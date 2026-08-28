@@ -1834,15 +1834,33 @@ fn parse_mask_sentinels(
         match zeroship_schema::mask_codec::parse_mask_sentinel(body) {
             Ok((kind, classification)) => {
                 let before = &create_table_text[..abs_marker];
-                if let Some(sibling_name) = recover_preceding_quoted_ident(before) {
-                    if let Some(parent) = sibling_name.strip_suffix("_masked") {
+                // The sentinel rides the MASKED column, which after the
+                // storage flip is the field's OWN column - so the identifier
+                // preceding the comment IS the logical field name and there is
+                // no suffix to strip.
+                //
+                // The strip that used to be here had no `else`: an identifier
+                // that did not end `_masked` was discarded in silence. After
+                // the flip that arm would have matched EVERY sentinel, so this
+                // function would have reported every masked column as
+                // unmasked, with no warning - unlike the malformed-sentinel
+                // arm below, which is loud.
+                match recover_preceding_quoted_ident(before) {
+                    Some(column) => {
                         out.insert(
-                            parent.to_string(),
+                            column.clone(),
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: sibling_name.clone(),
+                                sibling_column: crate::query::raw_column_name(&column),
                             },
+                        );
+                    }
+                    None => {
+                        tracing::warn!(
+                            sentinel = %body,
+                            "diff: mask sentinel with no recoverable column name \
+                             in the CREATE TABLE text; ignoring",
                         );
                     }
                 }
@@ -2453,13 +2471,16 @@ mod tests {
             "spatial base query must not use SELECT * when masked columns exist: {}",
             bq.sql,
         );
-        // Same derivation the builder used, rather than a literal sibling name
-        // — see the sibling assertion in `backend::sqlite::vector`'s tests.
-        let read = crate::query::read_column_for("ssn", &schema);
-        assert_eq!(read, "ssn_masked", "a masked column must read its sibling");
+        // A masked column reads its OWN column (the mask); the raw column must
+        // not appear — see the twin assertion in `backend::sqlite::vector`.
         assert!(
-            bq.sql.contains(&format!("\"{read}\" AS \"ssn\"")),
-            "spatial base query must read the masked sibling: {}",
+            bq.sql.contains("\"ssn\""),
+            "spatial base query must project the masked column: {}",
+            bq.sql,
+        );
+        assert!(
+            !bq.sql.contains(&crate::query::raw_column_name("ssn")),
+            "spatial base query must never name the raw column: {}",
             bq.sql,
         );
     }
@@ -2682,34 +2703,47 @@ mod tests {
     // Mask sentinel parser
     // -----------------------------------------------------------------
 
-    /// **SQLite introspection**: a CREATE TABLE body with an
-    /// inline `/* __zsmask:kind=…,classification=… */` comment attached
-    /// to the `<col>_masked` sibling column gets parsed back as a
-    /// `MaskMeta` on the PARENT column.
+    /// **SQLite introspection**: a CREATE TABLE body with an inline
+    /// `/* __zsmask:kind=…,classification=… */` comment attached to the MASKED
+    /// column - which after the storage flip is the field's own - gets parsed
+    /// back as a `MaskMeta` on that field, naming the raw column as its
+    /// sibling.
+    ///
+    /// The DDL below is the shape `build_create_table_with_fks` emits: the raw
+    /// column carries the declared type, the field's own column is bare TEXT
+    /// and carries the sentinel.
     #[test]
     fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
         use crate::diff::{Classification, MaskKind};
-        let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
-            \"id\" INTEGER PRIMARY KEY,\n  \
-            \"ssn\" TEXT,\n  \
-            \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\n)";
-        let got = parse_mask_sentinels(ddl);
-        let meta = got.get("ssn").expect("mask meta on parent");
+        let raw = crate::query::raw_column_name("ssn");
+        let ddl = format!(
+            "CREATE TABLE \"app\".\"users\" (\n  \
+             \"id\" INTEGER PRIMARY KEY,\n  \
+             \"{raw}\" TEXT,\n  \
+             \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */\n)"
+        );
+        let got = parse_mask_sentinels(&ddl);
+        let meta = got.get("ssn").expect("mask meta on the declared field");
         assert_eq!(meta.kind, MaskKind::Last4);
         assert_eq!(meta.classification, Classification::Spi);
-        assert_eq!(meta.sibling_column, "ssn_masked");
+        assert_eq!(meta.sibling_column, raw);
+        assert_eq!(got.len(), 1, "the raw column is not itself a masked field: {got:?}");
     }
 
-    /// Multiple masked columns in one table → one entry per parent.
+    /// Multiple masked columns in one table → one entry per field.
     #[test]
     fn sqlite_introspection_multiple_masked_columns() {
         use crate::diff::{Classification, MaskKind};
-        let ddl = "CREATE TABLE t (\n  \
-            \"ssn\" TEXT,\n  \
-            \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */,\n  \
-            \"email\" TEXT,\n  \
-            \"email_masked\" TEXT NOT NULL /* __zsmask:kind=email,classification=pii */\n)";
-        let got = parse_mask_sentinels(ddl);
+        let ddl = format!(
+            "CREATE TABLE t (\n  \
+             \"{}\" TEXT,\n  \
+             \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */,\n  \
+             \"{}\" TEXT,\n  \
+             \"email\" TEXT /* __zsmask:kind=email,classification=pii */\n)",
+            crate::query::raw_column_name("ssn"),
+            crate::query::raw_column_name("email"),
+        );
+        let got = parse_mask_sentinels(&ddl);
         assert_eq!(got.len(), 2);
         assert_eq!(got.get("ssn").unwrap().kind, MaskKind::Last4);
         assert_eq!(got.get("ssn").unwrap().classification, Classification::Spi);
@@ -2717,15 +2751,18 @@ mod tests {
         assert_eq!(got.get("email").unwrap().classification, Classification::Pii);
     }
 
-    /// Sentinel on a non-`_masked`-suffixed column is silently
-    /// ignored — the parent recovery requires the sibling name to end
-    /// in `_masked` (the platform invariant).
+    /// A sentinel with no recoverable column name before it is ignored, and
+    /// WARNS rather than being discarded in silence.
+    ///
+    /// This test used to assert that a sentinel on a column NOT ending
+    /// `_masked` was ignored - which, after the flip, is where every sentinel
+    /// legitimately sits. Keeping it would have asserted that the introspector
+    /// must drop all mask metadata.
     #[test]
-    fn sqlite_introspection_ignores_non_sibling_sentinel() {
-        let ddl =
-            "CREATE TABLE t (\n  \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */\n)";
+    fn sqlite_introspection_ignores_a_sentinel_with_no_column() {
+        let ddl = "CREATE TABLE t (\n  /* __zsmask:kind=last4,classification=spi */\n)";
         let got = parse_mask_sentinels(ddl);
-        assert!(got.is_empty(), "non-sibling sentinel must not stamp parent: {got:?}");
+        assert!(got.is_empty(), "a sentinel with no column must not stamp anything: {got:?}");
     }
 
     /// Empty DDL / no markers → empty map.

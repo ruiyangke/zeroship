@@ -941,7 +941,7 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
             "op": ev.op.as_str(),
             "collection": ev.collection,
             "pk": ev.pk,
-            "columns": ev.changed_columns,
+            "columns": creator_visible_columns(&ev.changed_columns),
         })
         .to_string(),
         SubscriptionMessage::Resync => Value::Object({
@@ -959,6 +959,25 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
     }
 }
 
+/// Drop platform-internal column names from a change event's column list.
+///
+/// A change to a masked field touches two physical columns - the field's own
+/// (the mask) and `__zs_raw__<field>` (the real value) - and the second is not
+/// a name a creator has ever seen. Only the `__zs_` family is removed, so a
+/// system field like `updated_at` still reaches the subscriber.
+///
+/// The event carries no schema, which is exactly why this is a name test on a
+/// prefix the platform owns and `validate_field_name` refuses, rather than a
+/// descriptor lookup: the WAL consumer builds these lists in a background task
+/// with no isolate and no descriptor in reach.
+fn creator_visible_columns(columns: &[String]) -> Vec<String> {
+    columns
+        .iter()
+        .filter(|c| !c.starts_with("__zs_"))
+        .cloned()
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // WS push-frame format
 // ---------------------------------------------------------------------------
@@ -968,64 +987,43 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
 // ```json
 // { "type": "zs.subscription.event",
 //   "handle": "<subscription_id>",
-//   "event": { "kind": "insert", "collection": "users",
-//              "pk": "usr_42", "row": {...} } }
+//   "event": { "kind": "insert", "collection": "users", "pk": "usr_42" } }
 // ```
 //
 // The intent is that a WS handler in JS owns a `Map<handle, ws_conn>`
 // and pushes the JSON-encoded frame on receipt. The frame is shaped to
 // be self-describing — `type` lets the WS handler distinguish broker
 // events from app-level WS messages on the same connection.
+//
+// **There is deliberately no row payload.** `ws_frame_for_change` used to carry
+// `ev.new_tuple`, which is every physical column of the row with its value -
+// including a masked field's raw column, unmasked, undecrypted and unaudited.
+// It had no caller outside this module, and keeping a dead exporter of the raw
+// tuple around while the rest of this change removes every other way to reach
+// it is how it gets wired up later by someone who reads the function and not
+// the design. The frame a subscriber gets names the changed columns; fetching
+// the row goes through `find`, which is where the read pipeline runs.
 
-/// Build a WS push frame for a change event.
-///
-/// The `handle` parameter is the per-WS-connection subscription handle
-/// (stringified — protocol stays stable if the handle type ever
-/// widens). The `row` carries the new tuple values so client code can
-/// avoid an extra fetch on the common "patch in place" path.
-pub fn ws_frame_for_change(handle: &str, ev: &ChangeEvent) -> String {
-    serde_json::json!({
-        "type": "zs.subscription.event",
-        "handle": handle,
-        "event": {
+/// Build a WS push frame for a subscription message (Resync / Closed /
+/// Change). A `Change` reports its op, collection, pk and creator-visible
+/// column names - never values.
+pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
+    let event = match msg {
+        SubscriptionMessage::Resync => serde_json::json!({ "kind": "resync" }),
+        SubscriptionMessage::Closed => serde_json::json!({ "kind": "closed" }),
+        SubscriptionMessage::Change(ev) => serde_json::json!({
             "kind": ev.op.as_str(),
             "collection": ev.collection,
             "pk": ev.pk,
-            "columns": ev.changed_columns,
-            "row": ev.new_tuple,
-        }
+            "columns": creator_visible_columns(&ev.changed_columns),
+        }),
+    };
+    serde_json::json!({
+        "type": "zs.subscription.event",
+        "handle": handle,
+        "event": event,
     })
     .to_string()
-}
-
-/// Build a WS push frame for a non-Change subscription message
-/// (Resync / Closed). `Change` should go through
-/// [`ws_frame_for_change`] which carries the row payload.
-pub fn ws_frame_for_control(handle: &str, msg: &SubscriptionMessage) -> Option<String> {
-    let kind = match msg {
-        SubscriptionMessage::Resync => "resync",
-        SubscriptionMessage::Closed => "closed",
-        SubscriptionMessage::Change(_) => return None,
-    };
-    Some(
-        serde_json::json!({
-            "type": "zs.subscription.event",
-            "handle": handle,
-            "event": { "kind": kind },
-        })
-        .to_string(),
-    )
-}
-
-/// Convenience: dispatch a [`SubscriptionMessage`] into the right
-/// WS-frame shape. Returns `None` only if the message is `Change` and
-/// the caller passed it through this path by mistake (shouldn't happen
-/// in practice — kept defensive).
-pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
-    match msg {
-        SubscriptionMessage::Change(ev) => ws_frame_for_change(handle, ev),
-        other => ws_frame_for_control(handle, other).unwrap_or_default(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,7 +1287,7 @@ mod tests {
     fn rs_entry(collection: &str, filter: serde_json::Value) -> ReadSetEntry {
         ReadSetEntry {
             collection: collection.to_string(),
-            predicate: read_set::normalise_filter(&filter),
+            predicate: read_set::normalise_filter(&filter, &serde_json::json!({})),
         }
     }
 
@@ -1476,20 +1474,27 @@ mod tests {
             new_tuple: tuple,
             old_tuple: None,
         };
-        let frame = ws_frame_for_change("sub_42", &ev);
+        let frame = ws_frame("sub_42", &SubscriptionMessage::Change(std::sync::Arc::new(ev.clone())));
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["type"], "zs.subscription.event");
         assert_eq!(v["handle"], "sub_42");
         assert_eq!(v["event"]["kind"], "insert");
         assert_eq!(v["event"]["collection"], "messages");
         assert_eq!(v["event"]["pk"], "7");
-        assert_eq!(v["event"]["row"]["userId"], "42");
+        assert_eq!(v["event"]["columns"][0], "userId");
+        // The frame names columns and carries NO values. `row` used to be
+        // `ev.new_tuple` verbatim - every physical column with its contents.
+        assert!(
+            v["event"].get("row").is_none(),
+            "a change frame must carry no row payload: {frame}",
+        );
+        assert!(!frame.contains("\"hi\""), "no cell values on the wire: {frame}");
     }
 
     #[test]
     fn b8b_ws_frame_resync_and_closed() {
-        let r = ws_frame_for_control("h", &SubscriptionMessage::Resync).unwrap();
-        let c = ws_frame_for_control("h", &SubscriptionMessage::Closed).unwrap();
+        let r = ws_frame("h", &SubscriptionMessage::Resync);
+        let c = ws_frame("h", &SubscriptionMessage::Closed);
         let rv: serde_json::Value = serde_json::from_str(&r).unwrap();
         let cv: serde_json::Value = serde_json::from_str(&c).unwrap();
         assert_eq!(rv["event"]["kind"], "resync");
@@ -1521,14 +1526,14 @@ mod tests {
         // Drain each subscriber's queue and format as WS frames.
         let alice_frames: Vec<String> = std::iter::from_fn(|| match s_alice.pop() {
             Some(SubscriptionMessage::Change(ev)) => {
-                Some(ws_frame_for_change("alice", &ev))
+                Some(ws_frame("alice", &SubscriptionMessage::Change(ev.clone())))
             }
             _ => None,
         })
         .collect();
         let bob_frames: Vec<String> = std::iter::from_fn(|| match s_bob.pop() {
             Some(SubscriptionMessage::Change(ev)) => {
-                Some(ws_frame_for_change("bob", &ev))
+                Some(ws_frame("bob", &SubscriptionMessage::Change(ev.clone())))
             }
             _ => None,
         })
@@ -1538,7 +1543,13 @@ mod tests {
         assert_eq!(bob_frames.len(), 0, "Bob should receive 0 frames");
         let f: serde_json::Value = serde_json::from_str(&alice_frames[0]).unwrap();
         assert_eq!(f["handle"], "alice");
-        assert_eq!(f["event"]["row"]["userId"], "1");
+        assert_eq!(f["event"]["pk"], "10");
+        // The narrowing decision used the tuple; the frame does not carry it.
+        assert!(
+            !alice_frames[0].contains("hi alice"),
+            "a routed frame carries no cell values: {}",
+            alice_frames[0],
+        );
     }
 
     #[test]
@@ -1860,40 +1871,44 @@ mod tests {
     // plaintext in `new_tuple["ssn"]` and flip this assertion.
     // -----------------------------------------------------------------
 
+    /// The CDC tuple after the storage flip, and what a subscriber may see of
+    /// it.
+    ///
+    /// The tuple carries the mask under the field's own name and the real value
+    /// (here, ciphertext) under `__zs_raw__ssn`. The two published surfaces -
+    /// `message_to_json` and `ws_frame` - must name only creator-visible
+    /// columns and must carry no values at all: the raw column's NAME is
+    /// internal and its VALUE has exactly one authorized reader.
     #[test]
-    fn cdc_event_carries_masked_value_for_masked_columns() {
+    fn a_change_event_publishes_no_values_and_no_raw_column_name() {
         // Synthetic encrypted-column ciphertext: PG renders BYTEA
-        // as `\xHHHHHH...` in the text protocol. The pre-computed
-        // mask sibling carries the human-readable last-4 form.
-        let parent_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
-        let sibling_masked_text = "***-**-6789";
+        // as `\xHHHHHH...` in the text protocol.
+        let raw_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
+        let masked_text = "***-**-6789";
         let plaintext = "123-45-6789";
+        let raw_col = crate::query::raw_column_name("ssn");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".into(), "42".into());
-        tuple.insert("ssn".into(), parent_ciphertext_text.into());
-        tuple.insert("ssn_masked".into(), sibling_masked_text.into());
+        tuple.insert("ssn".into(), masked_text.into());
+        tuple.insert(raw_col.clone(), raw_ciphertext_text.into());
 
         let ev = ChangeEvent {
             app_id: "app".into(),
             collection: "users".into(),
             op: ChangeOp::Insert,
             pk: Some("42".to_string()),
-            changed_columns: vec!["id".into(), "ssn".into(), "ssn_masked".into()],
+            changed_columns: vec!["id".into(), "ssn".into(), raw_col.clone()],
             new_tuple: tuple,
             old_tuple: None,
         };
 
-        // The ChangeEvent itself must carry both columns verbatim.
+        // The field's own column holds the mask; the raw column holds the
+        // stored (ciphertext) value. Neither is the plaintext.
+        assert_eq!(ev.new_tuple.get("ssn").map(String::as_str), Some(masked_text));
         assert_eq!(
-            ev.new_tuple.get("ssn").map(String::as_str),
-            Some(parent_ciphertext_text),
-            "parent column must carry the raw stored (ciphertext) value, not plaintext",
-        );
-        assert_eq!(
-            ev.new_tuple.get("ssn_masked").map(String::as_str),
-            Some(sibling_masked_text),
-            "sibling column must carry the pre-computed masked value",
+            ev.new_tuple.get(&raw_col).map(String::as_str),
+            Some(raw_ciphertext_text),
         );
         assert!(
             !ev.new_tuple.values().any(|v| v == plaintext),
@@ -1901,15 +1916,22 @@ mod tests {
             ev.new_tuple,
         );
 
-        // The WS push frame must carry the same shape (both columns
-        // present; plaintext absent).
-        let frame = ws_frame_for_change("sub_x", &ev);
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(v["event"]["row"]["ssn"], parent_ciphertext_text);
-        assert_eq!(v["event"]["row"]["ssn_masked"], sibling_masked_text);
-        assert!(
-            !frame.contains(plaintext),
-            "WS frame must not contain plaintext: {frame}",
-        );
+        for published in [
+            message_to_json(&SubscriptionMessage::Change(std::sync::Arc::new(ev.clone()))),
+            ws_frame("sub_x", &SubscriptionMessage::Change(std::sync::Arc::new(ev.clone()))),
+        ] {
+            assert!(
+                !published.contains(&raw_col),
+                "a published event must not name the raw column: {published}",
+            );
+            assert!(
+                !published.contains(raw_ciphertext_text) && !published.contains(masked_text),
+                "a published event carries column NAMES, never values: {published}",
+            );
+            assert!(
+                published.contains("\"ssn\""),
+                "the masked field's own name is creator-visible and must survive: {published}",
+            );
+        }
     }
 }

@@ -145,28 +145,33 @@ struct RuntimeCollectionDescriptorV2 {
 /// derived at eight sites is eight chances to disagree with the ONE emitter that
 /// created the column. This type is that name, recorded.
 ///
-/// **What these names are today.** The engine writes the MASKED value into the
-/// `<field>_masked` sibling and keeps the authoritative value in the field's own
-/// column, so [`Self::value_column`] is the sibling and [`Self::raw_column`] is the
-/// parent. Both come from [`crate::schema::query::mask_sibling_column_for_field`], the
-/// DDL emitter's own function, rather than being re-derived here - so the descriptor
-/// and the database cannot drift apart, whatever that function decides to spell. If the
-/// platform later flips which column holds the mask, this projection follows without a
-/// consumer edit, which is the whole point of recording it.
+/// **What these names are today.** After the 2026-08-28 storage flip the engine
+/// writes the MASKED value into the field's own column and keeps the authoritative
+/// value in a `__zs_raw__<field>` sibling, so [`Self::value_column`] is the field's
+/// own column (holding the mask) and [`Self::raw_column`] is `__zs_raw__<field>`
+/// (holding the real value). Both come from
+/// [`crate::schema::query::raw_column_for_field`], the DDL emitter's own function,
+/// rather than being re-derived here - so the descriptor and the database cannot drift
+/// apart, whatever that function decides to spell.
 ///
-/// **The AEAD binds the column the ciphertext physically occupies** - [`Self::raw_column`]
-/// when present, otherwise the field's own column. That rule is total and one line, and
-/// it is what the consumer side must use in place of the string formatting it does now.
-/// There is deliberately **no separate `aadColumn`**: such a field earns its place only
-/// if the AAD must stay bound to a name the data no longer lives under, and pre-launch
-/// there is no ciphertext for which that is true.
+/// **The AEAD binds the LOGICAL FIELD NAME, not the physical column.** `canonical_aad`
+/// receives its `col` argument from `for (col, def) in schema_obj.iter()` - the schema
+/// FIELD KEY - in `crud/encryption_pass.rs` and `crud/unmask.rs` alike. The two were the
+/// same string before the storage flip, which is why the distinction was invisible; they
+/// are not the same string now, and the rule that survived is the logical one.
 ///
-/// The corollary is a constraint this type cannot solve and does not try to: **moving an
-/// encrypted value to another column is a re-encrypt, not a rename.** `canonical_aad`
-/// length-prefixes the column name into the AEAD tag, so an
-/// `ALTER TABLE ... RENAME COLUMN` leaves every stored cell authenticated under the old
-/// name and the table fails tag verification on every row. Pre-launch that costs nothing
-/// because no ciphertext exists. It cannot be made free later.
+/// **That makes the flip a rename and not a re-encrypt, and this comment used to say the
+/// opposite.** It read: "moving an encrypted value to another column is a re-encrypt,
+/// not a rename ... an `ALTER TABLE ... RENAME COLUMN` leaves every stored cell
+/// authenticated under the old name and the table fails tag verification on every row."
+/// That was false about the code even when it was written, and acting on it - "fixing"
+/// the AAD to bind `raw_column` so it matches the comment - would destroy every
+/// ciphertext in the deployment, because every existing cell is authenticated under the
+/// logical name.
+///
+/// There is deliberately **no separate `aadColumn`**: a field that can disagree with the
+/// rule is a second source of truth for one fact. The rule is "the logical field name,
+/// always", and it is one line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldStorage {
@@ -292,15 +297,18 @@ fn field_storage(
     let auxiliary = auxiliary_objects(vendors, collection, field, def, dialect);
     // The ONE call that decides whether this field has a second column, and what it is
     // called. Everything else here is bookkeeping around its answer.
-    match crate::schema::query::mask_sibling_column_for_field(field, def) {
-        Some(sibling) => FieldStorage {
-            value_column: sibling,
-            raw_column: Some(field.to_string()),
-            // The authoritative column is not part of the creator-facing read surface.
-            // This is a DECLARATION, not a reading of what the data plane does today:
-            // `build_where` receives no schema at all, so a filter currently reaches the
-            // raw column and an `orderBy` currently orders by it (specification section
-            // 4.3). Recording the flags is what lets a consumer close that.
+    match crate::schema::query::raw_column_for_field(field, def) {
+        Some(raw) => FieldStorage {
+            // After the storage flip the readable column IS the field's own: it
+            // holds the mask. There is no aliasing left on the read path.
+            value_column: field.to_string(),
+            raw_column: Some(raw),
+            // The authoritative column is not part of the creator-facing read surface,
+            // and after the flip that is enforced by its NAME rather than by these
+            // flags: `__zs_raw__<field>` is refused by `validate_field_name`, which
+            // every inbound identifier surface already calls. The flags stay as the
+            // declaration of intent - a consumer reading the descriptor learns the
+            // column is off-surface without having to know the naming rule.
             raw_filterable: Some(false),
             raw_sortable: Some(false),
             raw_projectable: Some(false),

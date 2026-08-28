@@ -1,29 +1,18 @@
-//! Mask sibling-column backfill / rewrite / removal
-//! jobs invoked from the register-model `apply` pipeline.
+//! Mask computation helpers for the migration engine's mask transitions.
 //!
-//! Three entry points, one per sub-path:
+//! **The three runner entry points this doc used to describe -
+//! `run_mask_backfill`, `run_mask_rewrite`, `run_mask_remove` - do not exist
+//! in this module, and nothing outside it calls anything that does.** Grepped
+//! 2026-08-28 across `crates/` and `sdks/`: `crud::mask_backfill` has zero
+//! consumers. What survives here is the sentinel codec wrapper, the audit-name
+//! builders, and two helpers marked "exposed for tests" that no test calls.
 //!
-//! - [`run_mask_backfill`] — existing column gained a `.mask(...)`
-//!   declaration. The diff classifier already emitted a paired
-//!   `ALTER TABLE ADD COLUMN <col>_masked TEXT NULL` op IMMEDIATELY
-//!   before the `MaskBackfill` op (the ALTER carries `NULL` so the
-//!   migration succeeds against existing data); this function then
-//!   walks every row with `<col>_masked IS NULL`, computes the
-//!   masked representation, writes it, and finishes with
-//!   `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT NULL` once the
-//!   `IS NULL` set has been clean for two consecutive polls (the
-//!   racing-insert fence).
-//!
-//! - [`run_mask_rewrite`] — existing masked column's `.mask(...)`
-//!   `kind` (or `classification`) changed. The sibling already exists
-//!   and is NOT NULL, so the rewrite touches every row (no IS NULL
-//!   filter) and DOES NOT mutate the schema afterwards.
-//!
-//! - [`run_mask_remove`] — `.mask(...)` declaration removed (or
-//!   switched to `kind: "none"`). Classified `Destructive`; under
-//!   `strictness == "off"` the apply pipeline issues
-//!   `ALTER TABLE … DROP COLUMN <col>_masked`. Under `strict` and
-//!   `lenient` the validate stage refuses before reaching us.
+//! It is left in place rather than deleted because that is a decision about
+//! dead code, not about masking. What was NOT left in place is its vocabulary:
+//! every derivation of a physical column name in here now agrees with the
+//! storage flip (the field's own column holds the mask), because a second,
+//! wrong derivation sitting in a module nothing calls is exactly the thing that
+//! gets copied back into a live path.
 //!
 //! ## Audit-table integration
 //!
@@ -332,11 +321,15 @@ pub fn compute_masked_for_plaintext(kind: MaskKind, plaintext: &str) -> String {
     apply_mask_kind(kind, plaintext)
 }
 
-/// Compute the masked sibling for the same shape `apply_mask_on_write`
-/// consumes — `(schema, row, plaintexts)` — returning the masked
-/// `(sibling_column → masked_string)` pairs WITHOUT mutating the row.
-/// The SQLite integration test uses this to build the expected
-/// post-backfill state without invoking the actual loop.
+/// Compute the mask for the same shape `apply_mask_on_write` consumes —
+/// `(schema, row, plaintexts)` — returning `(logical_field → masked_string)`
+/// pairs WITHOUT mutating the row.
+///
+/// The key is the LOGICAL field name, because after the storage flip that is
+/// the column the mask lives in. It used to be `<col>_masked`; leaving the
+/// suffix here would have kept a second, wrong derivation of a physical column
+/// name alive in a module nothing calls, which is exactly how one gets copied
+/// back into a live path.
 #[must_use]
 #[allow(dead_code)] // helper exposed for tests
 pub fn compute_masked_pairs_for_row(
@@ -376,8 +369,7 @@ pub fn compute_masked_pairs_for_row(
             None
         };
         if let Some(pt) = plaintext {
-            let sibling = format!("{col}_masked");
-            out.push((sibling, apply_mask_kind(kind, pt.as_str())));
+            out.push((col.clone(), apply_mask_kind(kind, pt.as_str())));
         }
     }
     out
@@ -482,7 +474,7 @@ mod tests {
         );
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0], ("ssn_masked".to_string(), "***-**-6789".to_string()));
+        assert_eq!(pairs[0], ("ssn".to_string(), "***-**-6789".to_string()));
     }
 
     #[test]
@@ -497,7 +489,7 @@ mod tests {
         let pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0], ("email_masked".to_string(), "a***@example.com".to_string()));
+        assert_eq!(pairs[0], ("email".to_string(), "a***@example.com".to_string()));
     }
 
     #[test]
@@ -552,9 +544,9 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         let mut sorted = pairs.clone();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(sorted[0].0, "email_masked");
+        assert_eq!(sorted[0].0, "email");
         assert_eq!(sorted[0].1, "a***@example.com");
-        assert_eq!(sorted[1].0, "ssn_masked");
+        assert_eq!(sorted[1].0, "ssn");
         assert_eq!(sorted[1].1, "***-**-6789");
     }
 }

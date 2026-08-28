@@ -11,11 +11,28 @@ pub(crate) enum SchemaFieldScope<'a> {
     Only(&'a [String]),
 }
 
+/// Which key names a decoded row may carry across the JS boundary.
+///
+/// **There is no unrestricted arm**, and [`RowSurface::Declared`] is the
+/// `Default`, so a call site that says nothing gets the safe answer and a call
+/// site that wants something else has to name a list. That is the whole
+/// defence against the next row-returning verb: it cannot opt out of the
+/// surface filter because there is nothing to opt out to.
+pub(crate) enum RowSurface<'a> {
+    /// Declared fields + the seven system fields + the closed set of synthetic
+    /// result columns. The default.
+    Declared,
+    /// An explicit name list. Aggregate result sets only: their keys are
+    /// accumulator aliases, which no descriptor declares.
+    Projected(&'a [String]),
+}
+
 pub(crate) struct ApplyOptions<'a> {
     pub unmask_columns: &'a [String],
     pub schema_field_scope: SchemaFieldScope<'a>,
     pub apply_decrypt: bool,
     pub wrap_masked: bool,
+    pub row_surface: RowSurface<'a>,
 }
 
 impl<'a> Default for ApplyOptions<'a> {
@@ -25,6 +42,7 @@ impl<'a> Default for ApplyOptions<'a> {
             schema_field_scope: SchemaFieldScope::All,
             apply_decrypt: true,
             wrap_masked: true,
+            row_surface: RowSurface::Declared,
         }
     }
 }
@@ -43,6 +61,14 @@ pub(crate) struct ApplyResult {
 /// 3. decrypt encrypted columns
 /// 4. wrap masked columns
 /// 5. apply per-query unmask overrides
+/// 6. restrict the row to its declared surface
+///
+/// Step 6 is what makes this function the write path's answer too, not just
+/// the read path's: seven of the nine row-returning write verbs already route
+/// their `RETURNING *` rows through here, so one stage covers all of them.
+/// (The other five - `updateMany`, `deleteMany`, `purgeMany`, `restoreMany`
+/// and the CAS fan-out - collapse their rows to a count and hand nothing to
+/// JS.)
 ///
 /// There is no cold-schema arm. Every stage below is driven by the descriptor
 /// entry, and a collection this deploy's descriptor does not declare is refused
@@ -76,7 +102,7 @@ pub(crate) async fn apply(
     normalize_rows_on_read(&schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
-        decrypt_rows_on_read(app_id, collection, &schema, &mut rows, opts.unmask_columns).await?;
+        decrypt_rows_on_read(app_id, collection, &schema, &mut rows).await?;
     }
 
     let has_masked = if opts.wrap_masked && super::schema_has_masked_columns(&schema) {
@@ -95,6 +121,8 @@ pub(crate) async fn apply(
         )
         .await?;
     }
+
+    restrict_rows_to_surface(&schema, &opts.row_surface, &mut rows);
 
     Ok(ApplyResult { rows, has_masked })
 }
@@ -353,19 +381,13 @@ async fn decrypt_rows_on_read(
     collection: &str,
     schema: &Value,
     rows: &mut [Value],
-    unmask_columns: &[String],
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
     if let Some(pg) = backend.as_encrypted_column_pg() {
         for row in rows.iter_mut() {
             crate::crud::encryption_pass::decrypt_row_on_read(
-                pg,
-                app_id,
-                collection,
-                schema,
-                row,
-                unmask_columns,
+                pg, app_id, collection, schema, row,
             )
             .await?;
         }
@@ -374,17 +396,37 @@ async fn decrypt_rows_on_read(
     if let Some(sq) = backend.as_encrypted_column_sqlite() {
         for row in rows.iter_mut() {
             crate::crud::encryption_pass::decrypt_row_on_read(
-                sq,
-                app_id,
-                collection,
-                schema,
-                row,
-                unmask_columns,
+                sq, app_id, collection, schema, row,
             )
             .await?;
         }
     }
     Ok(())
+}
+
+/// Remove every key that is not on the row's declared surface.
+///
+/// The LAST stage, and the one that closes the `RETURNING *` leak. Twelve SQL
+/// sites in `zeroship-schema` emit `RETURNING *`, which is every physical
+/// column - including a masked field's raw column - and none of them passes
+/// through the projection allowlist, which is SELECT-side only. Without this
+/// stage `await db.users.insert({ ssn })` hands the real value back under a key
+/// the generated `Row<S>` type does not declare, which is invisible to any
+/// review written against the generated types.
+///
+/// It runs last because the stages before it need the physical columns: the
+/// decrypt stage reads ciphertext, and the mask pass strips the raw column
+/// itself. A strip placed earlier would delete their input.
+fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
+    let allowed = match surface {
+        RowSurface::Declared => crate::query::read_surface_columns(schema),
+        RowSurface::Projected(names) => names.iter().cloned().collect(),
+    };
+    for row in rows.iter_mut() {
+        if let Some(obj) = row.as_object_mut() {
+            obj.retain(|key, _| allowed.contains(key.as_str()));
+        }
+    }
 }
 
 fn wrap_masked_rows_on_read(
@@ -535,8 +577,30 @@ mod tests {
         })];
 
         let binding = DbBinding::cold_start("app_aggregate_scope");
-        let result = compio::runtime::Runtime::new()
-            .expect("compio runtime build")
+        let alias = ["secret".to_string()];
+        let rt = compio::runtime::Runtime::new().expect("compio runtime build");
+        let result = rt
+            .block_on(apply(
+                &binding,
+                "users",
+                rows.clone(),
+                ApplyOptions {
+                    unmask_columns: &[],
+                    schema_field_scope: SchemaFieldScope::Only(&[]),
+                    row_surface: RowSurface::Projected(&alias),
+                    ..ApplyOptions::default()
+                },
+            ))
+            .expect("aggregate aliases must bypass schema-driven transforms");
+
+        assert_eq!(result.rows, vec![serde_json::json!({ "secret": 3 })]);
+        assert!(!result.has_masked);
+
+        // The control, and the reason `RowSurface` has no permissive arm: a
+        // caller that does NOT name its aliases loses them. That is the safe
+        // direction - a dropped accumulator is a visible failure - and it is
+        // what makes `Declared` a usable default for the other twelve sites.
+        let defaulted = rt
             .block_on(apply(
                 &binding,
                 "users",
@@ -547,10 +611,8 @@ mod tests {
                     ..ApplyOptions::default()
                 },
             ))
-            .expect("aggregate aliases must bypass schema-driven transforms");
-
-        assert_eq!(result.rows, vec![serde_json::json!({ "secret": 3 })]);
-        assert!(!result.has_masked);
+            .expect("apply");
+        assert_eq!(defaulted.rows, vec![serde_json::json!({})]);
     }
 
     #[test]

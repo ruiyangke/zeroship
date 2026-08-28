@@ -182,15 +182,15 @@ mod tests {
             !sql.starts_with("SELECT t.*"),
             "vector search must not use t.* when masked columns exist: {sql}"
         );
-        // Asked of the SAME derivation the builder used, not of a literal:
-        // `read_column_for` prefers the descriptor's `storage.valueColumn` and
-        // only falls back to the `_masked` suffix, so a later flip of which
-        // physical column holds the readable value moves both sides together.
-        let read = crate::query::read_column_for("ssn", &schema);
-        assert_eq!(read, "ssn_masked", "a masked column must read its sibling");
+        // A masked column reads its OWN column, which holds the mask, and the
+        // raw column must not appear in the projection at all.
         assert!(
-            sql.contains(&format!(r#""t"."{read}" AS "ssn""#)),
-            "vector search must read the masked sibling: {sql}"
+            sql.contains(r#""t"."ssn" AS "ssn""#),
+            "vector search must project the masked column: {sql}"
+        );
+        assert!(
+            !sql.contains(&crate::query::raw_column_name("ssn")),
+            "vector search must never name the raw column: {sql}"
         );
     }
 

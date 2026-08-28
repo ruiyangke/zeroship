@@ -28,9 +28,9 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
  *
  * when the field is masked (third `TypeBuilder` brand
  * is a non-`"none"` mask kind), the inferred type wraps the bare
- * primitive in `MaskedValue<T>`. The `<col>_masked` sibling column
- * is NEVER part of `Row<S>` — only the parent column appears, with
- * the masked-value wrapper around it.
+ * primitive in `MaskedValue<T>`. The hidden `__zs_raw__<col>` sibling
+ * that holds the real value is NEVER part of `Row<S>` — only the
+ * declared field appears, with the masked-value wrapper around it.
  */
 export type InferFieldDef<T> =
   T extends TypeBuilder<infer U, any, infer M, any, any>
@@ -488,9 +488,9 @@ export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json
 export type EncryptionMode = "randomised" | "deterministic";
 
 /**
- * built-in mask transform applied at write time to
- * compute the sibling `<col>_masked` column's value from the
- * plaintext. Mirrors `crate::diff::MaskKind` on the Rust side.
+ * built-in mask transform applied at write time to compute the value
+ * stored in the field's own column from the plaintext (which is
+ * relocated to `__zs_raw__<col>` by the same write). Mirrors `crate::diff::MaskKind` on the Rust side.
  *
  * - `full`        — `"***"`; maximum redaction. Default for encrypted.
  * - `last4`       — `"***-**-6789"`; SSN / card / phone tails.
@@ -839,14 +839,21 @@ export type AuxiliaryObject = {
  * **Where one declared field physically lives** (runtime descriptor v2).
  *
  * A declared field is not always one column. A masked field occupies two: the value a
- * default projection reads, and the authoritative value behind it. Recording both is
- * what lets a consumer stop deriving the second name by formatting `\`${col}_masked\``.
+ * default projection reads (the field's OWN column, holding the mask), and the
+ * authoritative value behind it (`__zs_raw__<col>`). Recording both is what lets a
+ * consumer stop deriving the second name by string formatting.
  *
- * **The AEAD binds the column the ciphertext physically occupies** - `rawColumn` when
- * present, otherwise the field's own column. That rule is total; there is deliberately
- * no separate `aadColumn`. The corollary is a constraint no field here can solve:
- * moving an encrypted value to another column is a re-encrypt, not a rename, because
- * the column name is length-prefixed into the AEAD tag.
+ * **The AEAD binds the LOGICAL FIELD NAME, not the physical column.** `canonical_aad`
+ * receives the schema field key, in the encryption pass and the unmask path alike. The
+ * two were the same string before the storage flip, which is why the distinction was
+ * invisible; they are not now, and the rule that survived is the logical one. That
+ * makes the flip a rename rather than a re-encrypt.
+ *
+ * This comment used to say the opposite - that the AEAD binds `rawColumn` when present,
+ * so moving an encrypted value is a re-encrypt. Acting on that (changing the AAD to
+ * match) would destroy every ciphertext in the deployment, because every stored cell is
+ * authenticated under the logical name. There is deliberately no separate `aadColumn`:
+ * a field that can disagree with the rule is a second source of truth for one fact.
  *
  * Emitted by the migration fold, which is the only producer that knows physical
  * layout. It is absent on a `FieldDef` built by the `t.*()` authoring builders, which
@@ -997,17 +1004,18 @@ export interface FieldDef {
    * (`{ kind: "full", classification: "pii" }`).
    *
    * When present (and `kind !== "none"`), the platform emits a hidden
-   * `<col>_masked` sibling column at CREATE TABLE time (PR 2),
-   * pre-computes the masked representation on every write (PR 2), and
-   * aliases the sibling back to the schema-declared name on read
-   * (PR 3). The sibling column is NEVER part of the creator-visible
-   * SDK surface — `Row<S>` only contains the parent column wrapped
-   * in `MaskedValue<T>`.
+   * `__zs_raw__<col>` sibling at CREATE TABLE time carrying the
+   * declared type and constraints, pre-computes the mask on every
+   * write, and stores the mask in the field's OWN column. A read needs
+   * no aliasing: the column with the declared name is the mask. The raw
+   * sibling is NEVER part of the creator-visible SDK surface, and its
+   * name is one `validate_field_name` refuses, so no filter, projection
+   * or sort can name it either.
    *
    * `kind: "none"` is the explicit opt-out — encrypted columns where
    * the creator genuinely wants plaintext-on-read (e.g. background-
-   * job-only read paths). PR 2 / PR 3 branch on `kind === "none"` to
-   * skip sibling emission and use the P5 decrypt-on-read path.
+   * job-only read paths). It emits no second column and takes the
+   * decrypt-on-read path, exactly as an unmasked encrypted field does.
    */
   mask?: {
     kind: MaskKind;
@@ -1201,12 +1209,17 @@ export class TypeBuilder<
   }
 
   /**
-   * declare a column-level mask. The platform emits
-   * a pre-computed sibling `<col>_masked` column (Path B) at CREATE
-   * TABLE time (PR 2), routes default reads through that sibling
-   * (PR 3), and exposes the parent column as `MaskedValue<T>` on
-   * the SDK surface. The unmask round-trip (PR 4) is the only path
-   * to plaintext.
+   * declare a column-level mask. The platform stores the
+   * pre-computed mask in the field's OWN column and the real value in a
+   * hidden `__zs_raw__<col>` sibling, so every query surface - filter,
+   * projection, sort, `distinct`, `aggregate` - sees the mask, and the
+   * SDK surfaces the field as `MaskedValue<T>`. The unmask round-trip
+   * is the only path to plaintext, and the only reader of that sibling.
+   *
+   * A consequence worth knowing before you declare a mask:
+   * `find({ ssn: "123-45-6789" })` matches nothing, and
+   * `find({ ssn: { $gt: v } })` compares masks. Looking a row up by its
+   * real value is `unmask`-shaped work, not filter-shaped work.
    *
    * Valid on `t.string()`, `t.number()`, `t.bytes()`, and
    * `t.encrypted()` (the encrypted column wraps one of those

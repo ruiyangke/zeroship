@@ -234,9 +234,13 @@ impl<'a> WriteStages<'a> {
             )
             .await?;
         }
-        if self.has_masked {
-            super::mask_pass::apply_mask_on_write(schema, &sidechannel, row)?;
-        }
+        // Derive the masks here - from the plaintext, while the row still
+        // holds the value under its logical key - but do NOT place them.
+        let masks = if self.has_masked {
+            super::mask_pass::apply_mask_on_write(schema, &sidechannel, row)?
+        } else {
+            Vec::new()
+        };
         if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_doc_with_schema(schema, row)?;
         }
@@ -251,6 +255,12 @@ impl<'a> WriteStages<'a> {
                 row,
             )?;
         }
+        // LAST. Every stage above reads and writes a masked field under its
+        // LOGICAL key and knows nothing about the flip; this one moves the
+        // finished value to the raw column and puts the mask in the logical
+        // slot. Exactly one stage owns physical placement, and it is the one
+        // that runs after all the producers.
+        super::mask_pass::relocate_masked_columns(&masks, row)?;
         Ok(())
     }
 
@@ -279,9 +289,11 @@ impl<'a> WriteStages<'a> {
             )
             .await?;
         }
-        if self.has_masked {
-            super::mask_pass::apply_mask_on_write(schema, &sidechannel, target)?;
-        }
+        let masks = if self.has_masked {
+            super::mask_pass::apply_mask_on_write(schema, &sidechannel, target)?
+        } else {
+            Vec::new()
+        };
         if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
         }
@@ -292,6 +304,11 @@ impl<'a> WriteStages<'a> {
                 patch,
             )?;
         }
+        // LAST, on the same sub-document the encryption pass wrote to (`$set`
+        // when the patch uses one). A field the patch does not mention is
+        // absent from `masks`, so it is neither relocated nor re-masked and its
+        // stored pair stays consistent.
+        super::mask_pass::relocate_masked_columns(&masks, update_target(patch))?;
         Ok(())
     }
 }
@@ -711,18 +728,26 @@ mod tests {
             );
         }
         assert_eq!(
-            row.get("ssn_masked").and_then(Value::as_str),
+            row.get("ssn").and_then(Value::as_str),
             Some(last4_mask(expected_plaintext).as_str()),
-            "mask stage must derive the sibling from plaintext",
+            "the field's own column must carry the mask after the relocation stage",
         );
 
+        let raw_col = crate::query::raw_column_name("ssn");
         let ciphertext_b64 = row
-            .get("ssn")
+            .get(&raw_col)
             .and_then(Value::as_str)
-            .expect("ssn should be ciphertext base64");
+            .expect("the raw column should carry the ciphertext base64");
         assert_ne!(
             ciphertext_b64, expected_plaintext,
             "write pipeline must not leave plaintext in the write doc",
+        );
+        // The binary-bind marker followed the value to the raw column, or the
+        // INSERT would bind base64 text into a BYTEA column.
+        assert!(
+            row.get(format!("__zsbin__{raw_col}").as_str()).is_some()
+                && row.get("__zsbin__ssn").is_none(),
+            "the binary-bind marker must name the raw column: {row}",
         );
         let ciphertext = base64::engine::general_purpose::STANDARD
             .decode(ciphertext_b64)
@@ -920,14 +945,15 @@ mod tests {
                 "update pipeline must preserve explicit updated_by override",
             );
             assert_eq!(
-                update_target.get("ssn_masked").and_then(Value::as_str),
+                update_target.get("ssn").and_then(Value::as_str),
                 Some(last4_mask("555-55-5555").as_str()),
-                "update mask stage must target the same $set object",
+                "the relocation stage must target the same $set object the \
+                 encryption pass wrote to",
             );
             let update_ciphertext = update_target
-                .get("ssn")
+                .get(crate::query::raw_column_name("ssn").as_str())
                 .and_then(Value::as_str)
-                .expect("update ssn ciphertext");
+                .expect("update ssn ciphertext in the raw column");
             let update_key = backend
                 .resolve_key(app_id, key_id)
                 .await

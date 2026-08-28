@@ -217,7 +217,33 @@ impl ReadSetEntry {
 /// events; false positives (matching when we shouldn't) would silently
 /// drop events. The latter is unacceptable so we round trip every
 /// supported shape through the unit tests in this module.
-pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
+///
+/// # Masked columns
+///
+/// `schema` is the collection's descriptor entry, and it is a `&Value` rather
+/// than an `Option` so "no schema" is unspellable: a caller without one cannot
+/// build a predicate at all, rather than building one that silently compares
+/// against the wrong thing.
+///
+/// The WAL tuple carries what the row physically holds, and for a masked field
+/// that is the MASK under the field's own name. So a conjunct on a masked
+/// column is lowered rather than compared as written:
+///
+/// - `Eq` → the operand is masked with the column's own mask kind, and the
+///   comparison becomes mask-against-mask. That holds whenever the underlying
+///   values were equal. It also holds for values that merely share a mask,
+///   which is a false positive - a wider fanout, the side this module already
+///   declares acceptable.
+/// - a range (`$gt` / `$gte` / `$lt` / `$lte`) → `None`, coarse-grained. A
+///   range over a mask is not a range over the value and no rewriting makes it
+///   one. Coarse-grained wakes the subscription on every change to the
+///   collection: correct and slow, which is the declared bias.
+///
+/// Without this, `find({ssn: "123-45-6789"})` would compare a plaintext operand
+/// against a stored mask, never match, and the subscription would stop firing
+/// with no error anywhere - the failure mode this module's own contract calls
+/// unacceptable.
+pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
     let Value::Object(map) = filter else {
         // null / array / scalar / etc. — caller policy: treat as
         // coarse-grained. The query builder rejects these too, so
@@ -238,13 +264,14 @@ pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
             // back coarse-grained to keep the code small.
             return None;
         }
+        let mask_kind = mask_kind_for_column(schema, key);
         match value {
             // Bare scalar: { col: scalar } → Eq.
             Value::String(_) | Value::Number(_) | Value::Bool(_) => {
                 conjuncts.push(Conjunct {
                     column: key.clone(),
                     op: PredicateOp::Eq,
-                    value: value.clone(),
+                    value: lower_operand(mask_kind, value),
                 });
             }
             // Null on the lhs of equality is `IS NULL` in SQL — we
@@ -269,10 +296,14 @@ pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
                     ) {
                         return None;
                     }
+                    // A range over a mask is not a range over the value.
+                    if mask_kind.is_some() && predicate_op != PredicateOp::Eq {
+                        return None;
+                    }
                     conjuncts.push(Conjunct {
                         column: key.clone(),
                         op: predicate_op,
-                        value: val.clone(),
+                        value: lower_operand(mask_kind, val),
                     });
                 }
             }
@@ -282,6 +313,44 @@ pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
         }
     }
     Some(Predicate::All(conjuncts))
+}
+
+/// The mask kind declared for `column`, or `None` when it is unmasked or opted
+/// out with `kind: "none"`.
+fn mask_kind_for_column(schema: &Value, column: &str) -> Option<crate::diff::MaskKind> {
+    let kind = schema
+        .as_object()?
+        .get(column)?
+        .get("mask")?
+        .as_object()?
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("full");
+    match kind {
+        "full" => Some(crate::diff::MaskKind::Full),
+        "last4" => Some(crate::diff::MaskKind::Last4),
+        "first4" => Some(crate::diff::MaskKind::First4),
+        "email" => Some(crate::diff::MaskKind::Email),
+        "name" => Some(crate::diff::MaskKind::Name),
+        "dateYear" | "date-year" => Some(crate::diff::MaskKind::DateYear),
+        "dateDecade" | "date-decade" => Some(crate::diff::MaskKind::DateDecade),
+        // "none", and anything the parser does not know: treat as unmasked so
+        // an unrecognised kind widens the fanout rather than silently
+        // rewriting the operand with the wrong transform.
+        _ => None,
+    }
+}
+
+/// Mask the operand when the column is masked, so the comparison runs
+/// mask-against-mask against what the WAL tuple actually carries.
+fn lower_operand(mask_kind: Option<crate::diff::MaskKind>, value: &Value) -> Value {
+    let Some(kind) = mask_kind else {
+        return value.clone();
+    };
+    Value::String(crate::crud::mask_pass::apply_mask_kind(
+        kind,
+        &value_to_text(value),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +438,11 @@ pub fn is_active() -> bool {
 /// `action` the call is silently dropped — those callbacks read from
 /// the DB freely but their reads should never invalidate any
 /// subscription.
-pub fn record_if_active(collection: &str, filter: &Value) {
+///
+/// `schema` is the collection's descriptor entry; every call site already holds
+/// one because the read builder it just called takes the same value. It is
+/// needed to lower a predicate on a masked column - see [`normalise_filter`].
+pub fn record_if_active(collection: &str, filter: &Value, schema: &Value) {
     if !is_active() {
         return;
     }
@@ -381,7 +454,7 @@ pub fn record_if_active(collection: &str, filter: &Value) {
     }
     let entry = ReadSetEntry {
         collection: collection.to_string(),
-        predicate: normalise_filter(filter),
+        predicate: normalise_filter(filter, schema),
     };
     CURRENT_BUFFER.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
@@ -410,20 +483,20 @@ mod tests {
 
     #[test]
     fn normalise_empty_filter_is_always_true() {
-        let p = normalise_filter(&json!({})).expect("empty filter normalises");
+        let p = normalise_filter(&json!({}), &json!({})).expect("empty filter normalises");
         assert!(p.matches(&row(&[])));
     }
 
     #[test]
     fn normalise_bare_equality() {
-        let p = normalise_filter(&json!({ "userId": 42 })).expect("scalar normalises");
+        let p = normalise_filter(&json!({ "userId": 42 }), &json!({})).expect("scalar normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
         assert!(!p.matches(&row(&[("userId", "99")])));
     }
 
     #[test]
     fn normalise_multi_field_and() {
-        let p = normalise_filter(&json!({ "userId": 42, "status": "active" }))
+        let p = normalise_filter(&json!({ "userId": 42, "status": "active" }), &json!({}))
             .expect("conjunction normalises");
         assert!(p.matches(&row(&[("userId", "42"), ("status", "active")])));
         assert!(!p.matches(&row(&[("userId", "42"), ("status", "archived")])));
@@ -432,13 +505,13 @@ mod tests {
 
     #[test]
     fn normalise_explicit_eq_operator() {
-        let p = normalise_filter(&json!({ "userId": { "$eq": 42 } })).expect("op normalises");
+        let p = normalise_filter(&json!({ "userId": { "$eq": 42 } }), &json!({})).expect("op normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
     }
 
     #[test]
     fn normalise_gt_range_query() {
-        let p = normalise_filter(&json!({ "createdAt": { "$gt": 1000 } })).unwrap();
+        let p = normalise_filter(&json!({ "createdAt": { "$gt": 1000 } }), &json!({})).unwrap();
         assert!(p.matches(&row(&[("createdAt", "1500")])));
         assert!(!p.matches(&row(&[("createdAt", "500")])));
         assert!(!p.matches(&row(&[("createdAt", "1000")])));
@@ -447,7 +520,7 @@ mod tests {
     #[test]
     fn normalise_range_combination() {
         let p =
-            normalise_filter(&json!({ "createdAt": { "$gte": 1000, "$lt": 2000 } })).unwrap();
+            normalise_filter(&json!({ "createdAt": { "$gte": 1000, "$lt": 2000 } }), &json!({})).unwrap();
         assert!(p.matches(&row(&[("createdAt", "1000")])));
         assert!(p.matches(&row(&[("createdAt", "1500")])));
         assert!(!p.matches(&row(&[("createdAt", "2000")])));
@@ -456,19 +529,19 @@ mod tests {
 
     #[test]
     fn normalise_or_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "$or": [ { "a": 1 }, { "b": 2 } ] }));
+        let p = normalise_filter(&json!({ "$or": [ { "a": 1 }, { "b": 2 } ] }), &json!({}));
         assert!(p.is_none(), "$or should collapse to coarse-grained");
     }
 
     #[test]
     fn normalise_in_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "userId": { "$in": [1, 2, 3] } }));
+        let p = normalise_filter(&json!({ "userId": { "$in": [1, 2, 3] } }), &json!({}));
         assert!(p.is_none(), "$in should collapse to coarse-grained");
     }
 
     #[test]
     fn normalise_like_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "name": { "$like": "j%" } }));
+        let p = normalise_filter(&json!({ "name": { "$like": "j%" } }), &json!({}));
         assert!(p.is_none(), "$like should collapse to coarse-grained");
     }
 
@@ -477,13 +550,13 @@ mod tests {
         // Null/IS NULL semantics need a NULL-aware tuple representation;
         // the WAL consumer's text-encoded tuple can't distinguish "absent"
         // from "explicit NULL" so we conservatively bail out.
-        let p = normalise_filter(&json!({ "deletedAt": null }));
+        let p = normalise_filter(&json!({ "deletedAt": null }), &json!({}));
         assert!(p.is_none());
     }
 
     #[test]
     fn normalise_array_filter_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "tags": ["x", "y"] }));
+        let p = normalise_filter(&json!({ "tags": ["x", "y"] }), &json!({}));
         assert!(p.is_none());
     }
 
@@ -501,7 +574,7 @@ mod tests {
 
     #[test]
     fn predicate_bool_eq() {
-        let p = normalise_filter(&json!({ "active": true })).unwrap();
+        let p = normalise_filter(&json!({ "active": true }), &json!({})).unwrap();
         assert!(p.matches(&row(&[("active", "true")])));
         assert!(!p.matches(&row(&[("active", "false")])));
     }
@@ -522,7 +595,7 @@ mod tests {
     fn read_set_entry_filters_by_predicate() {
         let entry = ReadSetEntry {
             collection: "messages".into(),
-            predicate: normalise_filter(&json!({ "userId": 42 })),
+            predicate: normalise_filter(&json!({ "userId": 42 }), &json!({})),
         };
         assert!(entry.matches(&row(&[("userId", "42")])));
         assert!(!entry.matches(&row(&[("userId", "99")])));
@@ -538,7 +611,7 @@ mod tests {
     #[test]
     fn record_no_op_when_inactive() {
         // No `Active::begin` — record should be a no-op.
-        record_if_active("messages", &json!({ "userId": 42 }));
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         assert!(!is_active());
     }
 
@@ -546,7 +619,7 @@ mod tests {
     fn record_no_op_outside_query_kind() {
         let guard = Active::begin();
         // No kind set on the thread — record_if_active should skip.
-        record_if_active("messages", &json!({ "userId": 42 }));
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         let entries = guard.take();
         assert!(entries.is_empty());
     }
@@ -556,8 +629,8 @@ mod tests {
         use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
         let _kg = KindGuard::enter(ProcedureKind::Query);
         let guard = Active::begin();
-        record_if_active("messages", &json!({ "userId": 42 }));
-        record_if_active("messages", &json!({}));
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        record_if_active("messages", &json!({}), &json!({}));
         let entries = guard.take();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].collection, "messages");
@@ -570,7 +643,7 @@ mod tests {
         use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
         let _kg = KindGuard::enter(ProcedureKind::Mutation);
         let guard = Active::begin();
-        record_if_active("messages", &json!({ "userId": 42 }));
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         let entries = guard.take();
         assert!(entries.is_empty(), "mutations must not record read-set");
     }

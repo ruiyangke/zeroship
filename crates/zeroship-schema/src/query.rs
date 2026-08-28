@@ -1255,44 +1255,44 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 }
                 continue;
             }
+            // The declared type and the WHOLE constraint set
+            // (`NOT NULL`, `DEFAULT`, range / literal / enum `CHECK`) travel
+            // with the REAL value, which after the storage flip lives in
+            // `__zs_raw__<col>` for a masked field and in the field's own
+            // column otherwise. `field_to_column_for_dialect` picks the
+            // physical name; it validates the LOGICAL one.
             let col_def = field_to_column_for_dialect(field, def, dialect)?;
             columns.push(col_def);
 
-            // Path B sibling-column emission. When the
-            // field carries a `.mask({...})` declaration (or the
-            // auto-default mask attached to `t.encrypted(...)` columns)
-            // AND the mask kind is NOT `"none"`, emit a sibling
-            // `<col>_masked TEXT` column alongside the parent. The sibling is
-            // engine-managed: raw inserts may omit it and the runtime mask-write
-            // pass fills it when the parent value is written.
-            // The sibling stores the pre-computed masked representation
-            // (e.g. `"***-**-6789"`) computed at INSERT/UPDATE time by
-            // `crud::mask_pass::apply_mask_on_write`. Reads default to
-            // the sibling; writes dual-bind both columns atomically.
+            // Masked-column emission. When the field carries a
+            // `.mask({...})` declaration (or the auto-default mask attached
+            // to `t.encrypted(...)` columns) AND the mask kind is NOT
+            // `"none"`, the column with the field's OWN name holds the
+            // pre-computed masked representation (e.g. `"***-**-6789"`) that
+            // `crud::mask_pass` derives at INSERT/UPDATE time, and the real
+            // value has already been emitted above under `__zs_raw__<col>`.
             //
-            // The sibling type is `TEXT` for every mask kind
-            // (full / last4 / first4 / email / name / dateYear /
-            // dateDecade) — the union of mask outputs is string-shaped.
-            // Future BYTEA-shaped masks would extend this with a per-
-            // kind type lookup.
+            // The masked column is `TEXT` for every mask kind (full / last4 /
+            // first4 / email / name / dateYear / dateDecade) — the union of
+            // mask outputs is string-shaped — and carries NONE of the
+            // declared constraints. That is not an oversight: a
+            // `t.number().mask(...)` field's own column would refuse
+            // `'***'` under `DOUBLE PRECISION`, and a
+            // `t.string().enum([...]).mask(...)` field would refuse it under
+            // `CHECK ("ssn" IN (...))`, so every write would fail. The
+            // constraints belong to the value, and the value moved.
             //
-            // Explicit `.mask({ kind: "none" })` opt-out → no sibling
-            // emission. The decrypt-on-read path continues to serve
-            // such columns; the parent column is the only storage site.
-            if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
-                // `_masked` suffix is platform-reserved
-                // (`validate_field_name`'s `ReservedName::Suffix`
-                // forbids creator-declared columns ending in
-                // `_masked`); no collision possible.
-                //
-                // Attach a `/* __zsmask:kind=…,
-                // classification=… */` inline comment to the sibling
-                // DDL so the SQLite introspector can recover the mask
-                // metadata from `sqlite_master.sql`. PG ignores SQL
-                // comments at parse time, so the introspector on the
-                // PG arm reads `pg_description` populated by the
-                // `COMMENT ON COLUMN` statement emitted alongside the
-                // table create (see `mask_sentinel_for_field`).
+            // Explicit `.mask({ kind: "none" })` opt-out → no second column.
+            // The field's own column is the only storage site and holds the
+            // real value, exactly as an unmasked column does.
+            if raw_column_for_field(field, def).is_some() {
+                // Attach a `/* __zsmask:kind=…, classification=… */` inline
+                // comment to the MASKED column's DDL so the SQLite
+                // introspector can recover the mask metadata from
+                // `sqlite_master.sql`. PG ignores SQL comments at parse time,
+                // so the introspector on the PG arm reads `pg_description`
+                // populated by the `COMMENT ON COLUMN` statement emitted
+                // alongside the table create (see `mask_sentinel_for_field`).
                 let sentinel = mask_sentinel_for_field(def);
                 let inline_comment = match &sentinel {
                     Some(s) => format!(" /* {s} */"),
@@ -1300,7 +1300,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 };
                 columns.push(format!(
                     "{} TEXT{inline_comment}",
-                    quote_ident_for_dialect(&sibling_col, dialect)
+                    quote_ident_for_dialect(field, dialect)
                 ));
             }
 
@@ -1676,40 +1676,39 @@ pub fn build_add_column(
 
     let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
     let pg_type = def_to_pg_type(def);
-    let constraints = def_to_constraints(field, def);
+    // The declared type and constraints go on the column that holds the REAL
+    // value - `__zs_raw__<field>` when masked, the field's own name otherwise.
+    let raw = raw_column_for_field(field, def);
+    let physical = raw.clone().unwrap_or_else(|| field.to_string());
+    let constraints = def_to_constraints(&physical, def);
 
     let mut sql = format!(
         "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
         table,
-        quote_ident(field),
+        quote_ident(&physical),
         pg_type,
         constraints
     )
     .trim()
     .to_string();
 
-    // When the field carries a `.mask({...})`
-    // declaration, also emit the sibling `<col>_masked TEXT NULL` ADD
-    // COLUMN op and the `COMMENT ON COLUMN` sentinel attachment in the
-    // same multi-statement payload. Only the sibling is NULL here
-    // (versus NOT NULL on CREATE TABLE) — existing rows would refuse
-    // the ALTER if the sibling were NOT NULL; the backfill flips it
-    // to NOT NULL after every row has its sibling populated.
+    // When the field carries a `.mask({...})` declaration, also emit the
+    // MASKED column - the one with the field's own name - as `TEXT NULL`, plus
+    // the `COMMENT ON COLUMN` sentinel attachment, in the same multi-statement
+    // payload. It is NULL here (versus the CREATE TABLE shape) because
+    // existing rows would refuse the ALTER if it were NOT NULL; the backfill
+    // populates it after every row has its mask computed.
     //
-    // Note: this branch is taken ONLY when the diff classifier emits
-    // an `AddColumn` for a fresh top-level field declared with
-    // `.mask({...})` — for that case the sibling tags along in the
-    // same payload. The separate `MaskBackfill`-paired
-    // `AddColumn(<col>_masked)` op the diff classifier emits for the backfill
-    // sets `mask_sibling_for` in `details` and the field IS the
-    // sibling itself; `mask_sibling_column_for_field(sibling, def)`
-    // returns `None` there because the synthetic def carries no
-    // mask block. So we don't double-emit.
-    if let Some(sibling) = mask_sibling_column_for_field(field, def) {
+    // Note: this branch is taken ONLY when the diff classifier emits an
+    // `AddColumn` for a fresh top-level field declared with `.mask({...})`.
+    // The separate `MaskBackfill`-paired op the classifier emits for the
+    // backfill passes a synthetic def carrying no mask block, so
+    // `raw_column_for_field` returns `None` there and we do not double-emit.
+    if raw.is_some() {
         sql.push_str(&format!(
             ";\nALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
             table,
-            quote_ident(&sibling),
+            quote_ident(field),
         ));
         if let Some(comment) =
             build_mask_sentinel_comment_for_field(app_id, collection, field, def)
@@ -1943,12 +1942,24 @@ pub fn build_create_indexes(
             continue;
         }
 
+        // `.index()` and `.unique()` are declarations about the REAL value, so
+        // they land on the column that holds it: `__zs_raw__<field>` when the
+        // field is masked, the field's own column otherwise.
+        //
+        // Putting a `.unique()` on the masked column instead would enforce
+        // uniqueness over MASKS, where many rows legitimately share
+        // `***-**-1234` - a data-integrity failure that presents as a
+        // duplicate-key error on perfectly valid data, and for
+        // `kind: "full"` (every mask is `***`) caps the table at one row.
+        let raw = raw_column_for_field(field, def);
+        let value_col = raw.clone().unwrap_or_else(|| field.to_string());
+
         // Unique implies an index — if both flags are set, prefer the unique
         // form (a unique index also serves as a lookup index, so emitting
         // both would be redundant and waste storage).
         if wants_unique {
             let name = index_name(collection, &[field.as_str()], /* unique = */ true);
-            let col_list = quote_ident(field);
+            let col_list = quote_ident(&value_col);
             let sql = format!(
                 "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
                 quote_ident(&name),
@@ -1957,14 +1968,14 @@ pub fn build_create_indexes(
             );
             out.push(IndexSpec {
                 name,
-                columns: vec![field.clone()],
+                columns: vec![value_col.clone()],
                 unique: true,
                 sql,
                 kind: IndexKind::BTree,
             });
         } else if wants_index {
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
-            let col_list = quote_ident(field);
+            let col_list = quote_ident(&value_col);
             let sql = format!(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
                 quote_ident(&name),
@@ -1973,35 +1984,33 @@ pub fn build_create_indexes(
             );
             out.push(IndexSpec {
                 name,
-                columns: vec![field.clone()],
+                columns: vec![value_col.clone()],
                 unique: false,
                 sql,
                 kind: IndexKind::BTree,
             });
         }
 
-        // Auto-emit a B-tree index on the sibling
-        // `<col>_masked` column when the parent column has `.index()`
-        // or `.uniqueIndex()` declared AND the field carries a mask
-        // declaration with `kind != "none"`. The sibling index lets
-        // reads route equality / sort queries through the masked sibling
-        // without a sequential scan. Naming: `<coll>__<col>_masked_idx`
+        // Auto-emit a B-tree index on the MASKED column when the field has
+        // `.index()` or `.uniqueIndex()` declared AND carries a mask
+        // declaration with `kind != "none"`. Every creator-visible read and
+        // filter now touches the masked column, so this is the index those
+        // queries use; the one emitted above serves the raw column, which only
+        // the unmask path reads. Naming: `<coll>__<col>_mask_idx`
         // (double-underscore separator, matching `named_index_name`'s
-        // collision-avoidance convention). Never UNIQUE — uniqueness
-        // applies to the parent column only (the sibling is a derived
-        // value, multiple rows can share the same masked output).
+        // collision-avoidance convention). Never UNIQUE - see above.
         if wants_index || wants_unique {
-            if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
-                let idx_name = cap_ident_name(&format!("{collection}__{sibling_col}_idx"));
+            if raw.is_some() {
+                let idx_name = cap_ident_name(&format!("{collection}__{field}_mask_idx"));
                 let sql = format!(
                     "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
                     quote_ident(&idx_name),
                     table_qualified,
-                    quote_ident(&sibling_col),
+                    quote_ident(field),
                 );
                 out.push(IndexSpec {
                     name: idx_name,
-                    columns: vec![sibling_col],
+                    columns: vec![field.clone()],
                     unique: false,
                     sql,
                     kind: IndexKind::BTree,
@@ -2138,26 +2147,80 @@ pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
     cap_ident_name(&format!("{table}_{joined_cols}_{suffix}"))
 }
 
-/// Return the sibling column name `<field>_masked` IFF
-/// the field's schema entry carries a `.mask({...})` declaration with
-/// `kind != "none"`. Returns `None` for non-masked columns and for
-/// columns that explicitly opt out via `.mask({ kind: "none" })`.
+/// The prefix every RAW-value column carries.
 ///
-/// The platform reserves the `_masked` suffix at the field-name level
-/// (`validate_field_name`'s `ReservedName::Suffix`) so a creator cannot
-/// shadow a sibling. Called by both `build_create_table_with_fks`
-/// (DDL emission) and `build_insert` / `build_set_clauses` (atomic
-/// dual-write).
-pub fn mask_sibling_column_for_field(
-    field: &str,
-    def: &serde_json::Value,
-) -> Option<String> {
+/// Chosen so that [`validate_field_name`] already refuses it: `RESERVED_NAMES`
+/// reserves both `Prefix("_")` and `Prefix("__zs_")`, and that validator is
+/// called on every inbound identifier surface the platform has (filter keys,
+/// conflict-probe keys, write-document keys including `$set` nesting, and every
+/// read identifier via `validate_read_identifier`). A raw column named with
+/// this prefix is therefore **unnameable by creator code on surfaces nobody has
+/// written yet**, which is a stronger property than adding a fence to each of
+/// the surfaces that exist today.
+pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
+
+/// The longest field name that can carry a mask.
+///
+/// `63 - RAW_COLUMN_PREFIX.len()`. Postgres truncates identifiers at 63 bytes
+/// (NAMEDATALEN) and [`validate_field_name`] admits a 63-byte field, so a longer
+/// masked field would produce a raw column the server silently truncates - and
+/// two such fields could truncate to the same column. The declaration is
+/// REFUSED instead, at DDL-emission time, in `field_to_column_for_dialect`.
+///
+/// (The pre-flip `<field>_masked` sibling had exactly this bug and did not cap:
+/// a 60-character masked field produced a 67-character sibling.)
+pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
+
+/// The physical column that holds `field`'s REAL value.
+///
+/// Total, and deliberately a plain concatenation rather than a hashing cap.
+/// This name must stay byte-identical to
+/// `zeroship_migrate_backend::schema::raw_column_name` - that one names the
+/// column the migration engine CREATES, this one names the column the data
+/// plane READS and WRITES - and a hashing cap implemented in two crates could
+/// not be checked to agree by any compiler. Refusing an overlong masked field
+/// name at declaration time removes the need for one entirely; see
+/// [`MAX_MASKED_FIELD_NAME_BYTES`].
+#[must_use]
+pub fn raw_column_name(field: &str) -> String {
+    format!("{RAW_COLUMN_PREFIX}{field}")
+}
+
+/// Return the RAW-value column name for `field` IFF the field's schema entry
+/// carries a `.mask({...})` declaration with `kind != "none"`. Returns `None`
+/// for non-masked columns and for columns that explicitly opt out via
+/// `.mask({ kind: "none" })`.
+///
+/// # The storage flip
+///
+/// The field's OWN column (`ssn`) holds the **masked** string; this sibling
+/// (`__zs_raw__ssn`) holds the real value and is unqueryable - not in a filter,
+/// not in a projection, not in a sort, and not a field of the generated type.
+///
+/// It used to be the other way round: `ssn` held plaintext and `ssn_masked`
+/// held the mask. The projection substituted `"ssn_masked" AS "ssn"`, but the
+/// WHERE builder could not - it takes no schema hint - so
+/// `find({ ssn: { $gt: "500-00-0000" } })` compared against **plaintext**. The
+/// caller never saw a value and did not need to: the set of matching rows is
+/// the answer, and repeated probes binary-search it with no authorization check
+/// on the path and no audit row written.
+///
+/// After the flip the ignorant path is the safe path. A builder that knows
+/// nothing about masking selects and filters the column with the natural name,
+/// which is the mask, and leaks nothing. Plaintext has exactly one reader - the
+/// explicit unmask API, where the authorization check and the audit row already
+/// live.
+///
+/// Called by `build_create_table_with_fks` and `build_add_column` (DDL
+/// emission), `build_create_indexes` (constraints follow the real value), and
+/// the runtime's write relocation / read strip / unmask fetch.
+pub fn raw_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
     if kind == "none" {
         return None;
     }
-    Some(format!("{field}_masked"))
+    Some(raw_column_name(field))
 }
 
 /// Render the canonical mask-sentinel comment payload
@@ -2214,9 +2277,9 @@ pub fn build_mask_sentinel_comments(
         if is_schema_metadata_key(field) {
             continue;
         }
-        let Some(sibling) = mask_sibling_column_for_field(field, def) else {
+        if raw_column_for_field(field, def).is_none() {
             continue;
-        };
+        }
         let Some(sentinel) = mask_sentinel_for_field(def) else {
             continue;
         };
@@ -2228,7 +2291,7 @@ pub fn build_mask_sentinel_comments(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
             quote_ident(app_id),
             quote_ident(collection),
-            quote_ident(&sibling),
+            quote_ident(field),
             escaped,
         ));
     }
@@ -2238,11 +2301,14 @@ pub fn build_mask_sentinel_comments(
 /// Render the `COMMENT ON COLUMN` statement for one
 /// masked field, IFF the field has a `.mask({...})` declaration
 /// (`kind != "none"`). Used by the diff classifier's `MaskBackfill`
-/// op to attach the sentinel at the same time as the
-/// `ALTER TABLE ADD COLUMN <col>_masked` op.
+/// op to attach the sentinel at the same time as the masked column's
+/// `ALTER TABLE ADD COLUMN` op.
+///
+/// The sentinel rides the MASKED column - the one with the field's own name -
+/// because that is the column whose contents the sentinel describes.
 ///
 /// Returns `None` for fields without a mask or with `kind: "none"` —
-/// no sibling, no sentinel.
+/// no masked column, no sentinel.
 #[must_use]
 pub fn build_mask_sentinel_comment_for_field(
     app_id: &str,
@@ -2250,14 +2316,14 @@ pub fn build_mask_sentinel_comment_for_field(
     field: &str,
     def: &serde_json::Value,
 ) -> Option<String> {
-    let sibling = mask_sibling_column_for_field(field, def)?;
+    raw_column_for_field(field, def)?;
     let sentinel = mask_sentinel_for_field(def)?;
     let escaped = sentinel.replace('\'', "''");
     Some(format!(
         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
         quote_ident(app_id),
         quote_ident(collection),
-        quote_ident(&sibling),
+        quote_ident(field),
         escaped,
     ))
 }
@@ -2315,6 +2381,39 @@ fn field_to_column_for_dialect(
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_field_name_for_declaration(field)?;
+    // The declared type and constraints are emitted under the column that
+    // holds the REAL value: `__zs_raw__<field>` when the field is masked,
+    // the field's own name otherwise. The LOGICAL name is what gets
+    // validated - the physical one is the platform's, and
+    // `validate_field_name_for_declaration` would refuse it (it starts
+    // `__zs_`, which is exactly why that name was chosen).
+    let physical = match raw_column_for_field(field, def) {
+        Some(raw) => {
+            if field.len() > MAX_MASKED_FIELD_NAME_BYTES {
+                return Err(QueryError::InvalidIdent(format!(
+                    "masked field name exceeds {MAX_MASKED_FIELD_NAME_BYTES} bytes: {field} \
+                     (a mask needs a second column named '{RAW_COLUMN_PREFIX}<field>', and \
+                     Postgres truncates identifiers at 63 bytes)"
+                )));
+            }
+            raw
+        }
+        None => field.to_string(),
+    };
+    Ok(field_to_column_named_for_dialect(&physical, def, dialect))
+}
+
+/// [`field_to_column_for_dialect`] with the physical column name supplied.
+///
+/// Split out so the DDL emitter can put a masked field's declared type and
+/// constraint set on the raw column while validating the logical field name.
+/// Performs NO name validation: every caller has already validated the logical
+/// name this physical one was derived from.
+fn field_to_column_named_for_dialect(
+    physical: &str,
+    def: &serde_json::Value,
+    dialect: SqlDialect,
+) -> String {
     // `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
     // regardless of `wraps`. The encryption pass swaps the plaintext
@@ -2341,20 +2440,20 @@ fn field_to_column_for_dialect(
         ""
     };
     let sql_type = def_to_column_type_for_dialect(def, dialect);
-    let constraints = def_to_constraints_for_dialect(field, def, dialect);
+    let constraints = def_to_constraints_for_dialect(physical, def, dialect);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zsenc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
     // `sqlite_master.sql` for the introspector regex.
-    Ok(format!(
+    format!(
         "{} {}{} {}",
-        quote_ident_for_dialect(field, dialect),
+        quote_ident_for_dialect(physical, dialect),
         sql_type,
         enc_comment,
         constraints
     )
     .trim()
-    .to_string())
+    .to_string()
 }
 
 /// Map a single SDK field definition (`{ type, encrypted?, vectorDims?, … }`)
@@ -3258,8 +3357,7 @@ pub fn build_masked_aware_select_expr_for_table_alias(
     schema_hint: &Value,
     table_alias: &str,
 ) -> Result<String, QueryError> {
-    let empty_unmask: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let parts = implicit_read_projection_parts(schema_hint, &empty_unmask, Some(table_alias))?;
+    let parts = implicit_read_projection_parts(schema_hint, Some(table_alias))?;
     Ok(parts.join(", "))
 }
 
@@ -3282,11 +3380,8 @@ pub fn build_masked_aware_select_expr_for_table_alias(
 fn build_masked_aware_select_expr_with_unmask(
     select: Option<&Value>,
     schema_hint: &Value,
-    unmask_columns: &[String],
+    _unmask_columns: &[String],
 ) -> Result<String, QueryError> {
-    let unmask_set: std::collections::HashSet<&str> =
-        unmask_columns.iter().map(String::as_str).collect();
-
     // Case 1: explicit projection.
     if let Some(Value::Array(arr)) = select {
         if !arr.is_empty() {
@@ -3298,13 +3393,13 @@ fn build_masked_aware_select_expr_with_unmask(
                     )
                 })?;
                 validate_read_identifier(name, schema_hint)?;
-                cols.push(project_read_field(name, schema_hint, &unmask_set, None));
+                cols.push(project_read_field(name, None));
             }
             return Ok(cols.join(", "));
         }
     }
 
-    Ok(implicit_read_projection_parts(schema_hint, &unmask_set, None)?.join(", "))
+    Ok(implicit_read_projection_parts(schema_hint, None)?.join(", "))
 }
 
 fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
@@ -3314,18 +3409,20 @@ fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
     }
 }
 
+/// Project one field.
+///
+/// There is no per-column decision left to make: after the storage flip the
+/// column with the field's own name is the one a read may serve, for masked and
+/// unmasked fields alike. A SELECT never names the raw column - not for an
+/// unmask hint either, because the unmask path re-fetches the value under its
+/// own authorization check and audit row (`crud::unmask`), which is the whole
+/// point of having one reader.
 fn project_read_field(
     field: &str,
-    schema_hint: &Value,
-    unmask_set: &std::collections::HashSet<&str>,
     table_alias: Option<&str>,
 ) -> String {
     let logical = quote_ident(field);
-    let source = if unmask_set.contains(field) {
-        qualified_read_field(table_alias, field)
-    } else {
-        qualified_read_field(table_alias, &read_column_for(field, schema_hint))
-    };
+    let source = qualified_read_field(table_alias, field);
     if table_alias.is_some() || source != logical {
         format!("{source} AS {logical}")
     } else {
@@ -3343,7 +3440,6 @@ fn project_read_field(
 /// projection.
 fn implicit_read_projection_parts(
     schema_hint: &Value,
-    unmask_set: &std::collections::HashSet<&str>,
     table_alias: Option<&str>,
 ) -> Result<Vec<String>, QueryError> {
     let schema_obj = schema_hint.as_object().ok_or_else(|| {
@@ -3354,15 +3450,73 @@ fn implicit_read_projection_parts(
     })?;
     let mut parts = Vec::with_capacity(SYSTEM_FIELD_NAMES.len() + schema_obj.len());
     for field in SYSTEM_FIELD_NAMES {
-        parts.push(project_read_field(field, schema_hint, unmask_set, table_alias));
+        parts.push(project_read_field(field, table_alias));
     }
     for field in schema_obj.keys() {
         if is_schema_metadata_key(field) || SYSTEM_FIELD_NAMES.contains(&field.as_str()) {
             continue;
         }
-        parts.push(project_read_field(field, schema_hint, unmask_set, table_alias));
+        parts.push(project_read_field(field, table_alias));
     }
     Ok(parts)
+}
+
+/// The closed set of synthetic result columns the read builders emit.
+///
+/// A deliberate literal list, NOT "anything starting with `_`". The raw column
+/// is `_`-prefixed too, so a blanket underscore allowance would re-admit
+/// exactly the column [`read_surface_columns`] exists to remove. Adding a new
+/// synthetic column means adding it here; forgetting to means the column is
+/// dropped from the row - a visible failure, not a leak.
+pub const SYNTHETIC_RESULT_COLUMNS: &[&str] = &[
+    // `build_vector_search` (`{col} {op} $1::vector AS _distance`) and the
+    // SQLite arm's `v.distance AS _distance`.
+    "_distance",
+    // `build_spatial_near` (`ST_Distance(...) AS _distance_m`).
+    "_distance_m",
+    // `build_upsert_with_dialect` (`RETURNING *, (xmax = 0) AS __created`).
+    "__created",
+];
+
+/// Every column name a decoded row may carry across the JS boundary.
+///
+/// The seven system fields, every declared field's LOGICAL name, and
+/// [`SYNTHETIC_RESULT_COLUMNS`]. A physical column that is not one of those - a
+/// raw column, an auxiliary shadow-table key - is not on this surface and is
+/// removed before the row is serialised.
+///
+/// # Why a row predicate rather than a `RETURNING` column list
+///
+/// The twelve `RETURNING *` sites in this file are not the only way a physical
+/// column reaches a creator, and narrowing them would not close the hole it
+/// appears to close: the same rows feed the change broker, and on a deployed
+/// Postgres app the authoritative event source is the WAL consumer, which zips
+/// every physical column out of pgoutput with no schema in sight. A predicate
+/// over key names applies to both. `BuiltQuery` is also `{ sql, params }` with
+/// no constructor - nineteen sites hand-roll the struct literal - so a
+/// projection list threaded through it is nineteen edits now and one more per
+/// future builder.
+///
+/// The union of system fields and declared fields is not a choice between the
+/// two: `id` is minted SDK-side and read back out of the `RETURNING` row,
+/// `version` and `updated_at` are auto-bumped in SQL, `deleted_at` is what
+/// soft-delete writes, and none of the seven is necessarily a descriptor key.
+#[must_use]
+pub fn read_surface_columns(schema_hint: &Value) -> std::collections::BTreeSet<String> {
+    let mut out: std::collections::BTreeSet<String> = SYSTEM_FIELD_NAMES
+        .iter()
+        .chain(SYNTHETIC_RESULT_COLUMNS.iter())
+        .map(|name| (*name).to_string())
+        .collect();
+    if let Some(obj) = schema_hint.as_object() {
+        for field in obj.keys() {
+            if is_schema_metadata_key(field) {
+                continue;
+            }
+            out.insert(field.clone());
+        }
+    }
+    out
 }
 
 /// Does the column named `name` declare a non-`none`
@@ -3383,75 +3537,42 @@ pub fn column_is_masked(name: &str, schema_hint: &Value) -> bool {
     kind != "none"
 }
 
-/// The PHYSICAL column every read surface must serve `field` from.
-///
-/// This is the SINGLE derivation site for the masked-sibling mapping. The
-/// implicit projection, an explicit `select`, `$group.by`, the aggregate
-/// accumulators, `$having`, `distinct` and `orderBy` all route through it,
-/// because disagreeing is not cosmetic: an `ORDER BY` over a column the
-/// `SELECT` does not return is a sort over a value the caller cannot read, and
-/// with `limit`/`offset` that is a binary search over hidden data (L26).
-///
-/// The name is READ from the descriptor's `storage.valueColumn` when the field
-/// carries one, and only derived by suffixing when it does not. The descriptor
-/// stamps that block from the DDL emitter's own
-/// `mask_sibling_column_for_field`
-/// (`crates/zeroship-migrate-core/src/render/gen_types.rs:285-318`), so the two
-/// cannot drift, and a later flip of which physical column holds the readable
-/// value moves this function's answer without touching a single caller.
-pub fn read_column_for(field: &str, schema_hint: &Value) -> String {
-    let declared = schema_hint
-        .as_object()
-        .and_then(|obj| obj.get(field))
-        .and_then(|def| def.get("storage"))
-        .and_then(|storage| storage.get("valueColumn"))
-        .and_then(Value::as_str);
-    match declared {
-        Some(column) => column.to_string(),
-        // No `storage` block: either the field is unmasked (it reads from
-        // itself) or the schema predates the storage projection, in which case
-        // the sibling convention is the emitter's own.
-        None if column_is_masked(field, schema_hint) => format!("{field}_masked"),
-        None => field.to_string(),
-    }
-}
+// There is deliberately NO `read_column_for` here any more, and no
+// `aggregate_read_ident`.
+//
+// They existed to substitute `"<col>_masked" AS "<col>"` on every read surface
+// while `<col>` held plaintext, and the substitution is what the storage flip
+// deleted. Every read surface - the implicit projection, an explicit `select`,
+// `$group.by`, the aggregate accumulators, `$having`, `distinct`, `orderBy`,
+// the vector and spatial builders - now names the field's own column, which
+// holds the mask, so there is nothing to derive and nothing to keep in
+// agreement.
+//
+// This is the point of the flip rather than a side effect of it. The old shape
+// needed EVERY builder to ask "is this masked?"; the ones that asked were
+// correct and the one that could not - `build_where`, which takes no schema at
+// all - compared against plaintext, so `find({ ssn: { $gt: v } })` plus
+// `orderBy` plus `limit` binary-searched a value the caller could not read,
+// with no authorization check on the path and no audit row written. A function
+// that maps a logical field to some other physical column is exactly the
+// asymmetry that produced it, so it is gone rather than corrected.
 
-/// **SEC-4** — the column SQL expression to read for `field` inside an
-/// aggregate, substituting the `<field>_masked` sibling when `field` is a
-/// masked column.
+/// Push one `$group.by` field's SELECT projection and GROUP BY term.
 ///
-/// For a mask-only column the plaintext lives in `<field>` and the masked
-/// string in `<field>_masked`. The normal read path and `build_distinct`
-/// alias the sibling back to the logical name (`"<field>_masked" AS
-/// "<field>"`); the aggregate builder must do the same so `$group.by` /
-/// `$sum` / `$avg` / `$min` / `$max` / `$first` / `$sort` / `$having`
-/// never lower to the bare plaintext column. Returns a quoted identifier
-/// (the sibling when masked, the field itself otherwise) — NOT aliased,
-/// since the aggregate builder applies its own `AS` where appropriate.
-pub fn aggregate_read_ident(field: &str, schema_hint: &Value) -> String {
-    quote_ident(&read_column_for(field, schema_hint))
-}
-
-/// **SEC-4** — push one `$group.by` field's SELECT projection and GROUP
-/// BY term. A masked column projects `"<col>_masked" AS "<col>"` (so the
-/// row carries the masked string under the logical name, exactly like
-/// `build_distinct`) and groups by the masked sibling; an unmasked
-/// column projects + groups by the bare quoted column.
+/// Both are the field's own quoted column - for masked and unmasked fields
+/// alike, because after the storage flip that column carries the value a read
+/// may serve. Grouping a masked column groups by the mask, which is what a
+/// caller who cannot read the value should get: `$group.by: ["ssn"]` yields one
+/// bucket per DISTINCT MASK, not one per distinct SSN, and the bucket counts
+/// therefore say nothing about the underlying values.
 fn push_group_by_field(
     field: &str,
-    schema_hint: &Value,
     select_cols: &mut Vec<String>,
     group_by_cols: &mut Vec<String>,
 ) {
     let logical = quote_ident(field);
-    let read = quote_ident(&read_column_for(field, schema_hint));
-    if read == logical {
-        select_cols.push(logical.clone());
-        group_by_cols.push(logical);
-    } else {
-        select_cols.push(format!("{read} AS {logical}"));
-        group_by_cols.push(read);
-    }
+    select_cols.push(logical.clone());
+    group_by_cols.push(logical);
 }
 
 /// Build a SELECT COUNT(*) query.
@@ -4615,6 +4736,38 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
     schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_aggregate_with_result_columns(
+        app_id,
+        collection,
+        pipeline,
+        filter_soft_deleted,
+        schema_hint,
+        dialect,
+    )
+    .map(|(query, _)| query)
+}
+
+/// [`build_aggregate_with_soft_delete_with_dialect`], plus the exact key set
+/// its rows will carry.
+///
+/// The second element is `None` when the pipeline has no `$group` stage - the
+/// rows are then plain declared-shape rows. When there is a `$group` it is the
+/// group-by fields plus the accumulator aliases, which no descriptor declares,
+/// so the read pipeline's row-surface filter has to be told them rather than
+/// deriving them from the schema.
+///
+/// Returned from the builder rather than re-derived beside it: a second
+/// traversal of the pipeline that disagreed with this one would silently drop
+/// result columns, and the drop would look like a missing accumulator rather
+/// than like a bug in a surface filter.
+pub fn build_aggregate_with_result_columns(
+    app_id: &str,
+    collection: &str,
+    pipeline: &Value,
+    filter_soft_deleted: bool,
+    schema_hint: &Value,
+    dialect: SqlDialect,
+) -> Result<(BuiltQuery, Option<Vec<String>>), QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -4628,6 +4781,9 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
     let mut params: Vec<String> = Vec::new();
     let mut where_clause = String::new();
     let mut select_cols: Vec<String> = Vec::new();
+    // The UNQUOTED result key for every entry pushed onto `select_cols`, in
+    // the same order. Kept beside it rather than parsed back out of the SQL.
+    let mut result_cols: Vec<String> = Vec::new();
     let mut group_by_cols: Vec<String> = Vec::new();
     // Map alias → SQL expression for HAVING clause rewriting
     let mut agg_exprs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -4654,7 +4810,8 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                 match by_val {
                     Value::String(s) => {
                         validate_read_identifier(s, schema_hint)?;
-                        push_group_by_field(s, schema_hint, &mut select_cols, &mut group_by_cols);
+                        push_group_by_field(s, &mut select_cols, &mut group_by_cols);
+                        result_cols.push(s.clone());
                     }
                     Value::Array(arr) => {
                         for item in arr {
@@ -4665,12 +4822,8 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 )
                             })?;
                             validate_read_identifier(s, schema_hint)?;
-                            push_group_by_field(
-                                s,
-                                schema_hint,
-                                &mut select_cols,
-                                &mut group_by_cols,
-                            );
+                            push_group_by_field(s, &mut select_cols, &mut group_by_cols);
+                            result_cols.push(s.to_string());
                         }
                     }
                     _ => {
@@ -4709,7 +4862,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                         })?;
                         validate_read_identifier(field, schema_hint)?;
                         // SEC-4: read the masked sibling for masked columns.
-                        format!("SUM({})", aggregate_read_ident(field, schema_hint))
+                        format!("SUM({})", quote_ident(field))
                     }
                     "$avg" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -4718,7 +4871,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("AVG({})", aggregate_read_ident(field, schema_hint))
+                        format!("AVG({})", quote_ident(field))
                     }
                     "$min" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -4727,7 +4880,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("MIN({})", aggregate_read_ident(field, schema_hint))
+                        format!("MIN({})", quote_ident(field))
                     }
                     "$max" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -4736,7 +4889,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("MAX({})", aggregate_read_ident(field, schema_hint))
+                        format!("MAX({})", quote_ident(field))
                     }
                     "$first" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -4746,19 +4899,14 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                         })?;
                         validate_read_identifier(field, schema_hint)?;
                         // SEC-4: read the masked sibling for masked columns.
-                        let read_ident = aggregate_read_ident(field, schema_hint);
+                        let read_ident = quote_ident(field);
                         if last_sort.is_empty() {
                             format!("(array_agg({read_ident}))[1]")
                         } else {
                             let order_parts: Vec<String> = last_sort
                                 .iter()
                                 .map(|(col, descending)| {
-                                    build_order_term_with_schema(
-                                        col,
-                                        *descending,
-                                        dialect,
-                                        schema_hint,
-                                    )
+                                    build_order_term(col, *descending, dialect)
                                 })
                                 .collect();
                             format!(
@@ -4776,6 +4924,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
 
                 agg_exprs.insert(alias.clone(), agg_expr.clone());
                 select_cols.push(format!("{agg_expr} AS {}", quote_ident(alias)));
+                result_cols.push(alias.clone());
             }
         } else if let Some(having_val) = obj.get("$having") {
             having_clause = build_having(having_val, &mut params, &agg_exprs, schema_hint)?;
@@ -4805,13 +4954,16 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
         }
     }
 
-    let select_expr = if select_cols.is_empty() {
-        let empty_unmask: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let (select_expr, result_columns) = if select_cols.is_empty() {
         // L24: no `*` fallback. An aggregate with no projection stage returns
-        // the same allowlist a plain read does.
-        implicit_read_projection_parts(schema_hint, &empty_unmask, None)?.join(", ")
+        // the same allowlist a plain read does — and therefore the same row
+        // surface, which is why the second element is `None` here.
+        (
+            implicit_read_projection_parts(schema_hint, None)?.join(", "),
+            None,
+        )
     } else {
-        select_cols.join(", ")
+        (select_cols.join(", "), Some(result_cols))
     };
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
@@ -4842,7 +4994,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
         sql.push_str(&limit_clause);
     }
 
-    Ok(BuiltQuery { sql, params })
+    Ok((BuiltQuery { sql, params }, result_columns))
 }
 
 /// Build a SELECT DISTINCT query:
@@ -4898,12 +5050,11 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
     let col = quote_ident(field);
-    let read = quote_ident(&read_column_for(field, schema_hint));
-    let select_expr = if read == col {
-        col.clone()
-    } else {
-        format!("{read} AS {col}")
-    };
+    // DISTINCT over the field's own column. For a masked field that column
+    // holds the mask, so `distinct("ssn")` enumerates MASKS - it can no longer
+    // be one `read_column_for` disagreement away from enumerating the values
+    // behind them.
+    let select_expr = col.clone();
 
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where(filter, &mut params)?;
@@ -5159,7 +5310,7 @@ fn build_having_inner(
                         expr.clone()
                     } else {
                         validate_read_identifier(key, schema_hint)?;
-                        aggregate_read_ident(key, schema_hint)
+                        quote_ident(key)
                     };
                     let cond = build_having_condition(&col, value, params)?;
                     conditions.push(cond);
@@ -5518,11 +5669,13 @@ fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<Str
 
 /// **L26** — the READ-path ORDER BY builder.
 ///
-/// The sort term is resolved through [`read_column_for`], the same function the
-/// projection uses. Before that, this emitted the bare declared name while the
-/// SELECT served the masked sibling, so `orderBy: { ssn: 1 }` ordered rows by
-/// the value the mask hides - observable through `limit`/`offset` as a binary
-/// search over data the caller cannot read.
+/// The sort term is the field's own column, the same one the projection serves.
+/// This used to need a lowering function to keep the two in agreement, because
+/// the SELECT served the masked sibling while the ORDER BY named the declared
+/// column, so `orderBy: { ssn: 1 }` ordered rows by the value the mask hides -
+/// observable through `limit`/`offset` as a binary search over data the caller
+/// cannot read. After the storage flip both name the same column and the
+/// agreement is structural rather than maintained.
 fn build_order_by_read_with_dialect(
     order: &Value,
     dialect: SqlDialect,
@@ -5532,7 +5685,7 @@ fn build_order_by_read_with_dialect(
         order,
         dialect,
         |field| validate_read_identifier(field, schema_hint),
-        |field| read_column_for(field, schema_hint),
+        |field| field.to_string(),
     )
 }
 
@@ -5600,7 +5753,7 @@ fn build_aggregate_order_by(
             Ok(build_order_term_expr(&quote_ident(field), descending, dialect))
         } else {
             validate_read_identifier(field, schema_hint)?;
-            Ok(build_order_term_with_schema(field, descending, dialect, schema_hint))
+            Ok(build_order_term(field, descending, dialect))
         }
     };
     match order {
@@ -5736,19 +5889,6 @@ fn count_clause_budget(
 
 fn build_order_term(field: &str, descending: bool, dialect: SqlDialect) -> String {
     build_order_term_expr(&quote_ident(field), descending, dialect)
-}
-
-/// **SEC-4** — like [`build_order_term`] but substitutes the masked
-/// sibling for masked columns, so an aggregate `$sort` (or a `$first`
-/// ORDER BY) on a mask-only column never orders by — and thereby leaks
-/// the ordering of — the plaintext column.
-fn build_order_term_with_schema(
-    field: &str,
-    descending: bool,
-    dialect: SqlDialect,
-    schema_hint: &Value,
-) -> String {
-    build_order_term_expr(&aggregate_read_ident(field, schema_hint), descending, dialect)
 }
 
 /// Shared ORDER BY term renderer over an already-quoted column
@@ -6074,10 +6214,9 @@ mod tests {
     /// from it. Spelled once so a change to the system-field set or to
     /// `tschema` is a one-line edit rather than a sweep.
     fn tselect() -> String {
-        let empty: std::collections::HashSet<&str> = std::collections::HashSet::new();
         format!(
             "SELECT {}",
-            implicit_read_projection_parts(&tschema(), &empty, None)
+            implicit_read_projection_parts(&tschema(), None)
                 .expect("tschema is an object")
                 .join(", ")
         )
@@ -6720,8 +6859,11 @@ mod tests {
         assert_eq!(q.params, vec!["true"]);
     }
 
+    /// After the storage flip, `email`'s own column already holds the
+    /// masked value, so DISTINCT reads it directly with no sibling alias.
+    /// The raw column (holding the real value) must never be named.
     #[test]
-    fn distinct_on_masked_field_reads_masked_sibling() {
+    fn distinct_on_a_masked_field_reads_the_masked_column() {
         let schema = json!({
             "email": {
                 "type": "string",
@@ -6740,13 +6882,13 @@ mod tests {
         .expect("build distinct with schema");
 
         assert!(
-            q.sql.starts_with(r#"SELECT DISTINCT "email_masked" AS "email" FROM "app1"."users""#),
-            "masked distinct must read the sibling column: {}",
+            q.sql.starts_with(r#"SELECT DISTINCT "email" FROM "app1"."users""#),
+            "masked distinct must read the field's own (masked) column: {}",
             q.sql
         );
         assert!(
-            !q.sql.contains(r#"SELECT DISTINCT "email" FROM"#),
-            "masked distinct must not read the parent column: {}",
+            !q.sql.contains(&raw_column_name("email")),
+            "masked distinct must never name the raw column: {}",
             q.sql
         );
     }
@@ -6800,15 +6942,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SEC-4: the aggregation pipeline must NOT leak masked-column plaintext.
+    // SEC-4: the aggregation pipeline must NOT leak the raw (real) value of a
+    // masked column.
     //
-    // For a mask-only column (`.mask({...})` without `.encrypted()`),
-    // plaintext lives in `<col>` and the masked string in `<col>_masked`.
-    // `build_distinct` substitutes the sibling; the aggregate builder used
-    // a bare `quote_ident(field)` against the base plaintext column, so
-    // `$group.by:"ssn"` / `$max:"ssn"` returned PLAINTEXT. These pin the
-    // sibling substitution at the SQL-builder level (BASE column, not the
-    // already-rejected `ssn_masked` sibling name).
+    // Originally: for a mask-only column (`.mask({...})` without
+    // `.encrypted()`), plaintext lived in `<col>` and the masked string in
+    // `<col>_masked`. The aggregate builder used a bare `quote_ident(field)`
+    // against the base plaintext column, so `$group.by:"ssn"` / `$max:"ssn"`
+    // returned PLAINTEXT.
+    //
+    // After the storage flip, `<col>` itself holds the masked value and the
+    // real value lives in the unqueryable `__zs_raw__<col>` sibling
+    // (`raw_column_name`). The same bare `quote_ident(field)` the builder
+    // always used now reads the masked column by construction - these pin
+    // that the raw sibling is never named anywhere in the built SQL.
     // -----------------------------------------------------------------------
 
     fn mask_only_ssn_schema() -> Value {
@@ -6822,7 +6969,7 @@ mod tests {
     }
 
     #[test]
-    fn sec4_aggregate_group_by_masked_field_reads_masked_sibling() {
+    fn sec4_aggregate_group_by_masked_field_reads_the_masked_column() {
         let pipeline = json!([
             {"$group": {"by": "ssn", "n": {"$count": true}}}
         ]);
@@ -6833,29 +6980,27 @@ mod tests {
         .expect("build aggregate with schema");
 
         assert!(
-            q.sql.contains(r#""ssn_masked" AS "ssn""#),
-            "SEC-4: $group.by on a masked column must select the masked \
-             sibling, not plaintext: {}",
-            q.sql
-        );
-        // The bare plaintext column must not appear in the SELECT or the
-        // GROUP BY (the sibling alias `"ssn"` is fine, the bare quoted
-        // `"ssn"` projection is not).
-        assert!(
-            !q.sql.contains(r#"SELECT "ssn","#) && !q.sql.contains(r#"SELECT "ssn" "#),
-            "SEC-4: aggregate must not project the bare plaintext ssn column: {}",
+            q.sql.contains(r#"SELECT "ssn", COUNT(*) AS "n""#),
+            "SEC-4: $group.by on a masked column reads the field's own \
+             (masked) column: {}",
             q.sql
         );
         assert!(
-            q.sql.contains(r#"GROUP BY "ssn_masked""#),
-            "SEC-4: GROUP BY on a masked column must group by the masked \
-             sibling: {}",
+            q.sql.contains(r#"GROUP BY "ssn""#),
+            "SEC-4: GROUP BY on a masked column groups by the masked \
+             column: {}",
+            q.sql
+        );
+        // The raw (real-value) sibling must never appear.
+        assert!(
+            !q.sql.contains(&raw_column_name("ssn")),
+            "SEC-4: aggregate must never name the raw column: {}",
             q.sql
         );
     }
 
     #[test]
-    fn sec4_aggregate_max_on_masked_field_reads_masked_sibling() {
+    fn sec4_aggregate_max_on_masked_field_reads_the_masked_column() {
         let pipeline = json!([
             {"$group": {"by": "tenant", "top": {"$max": "ssn"}}}
         ]);
@@ -6866,24 +7011,31 @@ mod tests {
         .expect("build aggregate with schema");
 
         assert!(
-            q.sql.contains(r#"MAX("ssn_masked") AS "top""#),
-            "SEC-4: $max on a masked column must aggregate the masked \
-             sibling, not plaintext: {}",
+            q.sql.contains(r#"MAX("ssn") AS "top""#),
+            "SEC-4: $max on a masked column must aggregate the field's own \
+             (masked) column: {}",
             q.sql
         );
         assert!(
-            !q.sql.contains(r#"MAX("ssn")"#),
-            "SEC-4: $max must not read the bare plaintext ssn column: {}",
+            !q.sql.contains(&raw_column_name("ssn")),
+            "SEC-4: $max must never read the raw column: {}",
             q.sql
         );
     }
 
     #[test]
-    fn sec4_aggregate_sum_min_first_on_masked_field_read_masked_sibling() {
-        // $sum / $min / $first all lower a field reference and must each
-        // substitute the masked sibling.
+    fn sec4_aggregate_sum_min_first_on_masked_field_reads_the_masked_column() {
+        // $sum / $min / $first all lower a field reference; after the
+        // storage flip the field's own column already holds the mask, so
+        // each op reads it directly with no substitution, and the raw
+        // (real-value) sibling must never appear.
         let schema = mask_only_ssn_schema();
-        for op in ["$sum", "$min", "$first"] {
+        let expected = [
+            ("$sum", r#"SUM("ssn") AS "v""#),
+            ("$min", r#"MIN("ssn") AS "v""#),
+            ("$first", r#"(array_agg("ssn"))[1] AS "v""#),
+        ];
+        for (op, expected_expr) in expected {
             let pipeline = json!([
                 {"$group": {"by": "tenant", "v": {op: "ssn"}}}
             ]);
@@ -6892,14 +7044,14 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("build aggregate {op}: {e:?}"));
             assert!(
-                q.sql.contains(r#""ssn_masked""#),
-                "SEC-4: {op} on a masked column must reference the masked \
-                 sibling: {}",
+                q.sql.contains(expected_expr),
+                "SEC-4: {op} on a masked column must reference the field's \
+                 own (masked) column: {}",
                 q.sql
             );
             assert!(
-                !q.sql.contains(r#"("ssn")"#) && !q.sql.contains(r#"("ssn" "#),
-                "SEC-4: {op} must not read the bare plaintext ssn column: {}",
+                !q.sql.contains(&raw_column_name("ssn")),
+                "SEC-4: {op} must never read the raw column: {}",
                 q.sql
             );
         }
@@ -8606,14 +8758,15 @@ mod tests {
 
     /// A collection name at the 63-byte ceiling PASSES `validate_collection`,
     /// but nothing bounds the names DERIVED from it. `build_create_indexes`
-    /// builds the masked-sibling index as `<coll>__<col>_masked_idx`, which is
-    /// guaranteed to overflow NAMEDATALEN for such a collection. Postgres does
-    /// not error on that — it truncates to 63 bytes and emits a NOTICE — so two
-    /// masked siblings on the same collection collapse to ONE identifier and
-    /// the second `CREATE INDEX ... IF NOT EXISTS` is a SILENT no-op.
+    /// builds the auto mask index (on the field's own, masked column) as
+    /// `<coll>__<col>_mask_idx`, which is guaranteed to overflow NAMEDATALEN
+    /// for such a collection. Postgres does not error on that - it truncates
+    /// to 63 bytes and emits a NOTICE - so two mask indexes on the same
+    /// collection collapse to ONE identifier and the second
+    /// `CREATE INDEX ... IF NOT EXISTS` is a SILENT no-op.
     ///
     /// The two natural names here diverge only at byte 65 (`__alpha` vs
-    /// `__beta`), i.e. strictly AFTER the truncation point — a shorter
+    /// `__beta`), i.e. strictly AFTER the truncation point - a shorter
     /// collection would leave the truncated forms distinct and the test would
     /// pass for the wrong reason.
     ///
@@ -8632,18 +8785,33 @@ mod tests {
         });
         let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
 
+        // The auto mask index lands on the field's OWN (masked) column and
+        // is named `<coll>__<field>_mask_idx` - but at this ceiling that
+        // natural name overflows and `cap_ident_name` replaces the
+        // `_mask_idx` tail with a hash, so the index CANNOT be selected by
+        // name suffix (that would defeat the very truncation this test
+        // exercises). Select it by column identity instead: its sole column
+        // is the bare field name, distinct from the raw-column index's sole
+        // column `raw_column_name(field)`.
         let masked: Vec<&IndexSpec> = specs
             .iter()
-            .filter(|s| s.columns.iter().any(|c| c.ends_with("_masked")))
+            .filter(|s| s.columns == ["alpha".to_string()] || s.columns == ["beta".to_string()])
             .collect();
-        assert_eq!(masked.len(), 2, "expected one sibling index per masked field: {masked:?}");
+        assert_eq!(masked.len(), 2, "expected one mask index per masked field: {masked:?}");
 
         for spec in &masked {
             assert!(
                 spec.name.len() <= 63,
-                "derived name {} is {} bytes — Postgres will truncate it silently",
+                "derived name {} is {} bytes - Postgres will truncate it silently",
                 spec.name,
                 spec.name.len()
+            );
+            // The mask index must cover the field's own column, never the
+            // raw (real-value) sibling - that would defeat the point of
+            // indexing the mask for creator-visible reads.
+            assert!(
+                spec.columns.iter().all(|c| !c.starts_with(RAW_COLUMN_PREFIX)),
+                "mask index must not cover the raw column: {spec:?}"
             );
         }
 
@@ -8652,7 +8820,7 @@ mod tests {
         assert_ne!(
             truncate(&masked[0].name),
             truncate(&masked[1].name),
-            "distinct masked siblings collapsed to one identifier after \
+            "distinct mask indexes collapsed to one identifier after \
              NAMEDATALEN truncation: {} / {}",
             masked[0].name,
             masked[1].name
@@ -10696,43 +10864,110 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Sibling-column DDL emission
+    // Raw-column DDL emission
     // -----------------------------------------------------------------
 
-    /// `mask_sibling_column_for_field` returns `Some("<col>_masked")`
-    /// for masked columns and `None` for non-masked / kind=none columns.
+    /// `raw_column_for_field` returns the raw column for masked columns and
+    /// `None` for non-masked / kind=none columns.
     #[test]
-    fn mask_sibling_column_for_field_returns_sibling_for_masked() {
+    fn raw_column_for_field_returns_the_raw_column_for_masked() {
         let def = serde_json::json!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
         assert_eq!(
-            mask_sibling_column_for_field("ssn", &def),
-            Some("ssn_masked".to_string())
+            raw_column_for_field("ssn", &def),
+            Some("__zs_raw__ssn".to_string())
+        );
+    }
+
+    /// The raw column's name must be one every inbound surface ALREADY refuses.
+    ///
+    /// This is the whole inbound half of the storage flip: rather than
+    /// threading a schema hint into `build_where` and its fifteen call sites -
+    /// and every builder written after them - the raw column is named
+    /// something `validate_field_name` will not accept, so a path that has
+    /// never heard of masking cannot name it in a filter, a projection, a sort,
+    /// a conflict probe or a write document.
+    #[test]
+    fn the_raw_column_name_is_refused_by_the_inbound_validator() {
+        for field in ["ssn", "email", "a", &"x".repeat(MAX_MASKED_FIELD_NAME_BYTES)] {
+            let raw = raw_column_name(field);
+            assert!(raw.len() <= 63, "raw column must fit NAMEDATALEN: {raw}");
+            let err = validate_field_name(&raw)
+                .expect_err("the raw column must be unnameable on every inbound surface");
+            assert!(
+                format!("{err}").contains("reserved field name"),
+                "expected a reserved-name refusal for {raw}, got {err}",
+            );
+        }
+        // And the reservation it lands on predates the flip - no new fence.
+        assert!(RESERVED_NAMES.iter().any(|r| matches!(r, ReservedName::Prefix("__zs_"))));
+    }
+
+    /// A masked field name one byte too long is REFUSED, not silently
+    /// truncated.
+    ///
+    /// `raw_column_name` is a plain concatenation so that it can be
+    /// byte-identical to the migration engine's copy without two hashing
+    /// implementations that no compiler can check agree. The price is that the
+    /// overlong case has to be refused somewhere, and this is where.
+    ///
+    /// The pre-flip `<field>_masked` sibling did neither: it neither capped nor
+    /// refused, so a 60-character masked field produced a 67-character sibling
+    /// that Postgres truncated, and two such fields could collide on one
+    /// column.
+    #[test]
+    fn a_masked_field_name_too_long_for_its_raw_column_is_refused() {
+        let masked = serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "full", "classification": "pii" }
+        });
+        let plain = serde_json::json!({ "type": "string" });
+
+        let at_limit = "x".repeat(MAX_MASKED_FIELD_NAME_BYTES);
+        assert!(
+            field_to_column_for_dialect(&at_limit, &masked, SqlDialect::Postgres).is_ok(),
+            "a masked field exactly at the limit must still be declarable",
+        );
+
+        let over = "x".repeat(MAX_MASKED_FIELD_NAME_BYTES + 1);
+        let err = field_to_column_for_dialect(&over, &masked, SqlDialect::Postgres)
+            .expect_err("one byte over must be refused, not truncated");
+        assert!(
+            format!("{err}").contains("masked field name exceeds"),
+            "expected the length refusal, got {err}",
+        );
+
+        // The control: the SAME name is fine on an UNMASKED field, because it
+        // needs no second column. Without this arm a validator that refused
+        // every long name would pass the assertion above.
+        assert!(
+            field_to_column_for_dialect(&over, &plain, SqlDialect::Postgres).is_ok(),
+            "an unmasked field is bounded by NAMEDATALEN alone",
         );
     }
 
     #[test]
-    fn mask_sibling_column_for_field_returns_none_for_unmasked() {
+    fn raw_column_for_field_returns_none_for_unmasked() {
         let def = serde_json::json!({ "type": "string" });
-        assert_eq!(mask_sibling_column_for_field("name", &def), None);
+        assert_eq!(raw_column_for_field("name", &def), None);
     }
 
     #[test]
-    fn mask_sibling_column_for_field_returns_none_for_kind_none() {
+    fn raw_column_for_field_returns_none_for_kind_none() {
         let def = serde_json::json!({
             "type": "string",
             "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         });
-        assert_eq!(mask_sibling_column_for_field("ssn", &def), None);
+        assert_eq!(raw_column_for_field("ssn", &def), None);
     }
 
-    /// **DDL shape** — masked column emits parent + nullable sibling
-    /// `<col>_masked TEXT`.
+    /// **DDL shape** — a masked column emits its own `TEXT` column for the mask
+    /// plus `__zs_raw__<col>` carrying the declared type.
     #[test]
-    fn build_create_table_emits_sibling_for_masked_column() {
+    fn build_create_table_emits_a_raw_column_for_a_masked_column() {
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
@@ -10743,23 +10978,76 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("\"ssn_masked\" TEXT"),
-            "expected sibling column with TEXT: {sql}"
+            sql.contains("\"ssn\" TEXT"),
+            "the field's own column holds the mask, as bare TEXT: {sql}"
         );
         assert!(
-            !sql.contains("\"ssn_masked\" TEXT NOT NULL"),
-            "masked sibling must be nullable / omittable: {sql}"
+            sql.contains(&format!("\"{}\" TEXT", raw_column_name("ssn"))),
+            "the raw column carries the declared type: {sql}"
         );
-        assert!(sql.contains("\"ssn\""), "parent column still present: {sql}");
         assert!(
-            !sql.contains("\"name_masked\""),
-            "non-masked column must NOT emit sibling: {sql}"
+            !sql.contains("\"ssn_masked\""),
+            "the `_masked` sibling is gone: {sql}"
+        );
+        assert!(
+            !sql.contains(&raw_column_name("name")),
+            "a non-masked column must NOT emit a raw column: {sql}"
         );
     }
 
-    /// Masked column CREATE TABLE emits `COMMENT ON
-    /// COLUMN` for the sibling so PG introspection round-trips the
-    /// mask metadata via `pg_description`.
+    /// **The type-and-constraint swap.** The declared type and the whole
+    /// constraint set travel to the raw column; the masked column is bare TEXT.
+    ///
+    /// Leaving them on the field's own column is not a cosmetic mistake, it is
+    /// a total write failure: `'***'` is not a `DOUBLE PRECISION`, and it is
+    /// not in an enum `CHECK` list.
+    #[test]
+    fn a_masked_columns_type_and_constraints_travel_to_the_raw_column() {
+        let schema = serde_json::json!({
+            "score": {
+                "type": "number",
+                "required": true,
+                "mask": { "kind": "full", "classification": "pii" }
+            },
+            "tier": {
+                "type": "string",
+                "enum": ["gold", "silver"],
+                "mask": { "kind": "full", "classification": "pii" }
+            }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        let raw_score = raw_column_name("score");
+        let raw_tier = raw_column_name("tier");
+
+        assert!(
+            sql.contains(&format!("\"{raw_score}\" DOUBLE PRECISION")),
+            "the declared numeric type belongs to the value: {sql}"
+        );
+        assert!(
+            sql.contains("\"score\" TEXT"),
+            "the masked column must be TEXT so it can hold '***': {sql}"
+        );
+        assert!(
+            !sql.contains("\"score\" DOUBLE PRECISION"),
+            "a mask written into a DOUBLE PRECISION column is a hard error: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("CHECK (\"{raw_tier}\" IN")),
+            "the enum CHECK must name the raw column: {sql}"
+        );
+        assert!(
+            !sql.contains("CHECK (\"tier\" IN"),
+            "an enum CHECK on the masked column refuses every write: {sql}"
+        );
+    }
+
+    /// Masked column CREATE TABLE emits `COMMENT ON COLUMN` on the field's
+    /// OWN column (the masked one) so PG introspection round-trips the mask
+    /// metadata via `pg_description`. Before the storage flip this rode on a
+    /// `<col>_masked` sibling; that sibling is gone and the field's own name
+    /// IS the masked column now, so the comment - and never the raw column -
+    /// is what must carry the sentinel.
     #[test]
     fn build_create_table_emits_comment_on_column_sentinel_for_masked_column() {
         let schema = serde_json::json!({
@@ -10771,18 +11059,25 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn_masked\""),
-            "expected COMMENT ON COLUMN for sibling: {sql}"
+            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn\""),
+            "expected COMMENT ON COLUMN for the field's own (masked) column: {sql}"
         );
         assert!(
             sql.contains("'__zsmask:kind=last4,classification=spi'"),
             "expected sentinel literal: {sql}"
         );
+        assert!(
+            !sql.contains(&format!(
+                "COMMENT ON COLUMN \"app1\".\"users\".\"{}\"",
+                raw_column_name("ssn")
+            )),
+            "the raw column must never carry the mask-sentinel comment: {sql}"
+        );
     }
 
-    /// Sibling DDL inline `/* __zsmask:... */` comment
-    /// for SQLite-arm introspection (PG ignores SQL comments; SQLite
-    /// preserves them in `sqlite_master.sql`).
+    /// Inline `/* __zsmask:... */` comment rides on the field's OWN
+    /// (masked) column for SQLite-arm introspection (PG ignores SQL
+    /// comments; SQLite preserves them in `sqlite_master.sql`).
     #[test]
     fn build_create_table_emits_inline_mask_sentinel_comment() {
         let schema = serde_json::json!({
@@ -10794,8 +11089,13 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("\"email_masked\" TEXT /* __zsmask:kind=email,classification=pii */"),
-            "expected inline /* __zsmask:... */ comment on sibling: {sql}"
+            sql.contains("\"email\" TEXT /* __zsmask:kind=email,classification=pii */"),
+            "expected inline /* __zsmask:... */ comment on the field's own \
+             (masked) column: {sql}"
+        );
+        assert!(
+            !sql.contains(&format!("\"{}\" TEXT /* __zsmask:", raw_column_name("email"))),
+            "the raw column must never carry the inline mask-sentinel comment: {sql}"
         );
     }
 
@@ -10821,22 +11121,34 @@ mod tests {
         );
     }
 
-    /// `build_add_column` for a fresh field with a
-    /// `.mask({...})` declaration emits BOTH the parent ADD + the
-    /// sibling ADD + the `COMMENT ON COLUMN` sentinel in one
-    /// multi-statement payload.
+    /// `build_add_column` for a fresh field with a `.mask({...})`
+    /// declaration emits the RAW column ADD (the real value, carrying the
+    /// declared type), the MASKED column ADD (the field's own name, bare
+    /// `TEXT NULL`), and the `COMMENT ON COLUMN` sentinel attached to the
+    /// masked column - all in one multi-statement payload.
     #[test]
-    fn build_add_column_emits_sibling_and_sentinel_when_masked() {
+    fn build_add_column_emits_raw_and_masked_columns_and_sentinel_when_masked() {
         let def = serde_json::json!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
         let sql = build_add_column("app1", "users", "ssn", &def).expect("build_add_column ok");
-        assert!(sql.contains("ADD COLUMN IF NOT EXISTS \"ssn\""), "parent: {sql}");
-        assert!(sql.contains("ADD COLUMN IF NOT EXISTS \"ssn_masked\""), "sibling: {sql}");
+        let raw = raw_column_name("ssn");
         assert!(
-            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn_masked\""),
-            "comment: {sql}"
+            sql.contains(&format!("ADD COLUMN IF NOT EXISTS \"{raw}\"")),
+            "raw column: {sql}"
+        );
+        assert!(
+            sql.contains("ADD COLUMN IF NOT EXISTS \"ssn\" TEXT NULL"),
+            "masked column (the field's own name): {sql}"
+        );
+        assert!(
+            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn\""),
+            "comment attaches to the masked column: {sql}"
+        );
+        assert!(
+            !sql.contains(&format!("COMMENT ON COLUMN \"app1\".\"users\".\"{raw}\"")),
+            "the raw column must never carry the mask-sentinel comment: {sql}"
         );
         assert!(
             sql.contains("'__zsmask:kind=last4,classification=spi'"),
@@ -10854,11 +11166,13 @@ mod tests {
         assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
 
-    /// **DDL shape** — `t.encrypted(...)` (default-mask path) gets the
-    /// sibling because schema-normalisation auto-populates `mask: {kind: "full", ...}`
-    /// on encrypted columns.
+    /// **DDL shape** - `t.encrypted(...)` (default-mask path) gets a raw
+    /// column because schema-normalisation auto-populates
+    /// `mask: {kind: "full", ...}` on encrypted columns. The raw column (the
+    /// real, encrypted value) carries the declared ciphertext type BYTEA;
+    /// the field's own column (the mask) is bare, nullable TEXT.
     #[test]
-    fn build_create_table_emits_sibling_for_encrypted_with_default_mask() {
+    fn build_create_table_emits_raw_column_for_encrypted_with_default_mask() {
         // Mirror the SDK's auto-fill: `t.encrypted(...)` -> mask = full.
         let schema = serde_json::json!({
             "ssn": {
@@ -10869,17 +11183,22 @@ mod tests {
         });
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
+        let raw = raw_column_name("ssn");
         assert!(
-            sql.contains("\"ssn\" BYTEA"),
-            "parent encrypted column stays BYTEA: {sql}"
+            sql.contains(&format!("\"{raw}\" BYTEA")),
+            "raw column carries the ciphertext type BYTEA: {sql}"
         );
         assert!(
-            sql.contains("\"ssn_masked\" TEXT"),
-            "encrypted column with default mask emits sibling: {sql}"
+            sql.contains("\"ssn\" TEXT"),
+            "the field's own column (the mask) is TEXT: {sql}"
         );
         assert!(
-            !sql.contains("\"ssn_masked\" TEXT NOT NULL"),
-            "encrypted masked sibling must be nullable / omittable: {sql}"
+            !sql.contains("\"ssn\" TEXT NOT NULL"),
+            "masked column must be nullable / omittable: {sql}"
+        );
+        assert!(
+            !sql.contains("\"ssn\" BYTEA"),
+            "the field's own column must never carry the ciphertext type: {sql}"
         );
     }
 
@@ -10903,10 +11222,13 @@ mod tests {
         assert!(sql.contains("\"ssn\" BYTEA"), "parent still present: {sql}");
     }
 
-    /// **Index auto-emit** — `.index()` on the parent masked column
-    /// produces a B-tree index on the sibling, NEVER unique.
+    /// **Index auto-emit** - `.index()` on a masked field produces a B-tree
+    /// index on the RAW column (the real value `.index()` describes) PLUS
+    /// an automatic B-tree index on the field's own (masked) column, since
+    /// every creator-visible read/filter now touches that column. Neither
+    /// is ever UNIQUE (the field only declared `.index()`).
     #[test]
-    fn build_create_indexes_emits_btree_on_sibling_when_parent_indexed() {
+    fn build_create_indexes_emits_btree_on_raw_and_mask_columns_when_indexed() {
         let schema = serde_json::json!({
             "email": {
                 "type": "string",
@@ -10915,34 +11237,41 @@ mod tests {
             }
         });
         let out = build_create_indexes("app1", "users", &schema).unwrap();
-        // One index on the parent (B-tree), one on the sibling
-        // (B-tree, never unique).
-        let sibling_idx: Vec<_> = out
+
+        let raw = raw_column_name("email");
+        let raw_idx: Vec<_> = out.iter().filter(|s| s.columns == vec![raw.clone()]).collect();
+        assert_eq!(raw_idx.len(), 1, "expected one index on the raw column: {out:?}");
+        assert!(!raw_idx[0].unique, "raw-column index must NEVER be UNIQUE: {raw_idx:?}");
+        assert!(
+            raw_idx[0].sql.contains("CREATE INDEX") && !raw_idx[0].sql.contains("UNIQUE"),
+            "raw-column index uses CREATE INDEX, not CREATE UNIQUE INDEX: {}",
+            raw_idx[0].sql,
+        );
+
+        let mask_idx: Vec<_> = out
             .iter()
-            .filter(|s| s.columns.iter().any(|c| c == "email_masked"))
+            .filter(|s| s.columns == vec!["email".to_string()])
             .collect();
-        assert_eq!(sibling_idx.len(), 1, "expected one sibling index: {out:?}");
+        assert_eq!(mask_idx.len(), 1, "expected one auto index on the masked column: {out:?}");
         assert!(
-            !sibling_idx[0].unique,
-            "sibling index must NEVER be UNIQUE: {sibling_idx:?}"
+            !mask_idx[0].unique,
+            "the auto mask-column index must NEVER be UNIQUE: {mask_idx:?}"
         );
         assert!(
-            sibling_idx[0].sql.contains("CREATE INDEX"),
-            "sibling index uses CREATE INDEX, not CREATE UNIQUE INDEX: {}",
-            sibling_idx[0].sql,
-        );
-        assert!(
-            !sibling_idx[0].sql.contains("UNIQUE"),
-            "sibling index DDL must not say UNIQUE: {}",
-            sibling_idx[0].sql,
+            mask_idx[0].sql.contains("CREATE INDEX") && !mask_idx[0].sql.contains("UNIQUE"),
+            "mask-column index DDL must not say UNIQUE: {}",
+            mask_idx[0].sql,
         );
     }
 
-    /// **Index auto-emit** — `.unique()` on the parent still emits a
-    /// (non-unique) B-tree index on the sibling alongside the unique
-    /// index on the parent.
+    /// **Index auto-emit** - `.unique()` on a masked field puts the UNIQUE
+    /// constraint on the RAW column (the real value), never on the field's
+    /// own (masked) column: a `.unique()` on the mask would enforce
+    /// uniqueness over MASKS, and for `kind: "full"` every mask is the same
+    /// `***`, capping the table at one row. The automatic mask-column index
+    /// alongside it is always a plain (non-unique) B-tree.
     #[test]
-    fn build_create_indexes_unique_parent_btree_sibling() {
+    fn build_create_indexes_unique_on_raw_column_plain_btree_on_mask_column() {
         let schema = serde_json::json!({
             "email": {
                 "type": "string",
@@ -10951,25 +11280,33 @@ mod tests {
             }
         });
         let out = build_create_indexes("app1", "users", &schema).unwrap();
-        let parent_idx = out
+        let raw = raw_column_name("email");
+        let raw_idx = out
             .iter()
-            .find(|s| s.columns.iter().any(|c| c == "email"))
-            .expect("parent unique index");
-        assert!(parent_idx.unique, "parent uniqueness preserved");
-        let sibling_idx = out
+            .find(|s| s.columns == vec![raw.clone()])
+            .expect("unique index on the raw column");
+        assert!(raw_idx.unique, "uniqueness must land on the raw column: {raw_idx:?}");
+
+        let mask_idx = out
             .iter()
-            .find(|s| s.columns.iter().any(|c| c == "email_masked"))
-            .expect("sibling index");
+            .find(|s| s.columns == vec!["email".to_string()])
+            .expect("auto index on the masked column");
         assert!(
-            !sibling_idx.unique,
-            "sibling must be non-unique even when parent is unique: {sibling_idx:?}"
+            !mask_idx.unique,
+            "the mask column's auto index must never be UNIQUE, even when \
+             the field declares .unique(): {mask_idx:?}"
         );
     }
 
-    /// **Index auto-emit** — no sibling index when parent has no
-    /// `.index()` / `.unique()`.
+    /// **Index auto-emit** — a masked field with NO `.index()` / `.unique()`
+    /// gets no index at all, on either of its two columns.
+    ///
+    /// This test used to look for a column named literally `"ssn_masked"`,
+    /// which cannot exist under any outcome after the storage flip - so it
+    /// passed whatever `build_create_indexes` did, including emitting both
+    /// indexes for an unindexed field. It now names both real columns.
     #[test]
-    fn build_create_indexes_no_sibling_when_parent_not_indexed() {
+    fn build_create_indexes_emits_nothing_for_an_unindexed_masked_field() {
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
@@ -10977,10 +11314,26 @@ mod tests {
             }
         });
         let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let raw = raw_column_name("ssn");
         assert!(
-            out.iter().all(|s| !s.columns.iter().any(|c| c == "ssn_masked")),
-            "no sibling index when parent isn't indexed: {out:?}"
+            out.iter()
+                .all(|s| !s.columns.iter().any(|c| c == "ssn" || *c == raw)),
+            "an unindexed masked field must produce no index on either of its \
+             columns ({raw:?} or \"ssn\"): {out:?}"
         );
+
+        // The control: the SAME schema WITH `.index()` produces both, so this
+        // is not a green from `build_create_indexes` returning nothing ever.
+        let indexed = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "index": true,
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let out = build_create_indexes("app1", "users", &indexed).unwrap();
+        assert!(out.iter().any(|s| s.columns == vec![raw.clone()]));
+        assert!(out.iter().any(|s| s.columns == vec!["ssn".to_string()]));
     }
 
     /// **Build insert** — when the row carries both parent + sibling
@@ -11006,37 +11359,34 @@ mod tests {
     // §11 closeout SELECT-shape gates
     //
     // Three invariants pinned at the SQL-build layer (the production
-    // path is `build_find_with_schema` → `build_masked_aware_select_
+    // path is `build_find_with_schema` -> `build_masked_aware_select_
     // expr_with_unmask`):
     //
-    // 1. `default_read_does_not_touch_ciphertext_column` — when a
-    //    schema declares a masked column and no `unmask` hint is
-    //    passed, the SELECT clause emits `"<col>_masked" AS "<col>"`
-    //    and the bare ciphertext column name MUST NOT appear in the
-    //    select-list (it appears in the alias's right-hand side only
-    //    and not as a top-level select expression).
-    // 2. `creator_cannot_query_by_masked_sibling` — `build_where`
+    // 1. `default_read_does_not_touch_the_raw_column` - when a schema
+    //    declares a masked column, the SELECT clause names the field's
+    //    own column directly (it already holds the mask - no alias, no
+    //    sibling), and the raw column (`raw_column_name`, which holds
+    //    the real value) MUST NOT appear anywhere in the built SQL.
+    // 2. `creator_cannot_query_by_masked_sibling` - `build_where`
     //    refuses filter keys ending in `_masked` because
-    //    `validate_field_name` is on the reserved-suffix path. That
-    //    is pinned elsewhere; we double-check the end-to-end path through
-    //    `build_find_with_schema` for belt-and-braces.
-    // 3. `sibling_masked_column_not_visible_in_sdk_introspection` —
-    //    the SDK `Row<S>` shape excludes `<col>_masked`. The Rust-
-    //    side dual to that invariant is that callers never need to
-    //    PROJECT through `<col>_masked` — the alias substitution
-    //    means the SDK sees `<col>` carrying the masked value.
-    //    Asserted by ensuring the build emits the sibling under an
-    //    `AS "<col>"` alias and never as a bare top-level identifier.
+    //    `validate_field_name` is on the reserved-suffix path (a
+    //    reservation that predates the storage flip and still fences the
+    //    name). That is pinned elsewhere; we double-check the end-to-end
+    //    path through `build_find_with_schema` for belt-and-braces.
+    // 3. `an_explicit_projection_of_a_masked_column_reads_the_masked_
+    //    column` - the SDK `Row<S>` shape never carries the raw column.
+    //    The Rust-side dual to that invariant is that callers never need
+    //    to project through the raw column - reading the field's own
+    //    column already returns the masked value the SDK expects.
     // -----------------------------------------------------------------
 
-    /// Default-read (no `unmask` hint) for a schema with one masked
-    /// column. The SELECT clause must:
-    /// - emit `"<col>_masked" AS "<col>"` for the masked column,
+    /// Read (no `unmask` hint) for a schema with one masked column. The
+    /// SELECT clause must:
+    /// - name the masked column (the field's own name) verbatim, no alias,
     /// - emit `"id"` and other non-masked columns verbatim,
-    /// - NEVER name the bare ciphertext column at the top level of
-    ///   the select list (only inside the sibling AS-clause).
+    /// - NEVER name the raw column anywhere in the built SQL.
     #[test]
-    fn default_read_does_not_touch_ciphertext_column() {
+    fn default_read_does_not_touch_the_raw_column() {
         let schema = serde_json::json!({
             "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
                        "mask": { "kind": "last4", "classification": "spi" } },
@@ -11049,36 +11399,20 @@ mod tests {
         )
         .expect("build_find_with_schema ok");
 
-        // The masked sibling must appear under an alias mapping to
-        // the bare parent name.
+        // The masked column rides through under its own name, no alias.
         assert!(
-            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
-            "expected sibling-AS-parent alias in SELECT: {}",
+            bq.sql.contains("\"ssn\""),
+            "expected the field's own (masked) column in SELECT: {}",
             bq.sql,
         );
 
-        // The bare ciphertext column must NOT appear as a top-level
-        // select expression. The only place it appears is on the
-        // right-hand side of the `AS` alias (covered above).
-        //
-        // We assert via the SELECT-list slice — everything between
-        // `SELECT ` and ` FROM `.
-        let select_clause = bq
-            .sql
-            .split_once(" FROM ")
-            .map(|(head, _)| head.trim_start_matches("SELECT "))
-            .unwrap_or(&bq.sql);
-        let select_list: Vec<&str> = select_clause.split(", ").collect();
-        for item in &select_list {
-            // A top-level bare `"ssn"` is illegal; an aliased
-            // `"ssn_masked" AS "ssn"` is fine (the bare `"ssn"`
-            // appears in the alias right-hand side, not on its own).
-            if item.trim() == "\"ssn\"" {
-                panic!(
-                    "default-read SELECT must NOT carry bare ciphertext column; select list = {select_list:?}",
-                );
-            }
-        }
+        // The raw column must NEVER appear - not as a bare identifier, not
+        // aliased, nowhere in the built SQL.
+        assert!(
+            !bq.sql.contains(&raw_column_name("ssn")),
+            "default read must never name the raw column: {}",
+            bq.sql,
+        );
 
         // Non-masked columns ride through verbatim.
         assert!(
@@ -11088,11 +11422,11 @@ mod tests {
         );
     }
 
-    /// Default-read with an explicit projection that LISTS the
-    /// masked column — the projection is rewritten so the sibling
-    /// alias is what hits the wire; the bare parent never appears.
+    /// An explicit projection that LISTS a masked column reads the field's
+    /// own (masked) column directly - the same as the implicit/default
+    /// read. The raw column never appears.
     #[test]
-    fn default_read_with_explicit_projection_still_aliases_through_sibling() {
+    fn an_explicit_projection_of_a_masked_column_reads_the_masked_column() {
         let schema = serde_json::json!({
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
@@ -11104,31 +11438,28 @@ mod tests {
         )
         .expect("build_find_with_schema ok");
         assert!(
-            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
-            "explicit projection must still alias through sibling: {}",
+            bq.sql.contains("SELECT \"id\", \"ssn\""),
+            "explicit projection must read the field's own (masked) column: {}",
             bq.sql,
         );
-        // The select expression must NOT have a bare ssn entry alongside.
-        let select_clause = bq
-            .sql
-            .split_once(" FROM ")
-            .map(|(head, _)| head.trim_start_matches("SELECT "))
-            .unwrap_or(&bq.sql);
-        let items: Vec<&str> = select_clause.split(", ").collect();
-        for item in &items {
-            assert_ne!(
-                item.trim(),
-                "\"ssn\"",
-                "bare ciphertext column appeared in explicit projection: {items:?}",
-            );
-        }
+        assert!(
+            !bq.sql.contains(&raw_column_name("ssn")),
+            "explicit projection must never name the raw column: {}",
+            bq.sql,
+        );
     }
 
-    /// The `unmask` hint flips the behaviour — the hinted column is
-    /// served as the bare parent (the encryption pass will decrypt
-    /// the ciphertext on the way out).
+    /// **The unmask hint no longer changes the projection at all.** A SELECT
+    /// never names the raw column, whether or not the caller passed an
+    /// `unmask` hint - plaintext is fetched afterwards by the separate,
+    /// audited unmask path (which the SQL builder has no part in). This
+    /// replaces the pre-flip behaviour, where the hinted column used to be
+    /// served bare (pulling ciphertext into the SELECT for the encryption
+    /// pass to decrypt); after the flip there is no ciphertext in the
+    /// field's own column to decrypt, so the hint has nothing left to do at
+    /// this layer.
     #[test]
-    fn unmask_hint_overrides_default_alias() {
+    fn unmask_hint_does_not_change_the_projection() {
         let schema = serde_json::json!({
             "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
                        "mask": { "kind": "last4", "classification": "spi" } },
@@ -11136,23 +11467,31 @@ mod tests {
                        "mask": { "kind": "full", "classification": "pii" } },
         });
         let filter = serde_json::json!({});
+
+        let bq_no_hint = build_find_with_schema(
+            "app1", "users", &filter, None, None, None, None, &schema,
+        )
+        .expect("build_find_with_schema ok");
+
         let unmask: Vec<String> = vec!["ssn".to_string()];
-        let bq = build_find_with_schema_and_unmask(
+        let bq_with_hint = build_find_with_schema_and_unmask(
             "app1", "users", &filter, None, None, None, None, &schema, &unmask,
         )
         .expect("build_find_with_schema_and_unmask ok");
 
-        // The unmask-listed column hits the wire bare.
-        assert!(
-            bq.sql.contains("\"ssn\""),
-            "unmasked column must appear bare in SELECT: {}",
-            bq.sql,
+        assert_eq!(
+            bq_no_hint.sql, bq_with_hint.sql,
+            "the unmask hint must not change the SELECT projection",
         );
-        // The non-unmasked masked column still aliases through sibling.
         assert!(
-            bq.sql.contains("\"email_masked\" AS \"email\""),
-            "non-unmasked masked column still routes through sibling: {}",
-            bq.sql,
+            !bq_with_hint.sql.contains(&raw_column_name("ssn")),
+            "the unmask hint must never cause the raw column to be named: {}",
+            bq_with_hint.sql,
+        );
+        assert!(
+            !bq_with_hint.sql.contains(&raw_column_name("email")),
+            "the raw column of a non-hinted masked field must never appear either: {}",
+            bq_with_hint.sql,
         );
     }
 
@@ -11178,10 +11517,15 @@ mod tests {
         );
     }
 
-    /// Composite gate — the alias substitution must happen even
-    /// when the masked column is the only column declared. This
-    /// covers the `any_masked` short-circuit in
-    /// `build_masked_aware_select_expr_with_unmask` (case 2).
+    /// Composite gate - the read projection is an explicit list even when
+    /// the masked column is the only column declared. Before the flip this
+    /// covered the `any_masked` short-circuit in
+    /// `build_masked_aware_select_expr_with_unmask` (case 2), which aliased
+    /// through the sibling; after the flip there is nothing masked-specific
+    /// left to special-case - EVERY read is an explicit allowlist naming
+    /// each field's own column (see
+    /// `the_weakest_possible_schema_still_projects_an_explicit_allowlist`),
+    /// and the raw column must never appear.
     #[test]
     fn implicit_select_expands_to_explicit_when_any_column_masked() {
         let schema = serde_json::json!({
@@ -11199,8 +11543,17 @@ mod tests {
             "implicit SELECT must expand to an explicit list when any column is masked: {}",
             bq.sql,
         );
-        assert!(bq.sql.contains("\"ssn_masked\" AS \"ssn\""));
+        assert!(
+            bq.sql.contains("\"ssn\""),
+            "masked column must ride through under its own name: {}",
+            bq.sql,
+        );
         assert!(bq.sql.contains("\"id\""));
+        assert!(
+            !bq.sql.contains(&raw_column_name("ssn")),
+            "the raw column must never appear: {}",
+            bq.sql,
+        );
     }
 
     /// **L24, arm 1** — the read projection is TOTAL. There is no schema value
@@ -11323,8 +11676,8 @@ mod tests {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "pci" },
                 "storage": {
-                    "valueColumn": "ssn_masked",
-                    "rawColumn": "ssn",
+                    "valueColumn": "ssn",
+                    "rawColumn": raw_column_name("ssn"),
                     "rawFilterable": false,
                     "rawSortable": false,
                     "rawProjectable": false
@@ -11349,7 +11702,7 @@ mod tests {
     #[test]
     fn order_by_on_a_masked_column_sorts_by_the_column_the_projection_reads() {
         let schema = l26_masked_schema();
-        let read = read_column_for("ssn", &schema);
+        let read = "ssn";
         let bq = build_find_with_schema(
             "app1",
             "users",
@@ -11362,7 +11715,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            bq.sql.contains(&format!("ORDER BY {} ASC", quote_ident(&read))),
+            bq.sql.contains(&format!("ORDER BY {} ASC", quote_ident(read))),
             "orderBy must sort by the projected column {read:?}; got {}",
             bq.sql,
         );
@@ -11380,7 +11733,7 @@ mod tests {
     #[test]
     fn order_by_array_form_on_a_masked_column_sorts_by_the_projected_column() {
         let schema = l26_masked_schema();
-        let read = read_column_for("ssn", &schema);
+        let read = "ssn";
         let bq = build_find_with_schema(
             "app1",
             "users",
@@ -11393,12 +11746,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            bq.sql.contains(&format!("ORDER BY {} DESC", quote_ident(&read))),
+            bq.sql.contains(&format!("ORDER BY {} DESC", quote_ident(read))),
             "orderBy array form must sort by the projected column {read:?}; got {}",
             bq.sql,
         );
     }
 
+    /// Vector search's projection expands to an explicit list when the
+    /// schema carries a masked column - the masked column rides through
+    /// under its own name (it already holds the mask) and the raw column
+    /// must never appear.
     #[test]
     fn vector_search_expands_masked_projection_when_schema_cached() {
         let schema = serde_json::json!({
@@ -11423,12 +11780,21 @@ mod tests {
             q.sql,
         );
         assert!(
-            q.sql.contains("\"ssn_masked\" AS \"ssn\""),
-            "vector search must read masked sibling: {}",
+            q.sql.contains("\"ssn\""),
+            "vector search must read the field's own (masked) column: {}",
+            q.sql,
+        );
+        assert!(
+            !q.sql.contains(&raw_column_name("ssn")),
+            "vector search must never name the raw column: {}",
             q.sql,
         );
     }
 
+    /// Spatial search's projection expands to an explicit list when the
+    /// schema carries a masked column - the masked column rides through
+    /// under its own name (it already holds the mask) and the raw column
+    /// must never appear.
     #[test]
     fn spatial_near_expands_masked_projection_when_schema_cached() {
         let schema = serde_json::json!({
@@ -11453,8 +11819,13 @@ mod tests {
             q.sql,
         );
         assert!(
-            q.sql.contains("\"ssn_masked\" AS \"ssn\""),
-            "spatial search must read masked sibling: {}",
+            q.sql.contains("\"ssn\""),
+            "spatial search must read the field's own (masked) column: {}",
+            q.sql,
+        );
+        assert!(
+            !q.sql.contains(&raw_column_name("ssn")),
+            "spatial search must never name the raw column: {}",
             q.sql,
         );
     }
@@ -12060,9 +12431,11 @@ mod tests {
         assert!(via_stable.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."accounts" ("#));
     }
 
-    /// `MainUnqualified` SQLite carries the goodies: the inline `__zsmask:` mask
-    /// sentinel on the `_masked` sibling, the inline `zsenc:` encryption
-    /// sentinel on the BLOB column, and an unqualified FK clause — so all three
+    /// `MainUnqualified` SQLite carries the goodies: the inline `__zsmask:`
+    /// mask sentinel rides on the field's own (masked) `ssn` column - not a
+    /// `_masked` sibling, which is gone after the storage flip - the inline
+    /// `zsenc:` encryption sentinel rides on the (unmasked) `secret` BLOB
+    /// column, and an unqualified FK clause is present - so all three
     /// survive into `sqlite_master.sql` for the drift snapshot to recover.
     #[test]
     fn sqlite_main_unqualified_carries_mask_enc_and_fk() {
@@ -12076,12 +12449,20 @@ mod tests {
         )
         .expect("build goodies sqlite ddl");
 
-        // Mask sentinel rides inline on the `<col>_masked` sibling column.
+        // Mask sentinel rides inline on the field's own (masked) column.
         assert!(
-            sql.contains(r#""ssn_masked" TEXT /* __zsmask:"#),
-            "mask sentinel must ride inline on the sibling: {sql}"
+            sql.contains(r#""ssn" TEXT /* __zsmask:"#),
+            "mask sentinel must ride inline on the field's own (masked) column: {sql}"
         );
-        // Encryption: BLOB physical column + inline `zsenc:` sentinel.
+        // The raw column (the real ssn value) must never carry the mask
+        // sentinel.
+        assert!(
+            !sql.contains(&format!("\"{}\" TEXT /* __zsmask:", raw_column_name("ssn"))),
+            "the raw column must never carry the inline mask sentinel: {sql}"
+        );
+        // Encryption: BLOB physical column + inline `zsenc:` sentinel. (The
+        // `secret` field carries no `mask` declaration, so it stays on its
+        // own column - no raw sibling here.)
         assert!(
             sql.contains("BLOB") && sql.contains("/* zsenc:"),
             "encrypted column must be BLOB with an inline zsenc sentinel: {sql}"

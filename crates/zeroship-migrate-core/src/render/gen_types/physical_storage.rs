@@ -75,30 +75,35 @@ fn encrypted_and_masked(name: &str) -> FieldDescriptor {
 
 /// A masked field occupies TWO columns, and the descriptor names both.
 ///
-/// The three raw capability flags are the policy half rather than an observation:
-/// they say the authoritative column is not reachable through the creator-facing
-/// read surface. Today nothing enforces that - `build_where` receives no schema at
-/// all, so `find({ ssn: x })` reaches the raw column and `orderBy: { ssn: 1 }` orders
-/// by it (specification section 4.3). Recording the flags is what lets the consumer
-/// close that without a second policy table in Rust.
+/// The three raw capability flags declare a policy, not just an observation: they
+/// say the raw column is not reachable through the creator-facing read surface.
+/// Before the 2026-08-28 storage flip the field's own column held plaintext and
+/// `build_where` (which takes no schema hint) could reach it directly through an
+/// ordinary `find({ ssn: x })` - an unaudited binary search over a value the caller
+/// could not read (specification section 4.3). After the flip the field's own
+/// column holds the mask and the raw column's `__zs_raw__` name is refused by
+/// every inbound identifier surface, so an ordinary filter can no longer name it at
+/// all; the flags remain the declared contract a consumer reads instead of
+/// re-deriving the naming rule.
 #[test]
 fn a_masked_field_records_both_of_its_physical_columns() {
     let value = descriptor_for(vec![masked("ssn")], &POSTGRES);
     let storage = &value["collections"]["people"]["fields"]["ssn"]["storage"];
 
-    let sibling = crate::schema::query::mask_sibling_column_for_field(
+    let raw = crate::schema::query::raw_column_for_field(
         "ssn",
         &json!({ "mask": { "kind": "last4", "classification": "pci" } }),
     )
-    .expect("a last4 mask declares a sibling");
+    .expect("a last4 mask declares a raw column");
 
     assert_eq!(
-        storage["valueColumn"], sibling,
-        "a default projection reads the masked sibling under the logical name: {value}"
+        storage["valueColumn"], "ssn",
+        "after the storage flip a default projection reads the field's own column, \
+         which now holds the mask: {value}"
     );
     assert_eq!(
-        storage["rawColumn"], "ssn",
-        "the authoritative value stays in the field's own column: {value}"
+        storage["rawColumn"], raw,
+        "the authoritative value lives in the raw column named by raw_column_for_field: {value}"
     );
     assert_eq!(storage["rawFilterable"], false, "{value}");
     assert_eq!(storage["rawSortable"], false, "{value}");
@@ -128,9 +133,14 @@ fn an_ordinary_field_records_one_column_and_no_raw_sibling() {
 /// An encrypted field's CIPHERTEXT is the authoritative value, so it is what
 /// `rawColumn` names.
 ///
-/// This is the arm the AEAD depends on. `canonical_aad` length-prefixes the physical
-/// column name into the tag, so the consumer must bind exactly the column the
-/// ciphertext occupies - `rawColumn` when present, the field's own column otherwise.
+/// This is the arm that pins WHERE the ciphertext physically lives - `rawColumn`
+/// when present, the field's own column otherwise. It is deliberately NOT the arm
+/// the AEAD tag depends on: `canonical_aad` binds the LOGICAL field name (the
+/// schema key), not this physical column, so a future storage move stays a rename
+/// rather than a re-encrypt. An earlier draft of this comment claimed the AAD
+/// bound the physical column instead; see the correction atop `FieldStorage` in
+/// `gen_types.rs` for why that was false and why "fixing" the AAD to match it would
+/// have destroyed every ciphertext already written under the logical name.
 #[test]
 fn an_encrypted_and_masked_field_puts_the_ciphertext_column_in_raw_column() {
     let value = descriptor_for(vec![encrypted_and_masked("card")], &POSTGRES);
@@ -142,8 +152,9 @@ fn an_encrypted_and_masked_field_puts_the_ciphertext_column_in_raw_column() {
         "fixture must actually be encrypted: {value}"
     );
     assert_eq!(
-        storage["rawColumn"], "card",
-        "the ciphertext column is the AAD-bound one: {value}"
+        storage["rawColumn"],
+        crate::schema::query::raw_column_name("card"),
+        "the ciphertext lives in the raw column: {value}"
     );
     assert_ne!(
         storage["valueColumn"], storage["rawColumn"],
@@ -231,13 +242,18 @@ fn the_capability_flags_are_present_in_the_bytes_not_supplied_by_the_reader() {
     assert!(storage.get("rawColumn").is_some(), "{reparsed}");
 }
 
-/// The descriptor's `valueColumn` is the DDL emitter's OWN sibling name, not a second
-/// spelling of the same convention.
+/// The descriptor's `valueColumn` / `rawColumn` are the DDL emitter's OWN names,
+/// not a second spelling of the same convention.
 ///
-/// This is the arm that outlives the current physical layout. If the platform ever
-/// flips which column holds the mask, `mask_sibling_column_for_field` moves and this
-/// arm fails unless the projection moves with it - which is exactly the coupling the
-/// eight `format!` sites never had.
+/// This is the arm that outlives the current physical layout: it reads both names
+/// from `raw_column_for_field` rather than hardcoding either, so a storage change
+/// only has to move the projection here to keep this arm green. The 2026-08-28
+/// storage flip already exercised that promise once - `valueColumn` was the
+/// emitted `<col>_masked` sibling before the flip and is the field's own column
+/// now, while `rawColumn` moved the other way, from the field's own column to
+/// `raw_column_name(field)` - and this arm needed no shape change, only the
+/// renamed source function, which is exactly the coupling the eight `format!`
+/// sites never had.
 #[test]
 fn the_recorded_columns_are_the_ddl_emitters_own_names() {
     let value = descriptor_for(vec![masked("ssn"), plain("nickname")], &POSTGRES);
@@ -247,13 +263,16 @@ fn the_recorded_columns_are_the_ddl_emitters_own_names() {
 
     for (name, def) in fields {
         let storage = &def["storage"];
-        match crate::schema::query::mask_sibling_column_for_field(name, def) {
-            Some(sibling) => {
+        match crate::schema::query::raw_column_for_field(name, def) {
+            Some(raw) => {
                 assert_eq!(
-                    storage["valueColumn"], sibling,
-                    "field {name} must record the emitter's sibling name: {value}"
+                    storage["valueColumn"], name.as_str(),
+                    "field {name}: after the flip valueColumn is the field's own name: {value}"
                 );
-                assert_eq!(storage["rawColumn"], name.as_str(), "{value}");
+                assert_eq!(
+                    storage["rawColumn"], raw,
+                    "field {name} must record the emitter's own raw column name: {value}"
+                );
             }
             None => {
                 assert_eq!(storage["valueColumn"], name.as_str(), "{value}");
@@ -384,17 +403,19 @@ fn the_typed_storage_block_survives_a_serde_round_trip() {
             reserialized, def["storage"],
             "field {name} storage is not stable across the round trip: {value}"
         );
+        // After the flip valueColumn is the field's own name unconditionally -
+        // masked and plain fields no longer diverge on this point.
+        assert_eq!(storage.value_column, *name, "{value}");
         match &storage.raw_column {
             Some(raw) => {
                 seen_raw += 1;
-                assert_eq!(raw, name);
+                assert_eq!(*raw, crate::schema::query::raw_column_name(name));
                 assert_eq!(storage.raw_filterable, Some(false));
                 assert_eq!(storage.raw_sortable, Some(false));
                 assert_eq!(storage.raw_projectable, Some(false));
             }
             None => {
                 seen_plain += 1;
-                assert_eq!(storage.value_column, *name);
                 assert_eq!(storage.raw_filterable, None);
             }
         }

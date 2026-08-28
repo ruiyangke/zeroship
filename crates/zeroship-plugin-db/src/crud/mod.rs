@@ -161,6 +161,25 @@ where
     }
 }
 
+/// Record `(collection, filter)` into the active query's read-set.
+///
+/// Resolves the descriptor entry the predicate has to be lowered against - a
+/// conjunct on a masked column compares against the mask, not the value the
+/// caller wrote. An undeclared collection records nothing rather than recording
+/// an unlowered predicate: the dispatch this call precedes is about to reject
+/// with `collection_not_declared`, so there is no subscription to narrow, and a
+/// predicate built without a schema is exactly the silent false negative
+/// `read_set` refuses to produce.
+fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
+    if !crate::read_set::is_active() {
+        return;
+    }
+    let Ok(schema) = crate::descriptor::collection_schema(binding, collection) else {
+        return;
+    };
+    crate::read_set::record_if_active(collection, filter, &schema);
+}
+
 fn current_sql_dialect() -> query::SqlDialect {
     match crate::context::with(|c| c.backend()) {
         Some(crate::backend::BackendHandle::Sqlite(_)) => query::SqlDialect::Sqlite,
@@ -600,7 +619,7 @@ pub(crate) fn dispatch_find<'s>(
     let state = runtime_state(scope);
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
-    crate::read_set::record_if_active(collection, &filter);
+    record_read_set(&binding, collection, &filter);
 
     // DB-2: public `find` normalises an omitted limit here before calling the
     // builder. This does not protect internal builder callers; they must pass
@@ -1748,7 +1767,7 @@ pub(crate) fn dispatch_aggregate<'s>(
             .and_then(|stage| stage.get("$match"))
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        crate::read_set::record_if_active(collection, &captured_filter);
+        record_read_set(&binding, collection, &captured_filter);
     }
 
     let include_deleted = opts
@@ -1762,11 +1781,11 @@ pub(crate) fn dispatch_aggregate<'s>(
     let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
-    // The descriptor entry is the aggregate builder's identifier allowlist AND
-    // its masked-sibling map: `$group.by` / `$sum` / `$sort` on a masked column
-    // lower to the sibling, never the plaintext parent.
+    // The descriptor entry is the aggregate builder's identifier allowlist.
+    // `$group.by` / `$sum` / `$sort` on a masked column read the field's own
+    // column, which holds the mask - there is no sibling to lower to any more.
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
-        query::build_aggregate_with_soft_delete_with_dialect(
+        query::build_aggregate_with_result_columns(
             app_id,
             collection,
             &pipeline,
@@ -1776,6 +1795,10 @@ pub(crate) fn dispatch_aggregate<'s>(
         )
         .map_err(DbError::from)
     });
+    let (built, result_columns): (_, Option<Vec<String>>) = match built {
+        Ok((bq, cols)) => (Ok(bq), cols),
+        Err(e) => (Err(e), None),
+    };
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1793,6 +1816,14 @@ pub(crate) fn dispatch_aggregate<'s>(
                         read_pipeline::SchemaFieldScope::All
                     } else {
                         read_pipeline::SchemaFieldScope::Only(group_fields.as_slice())
+                    },
+                    // A `$group` result's keys are accumulator aliases, which no
+                    // descriptor declares, so the declared surface would drop
+                    // every one of them. This is the ONLY call site in the crate
+                    // that names a surface; every other one takes the default.
+                    row_surface: match &result_columns {
+                        Some(cols) => read_pipeline::RowSurface::Projected(cols.as_slice()),
+                        None => read_pipeline::RowSurface::Declared,
                     },
                     ..read_pipeline::ApplyOptions::default()
                 },
@@ -1832,9 +1863,12 @@ pub(crate) fn dispatch_distinct<'s>(
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
-    // Whether the DISTINCT reads the masked sibling decides the read pipeline's
-    // decrypt stage below, so it is derived from the same entry the builder
-    // uses. An undeclared collection rejects before either.
+    // A DISTINCT over a masked column returns MASKS - the column with the
+    // field's own name is the one it selects, and that column holds the mask.
+    // So the read pipeline's decrypt stage has nothing to do for it, and would
+    // be handed a mask string where it expects base64. Derived from the same
+    // descriptor entry the builder uses; an undeclared collection rejects
+    // before either.
     let schema_hint = match crate::descriptor::collection_schema(&binding, collection) {
         Ok(schema) => schema,
         Err(e) => {
@@ -1913,7 +1947,7 @@ pub(crate) fn dispatch_count<'s>(
     let state = runtime_state(scope);
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
-    crate::read_set::record_if_active(collection, &filter);
+    record_read_set(&binding, collection, &filter);
 
     let include_deleted = opts
         .get("include_deleted")

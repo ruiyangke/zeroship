@@ -1,6 +1,29 @@
 TableSnapshot {
     columns: [
         ColumnSnapshot {
+            name: "__zs_raw__secret",
+            data_type: "bytea",
+            nullable: true,
+            default: None,
+            generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
+            identity: None,
+            rowid_alias: false,
+            value_format: None,
+            id_default: None,
+            case_sensitive: None,
+            collation: None,
+            encryption_sentinel: Some(
+                "/* zero-migrate:enc:randomised:default:string */",
+            ),
+            comment_sentinel: Some(
+                "zero-migrate:enc:randomised:default:string",
+            ),
+            comment: None,
+        },
+        ColumnSnapshot {
             name: "author",
             data_type: "text",
             nullable: true,
@@ -97,29 +120,6 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "secret",
-            data_type: "bytea",
-            nullable: true,
-            default: None,
-            generated: None,
-            generated_kind: Some(
-                NotGenerated,
-            ),
-            identity: None,
-            rowid_alias: false,
-            value_format: None,
-            id_default: None,
-            case_sensitive: None,
-            collation: None,
-            encryption_sentinel: Some(
-                "/* zero-migrate:enc:randomised:default:string */",
-            ),
-            comment_sentinel: Some(
-                "zero-migrate:enc:randomised:default:string",
-            ),
-            comment: None,
-        },
-        ColumnSnapshot {
-            name: "secret_masked",
             data_type: "text",
             nullable: true,
             default: None,

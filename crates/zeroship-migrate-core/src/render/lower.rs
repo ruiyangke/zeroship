@@ -7182,11 +7182,30 @@ impl IrAuthor {
             &self.dialect,
             &inject,
         )?;
-        let sibling_name = format!("{column}_masked");
+        // For a MASKED column the resolved snapshot carries two columns: the
+        // raw one holding the declared type, constraints and any encryption
+        // sentinel, and the field's own holding the mask as bare TEXT. `main`
+        // is the one that carries the type - the author-type override and the
+        // structured-default fixups below apply to it - so it is the RAW
+        // column, and the second lowered ADD is the mask.
+        //
+        // Both are still emitted, and in that order, for the reason this
+        // function was written: a masked added column that grew only one of its
+        // two columns is the bug that shipped before the pair was lowered
+        // together.
+        // Read the pair off the RESOLVED SNAPSHOT rather than off this op's
+        // `mask` argument. An encrypted column carries an auto-default mask
+        // that the shared builder applies and the IR `mask` field does not
+        // record, so `mask.is_some()` is not the same question as "did the
+        // builder emit two columns".
+        let raw_name = zeroship_migrate_backend::schema::raw_column_name(column);
+        let is_masked = snap.columns.iter().any(|c| c.name == raw_name);
+        let main_name = if is_masked { raw_name.as_str() } else { column };
+        let sibling_name = is_masked.then(|| column.to_string());
         let mut main = snap
             .columns
             .iter()
-            .find(|c| c.name == column)
+            .find(|c| c.name == main_name)
             .cloned()
             .ok_or(IrLowerError::UnsupportedOp(
                 "addColumn (column folded away)",
@@ -7208,7 +7227,8 @@ impl IrAuthor {
             &mut main,
             &self.dialect,
         )?;
-        let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
+        let sibling = sibling_name
+            .and_then(|name| snap.columns.into_iter().find(|c| c.name == name));
         Ok((main, sibling))
     }
 
@@ -13678,11 +13698,20 @@ mod tests {
                 &effective,
             )
             .expect("differ snapshot");
+            // The column carrying the CIPHERTEXT. An encrypted column also
+            // carries an auto-default mask, so after the storage flip the
+            // encrypted bytes live in the raw column and `secret` is the
+            // bare-TEXT mask column - comparing that one would compare the
+            // wrong halves of the pair, and its `None` sentinels would make the
+            // equality below the tautology the closing assertion exists to
+            // rule out.
+            let ciphertext_column =
+                zeroship_migrate_backend::schema::raw_column_name("secret");
             let differ_col = differ_snap
                 .columns
                 .iter()
-                .find(|c| c.name == "secret")
-                .expect("differ secret column");
+                .find(|c| c.name == ciphertext_column)
+                .expect("differ ciphertext column");
 
             assert_col_byte_eq(
                 &ir_col,

@@ -389,8 +389,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     // The sentinel trap: an encrypted column. Both paths MUST carry the
     // byte-identical BYTEA type + the `/* zero-migrate:enc:… */` inline sentinel + the
     // `COMMENT ON COLUMN … 'zero-migrate:enc:…'` side output + the encrypted default-mask
-    // `<col>_masked` sibling / `zero-migrate:mask` sentinel — built by the shared kernel
-    // (`zeroship_migrate::schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
+    // `__zs_raw__<col>` raw column / `zero-migrate:mask` sentinel — built by the shared
+    // kernel (`zeroship_migrate::schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
     let desc = CollectionDescriptor {
         name: "vault".into(),
         owner_app: OWNER.into(),
@@ -455,20 +455,21 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         decl.iter().any(|(up, _)| up.contains("bytea")),
         "an encrypted column's physical type is BYTEA on both paths"
     );
+    let raw = zeroship_migrate::schema::query::raw_column_name("secret");
     assert!(
-        decl.iter().any(|(up, _)| up.contains("secret_masked")),
-        "an encrypted column must create its masked sibling on both paths"
+        decl.iter().any(|(up, _)| up.contains(&format!("\"{raw}\""))),
+        "an encrypted column must create its raw column on both paths"
     );
     assert!(
-        decl.iter()
-            .any(|(up, _)| up.contains(r#""secret_masked" text"#)),
-        "an encrypted nullable column's masked sibling must render nullable on PG"
+        decl.iter().any(|(up, _)| up.contains(r#""secret" text"#)),
+        "an encrypted nullable column's mask column (the field's own name) must render \
+         nullable on PG"
     );
     assert!(
         !decl
             .iter()
-            .any(|(up, _)| up.contains(r#""secret_masked" text NOT NULL"#)),
-        "an encrypted nullable column's masked sibling must not render NOT NULL on PG"
+            .any(|(up, _)| up.contains(r#""secret" text NOT NULL"#)),
+        "an encrypted nullable column's mask column must not render NOT NULL on PG"
     );
     assert!(
         decl.iter()
@@ -534,9 +535,10 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         decl, ir,
         "explicit-mask createTable render must be byte-identical across paths"
     );
+    let raw = zeroship_migrate::schema::query::raw_column_name("ssn");
     assert!(
-        decl.iter().any(|(up, _)| up.contains("ssn_masked")),
-        "an explicit masked column must create its masked sibling on both paths"
+        decl.iter().any(|(up, _)| up.contains(&format!("\"{raw}\""))),
+        "an explicit masked column must create its raw column on both paths"
     );
     assert!(
         decl.iter()
@@ -1680,19 +1682,21 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         ir.iter().any(|(up, _)| up.contains("zero-migrate:enc:")),
         "the encryption sentinel must be emitted on the SQLite leg too (shared-kernel source)"
     );
+    let raw = zeroship_migrate::schema::query::raw_column_name("secret");
     assert!(
-        ir.iter().any(|(up, _)| up.contains("secret_masked")),
-        "an encrypted column must create its masked sibling on the SQLite leg too"
+        ir.iter().any(|(up, _)| up.contains(&format!("\"{raw}\""))),
+        "an encrypted column must create its raw column on the SQLite leg too"
     );
     assert!(
         ir.iter()
-            .any(|(up, _)| up.contains(r#""secret_masked" TEXT /* zero-migrate:mask:"#)),
-        "an encrypted nullable column's masked sibling must render nullable on SQLite"
+            .any(|(up, _)| up.contains(r#""secret" TEXT /* zero-migrate:mask:"#)),
+        "an encrypted nullable column's mask column (the field's own name) must render \
+         nullable on SQLite"
     );
     assert!(
         !ir.iter()
-            .any(|(up, _)| up.contains(r#""secret_masked" TEXT NOT NULL"#)),
-        "an encrypted nullable column's masked sibling must not render NOT NULL on SQLite"
+            .any(|(up, _)| up.contains(r#""secret" TEXT NOT NULL"#)),
+        "an encrypted nullable column's mask column must not render NOT NULL on SQLite"
     );
     assert!(
         ir.iter()
@@ -1758,9 +1762,10 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         decl, ir,
         "SQLite masked createTable must be byte-identical across policy-resolved paths"
     );
+    let raw = zeroship_migrate::schema::query::raw_column_name("ssn");
     assert!(
-        ir.iter().any(|(up, _)| up.contains("ssn_masked")),
-        "an explicit masked column must create its masked sibling on the SQLite leg"
+        ir.iter().any(|(up, _)| up.contains(&format!("\"{raw}\""))),
+        "an explicit masked column must create its raw column on the SQLite leg"
     );
     assert!(
         ir.iter()

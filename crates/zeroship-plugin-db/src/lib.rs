@@ -144,7 +144,14 @@ pub mod crud;
 pub(crate) use zeroship_schema::diff;
 #[cfg(feature = "test-helpers")]
 pub use zeroship_schema::diff;
+// `pub` only under `test-helpers`, matching `diff` above: the mask-flip suite
+// asserts that a predicate on a masked column is LOWERED rather than compared
+// as written, and that assertion has to reach `normalise_filter`'s output. The
+// production visibility is unchanged.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod read_set;
+#[cfg(feature = "test-helpers")]
+pub mod read_set;
 pub(crate) mod v8_bridge;
 
 // THE schema authority for the data plane: the runtime descriptor this isolate
