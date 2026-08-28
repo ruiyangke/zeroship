@@ -318,7 +318,15 @@ scope = "all"
 /// test that needs one instead of quietly reporting green.
 pub const PG_URL_ENV: &str = "ZERO_MIGRATE_TEST_PG_URL";
 
-/// The live DSN in `env_var`, or a panic naming the variable and the server it needs.
+/// `value` — already resolved by the caller through a typed read — or a panic naming
+/// the variable and the server it needs.
+///
+/// Split from the read itself: `zeroship_core::test_env!` needs a compile-time string
+/// literal, so it cannot live behind a function generic over `env_var: &str`. Each
+/// live-DSN macro ([`require_live_pg!`], [`require_live_mysql!`]) reads its own literal
+/// name at its own call site and passes the resolved value in here; `env_var` is
+/// carried only so the panic message can name it, and this function performs no
+/// environment read of its own.
 ///
 /// There is no skip. A skipped live suite is INVISIBLE rather than merely quiet: the
 /// early return still counts as a pass, so `cargo test` printed the same `30 passed` a
@@ -330,12 +338,12 @@ pub const PG_URL_ENV: &str = "ZERO_MIGRATE_TEST_PG_URL";
 /// which service to start as well as which variable to export.
 ///
 /// # Panics
-/// Panics when `env_var` is unset or blank, which fails the calling test rather than
+/// Panics when `value` is `None` or blank, which fails the calling test rather than
 /// passing it without coverage.
 #[must_use]
-pub fn require_live_db_dsn(env_var: &str, server: &str) -> String {
-    match std::env::var(env_var) {
-        Ok(url) if !url.trim().is_empty() => url,
+pub fn require_live_db_dsn(value: Option<String>, env_var: &str, server: &str) -> String {
+    match value {
+        Some(url) if !url.trim().is_empty() => url,
         _ => panic!(
             "{env_var} is unset, so this test has no live {server} to run against and \
              cannot report coverage it never gathered. Start a {server} and export \
@@ -349,10 +357,18 @@ pub fn require_live_db_dsn(env_var: &str, server: &str) -> String {
 /// Accepts either the libpq keyword form
 /// (`host=… port=… user=… password=… dbname=…`) or a `postgres://…` URL — the
 /// `postgres` crate parses both.
+///
+/// The literal below MUST stay byte-identical to [`PG_URL_ENV`]: `test_env!` requires a
+/// compile-time literal, so it cannot read the constant, and the two are checked apart
+/// rather than the one place a non-literal form could hold them.
 #[macro_export]
 macro_rules! require_live_pg {
     () => {{
-        $crate::support::require_live_db_dsn($crate::support::PG_URL_ENV, "PostgreSQL")
+        $crate::support::require_live_db_dsn(
+            ::zeroship_core::test_env!("ZERO_MIGRATE_TEST_PG_URL"),
+            $crate::support::PG_URL_ENV,
+            "PostgreSQL",
+        )
     }};
 }
 
