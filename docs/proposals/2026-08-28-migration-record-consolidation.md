@@ -98,7 +98,76 @@ DDL audit table that would have collided - disappears under operator decision
 10 (no DDL in the data plane), because its only writers are the two lazy index
 paths that decision removes. See the index, "Decision 10".
 
-## The platform half: two shadows can go
+## DECIDED 2026-08-28: remove all three platform records
+
+**Operator: remove `zeroship.migrated_migrations`,
+`zeroship_migrations.platform_migration_files`, and
+`db/released_migrations.tsv`.**
+
+That leaves **one** record of what ran, per schema: the engine journal. It is
+append-only, checksummed, and enforced by an immutability trigger on the
+platform side.
+
+### Why each one goes
+
+| record | why |
+| --- | --- |
+| `platform_migration_files` | **no writer** since `platform.rs` was deleted today. Holds filename + checksum, which `schema_migrations` already stores under a trigger |
+| `db/released_migrations.tsv` | a snapshot of the above. All 34 checksums stale; its pre-flight check was already demoted from `fail` to a printed report |
+| `zeroship.migrated_migrations` | see below - its two halves die for different reasons |
+
+### `migrated_migrations` has two halves and both are dispensable
+
+**The approval workflow is unreachable in production.** `apply.rs:491` computes
+`requires_approval = !gated_versions.is_empty()`, driven by
+`migration_requires_approval` and the `safety.require_approval` obligation.
+`ApprovalLevel::Never` is the **default** (`migrate-ir/src/policy_approval.rs:32-38`),
+and measured 2026-08-28: **no policy artifact anywhere in the tree sets
+`require_approval`** - not in `policies/`, not in any `.toml`, `.json` or `.ts`
+outside tests. So `gated_versions` is always empty, `insert_pending` is never
+called, and the whole `pending_approval -> approved -> applied` state machine,
+with `approved_by`, `approved_at`, `approved_checksum` and `ceiling_version`, is
+configured-but-unused.
+
+**This is a capability removal and should be explicit rather than incidental:**
+operator approval of destructive creator migrations goes away. Under "the
+creator is responsible for the migration" that is the right answer - a creator
+approves their own destructive ops - but it is a decision, not a cleanup.
+
+**The other half - `descriptor_sha256` - moves to the journal.** The deploy
+precondition (landed today, `5d27e71c5`) reads it to refuse a deploy whose
+migrations have not applied. Re-pointing that read at the creator's own journal
+**closes the rollback hole for free**: the hole exists because the ledger
+records *requests* and can be moved backwards by re-submitting an old IR, while
+the journal records *events* and cannot. Re-submitting an old IR journals
+nothing.
+
+**And the tenant-ownership objection does not apply here.** The creator's
+journal is tenant-owned and destructible - but the precondition exists to
+protect the creator from their own ordering mistake. A creator who forges their
+journal to bypass it harms only themselves, which is the same reasoning that
+made tenant-owned journals acceptable in the first place.
+
+### What this deletes
+
+- the three tables, and `zeroship.migrated_app_policies` /
+  `zeroship.migrated_migration_audit` if they prove to have the same status
+  (not yet measured);
+- `migration_store.rs`'s approval transitions (`insert_pending`, approve,
+  reject) and the `status` state machine;
+- the `zeroship_control` grant on `migrated_migrations`
+  (`db/migrations-ts/20260702000900_grants.ts:25`);
+- the freeze check's dependence on a table nothing writes - it reads
+  `zeroship_migrations.schema_migrations` instead.
+
+**Constraint:** the three tables are created by an **applied, frozen** migration
+(`20260702000200_control_tables.ts`, row 28 of the released ledger). Removing
+them needs a NEW migration dated after the last applied file, not an edit. And
+`db/released_migrations.tsv` is itself being deleted, so the ordering guard that
+reads it (`released_ledger_misordered`) must move to the journal in the same
+change or it silently stops guarding.
+
+## Background: the shadows this replaces
 
 `zeroship_migrations.schema_migrations` is append-only, enforced by a
 `schema_migrations_immutable` trigger. Two other records duplicate slices of it
