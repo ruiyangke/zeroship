@@ -298,6 +298,10 @@ impl From<RegistryError> for WorkflowApiError {
             | RegistryError::ReservedName(msg) => Self::Conflict(msg),
             RegistryError::Database(msg) => Self::Database(msg),
             RegistryError::FxUnresolved => Self::Database(value.to_string()),
+            // Not reachable from here - no workflow surface commits a deploy -
+            // but the conversion has to be total, and the schema precondition is
+            // a conflict wherever it surfaces, never a 500.
+            RegistryError::SchemaNotApplied { .. } => Self::Conflict(value.to_string()),
         }
     }
 }

@@ -2638,7 +2638,11 @@ DB9_BUILD_BYTES=$(wc -c </tmp/gp-dbtodos9-build.log 2>/dev/null | tr -d ' ')
 if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
   pass "db-todos builds through the real vite-plugin for the deployed leg ($(du -k "$TODOS/dist/app.zship" | cut -f1)KB)"
 
-  DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
+  # --defer-deploy: this app's .zship carries a runtime schema descriptor, and
+  # control refuses to make such a deploy live until the matching migrations are
+  # applied. The migration service needs the app row first, so the app is
+  # created here and activated after the apply below.
+  DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" --defer-deploy 2>&1)
   DB9_APP_ID=$(echo "$DB9_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   DB9_API_KEY=$(echo "$DB9_OUT" | awk -F= '$1 == "api_key" { print $2 }')
   if [ -z "$DB9_APP_ID" ] || [ -z "$DB9_API_KEY" ]; then
@@ -2655,24 +2659,33 @@ INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$DB9_APP_ID','$D
 SQL
     DB9_TOKEN="$(e2e_mint_platform_bearer "$DB9_CREATOR" "$DB9_SCOPE" 2>/tmp/gp-dbtodos9-mint.log)"
 
-    node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$TODOS/migrations" >/tmp/gp-dbtodos9-ir.json 2>/tmp/gp-dbtodos9-ir.log <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
+    # THE BUILD'S OWN APPLY BODY, not a second recording of the same sources.
+    # `migrations.ir.json` carries `descriptor_sha256`, the hash of the
+    # `schema.runtime.json` the SAME `genArtifacts` call emitted - which is what
+    # the .zship's manifest is content-addressed by. Re-recording here would
+    # produce a body with no descriptor at all, and the deploy activation below
+    # would then be refused for a reason that has nothing to do with the app.
     DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_TOKEN" \
-      --data-binary @/tmp/gp-dbtodos9-ir.json)"
+      --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
     DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
     if [ "$DB9_APPLY_CODE" = "200" ] && [ "${DB9_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
       pass "db-todos' own migrations applied through zeroship-migrated to the deployed app (applied=$DB9_APPLIED ops)"
-      DB9_READY=1
-      sleep 6   # gateway route-sync poll
+      # NOW the deploy can go live: the app's newest applied migration records
+      # the descriptor this artifact carries. Same command, minus the flag. No
+      # new `pass` here on purpose - the floor at the bottom of this file is an
+      # exact measurement, and every assertion below this point already depends
+      # on the app serving, which it cannot do unless this call succeeded.
+      DB9_ACT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" 2>&1)
+      DB9_LIVE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+        "select coalesce(deploy_hash,'') from zeroship.apps where id = '$DB9_APP_ID'" | tr -d '[:space:]')
+      if [ -n "$DB9_LIVE" ]; then
+        DB9_READY=1
+        sleep 6   # gateway route-sync poll
+      else
+        fail "db-todos migrations applied but the deploy did not go live: ${DB9_ACT:0:300}"
+      fi
     else
       fail "zeroship-migrated could not apply db-todos' migrations for the deployed leg (http=$DB9_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos9-apply.json)"
     fi
@@ -2988,7 +3001,11 @@ else
 fi
 
 # --- 10c. Deploy it, and give it a schema the way a real deploy does --------
-SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
+# --defer-deploy: the scaffold's .zship carries a runtime schema descriptor, and
+# control refuses to make such a deploy live before the matching migrations are
+# applied. The app row has to exist first for the migration service to accept
+# them, so creation and activation are two calls with the apply between them.
+SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" --defer-deploy 2>&1)
 SC_APP_ID=$(echo "$SC_OUT" | awk -F= '$1 == "app_id" { print $2 }')
 SC_API_KEY=$(echo "$SC_OUT" | awk -F= '$1 == "api_key" { print $2 }')
 SC_READY=0
@@ -3023,23 +3040,28 @@ INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$SC_CREATO
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$SC_APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
   SC_TOKEN="$(e2e_mint_platform_bearer "$SC_CREATOR" "$SC_SCOPE" 2>/tmp/gp-scaffold-mint.log)"
-  node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$SCAFFOLD/migrations" >/tmp/gp-scaffold-ir.json 2>/tmp/gp-scaffold-ir.log <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
+  # The BUILD's apply body, not a second recording of the same sources: it
+  # carries `descriptor_sha256`, the hash of the `schema.runtime.json` the same
+  # `genArtifacts` call emitted and the .zship is content-addressed by. A
+  # re-recording here carries no descriptor and the activation below would be
+  # refused for a reason unrelated to the app.
   SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
     "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
-    --data-binary @/tmp/gp-scaffold-ir.json)"
+    --data-binary @"$SCAFFOLD/generated/zeroship/migrations.ir.json")"
   SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
   if [ "$SC_APPLY_CODE" = "200" ] && [ "${SC_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
     pass "the scaffold's own migrations applied through zeroship-migrated (applied=$SC_APPLIED ops)"
-    SC_READY=1
+    # Activate now that the schema matches. No new `pass`: the floor is an exact
+    # measurement and every probe below needs the app serving anyway.
+    SC_ACT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
+    SC_LIVE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+      "select coalesce(deploy_hash,'') from zeroship.apps where id = '$SC_APP_ID'" | tr -d '[:space:]')
+    if [ -n "$SC_LIVE" ]; then
+      SC_READY=1
+    else
+      fail "the scaffold's migrations applied but the deploy did not go live: ${SC_ACT:0:300}"
+    fi
   else
     fail "zeroship-migrated could not apply the scaffold's migrations (http=$SC_APPLY_CODE): $(head -c 200 /tmp/gp-scaffold-apply.json)"
   fi
@@ -3303,7 +3325,15 @@ else
   if [ -z "$PW_ID" ]; then
     fail "could not create the second app for the pairwise check: $(head -c 200 <<<"$PW_JSON")"
   else
-    "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$PW_ID" \
+    # THE STARTER'S ARTIFACT, NOT THE SCAFFOLD'S, and the reason is the schema
+    # precondition rather than a preference. The scaffold's .zship carries a
+    # runtime schema descriptor, and control refuses to make such a deploy live
+    # on an app whose migrations have not been applied - which this throwaway
+    # app's never will be. The starter declares no migrations, so it carries no
+    # descriptor and is not subject to the check. Nothing here is about the
+    # artifact: the step needs a second app registered THROUGH THE DEPLOY API,
+    # because that is the only path that calls `ensure_app_client`.
+    "$BIN/zeroship" deploy "$ZSHIP" --app="$PW_ID" \
       --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" \
       >/tmp/gp-pairwise-deploy.log 2>&1 \
       && pass "second app registered through the deploy API ($PW_APP)" \
@@ -3349,7 +3379,10 @@ elif ! ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos-build.log 2>&1 || [ ! -f "
   fail "examples/db-todos does not build: $(tail -5 /tmp/gp-dbtodos-build.log | tr '\n' ' ')"
 else
   pass "db-todos builds through the real vite-plugin ($(du -k "$DB_ZSHIP" | cut -f1)KB)"
-  DB_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
+  # --defer-deploy, then activate after the apply: db-todos' .zship carries a
+  # runtime schema descriptor and control refuses to make it live before the
+  # matching migrations are applied.
+  DB_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" --defer-deploy 2>&1)
   DB_APP_ID=$(echo "$DB_OUT" | awk -F= '$1 == "app_id" { print $2 }')
   DB_API_KEY=$(echo "$DB_OUT" | awk -F= '$1 == "api_key" { print $2 }')
   if [ -z "$DB_APP_ID" ] || [ -z "$DB_API_KEY" ]; then
@@ -3362,24 +3395,25 @@ else
     docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$DB_APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
-    node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$TODOS/migrations" >/tmp/gp-dbtodos-ir.json 2>/tmp/gp-dbtodos-ir.log <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
+    # The build's own apply body - it carries the `descriptor_sha256` that the
+    # .zship's manifest is content-addressed by, which the activation below
+    # requires. A re-recording of the same sources carries no descriptor.
     DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
-      --data-binary @/tmp/gp-dbtodos-ir.json)"
+      --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
     DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
     if [ "$DB_APPLY_CODE" = "200" ] && [ "${DB_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
       pass "db-todos migrations applied through zeroship-migrated (applied=$DB_APPLIED ops)"
-      DB_DEP_READY=1
-      sleep 6   # gateway route-sync poll
+      DB_ACT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
+      DB_LIVE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+        "select coalesce(deploy_hash,'') from zeroship.apps where id = '$DB_APP_ID'" | tr -d '[:space:]')
+      if [ -n "$DB_LIVE" ]; then
+        DB_DEP_READY=1
+        sleep 6   # gateway route-sync poll
+      else
+        fail "db-todos migrations applied but the deploy did not go live: ${DB_ACT:0:300}"
+      fi
     else
       fail "zeroship-migrated could not apply db-todos' migrations (http=$DB_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos-apply.json)"
     fi
@@ -3963,38 +3997,37 @@ else
   # and nothing else. Anchored on the QUOTED key so an error body with no id
   # yields empty and the fail arm fires.
   AN_APP_ID=$(printf '%s' "$AN_CREATE_JSON" | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  # SCHEMA FIRST, THEN DEPLOY, and that order is now the product's rather than
+  # this harness's preference. Control refuses a deploy whose runtime schema
+  # descriptor is not the one the app's newest applied migration recorded, so
+  # deploying before the apply - which is what this step used to do - answers
+  # 409 schema_not_applied. The app row must exist first either way: the
+  # migration service will not create one, and POST /api/apps above is what
+  # does, along with brokering the OAuth client this step later reads.
   if [ -z "$AN_APP_ID" ]; then
     fail "14: could not create the notes app: $(head -c 200 <<<"$AN_CREATE_JSON")"
-  elif ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
-         --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" \
-         >/tmp/gp-notes-deploy.log 2>&1; then
-    fail "14: deploy failed: $(tail -2 /tmp/gp-notes-deploy.log | tr '\n' ' ')"
   else
-    pass "14: auth-notes-db registered through the deploy API ($AN_APP_ID)"
-
-    # Schema through the REAL deployed path. The apply endpoint takes an IR
-    # ENVELOPE, not an empty object: the first version of this step sent
-    # `-d '{}'` and got `400 Json deserialize error: missing field 'kind'`.
-    # The three working call sites (:1925, :2268, :2607) all --data-binary a
-    # recorder-produced document, and all send the bearer.
-    node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" \
-      "$ROOT/examples/auth-notes-db/migrations" >/tmp/gp-notes-ir.json 2>/tmp/gp-notes-ir.log <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const m of migrations) documents.push({ filename: m.stem + ".ir.json", body: await recordMigration(m.path) });
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
+    # THE BUILD'S OWN APPLY BODY. It carries `descriptor_sha256`, the hash of
+    # the `schema.runtime.json` the same `genArtifacts` call emitted - which is
+    # exactly what the .zship's manifest is content-addressed by, and therefore
+    # what the deploy below is checked against. Re-recording the sources here
+    # would produce a body with no descriptor and the deploy would be refused.
     AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
-      --data-binary @/tmp/gp-notes-ir.json)
+      --data-binary @"$ROOT/examples/auth-notes-db/generated/zeroship/migrations.ir.json")
     AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
     { [ "$AN_APPLY" = "200" ] && [ "${AN_APPLIED:-0}" -ge 1 ] 2>/dev/null; } \
       && pass "14: notes migration applied through zeroship-migrated (applied=$AN_APPLIED ops)" \
       || fail "14: migrated could not apply (http=$AN_APPLY applied=${AN_APPLIED:-0}): $(head -c 200 /tmp/gp-notes-apply.json)"
+
+    if ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
+         --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" \
+         >/tmp/gp-notes-deploy.log 2>&1; then
+      fail "14: deploy failed: $(tail -2 /tmp/gp-notes-deploy.log | tr '\n' ' ')"
+    else
+      pass "14: auth-notes-db registered through the deploy API ($AN_APP_ID)"
+    fi
 
     # The gateway needs route.oauth_client_id + sector_identifier or it answers
     # 503 client_not_provisioned. Control brokers the client at app-create; READ

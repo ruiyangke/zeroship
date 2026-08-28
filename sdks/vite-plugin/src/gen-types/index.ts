@@ -25,6 +25,7 @@
  * absent, so drift is always caught.
  */
 
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
@@ -329,9 +330,28 @@ export async function genTypesFromMigrations(
   // own `envDbTs` re-authors the fold in the migration DSL, which a deployed app
   // neither depends on nor gets `env.db` typing from.
   const envDbTs = renderGeneratedEnvDb(parseRuntimeDescriptor(runtimeJson));
+  // THE ORDERING ANCHOR. `genArtifacts` ran ONCE above and both artifacts come
+  // out of that single reply, so this hash names the descriptor that belongs to
+  // exactly these documents. `migrated` records it on the ledger row for the
+  // apply request; the control plane refuses a deploy whose
+  // `manifest.runtime_descriptor.hash` is not the hash on the newest applied
+  // row.
+  //
+  // IT MUST BE THE HASH OF THE BYTES THAT REACH THE PACKER, not of some
+  // re-serialisation of the same value. `emit` writes `runtimeJson` verbatim
+  // with `fs.writeFile(..., "utf8")`, and `zship.ts` hashes the file it reads
+  // back (`sha256Hex(descriptorBytes)`), so hashing the string here as utf8
+  // yields the same digest. A pretty-print, a re-`JSON.stringify`, or a
+  // trailing newline added on either side would produce two hashes that can
+  // never agree, and the failure would look like the guard misfiring.
+  const descriptorSha256 = createHash("sha256").update(runtimeJson, "utf8").digest("hex");
   // Two-space JSON, trailing newline: this file is committed and reviewed, and
   // a one-line 200 KB blob is not.
-  const migrationsIr = `${JSON.stringify({ kind: "ir", documents }, null, 2)}\n`;
+  const migrationsIr = `${JSON.stringify(
+    { kind: "ir", descriptor_sha256: descriptorSha256, documents },
+    null,
+    2,
+  )}\n`;
   return emit(outDir, envDbTs, runtimeJson, opts.check ?? false, migrationsIr);
 }
 

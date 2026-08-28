@@ -171,6 +171,7 @@ async fn ensure_migrated_service_tables(conn: &Client) {
           approved_at timestamptz,
           applied_at timestamptz,
           approved_checksum text,
+          descriptor_sha256 text,
           last_error text,
           PRIMARY KEY (app_id, migration_id)
         );
@@ -447,9 +448,24 @@ fn state_for_with_policy_config(
     )
 }
 
+/// A syntactically valid descriptor hash for the cases that are about
+/// something else.
+///
+/// Only the CONTROL PLANE compares this value against anything; `migrated`
+/// checks its spelling and records it. So a fixture that is not about the
+/// deploy precondition needs a well-formed hash and nothing more.
+const TEST_DESCRIPTOR_SHA256: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
+
+/// A second, DIFFERENT well-formed hash - the "the build's descriptor bytes
+/// moved" case.
+const TEST_DESCRIPTOR_SHA256_NEXT: &str =
+    "2222222222222222222222222222222222222222222222222222222222222222";
+
 fn create_notes_request() -> Value {
     json!({
         "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
         "documents": [{
             "filename": "0001_create_notes.ir.json",
             "body": {
@@ -471,6 +487,7 @@ fn create_notes_request() -> Value {
 fn denied_vendor_request() -> Value {
     json!({
         "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
         "documents": [{
             "filename": "0001_create_role.ir.json",
             "body": {
@@ -488,6 +505,7 @@ fn denied_vendor_request() -> Value {
 fn drop_notes_request() -> Value {
     json!({
         "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
         "documents": [{
             "filename": "0002_drop_notes.ir.json",
             "body": {
@@ -1101,6 +1119,96 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     cleanup_user(&conn, &owner_id).await;
 }
 
+/// Every applied `(descriptor_sha256, applied_at)` for an app, newest last.
+async fn applied_descriptors(conn: &Client, app_id: &Uuid) -> Vec<Option<String>> {
+    conn.query(
+        "SELECT descriptor_sha256 FROM zeroship.migrated_migrations \
+          WHERE app_id = $1 AND status = 'applied' \
+          ORDER BY applied_at ASC, submitted_at ASC, migration_id ASC",
+        &[app_id],
+    )
+    .await
+    .expect("query applied descriptors")
+    .iter()
+    .map(|row| row.get::<_, Option<String>>("descriptor_sha256"))
+    .collect()
+}
+
+/// THE LEDGER ROW IS PER APPLY REQUEST, NOT PER APPLIED MIGRATION - and that is
+/// a REQUIREMENT, not an observation about where the insert happens to sit.
+///
+/// The control plane's deploy precondition compares the artifact's descriptor
+/// against the hash on the app's NEWEST APPLIED row. So when a build emits
+/// different descriptor bytes for an unchanged migration set - an engine
+/// upgrade, a codegen fix - the only thing that can move the app forward is a
+/// migrate run that applies NOTHING and still records the new hash.
+///
+/// "Skip the ledger write when nothing applied" is the natural optimisation
+/// here and it would brick every such app's next deploy permanently, with no
+/// creator-reachable remedy. This case is what makes that optimisation fail
+/// loudly instead: the second apply below journals zero versions.
+#[ntex::test]
+async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrated::configure),
+    )
+    .await;
+
+    let post = |body: Value| {
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .set_json(&body)
+            .to_request()
+    };
+
+    let resp = test::call_service(&svc, post(create_notes_request())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    assert!(
+        !first["applied"].as_array().unwrap().is_empty(),
+        "the first apply must actually apply something, or the second one is not a re-apply: {first}"
+    );
+
+    // THE SAME DOCUMENTS, A DIFFERENT DESCRIPTOR. This is the engine-upgrade
+    // shape: the migration set has not changed, so the engine has nothing to
+    // do, but the descriptor those documents fold to has different bytes.
+    let mut second_request = create_notes_request();
+    second_request["descriptor_sha256"] = json!(TEST_DESCRIPTOR_SHA256_NEXT);
+    let resp = test::call_service(&svc, post(second_request)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let second: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    assert!(
+        second["applied"].as_array().unwrap().is_empty(),
+        "the second apply must apply NOTHING - otherwise this case is not about \
+         the empty-apply path at all: {second}"
+    );
+
+    assert_eq!(
+        applied_descriptors(&conn, &app_id).await,
+        vec![
+            Some(TEST_DESCRIPTOR_SHA256.to_string()),
+            Some(TEST_DESCRIPTOR_SHA256_NEXT.to_string()),
+        ],
+        "an apply request that journals nothing must STILL record its descriptor \
+         as the newest applied row - without it the app can never deploy again",
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+}
+
 #[ntex::test]
 async fn destructive_apply_requires_operator_approval_then_applies_pg() {
     let conn = admin_conn().await;
@@ -1333,6 +1441,7 @@ async fn store_state_machine_plan_approve_and_content_drift_revert_pg() {
         ceiling_id: "confined-default",
         ceiling_version: 1,
         gated_versions: &[],
+        descriptor_sha256: TEST_DESCRIPTOR_SHA256,
     };
 
     // PLAN (requires approval) → pending_approval, no approved_checksum yet.
@@ -1947,6 +2056,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     // A JSON object, so it clears validate_request_shape, but not an IR envelope.
     let malformed = json!({
         "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
         "documents": [{
             "filename": "0001_broken.ir.json",
             "body": {"foo": 1}

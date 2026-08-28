@@ -431,6 +431,13 @@ fn cmd_deploy(args: &[String]) {
         std::process::exit(1);
     });
 
+    // BEFORE the upload, not after it. A reminder printed after a successful
+    // deploy names a step the deploy has already made it too late to take in
+    // order; control now REFUSES a deploy whose migrations have not been
+    // applied, so this line is what a creator reads on the way to that 409
+    // rather than a footnote under a green result.
+    print_migrate_reminder(&app, &control_url, resolved.as_ref());
+
     eprintln!(
         "Deploying {} ({:.1}KB) to {control_url}/api/apps/{app}/deploy...",
         input_path.display(),
@@ -461,7 +468,6 @@ fn cmd_deploy(args: &[String]) {
             if let Some(hash) = outcome.deploy_hash {
                 eprintln!("  deploy_hash: {hash}");
             }
-            print_migrate_reminder(&app, &control_url, resolved.as_ref());
         }
         Err(e) => {
             eprintln!("zeroship deploy: {e}");
@@ -590,8 +596,8 @@ fn record_created_app(
     }
 }
 
-/// After a successful deploy, name the migrate step when the selected project
-/// has migrations to apply.
+/// BEFORE the upload, name the migrate step when the selected project has
+/// migrations to apply.
 ///
 /// DELIBERATELY A CLIENT-SIDE HINT, and a weak one. It fires on the presence of
 /// the build's own artifact beside the selected project config, including when
@@ -599,12 +605,13 @@ fn record_created_app(
 /// app's migrations are already applied. It cannot tell you that you FORGOT;
 /// only that there is something to run.
 ///
-/// The check that could tell you is server-side: the deploy handler knows
-/// whether the bundle carries a `runtime_descriptor` (i.e. the app uses
-/// `env.db`) and could report whether the app has ever had a migration applied.
-/// That is the right place for it and it is not built. This is the cheap half,
-/// and it is here because the expensive half not existing is what let a deploy
-/// answer 200 over an app that could not serve a single database call.
+/// THE EXPENSIVE HALF NOW EXISTS, which is why this prints first. The deploy
+/// handler compares the artifact's `runtime_descriptor.hash` against the
+/// descriptor recorded on the app's newest applied migration and answers 409
+/// `schema_not_applied` when they disagree
+/// (`Registry::set_deploy_with_manifest`). This line is the warning on the way
+/// in; that refusal is the guarantee. Printing it after a 200, as this used to,
+/// named a step the deploy had already made it too late to take in order.
 fn print_migrate_reminder(
     app: &str,
     control_url: &str,
@@ -623,7 +630,7 @@ fn print_migrate_reminder(
     eprintln!();
     eprintln!("This app has committed migrations. Deploy does NOT apply them:");
     eprintln!("  zeroship migrate --app={app} --control={control_url}");
-    eprintln!("Until you do, every env.db call fails with a missing-role error.");
+    eprintln!("Until you do, this deploy is REFUSED with 409 schema_not_applied.");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -49,6 +49,24 @@ use crate::provisioning::{exec_retry, provision_migrator, ProvisionRoleError};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyMigrationsRequest {
     pub kind: ApplyKind,
+    /// sha256 of the `schema.runtime.json` the SAME build emitted from these
+    /// documents, lowercase hex.
+    ///
+    /// This is the deploy precondition's anchor. `genTypesFromMigrations` calls
+    /// `genArtifacts` ONCE and writes both `schema.runtime.json` and
+    /// `migrations.ir.json` from that single reply, so the hash names the
+    /// descriptor that corresponds to exactly this document set. The control
+    /// plane later refuses to make a deploy live unless the manifest's
+    /// `runtime_descriptor.hash` equals the hash on the app's newest APPLIED
+    /// row - which is how a descriptor claiming a column is masked cannot go
+    /// live over a database that still holds plaintext there.
+    ///
+    /// WHAT THIS PROVES IS ORDERING, NOT TRUTH. The value is client-declared: a
+    /// creator who hand-edits both generated files can make them agree about a
+    /// lie. Closing that needs the server to re-render the descriptor from the
+    /// documents it just applied and refuse a mismatch, which is a separate
+    /// change and owes a byte-identity gate first.
+    pub descriptor_sha256: String,
     pub documents: Vec<IrDocument>,
     #[serde(default)]
     pub policy: Option<PolicyDraftDocument>,
@@ -164,6 +182,11 @@ pub enum ApplyRequestError {
     DuplicateFilename(String),
     #[error("document {0:?} must be a JSON object")]
     InvalidDocument(String),
+    #[error(
+        "descriptor_sha256 {0:?} is not lowercase sha256 hex: it must be the sha256 of the \
+         schema.runtime.json this build emitted"
+    )]
+    InvalidDescriptorHash(String),
     #[error("create migration temp directory: {0}")]
     TempDir(std::io::Error),
     #[error("write {path}: {source}")]
@@ -491,6 +514,7 @@ async fn apply_ir_documents_with_policy(
                         ceiling_id: &policy.ceiling_id,
                         ceiling_version: policy.ceiling_version,
                         gated_versions: &gated_versions,
+                        descriptor_sha256: &request.descriptor_sha256,
                     })
                     .await?;
                 migration_store
@@ -546,6 +570,7 @@ async fn apply_ir_documents_with_policy(
                         ceiling_id: &policy.ceiling_id,
                         ceiling_version: policy.ceiling_version,
                         gated_versions: &[],
+                        descriptor_sha256: &request.descriptor_sha256,
                     },
                     &report.content_checksum(),
                 )
@@ -1463,6 +1488,11 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
     if request.documents.is_empty() {
         return Err(ApplyRequestError::Empty);
     }
+    if !is_sha256_hex(&request.descriptor_sha256) {
+        return Err(ApplyRequestError::InvalidDescriptorHash(
+            request.descriptor_sha256.clone(),
+        ));
+    }
     let mut seen = HashSet::new();
     for doc in &request.documents {
         validate_filename(&doc.filename)?;
@@ -1529,11 +1559,27 @@ fn validate_filename(filename: &str) -> Result<(), ApplyRequestError> {
     Ok(())
 }
 
+/// Lowercase sha256 hex, the one spelling the control plane's deploy predicate
+/// compares against.
+///
+/// The comparison is a plain SQL `=` on `text`, so an uppercase or whitespace-
+/// padded hash of the SAME bytes would be recorded, would look right in the
+/// row, and would refuse every deploy of the app that submitted it. Refusing
+/// the spelling at the door is the difference between a 400 naming the field
+/// and a 409 nobody can explain.
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'static str) {
     match err {
         ApplyRequestError::Empty
         | ApplyRequestError::InvalidFilename(_)
         | ApplyRequestError::DuplicateFilename(_)
+        | ApplyRequestError::InvalidDescriptorHash(_)
         | ApplyRequestError::InvalidDocument(_) => (
             ntex::http::StatusCode::BAD_REQUEST,
             "invalid_migration_request",
@@ -1779,6 +1825,43 @@ mod tests {
         );
     }
 
+    /// A syntactically valid descriptor hash for the shape tests, which are
+    /// about everything EXCEPT the hash.
+    const TEST_DESCRIPTOR_SHA256: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+
+    #[test]
+    fn descriptor_hash_must_be_lowercase_sha256_hex() {
+        let with = |hash: &str| ApplyMigrationsRequest {
+            kind: ApplyKind::Ir,
+            descriptor_sha256: hash.to_string(),
+            documents: vec![IrDocument {
+                filename: "0001_notes.ir.json".to_string(),
+                body: json!({}),
+            }],
+            policy: None,
+        };
+        assert!(validate_request_shape(&with(TEST_DESCRIPTOR_SHA256)).is_ok());
+        // The control plane's predicate is a SQL `=` on text, so every spelling
+        // below would be stored verbatim and then refuse the app's own deploys.
+        for bad in [
+            "",
+            "1111111111111111111111111111111111111111111111111111111111111",
+            "11111111111111111111111111111111111111111111111111111111111111111",
+            "1111111111111111111111111111111111111111111111111111111111111111 ",
+            "AAAA111111111111111111111111111111111111111111111111111111111111",
+            "zzzz111111111111111111111111111111111111111111111111111111111111",
+        ] {
+            assert!(
+                matches!(
+                    validate_request_shape(&with(bad)),
+                    Err(ApplyRequestError::InvalidDescriptorHash(_))
+                ),
+                "{bad:?} must be refused as a descriptor hash"
+            );
+        }
+    }
+
     #[test]
     fn rejects_non_bare_ir_filenames() {
         for bad in ["../x.ir.json", "nested/x.ir.json", "x.sql", "", "."] {
@@ -1791,6 +1874,7 @@ mod tests {
     fn request_requires_documents() {
         let request = ApplyMigrationsRequest {
             kind: ApplyKind::Ir,
+            descriptor_sha256: TEST_DESCRIPTOR_SHA256.to_string(),
             documents: Vec::new(),
             policy: None,
         };
@@ -1819,6 +1903,7 @@ mod tests {
     fn rejects_scalar_document() {
         let request = ApplyMigrationsRequest {
             kind: ApplyKind::Ir,
+            descriptor_sha256: TEST_DESCRIPTOR_SHA256.to_string(),
             documents: vec![IrDocument {
                 filename: "0001_bad.ir.json".to_string(),
                 body: json!(true),
