@@ -698,7 +698,7 @@ fn corpus_lines(
     let collections = runtime
         .get("collections")
         .and_then(Value::as_object)
-        .expect("the v1 descriptor carries `collections`");
+        .expect("the v2 descriptor carries `collections`");
     for (name, collection) in collections {
         let options = collection.get("options").expect("a collection has options");
         out.push(format!(

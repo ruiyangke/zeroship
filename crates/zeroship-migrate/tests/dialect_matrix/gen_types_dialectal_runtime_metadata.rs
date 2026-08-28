@@ -87,7 +87,7 @@ fn runtime_json(dialect: &zeroship_migrate::DialectId) -> Value {
     serde_json::from_str(&artifacts.runtime_json).expect("schema.runtime.json parses")
 }
 
-/// The `notes` collection object out of the v1 descriptor, so a failure prints the
+/// The `notes` collection object out of the v2 descriptor, so a failure prints the
 /// collection rather than the whole document.
 fn notes(dialect: &zeroship_migrate::DialectId) -> Value {
     let doc = runtime_json(dialect);
