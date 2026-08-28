@@ -49,30 +49,6 @@ the journal already covered the case cannot be undone as cheaply.
 Whether any NON-workflow durable consumer awaits a transaction terminal is
 unverified.*
 
-## Terms this contract uses but does not define
-
-Four pieces of vocabulary appear in the rules, the guard order and the
-invariants below without ever being defined - not here, and not in any other
-document of this set. They are enumerated rather than defined, because defining
-them is a decision this document has not made:
-
-- **`Preparing`** and **`Quiescing`** are used as protocol states ("One gate for
-  every forcing publisher" applies the gate "in `Preparing`, `Starting`,
-  `InFlight` and `Quiescing` alike", and invariant 15 is *titled* Quiescing).
-  Neither appears in the diagram or the list under "States", which names six:
-  `Starting`, `Idle`, `InFlight`, `Poisoned`, `Settling`, `Settled`.
-- **`ReResolve` / `Deny` / `Current`** are the lifecycle classifier's verdicts,
-  named in the forcing-publisher list under "One gate for every forcing
-  publisher", which also has the reducer re-run the classifier. The classifier
-  that produces them is specified nowhere in this set.
-- **`Armed` / `Fired`** are the deadline slot's two states, named in guard step
-  3 together with a `(kind, generation)` pair, an atomic claim and a diagnostic
-  outcome for a wrong pair. The slot's own protocol is not written down here.
-
-All four are specified in the r7 artifact named under "Where the full transition
-matrix lives", which is untracked - so this contract currently rests on
-vocabulary a reader of the tracked set cannot resolve.
-
 ## Why this is a document and not a discovery
 
 A black-box test suite **underdetermines** this protocol: a suite that never
@@ -173,30 +149,63 @@ whoever first writes a concurrency test on the dev tier.
 ## States
 
 ```text
-                    admission granted
-     Starting ------------------------------> Idle
-        |                                    ^   |
-        | BEGIN fails                        |   | an operation starts
-        | or cancelled                       |   v
-        |            operation completes ----+  InFlight
-        |                                    |     |
-        |          ROLLBACK TO SAVEPOINT ----+     | a statement errored
-        |          (nested reject; the             v
-        |           outer transaction           Poisoned
-        |           continues)                     |
-        |                                          | settle requested
-        |            settle requested              | (COMMIT here is legal
-        v                    |                     |  and FAILS: the server
-     Settled <--- Settling <-+---------------------+  answers ROLLBACK)
+               authority read: Current          BEGIN confirmed
+     Preparing ----------------------> Starting -----------> Idle
+        |                                 |               ^   |
+        |<--------------------------------+               |   | an operation
+        |   ReResolve or Deny, a failed BEGIN,            |   | starts
+        |   or cancellation before BEGIN returns          |   v
+        |                                                 |  InFlight
+        |            operation completes -----------------+     |
+        |                                                 |     |
+        |          ROLLBACK TO SAVEPOINT -----------------+     | a statement
+        |          (nested reject; the outer                    | errored
+        |           transaction continues)                      v
+        |                                                    Poisoned
+        |                                                       |
+        |      settle requested while a command owns            | settle
+        |      logical execution                                | requested
+        |                       |                               |
+        |                   Quiescing                           |
+        |                       |                               |
+        |                       | that command returns          |
+        |                       |                               |
+        v                       v                               |
+     Settled <--- Settling <----+-------------------------------+
 ```
 
-Settlement may also be requested directly from `Idle` or `InFlight`; from
-`InFlight` it waits for the operation to return the client rather than treating
-the empty slot as proof that terminal SQL ran.
+Settlement may be requested from `Idle`, `InFlight` or `Poisoned`. From `Idle`
+and `Poisoned` it goes straight to `Settling`. From `InFlight` it goes to
+`Quiescing` first and waits there for the operation to return the client, rather
+than treating the empty slot as proof that terminal SQL ran.
 
-- **Starting** - admission granted, `BEGIN` issued, no client installed yet.
+- **Preparing** - admission is granted, the RAII claim guard is held and the
+  execution deadline is armed, and the platform-role authority read that decides
+  whether this transaction may proceed is in flight. **No `BEGIN` has been
+  sent.** That read's verdict decides what happens next: `Current` proceeds to
+  `Starting` and captures the `BEGIN` ceiling from it, while `ReResolve` and
+  `Deny` end the transaction without ever issuing `BEGIN`.
+
+  Time spent waiting for admission is *not* part of this state, and the deadline
+  is armed on the transition into it. Queue time therefore does not consume the
+  transaction's execution budget.
+- **Starting** - the authority read returned `Current`; `BEGIN` and session
+  setup are in flight, and no operation can see the session yet.
 - **Idle** - transaction open, no operation owns the client.
-- **InFlight** - an operation owns the client. **Settlement may arrive here.**
+- **InFlight** - an operation owns the client. **Settlement may arrive here**,
+  and moves the transaction to `Quiescing` rather than to `Settling`.
+- **Quiescing** - a settlement was requested while a command still owns logical
+  execution. The intent - either a frame close or a root settle - is latched,
+  and **no frame or terminal SQL is issued until the active command returns**.
+  Exactly one intent is latched: a second request naming the same attempt joins
+  the waiter already there and issues no second command, and a different attempt
+  is a settle conflict.
+
+  `Quiescing` is distinct from `Settling` because `Settling` *promises terminal
+  SQL has already been issued*, and `Quiescing` promises it has not. Collapsing
+  the two is precisely what lets an absent client look like proof that terminal
+  SQL ran, which is rule 1's defect; invariant 15 is the property that keeps
+  them apart.
 - **Poisoned** - a statement errored. PostgreSQL refuses every further *data*
   statement until the transaction ends
   (`libs/compio-postgres/src/client.rs:507-533`), so this is a real server-side
@@ -218,7 +227,58 @@ the empty slot as proof that terminal SQL ran.
 - **Settling** - terminal SQL has been issued and not yet answered.
 - **Settled** - terminal, with a recorded outcome.
 
-`Poisoned` is why five labels were not enough.
+`Poisoned`, `Preparing` and `Quiescing` are why five labels were not enough.
+Each names a condition a shorter list has to fake somewhere else: as a
+bookkeeping flag beside the state, as an early `Starting` that has already
+issued `BEGIN` on an authority nobody checked, or as an empty client slot.
+
+**Forced cleanup has no state of its own here.** When a force wins - a deadline,
+a cancel, a detach, or a `ReResolve`/`Deny` verdict - this contract routes the
+transaction through `Poisoned` and `Settling` to `Settled`, and the gate below
+is what makes that routing deterministic. *Open question: the r7 artifact
+instead gives forced cleanup a distinct `Cancelling` state, which waits for the
+backend's positive proof that no transaction remains before releasing the claim.
+Whether that wait needs its own label turns on one observable - what a caller is
+told while a forced rollback is still outstanding - and on where the proof
+obligation in rule 5 and invariant 3 is discharged. The invariants below hold
+under either shape.*
+
+## The lifecycle classifier
+
+Every authority observation runs through **one total classifier** before any
+data SQL: the read `Preparing` waits on, the read each operation takes before
+its own data SQL, and any unsolicited lifecycle observation a publisher submits.
+It compares the observation against the authority and schema epoch the binding
+captured, and returns exactly one of three verdicts.
+
+| Verdict | Returned when | What the protocol does |
+| --- | --- | --- |
+| **`Current { ceiling }`** | app id, authority domain and incarnation all match, the app's lifecycle state is stable, and the observed schema epoch equals the expected one | proceed. **Not forcing**: it never claims the gate. Its ceiling is folded into the effective ceiling by `meet`, so it can only tighten |
+| **`ReResolve`** | identity matches, but the lifecycle state is *changing*, or the epoch differs | **retryable.** The attempt is rolled back and the caller receives an epoch-changed error. The entry never follows the new epoch in place; the caller re-resolves to a fresh `TxKey` |
+| **`Deny(reason)`** | app id, authority domain or incarnation differs, or the app is deprovisioned | **terminal.** No `BEGIN`, no data SQL, no following the new app. The caller receives an incarnation-mismatch error, or the more specific deprovisioned reason |
+
+**The order inside the classifier is load-bearing:** identity is compared before
+lifecycle state, so an observation that names a *different* app is denied for
+the identity mismatch rather than for whatever that other app's lifecycle
+happens to be. That is what makes invariant 1's split - epoch mismatch
+re-resolves, domain or incarnation mismatch denies terminally - a consequence of
+one function rather than a second rule that can drift away from it.
+
+This classifier is also the comparison "Two identities, deliberately distinct"
+promises when it leaves the authority domain out of the admission key: the
+domain is checked here, at the authority read, against the binding's captured
+value, on every observation rather than once at admission.
+
+`ReResolve` and `Deny` are forcing publishers; `Current` is not. **The reducer
+re-runs the classifier on the observation itself** rather than trusting the
+verdict a publisher attached, so labelling a `Deny` as `Current` buys nothing:
+the label is an input, never a verdict.
+
+The ceiling folds as `meet(begin_ceiling, effective_ceiling,
+newly_read_ceiling)`, which is invariant 8 - a raise is ignored until a new
+top-level transaction, a lower value tightens the next authorization. The read
+happens on the platform-role session and never borrows the tenant data session,
+which is Fork B and invariant 7.
 
 ## The rules that are actually load-bearing
 
@@ -252,13 +312,16 @@ the empty slot as proof that terminal SQL ran.
 
 4. **The deadline is enforced by an independent timer, not by the settle path.**
    A deadline enforced by the settle path is circular - a body that never
-   settles never reaches the settle path. The timer is armed at `Starting` and
-   fires regardless of callback behaviour, moving the transaction to `Poisoned`
-   and then `Settling` with a rollback.
+   settles never reaches the settle path. The timer is armed on the transition
+   into `Preparing` - the same transition that grants admission and creates the
+   claim guard - and fires regardless of callback behaviour, moving the
+   transaction to `Poisoned` and then `Settling` with a rollback. Its slot
+   protocol is under "The deadline slot".
 
-5. **Cancellation before `BEGIN` returns must not leak the admission claim.** An
-   RAII guard is armed at admission and disarmed only once the client is
-   installed. Today the claim can outlive the isolate, leaving later
+5. **Cancellation before `BEGIN` returns must not leak the admission claim.**
+   That window is exactly `Preparing` and `Starting`. An RAII guard is armed at
+   admission - the transition into `Preparing` - and disarmed only once the
+   client is installed. Today the claim can outlive the isolate, leaving later
    transactions for that app parked indefinitely. That defect is labelled
    **DBR-11**.
 
@@ -267,6 +330,73 @@ the empty slot as proof that terminal SQL ran.
 these defects carry no `L` number in the register. The labels are kept because
 they are the only handle the defects have, but the numbering is **owed** either
 a definition or register rows.
+
+## The deadline slot
+
+Rule 4's timer is not a bare sleep, because the deadline it enforces is
+replaced, not merely cancelled, as the transaction moves. The transaction owns
+**one** deadline slot, shared by every deadline this protocol arms, holding
+exactly one of three values:
+
+```text
+Disarmed
+Armed  { kind, generation, at }
+Fired  { kind, generation }
+```
+
+A timer task carries only the transaction key, the `kind`, the `generation` and
+the event sender. It owns no session, no client and no settle future, which is
+what makes rule 4's "independent of callback behaviour" true rather than
+aspirational.
+
+A `generation` is minted fresh at every arming and is **never reused across
+kinds**, so the number alone never authenticates a fire - the `(kind,
+generation)` pair does. The slot has exactly four mutators and no others:
+
+| Mutator | Legal from | Effect |
+| --- | --- | --- |
+| `arm_initial(kind, generation, at)` | `Disarmed` only | becomes `Armed`, and schedules the timer |
+| `claim_fire(kind, generation)` | `Armed` on **that exact pair** | flips to `Fired` atomically, granting the caller the sole right to act on that expiry |
+| `replace_current(expected_kind, next_kind, next_generation, next_at)` | `Armed` **or** `Fired`, of `expected_kind` | becomes `Armed` on the successor kind with a fresh generation, and schedules it |
+| `disarm` | any state, naming the terminal generation | becomes `Disarmed`, at terminal cleanup |
+
+**Every other call is a pure diagnostic.** It returns
+`StaleTransactionDeadline` and produces no SQL, no reply, no claim change, no
+interrupt and no state mutation. A duplicate delivery of an already-claimed
+timer is exactly that case, which is why `Armed -> Fired` has to be one atomic
+flip rather than a check followed by a mutation: a check-then-mutate lets two
+deliveries of the same expiry both believe they own it, and guard order step 3
+would then be ordering a claim that does not exclude.
+
+`replace_current` accepts `Fired` as well as `Armed` deliberately. A deadline
+that has already fired and driven the transaction into forced cleanup must
+still be replaceable by the deadline that bounds *that* cleanup; otherwise a
+hung rollback is unbounded and strands the admission claim, which is rule 5's
+DBR-11 failure reached by a second route.
+
+**The set of `kind`s is not closed by this contract.** One is fixed:
+`Execution`, armed on entry to `Preparing`, is rule 4's timer. Guard order step
+3 authenticates on a `(kind, generation)` pair, so at least one more exists, and
+this contract's own shape says what it is for - rule 4 has the execution
+deadline drive the transaction to `Settling` with a rollback, and nothing stated
+here bounds that rollback.
+
+*Open question: the name, arming point and expiry behaviour of the deadline that
+bounds forced terminal SQL, and what a transaction whose terminal SQL never
+answers settles as. The r7 artifact names five kinds beyond `Execution`. Three
+of them - `CancellationHardStop`, `TerminalHardStop` and `RetirementFence` -
+belong to the supervisor and generation-fencing machinery this contract declines
+under "Where the full transition matrix lives", and a fourth, `CancellationSql`,
+bounds the `Cancelling` state this contract does not have. Only `TerminalSql`,
+which bounds `Settling`, lands on a state that exists here. So the artifact
+answers the question but not in this contract's shape, and its answer cannot be
+adopted wholesale. Until this is settled, the three states and four mutators
+above hold, and invariant 3's claim balance does not: an execution deadline
+firing against a rollback that never answers has nothing to release the claim.*
+
+*The artifact also carries a fifth mutator, for arming a retirement fence. It
+belongs to the same declined machinery and is deliberately absent above; the
+four-mutator list is closed for the kinds this contract does arm.*
 
 ## Frames and effects
 
@@ -342,11 +472,19 @@ in a contract someone has to read end to end.
 
 The exhaustive version exists and was produced against this design: the closed
 state enum, the closed event and completion enums, the complete legal transition
-table, the exhaustive illegal matrix with a typed error per cell, the deadline
-slot protocol, and the terminal outcome table. It is preserved at
+table, the exhaustive illegal matrix with a typed error per cell, the full
+deadline-kind set, and the terminal outcome table. It is preserved at
 `docs/reviews/dbbind-2026-08-26/dbbind-r7-codex.md` (untracked, beside these
 drafts). An implementer should work from that for the matrix; a reviewer should
 work from this.
+
+**Its state enum is larger than the one under "States", and the difference is
+not accidental.** It also carries `WaitingAdmission` for the pre-admission
+queue, `Cancelling` for forced cleanup, and `HardStopping` and `Quarantining`
+for the generation-fencing machinery below. The two named open questions -
+whether forced cleanup needs its own label, and which deadline bounds forced
+terminal SQL - are exactly where that difference bites; everything else the
+artifact adds is machinery this contract declines.
 
 **It is not SC-1 written out in full, and the difference is a scope trap.** That
 artifact invokes a *supervisor*, a `FenceJobRegistry` and durable fence jobs
@@ -381,7 +519,8 @@ contract. It runs:
    **pure** state/event capability check under the reducer lock first, and only
    a preflight-legal event is allowed to claim the fire. The claim succeeds only
    if the shared slot is `Armed` with that exact (kind, generation) pair, and
-   flips it to `Fired` atomically. A wrong pair is a pure diagnostic. Ordering
+   flips it to `Fired` atomically. A wrong pair is a pure diagnostic -
+   `StaleTransactionDeadline`, no SQL, no reply, no state change. Ordering
    it this way is what stops an illegal cell from claiming a timer or queueing a
    forced settlement as a side effect of being rejected.
 4. **Backend generation.** A completion naming a generation other than the one
