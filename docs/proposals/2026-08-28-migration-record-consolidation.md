@@ -227,6 +227,34 @@ them needs a NEW migration dated after the last applied file, not an edit. And
 reads it (`released_ledger_misordered`) must move to the journal in the same
 change or it silently stops guarding.
 
+## What still enforces the freeze, measured 2026-08-28
+
+`AGENTS.md` states the rule and points here for the mechanisms, because an
+inventory of live guards is a ledger and belongs in a proposal rather than in
+the guidelines page.
+
+The freeze was enforced by four mechanisms. **Three were deleted on 2026-08-28
+with the platform-migrate removal:**
+
+| mechanism | state |
+| --- | --- |
+| the engine's own `ChecksumMismatch`, at apply time | **ALIVE.** This is what makes the freeze real |
+| `released_ledger_misordered` (`deploy/scripts/deploy-remote.sh`), before the roll | **ALIVE.** Catches a NEW file sorting before an applied one |
+| `unreleased_migrations_sort_after_every_released_one` (DB-free, in the `--features platform-cli` CI step) | **GONE** - zero occurrences tree-wide |
+| `platform.rs` deriving each file's journal version from its sorted ordinal, and `run_platform_migrations` raising `PlatformMigrateError::VersionCollision` | **GONE** with the crate - zero occurrences |
+
+Both survivors measure ONE deployment's journal, so a second cluster further
+behind is outside what either can see.
+
+**And the byte comparison was demoted from `fail` to a printed report**, because
+the table it reads lost its only writer and all 34 of its checksums are stale.
+So nothing mechanical detects a *pre-flight* edit to an applied file; only the
+engine catches it, at apply time, on the roll itself.
+
+**The consolidation above closes this**: the freeze check moves to
+`zeroship_migrations.schema_migrations`, which is append-only by trigger and
+cannot lose its writer.
+
 ## Background: the shadows this replaces
 
 `zeroship_migrations.schema_migrations` is append-only, enforced by a
