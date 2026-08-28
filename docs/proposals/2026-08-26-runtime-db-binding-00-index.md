@@ -419,11 +419,40 @@ substance; step 5a = SC-5's behaviour-neutral half.**
 | **SC-6** | write path **specified** (`docs/reviews/2026-08-28-flip-write-path.md`, 966 lines). Its author recommends **cancelling the flip** |
 
 **The load-bearing consequence for SC-6:** most of that specification **is not
-flip work**. The row-surface filter, the unnameable raw column, the introspector
-fall-throughs and the `_raw` reservation all repair the CURRENT layout, because
-**`RETURNING *` returns plaintext under `ssn` today, pre-flip, for every
-mask-only field.** That is unblocked security work regardless of which way the
-flip decision goes.
+flip work** - it repairs the CURRENT layout. But the reason has to be stated
+precisely, because an earlier revision of this page stated it wrong **twice**.
+
+**WRONG (retracted 2026-08-28): "`RETURNING *` returns plaintext under `ssn`
+today, pre-flip."** Measured: it does not, on any production JS-facing path.
+`wrap_masked` defaults to `true` (`crud/read_pipeline.rs:27`) and
+`wrap_row_on_read` **overwrites the parent with the sibling's masked value and
+strips the sibling** (`crud/mask_pass.rs:469-482`). Only two sites set
+`wrap_masked: false`: `dispatch_distinct` (`crud/mod.rs:1872`), where the SQL
+already aliased the masked sibling so the row holds the mask anyway, and a test
+(`read_pipeline.rs:581`). The write verbs funnel their `RETURNING *` rows
+through the same `read_pipeline::apply` the reads use, so they inherit the
+re-mask.
+
+**RIGHT: the leak today is the CDC / subscription path, which is a THIRD exit
+that never enters `read_pipeline` at all.** Verified:
+
+- `exec.rs:531-541` builds the broker tuple from `m.iter()` over **every key** of
+  the `RETURNING *` row, with no mask filtering.
+- `wal_consumer.rs` contains **zero** occurrences of `mask`, `wrap_row_on_read`
+  or `apply_mask` - the WAL path has no mask awareness whatsoever, and
+  `tuple_to_map` zips every physical column out of pgoutput.
+- `broker.rs` then puts that tuple on the wire under `"row"`.
+
+So for a mask-only field the **parent column holds plaintext and reaches every
+subscriber, today.** The existing contract test covers only the *encrypted*
+shape, so it has never ruled on the shape that leaks.
+
+**This changes the flip's ledger in both directions:** the flip would CLOSE this
+leak for the parent (which becomes the mask) while OPENING a new one for
+`<col>_raw` in the same tuple. And it is why narrowing `RETURNING *` to an
+explicit column list does not help - the replication stream is just as wide, and
+a `RETURNING` list cannot be applied to it. The whitelist belongs on the decoded
+row and on the broker's `changed_columns`, not in the SQL.
 
 **L28 is CLOSED by the platform-migrate removal** - the `platform-cli` feature it
 named no longer exists, so the 26 harnesses it blocked are unblocked. An example
