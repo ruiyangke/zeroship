@@ -132,11 +132,24 @@ The alternative - a bounded set of SQLite transaction connections keyed by
 - and they would trade deterministic queueing for `SQLITE_BUSY_SNAPSHOT`
   nondeterminism on write upgrade, while pinning WAL read marks.
 
-So SQLite serializes top-level transactions per `(thread-resource, app_id)` at
-the actor's `Reserve(Transaction)` queue. The divergence is house style rather
-than an embarrassment - `docs/reference/db.md:992-997` already disclaims
-dev-tier concurrency fidelity - but it is **stated**, not discovered by
-whoever first writes a concurrency test on the dev tier.
+So SQLite admits **one** top-level transaction per `(thread-resource, app_id)`.
+**It does not serialize the second one - there is no `Reserve(Transaction)`
+queue.** A second `db.transaction()` for the same app is refused at once with
+`transaction_connection_busy`
+(`crates/zeroship-plugin-db/src/backend/sqlite/session.rs:688-695`, whose own
+heading is "Exhaustion: refuse immediately, do not queue"). Postgres queues
+instead, on the pool's `acquire_timeout`, so the two tiers differ in what a
+creator observes under contention: a refusal on SQLite, a wait on Postgres.
+
+That difference decides the shape of any arm about contention. **An arm in which
+a second same-app top-level `begin` waits and then succeeds is
+PostgreSQL-only**, and must be labelled so - not only the cross-isolate arms.
+Whether SQLite's refusal should become a bounded wait once the deadline lands is
+this contract's call to make; `session.rs:694-695` explicitly defers it here.
+The divergence is house style rather than an embarrassment -
+`docs/reference/db.md:992-997` already disclaims dev-tier concurrency fidelity -
+but it is **stated**, not discovered by whoever first writes a concurrency test
+on the dev tier.
 
 ### What this contract does not decide
 
@@ -305,6 +318,20 @@ the terminal classifier uses: PostgreSQL's `transaction_status()`, whose `None`
 means *indeterminate* and is documented as such
 (`libs/compio-postgres/src/client.rs:3170-3188`), and SQLite's `is_autocommit`
 sample (`sc2:262-266`).
+
+**WHEN the oracle is sampled is load-bearing, and sampling it too early
+destroys healthy connections.** On PostgreSQL `transaction_status()` returns
+`None` while a request is in flight, and a *failed* statement's trailing
+`ReadyForQuery` is not consumed when its `await` returns. Inside a poisoned
+block - where every data statement fails with `25P02` - **no retry makes the
+oracle answer**. Since `None` is indeterminate and indeterminate withdraws the
+session, a driver that samples on entry to `Cancelling` would withdraw a
+perfectly healthy connection on *every* forced cleanup.
+
+So the oracle is sampled **after** the cleanup `ROLLBACK`, which succeeds and
+resolves the byte - never before it. This is a constraint on the driver, not on
+the reducer, which is why it belongs here rather than being left to whoever
+writes the driver to rediscover.
 
 An acknowledgement that proves the goal settles the transaction with the latched
 cause. **Anything else - an acknowledgement that contradicts the goal, or one
