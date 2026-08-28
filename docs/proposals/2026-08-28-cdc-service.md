@@ -2017,11 +2017,27 @@ Stated as gaps rather than written as facts elsewhere in this document.
   neither (6.4). What remains unobserved is a *consumer* resuming across that
   divergence and encountering reused LSNs; the gate is specified and its input is
   proved to move, but the failure it prevents has not been reproduced.
-- **Whether `heap_multi_insert` is reachable from any path this platform runs
-  today.** The collapse is measured (6.3); its reachability is not.
-  `env.db.insertMany` emits multi-`VALUES` (`query.rs:4013-4157`), which does not
-  collapse, and the other writers - the migration engine, any future backfill,
-  `CREATE TABLE AS` inside a creator migration - were not enumerated.
+- **`heap_multi_insert` IS reachable, through creator migrations. Enumerated.**
+  The data plane is clear: `env.db.insertMany` emits multi-`VALUES`
+  (`query.rs:4013-4157`), and a three-row multi-`VALUES` insert was measured
+  producing **three separate `Insert` messages**, not a collapsed one. But the
+  migration guard permits two paths that do collapse:
+  - **`COPY ... FROM STDIN`** is explicitly allowed. `check_statement_kind`
+    denies only `COPY ... PROGRAM` (`rule::COPY_PROGRAM`) and a `COPY` naming a
+    file (`rule::COPY_FILE`); the remaining arm returns `Ok(())` with the comment
+    "Plain COPY ... TO STDOUT / FROM STDIN - safe"
+    (`crates/zeroship-migrate-postgres/src/guard/sql.rs:1396-1408`). Safe against
+    RCE and filesystem access, which is what that rule is for - and orthogonal to
+    decoding shape.
+  - **`CREATE TABLE AS`** is gated by target ownership, not denied: the
+    `CreateTableAsStmt` arm resolves the relation and calls `gate_raw_create`
+    (`guard/sql.rs:922-932`), so a creator may CTAS into their own schema.
+
+  **So `change_index` is load-bearing rather than defensive.** 6.3 rejects the
+  per-change LSN because it collapses under `heap_multi_insert`; that collapse is
+  reachable by a creator today, without any new feature. 12.6's
+  ordering-free alternative is therefore a genuine fallback, not a
+  belt-and-braces option.
 - **Whether `ALTER PUBLICATION ... DROP TABLE` + `ADD TABLE` in one transaction
   is invisible to a CONCURRENTLY DECODING consumer**, as opposed to invisible to
   a later catalog read. 3.6 measures the catalog outcome and the mid-stream
