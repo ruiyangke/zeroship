@@ -20,8 +20,22 @@
 #
 # The apply is idempotent: a re-run re-derives byte-identical journal versions
 # (each is a hash of owner_app + migration name) and skips every applied file.
-# Measured 2026-08-28 against a fresh PostgreSQL 17.11: 35 files applied, then an
-# immediate second run reported `"applied":[]` for all 35 and exited 0.
+#
+# MEASURED 2026-08-28 against a PostgreSQL 17.11 cluster created for the run:
+# 35 of 35 files applied and exit 0, producing 659 journal versions, 104 tables
+# (98 `zeroship`, 5 `zeroship_migrations`, 1 `service_authn`), 63 functions (48
+# `public`, 15 `zeroship`) and 11 non-`pg_*` roles; an immediate second run
+# reported all 35 files with `"applied":[]` and exited 0.
+#
+# AN EARLIER VERSION OF THIS COMMENT CLAIMED THE SAME NUMBERS AND COULD NOT HAVE.
+# It was written when this script had just been repointed at the Node CLI, and on
+# that day the script could not apply the corpus at all: every file imported
+# `@zeroship/migrate`, a specifier no Node applier resolves, so the run died on
+# file #1 with `Cannot find package`. The claim survived four months because a
+# sentence asserting a measurement reads exactly like a measurement. The numbers
+# above are now produced by `tests/platform_migration_corpus_gate.sh`, which
+# applies the committed corpus to a real database and reconciles the count
+# against the files on disk - do not hand-edit them, re-run it.
 #
 # Examples:
 #   deploy/ops/db-migrate.sh

@@ -1,4 +1,4 @@
-import { grant } from "@zeroship/migrate";
+import { grant } from "zero-migrate";
 
 // `zeroship_control` could neither write the authorization audit trail nor run
 // its own retention sweep.

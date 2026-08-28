@@ -4,6 +4,15 @@
 and onto the `zero-migrate` CLI. **Out of scope for that change and not acted on**;
 recorded here so the next person does not rediscover it from the symptom.
 
+> **STATUS, updated later the same day.** Option (1) below has landed: all 35
+> corpus files import `zero-migrate`, `db/migrations-ts` is a workspace member
+> that declares it, and the hand-made symlink this note ends on is gone - a clean
+> checkout migrates the platform schema after `pnpm install`, and
+> `tests/platform_migration_corpus_gate.sh` applies the committed corpus to a live
+> PostgreSQL on every run. **Option (2), the collapse, remains the end state and
+> remains undone.** Nothing prevents the two forks drifting further; what changed
+> is that the platform no longer depends on their agreeing.
+
 ## The finding
 
 `@zeroship/migrate` (`sdks/migrate`, 159 KB of `src/ops.ts`) and `zero-migrate`
@@ -17,8 +26,14 @@ A migration module records into whichever recorder its import specifier resolves
 to. The host that drains is fixed: `packages/zero-migrate-cli` imports
 `__begin`/`__drain` from `zero-migrate`'s own `ops.js`
 (`packages/zero-migrate/src/internal/recorder.ts:31`). So an ops list authored
-through `@zeroship/migrate` is drained by nobody, and the CLI sees an empty
-migration rather than an error.
+through `@zeroship/migrate` is drained by nobody.
+
+That is where the luck was: it fails LOUDLY rather than applying 35 empty files.
+An op producer called with no ambient recorder installed refuses by name
+(`op authoring called outside an active migration recorder`) instead of recording
+into a buffer nothing reads - see the arm below. This paragraph originally said
+"the CLI sees an empty migration rather than an error", which the same note's own
+Measured section contradicts; the refusal is what both re-runs observed.
 
 ## Measured
 

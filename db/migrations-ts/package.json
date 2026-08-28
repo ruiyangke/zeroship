@@ -1,0 +1,10 @@
+{
+  "name": "@zeroship/platform-migrations",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The zeroship platform schema corpus: the committed op-DSL migrations that build the zeroship / public / service_authn schemas. Not published; applied by the zero-migrate CLI.",
+  "type": "module",
+  "dependencies": {
+    "zero-migrate": "workspace:*"
+  }
+}

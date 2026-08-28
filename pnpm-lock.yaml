@@ -83,6 +83,12 @@ importers:
         specifier: 3.7.3
         version: 3.7.3(@emnapi/runtime@1.11.2)(@types/node@22.19.17)(supports-color@8.1.1)
 
+  db/migrations-ts:
+    dependencies:
+      zero-migrate:
+        specifier: workspace:*
+        version: link:../../packages/zero-migrate
+
   examples/ai-chat:
     dependencies:
       '@ai-sdk/openai':

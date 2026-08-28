@@ -1,4 +1,4 @@
-import { grant } from "@zeroship/migrate";
+import { grant } from "zero-migrate";
 
 // Auth reads `principal_grants` when it decides what a platform token may be
 // minted for. The grant was originally added by EDITING 20260702000900_grants.ts

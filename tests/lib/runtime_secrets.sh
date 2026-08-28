@@ -333,13 +333,21 @@ ZS_PLATFORM_OWNER_APP="zeroship_platform"
 # refuses a config file that supplies a LITERAL `url` and has any bit set in
 # 0o077, naming the mode and the chmod - the same contract the deleted binary got
 # from `crates/core/src/config/secrets.rs`. Measured 2026-08-28 with one variable
-# between the arms: the same file at 0600 runs and reports `status: 35 applied, 0
-# pending`; at 0644 the CLI exits 1 with
+# between the arms: the same file at 0600 is accepted and the run proceeds to the
+# corpus; at 0644 the CLI exits 1 with
 #   config file ... supplies a literal database url and has mode 0644; group and
 #   other permissions must be zero (chmod 600 '...')
 # A `url = "env:NAME"` reference at 0644 is deliberately NOT refused - it carries
 # no credential - which is the control that shows the rule is scoped to secrets
 # rather than to every config file.
+#
+# THE 0600 ARM USED TO CLAIM IT REPORTED `status: 35 applied, 0 pending`, and it
+# cannot have. On the day that was written the corpus imported `@zeroship/migrate`
+# and no Node applier could resolve it, so a run that got past this permission
+# check still died on migration file #1. Only the part this function is
+# responsible for - the mode check - was ever observed; the corpus half was
+# carried over from a path that no longer existed. What the corpus actually does
+# is measured by `tests/platform_migration_corpus_gate.sh`, which applies it.
 #
 # WHERE THE FILE LIVES, AND WHO REMOVES IT. Both are in THIS function, so the
 # lifetime is one invocation and no caller has to remember a cleanup step:

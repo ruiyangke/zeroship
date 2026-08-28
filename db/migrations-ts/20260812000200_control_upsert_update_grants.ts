@@ -1,4 +1,4 @@
-import { grant } from "@zeroship/migrate";
+import { grant } from "zero-migrate";
 
 // Two more production upserts `zeroship_control` could not execute. Same class
 // as the token_revocations/gateway fix (20260812000000) and the

@@ -1,4 +1,4 @@
-import { table } from "@zeroship/migrate";
+import { table } from "zero-migrate";
 
 // The table backed three operator routes that wrote it and nothing that read
 // it. Enforcement takes the boot-time `load_platform_policies()` value - the

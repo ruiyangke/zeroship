@@ -1,4 +1,4 @@
-import { raw } from "@zeroship/migrate";
+import { raw } from "zero-migrate";
 
 // Control could not read ANY per-app workflow journal. `app_<uuid>` is created
 // AUTHORIZATION zeroship_workflow_owner (crates/migrated/src/provisioning.rs,

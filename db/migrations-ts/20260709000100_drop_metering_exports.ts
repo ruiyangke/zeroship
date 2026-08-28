@@ -1,4 +1,4 @@
-import { table } from "@zeroship/migrate";
+import { table } from "zero-migrate";
 
 export default {
   name: "drop_metering_exports",

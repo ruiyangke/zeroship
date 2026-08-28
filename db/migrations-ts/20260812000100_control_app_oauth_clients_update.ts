@@ -1,4 +1,4 @@
-import { grant } from "@zeroship/migrate";
+import { grant } from "zero-migrate";
 
 // `zeroship_control` could not provision a per-app OAuth client.
 //

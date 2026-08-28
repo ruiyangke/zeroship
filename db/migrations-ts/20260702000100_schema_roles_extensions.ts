@@ -5,7 +5,7 @@ import {
   role,
   schema,
   sequence,
-} from "@zeroship/migrate";
+} from "zero-migrate";
 
 export default {
   name: "schema_roles_extensions",

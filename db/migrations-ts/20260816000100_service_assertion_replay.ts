@@ -1,4 +1,4 @@
-import { table, t, grant, revoke, schema } from "@zeroship/migrate";
+import { table, t, grant, revoke, schema } from "zero-migrate";
 
 // The `jti` single-use cache behind the JWT service-assertion mechanism
 // (crates/core/src/service_assertion.rs, crates/authn/src/service_replay.rs).
