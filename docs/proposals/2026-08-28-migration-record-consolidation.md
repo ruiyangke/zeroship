@@ -69,12 +69,41 @@ Without a fenced prefix, co-habitation is a live collision:
 So a creator declaring a table named `schema_migrations` in their own schema
 would have it silently **adopted as the journal**.
 
-`validate_collection` already refuses the `__zeroship` prefix for table names,
-so the protection is free and needs no new reservation. The prefix means one
-thing everywhere: **the platform owns this name.** The pattern is already in use
-- `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}` live in the
-`app_<uuid>` workflow schema, which is a different service's journal and is not
-folded in here.
+**The prefix is NOT enforced by a validator on the authoring path, and an
+earlier version of this document said it was.** There are two forks of
+`validate_collection` with no dependency edge between them:
+
+| fork | reserves | governs |
+| --- | --- | --- |
+| `zeroship-schema/src/query.rs:650` | `__zeroship` (10 bytes) | data-plane collection access |
+| `zeroship-migrate-core/src/schema/query.rs:313` | `__zero_migrate` (14 bytes) | **migration authoring** |
+
+A creator's `createTable` passes through the **authoring** fork, which does not
+fence `__zeroship`. `__zeroship_schema_migrations` passes it cleanly.
+
+**What actually closes the hazard is sequencing, not a rule.** `ensure_journal`
+bootstraps the journal before any creator DDL runs, so `createTable
+"__zeroship_schema_migrations"` is refused with *"relation already exists"* -
+and on an app with no journal yet it is refused the same way, so the
+silent-adoption case is closed for every app. That is a weaker guarantee than a
+reservation and should be stated as what it is.
+
+**A second refusal stands behind it, and it is conditional.** `dropTable` on the
+journal is refused by the engine's own gate - *"plan requires approval
+(destructive) but none was given"* - reached because the host passes
+`Approval::None`. **If the host is ever made to assert approval on the
+creator's behalf, the creator can drop their journal by name.** Both refusals
+are asserted by message in `abf7ec064`, so that change goes red.
+
+`crates/zeroship-data-plan/src/ident.rs:54`, `:56` and `:157` assert the same
+false claim - that `__zeroship` is one of `validate_collection`'s reserved
+prefixes - and cite `query.rs:645-653`, line numbers that no longer exist. That
+comment is a claim that reads as protection and should be corrected.
+
+The prefix is still worth having: it means one thing everywhere, and the pattern
+is already in use - `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}`
+live in the `app_<uuid>` workflow schema, which is a different service's journal
+and is not folded in here.
 
 ## What this costs, accepted deliberately
 
