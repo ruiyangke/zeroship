@@ -835,11 +835,21 @@ Nothing external blocks these. Dev cannot exercise `APP_DEPROVISIONED`,
 `STALE_APP_INCARNATION` or `AUTHORITY_DOMAIN_MISMATCH`, for the reasons under
 "Dev carries a different type"; those need the PostgreSQL arms above.
 
-**This group is already on the database axis and the decoupling does not touch
-it.** The attach generation is minted by the connection owner and changes on
-detach or reattachment, so it fences a *file*, never an app. That is a point in
-favour of the sum type rather than a coincidence: the tier that was forced to
-name what it actually fences named the database.
+**The dev tier's PROPOSED fence is on the database axis; its BUILT code is not.**
+The attach generation of "Dev carries a different type" is minted by the
+connection owner and changes on detach or reattachment, so it fences a *file*.
+That is worth noting - the tier that was forced to name what it actually fences
+named the database rather than the app - but it is a property of the design,
+not of the tree: `attach_generation` has zero occurrences in `crates/`.
+
+**What is built is app-keyed, exactly like production.**
+`SqliteBackend::attach_app_file` takes an `app_id`, derives
+`zs-{app_id}.sqlite`, aliases the attachment by app id and dedups on an
+`app_id_cache`
+(`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:751-775`). One file per
+app, one app per file. So the decoupling **does** reach this group: if an app
+may hold several databases, the file name, the alias and the cache key can no
+longer all be the app id.
 
 ### 4.1 An ordinary dev restart does not deny replay
 
