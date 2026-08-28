@@ -142,20 +142,29 @@ DOC_PAT='(?<![A-Za-z0-9_/.-])(?:\.\./)*(?:crates|sdks|libs|db|examples|tests)/[A
 DOC_EXCLUDED="archive decisions proposals superpowers reviews research"
 
 # file:citation pairs that are correct as written. See the two categories above.
+#
+# THE TWO SIDES OF A PAIR ARE NOT THE SAME KIND OF THING, and a bulk rename will
+# get this wrong. The LEFT side is a path in the tree and moves when the file
+# moves. The RIGHT side is the literal text the citing file contains, and must
+# be edited only when that text is. The crate reorg's sweep rewrote both here,
+# which silently unhooked the init.rs entry: its citation names the pre-reorg
+# `crates/runtime/src/embed/websocket.js` inside a `git log --diff-filter=D`
+# recipe for a DELETED file, so it can never resolve, and a "corrected"
+# right-hand side simply stops matching and lets the citation be reported again.
 ALLOW="
-crates/auth/tests/common/mod.rs:tests/common.rs
-crates/runtime/tests/call_fetch_handler.rs:tests/http.rs
+crates/zeroship-auth/tests/common/mod.rs:tests/common.rs
+crates/zeroship-runtime/tests/call_fetch_handler.rs:tests/http.rs
 crates/zeroship-migrate-server/tests/typed_id_parity.rs:tests/core_id_parity.rs
-crates/runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
-crates/plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
+crates/zeroship-runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
+crates/zeroship-plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
 tests/golden_path.sh:tests/m0_gate.sh
 libs/compio-s3/tests/common/mod.rs:tests/common/env.rs
-crates/config-contract/src/raw_env.rs:tests/common/env.rs
-crates/config-contract/tests/raw_env_contract.rs:tests/common/env.rs
-crates/config-contract/src/inventory.rs:crates/alpha/src/config.rs
-crates/config-contract/src/inventory.rs:crates/demo/src/config.rs
-crates/config-contract/src/inventory.rs:crates/demo/src/main.rs
-crates/config-contract/src/inventory.rs:crates/x/src/lib.rs
+crates/zeroship-config-contract/src/raw_env.rs:tests/common/env.rs
+crates/zeroship-config-contract/tests/raw_env_contract.rs:tests/common/env.rs
+crates/zeroship-config-contract/src/inventory.rs:crates/alpha/src/config.rs
+crates/zeroship-config-contract/src/inventory.rs:crates/demo/src/config.rs
+crates/zeroship-config-contract/src/inventory.rs:crates/demo/src/main.rs
+crates/zeroship-config-contract/src/inventory.rs:crates/x/src/lib.rs
 tests/bench_platform.sh:examples/bench/dist/server/index.js
 tests/e2e-browser/src/dev-server.ts:sdks/vite-plugin/dist/cli/migrate-dev.js
 tests/e2e_dev_vs_deployed_stream.sh:sdks/vite-plugin/dist/dev-bootstrap.js

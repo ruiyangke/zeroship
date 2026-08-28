@@ -452,7 +452,7 @@ fn collect_matcher_set_labels(
                      is exactly the hole this gate exists to close. If `{other}` \
                      provably cannot match on host, add it to \
                      MATCHERS_WITHOUT_HOSTS in \
-                     crates/control/src/reserved_names.rs; if it can, the host it \
+                     crates/zeroship-control/src/reserved_names.rs; if it can, the host it \
                      claims must be in RESERVED_APP_NAMES."
                 ));
             }
@@ -603,7 +603,7 @@ mod tests {
             "deploy/ops/Caddyfile and RESERVED_APP_NAMES disagree. Every host the \
              edge claims under the app domain must have its label in \
              RESERVED_APP_NAMES and vice versa; update \
-             crates/control/src/reserved_names.rs in the same change as the edge \
+             crates/zeroship-control/src/reserved_names.rs in the same change as the edge \
              config."
         );
     }
@@ -898,7 +898,7 @@ mod tests {
     /// host [`RESERVED_APP_NAMES`] does not cover. It cannot ask this module:
     /// it runs on an operator's machine, has no Rust toolchain requirement, and
     /// `cargo run` to read four strings is a worse trade than a pinned pattern
-    /// (the same trade `crates/core/tests/generated_secret_scrape.rs`
+    /// (the same trade `crates/zeroship-core/tests/generated_secret_scrape.rs`
     /// documents for the generated-secret table).
     ///
     /// So it scrapes the const, and the scrape is pinned HERE. The failure this
@@ -908,6 +908,12 @@ mod tests {
     /// than passing, so the live symptom would be a deploy that cannot run at
     /// all -- but the diagnosis belongs next to the const, not on a roll.
     const DEPLOY_REMOTE: &str = include_str!("../../../deploy/scripts/deploy-remote.sh");
+
+    /// This file's path AS THE DEPLOY SCRIPT SPELLS IT, repo-root-relative.
+    /// `include_str!` above resolves relative to this source file and so can
+    /// never notice that the script names a different (or absent) path -- which
+    /// is exactly how it did not notice for the whole of the crate reorg.
+    const SELF_PATH_FROM_ROOT: &str = "crates/zeroship-control/src/reserved_names.rs";
 
     /// The Rust twin of
     /// `sed -n 's/^pub const RESERVED_APP_NAMES: &\[&str\] = &\[\(.*\)\];$/\1/p'`
@@ -976,6 +982,42 @@ mod tests {
             DEPLOY_REMOTE.contains("RESERVED_APP_NAMES does not cover:"),
             "deploy/scripts/deploy-remote.sh reads RESERVED_APP_NAMES but no \
              longer refuses a roll whose edge claims a host it does not cover"
+        );
+
+        // ...and must be pointing that pattern at THIS FILE, by a path that
+        // RESOLVES. Everything above this line was green for the entire period
+        // in which the script scraped this file under its pre-reorg directory
+        // (`crates/control/`, no `zeroship-` prefix) -- a path the crate reorg
+        // deleted. The pattern was pinned, the const's
+        // spelling was pinned, and the extraction still read nothing on every
+        // roll, because the one thing nobody pinned was the target. A pin on a
+        // filename that never opens the file is a pin on a string.
+        assert!(
+            DEPLOY_REMOTE.contains(SELF_PATH_FROM_ROOT),
+            "deploy/scripts/deploy-remote.sh no longer names {SELF_PATH_FROM_ROOT}; \
+             its RESERVED_APP_NAMES extraction is pointed somewhere else, and an \
+             empty reserved list makes EVERY host the edge claims look unreserved"
+        );
+        assert!(
+            std::path::Path::new(SELF_PATH_FROM_ROOT).is_file()
+                || std::path::Path::new("../..")
+                    .join(SELF_PATH_FROM_ROOT)
+                    .is_file(),
+            "deploy/scripts/deploy-remote.sh scrapes {SELF_PATH_FROM_ROOT}, which \
+             does not exist. Crate directories are 'crates/zeroship-<name>/'."
+        );
+
+        // The script must also put a FLOOR under the count, not merely refuse
+        // on empty. Its `[ -n "$X" ] || refuse` arm was unreachable under
+        // `set -euo pipefail`: `grep -oE` exits 1 on no-match, so the
+        // assignment aborted the script one line before the refusal could run.
+        // Measured 2026-08-28: a roll died with a bare `sed: can't read ...`
+        // and none of that carefully written diagnosis.
+        assert!(
+            DEPLOY_REMOTE.contains("scrape_floor reserved_app_names"),
+            "deploy/scripts/deploy-remote.sh no longer puts a floor under the \
+             RESERVED_APP_NAMES extraction; a bare emptiness check there is \
+             unreachable under `set -euo pipefail`"
         );
     }
 

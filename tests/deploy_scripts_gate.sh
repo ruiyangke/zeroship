@@ -130,6 +130,58 @@ if ! declare -F compose_vars >/dev/null || ! declare -F rename_suspects >/dev/nu
   exit 1
 fi
 
+# ---------------------------------------- every repo path the roll reads exists
+#
+# THE ARM THAT WOULD HAVE CAUGHT THE 2026-08 REORG, and the reason it is written
+# generically rather than as two `test -f` lines. The crate directories were all
+# renamed `crates/<name>` -> `crates/zeroship-<name>`. deploy-remote.sh scrapes
+# two Rust files with `sed`, and both paths went stale. Under its own
+# `set -euo pipefail` that does not produce a wrong answer, it produces a roll
+# that DIES at the assignment with a bare `sed: can't read ...` -- before the
+# carefully written "read ZERO names, refusing" arm on the next line can run.
+# The platform could not be deployed at all, and every one of this gate's own
+# checks on that path failed with the same opaque capture.
+#
+# What no check in the tree was doing was the simplest possible thing: opening
+# the files the script names. The Rust twins pinned the sed PATTERNS (and one of
+# them pinned the stale PATH as a literal, so it required the broken spelling);
+# this gate's edge arms sat behind `[ -f "$EDGE_RS" ]` and stopped being
+# declared. A path is not verified by being spelled.
+#
+# So: take every repo-relative path deploy-remote.sh hands to a command, and
+# open it. One verdict per path.
+ROLL_SOURCE_PATHS="$(
+  grep -oE '(crates|sdks|libs|db|deploy|examples)/[A-Za-z0-9_./-]+\.(rs|toml|tsv|json|yml|yaml)' "$REMOTE" \
+    | sort -u
+)"
+N_ROLL_PATHS=0
+[ -n "$ROLL_SOURCE_PATHS" ] && N_ROLL_PATHS="$(printf '%s\n' "$ROLL_SOURCE_PATHS" | grep -c .)"
+
+# MEASURED 2026-08-28: 10 distinct paths. Floor 5 -- far below that, so ordinary
+# editing of the script does not reach it, while the failure this guards (the
+# grep stops matching the script's shape and rules on nothing) lands on 0.
+# NOTE ON WHAT THIS ARM CANNOT SEE: it enumerates by SPELLING, so a path built
+# at runtime from a variable is invisible to it, and a path that appears only
+# inside a comment is counted as though the script read it. The first is the
+# blind spot; the second only ever over-fires, which prints a refusal a reader
+# resolves rather than shipping a name.
+if ! gate_arm roll_source_paths "$N_ROLL_PATHS" 5; then
+  fail "no repo-relative source path was found in $REMOTE at all; the enumeration below rules on nothing"
+else
+  roll_missing=""
+  for p in $ROLL_SOURCE_PATHS; do
+    [ -e "$ROOT/$p" ] || roll_missing="$roll_missing $p"
+  done
+  [ -z "$roll_missing" ] \
+    && pass "every repo path deploy-remote.sh names resolves ($N_ROLL_PATHS checked)" \
+    || fail "deploy-remote.sh names repo paths that are not in this tree:$roll_missing. Anything it feeds to sed/cat/test -f there reads nothing, and under its set -euo pipefail the roll aborts with a bare shell error instead of a diagnosis"
+  # CONTROL: the loop must be able to say no. Without it, "all resolve" could
+  # mean the existence test passes on everything.
+  [ -e "$ROOT/crates/zeroship-control/src/zz_not_a_real_file.rs" ] \
+    && fail "CONTROL: an invented path resolved; the existence check discriminates nothing" \
+    || pass "CONTROL: an invented crate path does NOT resolve, so the check above can fail"
+fi
+
 # ------------------------------------------------------------ set comparison
 #
 # ANTI-VACUITY. An extraction that returns NOTHING compares equal to an empty
@@ -205,7 +257,7 @@ expect_set "$CMT_ALL" "COMMENT_ONLY_VAR DEFAULTED_VAR PLAIN_VAR STRICT_VAR" \
 # ------------------------------------------------ secret_files extraction
 #
 # WHY THIS FUNCTION EXISTS. Provisioning read its list out of `ENV_KEYS` in
-# crates/cli/src/dev.rs (that const is gone since 2026-08-20; the list is
+# crates/zeroship-cli/src/dev.rs (that const is gone since 2026-08-20; the list is
 # `zeroship_core::config::PLATFORM_SECRETS`), which is env-shaped by
 # construction, so the seven
 # secret FILES the servers open were in nobody's list and nothing created them.
@@ -384,9 +436,9 @@ fi
 # THE DRIFT CHECK, and the actual defect this whole area is about: two lists,
 # one of which nobody updated. Every file the SHIPPED compose hands a binary
 # must be a file the provisioner (`secret_specs()` + the pairwise-salt case in
-# crates/cli/src/dev.rs) knows how to create. This is asserted against the real
+# crates/zeroship-cli/src/dev.rs) knows how to create. This is asserted against the real
 # compose deliberately -- a fixture cannot go stale in the way that matters.
-DEV_RS="$ROOT/crates/cli/src/dev.rs"
+DEV_RS="$ROOT/crates/zeroship-cli/src/dev.rs"
 if [ -f "$REAL_COMPOSE" ] && [ -f "$DEV_RS" ]; then
   REAL_SECRETS="$(secret_files "$REAL_COMPOSE")"
   N_REAL_SECRETS=0
@@ -412,6 +464,14 @@ if [ -f "$REAL_COMPOSE" ] && [ -f "$DEV_RS" ]; then
       && fail "CONTROL: dev.rs appears to name an invented secret; the drift check discriminates nothing" \
       || pass "CONTROL: an invented secret name is NOT found in dev.rs, so the check above can fail"
   fi
+else
+  # AN ABSENT INPUT IS A FAILURE, NOT A SKIP. See the census block near the top:
+  # `gate_arm real_secret_files` lives inside the arm above, so a false
+  # condition here does not produce an arm that ruled on zero - it produces NO
+  # ARM AT ALL, and `gate_arms_finish` only refuses when the gate declares zero
+  # arms in total. Four arms of this gate vanished exactly that way during the
+  # crate reorg while the trailer printed `arms=5 refusals=0`.
+  fail "the drift check did not run: missing $( [ -f "$REAL_COMPOSE" ] || echo "$REAL_COMPOSE" ) $( [ -f "$DEV_RS" ] || echo "$DEV_RS" ). It rules on nothing and declares no arm, so this gate would otherwise report a clean census while examining none of it."
 fi
 
 # ------------------------------------- the edge's host claims vs the reserved list
@@ -424,14 +484,14 @@ fi
 # production, so before this it could ship an edge claiming a name the registry
 # still hands out. Both halves of the new refusal are exercised here, and the
 # fixture pair that makes the failing half one-variable is
-# crates/control/testdata/edge_{control,matcher_claim}.json -- REAL `caddy
+# crates/zeroship-control/testdata/edge_{control,matcher_claim}.json -- REAL `caddy
 # adapt` output for the live edge and for the live edge plus one matcher.
 echo "-- the edge config the roll ships (host claims vs RESERVED_APP_NAMES)"
 
 EDGE_ART="$ROOT/deploy/ops/caddy-claimed-hosts.json"
-EDGE_RS="$ROOT/crates/control/src/reserved_names.rs"
-FIX_CONTROL="$ROOT/crates/control/testdata/edge_control.json"
-FIX_MATCHER="$ROOT/crates/control/testdata/edge_matcher_claim.json"
+EDGE_RS="$ROOT/crates/zeroship-control/src/reserved_names.rs"
+FIX_CONTROL="$ROOT/crates/zeroship-control/testdata/edge_control.json"
+FIX_MATCHER="$ROOT/crates/zeroship-control/testdata/edge_matcher_claim.json"
 
 # ANTI-VACUITY FIRST, and it is not a formality here: both extractions are one
 # `sed` over a file this gate does not own, so both can go to zero silently, and
@@ -479,6 +539,15 @@ if [ -f "$EDGE_ART" ] && [ -f "$EDGE_RS" ]; then
   printf '%s\n' "$REAL_LABELS" | grep -qxF '*' \
     && fail "the wildcard host leaked into the claimed-label set; the deploy path would refuse every tree" \
     || pass "the creator-app wildcard is excluded from the claimed-label set"
+else
+  # AN ABSENT INPUT IS A FAILURE, NOT A SKIP -- and this is the block where that
+  # cost the most. Both `gate_arm edge_claimed_labels` and `gate_arm
+  # reserved_app_names` are inside it, so when the reorg moved
+  # reserved_names.rs this condition went false and BOTH arms stopped being
+  # declared. Not "declared as zero", which gate_arms.sh refuses: not declared,
+  # which it cannot see. The gate went on printing `arms=5 refusals=0` while the
+  # deploy path it guards could not complete a single roll.
+  fail "the edge-vs-reserved check did not run: missing $( [ -f "$EDGE_ART" ] || echo "$EDGE_ART" ) $( [ -f "$EDGE_RS" ] || echo "$EDGE_RS" ). Two arms are declared inside it, so a skip here removes them from the census rather than showing them as empty."
 fi
 
 # THE FAILING ARM, one variable from its control. Both fixtures are real `caddy
@@ -983,7 +1052,7 @@ SECRET_NAMES="$(secret_files "$REAL_COMPOSE" | tr '\n' ' ')"
 # a second, independent read feeding different consumers: that arm guards the
 # dev.rs drift check, this one guards seed_sandbox and the two rollback loops
 # that compare restored key material. The dev.rs block is also conditional on
-# crates/cli/src/dev.rs existing, so its arm can be absent from a run this one
+# crates/zeroship-cli/src/dev.rs existing, so its arm can be absent from a run this one
 # is present in. MEASURED 2026-08-20: 7. Floor 4, as above.
 gate_arm rollback_secret_files "$(printf '%s\n' $SECRET_NAMES | grep -c .)" 4 || true
 
@@ -1603,11 +1672,11 @@ seen "$CAP" '### docker compose up -d --remove-orphans' \
 # The CONTROL is the happy path above, which ran with the real edge and reached
 # the roll. Run under --image, so it also establishes the check is NOT skipped
 # on the paths that build no image but still scp the Caddyfile.
-if [ -f "$FIX_MATCHER" ] && [ -f "$ROOT/crates/control/testdata/edge_matcher_claim.Caddyfile" ]; then
+if [ -f "$FIX_MATCHER" ] && [ -f "$ROOT/crates/zeroship-control/testdata/edge_matcher_claim.Caddyfile" ]; then
   EDGE_CADDY="$ROOT/deploy/ops/Caddyfile"
   cp "$EDGE_CADDY" "$FIX/edge.Caddyfile.orig"
   cp "$EDGE_ART"   "$FIX/edge.json.orig"
-  cp "$ROOT/crates/control/testdata/edge_matcher_claim.Caddyfile" "$EDGE_CADDY"
+  cp "$ROOT/crates/zeroship-control/testdata/edge_matcher_claim.Caddyfile" "$EDGE_CADDY"
   cp "$FIX_MATCHER" "$EDGE_ART"
   SB_EDGE="$FIX/sb_edge"; seed_deploy "$SB_EDGE"
   run_deploy "$SB_EDGE"
@@ -1637,7 +1706,7 @@ if [ -f "$FIX_MATCHER" ] && [ -f "$ROOT/crates/control/testdata/edge_matcher_cla
   # knows what the edge claims, so the check cannot RULE -- and an unchecked
   # edge must not print what a checked one prints. One variable from the arm
   # above: the same fixture Caddyfile, with the SHIPPED artifact left in place.
-  cp "$ROOT/crates/control/testdata/edge_matcher_claim.Caddyfile" "$EDGE_CADDY"
+  cp "$ROOT/crates/zeroship-control/testdata/edge_matcher_claim.Caddyfile" "$EDGE_CADDY"
   SB_STALE="$FIX/sb_edge_stale"; seed_deploy "$SB_STALE"
   run_deploy "$SB_STALE"
   cp "$FIX/edge.Caddyfile.orig" "$EDGE_CADDY"
@@ -1663,6 +1732,13 @@ if [ -f "$FIX_MATCHER" ] && [ -f "$ROOT/crates/control/testdata/edge_matcher_cla
     && pass "CONTROL: the edge this repo ships passes the same check and reaches the roll (exit $DEP_RC)" \
     || fail "CONTROL: the shipped edge did not pass the check and reach the roll (rc=$DEP_RC; either it was refused, or the check never ran), so the two refusals above prove nothing: $DEP_OUT"
   CAP="$CAP_HAPPY"
+else
+  # AN ABSENT FIXTURE IS A FAILURE, NOT A SKIP. This block holds the ONE arm
+  # that proves the roll refuses an edge claiming an unreserved host - the
+  # failure the whole reserved-name apparatus exists for. Its fixtures moved
+  # with the crate directory, so it silently stopped running and took that
+  # proof with it.
+  fail "the uncovered-host arm did not run: the edge fixtures are missing ($FIX_MATCHER, ${FIX_MATCHER%.json}.Caddyfile). Regenerate with deploy/ops/caddy-claimed-hosts.sh --write. Nothing here then proves the roll refuses an edge that claims a registrable name."
 fi
 
 # --- D4: a journal probe that answers neither t nor f is refused ------------

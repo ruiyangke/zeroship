@@ -350,12 +350,12 @@ else
   if [ "$PUT_CODE" = "504" ] || echo "$PUT_BODY" | grep -qi "timed out"; then
     ELAPSED_INT="${PUT_ELAPSED%.*}"
     fail "WORKER CUT THE UPLOAD: HTTP $PUT_CODE 'request timed out' after ${PUT_ELAPSED}s — the hardcoded 30s wall_limit fired despite the 'unlimited' plan (wall_timeout=None). ~${MINIO_OBJ_SIZE} bytes reached MinIO before the cut."
-    note "FINDING: crates/worker/src/handler.rs::wall_limit() falls back to Duration::from_secs(30) when runtime.wall_timeout() is None. The 'unlimited' plan's None must propagate to a no-wall-cap (or an inactivity/idle timeout) for streaming dispatch; a fixed wall cap makes large single-request streaming uploads impossible."
+    note "FINDING: crates/zeroship-worker/src/handler.rs::wall_limit() falls back to Duration::from_secs(30) when runtime.wall_timeout() is None. The 'unlimited' plan's None must propagate to a no-wall-cap (or an inactivity/idle timeout) for streaming dispatch; a fixed wall cap makes large single-request streaming uploads impossible."
     echo "    --- worker.log evidence ---"
     echo "$WORKER_TAIL" | sed 's/^/    /'
   elif echo "$WORKER_TAIL$PUT_BODY" | grep -qi "backpressure cap\|exceeded the buffer"; then
     fail "BACKPRESSURE-CAP OVERFLOW: putLarge HTTP $PUT_CODE after ${PUT_ELAPSED}s — a pull() chunk exceeded the runtime's 4 MiB per-stream buffer cap (DEFAULT_STREAM_BUFFER_CAP)."
-    note "FINDING: crates/runtime/src/core/channel.rs::DEFAULT_STREAM_BUFFER_CAP = 4 MiB is a HARD per-chunk ceiling for env.storage putStream. Any single ReadableStream chunk > 4 MiB trips StreamPushResult::Full on the first push (HTTP 500, before any S3 part is sent). chunkBytes MUST be <= 4 MiB; this harness uses 1 MiB. Worth documenting the cap in docs/reference/db/storage and/or having the SDK re-slice oversized chunks."
+    note "FINDING: crates/zeroship-runtime/src/core/channel.rs::DEFAULT_STREAM_BUFFER_CAP = 4 MiB is a HARD per-chunk ceiling for env.storage putStream. Any single ReadableStream chunk > 4 MiB trips StreamPushResult::Full on the first push (HTTP 500, before any S3 part is sent). chunkBytes MUST be <= 4 MiB; this harness uses 1 MiB. Worth documenting the cap in docs/reference/db/storage and/or having the SDK re-slice oversized chunks."
     echo "    --- worker.log evidence ---"
     echo "$WORKER_TAIL" | sed 's/^/    /'
   else

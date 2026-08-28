@@ -28,7 +28,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/gate_arms.sh"
 gate_arms_init cli_command_index
 
-MAIN="$ROOT/crates/cli/src/main.rs"
+MAIN="$ROOT/crates/zeroship-cli/src/main.rs"
 AGENTS="$ROOT/AGENTS.md"
 
 fail=0

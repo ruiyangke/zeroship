@@ -38,7 +38,7 @@
 #      configuration BEFORE the stack is touched.
 #
 #   4. Provisioning only ever created ENV-shaped secrets, because it read its
-#      list out of `crates/cli/src/dev.rs` `ENV_KEYS`. The binaries also need
+#      list out of `crates/zeroship-cli/src/dev.rs` `ENV_KEYS`. The binaries also need
 #      secret FILES, and nothing created them, so control refused to
 #      start on a missing `--signing-key-file`. Provisioning now runs the
 #      deployed image's own `zeroship dev init`, which owns BOTH lists, and
@@ -100,6 +100,74 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # what a clean tree prints.
 refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 
+# --------------------------------------------------------------------
+# SOURCE-SCRAPING GUARDS: THE FLOOR
+# --------------------------------------------------------------------
+#
+# Two preflight guards read a Rust source file with `sed` and rule on what
+# comes back. Both spent the whole of the crates/<name> -> crates/zeroship-<name>
+# reorg pointed at a path that no longer existed, and NEITHER of the hand-written
+# "read ZERO names ... refusing" arms below them could say so, for a reason worth
+# stating because it is not the obvious one:
+#
+#   `set -euo pipefail` is on (line 72). `X="$(sed ... missing | grep -oE ...)"`
+#   aborts the SCRIPT at the assignment -- sed exits 2, and `grep -oE` exits 1
+#   on no-match even when the file is fine. The `[ -n "$X" ] || refuse` on the
+#   NEXT line is unreachable in both failure modes. Measured 2026-08-28: the
+#   real roll died with a bare `sed: can't read crates/control/src/
+#   reserved_names.rs` and none of the diagnosis those refusals were written to
+#   give. A guard whose refusal cannot be reached is not a guard.
+#
+# So the enumeration is done HERE, once, in a form that can rule:
+#
+#   1. the source file's absence is its OWN refusal, naming the file, before
+#      any pipeline runs;
+#   2. the extraction is allowed to come back empty instead of killing the
+#      script, so the count exists to be judged;
+#   3. the count is compared against a FLOOR, and the floor is the thing that
+#      separates "clean" from "did not look".
+#
+# This is `tests/lib/gate_arms.sh`'s contract, on the roll instead of in CI:
+# every arm declares the number of items THAT ARM RULED ON and a floor that
+# number must clear. A floor is not a target -- set it well under today's count,
+# far enough that ordinary editing does not reach it, close enough that a
+# collapse does.
+#
+# The emitted line is deliberately `zsroll-arm`, NOT the `zsgate-arm` that
+# tests/lib/gate_arms.sh emits: tests/gate_arm_census.sh consumes that name, and
+# a deploy transcript must not be scrapeable as a CI gate's census.
+#
+# scrape_floor <arm-id> <source-file> <floor> <extractor-fn> -- prints the
+# extracted items on stdout, refuses on an absent file or a short count.
+scrape_floor() {
+  local arm="$1" src="$2" floor="$3" fn="$4" out n
+
+  [ -f "$src" ] || refuse "$arm reads $src, which is not in this tree.
+  It cannot rule on a file that is not there, and an extraction that returns
+  nothing compares clean against anything -- so this refuses instead of
+  printing what a clean tree prints. The path most likely moved: crate
+  directories are 'crates/zeroship-<name>/', not 'crates/<name>/'. Point this
+  guard at the real file; do not delete the guard."
+
+  # `|| true` is what makes the floor below reachable at all: without it
+  # `pipefail` turns an empty extraction into an abort one line too early.
+  out="$("$fn" "$src" || true)"
+  n="$(printf '%s\n' "$out" | grep -c . || true)"
+  [ -n "$n" ] || n=0
+
+  printf 'zsroll-arm arm=%s examined=%s floor=%s source=%s\n' \
+    "$arm" "$n" "$floor" "$src" >&2
+
+  [ "$n" -ge "$floor" ] || refuse "$arm ruled on $n item(s) out of $src, floor $floor.
+  THIS IS NOT A FINDING ABOUT WHAT YOU ARE SHIPPING. The guard had (almost)
+  nothing to rule on, so its verdict says nothing: a check that examines
+  nothing and a clean tree print the same thing. The file is there, so the
+  PATTERN stopped matching -- the const was reformatted, renamed, or moved.
+  Fix the extraction. Do not lower the floor."
+
+  printf '%s\n' "$out"
+}
+
 # ====================================================================
 # THE FROZEN-MIGRATION LEDGER
 # ====================================================================
@@ -110,13 +178,21 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 # therefore bricks that database; it blocked a roll here for a full day on
 # 2026-08-19.
 #
-# `crates/zeroship-migrate-adapter/tests/platform_migrate.rs` holds the CI half
-# of that guard, and it can only check the files listed in
-# `db/released_migrations.tsv`. Nothing in the repo can learn which files are
-# actually applied -- only a deployed database knows -- so the list went stale
-# the moment a deploy applied files nobody added to it: it was written covering
-# 21 files while the deployed journal held 34, and it reported the identical
-# green either way.
+# THERE IS NO LONGER A CI HALF OF THAT GUARD, and this comment named it as
+# though there were until 2026-08-28. It was a test in the `migrate-adapter`
+# crate; that crate was folded into `zeroship-migrate-server` and the test was
+# deleted with the Rust one-shot. Nothing in the tree asserts anything about
+# `db/released_migrations.tsv` today -- the same removal is recorded, for its
+# other victim, in the header of `policies/platform.policy.toml`. Do not read
+# the paragraphs below as "the belt, with a brace in CI": this script is now
+# the ONLY thing standing between an edited applied migration and a bricked
+# database.
+#
+# The list can only ever cover the files someone recorded in it. Nothing in the
+# repo can learn which files are actually applied -- only a deployed database
+# knows -- so it went stale the moment a deploy applied files nobody added to
+# it: it was written covering 21 files while the deployed journal held 34, and
+# it reported the identical green either way.
 #
 # This script is the only place that both KNOWS the journal and RUNS every time
 # the journal changes, so it owns keeping the list honest. Two uses below:
@@ -324,7 +400,7 @@ submodule_manifests() {
 # `*.{domain}` wildcard, so every host the edge claims is a name no creator app
 # may hold. Taking `auth` gets an app that silently never receives a request;
 # taking `console` gets the one origin the auth service allows to frame its real
-# login page. crates/control/src/reserved_names.rs states both failure modes in
+# login page. crates/zeroship-control/src/reserved_names.rs states both failure modes in
 # full and holds `RESERVED_APP_NAMES` -- the list `create_app` refuses against.
 #
 # That list is already bound to the edge, in both directions, by
@@ -391,23 +467,52 @@ edge_claimed_labels() {
     | sort -u
 }
 
+# The two Rust files this script scrapes, named ONCE. They were spelled inline
+# at the point of use and in four refusal messages, and the reorg moved them
+# without moving any of the five copies.
+RESERVED_NAMES_SRC="crates/zeroship-control/src/reserved_names.rs"
+PLATFORM_SECRETS_SRC="crates/zeroship-core/src/config/secrets.rs"
+
 # RESERVED_APP_NAMES, read out of the const that IS the contract.
 #
 # A shell script scraping Rust source is allowed here for exactly the reason
-# crates/core/tests/generated_secret_scrape.rs gives for the
+# crates/zeroship-core/tests/generated_secret_scrape.rs gives for the
 # generated-secret table: this path has no Rust toolchain requirement today,
 # and adding `cargo run` to a deploy to read four strings is a worse trade than
-# a pinned pattern. PINNED IT IS --
+# a pinned pattern.
+#
+# WHAT PINS IT, and WHAT THAT PIN DID NOT COVER UNTIL 2026-08-28.
 # `the_deploy_scripts_sed_still_yields_reserved_app_names` in
-# crates/control/src/reserved_names.rs reproduces this extraction character for
-# character and asserts it yields the const exactly, and asserts this file
-# still runs it. It cannot go blind without that test going red.
+# crates/zeroship-control/src/reserved_names.rs reproduces this extraction
+# character for character, asserts it yields the const exactly, and asserts
+# this file still contains the pattern. That comment used to end "it cannot go
+# blind without that test going red", and that was WRONG: the test pinned the
+# PATTERN and the const's spelling, and never the PATH the pattern is pointed
+# at. The reorg moved the file, this default went stale, the extraction read a
+# missing file on every roll for weeks, and the test stayed green the whole
+# time -- it was reading `include_str!("reserved_names.rs")`, its own source,
+# which of course still existed. The pin was bound to the wrong thing. The test
+# now also asserts the PATH, and that the path RESOLVES.
 #
 # $1 is the source file, defaulting to the real one; tests pass fixtures.
 reserved_app_names() {
   sed -n 's/^pub const RESERVED_APP_NAMES: &\[&str\] = &\[\(.*\)\];$/\1/p' \
-    "${1:-crates/control/src/reserved_names.rs}" \
+    "${1:-$RESERVED_NAMES_SRC}" \
     | grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u
+}
+
+# The generated-secret env names, read out of `zeroship_core::config::
+# PLATFORM_SECRETS` -- the const table that IS the contract.
+#
+# This was an inline `sed` at its point of use; it is a named function for the
+# same reason the one above is, so `scrape_floor` can put a floor under it and
+# so the path has exactly one spelling. Pinned by
+# crates/zeroship-core/tests/generated_secret_scrape.rs, which asserts the
+# pattern, the path, and that the path resolves.
+#
+# $1 is the source file, defaulting to the real one; tests pass fixtures.
+generated_secret_names() {
+  sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' "${1:-$PLATFORM_SECRETS_SRC}" | sort -u
 }
 
 rename_norm() {
@@ -688,6 +793,14 @@ main() {
     IMAGE="$IMAGE_OVERRIDE"
     SKIP_BUILD=1
   fi
+  # DERIVED HERE, NOT IN THE BUILD BRANCH. The migrate one-shot's image was
+  # added on 2026-08-28 and assigned inside `if [ "$SKIP_BUILD" = 0 ]`, while
+  # the roll writes it to the host's .env unconditionally. Under `set -u` that
+  # is not a wrong tag, it is `MIGRATE_IMAGE: unbound variable` at the roll --
+  # so `--skip-build` and `--image <pinned>` died AFTER the config sync and
+  # AFTER the snapshot, with the stack half-updated. The name is a pure
+  # function of $IMAGE, so it belongs where $IMAGE is settled.
+  MIGRATE_IMAGE="$IMAGE-migrate"
   echo "ok  image will be $IMAGE"
 
   # ------------------------------------------------------ source-tree contract
@@ -809,11 +922,13 @@ main() {
   shape moved or the extraction rotted -- and an empty set compares clean
   against any reserved list, which is the vacuous green this refuses to print."
 
-  EDGE_RESERVED="$(reserved_app_names)"
-  [ -n "$EDGE_RESERVED" ] || refuse "read ZERO names out of RESERVED_APP_NAMES in
-  crates/control/src/reserved_names.rs; the const moved or the pattern rotted.
-  Refusing rather than treating every host the edge claims as unreserved, which
-  is the direction that ships the name."
+  # MEASURED 2026-08-28: 4 names (api, auth, console, control). Floor 3, which
+  # an edge that legitimately retires a reserved name still clears, while the
+  # failure this guards -- the file moves or the const is reformatted, and the
+  # extraction lands on 0 -- cannot. Treating every host the edge claims as
+  # unreserved is the direction that ships the name, so an empty answer must
+  # never read as agreement.
+  EDGE_RESERVED="$(scrape_floor reserved_app_names "$RESERVED_NAMES_SRC" 3 reserved_app_names)"
 
   EDGE_UNRESERVED=""
   for label in $EDGE_LABELS; do
@@ -828,7 +943,7 @@ main() {
   to the gateway -- creator content served from a platform ORIGIN, which for
   \`console\` is the one origin allowed to frame the real login page.
   Fix it in ONE of the two places that disagree:
-      add the label(s) to RESERVED_APP_NAMES in crates/control/src/reserved_names.rs
+      add the label(s) to RESERVED_APP_NAMES in crates/zeroship-control/src/reserved_names.rs
       or drop the claim from deploy/ops/Caddyfile and re-run
         deploy/ops/caddy-claimed-hosts.sh --write"
   echo "ok  every host the edge claims is reserved ($(echo $EDGE_LABELS))"
@@ -858,7 +973,7 @@ main() {
   # and bare `${VAR}` ones can break a render or silently mis-render.
   OPTIONAL="$(compose_vars ':-')"
   # The generated-secret names, read from the const table that IS the contract:
-  # `zeroship_core::config::PLATFORM_SECRETS`. This scraped `crates/cli/src/
+  # `zeroship_core::config::PLATFORM_SECRETS`. This scraped `crates/zeroship-cli/src/
   # dev.rs` for any `"NAME",` line until 2026-08-20, and that pattern matched
   # nothing the moment dev.rs stopped keeping its own copy of the list - which
   # would have silently emptied GENERATED and sent every generated secret down
@@ -867,13 +982,18 @@ main() {
   # A field-anchored pattern over a const table is a narrower coupling than
   # "any quoted uppercase word in a 900-line file", but it is STILL text
   # matching source, so it is not left to chance:
-  # `crates/core/tests/generated_secret_scrape.rs` runs this exact
-  # extraction and asserts it yields PLATFORM_SECRETS exactly. It cannot go
-  # blind without that test going red.
-  GENERATED="$(sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/core/src/config/secrets.rs | sort -u)"
-  [ -n "$GENERATED" ] || fail "read ZERO generated-secret names out of \
-crates/core/src/config/secrets.rs; the table moved or the pattern rotted. \
-Refusing rather than treating every generated secret as operator-supplied."
+  # `crates/zeroship-core/tests/generated_secret_scrape.rs` runs this exact
+  # extraction and asserts it yields PLATFORM_SECRETS exactly. That test also
+  # went stale-blind in the reorg -- it asserted the script contained the
+  # pattern INCLUDING the old `crates/core/...` path, so it was pinning the
+  # broken spelling rather than catching it. It now asserts the path resolves.
+  #
+  # MEASURED 2026-08-28: 8 names. Floor 4, which retiring a generated secret or
+  # two still clears; the failure this guards lands on 0, and a 0 here sends
+  # every generated secret down the "operator must supply this" arm on a fresh
+  # host -- or past the rename guard, which is how a signing key gets silently
+  # regenerated and every issued token invalidated.
+  GENERATED="$(scrape_floor generated_secret_names "$PLATFORM_SECRETS_SRC" 4 generated_secret_names)"
 
   MISSING=""
   DEFAULTED=""
@@ -1030,7 +1150,6 @@ $LEDGER_ORDER
 
   # ------------------------------------------------------------------- build
   if [ "$SKIP_BUILD" = 0 ]; then
-    MIGRATE_IMAGE="$IMAGE-migrate"
     say "building $IMAGE"
     # --target runtime: the builder stage carries the whole source tree and must
     # never be what we push.
@@ -1056,7 +1175,19 @@ $LEDGER_ORDER
     echo "ok  pushed"
   else
     docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "--skip-build but $IMAGE is not present locally"
-    echo "ok  reusing local $IMAGE"
+    # BOTH images, for the reason the build branch states: the roll writes
+    # ZEROSHIP_MIGRATE_IMAGE into the host's .env and the migrate one-shot is
+    # what applies the platform migrations. Checking only $IMAGE here is how a
+    # --skip-build roll gets all the way to `docker compose up` before the host
+    # discovers there is no migrate image for this tag -- and by then the
+    # config sync has already happened.
+    docker image inspect "$MIGRATE_IMAGE" >/dev/null 2>&1 \
+      || fail "--skip-build but $MIGRATE_IMAGE is not present locally.
+  The platform migration one-shot runs from its own image (deploy/Dockerfile
+  --target migrate) and the roll points the host at this tag. Build and push
+  both, or pass --image with a tag whose migrate twin is already in the
+  registry. Nothing was shipped."
+    echo "ok  reusing local $IMAGE and $MIGRATE_IMAGE"
   fi
 
   # ------------------------------------------------------- ship configuration
@@ -1093,7 +1224,7 @@ $LEDGER_ORDER
   # --------------------------------------------------------- provision secrets
   #
   # RUN THE IMAGE'S OWN PROVISIONER. This used to be a shell loop over a list
-  # scraped out of `crates/cli/src/dev.rs` with sed, and that list is
+  # scraped out of `crates/zeroship-cli/src/dev.rs` with sed, and that list is
   # `ENV_KEYS` -- env-shaped names. The servers also require secret
   # FILES, which appear in `secret_specs()` a hundred lines further down the
   # same file and were in nobody's list, so nothing ever created them and
@@ -1144,7 +1275,7 @@ $LEDGER_ORDER
   for f in $WANT_FILES; do [ -s \"\$SEC/\$f\" ] || printf ' %s' \"\$f\"; done" || true)"
   [ -z "$ABSENT" ] || fail "secret files the new compose requires are missing or empty:$ABSENT
   Nothing was restarted. The provisioner did not create them, so the two lists
-  have diverged: add them to secret_specs() in crates/cli/src/dev.rs, rebuild
+  have diverged: add them to secret_specs() in crates/zeroship-cli/src/dev.rs, rebuild
   the image, and deploy that. Re-run with --rollback to restore the $STAMP snapshot."
   echo "ok  every referenced secret file is present ($(echo $WANT_FILES))"
 

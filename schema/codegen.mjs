@@ -29,7 +29,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
 const SCHEMA_PATH = join(HERE, "project-v1.json");
 const TS_OUT = join(ROOT, "sdks/vite-plugin/src/project-config/generated.ts");
-const RS_OUT = join(ROOT, "crates/cli/src/project_config/generated.rs");
+const RS_OUT = join(ROOT, "crates/zeroship-cli/src/project_config/generated.rs");
 
 const schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8"));
 

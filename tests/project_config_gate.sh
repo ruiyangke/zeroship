@@ -272,7 +272,7 @@ else
     # The Rust reader must NAME every defaulted path. Check 3 tests bindings
     # behaviorally: CLI-read facts remain fallback-free, while optional
     # non-CLI defaults must resolve identically on both sides.
-    grep -qF -- "\"$path\"" crates/cli/src/project_config/generated.rs \
+    grep -qF -- "\"$path\"" crates/zeroship-cli/src/project_config/generated.rs \
       || rs_missing="$rs_missing $path"
   done <<< "$DEFAULT_PATHS"
 
@@ -287,8 +287,8 @@ fi
 echo
 echo "== 2b. operational control defaults use one resolver =="
 if grep -q '^pub const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";$' \
-  crates/cli/src/project_config/mod.rs \
-  && ! grep -q '^const DEFAULT_CONTROL_URL:' crates/cli/src/auth.rs; then
+  crates/zeroship-cli/src/project_config/mod.rs \
+  && ! grep -q '^const DEFAULT_CONTROL_URL:' crates/zeroship-cli/src/auth.rs; then
   pass "the compiled control fallback has one shared declaration"
 else
   fail "the compiled control fallback is not declared once in project_config"
@@ -296,7 +296,7 @@ fi
 
 missing_control_resolver=""
 for source in main.rs migrate.rs secrets.rs auth.rs; do
-  if ! grep -q 'project_config::resolve_control(' "crates/cli/src/$source"; then
+  if ! grep -q 'project_config::resolve_control(' "crates/zeroship-cli/src/$source"; then
     missing_control_resolver="$missing_control_resolver $source"
   fi
 done
@@ -757,8 +757,8 @@ fi
 
 echo
 echo "== 5. no runtime-side parser =="
-RUNTIME_DIRS=(crates/runtime crates/worker crates/gateway)
-for d in crates/plugin-*; do RUNTIME_DIRS+=("$d"); done
+RUNTIME_DIRS=(crates/zeroship-runtime crates/zeroship-worker crates/zeroship-gateway)
+for d in crates/zeroship-plugin-*; do RUNTIME_DIRS+=("$d"); done
 hits=""
 n_named=0
 for d in "${RUNTIME_DIRS[@]}"; do
@@ -771,11 +771,21 @@ done
 # THE COUNT IS POST-FILTER - directories that exist and were therefore grepped -
 # and `${#RUNTIME_DIRS[@]}` is not, which is why the pass line below now prints
 # this number instead. Three entries in that array are literal paths and four
-# come from the `crates/plugin-*` glob; with no match, bash leaves the pattern
-# itself in the array, so the pre-filter length stays 4 while nothing is read.
+# come from the `crates/zeroship-plugin-*` glob; with no match, bash leaves the
+# pattern itself in the array, so the pre-filter length stays 4 while nothing is
+# read.
 # MEASURED 2026-08-20: 7 directories (runtime, worker, gateway, plugin-db,
 # plugin-kv, plugin-storage, plugin-workflow). The floor is 4: it clears the
 # three literal paths, so a glob that stopped matching cannot pass it.
+#
+# AND IT DID EXACTLY THAT, 2026-08-28. The crate reorg renamed all seven
+# directories; the three literals stopped existing and the glob stopped
+# matching, so `n_named` went to 0 and BOTH arms below refused. That is the
+# floor working as designed and it is worth saying out loud, because the same
+# reorg silently removed four arms from tests/deploy_scripts_gate.sh -- those
+# were declared INSIDE an `if [ -f ... ]` that went false, so they were never
+# declared at all rather than declared as zero, and nothing noticed. An arm can
+# only refuse on a count it actually reports.
 gate_arm runtime_dirs_named "$n_named" 4 || true
 if [ -z "$hits" ]; then
   pass "no runtime-side crate ($n_named scanned) names the config file or its module"

@@ -78,7 +78,7 @@ ALLOW=(
   # this file fail whenever two agents overlapped. The fix is to clone from a
   # quiescent template the harness provisions, not from the database the suite
   # is running against.
-  "crates/control/tests/workflow_engine_test.rs|TRACKED VIOLATION: clones the live suite database per test; blocks sharing the billing database"
+  "crates/zeroship-control/tests/workflow_engine_test.rs|TRACKED VIOLATION: clones the live suite database per test; blocks sharing the billing database"
 
   # THIS GATE'S OWN PREMISE, in code. "The harness creates the database and
   # passes the DSN in" - zeroship-testkit IS that harness, and `admin.rs` holds

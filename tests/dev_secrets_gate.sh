@@ -44,7 +44,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIB="$ROOT/tests/lib/dev_secrets.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
-DEV_RS="$ROOT/crates/cli/src/dev.rs"
+DEV_RS="$ROOT/crates/zeroship-cli/src/dev.rs"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
@@ -138,7 +138,7 @@ if [ -f "$DEV_RS" ]; then
     grep -qF "\"$n\"" "$DEV_RS" || UNWRITTEN="$UNWRITTEN $n"
   done
   [ -z "$UNWRITTEN" ] \
-    && pass "every demanded file is a name crates/cli/src/dev.rs writes" \
+    && pass "every demanded file is a name crates/zeroship-cli/src/dev.rs writes" \
     || fail "these are demanded but 'zeroship dev init' never writes them, so this check CANNOT PASS on any machine:$UNWRITTEN"
 
   # CONTROL. Without it, "all found" could mean the grep matches anything.

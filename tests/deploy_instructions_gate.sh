@@ -29,7 +29,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CLI_MAIN="$ROOT/crates/cli/src/main.rs"
+CLI_MAIN="$ROOT/crates/zeroship-cli/src/main.rs"
 
 # shellcheck source=tests/lib/gate_arms.sh
 . "$ROOT/tests/lib/gate_arms.sh"
@@ -122,7 +122,7 @@ if [ "$ALLOWED" != "$PARSER_FLAGS" ]; then
   exit 1
 fi
 
-echo "allowed deploy flags, parsed from crates/cli/src/main.rs"
+echo "allowed deploy flags, parsed from crates/zeroship-cli/src/main.rs"
 echo "(help text and DEPLOY_KNOWN_FLAGS agree, $PARSER_COUNT flags):"
 printf '%s\n' "$ALLOWED" | sed 's/^/    /'
 echo

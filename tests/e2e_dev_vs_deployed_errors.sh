@@ -297,7 +297,7 @@ echo "  mutation: $MUTATE"
 # is ever re-introduced, this fires whether or not the variable happens to be set
 # in the shell that runs the harness.
 _ZS_HATCH_HITS="$(grep -rlE 'AUTH_INSECURE_DEV|insecureDevErrorsEnabled|expose_internal_dispatch_errors' \
-  "$ROOT/crates/runtime/src" "$ROOT/crates/worker/src" "$ROOT/crates/gateway/src" \
+  "$ROOT/crates/zeroship-runtime/src" "$ROOT/crates/zeroship-worker/src" "$ROOT/crates/zeroship-gateway/src" \
   "$ROOT/sdks/bootstrap/src" "$ROOT/sdks/rpc/src" 2>/dev/null || true)"
 if [ -n "$_ZS_HATCH_HITS" ]; then
   fail "an escape hatch out of the 5xx sanitization rail is back in the source: $(tr '\n' ' ' <<<"$_ZS_HATCH_HITS")"

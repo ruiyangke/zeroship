@@ -125,7 +125,7 @@ OPENAI_API_KEY   forwarded to creator apps; the platform itself does not read it
 # service was read by no code in crates/control/. Both were deleted; see
 # crates/core/src/config/file.rs and deploy/compose/docker-compose.yml.
 FILE_ONLY_OVERLAY_LEAVES="
-auth.trusted_oauth_clients  file-and-default only: no flag and no env by design (crates/core/src/config/file.rs)
+auth.trusted_oauth_clients  file-and-default only: no flag and no env by design (crates/zeroship-core/src/config/file.rs)
 "
 
 TMP="$(mktemp -d -t zeroship-config-gate-XXXXXX)"

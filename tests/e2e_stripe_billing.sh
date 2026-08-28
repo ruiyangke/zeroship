@@ -320,7 +320,7 @@ INV_STATUS="$(sget "invoices/$INV" | jget status)"
 if [ "$INV_TOTAL" = "750" ]; then
   pass "REAL finalized invoice total = 750c (the usage line was swept onto the invoice)"
 else
-  diverge "REAL finalized invoice $INV total=${INV_TOTAL}c status=$INV_STATUS (expected 750c). On Stripe API '2025-09-30.clover', POST /v1/invoices does NOT include pending invoice items unless 'pending_invoice_items_behavior=include' is passed — our create_invoice (crates/control/src/stripe_client.rs) omits it, so the creator is finalized a \$0 invoice and is NOT billed for infra usage. The mock-Stripe masked this."
+  diverge "REAL finalized invoice $INV total=${INV_TOTAL}c status=$INV_STATUS (expected 750c). On Stripe API '2025-09-30.clover', POST /v1/invoices does NOT include pending invoice items unless 'pending_invoice_items_behavior=include' is passed — our create_invoice (crates/zeroship-control/src/stripe_client.rs) omits it, so the creator is finalized a \$0 invoice and is NOT billed for infra usage. The mock-Stripe masked this."
 fi
 
 # billing-metering: the CU/usage must RENDER on the REAL Stripe invoice line — the
@@ -392,7 +392,7 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 echo "    REAL invoice.paid event data.object shape: $EVT_OBJ"
 WEBHOOK_HAS_IDS="$(echo "$EVT_OBJ" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.top_charge||o.top_pi||o.has_payments)?"yes":"no")}catch(e){console.log("err")}})')"
 if [ "$WEBHOOK_HAS_IDS" = "no" ]; then
-  diverge "Stripe's OWN delivered 'invoice.paid' event ($EVT_OBJ) carries NEITHER a top-level payment_intent/charge NOR a 'payments' key. Our record_infra_payment → invoice_payment_object_ids (crates/control/src/stripe_handlers.rs) reads exactly those fields, so against REAL Stripe it records NO pi_/ch_ linkage in billing_provider_refs — which means the PR-8 dispute resolution can NEVER resolve a real dispute, and the cash-refund create_refund (which reads invoice.payment_intent) ALSO fails. Root cause: API '2025-09-30.clover' moved the settlement ids off the invoice object; they need expand[]=payments.data.payment."
+  diverge "Stripe's OWN delivered 'invoice.paid' event ($EVT_OBJ) carries NEITHER a top-level payment_intent/charge NOR a 'payments' key. Our record_infra_payment → invoice_payment_object_ids (crates/zeroship-control/src/stripe_handlers.rs) reads exactly those fields, so against REAL Stripe it records NO pi_/ch_ linkage in billing_provider_refs — which means the PR-8 dispute resolution can NEVER resolve a real dispute, and the cash-refund create_refund (which reads invoice.payment_intent) ALSO fails. Root cause: API '2025-09-30.clover' moved the settlement ids off the invoice object; they need expand[]=payments.data.payment."
 fi
 
 # ===========================================================================
@@ -449,7 +449,7 @@ elif [ "$WH_CODE" = "500" ] && grep -q "store error" "$WORK/control.log" 2>/dev/
   # handler is NOT atomic), so on Stripe's retry the append is idempotent but
   # record_payout fails again → the event NEVER acks (poison). The infra
   # invoice.paid branch should `return` after record_infra_payment.
-  diverge "invoice.paid 500 (HTTP 500, 'store error') AFTER the infra writes committed: dispatch_event falls through an infra invoice.paid (metadata.invoice_kind=infra, metadata.creator_id set) into the Stream-2 record_payout, whose payouts→creator_accounts FK an infra-only creator can't satisfy. Non-atomic + poison-retry. crates/control/src/stripe_handlers.rs: the infra invoice.paid branch must return after record_infra_payment."
+  diverge "invoice.paid 500 (HTTP 500, 'store error') AFTER the infra writes committed: dispatch_event falls through an infra invoice.paid (metadata.invoice_kind=infra, metadata.creator_id set) into the Stream-2 record_payout, whose payouts→creator_accounts FK an infra-only creator can't satisfy. Non-atomic + poison-retry. crates/zeroship-control/src/stripe_handlers.rs: the infra invoice.paid branch must return after record_infra_payment."
 else
   fail "invoice.paid webhook rejected (HTTP $WH_CODE): $WH_RESP"
   tail -15 "$WORK/control.log"
@@ -508,7 +508,7 @@ if [ -n "$ADMIN_TOKEN" ] && [ -n "$INTERNAL_INV" ]; then
   else
     # Most likely: create_refund GET /v1/invoices reads a null payment_intent on
     # 2025-09-30.clover → "invoice has no payment_intent — cannot refund cash".
-    diverge "cash refund returned HTTP $REF_CODE: $REF_BODY. Likely create_refund (crates/control/src/stripe_client.rs) reads invoice.payment_intent which is NULL on API 2025-09-30.clover (the same root cause as Stage 4). The cash-refund-to-card path is broken against current Stripe."
+    diverge "cash refund returned HTTP $REF_CODE: $REF_BODY. Likely create_refund (crates/zeroship-control/src/stripe_client.rs) reads invoice.payment_intent which is NULL on API 2025-09-30.clover (the same root cause as Stage 4). The cash-refund-to-card path is broken against current Stripe."
   fi
 fi
 

@@ -413,7 +413,7 @@ stack_dev_diagnosis() {
   if grep -qiE 'blocked port|network error: blocked' "$log"; then
     local bp
     bp="$(grep -oiE 'blocked port [0-9]+' "$log" | head -1)"
-    echo "the runtime refused to fetch modules over a blocked port (${bp:-see log}) -- the WHATWG bad-ports list is enforced by our own fetch (crates/runtime/src/web/fetch/bad_ports.rs); pick a different port, this is not an app fault"
+    echo "the runtime refused to fetch modules over a blocked port (${bp:-see log}) -- the WHATWG bad-ports list is enforced by our own fetch (crates/zeroship-runtime/src/web/fetch/bad_ports.rs); pick a different port, this is not an app fault"
     return 0
   fi
   if grep -qiE 'is already in use|address already in use|port is already allocated' "$log"; then

@@ -369,6 +369,6 @@ echo "  deployed process.env keys: $(jread 'r.processEnv.keys.join(" ")')"
 echo "  deployed env keys        : $(jread 'r.appEnv.keys.join(" ")')"
 echo ""
 echo "  secret expose CLI: $PASS passed, $FAIL failed"
-echo "  MUTATION: crates/cli/src/secrets.rs merge_expose Add arm -> vec![key.to_string()]"
+echo "  MUTATION: crates/zeroship-cli/src/secrets.rs merge_expose Add arm -> vec![key.to_string()]"
 echo "            takes this to 27 passed / 8 failed, controls all still green"
 [ "$FAIL" -eq 0 ]

@@ -167,6 +167,17 @@ build_artifact() {
   # The adapted config is nested under `config` alongside the provenance
   # fields, so the Rust gate reads one file and can tell whether it describes
   # the Caddyfile in front of it.
+  #
+  # DO NOT "FIX" THE CRATE PATH IN `_comment` BELOW ON ITS OWN. It is stale --
+  # the reorg made it crates/zeroship-control/ -- but that string is EMITTED
+  # INTO the artifact, and `emit` diffs the whole artifact except
+  # `caddy_version`. Editing it here without re-running --write makes three
+  # committed files (deploy/ops/caddy-claimed-hosts.json and both
+  # crates/zeroship-control/testdata/*.json) disagree with what this script
+  # produces, and every consumer of them then refuses. Correct it in the same
+  # change as a --write, which needs caddy or docker; it was left alone on
+  # 2026-08-28 because neither was available here and a silently invalidated
+  # artifact is worse than a stale sentence inside one.
   jq -n \
     --arg sha "$sha" \
     --arg sentinel "$SENTINEL" \
@@ -231,7 +242,7 @@ fi
 # Caddyfile edit silently makes the control arm a fixture of a config that no
 # longer ships.
 # ---------------------------------------------------------------------------
-FIXTURES="$ROOT/crates/control/testdata"
+FIXTURES="$ROOT/crates/zeroship-control/testdata"
 
 emit "the live edge"
 
@@ -240,7 +251,7 @@ if [ "$MODE" = write ]; then
   cp "$CADDYFILE" "$FIXTURES/edge_control.Caddyfile"
 else
   diff -q "$CADDYFILE" "$FIXTURES/edge_control.Caddyfile" > /dev/null 2>&1 || {
-    echo "FAIL crates/control/testdata/edge_control.Caddyfile is not the live edge config." >&2
+    echo "FAIL crates/zeroship-control/testdata/edge_control.Caddyfile is not the live edge config." >&2
     echo "     The gate's passing arm must be what actually ships. Run: $0 --write" >&2
     RC=1
   }
@@ -277,7 +288,7 @@ if [ "$MODE" = write ]; then
   cp "$TMP/edge_matcher_claim.Caddyfile" "$FIXTURES/edge_matcher_claim.Caddyfile"
 elif ! diff -q "$TMP/edge_matcher_claim.Caddyfile" \
        "$FIXTURES/edge_matcher_claim.Caddyfile" > /dev/null 2>&1; then
-  echo "FAIL crates/control/testdata/edge_matcher_claim.Caddyfile is not the live" >&2
+  echo "FAIL crates/zeroship-control/testdata/edge_matcher_claim.Caddyfile is not the live" >&2
   echo "     edge plus the matcher. Run: $0 --write" >&2
   RC=1
 fi
