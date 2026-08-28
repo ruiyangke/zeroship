@@ -48,7 +48,56 @@ and nowhere else.
 
 ## What blocks
 
-### 1. L12: the replication-slot ceiling
+### 1. L12: DECIDED 2026-08-28 - build a new CDC service
+
+**Operator decision: a dedicated CDC service is being built, and every CDC
+defect is deferred into it rather than patched in place.** L12 is therefore no
+longer an open question; what follows is retained because it is the requirement
+list the new service inherits.
+
+**Three findings close by construction, not by repair:**
+
+| finding | how the service closes it |
+| --- | --- |
+| **L30** - `zeroship_worker` holds `REPLICATION` and `BYPASSRLS` | consumption moves to a process that runs no creator code, so the worker's role drops both. There is no narrower grant, so this was unfixable any other way |
+| **L12b** - a crashed worker's abandoned slot can take down the cluster | O(1) service-owned slots, so there is no per-worker slot to abandon and the reaper is deleted rather than fixed |
+| **the mask-only CDC leak** (this cycle) | the wire projection is designed once, in one place, instead of retrofitted onto a path with zero mask awareness |
+
+**Requirements the new service must carry - each measured, not asserted:**
+
+1. **A wire projection that is a WHITELIST over declared fields.** Today
+   `exec.rs:531-541` maps every key and `wal_consumer.rs` has zero mask
+   awareness, so a mask-only field's plaintext parent reaches every subscriber.
+   The whitelist must also cover the broker's `changed_columns`, which names
+   columns even where values do not escape.
+2. **A test fixture for the MASK-ONLY shape.** The existing contract test
+   (`broker.rs:1863`) rules only on ciphertext under a name claiming the general
+   property. Whatever replaces it must fail on a plaintext parent.
+3. **The schema-change signal.** Decisions 7 and 8 left subscribers with none.
+   A long-lived relay can stamp `(app, incarnation)` at produce time, which
+   dissolves the WAL-epoch carrier problem rather than solving it - the reason
+   the register says to decide the carrier together with L12.
+4. **Leader election and resume**, without tokio: advisory-lock election over
+   `compio-postgres`, resume from `confirmed_flush_lsn`, at-least-once with LSN
+   dedup. All apps share one database here, so this is **one leader per
+   cluster** - genuinely O(1), not O(databases).
+5. **`max_slot_wal_keep_size` must be set.** It is unset today. Without it,
+   relay-down means the shared cluster's disk fills; with it, relay-down
+   degrades to a `Resync`, which the broker already models as a first-class
+   event.
+6. **Measure the added latency; do not estimate it.** WAL -> relay -> stream ->
+   worker is the one genuine regression the service introduces, and no figure
+   for it exists anywhere in this set.
+
+**What it does NOT need to re-derive:** the decode multiplier is structural.
+Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
+filters run at commit replay, **after** decode, buffering and per-slot spill,
+and the output-plugin API has no filter-by-relation callback at all. One decode
+per database is the floor PostgreSQL sells, and the service reaches it.
+
+*(Everything below is the superseded analysis that led here.)*
+
+### 1a. L12 as it stood while open
 
 Live subscriptions cost one PostgreSQL logical replication slot per
 (app x worker), against a server-wide ceiling of 10.

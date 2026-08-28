@@ -1278,9 +1278,18 @@ creator-code process; only the relay removes them. The relay is therefore not
 merely the scaling answer - it is the only option that closes a violation that
 is live today.
 
-**Deliberately NOT fixed here.** Per the standing instruction to defer defect
-repair until the proposal implementation lands, and because the fix is the relay
-rather than an edit. Recorded so the L12 decision is made with it in view.
+**CLOSED BY DECISION, NOT BY REPAIR (2026-08-28).** The operator has decided to
+build a new CDC service, and every CDC-related defect is deferred into it rather
+than patched. L30 is one of the three that the service closes **by
+construction**: moving WAL consumption into a process that runs no creator code
+is the only thing that lets `zeroship_worker` drop `REPLICATION`, because
+PostgreSQL offers no narrower grant. Do not attempt a partial fix here - a
+"privileged slot janitor the worker calls" is precisely the shape the invariant
+forbids, and narrowing the grant is impossible rather than merely awkward.
+
+**One part does NOT travel with the relay and stays open:** `BYPASSRLS` is
+unrelated to replication, and nothing in this set explains why the worker needs
+it. Dropping `REPLICATION` leaves that question exactly where it was.
 
 **Related, same file, not separately entered:** `BYPASSRLS` deserves its own
 justification even after the relay lands, since it is unrelated to replication
