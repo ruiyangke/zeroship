@@ -1,0 +1,1480 @@
+diff --git a/crates/zeroship-plugin-db/src/context.rs b/crates/zeroship-plugin-db/src/context.rs
+index 333a6a4f9..ca8967ac3 100644
+--- a/crates/zeroship-plugin-db/src/context.rs
++++ b/crates/zeroship-plugin-db/src/context.rs
+@@ -35,14 +35,178 @@ use std::rc::Rc;
+ use std::sync::Arc;
+ 
+ use compio_postgres::{Client, Pool};
++use futures::channel::oneshot;
+ 
+ use crate::backend::sqlite::session::SqliteSessionHandle;
+ use crate::backend::{BackendHandle, PostgresBackend};
+ use crate::binding::DbBinding;
++use crate::diff::LiveSchema;
+ use crate::encryption::{LocalKeySource, SuppliedRootKeys};
+ use crate::broker::ChangeEvent;
+ use crate::error::DbError;
+ 
++/// Maximum estimated resident bytes one live-catalog read may add to one app.
++///
++/// The allocator measurement in `crud::introspect_schema` observed a maximum
++/// 17.3x live-to-serialized ratio. Charging at the rounded-up 18x ratio makes a
++/// 40-column schema carrying both encryption and mask facets cost just under
++/// 128 KiB, so 128 KiB is the smallest power-of-two admission budget that
++/// accepts the measured wide fixture.
++pub(crate) const INTROSPECTION_POPULATE_BUDGET_BYTES: usize = 128 * 1024;
++
++/// Maximum estimated resident bytes retained for one app across all deploys.
++///
++/// One current deploy plus the worker default of four deploy-pinned workflow
++/// isolates gives five independently keyed schema generations. Five measured
++/// wide-populate allowances produce a 640 KiB per-app ceiling. This is not
++/// coupled to isolate eviction; the isolate count is only the retention basis.
++pub(crate) const INTROSPECTION_APP_BUDGET_BYTES: usize =
++    5 * INTROSPECTION_POPULATE_BUDGET_BYTES;
++
++const INTROSPECTION_VALUE_HEAP_MULTIPLIER: usize = 18;
++const INTROSPECTION_ENTRY_FIXED_BYTES: usize = 2 * 1024;
++
++/// Conservative resident-byte charge for one introspected cache entry.
++///
++/// The multiplier is the ceiling of the counting-allocator measurement. The
++/// fixed component is the next power of two above the measured 1,875-byte
++/// first negative entry, including its app, deploy, collection, and map
++/// allocations. Charging it on every entry is conservative and prevents
++/// arbitrary absent collection names from bypassing the byte bound.
++pub(crate) fn introspected_schema_weight(
++    collection: &str,
++    schema: &Option<serde_json::Value>,
++) -> usize {
++    struct ByteCounter(usize);
++
++    impl std::io::Write for ByteCounter {
++        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
++            self.0 = self.0.saturating_add(buf.len());
++            Ok(buf.len())
++        }
++
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++
++    let serialized_bytes = schema.as_ref().map_or(0, |value| {
++        let mut counter = ByteCounter(0);
++        serde_json::to_writer(&mut counter, value)
++            .expect("serializing an in-memory serde_json::Value cannot fail");
++        counter.0
++    });
++    let fixed_bytes = INTROSPECTION_ENTRY_FIXED_BYTES.saturating_add(collection.len());
++
++    fixed_bytes.saturating_add(serialized_bytes.saturating_mul(INTROSPECTION_VALUE_HEAP_MULTIPLIER))
++}
++
++/// Result fanned out from one binding-level live-catalog read.
++pub(crate) type IntrospectionFlightResult = Result<Rc<LiveSchema>, DbError>;
++
++/// Result of claiming the per-thread introspection singleflight for a binding.
++pub(crate) enum IntrospectionFlightState {
++    /// This caller owns the read. Its generation prevents stale cancellation
++    /// from removing a newer flight for the same binding.
++    Leader { generation: u64 },
++    /// Another caller owns the read; await its result instead of walking the
++    /// catalog again.
++    Follower {
++        receiver: oneshot::Receiver<IntrospectionFlightResult>,
++    },
++}
++
++struct CachedIntrospectedSchema {
++    schema: Option<serde_json::Value>,
++    weight: usize,
++    last_used: u64,
++}
++
++struct IntrospectionFlight {
++    generation: u64,
++    waiters: Vec<oneshot::Sender<IntrospectionFlightResult>>,
++}
++
++/// All collection-keyed metadata owned by one app on this worker thread.
++#[derive(Default)]
++struct AppMetadata {
++    /// Collections registered for this app on this worker thread.
++    registered_models: HashSet<String>,
++
++    /// Raw schemas declared by successful `registerModel` calls, keyed by
++    /// collection. These drive the SQLite fallback and drift-check sweep.
++    schemas: HashMap<String, serde_json::Value>,
++
++    /// Live-catalog metadata, keyed by deploy token and then collection.
++    /// `schema = None` is a retained negative result, not a cache miss.
++    introspected_schemas: HashMap<String, HashMap<String, CachedIntrospectedSchema>>,
++    introspected_bytes: usize,
++    access_clock: u64,
++
++    /// Binding-level whole-catalog reads currently in progress, keyed by
++    /// deploy token. One read covers every collection for that binding.
++    introspection_flights: HashMap<String, IntrospectionFlight>,
++    next_flight_generation: u64,
++}
++
++impl AppMetadata {
++    fn next_access(&mut self) -> u64 {
++        self.access_clock = self.access_clock.saturating_add(1);
++        self.access_clock
++    }
++
++    fn next_generation(&mut self) -> u64 {
++        self.next_flight_generation = self.next_flight_generation.wrapping_add(1);
++        if self.next_flight_generation == 0 {
++            self.next_flight_generation = 1;
++        }
++        self.next_flight_generation
++    }
++
++    /// Evict this app's least-recently-used entry across every deploy.
++    fn evict_lru(&mut self) -> bool {
++        let Some((deploy_token, collection)) = self
++            .introspected_schemas
++            .iter()
++            .flat_map(|(deploy_token, schemas)| {
++                schemas
++                    .iter()
++                    .map(move |(collection, entry)| (deploy_token, collection, entry.last_used))
++            })
++            .min_by_key(|(_, _, last_used)| *last_used)
++            .map(|(deploy_token, collection, _)| (deploy_token.clone(), collection.clone()))
++        else {
++            return false;
++        };
++
++        let mut deploy_is_empty = false;
++        let removed = self
++            .introspected_schemas
++            .get_mut(&deploy_token)
++            .and_then(|schemas| {
++                let removed = schemas.remove(&collection);
++                deploy_is_empty = schemas.is_empty();
++                removed
++            });
++        if deploy_is_empty {
++            self.introspected_schemas.remove(&deploy_token);
++        }
++        if let Some(entry) = removed {
++            self.introspected_bytes = self.introspected_bytes.saturating_sub(entry.weight);
++            true
++        } else {
++            false
++        }
++    }
++
++    fn is_empty(&self) -> bool {
++        self.registered_models.is_empty()
++            && self.schemas.is_empty()
++            && self.introspected_schemas.is_empty()
++            && self.introspection_flights.is_empty()
++    }
++}
++
+ /// Result of trying to claim the per-thread backend initialisation slot.
+ pub(crate) enum BackendInitState {
+     /// A backend is already installed; no work needed.
+@@ -135,13 +299,9 @@ pub struct ThreadDbContext {
+     /// different values.
+     cdc_worker_id: Option<String>,
+ 
+-    /// Registered models — keyed by "app_id:collection". Prevents repeated
+-    /// registration on this worker thread.
+-    ///
+-    /// This key does not yet distinguish deploys. It cannot be changed alone:
+-    /// the declared [`Self::schemas`] cache and all of its consumers are keyed
+-    /// at the same granularity.
+-    registered_models: HashSet<String>,
++    /// Metadata caches keyed first by app, which is the tenant isolation
++    /// boundary for introspection eviction and singleflight coordination.
++    app_metadata: HashMap<String, AppMetadata>,
+ 
+     /// Active transaction clients, **keyed by owning `app_id`**.
+     ///
+@@ -253,36 +413,6 @@ pub struct ThreadDbContext {
+     /// that app.
+     pending_emits: HashMap<String, Vec<ChangeEvent>>,
+ 
+-    /// Per-thread, per-`(app_id, collection)` declared-schema
+-    /// cache. Populated by `register_model_dispatch` on successful
+-    /// register; consulted by the CRUD encryption pass (`crud::dispatch_*`)
+-    /// to find columns declared `t.encrypted(...)`. Empty for any
+-    /// collection that hasn't been registered on this thread - the cache is
+-    /// best-effort: a miss means "skip the encryption pass entirely",
+-    /// which is the correct behaviour for collections that have no
+-    /// encrypted columns. Keyed by `"{app_id}:{collection}"`; the value
+-    /// is the raw schema JSON the SDK declared.
+-    schemas: HashMap<String, serde_json::Value>,
+-
+-    /// Per-thread cache of the
+-    /// schema metadata **introspected from the LIVE catalog + sentinels**
+-    /// (`zeroship_schema::read_live_schema` + the `zsenc`/`__zsmask` codecs),
+-    /// NOT the declared descriptor. This is the runtime data-access metadata
+-    /// source the CRUD encryption + mask passes consume per the schema-authority
+-    /// split (design §6): plugin-db learns column types (for read coercions),
+-    /// which columns are `encrypted` (mode/keyId/wraps) and which are `masked`
+-    /// (kind/classification) by reading what the migration engine actually
+-    /// applied, decoupled from any in-memory declared schema.
+-    ///
+-    /// Keyed by `(DbBinding, collection)`, where the binding contains both the
+-    /// app id and deploy/schema-version token. Current and deploy-pinned
+-    /// isolates of one app therefore retain independent entries instead of
+-    /// evicting or reading one another's metadata. The inner `Option`
+-    /// distinguishes "introspected, collection absent / has no goodies" (`None`)
+-    /// from "not yet introspected" (no map entry) so a goodie-free collection is
+-    /// cached as a negative result rather than re-introspected every call.
+-    introspected_schemas: HashMap<(DbBinding, String), Option<serde_json::Value>>,
+-
+     /// Per-thread, per-app mask-policy cache. Seeded
+     /// on first unmask attempt by reading durable storage (PG admin
+     /// schema or SQLite sidecar file); refreshed write-through by the
+@@ -361,15 +491,13 @@ impl ThreadDbContext {
+             pool: None,
+             db_url: None,
+             cdc_worker_id: None,
+-            registered_models: HashSet::new(),
++            app_metadata: HashMap::new(),
+             tx_conns: HashMap::new(),
+             tx_claims: HashSet::new(),
+             tx_waiters: HashMap::new(),
+             savepoint_depths: HashMap::new(),
+             savepoint_emit_marks: HashMap::new(),
+             pending_emits: HashMap::new(),
+-            schemas: HashMap::new(),
+-            introspected_schemas: HashMap::new(),
+             mask_policies: HashMap::new(),
+             backend: None,
+             backend_init_in_progress: false,
+@@ -542,14 +670,18 @@ impl ThreadDbContext {
+ 
+     /// Check whether the model has been registered on this worker thread.
+     pub(crate) fn is_model_registered(&self, app_id: &str, collection: &str) -> bool {
+-        let key = format!("{app_id}:{collection}");
+-        self.registered_models.contains(&key)
++        self.app_metadata
++            .get(app_id)
++            .is_some_and(|metadata| metadata.registered_models.contains(collection))
+     }
+ 
+     /// Mark the model as registered (idempotent).
+     pub(crate) fn mark_model_registered(&mut self, app_id: &str, collection: &str) {
+-        let key = format!("{app_id}:{collection}");
+-        self.registered_models.insert(key);
++        self.app_metadata
++            .entry(app_id.to_string())
++            .or_default()
++            .registered_models
++            .insert(collection.to_string());
+     }
+ 
+     /// Clear the registered mark for one model — forces the next `registerModel`
+@@ -558,8 +690,10 @@ impl ThreadDbContext {
+     /// dev re-deploy presents a fresh binding; the test reuses one context).
+     #[cfg(any(test, feature = "test-helpers"))]
+     pub(crate) fn clear_model_registered(&mut self, app_id: &str, collection: &str) {
+-        let key = format!("{app_id}:{collection}");
+-        self.registered_models.remove(&key);
++        if let Some(metadata) = self.app_metadata.get_mut(app_id) {
++            metadata.registered_models.remove(collection);
++        }
++        self.remove_app_metadata_if_empty(app_id);
+     }
+ 
+     /// Cache the schema declared by `db.registerModel`.
+@@ -574,8 +708,11 @@ impl ThreadDbContext {
+         collection: &str,
+         schema: serde_json::Value,
+     ) {
+-        let key = format!("{app_id}:{collection}");
+-        self.schemas.insert(key, schema);
++        self.app_metadata
++            .entry(app_id.to_string())
++            .or_default()
++            .schemas
++            .insert(collection.to_string(), schema);
+     }
+ 
+     /// Drop every cached declared schema for `app_id`. Test-only seam used to
+@@ -585,8 +722,10 @@ impl ThreadDbContext {
+     /// must survive.
+     #[cfg(any(test, feature = "test-helpers"))]
+     pub(crate) fn clear_schemas_for_app(&mut self, app_id: &str) {
+-        let prefix = format!("{app_id}:");
+-        self.schemas.retain(|k, _| !k.starts_with(&prefix));
++        if let Some(metadata) = self.app_metadata.get_mut(app_id) {
++            metadata.schemas.clear();
++        }
++        self.remove_app_metadata_if_empty(app_id);
+     }
+ 
+     /// Fetch the cached schema for a `(app_id,
+@@ -599,8 +738,11 @@ impl ThreadDbContext {
+         app_id: &str,
+         collection: &str,
+     ) -> Option<serde_json::Value> {
+-        let key = format!("{app_id}:{collection}");
+-        self.schemas.get(&key).cloned()
++        self.app_metadata
++            .get(app_id)?
++            .schemas
++            .get(collection)
++            .cloned()
+     }
+ 
+     /// Read the cached INTROSPECTED schema for one immutable
+@@ -612,26 +754,191 @@ impl ThreadDbContext {
+     ///   - `None` — this binding has not cached the collection → caller must
+     ///     introspect.
+     pub(crate) fn introspected_schema_for(
+-        &self,
++        &mut self,
+         binding: &DbBinding,
+         collection: &str,
+     ) -> Option<Option<serde_json::Value>> {
+-        let key = (binding.clone(), collection.to_string());
+-        self.introspected_schemas.get(&key).cloned()
++        let metadata = self.app_metadata.get_mut(binding.app_id())?;
++        let last_used = metadata.next_access();
++        let entry = metadata
++            .introspected_schemas
++            .get_mut(binding.deploy_token())?
++            .get_mut(collection)?;
++        entry.last_used = last_used;
++        Some(entry.schema.clone())
+     }
+ 
+     /// Cache the result of a live introspection for one immutable binding and
+     /// collection. `schema = None` records a negative result (the collection
+-    /// has no encrypted/masked columns — the passes are skipped). Other deploys
+-    /// of the same app retain their own entries.
++    /// has no encrypted/masked columns -- the passes are skipped). The insertion
++    /// is byte-bounded and evicts only entries owned by this app.
+     pub(crate) fn cache_introspected_schema(
+         &mut self,
+         binding: &DbBinding,
+         collection: &str,
+         schema: Option<serde_json::Value>,
+     ) {
+-        let key = (binding.clone(), collection.to_string());
+-        self.introspected_schemas.insert(key, schema);
++        let _admitted = self.insert_introspected_schema(binding, collection, schema);
++    }
++
++    /// Admit one result while charging it against both the app-wide bound and
++    /// the remaining allowance for this whole-catalog populate.
++    ///
++    /// Returns `false` without changing either cache or allowance when the
++    /// entry does not fit. Charging the full entry weight on replacement is
++    /// deliberately conservative; production population calls this only for a
++    /// cache miss.
++    pub(crate) fn cache_introspected_schema_with_budget(
++        &mut self,
++        binding: &DbBinding,
++        collection: &str,
++        schema: Option<serde_json::Value>,
++        remaining_bytes: &mut usize,
++    ) -> bool {
++        let weight = introspected_schema_weight(collection, &schema);
++        if weight > *remaining_bytes {
++            return false;
++        }
++        if !self.insert_introspected_schema(binding, collection, schema) {
++            return false;
++        }
++        *remaining_bytes = (*remaining_bytes).saturating_sub(weight);
++        true
++    }
++
++    fn insert_introspected_schema(
++        &mut self,
++        binding: &DbBinding,
++        collection: &str,
++        schema: Option<serde_json::Value>,
++    ) -> bool {
++        let weight = introspected_schema_weight(collection, &schema);
++        if weight > INTROSPECTION_APP_BUDGET_BYTES {
++            return false;
++        }
++
++        let metadata = self
++            .app_metadata
++            .entry(binding.app_id().to_string())
++            .or_default();
++
++        if let Some(previous) = metadata
++            .introspected_schemas
++            .get_mut(binding.deploy_token())
++            .and_then(|schemas| schemas.remove(collection))
++        {
++            metadata.introspected_bytes = metadata
++                .introspected_bytes
++                .saturating_sub(previous.weight);
++        }
++
++        while metadata.introspected_bytes
++            > INTROSPECTION_APP_BUDGET_BYTES.saturating_sub(weight)
++        {
++            if !metadata.evict_lru() {
++                return false;
++            }
++        }
++
++        let last_used = metadata.next_access();
++        metadata
++            .introspected_schemas
++            .entry(binding.deploy_token().to_string())
++            .or_default()
++            .insert(
++                collection.to_string(),
++                CachedIntrospectedSchema {
++                    schema,
++                    weight,
++                    last_used,
++                },
++            );
++        metadata.introspected_bytes = metadata.introspected_bytes.saturating_add(weight);
++        true
++    }
++
++    /// Claim or follow the whole-catalog read for one immutable binding.
++    pub(crate) fn begin_introspection(
++        &mut self,
++        binding: &DbBinding,
++    ) -> IntrospectionFlightState {
++        let metadata = self
++            .app_metadata
++            .entry(binding.app_id().to_string())
++            .or_default();
++
++        if let Some(flight) = metadata
++            .introspection_flights
++            .get_mut(binding.deploy_token())
++        {
++            let (sender, receiver) = oneshot::channel();
++            flight.waiters.push(sender);
++            return IntrospectionFlightState::Follower { receiver };
++        }
++
++        let generation = metadata.next_generation();
++        metadata.introspection_flights.insert(
++            binding.deploy_token().to_string(),
++            IntrospectionFlight {
++                generation,
++                waiters: Vec::new(),
++            },
++        );
++        IntrospectionFlightState::Leader { generation }
++    }
++
++    /// Complete a matching flight, remove it before notification, and fan the
++    /// result out to its current cohort. A later miss therefore never observes
++    /// a retained failure.
++    pub(crate) fn finish_introspection(
++        &mut self,
++        binding: &DbBinding,
++        generation: u64,
++        result: IntrospectionFlightResult,
++    ) {
++        let waiters = self
++            .app_metadata
++            .get_mut(binding.app_id())
++            .and_then(|metadata| {
++                let matches_generation = metadata
++                    .introspection_flights
++                    .get(binding.deploy_token())
++                    .is_some_and(|flight| flight.generation == generation);
++                matches_generation
++                    .then(|| metadata.introspection_flights.remove(binding.deploy_token()))
++                    .flatten()
++                    .map(|flight| flight.waiters)
++            });
++        self.remove_app_metadata_if_empty(binding.app_id());
++
++        if let Some(waiters) = waiters {
++            for waiter in waiters {
++                let _receiver_alive = waiter.send(result.clone());
++            }
++        }
++    }
++
++    /// Cancel only the matching flight generation. Dropping its senders wakes
++    /// followers with cancellation so one can claim a replacement leader.
++    pub(crate) fn cancel_introspection(&mut self, binding: &DbBinding, generation: u64) {
++        if let Some(metadata) = self.app_metadata.get_mut(binding.app_id()) {
++            let matches_generation = metadata
++                .introspection_flights
++                .get(binding.deploy_token())
++                .is_some_and(|flight| flight.generation == generation);
++            if matches_generation {
++                metadata.introspection_flights.remove(binding.deploy_token());
++            }
++        }
++        self.remove_app_metadata_if_empty(binding.app_id());
++    }
++
++    #[cfg(test)]
++    pub(crate) fn introspection_flight_count(&self) -> usize {
++        self.app_metadata
++            .values()
++            .map(|metadata| metadata.introspection_flights.len())
++            .sum()
+     }
+ 
+     /// Enumerate every `(collection, schema)` pair the
+@@ -640,23 +947,28 @@ impl ThreadDbContext {
+     /// re-introspect the catalog. Returns an empty `Vec` when the
+     /// worker thread has registered no collections for the app yet.
+     ///
+-    /// Key shape: `<app_id>:<collection>` (the same format
+-    /// [`Self::cache_schema`] writes); we filter on the `<app_id>:`
+-    /// prefix and reconstruct the collection name from the suffix.
+     pub(crate) fn cached_schemas_for_app(
+         &self,
+         app_id: &str,
+     ) -> Vec<(String, serde_json::Value)> {
+-        let prefix = format!("{app_id}:");
+-        self.schemas
+-            .iter()
+-            .filter_map(|(k, v)| {
+-                k.strip_prefix(&prefix)
+-                    .map(|coll| (coll.to_string(), v.clone()))
+-            })
++        self.app_metadata
++            .get(app_id)
++            .into_iter()
++            .flat_map(|metadata| metadata.schemas.iter())
++            .map(|(collection, schema)| (collection.clone(), schema.clone()))
+             .collect()
+     }
+ 
++    fn remove_app_metadata_if_empty(&mut self, app_id: &str) {
++        if self
++            .app_metadata
++            .get(app_id)
++            .is_some_and(AppMetadata::is_empty)
++        {
++            self.app_metadata.remove(app_id);
++        }
++    }
++
+     // ----- MASK_POLICIES ---------------------------------------------
+ 
+     /// Fetch the cached mask policy for `app_id`.
+@@ -1149,7 +1461,10 @@ mod tests {
+         assert!(ctx.is_model_registered("app_a", "msgs"));
+         // HashSet dedupes — the second call shouldn't grow the registry
+         // (verified via the set's `len` semantics).
+-        assert_eq!(ctx.registered_models.len(), 1);
++        assert_eq!(
++            ctx.app_metadata["app_a"].registered_models.len(),
++            1
++        );
+     }
+ 
+     // ----- TX token monotonic counter ------------------------------------
+diff --git a/crates/zeroship-plugin-db/src/crud/introspect_schema.rs b/crates/zeroship-plugin-db/src/crud/introspect_schema.rs
+index b66853fcc..2974af10d 100644
+--- a/crates/zeroship-plugin-db/src/crud/introspect_schema.rs
++++ b/crates/zeroship-plugin-db/src/crud/introspect_schema.rs
+@@ -41,12 +41,55 @@
+ //! observable post-coercion. (PG is the engine's target backend — design §10;
+ //! the SQLite dev-tier introspector is a documented follow-up.)
+ 
++use std::future::Future;
++use std::rc::Rc;
++
+ use serde_json::{json, Map, Value};
+ 
+ use crate::binding::DbBinding;
++use crate::context::{IntrospectionFlightResult, IntrospectionFlightState};
+ use crate::diff::{ColumnInfo, EncryptionMeta, LiveSchema, MaskMeta, WrappedType};
+ use crate::error::DbError;
+ 
++/// Cancellation-safe ownership of one binding-level catalog read.
++///
++/// Dropping the leader while its read is pending removes only this generation
++/// of the flight. Dropping the senders wakes followers with cancellation; they
++/// loop and one of them claims a fresh flight with its still-unused reader.
++struct IntrospectionLeaderGuard {
++    binding: DbBinding,
++    generation: Option<u64>,
++}
++
++impl IntrospectionLeaderGuard {
++    fn new(binding: &DbBinding, generation: u64) -> Self {
++        Self {
++            binding: binding.clone(),
++            generation: Some(generation),
++        }
++    }
++
++    fn finish(mut self, result: IntrospectionFlightResult) {
++        let generation = self
++            .generation
++            .expect("an introspection leader generation is consumed once");
++        crate::context::with_mut(|ctx| {
++            ctx.finish_introspection(&self.binding, generation, result);
++        });
++        self.generation = None;
++    }
++}
++
++impl Drop for IntrospectionLeaderGuard {
++    fn drop(&mut self) {
++        if let Some(generation) = self.generation.take() {
++            crate::context::with_mut(|ctx| {
++                ctx.cancel_introspection(&self.binding, generation);
++            });
++        }
++    }
++}
++
+ /// Resolve the runtime data-access schema for `(app_id, collection)` from the
+ /// LIVE catalog + sentinels, with binding-keyed caching.
+ ///
+@@ -78,7 +121,9 @@ pub(crate) async fn runtime_schema_for(
+ 
+     // Fast path: cache hit under the immutable binding captured from the
+     // Collection's owning isolate. No thread-ambient lookup participates.
+-    if let Some(cached) = crate::context::with(|c| c.introspected_schema_for(binding, collection)) {
++    if let Some(cached) =
++        crate::context::with_mut(|c| c.introspected_schema_for(binding, collection))
++    {
+         return Ok(cached);
+     }
+ 
+@@ -89,30 +134,80 @@ pub(crate) async fn runtime_schema_for(
+         return Ok(sqlite_fallback_schema(app_id, collection));
+     };
+ 
+-    let live = crate::diff::read_live_schema(pool.as_ref(), app_id)
+-        .await
+-        .map_err(DbError::from)?;
+-
+-    let schema = build_runtime_schema(&live, collection);
+-    // Cache EVERY collection this read already covered, not just the requested
+-    // one, under the SAME deploy token.
+-    //
+-    // `read_live_schema` has no table predicate: it selects every column of
+-    // every table in the app's schema, joining `pg_attribute`/`pg_class`/
+-    // `pg_namespace`, LEFT JOINing `pg_attrdef` and `pg_description`, with a
+-    // correlated subquery per column. Caching one slice of that meant an app
+-    // with N collections paid N whole-schema catalog reads on cold start to
+-    // learn what a single read had already returned - quadratic work for
+-    // linear information.
+-    //
+-    // Cold start is the cost that matters at platform scale: the long tail is
+-    // rarely-hit apps, so a large share of requests are cold. It is also
+-    // invisible to any benchmark that warms one app and then measures steady
+-    // state, which is how this would be measured by default.
+-    crate::context::with_mut(|c| {
+-        cache_every_collection_and_request(c, binding, &live, collection);
+-    });
+-    Ok(schema)
++    resolve_introspection_miss_with(binding, collection, || async {
++        crate::diff::read_live_schema(pool.as_ref(), app_id)
++            .await
++            .map_err(DbError::from)
++    })
++    .await
++}
++
++/// Resolve one cache miss through an injected whole-catalog reader.
++///
++/// The injected reader is invoked only by the binding-level flight leader. A
++/// whole-catalog read covers every collection, so the flight deliberately keys
++/// on `(app, deploy)` rather than the requested collection. Active followers
++/// receive the same `Rc<LiveSchema>` even when byte admission declines their
++/// requested entry; waking them to recheck only the cache would serialize K
++/// duplicate reads in that case.
++async fn resolve_introspection_miss_with<Read, ReadFuture>(
++    binding: &DbBinding,
++    collection: &str,
++    read: Read,
++) -> Result<Option<Value>, DbError>
++where
++    Read: FnOnce() -> ReadFuture,
++    ReadFuture: Future<Output = Result<LiveSchema, DbError>>,
++{
++    let mut read = Some(read);
++    loop {
++        // A prior leader may have populated this collection before a cancelled
++        // follower won the retry race.
++        if let Some(cached) =
++            crate::context::with_mut(|ctx| ctx.introspected_schema_for(binding, collection))
++        {
++            return Ok(cached);
++        }
++
++        match crate::context::with_mut(|ctx| ctx.begin_introspection(binding)) {
++            IntrospectionFlightState::Leader { generation } => {
++                let guard = IntrospectionLeaderGuard::new(binding, generation);
++                let result = read
++                    .take()
++                    .expect("a caller can lead at most once")()
++                    .await
++                    .map(Rc::new);
++
++                if let Ok(live) = &result {
++                    // Cache every collection this read already covered, not
++                    // only the requested one, under one deploy token. The
++                    // requested entry is admitted first and siblings may spend
++                    // only the remainder of this populate's byte allowance.
++                    crate::context::with_mut(|ctx| {
++                        cache_every_collection_and_request(
++                            ctx,
++                            binding,
++                            live.as_ref(),
++                            collection,
++                        );
++                    });
++                }
++
++                guard.finish(result.clone());
++                return result.map(|live| build_runtime_schema(live.as_ref(), collection));
++            }
++            IntrospectionFlightState::Follower { receiver } => match receiver.await {
++                Ok(result) => {
++                    return result.map(|live| build_runtime_schema(live.as_ref(), collection));
++                }
++                Err(_leader_cancelled) => {
++                    // The leader future was dropped. This follower retains its
++                    // unused reader and loops so one waiter becomes the retry
++                    // leader; no failure or cancelled flight stays cached.
++                }
++            },
++        }
++    }
+ }
+ 
+ /// Populate the deploy-keyed cache for every collection present in one
+@@ -138,14 +233,7 @@ fn cache_every_collection_and_request(
+     live: &LiveSchema,
+     requested: &str,
+ ) {
+-    cache_every_collection(ctx, binding, live);
+-    // `cache_every_collection` skips internal tables and anything absent from
+-    // the catalog. If the caller asked about a collection in neither set, its
+-    // result - `None` - still has to be recorded.
+-    if ctx.introspected_schema_for(binding, requested).is_none() {
+-        let schema = build_runtime_schema(live, requested);
+-        ctx.cache_introspected_schema(binding, requested, schema);
+-    }
++    cache_collections_with_requested_first(ctx, binding, live, Some(requested));
+ }
+ 
+ fn cache_every_collection(
+@@ -153,18 +241,53 @@ fn cache_every_collection(
+     binding: &DbBinding,
+     live: &LiveSchema,
+ ) {
+-    for table in live.tables.keys() {
++    cache_collections_with_requested_first(ctx, binding, live, None);
++}
++
++fn cache_collections_with_requested_first(
++    ctx: &mut crate::context::ThreadDbContext,
++    binding: &DbBinding,
++    live: &LiveSchema,
++    requested: Option<&str>,
++) {
++    let mut remaining = crate::context::INTROSPECTION_POPULATE_BUDGET_BYTES;
++
++    if let Some(requested) = requested {
++        if ctx.introspected_schema_for(binding, requested).is_none() {
++            let schema = build_runtime_schema(live, requested);
++            let _admitted = ctx.cache_introspected_schema_with_budget(
++                binding,
++                requested,
++                schema,
++                &mut remaining,
++            );
++        }
++    }
++
++    // HashMap iteration order is randomized. Stable ordering makes admission
++    // reproducible once the requested entry has had first claim on the budget.
++    let mut tables: Vec<&str> = live.tables.keys().map(String::as_str).collect();
++    tables.sort_unstable();
++    for table in tables {
+         // Internal platform tables are not creator collections. They would
+         // never be requested, and caching them would spend the per-app cache
+         // budget on entries nobody reads.
+         if table.starts_with("__zeroship") || table.starts_with("__zs_") {
+             continue;
+         }
++        if requested == Some(table) || ctx.introspected_schema_for(binding, table).is_some() {
++            continue;
++        }
+         let schema = build_runtime_schema(live, table);
+         // One read, one token: every entry from this `LiveSchema` is stamped
+         // with the same deploy token, so a redeploy landing mid-populate can
+         // never leave entries from two schema versions under one identity.
+-        ctx.cache_introspected_schema(binding, table, schema);
++        let _admitted = ctx.cache_introspected_schema_with_budget(
++            binding,
++            table,
++            schema,
++            &mut remaining,
++        );
+     }
+ }
+ 
+@@ -357,6 +480,358 @@ mod tests {
+         }
+     }
+ 
++    fn wide_faceted_live(table_count: usize, column_count: usize) -> LiveSchema {
++        assert!(table_count > 0, "fixture must contain tables");
++        assert!(column_count > 0, "fixture must contain columns");
++
++        let mut tables = HashMap::new();
++        for table_index in 0..table_count {
++            let mut columns = HashMap::new();
++            for column_index in 0..column_count {
++                let mut info = col("bytea");
++                info.encryption = Some(EncryptionMeta {
++                    mode: EncryptionMode::Deterministic,
++                    key_id: format!("tenant_key_{column_index}"),
++                    wraps: WrappedType::String,
++                });
++                info.mask = Some(MaskMeta {
++                    kind: MaskKind::Last4,
++                    classification: Classification::Pci,
++                    sibling_column: format!("field_{column_index}_masked"),
++                });
++                columns.insert(format!("field_{column_index}"), info);
++            }
++            tables.insert(format!("collection_{table_index:03}"), columns);
++        }
++        LiveSchema {
++            tables,
++            ..Default::default()
++        }
++    }
++
++    fn retained_weight(
++        ctx: &mut crate::context::ThreadDbContext,
++        bindings: &[DbBinding],
++        collections: &[String],
++    ) -> (usize, usize) {
++        let mut retained = 0usize;
++        let mut bytes = 0usize;
++        for binding in bindings {
++            for collection in collections {
++                if let Some(schema) = ctx.introspected_schema_for(binding, collection) {
++                    retained += 1;
++                    bytes = bytes.saturating_add(crate::context::introspected_schema_weight(
++                        collection, &schema,
++                    ));
++                }
++            }
++        }
++        (retained, bytes)
++    }
++
++    #[test]
++    fn one_app_populate_is_capped_without_evicting_a_co_resident_app() {
++        const DEPLOYS: usize = 8;
++        const TABLES: usize = 8;
++        const COLUMNS: usize = 40;
++
++        let live = wide_faceted_live(TABLES, COLUMNS);
++        assert_eq!(live.tables.len(), TABLES, "table fixture must be nonempty");
++        assert!(
++            live.tables.values().all(|columns| columns.len() == COLUMNS),
++            "every pressure table must carry the wide facet-bearing fixture",
++        );
++
++        let mut ctx = crate::context::ThreadDbContext::new();
++        let victim = DbBinding::new("app_victim", "deploy_victim");
++        let victim_schema = Some(json!({ "marker": "must_survive" }));
++        ctx.cache_introspected_schema(&victim, "notes", victim_schema.clone());
++        assert_eq!(
++            ctx.introspected_schema_for(&victim, "notes"),
++            Some(victim_schema.clone()),
++            "victim setup must create a real cache entry",
++        );
++
++        let collections: Vec<String> = live.tables.keys().cloned().collect();
++        assert!(!collections.is_empty(), "pressure set must be nonempty");
++        let attacker_bindings: Vec<DbBinding> = (0..DEPLOYS)
++            .map(|index| DbBinding::new("app_attacker", format!("deploy_{index}")))
++            .collect();
++
++        for binding in &attacker_bindings {
++            cache_every_collection_and_request(&mut ctx, binding, &live, "collection_000");
++            let (admitted, admitted_bytes) =
++                retained_weight(&mut ctx, std::slice::from_ref(binding), &collections);
++            assert!(admitted > 0, "each populate must admit its requested entry");
++            assert!(
++                admitted_bytes <= crate::context::INTROSPECTION_POPULATE_BUDGET_BYTES,
++                "one populate admitted {admitted_bytes} bytes, above the {}-byte ceiling",
++                crate::context::INTROSPECTION_POPULATE_BUDGET_BYTES,
++            );
++        }
++
++        let (retained, retained_bytes) =
++            retained_weight(&mut ctx, &attacker_bindings, &collections);
++        assert!(
++            retained > 0,
++            "attacker cache must retain a nonempty working set"
++        );
++        assert!(
++            retained_bytes <= crate::context::INTROSPECTION_APP_BUDGET_BYTES,
++            "attacker retained {retained_bytes} bytes, above its {}-byte app ceiling",
++            crate::context::INTROSPECTION_APP_BUDGET_BYTES,
++        );
++        assert_eq!(
++            ctx.introspected_schema_for(&victim, "notes"),
++            Some(victim_schema),
++            "one app's pressure must never evict a co-resident app's entry",
++        );
++    }
++
++    #[test]
++    fn app_byte_bound_evicts_wide_facet_bearing_entries() {
++        const ENTRIES: usize = 10;
++        const COLUMNS: usize = 40;
++
++        let live = wide_faceted_live(1, COLUMNS);
++        let source = build_runtime_schema(&live, "collection_000")
++            .expect("wide fixture collection must exist");
++        assert_eq!(
++            source.as_object().map(Map::len),
++            Some(COLUMNS),
++            "bound fixture must carry every requested column",
++        );
++        assert!(
++            source
++                .as_object()
++                .expect("schema object")
++                .values()
++                .all(|column| column.get("encrypted").is_some() && column.get("mask").is_some()),
++            "every bound-fixture column must carry both expensive facets",
++        );
++
++        let binding = binding("deploy_wide");
++        let collections: Vec<String> = (0..ENTRIES)
++            .map(|index| format!("wide_{index:02}"))
++            .collect();
++        let one_weight =
++            crate::context::introspected_schema_weight(&collections[0], &Some(source.clone()));
++        assert!(one_weight > 0, "fixture weight must be nonzero");
++        assert!(
++            one_weight.saturating_mul(ENTRIES) > crate::context::INTROSPECTION_APP_BUDGET_BYTES,
++            "fixture must exceed the app byte ceiling",
++        );
++
++        let mut ctx = crate::context::ThreadDbContext::new();
++        for collection in &collections {
++            ctx.cache_introspected_schema(&binding, collection, Some(source.clone()));
++        }
++
++        let (retained, retained_bytes) =
++            retained_weight(&mut ctx, std::slice::from_ref(&binding), &collections);
++        assert!(retained > 0, "bound must retain a nonempty working set");
++        assert!(retained < ENTRIES, "pressure must exercise eviction");
++        assert!(
++            retained_bytes <= crate::context::INTROSPECTION_APP_BUDGET_BYTES,
++            "wide facet-bearing entries retained {retained_bytes} bytes, above the {}-byte ceiling",
++            crate::context::INTROSPECTION_APP_BUDGET_BYTES,
++        );
++        assert!(
++            ctx.introspected_schema_for(&binding, &collections[0])
++                .is_none(),
++            "the oldest wide entry must be the first eviction victim",
++        );
++    }
++
++    #[compio::test]
++    async fn concurrent_cold_resolutions_share_one_catalog_read() {
++        use futures::FutureExt;
++        use std::cell::Cell;
++        use std::future::Future as _;
++        use std::rc::Rc;
++        use std::task::{Context, Poll, Waker};
++
++        const CONCURRENCY: usize = 8;
++        assert!(CONCURRENCY > 1, "fixture must contain concurrent callers");
++        crate::context::with_mut(|ctx| *ctx = crate::context::ThreadDbContext::new());
++
++        let binding = binding("deploy_singleflight");
++        let calls = Rc::new(Cell::new(0usize));
++        let (release_tx, release_rx) = futures::channel::oneshot::channel::<()>();
++        let release = release_rx.map(|_| ()).shared();
++
++        let requests: Vec<_> = (0..CONCURRENCY)
++            .map(|_| {
++                let calls = Rc::clone(&calls);
++                let release = release.clone();
++                resolve_introspection_miss_with(&binding, "notes", move || async move {
++                    calls.set(calls.get() + 1);
++                    release.await;
++                    Ok(live_with_tables(vec![(
++                        "notes",
++                        vec![("singleflight_marker", col("text"))],
++                    )]))
++                })
++            })
++            .collect();
++        let mut joined = Box::pin(futures::future::join_all(requests));
++        let waker = Waker::noop();
++        let mut cx = Context::from_waker(waker);
++        assert!(
++            matches!(joined.as_mut().poll(&mut cx), Poll::Pending),
++            "the read gate must hold every cold resolution pending",
++        );
++        assert_eq!(
++            calls.get(),
++            1,
++            "K concurrent cold resolutions for one binding must invoke one catalog read",
++        );
++
++        release_tx
++            .send(())
++            .expect("release receiver must remain live");
++        let results = joined.await;
++        assert_eq!(results.len(), CONCURRENCY);
++        for result in results {
++            let schema = result
++                .expect("shared read must succeed")
++                .expect("fixture collection must exist");
++            assert!(
++                schema.get("singleflight_marker").is_some(),
++                "every waiter must receive the real catalog result",
++            );
++        }
++        assert_eq!(
++            crate::context::with(|ctx| ctx.introspection_flight_count()),
++            0,
++            "a completed read must remove its singleflight state",
++        );
++    }
++
++    #[compio::test]
++    async fn failed_singleflight_is_shared_only_with_its_current_cohort() {
++        use futures::FutureExt;
++        use std::cell::Cell;
++        use std::future::Future as _;
++        use std::rc::Rc;
++        use std::task::{Context, Poll, Waker};
++
++        const CONCURRENCY: usize = 4;
++        assert!(CONCURRENCY > 1, "fixture must contain concurrent callers");
++        crate::context::with_mut(|ctx| *ctx = crate::context::ThreadDbContext::new());
++
++        let binding = binding("deploy_failed_singleflight");
++        let calls = Rc::new(Cell::new(0usize));
++        let (release_tx, release_rx) = futures::channel::oneshot::channel::<()>();
++        let release = release_rx.map(|_| ()).shared();
++        let requests: Vec<_> = (0..CONCURRENCY)
++            .map(|_| {
++                let calls = Rc::clone(&calls);
++                let release = release.clone();
++                resolve_introspection_miss_with(&binding, "notes", move || async move {
++                    calls.set(calls.get() + 1);
++                    release.await;
++                    Err(DbError::internal("catalog read failed"))
++                })
++            })
++            .collect();
++        let mut joined = Box::pin(futures::future::join_all(requests));
++        let waker = Waker::noop();
++        let mut cx = Context::from_waker(waker);
++        assert!(
++            matches!(joined.as_mut().poll(&mut cx), Poll::Pending),
++            "the failure gate must hold every cold resolution pending",
++        );
++        assert_eq!(calls.get(), 1, "the failing cohort must share one read");
++
++        release_tx
++            .send(())
++            .expect("release receiver must remain live");
++        let failures = joined.await;
++        assert_eq!(failures.len(), CONCURRENCY, "fixture must exercise every waiter");
++        assert!(
++            failures
++                .iter()
++                .all(|result| matches!(result, Err(DbError::Internal { .. }))),
++            "every current waiter must receive the catalog error",
++        );
++        assert_eq!(
++            crate::context::with(|ctx| ctx.introspection_flight_count()),
++            0,
++            "a failed read must not remain as shared state",
++        );
++        assert!(
++            crate::context::with_mut(|ctx| {
++                ctx.introspected_schema_for(&binding, "notes").is_none()
++            }),
++            "a failed read must not create a cache entry",
++        );
++
++        let retry_calls = Rc::clone(&calls);
++        let retry = resolve_introspection_miss_with(&binding, "notes", move || async move {
++            retry_calls.set(retry_calls.get() + 1);
++            Ok(live_with_tables(vec![(
++                "notes",
++                vec![("retry_marker", col("text"))],
++            )]))
++        })
++        .await
++        .expect("a later success must retry instead of replaying the failure")
++        .expect("retry fixture collection must exist");
++        assert_eq!(calls.get(), 2, "the later request must perform a fresh read");
++        assert!(retry.get("retry_marker").is_some());
++    }
++
++    #[compio::test]
++    async fn cancelled_singleflight_leader_releases_the_binding() {
++        use std::cell::Cell;
++        use std::future::Future as _;
++        use std::rc::Rc;
++        use std::task::{Context, Poll, Waker};
++
++        crate::context::with_mut(|ctx| *ctx = crate::context::ThreadDbContext::new());
++        let binding = binding("deploy_cancelled_singleflight");
++        let calls = Rc::new(Cell::new(0usize));
++        let pending_calls = Rc::clone(&calls);
++        let mut pending = Box::pin(resolve_introspection_miss_with(
++            &binding,
++            "notes",
++            move || async move {
++                pending_calls.set(pending_calls.get() + 1);
++                futures::future::pending::<Result<LiveSchema, DbError>>().await
++            },
++        ));
++        let waker = Waker::noop();
++        let mut cx = Context::from_waker(waker);
++        assert!(
++            matches!(pending.as_mut().poll(&mut cx), Poll::Pending),
++            "fixture leader must remain pending until it is cancelled",
++        );
++        assert_eq!(calls.get(), 1, "fixture must start one real leader");
++        assert_eq!(
++            crate::context::with(|ctx| ctx.introspection_flight_count()),
++            1,
++            "pending fixture must install a real flight",
++        );
++        drop(pending);
++        assert_eq!(
++            crate::context::with(|ctx| ctx.introspection_flight_count()),
++            0,
++            "dropping the leader must remove its flight",
++        );
++
++        let retry_calls = Rc::clone(&calls);
++        let retry = resolve_introspection_miss_with(&binding, "notes", move || async move {
++            retry_calls.set(retry_calls.get() + 1);
++            Ok(live_with_tables(vec![("notes", vec![("fresh", col("text"))])]))
++        })
++        .await
++        .expect("a replacement leader must succeed")
++        .expect("replacement fixture collection must exist");
++        assert_eq!(calls.get(), 2, "a replacement leader must perform a new read");
++        assert!(retry.get("fresh").is_some());
++    }
++
+     /// One live-schema read must populate the cache for EVERY collection it
+     /// covered, not only the one that triggered it.
+     ///
+@@ -386,8 +861,12 @@ mod tests {
+         for (coll, expected_col) in [("notes", "title"), ("users", "email"), ("todos", "done")] {
+             let cached = ctx
+                 .introspected_schema_for(&deploy_a, coll)
+-                .unwrap_or_else(|| panic!("'{coll}' must be cached by the single read that covered it"))
+-                .unwrap_or_else(|| panic!("'{coll}' was cached as ABSENT, but the read covered it"));
++                .unwrap_or_else(|| {
++                    panic!("'{coll}' must be cached by the single read that covered it")
++                })
++                .unwrap_or_else(|| {
++                    panic!("'{coll}' was cached as ABSENT, but the read covered it")
++                });
+             assert!(
+                 cached.to_string().contains(expected_col),
+                 "'{coll}' cached a schema without its own column '{expected_col}': {cached}",
+@@ -497,9 +976,7 @@ mod tests {
+              uncached to re-introspect on every op",
+         );
+         // The present collection is still populated by the same call.
+-        assert!(ctx
+-            .introspected_schema_for(&deploy_a, "notes")
+-            .is_some());
++        assert!(ctx.introspected_schema_for(&deploy_a, "notes").is_some());
+     }
+ 
+     /// MEASUREMENT, not an assertion - run with `--nocapture`.
+@@ -534,54 +1011,77 @@ mod tests {
+     /// MEASUREMENT - run with `--nocapture`.
+     ///
+     /// The serialized figure above is a floor; the cache stores a live
+-    /// `serde_json::Value`. This reports the STRUCTURAL heap cost so the
+-    /// multiplier is a measured quantity rather than the phrase "several
+-    /// times".
+-    ///
+-    /// Counts what the type system fixes: the `Value` enum's own size, the
+-    /// per-entry cost of the map that backs an object, and the `String` header
+-    /// for every key. It does NOT include allocator rounding or fragmentation,
+-    /// so like the serialized figure it is a floor - but a much tighter one.
++    /// `serde_json::Value`. This uses the test binary's counting system
++    /// allocator and reports the allocation bytes that remain live while the
++    /// built value is resident. Its counters are thread-local, so allocations
++    /// made by parallel tests cannot contaminate the region.
+     #[test]
+     fn measure_value_memory_overhead() {
+-        use std::mem::size_of;
+-        let value_sz = size_of::<serde_json::Value>();
+-        let string_sz = size_of::<String>();
++        let mut negative_context = crate::context::ThreadDbContext::new();
++        let negative_binding = DbBinding::new(
++            "app_01K4M7D8J5V9QY2H6CBNZR3XTF",
++            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
++        );
++        let negative_region = crate::test_allocator::AllocationRegion::start();
++        negative_context.cache_introspected_schema(
++            &negative_binding,
++            "realistic_collection_name",
++            None,
++        );
++        let negative_resident = negative_region.finish();
++        assert!(
++            negative_resident > 0,
++            "negative fixture must retain allocator-visible bytes",
++        );
++        println!(
++            "MEASURED first_negative_cache_entry: resident {negative_resident} B"
++        );
++        std::hint::black_box(&negative_context);
+ 
+-        for (label, ncols) in [("narrow", 8usize), ("typical", 16), ("wide", 40)] {
++        for (label, ncols, facets) in [
++            ("narrow_plain", 8usize, false),
++            ("typical_plain", 16, false),
++            ("wide_plain", 40, false),
++            ("narrow_faceted", 8, true),
++            ("typical_faceted", 16, true),
++            ("wide_faceted", 40, true),
++            ("very_wide_faceted", 120, true),
++        ] {
+             let owned: Vec<(String, ColumnInfo)> = (0..ncols)
+-                .map(|i| (format!("column_name_{i}"), col("text")))
++                .map(|i| {
++                    let mut info = col(if facets { "bytea" } else { "text" });
++                    if facets {
++                        info.encryption = Some(EncryptionMeta {
++                            mode: EncryptionMode::Deterministic,
++                            key_id: format!("tenant_key_{i}"),
++                            wraps: WrappedType::String,
++                        });
++                        info.mask = Some(MaskMeta {
++                            kind: MaskKind::Last4,
++                            classification: Classification::Pci,
++                            sibling_column: format!("column_name_{i}_masked"),
++                        });
++                    }
++                    (format!("column_name_{i}"), info)
++                })
+                 .collect();
+             let refs: Vec<(&str, ColumnInfo)> =
+                 owned.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+             let live = live_with("collection_name", refs);
+-            let schema = build_runtime_schema(&live, "collection_name").expect("table exists");
+ 
++            let region = crate::test_allocator::AllocationRegion::start();
++            let schema = build_runtime_schema(&live, "collection_name").expect("table exists");
++            let resident = region.finish();
++            assert!(resident > 0, "fixture must retain allocator-visible bytes");
+             let json = serde_json::to_string(&schema).unwrap();
+-            // Outer object: one entry per column. Each entry is a String key
+-            // plus a Value (itself an object holding `type`, and possibly
+-            // `encrypted`/`mask`).
+-            let obj = schema.as_object().expect("object");
+-            let mut structural = 0usize;
+-            for (k, v) in obj {
+-                structural += string_sz + k.len() + value_sz;
+-                if let Some(inner) = v.as_object() {
+-                    for (ik, iv) in inner {
+-                        structural += string_sz + ik.len() + value_sz;
+-                        if let Some(s) = iv.as_str() {
+-                            structural += string_sz + s.len();
+-                        }
+-                    }
+-                }
+-            }
+             println!(
+-                "MEASURED {label}: {ncols} cols -> serialized {} B, structural {} B, ratio {:.1}x",
++                "MEASURED {label}: {ncols} cols -> serialized {} B, resident {} B, ratio {:.1}x",
+                 json.len(),
+-                structural,
+-                structural as f64 / json.len() as f64,
++                resident,
++                resident as f64 / json.len() as f64,
+             );
++            std::hint::black_box(&schema);
+         }
+-        println!("MEASURED sizeof(serde_json::Value) = {value_sz} B, sizeof(String) = {string_sz} B");
+     }
+ 
+     #[test]
+diff --git a/crates/zeroship-plugin-db/src/lib.rs b/crates/zeroship-plugin-db/src/lib.rs
+index ac3cd6ce4..d8e3dba1e 100644
+--- a/crates/zeroship-plugin-db/src/lib.rs
++++ b/crates/zeroship-plugin-db/src/lib.rs
+@@ -38,6 +38,136 @@
+ // compile time and nothing else.
+ #![recursion_limit = "256"]
+ 
++#[cfg(test)]
++#[allow(unsafe_code)]
++mod test_allocator {
++    use std::alloc::{GlobalAlloc, Layout, System};
++    use std::cell::Cell;
++
++    #[derive(Clone, Copy)]
++    struct ThreadStats {
++        tracking: bool,
++        allocated: usize,
++        deallocated: usize,
++    }
++
++    thread_local! {
++        static THREAD_STATS: Cell<ThreadStats> = const {
++            Cell::new(ThreadStats {
++                tracking: false,
++                allocated: 0,
++                deallocated: 0,
++            })
++        };
++    }
++
++    pub(super) struct TrackingAllocator;
++
++    fn record(allocated: usize, deallocated: usize) {
++        let _thread_is_alive = THREAD_STATS.try_with(|stats| {
++            let mut current = stats.get();
++            if current.tracking {
++                current.allocated = current.allocated.saturating_add(allocated);
++                current.deallocated = current.deallocated.saturating_add(deallocated);
++                stats.set(current);
++            }
++        });
++    }
++
++    // SAFETY: every allocation operation is forwarded unchanged to `System`.
++    // The extra work only updates allocation-free thread-local `Cell` state
++    // after a successful allocation or before the matching deallocation.
++    unsafe impl GlobalAlloc for TrackingAllocator {
++        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
++            // SAFETY: the caller supplies the `GlobalAlloc` layout contract,
++            // and it is forwarded unchanged to the system allocator.
++            let ptr = unsafe { System.alloc(layout) };
++            if !ptr.is_null() {
++                record(layout.size(), 0);
++            }
++            ptr
++        }
++
++        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
++            // SAFETY: the caller supplies the `GlobalAlloc` layout contract,
++            // and it is forwarded unchanged to the system allocator.
++            let ptr = unsafe { System.alloc_zeroed(layout) };
++            if !ptr.is_null() {
++                record(layout.size(), 0);
++            }
++            ptr
++        }
++
++        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
++            record(0, layout.size());
++            // SAFETY: `ptr` and `layout` are the unchanged pair supplied by the
++            // caller under the `GlobalAlloc::dealloc` contract.
++            unsafe { System.dealloc(ptr, layout) };
++        }
++
++        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
++            // SAFETY: all arguments are forwarded unchanged under the
++            // `GlobalAlloc::realloc` contract.
++            let resized = unsafe { System.realloc(ptr, layout, new_size) };
++            if !resized.is_null() {
++                if new_size >= layout.size() {
++                    record(new_size - layout.size(), 0);
++                } else {
++                    record(0, layout.size() - new_size);
++                }
++            }
++            resized
++        }
++    }
++
++    pub(crate) struct AllocationRegion {
++        active: bool,
++    }
++
++    impl AllocationRegion {
++        pub(crate) fn start() -> Self {
++            THREAD_STATS.with(|stats| {
++                assert!(!stats.get().tracking, "allocation regions must not nest");
++                stats.set(ThreadStats {
++                    tracking: true,
++                    allocated: 0,
++                    deallocated: 0,
++                });
++            });
++            Self { active: true }
++        }
++
++        pub(crate) fn finish(mut self) -> isize {
++            self.active = false;
++            THREAD_STATS.with(|stats| {
++                let current = stats.get();
++                stats.set(ThreadStats {
++                    tracking: false,
++                    allocated: 0,
++                    deallocated: 0,
++                });
++                current.allocated as isize - current.deallocated as isize
++            })
++        }
++    }
++
++    impl Drop for AllocationRegion {
++        fn drop(&mut self) {
++            if self.active {
++                let _thread_is_alive = THREAD_STATS.try_with(|stats| {
++                    let mut current = stats.get();
++                    current.tracking = false;
++                    stats.set(current);
++                });
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++#[global_allocator]
++static TEST_ALLOCATOR: test_allocator::TrackingAllocator = test_allocator::TrackingAllocator;
++
+ use std::path::PathBuf;
+ use std::rc::Rc;
+ use std::time::Duration;
+diff --git a/crates/zeroship-plugin-db/src/v8_classes/collection.rs b/crates/zeroship-plugin-db/src/v8_classes/collection.rs
+index ab099db94..92f7616b3 100644
+--- a/crates/zeroship-plugin-db/src/v8_classes/collection.rs
++++ b/crates/zeroship-plugin-db/src/v8_classes/collection.rs
+@@ -53,7 +53,7 @@ impl Collection {
+     pub(crate) fn resolved_runtime_schema_for_tests(
+         &self,
+     ) -> (String, Option<serde_json::Value>) {
+-        let schema = crate::context::with(|c| {
++        let schema = crate::context::with_mut(|c| {
+             c.introspected_schema_for(&self.binding, &self.name)
+                 .flatten()
+         });
