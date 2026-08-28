@@ -371,12 +371,50 @@ applied, one LSN" while the stated rule drops it. The gloss hid the bug.*
 | distinct per-change LSNs within one transaction | **3** |
 | **control** - distinct COMMIT LSNs across 3 transactions | 3 (the probe can see LSNs) |
 
-**So the stream already carries a usable discriminator.** Stamping each `Change`
-frame with its **own** LSN rather than the transaction's commit LSN fixes the
-bug with no new field, no in-transaction sequence number, and no
-transaction-boundary frame - and per-change LSNs are monotone both within and
-across transactions, so the "drop at or below the watermark" rule keeps working
-unchanged.
+**THAT FIX IS WRONG, AND THIS PAGE PRESCRIBED IT. Retracted 2026-08-28 after
+measuring the case my own fixture could not reach.**
+
+The sentence that stood here said per-change LSNs "are monotone both within and
+across transactions". They are monotone WITHIN a transaction - which is all my
+probe tested, because it used one transaction. **They are not monotone in the
+DELIVERED stream**, because logical decoding delivers in **commit** order while a
+change's LSN is its **insertion** position.
+
+Measured on 18.4 with two overlapping writers - A opens a transaction and
+inserts, B inserts and commits inside it, A commits:
+
+```
+delivered 1st:  0/BC92A4A8   B (written later, committed first)
+delivered 2nd:  0/BC92A3B8   A (written FIRST, committed later)  <- LOWER
+control: two sequential transactions          -> monotone
+```
+
+So drop-at-or-below **permanently discards A's row.**
+
+**This is worse than the bug it was meant to replace**, and that is the part
+worth keeping: the original loses rows in any two-row transaction, which a unit
+test finds immediately. This one loses rows only under **write concurrency**,
+which no unit test has.
+
+**A second failure of the same fix:** `heap_multi_insert` collapses many changes
+onto ONE LSN. Paired control differing in one variable - three rows via
+multi-`VALUES` `INSERT` get three distinct LSNs; the same three via `COPY` get
+one. `env.db.insertMany` emits the `INSERT` shape (`query.rs:4013-4157`), so it
+is unreachable from creator writes **today** - which is exactly why it would
+survive review and wait for the first code path that uses `COPY`.
+
+**The correct key is `(commit_lsn, change_index)`, lexicographic.** `commit_lsn`
+is available on the first frame via `Begin.final_lsn`
+(`libs/compio-postgres/src/replication.rs:1879-1886`), so no buffering is
+needed; `change_index` is per transaction and resets at `Begin`, because a
+global counter would not survive a relay restart.
+
+**The lesson is the one this document set already names, applied to my own
+work:** a fixture that cannot reach the failing case produces a confident
+measurement and a wrong conclusion. My probe measured one transaction and I
+generalised to "across transactions". The control I ran - three sequential
+transactions - could not distinguish sequential from overlapping, so it
+confirmed the wrong thing.
 
 *The synthesis proposed importing Salesforce's three-header design
 (`commitNumber` + `transactionKey` + `sequenceNumber`). That solves a harder
