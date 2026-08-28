@@ -12,6 +12,9 @@
 //                       driver (`pg`/`mysql2` seam) in filename order.
 //   status [dir]        Reconcile against the live journal over the `--database-url`
 //                       driver.
+//   baseline            Adopt a database the set has already been applied to by
+//                       other means: journal what a fresh apply WOULD have
+//                       recorded, without running any of it. PostgreSQL only.
 //
 // Migration discovery: `*.{ts,mts,cts,js,mjs,cjs}` under `dir` (default `./migrations`),
 // excluding `.d.ts`, sorted by filename (the migration order contract). Each is
@@ -26,12 +29,14 @@ import { extname, join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   apply,
+  baseline,
   history,
   previewSql,
   resolvePending,
   rollback,
   statusEnvelopes,
   currentIrVersion,
+  type BaselineOutcome,
   type DriverConfig,
   type NetworkSecurityOptions,
   type RollbackOutcome,
@@ -202,6 +207,9 @@ interface Args {
   verbose: boolean;
   /** `--approve` grants operator approval for reviewed destructive/data-rewrite steps. */
   approved: boolean;
+  /** `baseline --supersede-unmatched`: also record supersession edges over the
+   *  net-applied journal rows the migration set does not account for. */
+  supersedeUnmatched: boolean;
   /** `lint --explain` renders SQL for every selected dialect. */
   explain: boolean;
   /** `status --strict` fails on pending or dirty state. */
@@ -241,6 +249,7 @@ function parseArgs(argv: string[]): Args {
     json: false,
     verbose: false,
     approved: false,
+    supersedeUnmatched: false,
     explain: false,
     strict: false,
     resolveCommit: false,
@@ -351,6 +360,10 @@ function parseArgs(argv: string[]): Args {
         rejectInlineVal();
         args.approved = true;
         break;
+      case "supersede-unmatched":
+        rejectInlineVal();
+        args.supersedeUnmatched = true;
+        break;
       case "explain":
         rejectInlineVal();
         args.explain = true;
@@ -445,11 +458,18 @@ function parseArgs(argv: string[]): Args {
     args.command !== "status" &&
     args.command !== "rollback" &&
     args.command !== "history" &&
+    args.command !== "baseline" &&
     args.command !== "version"
   ) {
     throw new CliError(
-      "flag --json is only valid with lint, plan, status, rollback, history, or version",
+      "flag --json is only valid with lint, plan, status, rollback, history, baseline, or version",
     );
+  }
+  // `--supersede-unmatched` permanently reinterprets journal rows another tool
+  // wrote, and only `baseline` records supersession edges. Accepting it elsewhere
+  // would read as a granted authority that nothing consumes.
+  if (args.supersedeUnmatched && args.command !== "baseline") {
+    throw new CliError("flag --supersede-unmatched is only valid with baseline");
   }
   // `--approve` authorises destructive work, and only `apply`, `rollback` and
   // `resolve` consume it. `new`, `lint`, `plan`, `status` and `history` took it
@@ -460,9 +480,12 @@ function parseArgs(argv: string[]): Args {
     args.approved &&
     args.command !== "apply" &&
     args.command !== "rollback" &&
-    args.command !== "resolve"
+    args.command !== "resolve" &&
+    args.command !== "baseline"
   ) {
-    throw new CliError("flag --approve is only valid with apply, rollback, or resolve");
+    throw new CliError(
+      "flag --approve is only valid with apply, rollback, resolve, or baseline",
+    );
   }
   if (
     args.registryPath !== undefined &&
@@ -471,10 +494,11 @@ function parseArgs(argv: string[]): Args {
     args.command !== "apply" &&
     args.command !== "status" &&
     args.command !== "rollback" &&
-    args.command !== "resolve"
+    args.command !== "resolve" &&
+    args.command !== "baseline"
   ) {
     throw new CliError(
-      "flag --registry is only valid with lint, plan, apply, status, rollback, or resolve",
+      "flag --registry is only valid with lint, plan, apply, status, rollback, resolve, or baseline",
     );
   }
   if (
@@ -485,10 +509,11 @@ function parseArgs(argv: string[]): Args {
     args.command !== "status" &&
     args.command !== "history" &&
     args.command !== "rollback" &&
-    args.command !== "resolve"
+    args.command !== "resolve" &&
+    args.command !== "baseline"
   ) {
     throw new CliError(
-      "flag --policy is only valid with lint, plan, apply, status, history, rollback, or resolve",
+      "flag --policy is only valid with lint, plan, apply, status, history, rollback, resolve, or baseline",
     );
   }
   if (
@@ -1838,6 +1863,153 @@ async function runHistory(args: Args): Promise<number> {
   return 0;
 }
 
+/**
+ * The operator lines for an adoption, written whether or not it was journaled.
+ *
+ * A preview and a write print the SAME shape, because the operator gate is
+ * `--approve` and the thing being approved has to be the thing that happens.
+ * What differs is the tense, not the set.
+ *
+ * Every version is named. An adoption writes "applied" for migrations that never
+ * ran and supersedes rows another tool wrote, in a journal with no undo, so a
+ * summary reporting only counts would be asking for consent to an unnamed set.
+ *
+ * `gates.supersedeUnmatched` has to be passed in, and that is compensating for a
+ * gap in the reply rather than a preference. `BaselineReply.superseded` is
+ * documented, and implemented, as the rows ACTUALLY recorded as edges - it is
+ * emptied unless the write happened (crates/zeroship-migrate-node/src/verbs.rs:1388,
+ * crates/zeroship-migrate-node/src/wire.rs:729-731). So a preview run with
+ * `--supersede-unmatched` returns `superseded: []` while carrying a `kind: "squash"`
+ * event whose whole meaning is the edges it does not list, and the surrounding
+ * claim that a dry run "returns the identical reply without writing"
+ * (packages/zero-migrate-cli/src/index.ts:653-655) does not hold for the single
+ * most irreversible part of the operation. Measured: the same invocation with and
+ * without `--approve` differs in exactly that field. Reading the intent from the
+ * flag here keeps the preview complete without redefining what the field means.
+ */
+export function formatBaselineHuman(
+  outcome: BaselineOutcome,
+  gates: { supersedeUnmatched: boolean },
+): string {
+  const lines = [
+    outcome.wrote
+      ? `baseline: recorded ${outcome.recorded.length} event(s)`
+      : `baseline: ${outcome.recorded.length} event(s) would be recorded (nothing written)`,
+  ];
+  for (const step of outcome.recorded) {
+    lines.push(`  record ${step.version} ${step.name} [${step.kind}]`);
+  }
+  for (const version of outcome.alreadyRecorded) {
+    lines.push(`  already recorded ${version}`);
+  }
+  const superseded = new Set(outcome.superseded);
+  for (const version of outcome.unmatched) {
+    if (superseded.has(version)) {
+      lines.push(`  superseded ${version} (journal row this set does not account for)`);
+    } else if (gates.supersedeUnmatched) {
+      lines.push(
+        `  would supersede ${version} (journal row this set does not account for; ` +
+          `permanent, and recorded only on an approved run)`,
+      );
+    } else {
+      lines.push(`  unmatched ${version} (journal row this set does not account for)`);
+    }
+  }
+  if (outcome.recorded.length === 0 && outcome.alreadyRecorded.length === 0) {
+    lines.push("  this migration set journals no steps");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The refusal an adoption reply earns, or `undefined` when the run stands.
+ *
+ * Both gates are consent gates, and they are checked in this order because they
+ * fail for different reasons. Unmatched journal rows are a fact about the
+ * DATABASE: no amount of approving fixes them, so naming that first stops an
+ * operator from adding `--approve` and hitting the same wall. `--approve` is the
+ * operator's own step, checked last, so the preview above it is complete.
+ *
+ * Kept pure so both rules stay testable without a database.
+ */
+export function baselineRefusal(
+  outcome: BaselineOutcome,
+  gates: { supersedeUnmatched: boolean; approved: boolean },
+): string | undefined {
+  if (outcome.unmatched.length > 0 && !gates.supersedeUnmatched) {
+    return (
+      `this journal holds ${outcome.unmatched.length} net-applied row(s) the migration set ` +
+      `does not account for: ${outcome.unmatched.join(", ")}. Adoption cannot leave them ` +
+      "unexplained -- status would report them as drift forever, and the journal is " +
+      "append-only so no later event can remove them. Re-run with --supersede-unmatched " +
+      "to record supersession edges over them, which is permanent"
+    );
+  }
+  if (!gates.approved) {
+    return (
+      "baseline records migrations as applied WITHOUT running them, in an append-only " +
+      "journal with no undo, so it needs --approve. Nothing was written; the events " +
+      "above are the ones an approved run would record"
+    );
+  }
+  return undefined;
+}
+
+/**
+ * `baseline` adopts a database the authored set has already been applied to by
+ * other means: it journals what a fresh apply WOULD have recorded, without
+ * running any of it.
+ *
+ * A run without `--approve` is a dry run through the identical code path, so the
+ * previewed event set cannot drift from the act it previews. `--json` emits the
+ * addon reply verbatim, which means its `superseded` is the recorded set rather
+ * than the intended one on a dry run - see [`formatBaselineHuman`].
+ */
+async function runBaseline(args: Args): Promise<number> {
+  if (!args.databaseUrl) {
+    throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
+  }
+  const driver = driverFor(args.databaseUrl, undefined, args.security);
+  if (driver.kind !== "postgres") {
+    throw new CliError("baseline supports only PostgreSQL");
+  }
+  const charterLayers = await loadPolicyFiles(args.policyPaths);
+  const registry = await loadRegistry(args.registryPath);
+  const files = await discover(args.dir);
+  if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
+  // The COMPLETE authored set, in filename order. A prefix would adopt a prefix
+  // and leave the rest pending, which is not adoption.
+  const envelopes = authorMigrations(migrations).map(({ envelope }) => envelope);
+  const outcome = await baseline({
+    ownerApp: args.ownerApp,
+    projectSchema: args.projectSchema,
+    driver,
+    registry,
+    policy: charterLayers,
+    envelopes,
+    supersedeUnmatched: args.supersedeUnmatched,
+    dryRun: !args.approved,
+    appliedBy: "cli",
+  });
+  // Printed BEFORE any refusal: the refusal is also the preview, and an operator
+  // told "pass --approve" without being shown what approving would write has been
+  // asked to consent to a number.
+  process.stdout.write(
+    args.json
+      ? `${JSON.stringify(outcome, null, 2)}\n`
+      : formatBaselineHuman(outcome, { supersedeUnmatched: args.supersedeUnmatched }),
+  );
+  const refusal = baselineRefusal(outcome, {
+    supersedeUnmatched: args.supersedeUnmatched,
+    approved: args.approved,
+  });
+  if (refusal !== undefined) throw new CliError(refusal);
+  return 0;
+}
+
 /** The `--help` / usage text. */
 const USAGE = `zero-migrate: database migrations from JavaScript
 
@@ -1850,6 +2022,7 @@ Usage:
   zero-migrate status [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--strict] [--json]
   zero-migrate resolve <migration> (--commit | --rollback) --approve [--database-url <url>] [--policy <file> ...] [--registry <file>]
   zero-migrate history [--database-url <url>] [--policy <file> ...] [--json]
+  zero-migrate baseline --approve [--supersede-unmatched] [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--json]
   zero-migrate --version
 
 Flags:
@@ -1870,6 +2043,8 @@ Flags:
   --owner-app <app>     Deploying app id stamped as owner_app (default app_cli)
   --schema <schema>     Confined project schema (default public)
   --approve             Approve reviewed destructive changes and backfills
+  --supersede-unmatched baseline: also record supersession edges over the
+                        net-applied journal rows the migration set cannot explain
   --to <version>        rollback: unwind everything applied after this version
   --steps <n>           rollback: unwind the n most recently applied migrations
   --all                 rollback: unwind every applied migration
@@ -1895,6 +2070,9 @@ Only lint accepts --dialect; live commands derive it from the URL. lint is offli
 plan, apply and rollback support PostgreSQL, MySQL 8, and SQLite; status supports
 PostgreSQL and MySQL 8; history and resolve are PostgreSQL-only. rollback reverses
 applied migrations from their authored down; there is no clean command.
+baseline is PostgreSQL-only too, and is the one verb that records migrations as
+applied WITHOUT running them: it needs --approve, plus --supersede-unmatched for
+journal rows the authored set cannot explain. Both writes are permanent.
 `;
 
 /** Entry point: parse, dispatch, map thrown `CliError` to a clean non-zero exit. */
@@ -1948,6 +2126,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runHistory(args);
       case "resolve":
         return await runResolve(args);
+      case "baseline":
+        return await runBaseline(args);
       default:
         process.stderr.write(
           `zero-migrate: unknown command ${JSON.stringify(redactUrlTokens(args.command))}\n`,

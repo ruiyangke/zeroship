@@ -48,7 +48,15 @@ const OWNER_APP = "app_json_contract";
  * leaves `version` output unchanged"). Deriving this list from the usage block
  * alone missed it, and the existing `version` test caught the omission.
  */
-const JSON_VERBS = ["lint", "plan", "status", "history", "rollback", "version"] as const;
+const JSON_VERBS = [
+  "lint",
+  "plan",
+  "status",
+  "history",
+  "rollback",
+  "baseline",
+  "version",
+] as const;
 /** And the ones it does not. */
 const NON_JSON_VERBS = ["new", "apply", "resolve"] as const;
 
@@ -123,7 +131,7 @@ test("--json is refused by the commands that have no machine-readable reply", ()
       assert.equal(result.code, 1, `${verb} --json must be refused`);
       assert.match(
         result.err,
-        /flag --json is only valid with lint, plan, status, rollback, history, or version/,
+        /flag --json is only valid with lint, plan, status, rollback, history, baseline, or version/,
         `${verb}: the refusal must name the commands that do accept it; got ${result.err}`,
       );
       // Refused at argument parsing, before anything else is reported. Without

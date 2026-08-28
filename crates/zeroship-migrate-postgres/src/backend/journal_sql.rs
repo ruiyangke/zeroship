@@ -1588,14 +1588,43 @@ pub async fn record_baseline<D: SqlSession>(
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
+    record_baselines(conn, cfg, std::slice::from_ref(&rec)).await
+}
+
+/// Journal a SET of baseline/squash `completed` events in ONE transaction.
+///
+/// The plural form exists because ADOPTING a project is not adopting a migration:
+/// an operator declaring that an existing database already satisfies a whole
+/// authored corpus writes one records-not-run event per journal-visible STEP, and
+/// a partial write is the one outcome that must not survive. Recording half a
+/// corpus leaves a database that reconciles as neither pending nor applied, and the
+/// journal is append-only, so there is no edit that repairs it - only more rows.
+///
+/// One `BEGIN ... COMMIT` brackets every row AND every supersession edge, so the
+/// set commits together or not at all. `record_baseline` is the one-record case,
+/// which keeps a single implementation of the bracket rather than two that can
+/// drift. An empty set writes nothing and opens no transaction: adopting nothing is
+/// a no-op, not an empty commit.
+///
+/// # Errors
+/// [`JournalError::Db`] on any insert failure (the whole partial set is rolled back).
+pub async fn record_baselines<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    records: &[BaselineRecord<'_>],
+) -> Result<(), JournalError> {
+    if records.is_empty() {
+        return Ok(());
+    }
     conn.batch("BEGIN").await?;
-    let result = record_baseline_inner(conn, cfg, rec).await;
-    if let Err(e) = result {
-        // Roll back the partial row/edges; surface the original error.
-        if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %rec.version, "zero-migrate: ROLLBACK failed after a record_baseline error (#3)");
+    for rec in records {
+        if let Err(e) = record_baseline_inner(conn, cfg, *rec).await {
+            // Roll back the partial rows/edges; surface the original error.
+            if let Err(rb) = conn.batch("ROLLBACK").await {
+                tracing::warn!(error = %rb, version = %rec.version, "zero-migrate: ROLLBACK failed after a record_baseline error (#3)");
+            }
+            return Err(e);
         }
-        return Err(e);
     }
     conn.batch("COMMIT").await?;
     Ok(())

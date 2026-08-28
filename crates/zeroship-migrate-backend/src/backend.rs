@@ -699,6 +699,40 @@ pub trait MigrationBackend {
         supersedes: &[&str],
     ) -> Result<(), ApplyError>;
 
+    /// Journal a SET of records-not-run `completed` events ATOMICALLY - the
+    /// dialect-coupled write behind project ADOPTION.
+    ///
+    /// [`Self::record_squash`] records ONE supersession for one authored squash.
+    /// This records a whole authored corpus at once: an operator declaring that an
+    /// existing database already satisfies every migration in a set writes one
+    /// event per journal-visible STEP, each with its own `kind` and its own
+    /// supersession edges.
+    ///
+    /// The set is atomic on purpose, and that is the reason this is a separate
+    /// method rather than a loop over `record_squash`. A loop commits per row, so an
+    /// interrupted adoption leaves a corpus half-recorded - and the journal is
+    /// append-only, so nothing can edit those rows back out. The only repair for a
+    /// partial adoption is more rows, which is exactly the state adoption exists to
+    /// end. An empty set writes nothing.
+    ///
+    /// Callers must have verified, under the project lock, that every record's
+    /// version is absent from the journal (or present with the SAME checksum). This
+    /// method does not re-derive that: it writes what it is given.
+    ///
+    /// SUPPORTED ON PostgreSQL ONLY. MySQL and SQLite implement it as an explicit
+    /// refusal for the same reason they refuse [`Self::record_squash`]: the
+    /// records-not-run primitive shares the baseline machinery neither wires. A
+    /// trait impl existing is not the feature working.
+    ///
+    /// # Errors
+    /// [`ApplyError::Db`] on a structured driver/write failure, or
+    /// [`ApplyError::Backend`] for a dialect-level refusal.
+    async fn record_adoption(
+        &self,
+        cfg: &ExecutorConfig,
+        records: &[journal::BaselineRecord<'_>],
+    ) -> Result<(), ApplyError>;
+
     // -- declarative-only structured ops ------------------------------------
 
     /// Apply ONE structured SQLite 12-step table REBUILD atomically with

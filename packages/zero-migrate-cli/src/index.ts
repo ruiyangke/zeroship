@@ -32,6 +32,7 @@ import {
   type RollbackTargetDto,
   type StatusReply,
   type HistoryReply,
+  type BaselineReply,
   type LoadVerifyReply,
   type PreviewSqlSource,
 } from "./addon.js";
@@ -151,7 +152,7 @@ export type ApplyOutcome = ApplyReply;
  * not protect plain JavaScript callers. */
 function assertExplicitPolicy(
   value: unknown,
-  verb: "apply" | "rollback" | "status" | "history" | "resolvePending",
+  verb: "apply" | "rollback" | "status" | "history" | "resolvePending" | "baseline",
 ): asserts value is readonly string[] {
   if (
     !Array.isArray(value) ||
@@ -603,6 +604,74 @@ export async function history(opts: HostHistoryOptions): Promise<HistoryReply> {
       projectId: opts.projectSchema,
       projectSchema: opts.projectSchema,
       charterLayers: [...opts.policy],
+    });
+  } finally {
+    await close();
+  }
+}
+
+/** Options for {@link baseline} - adopting a database the set is already applied to. */
+export interface HostBaselineOptions {
+  /** The app id that authored the migrations. It is folded into every step
+   *  checksum, so it must match what a later `status` uses or the recorded events
+   *  reconcile as drift. */
+  ownerApp: string;
+  /** The confined project schema. */
+  projectSchema: string;
+  /** Adoption is the records-not-run journal write; only PostgreSQL implements it. */
+  driver: Extract<DriverConfig, { kind: "postgres" }>;
+  /** The project's `{ table: owner_app }` registry. Defaults to `{}`. */
+  registry?: Record<string, string>;
+  /** Required ordered table-shape policy documents, root/bound first. */
+  policy: readonly string[];
+  /** The COMPLETE ordered authored set, oldest first. A prefix would adopt a
+   *  prefix and leave the rest pending, which is not adoption. */
+  envelopes: readonly IrEnvelope[];
+  /** Record supersession edges over the net-applied journal rows this set does not
+   *  account for. Default `false`: superseding another tool's history is permanent,
+   *  so it is never implied by asking to adopt. */
+  supersedeUnmatched?: boolean;
+  /** Report the full event set WITHOUT writing it. Default `false`. */
+  dryRun?: boolean;
+  /** The audit label recorded with the events. Default `"host"`. */
+  appliedBy?: string;
+}
+
+/** The typed `baselineIr` reply - re-exported from the generated addon DTOs. */
+export type BaselineOutcome = BaselineReply;
+
+/**
+ * Adopt an existing database: journal what applying `envelopes` from nothing would
+ * have recorded, WITHOUT running any of it.
+ *
+ * This is the verb for a database whose schema some other process already built -
+ * including one whose journal is full of a peer runner's migration ids, which the
+ * CLI's own id derivation can never reproduce. The events are additive: nothing in
+ * the journal is rewritten, because nothing in the journal CAN be (it is append-only
+ * by trigger).
+ *
+ * `dryRun` runs the identical computation and returns the identical reply without
+ * writing, so a caller can show an operator exactly the event set the write would
+ * produce.
+ */
+export async function baseline(opts: HostBaselineOptions): Promise<BaselineOutcome> {
+  if (opts.driver.kind !== "postgres") {
+    throw new Error("zero-migrate-cli: baseline supports only PostgreSQL");
+  }
+  assertExplicitPolicy(opts.policy, "baseline");
+  const addon = loadAddon();
+  const { hostDriver, close } = await openSession(opts.driver);
+  try {
+    return await addon.baselineIr(hostDriver, {
+      ownerApp: opts.ownerApp,
+      projectSchema: opts.projectSchema,
+      dialect: dialectOf(opts.driver),
+      registry: opts.registry ?? {},
+      envelopes: [...opts.envelopes],
+      charterLayers: [...opts.policy],
+      supersedeUnmatched: opts.supersedeUnmatched ?? false,
+      dryRun: opts.dryRun ?? false,
+      appliedBy: opts.appliedBy ?? "host",
     });
   } finally {
     await close();

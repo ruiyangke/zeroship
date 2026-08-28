@@ -542,6 +542,7 @@ pub fn reconcile_applied_plans_with_snapshot(
         outstanding,
         &[],
         rolled_back,
+        &[],
     )
 }
 
@@ -553,6 +554,15 @@ pub fn reconcile_applied_plans_with_snapshot(
 /// step is applied. Atomic resolver entries, plus legacy per-step abort entries,
 /// are recognized as lifecycle evidence instead of unexpected journal data.
 ///
+/// `superseded` is the journal's supersession NET STATE - the versions covered by
+/// a net-applied squash, as [`MigrationBackend::superseded_versions`](crate::apply::backend::MigrationBackend::superseded_versions)
+/// reports them. Those versions are EXPLAINED journal rows, not unexpected ones:
+/// something in this journal declared, in an immutable event, that it stands in for
+/// them. Reporting them as `unexpected_journal` anyway made supersession
+/// unobservable from status - the one place an operator looks to decide whether a
+/// database is clean - so a squash could satisfy `pending` and still fail a strict
+/// gate forever, with no additive event able to fix it.
+///
 /// # Errors
 /// Returns [`StatusError::PlanManifest`] for duplicate plan/step identities or a
 /// dependency cycle among supplied plans.
@@ -563,6 +573,7 @@ pub fn reconcile_applied_plans_with_resolutions(
     outstanding: &[journal::PendingContract],
     resolved: &[ResolvedPendingContract],
     rolled_back: &[String],
+    superseded: &[String],
 ) -> Result<AppliedPlanStatus, StatusError> {
     let order = order_plan_manifests(manifests)?;
 
@@ -810,11 +821,18 @@ pub fn reconcile_applied_plans_with_resolutions(
     let current_version = applied.last().cloned();
     let (pending_contracts, blocked) =
         derive_pending_contract_status_for_plans(outstanding, manifests);
+    // A superseded version is an ACCOUNTED-FOR journal row. The immutable event
+    // that supersedes it is itself in this journal, so the row is explained by the
+    // history rather than left over from something the supplied set does not know
+    // about - which is what `unexpected` means everywhere else in this reply.
+    let superseded_versions: HashSet<&str> =
+        superseded.iter().map(String::as_str).collect();
     let mut unexpected_journal: Vec<UnexpectedJournalEntry> = journal_entries
         .iter()
         .filter(|entry| {
             !seen_steps.contains_key(entry.version.as_str())
                 && !known_resolver_versions.contains(entry.version.as_str())
+                && !superseded_versions.contains(entry.version.as_str())
         })
         .map(|entry| UnexpectedJournalEntry {
             version: entry.version.clone(),
@@ -963,37 +981,52 @@ async fn status_plans_via_backend_locked_inner<B: crate::apply::backend::Migrati
     // lock. Holding it across all readers makes their combined result one coherent
     // backend snapshot even on dialects without a shared read transaction seam.
     let journal_exists = !read_only || backend.journal_exists(cfg).await?;
-    let (entries, rolled_back, backfill_progress, outstanding, resolved) = if journal_exists {
-        let entries = backend.applied(cfg).await?;
-        let rolled_back = backend.net_rolled_back_versions(cfg).await?;
-        let backfill_progress = backend.backfill_progress(cfg).await?;
-        let (outstanding, resolved) = if let Some(pending_contracts) = backend.pending_contracts() {
-            let outstanding = pending_contracts.outstanding_pending_contracts(cfg).await?;
-            let resolved = pending_contracts
-                .resolved_pending_contracts(cfg)
-                .await?
-                .into_iter()
-                .map(|terminal| ResolvedPendingContract {
-                    pending_version: terminal.contract.pending_version,
-                    plan_version: terminal.contract.plan_version,
-                    contract_versions: terminal.contract.contract_versions,
-                    resolution: terminal.resolution,
-                })
-                .collect();
-            (outstanding, resolved)
+    let (entries, rolled_back, backfill_progress, outstanding, resolved, superseded) =
+        if journal_exists {
+            let entries = backend.applied(cfg).await?;
+            let rolled_back = backend.net_rolled_back_versions(cfg).await?;
+            let backfill_progress = backend.backfill_progress(cfg).await?;
+            // Read inside the same lock bracket as the journal itself: the
+            // supersession net state decides which journal rows are ACCOUNTED FOR,
+            // so reading it against a different snapshot would report a row as
+            // unexpected that the very same journal explains.
+            let superseded = backend.superseded_versions(cfg).await?;
+            let (outstanding, resolved) =
+                if let Some(pending_contracts) = backend.pending_contracts() {
+                    let outstanding = pending_contracts.outstanding_pending_contracts(cfg).await?;
+                    let resolved = pending_contracts
+                        .resolved_pending_contracts(cfg)
+                        .await?
+                        .into_iter()
+                        .map(|terminal| ResolvedPendingContract {
+                            pending_version: terminal.contract.pending_version,
+                            plan_version: terminal.contract.plan_version,
+                            contract_versions: terminal.contract.contract_versions,
+                            resolution: terminal.resolution,
+                        })
+                        .collect();
+                    (outstanding, resolved)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+            (
+                entries,
+                rolled_back,
+                backfill_progress,
+                outstanding,
+                resolved,
+                superseded,
+            )
         } else {
-            (Vec::new(), Vec::new())
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
         };
-        (
-            entries,
-            rolled_back,
-            backfill_progress,
-            outstanding,
-            resolved,
-        )
-    } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-    };
     reconcile_applied_plans_with_resolutions(
         manifests,
         &entries,
@@ -1001,6 +1034,7 @@ async fn status_plans_via_backend_locked_inner<B: crate::apply::backend::Migrati
         &outstanding,
         &resolved,
         &rolled_back,
+        &superseded,
     )
 }
 
@@ -1586,6 +1620,7 @@ mod plan_status_tests {
             &[],
             std::slice::from_ref(&resolved),
             &[],
+            &[],
         )
         .expect("atomic applied status");
 
@@ -1639,6 +1674,7 @@ mod plan_status_tests {
             &[],
             std::slice::from_ref(&resolved),
             &[],
+            &[],
         )
         .expect("atomic apply drift status");
 
@@ -1687,6 +1723,7 @@ mod plan_status_tests {
             &[],
             &[],
             std::slice::from_ref(&resolved),
+            &[],
             &[],
         )
         .expect("aborted status");
@@ -1738,6 +1775,7 @@ mod plan_status_tests {
             &[],
             std::slice::from_ref(&resolved),
             &[],
+            &[],
         )
         .expect("aborted dependency status");
 
@@ -1772,6 +1810,7 @@ mod plan_status_tests {
             &[],
             &[],
             std::slice::from_ref(&resolved),
+            &[],
             &[],
         )
         .expect("terminal aborted status");
@@ -1815,6 +1854,7 @@ mod plan_status_tests {
             &[],
             &[],
             std::slice::from_ref(&resolved),
+            &[],
             &[],
         )
         .expect("aborted drift status");
