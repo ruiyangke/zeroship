@@ -17,7 +17,7 @@
 //! to expose a constructor.
 //!
 //! Neither option fit this scaffold's scope guards (no production-code
-//! edits, no live Postgres). We instead bench `build_find` and
+//! edits, no live Postgres). We instead bench `build_find_with_schema` and
 //! `build_insert` — both `pub` — which:
 //!
 //! 1. exercise `validate_collection` (the byte-prefix check) transitively
@@ -53,7 +53,27 @@ use criterion::{
 };
 use serde_json::json;
 
-use zeroship_plugin_db::query::{build_find, build_insert};
+use zeroship_plugin_db::query::{build_find_with_schema, build_insert};
+
+/// The descriptor entry the benchmarked read is projected through.
+///
+/// `build_find` took no schema and expanded to `SELECT *`; it is deleted, and
+/// the read path now always builds an explicit projection from the descriptor.
+/// This map declares the fields the filter fixtures below name, so the builder
+/// does the same identifier validation and projection expansion it does at
+/// runtime — a benchmark against a `SELECT *` builder would be measuring work
+/// production no longer performs.
+fn users_schema() -> serde_json::Value {
+    json!({
+        "status": { "type": "string" },
+        "role": { "type": "string" },
+        "score": { "type": "int" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "createdAt": { "type": "date" },
+        "updatedAt": { "type": "date" },
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Filter shapes — each represents a realistic SDK call site
@@ -107,6 +127,7 @@ fn small_insert_doc() -> serde_json::Value {
 fn bench_build_find(c: &mut Criterion) {
     let app_id = "app_01HJQK2A8R000000000000000";
     let collection = "users";
+    let schema = users_schema();
 
     let workloads = vec![
         ("empty", empty_filter()),
@@ -126,7 +147,7 @@ fn bench_build_find(c: &mut Criterion) {
                 b.iter_batched_ref(
                     || filter.clone(),
                     |filter| {
-                        let built = build_find(
+                        let built = build_find_with_schema(
                             app_id,
                             collection,
                             filter,
@@ -134,8 +155,9 @@ fn bench_build_find(c: &mut Criterion) {
                             Some(0),
                             None,
                             None,
+                            &schema,
                         )
-                        .expect("build_find should succeed on benchmark fixture");
+                        .expect("build_find_with_schema should succeed on benchmark fixture");
                         black_box(built);
                     },
                     BatchSize::SmallInput,

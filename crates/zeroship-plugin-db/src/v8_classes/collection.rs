@@ -47,17 +47,19 @@ impl std::fmt::Debug for Collection {
 
 #[cfg(test)]
 impl Collection {
-    /// Observe the deploy token and cache entry the current CRUD reader would
-    /// resolve from this native receiver. Kept on the receiver so the
-    /// regression cannot accidentally re-read ambient runtime state.
+    /// Observe the deploy token and the DESCRIPTOR ENTRY the current CRUD
+    /// reader would resolve from this native receiver. Kept on the receiver so
+    /// the regression cannot accidentally re-read ambient runtime state.
+    ///
+    /// `None` is the `collection_not_declared` case — this deploy's descriptor
+    /// does not declare the collection — which is exactly what a co-resident
+    /// isolate at a DIFFERENT deploy must see for an entry it never installed.
     pub(crate) fn resolved_runtime_schema_for_tests(
         &self,
     ) -> (String, Option<serde_json::Value>) {
-        let schema = crate::context::with(|c| {
-            c.introspected_schema_for(&self.binding, &self.name)
-                .flatten()
-        })
-        .map(|facts| (*facts).clone());
+        let schema = crate::descriptor::collection_schema(&self.binding, &self.name)
+            .ok()
+            .map(|facts| (*facts).clone());
         (self.binding.deploy_token().to_string(), schema)
     }
 }
@@ -516,7 +518,7 @@ impl Collection {
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("row_pk".to_string(), row_pk_v);
         args.insert("column".to_string(), column_v);
-        dispatch_unmask_field(scope, self.binding.app_id(), Value::Object(args)).into()
+        dispatch_unmask_field(scope, &self.binding, Value::Object(args)).into()
     }
 
     /// `collection.bulkUnmask(items, opts?)` — bulk,
@@ -557,7 +559,7 @@ impl Collection {
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("items".to_string(), items_v);
-        dispatch_bulk_unmask_field(scope, self.binding.app_id(), Value::Object(args)).into()
+        dispatch_bulk_unmask_field(scope, &self.binding, Value::Object(args)).into()
     }
 
     /// `collection.openSubscription()` — returns a

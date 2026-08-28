@@ -13,11 +13,11 @@
 //!   (`sdks/vite-plugin/src/gen-types/dev-apply.ts`).
 //!
 //! Both arms then get the same two effects from the dispatch caller, on `Ok`:
-//! `mark_model_registered` (a per-thread flag) and `cache_schema` (the declared
-//! JSON). The flag is load-bearing beyond the fast path below:
-//! `crud::introspect_schema::runtime_schema_for` returns `None` for an
-//! UNREGISTERED collection, so registration is what turns introspected
-//! encryption / mask metadata on for a collection's reads and writes.
+//! `mark_model_registered` (a per-thread flag) and `cache_schema` (the
+//! descriptor entry, keyed by app-at-deploy). The second one is what makes the
+//! collection SERVEABLE at all: `crate::descriptor::collection_schema` is the
+//! data plane's sole schema authority, and a collection with no entry is
+//! refused with `collection_not_declared` on every read and every write.
 //!
 //! # The ATTACH is in the wrong place, and that is a known item
 //!
@@ -28,11 +28,10 @@
 //!
 //! It belongs in the data plane, which is where the file is used. It is not
 //! there yet because there is no single chokepoint to put it: `exec.rs`
-//! resolves `route.app_id()` per operation, the backend's exec methods never
-//! receive an `app_id` (it is interpolated into the SQL), and
-//! `runtime_schema_for` short-circuits before any DB work for the very case
-//! that needs it. The contained fix is attach-and-retry inside `SqliteSession`
-//! on an "unknown database" error, which touches no signature and no PG path.
+//! resolves `route.app_id()` per operation and the backend's exec methods never
+//! receive an `app_id` (it is interpolated into the SQL). The contained fix is
+//! attach-and-retry inside `SqliteSession` on an "unknown database" error,
+//! which touches no signature and no PG path.
 //!
 //! # A four-phase pipeline used to live here
 //!
@@ -45,10 +44,10 @@
 //! was a mistake the gating made easy - the chain was real and unreachable.
 //!
 //! Nothing consumed their output either: the data plane sources column types,
-//! encryption and mask metadata from LIVE introspection plus the engine's
-//! sentinels (`crud::read_pipeline`, `crud::write_pipeline`), never from the
-//! declared schema. The diff was a second model of schema truth competing with
-//! the introspection that is actually read.
+//! encryption and mask metadata from the RUNTIME DESCRIPTOR
+//! (`crud::read_pipeline`, `crud::write_pipeline`, both through
+//! `crate::descriptor`). The diff was a second model of schema truth competing
+//! with the one that is actually read.
 //!
 //! # Not reachable from creator code
 //!
@@ -59,6 +58,7 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
+use crate::binding::DbBinding;
 use crate::context;
 use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
@@ -70,11 +70,12 @@ use crate::v8_bridge::{runtime_state, setup_js_promise};
 /// Idempotent, and safe to call on every cold start.
 pub fn register_model_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
+    let app_id = binding.app_id();
 
     // Fast path: already registered on this thread.
     if crate::is_model_registered(app_id, collection) {
@@ -86,21 +87,22 @@ pub fn register_model_dispatch<'s>(
     }
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let app_id_owned = app_id.to_string();
+    let binding_owned = binding.clone();
     let collection_owned = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_register_model(&app_id_owned).await
+        match exec_register_model(binding_owned.app_id()).await
         {
             Ok(()) => {
-                crate::mark_model_registered(&app_id_owned, &collection_owned);
-                // Cache the schema so the CRUD encryption
-                // pass can find `t.encrypted(...)` columns at dispatch
-                // time. Cloned because the closure captures `schema` by
-                // move; the cache is per-isolate and lives for the
+                crate::mark_model_registered(binding_owned.app_id(), &collection_owned);
+                // Install this collection's descriptor entry under the
+                // APP-AT-DEPLOY binding, so a worker thread holding a pinned
+                // and a current isolate of one app never serves one deploy's
+                // schema to the other. Cloned because the closure captures
+                // `schema` by move; the store is per-isolate and lives for the
                 // isolate's lifetime (no eviction).
                 context::with_mut(|c| {
-                    c.cache_schema(&app_id_owned, &collection_owned, schema.clone());
+                    c.cache_schema(&binding_owned, &collection_owned, schema.clone());
                 });
                 OpResult::JsValue {
                     resolver,
@@ -149,21 +151,18 @@ async fn exec_register_model(app_id: &str) -> Result<(), DbError> {
     // in place, on both dialects, and issuing DDL here could only conflict with
     // the authority that owns it.
     //
-    // What registration still earns is the "schema-ready + metadata-available"
-    // contract the introspection cache depends on, and BOTH halves of it come
-    // from the dispatch caller reacting to this `Ok(())`, not from here:
+    // What registration still earns comes from the dispatch caller reacting to
+    // this `Ok(())`, not from here:
     //
-    //   * readiness. `mark_model_registered` sets the flag that
-    //     `crud::introspect_schema::runtime_schema_for` checks before it will
-    //     source per-collection metadata from live introspection plus the
-    //     engine's sentinels. Introspection is lazy and deploy-keyed and runs
-    //     on the first CRUD op, so marking readiness is sufficient - this path
-    //     deliberately reads no catalog, keeping registration cheap.
-    //   * the declared-schema cache. `cache_schema` keeps the declared-ONLY
-    //     hints that introspection cannot recover: the `t.id(prefix)` typed-id
-    //     `idPrefix` read by `system_fields_pass::prefix_for_collection`, and
-    //     the `schema_for` hints consulted by vector-search, unmask and
-    //     mask-drift.
+    //   * readiness. `mark_model_registered` sets the per-thread flag the warm
+    //     short-circuit at the top of `register_model_dispatch` reads.
+    //   * THE SCHEMA ITSELF. `cache_schema` installs this collection's
+    //     descriptor entry into the per-isolate store, and
+    //     `crate::descriptor::collection_schema` reads nothing else. Column
+    //     types, `encrypted` mode/keyId/wraps, `mask` kind/classification, the
+    //     `t.id(prefix)` typed-id `idPrefix`, `vectorDims` and the mask
+    //     sibling's `storage.valueColumn` all arrive on this one path. This
+    //     function deliberately reads no catalog, keeping registration cheap.
     //
     // If an authority somehow has not applied the schema, runtime CRUD fails
     // normally ("column does not exist"). That is the intended behaviour: there
@@ -229,8 +228,8 @@ pub async fn exec_register_model_via_dispatch_for_tests(
     //
     // This seam is the DATABASE half. It does NOT `mark_model_registered` or
     // `cache_schema` - those happen in `register_model_dispatch`, above. A test
-    // that needs a collection to count as registered (so `runtime_schema_for`
-    // stops returning `None` and encryption / mask metadata applies) calls
+    // whose collection must be serveable at all (so `collection_schema`
+    // resolves and the encryption / mask stages apply) calls
     // `mark_model_registered_for_tests` / `cache_schema_for_tests` itself. The
     // existing callers do exactly that.
     let _ = (collection, schema, indexes);

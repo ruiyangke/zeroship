@@ -548,7 +548,7 @@ impl VectorIndex for PostgresBackend {
 
     async fn vector_search(
         &self,
-        app_id: &str,
+        binding: &crate::binding::DbBinding,
         collection: &str,
         column: &str,
         query: &[f32],
@@ -562,7 +562,11 @@ impl VectorIndex for PostgresBackend {
         // which entry point fired.
         self.ensure_pgvector_available().await?;
 
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        let app_id = binding.app_id();
+        // The projection allowlist and the `column` identifier check both come
+        // off the descriptor. A collection this deploy does not declare is
+        // refused here rather than searched with an unbounded projection.
+        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
         let bq = crate::query::build_vector_search(
             app_id,
             collection,
@@ -571,7 +575,7 @@ impl VectorIndex for PostgresBackend {
             k,
             metric,
             filter,
-            schema_hint.as_ref(),
+            &schema_hint,
         )
         .map_err(DbError::from)?;
 
@@ -684,7 +688,7 @@ impl SpatialIndex for PostgresBackend {
 
     async fn spatial_near(
         &self,
-        app_id: &str,
+        binding: &crate::binding::DbBinding,
         collection: &str,
         column: &str,
         point: GeoPoint,
@@ -694,7 +698,8 @@ impl SpatialIndex for PostgresBackend {
     ) -> Result<Vec<serde_json::Value>, DbError> {
         self.ensure_postgis_available().await?;
 
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        let app_id = binding.app_id();
+        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
         let bq = crate::query::build_spatial_near(
             app_id,
             collection,
@@ -703,7 +708,7 @@ impl SpatialIndex for PostgresBackend {
             radius_m,
             filter,
             limit,
-            schema_hint.as_ref(),
+            &schema_hint,
         )
         .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();

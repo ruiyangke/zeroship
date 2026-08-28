@@ -33,7 +33,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
 
 use compio_postgres::{OwnedPooledClient, Pool};
 
@@ -43,7 +42,6 @@ use crate::binding::DbBinding;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::broker::ChangeEvent;
 use crate::error::DbError;
-use crate::live_metadata::{CachedFacts, LiveMetadataCache, LiveMetadataKey};
 use crate::service::DbResourceKey;
 
 /// Result of trying to claim the per-thread backend initialisation slot.
@@ -54,14 +52,6 @@ pub(crate) enum BackendInitState {
     Acquired,
     /// Another request is currently building the backend.
     InProgress,
-}
-
-/// Result of polling the per-thread live-schema singleflight.
-pub(crate) enum SchemaIntrospectionState {
-    /// Another resolution already populated this exact cache key.
-    Cached(CachedFacts),
-    /// This caller owns the catalog read and must release the marker.
-    Acquired,
 }
 
 /// Pinned transaction client parked in the app-keyed, per-thread tx map.
@@ -280,41 +270,35 @@ pub struct ThreadDbContext {
     /// that app.
     pending_emits: HashMap<String, Vec<ChangeEvent>>,
 
-    /// Per-thread, per-`(app_id, collection)` declared-schema
-    /// cache. Populated by `register_model_dispatch` on successful
-    /// register; consulted by the CRUD encryption pass (`crud::dispatch_*`)
-    /// to find columns declared `t.encrypted(...)`. Empty for any
-    /// collection that hasn't been registered on this thread - the cache is
-    /// best-effort: a miss means "skip the encryption pass entirely",
-    /// which is the correct behaviour for collections that have no
-    /// encrypted columns. Keyed by `"{app_id}:{collection}"`; the value
-    /// is the raw schema JSON the SDK declared.
-    schemas: HashMap<String, serde_json::Value>,
-
-    /// This thread's handle to the PROCESS-WIDE cache of schema metadata
-    /// **introspected from the LIVE catalog + sentinels**
-    /// (`zeroship_schema::read_live_schema` + the `zsenc`/`__zsmask` codecs),
-    /// NOT the declared descriptor. This is the runtime data-access metadata
-    /// source the CRUD encryption + mask passes consume per the schema-authority
-    /// split (design §6): plugin-db learns column types (for read coercions),
-    /// which columns are `encrypted` (mode/keyId/wraps) and which are `masked`
-    /// (kind/classification) by reading what the migration engine actually
-    /// applied, decoupled from any in-memory declared schema.
+    /// This thread's slice of THE schema authority: the runtime descriptor.
     ///
-    /// **It is a handle, not the cache.** The map used to live here, which made
-    /// an n-thread worker hold n copies of one app's immutable facts and pay n
-    /// whole-catalog reads to build them. `DbService` owns the map now;
-    /// `DbPlugin::register` hands this thread the service's `Arc`. See
-    /// [`crate::live_metadata`] for the identity the entries are keyed by and
-    /// for why the singleflight below deliberately stayed per thread.
-    live_metadata: Arc<LiveMetadataCache>,
+    /// One entry per `(app_id, deploy_token, collection)`. The value is the
+    /// descriptor's own field map for that collection - `{ <column>: FieldDef }`
+    /// including the v2 `storage` block - carried verbatim from
+    /// `manifest.runtime_descriptor` through `globalThis.__zsRuntimeDescriptor`
+    /// and `installSchema`'s `registerModel` chain.
+    ///
+    /// **There is no second source.** The live-catalog introspection cache that
+    /// used to sit beside this map is deleted: it re-derived a strict SUBSET of
+    /// what the descriptor already carries (`{type, encrypted?, mask?}`, with
+    /// `vector`/`geoPoint`/`idPrefix`/`vectorDims` unrecoverable), from sentinels
+    /// the migration engine had written out of the same DSL this descriptor is
+    /// folded from. It was a round trip, not an independent authority.
+    ///
+    /// **Keyed by the DEPLOY, not just the app.** A worker thread can hold a
+    /// deploy-pinned and a current isolate of one app at the same time, and they
+    /// have different schemas. The declared cache was keyed `"{app}:{coll}"` and
+    /// would have aliased them; only the deleted introspection cache was
+    /// deploy-keyed. Consolidating onto one map keeps the stronger key.
+    schemas: HashMap<String, Arc<serde_json::Value>>,
 
     /// The identity of the database this thread's resources belong to.
     ///
     /// Minted once from validated configuration by `DbService` and stamped here
-    /// by `DbPlugin::register`. It qualifies every live-metadata key, so two
-    /// services over different databases can share one process-wide cache
-    /// without aliasing each other's facts.
+    /// by `DbPlugin::register`. `install_db_resources` compares on it rather
+    /// than on the URL string, so "same database" is decided by the one value
+    /// the pools are indexed by; a thread pointed at a different database drops
+    /// its pool instead of silently aliasing the old one to the new URL.
     ///
     /// [`DbResourceKey::UNBOUND`] until a URL is installed.
     resource_key: DbResourceKey,
@@ -326,31 +310,6 @@ pub struct ThreadDbContext {
     /// `init_pool_async` reads it instead of re-parsing the URL. `None` until a
     /// URL is installed, which is also the "DB plugin disabled" state.
     backend_selection: Option<crate::BackendUrl>,
-
-    /// Success-only singleflight state for live-schema cache misses.
-    ///
-    /// Entry existence marks one catalog read in progress for the exact same
-    /// identity [`Self::live_metadata`] caches under. Waiters are woken after
-    /// either success or failure. Success is shared via the cache; failures are
-    /// never stored, so one woken waiter acquires and retries while the failed
-    /// owner alone receives its error.
-    ///
-    /// **Deliberately still per thread while the cache went process-wide.** The
-    /// parent design lists a process-wide singleflight under rejected
-    /// alternatives: it needs a cross-thread wake path to save at most
-    /// `n_threads` catalog walks per epoch bump. Two threads racing a cold miss
-    /// both walk the catalog; what they must not end up with is two cache
-    /// entries or two distinct fact objects, and that is the cache's job.
-    ///
-    /// Keyed by the SAME [`LiveMetadataKey`] the cache uses, resource key
-    /// included. It was keyed by `(DbBinding, collection)` while the doc above
-    /// said it matched the cache's identity - which was true only while a
-    /// thread had one database. It no longer does: `install_db_resources` can
-    /// repoint a thread, and the resource key is precisely the component that
-    /// records it. A flight for one database would otherwise hold the marker for
-    /// the same app/deploy/collection on a DIFFERENT one, parking a cold miss
-    /// that has nothing to wait for.
-    introspection_in_progress: HashMap<LiveMetadataKey, Vec<Waker>>,
 
     /// Per-thread, per-app mask-policy cache. Seeded
     /// on first unmask attempt by reading durable storage (PG admin
@@ -438,10 +397,8 @@ impl ThreadDbContext {
             savepoint_emit_marks: HashMap::new(),
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
-            live_metadata: crate::live_metadata::process_wide(),
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
-            introspection_in_progress: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
@@ -596,9 +553,8 @@ impl ThreadDbContext {
     }
 
     /// Hand this thread the service's database resources: the URL its lazy
-    /// backend init will open, the backend selection already made for it, the
-    /// stable resource key everything is indexed by, and the process-wide
-    /// live-metadata cache.
+    /// backend init will open, the backend selection already made for it, and
+    /// the stable resource key everything is indexed by.
     ///
     /// Returns `true` iff the resource CHANGED - i.e. this thread was pointed
     /// at a different database. The caller drops the pool in that case so the
@@ -614,13 +570,11 @@ impl ThreadDbContext {
         url: &str,
         resource_key: DbResourceKey,
         backend_selection: crate::BackendUrl,
-        live_metadata: Arc<LiveMetadataCache>,
     ) -> bool {
         let different = self.resource_key != resource_key;
         self.db_url = Some(url.to_string());
         self.resource_key = resource_key;
         self.backend_selection = Some(backend_selection);
-        self.live_metadata = live_metadata;
         different
     }
 
@@ -658,20 +612,30 @@ impl ThreadDbContext {
         self.registered_models.remove(&key);
     }
 
-    /// Cache the schema declared by `db.registerModel`.
-    /// Called after the four-phase DDL pipeline succeeds so the CRUD
-    /// encryption pass can find `t.encrypted(...)` columns by name.
-    /// Idempotent: re-registering the same collection overwrites the
-    /// cached schema (the DDL pipeline reconciles diffs but the in-
-    /// memory cache should reflect the latest declaration).
+    /// The descriptor-store key for one collection under one binding.
+    fn schema_key(binding: &DbBinding, collection: &str) -> String {
+        format!(
+            "{}:{}:{}",
+            binding.app_id(),
+            binding.deploy_token(),
+            collection
+        )
+    }
+
+    /// Install one collection's descriptor entry for this binding.
+    ///
+    /// The only production caller is `register_model_dispatch`, which is driven
+    /// by `installSchema` off `globalThis.__zsRuntimeDescriptor`. Idempotent:
+    /// a re-register overwrites, which is what a dev re-deploy of the same
+    /// deploy token means.
     pub(crate) fn cache_schema(
         &mut self,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
         schema: serde_json::Value,
     ) {
-        let key = format!("{app_id}:{collection}");
-        self.schemas.insert(key, schema);
+        self.schemas
+            .insert(Self::schema_key(binding, collection), Arc::new(schema));
     }
 
     /// Drop every cached declared schema for `app_id`. Test-only seam used to
@@ -685,135 +649,33 @@ impl ThreadDbContext {
         self.schemas.retain(|k, _| !k.starts_with(&prefix));
     }
 
-    /// Fetch the cached schema for a `(app_id,
-    /// collection)`. Returns `None` when the collection hasn't been
-    /// registered on this worker thread yet (the CRUD encryption pass
-    /// short-circuits on `None`, which is the correct behaviour for
-    /// collections with no encrypted columns).
+    /// The descriptor entry for one collection under one binding.
+    ///
+    /// `None` means the descriptor this isolate was built from does not declare
+    /// the collection. Callers must NOT treat that as "carry on without a
+    /// schema" - see [`crate::descriptor::collection_schema`], which is the only
+    /// thing that should call this and which turns the miss into a typed error.
     pub(crate) fn schema_for(
         &self,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
-    ) -> Option<serde_json::Value> {
-        let key = format!("{app_id}:{collection}");
-        self.schemas.get(&key).cloned()
+    ) -> Option<Arc<serde_json::Value>> {
+        self.schemas.get(&Self::schema_key(binding, collection)).cloned()
     }
 
-    /// The live-metadata identity for one binding and collection on this
-    /// thread's database.
-    fn live_metadata_key(&self, binding: &DbBinding, collection: &str) -> LiveMetadataKey {
-        LiveMetadataKey::new(self.resource_key, binding, collection)
-    }
-
-    /// Read the cached INTROSPECTED schema for one immutable
-    /// `(app_id, deploy_token, collection)` binding on this thread's database.
-    /// Returns:
-    ///   - `Some(Some(facts))` - cached, collection exists;
-    ///   - `Some(None)` - cached, collection is absent (negative cache);
-    ///   - `None` — nothing cached for this identity → caller must introspect.
+    /// Enumerate every `(collection, schema)` pair the descriptor store holds
+    /// for one BINDING. `mint_tx_view` uses it to mint one `Collection` per
+    /// declared name onto the `tx` view; the drift-check sweep uses it to walk
+    /// every declared collection. Empty when the isolate has installed no
+    /// schema.
     ///
-    /// The `Arc` is handed out rather than the schema deep-cloned, so every
-    /// reader of one identity - on any worker thread - observes one allocation.
-    pub(crate) fn introspected_schema_for(
+    /// Key shape: `<app_id>:<deploy_token>:<collection>` (the same format
+    /// [`Self::schema_key`] writes); the collection name is the suffix.
+    pub(crate) fn cached_schemas_for_binding(
         &self,
         binding: &DbBinding,
-        collection: &str,
-    ) -> Option<CachedFacts> {
-        self.live_metadata
-            .get(&self.live_metadata_key(binding, collection))
-    }
-
-    /// True when an introspected cache entry exists, including a cached
-    /// negative result. Unlike [`Self::introspected_schema_for`], this clones
-    /// no `Arc` when admission accounting only needs presence.
-    pub(crate) fn has_introspected_schema(&self, binding: &DbBinding, collection: &str) -> bool {
-        self.live_metadata
-            .contains(&self.live_metadata_key(binding, collection))
-    }
-
-    /// Cache the result of a live introspection for one immutable binding and
-    /// collection, and return what the process-wide cache holds for that
-    /// identity afterwards. `facts = None` records that the collection is
-    /// absent. Other deploys of the same app, and other databases, retain their
-    /// own entries.
-    ///
-    /// **Callers must use the return value rather than the `Arc` they passed
-    /// in.** Another thread racing the same cold miss may have published first;
-    /// its object is the one in the map and therefore the one every later
-    /// reader on every thread will see. See
-    /// [`crate::live_metadata::LiveMetadataCache::publish`].
-    ///
-    /// Takes `&self`: the cache is process-wide and carries its own
-    /// synchronisation, so writing to it is not a mutation of thread state.
-    pub(crate) fn cache_introspected_schema(
-        &self,
-        binding: &DbBinding,
-        collection: &str,
-        facts: CachedFacts,
-    ) -> CachedFacts {
-        self.live_metadata
-            .publish(self.live_metadata_key(binding, collection), facts)
-    }
-
-    /// Poll the success-only singleflight for one exact introspection key.
-    ///
-    /// Cache lookup and marker acquisition happen in the same mutable borrow,
-    /// so no same-thread future can slip between them. A pending caller parks
-    /// its waker and is polled again when the owner releases the marker.
-    pub(crate) fn poll_schema_introspection(
-        &mut self,
-        binding: &DbBinding,
-        collection: &str,
-        cx: &mut Context<'_>,
-    ) -> Poll<SchemaIntrospectionState> {
-        let key = self.live_metadata_key(binding, collection);
-        if let Some(cached) = self.live_metadata.get(&key) {
-            return Poll::Ready(SchemaIntrospectionState::Cached(cached));
-        }
-
-        match self.introspection_in_progress.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(Vec::new());
-                Poll::Ready(SchemaIntrospectionState::Acquired)
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let waiters = entry.get_mut();
-                if !waiters.iter().any(|waiter| waiter.will_wake(cx.waker())) {
-                    waiters.push(cx.waker().clone());
-                }
-                Poll::Pending
-            }
-        }
-    }
-
-    /// Release one introspection owner and return its waiters for wakeup.
-    ///
-    /// Callers wake after dropping the context borrow so a waker cannot
-    /// synchronously re-enter the thread-local `RefCell` while it is borrowed.
-    pub(crate) fn finish_schema_introspection(
-        &mut self,
-        binding: &DbBinding,
-        collection: &str,
-    ) -> Vec<Waker> {
-        self.introspection_in_progress
-            .remove(&self.live_metadata_key(binding, collection))
-            .unwrap_or_default()
-    }
-
-    /// Enumerate every `(collection, schema)` pair the
-    /// per-thread cache holds for `app_id`. Drift-check sweep uses
-    /// this to iterate every registered collection without having to
-    /// re-introspect the catalog. Returns an empty `Vec` when the
-    /// worker thread has registered no collections for the app yet.
-    ///
-    /// Key shape: `<app_id>:<collection>` (the same format
-    /// [`Self::cache_schema`] writes); we filter on the `<app_id>:`
-    /// prefix and reconstruct the collection name from the suffix.
-    pub(crate) fn cached_schemas_for_app(
-        &self,
-        app_id: &str,
-    ) -> Vec<(String, serde_json::Value)> {
-        let prefix = format!("{app_id}:");
+    ) -> Vec<(String, Arc<serde_json::Value>)> {
+        let prefix = format!("{}:{}:", binding.app_id(), binding.deploy_token());
         self.schemas
             .iter()
             .filter_map(|(k, v)| {
@@ -1193,7 +1055,6 @@ mod tests {
             url,
             DbResourceKey::for_url(url),
             crate::service::select_backend(url).expect("test URLs must be valid"),
-            crate::live_metadata::process_wide(),
         )
     }
 
@@ -1238,55 +1099,6 @@ mod tests {
             ctx.backend_selection(),
             Some(BackendUrl::Sqlite { .. })
         ));
-    }
-
-    /// The singleflight marker is keyed by the SAME identity as the cache, so
-    /// repointing this thread at a different database starts a NEW flight
-    /// instead of parking behind the old one's.
-    ///
-    /// The marker was keyed by `(DbBinding, collection)` while its own doc said
-    /// it marked "one catalog read in progress for the exact same identity
-    /// [the cache] caches under". Those differ by the resource key, and the
-    /// resource key is exactly the component that changes here. Under the old
-    /// shape the second poll below returns `Pending` and parks a waiter on a
-    /// flight against a database whose result can never satisfy it - the cache
-    /// entry it is woken to read is keyed under the other resource.
-    ///
-    /// The first two assertions are the control: a same-database re-poll MUST
-    /// still park, or the fix would read as "the singleflight was removed".
-    #[test]
-    fn a_flight_on_one_database_does_not_block_a_cold_miss_on_another() {
-        let mut ctx = ThreadDbContext::new();
-        let binding = DbBinding::new("app_flight_key", "deploy_a");
-        let waker = std::task::Waker::noop();
-        let mut cx = Context::from_waker(waker);
-
-        install(&mut ctx, "postgres://flight-key-a");
-        assert!(
-            matches!(
-                ctx.poll_schema_introspection(&binding, "notes", &mut cx),
-                Poll::Ready(SchemaIntrospectionState::Acquired)
-            ),
-            "the first cold miss must acquire the flight",
-        );
-        assert!(
-            matches!(
-                ctx.poll_schema_introspection(&binding, "notes", &mut cx),
-                Poll::Pending
-            ),
-            "a SECOND cold miss on the SAME database must park - that is the \
-             singleflight, and removing it would also satisfy the arm below",
-        );
-
-        install(&mut ctx, "postgres://flight-key-b");
-        assert!(
-            matches!(
-                ctx.poll_schema_introspection(&binding, "notes", &mut cx),
-                Poll::Ready(SchemaIntrospectionState::Acquired)
-            ),
-            "a cold miss on a DIFFERENT database must start its own flight, not \
-             wait on one whose result is keyed under another resource",
-        );
     }
 
     #[test]

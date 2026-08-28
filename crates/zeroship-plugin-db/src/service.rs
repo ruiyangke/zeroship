@@ -59,7 +59,6 @@ use compio_postgres::Pool;
 use sha2::{Digest, Sha256};
 
 use crate::error::DbError;
-use crate::live_metadata::LiveMetadataCache;
 use crate::{backend_for_url, BackendUrl, DbPlugin};
 
 /// Connections the operator-lifecycle pool keeps for maintenance work.
@@ -261,7 +260,6 @@ pub struct DbService {
     url: String,
     backend: BackendUrl,
     resource_key: DbResourceKey,
-    live_metadata: Arc<LiveMetadataCache>,
     plugin: Arc<DbPlugin>,
 }
 
@@ -292,20 +290,17 @@ impl DbService {
     pub fn new(config: DbServiceConfig) -> Result<Arc<Self>, DbError> {
         let backend = select_backend(&config.url)?;
         let resource_key = DbResourceKey::for_url(&config.url);
-        let live_metadata = crate::live_metadata::process_wide();
         let plugin = Arc::new(DbPlugin::new(
             config.url.clone(),
             config.worker_id,
             config.meter,
             resource_key,
             backend.clone(),
-            Arc::clone(&live_metadata),
         ));
         Ok(Arc::new(Self {
             url: config.url,
             backend,
             resource_key,
-            live_metadata,
             plugin,
         }))
     }
@@ -336,12 +331,6 @@ impl DbService {
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
-    }
-
-    /// The process-wide live-metadata cache.
-    #[must_use]
-    pub fn live_metadata(&self) -> &Arc<LiveMetadataCache> {
-        &self.live_metadata
     }
 
     /// The validated backend selection. Never re-derived from the URL.
@@ -384,21 +373,9 @@ impl DbLifecycle<'_> {
     /// the pool is this thread's shared operator pool. Neither is derived per
     /// deletion. That pool is not free and is not zero; see the module header.
     ///
-    /// It also drops the app's live-metadata entries. That is the ONLY reclaim
-    /// path the cache has: every component of an entry's identity is immutable,
-    /// so nothing but the app going away makes a generation unreachable. Leaving
-    /// them behind kept a deleted app's facts resident for the life of the
-    /// worker process, on the map that now serves every thread.
     pub async fn deprovision_app(&self, app_id: &str) -> Result<(), DbError> {
         crate::cdc_lifecycle::shutdown_app(app_id).await;
         crate::broker::drop_app(Some(app_id));
-        // Before the Postgres arm, not after: the teardown below is idempotent
-        // and retried on later polls, and a retry must not be what decides
-        // whether a deleted app's facts are still cached.
-        self.service
-            .live_metadata
-            .purge_app(self.service.resource_key, app_id);
-
         match self.service.backend() {
             BackendUrl::Sqlite { .. } => Ok(()),
             BackendUrl::Postgres => {
@@ -505,7 +482,6 @@ mod tests {
 
         let _plugin = service.plugin();
         let _key = service.resource_key();
-        let _cache = service.live_metadata();
         let _lifecycle = service.lifecycle();
         assert_eq!(
             url_parse_count(),
@@ -596,81 +572,6 @@ mod tests {
         assert!(
             rendered.contains("service-test-worker"),
             "the redaction must not blind the fields that are safe to print: {rendered}",
-        );
-    }
-
-    /// Every service in a process shares one live-metadata cache object.
-    ///
-    /// **Near-tautological, and recorded as such.** Both services call
-    /// [`crate::live_metadata::process_wide`], which is a `OnceLock`, so this
-    /// can only fail if `DbService::new` stops adopting that handle - a real but
-    /// narrow mistake. It rules on NOTHING about cross-thread sharing: the arm
-    /// that does is
-    /// `live_metadata::tests::facts_written_on_one_thread_are_the_same_allocation_on_another`.
-    #[test]
-    fn services_share_the_process_wide_metadata_cache() {
-        let one = DbService::new(config("postgres://host-a/db")).expect("service");
-        let other = DbService::new(config("postgres://host-b/db")).expect("service");
-        assert!(
-            Arc::ptr_eq(one.live_metadata(), other.live_metadata()),
-            "the live-metadata cache is process-wide, not per service",
-        );
-    }
-
-    /// Deleting an app must retire its live-metadata entries, and only its own.
-    ///
-    /// Before this, `deprovision_app` left every entry in place. The cache has
-    /// no eviction and no size bound - the identity is immutable, so nothing
-    /// else can ever make an entry unreachable - so a deleted app's facts stayed
-    /// resident for the life of the worker process, on a map that had just gone
-    /// from per-thread to per-process.
-    ///
-    /// **The neighbour is the load-bearing half.** A purge that took the whole
-    /// map would satisfy a deleted-app-is-gone assertion just as happily, and
-    /// would be the same process-global-wipe mistake `reset_context_for_tests`
-    /// was making. The neighbour here shares the resource key, so only the app
-    /// component of the identity separates them.
-    #[compio::test]
-    async fn deprovisioning_retires_the_deleted_apps_metadata_and_no_one_elses() {
-        use crate::binding::DbBinding;
-        use crate::live_metadata::LiveMetadataKey;
-
-        const URL: &str = "sqlite::memory:";
-        let service = DbService::new(config(URL)).expect("service");
-        let resource = service.resource_key();
-
-        let deleted = DbBinding::new("app_deprovision_purge_deleted", "deploy_a");
-        let neighbour = DbBinding::new("app_deprovision_purge_neighbour", "deploy_a");
-        let deleted_key = LiveMetadataKey::new(resource, &deleted, "notes");
-        let neighbour_key = LiveMetadataKey::new(resource, &neighbour, "notes");
-        // A second deploy of the deleted app: deletion must take every
-        // generation, not the one that happens to be current.
-        let deleted_older = DbBinding::new("app_deprovision_purge_deleted", "deploy_older");
-        let deleted_older_key = LiveMetadataKey::new(resource, &deleted_older, "notes");
-
-        let cache = service.live_metadata();
-        for key in [&deleted_key, &deleted_older_key, &neighbour_key] {
-            cache.publish(key.clone(), Some(Arc::new(serde_json::json!({ "n": 1 }))));
-            assert!(cache.contains(key), "the fixture must actually cache {key:?}");
-        }
-
-        service
-            .lifecycle()
-            .deprovision_app(deleted.app_id())
-            .await
-            .expect("sqlite deprovision is a no-op for the database itself");
-
-        assert!(
-            !cache.contains(&deleted_key),
-            "the deleted app's current-deploy entry must be retired",
-        );
-        assert!(
-            !cache.contains(&deleted_older_key),
-            "the deleted app's earlier-deploy entry must be retired too",
-        );
-        assert!(
-            cache.contains(&neighbour_key),
-            "deleting one app must not retire another app's facts",
         );
     }
 

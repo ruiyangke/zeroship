@@ -450,6 +450,18 @@ mod tests {
         })
     }
 
+    /// A worker thread can hold a deploy-pinned isolate and the current isolate
+    /// of ONE app at the same time. Their schema metadata must not be shared:
+    /// each `Collection` receiver has to resolve the descriptor entry its own
+    /// deploy installed, and see nothing at all for a collection the other
+    /// deploy declared.
+    ///
+    /// The property is unchanged; what carries it is not. It used to be pinned
+    /// on the deploy-keyed live-metadata cache, which is deleted. It is now
+    /// pinned on the descriptor store — `cache_schema` in, `collection_schema`
+    /// out — which is the only schema authority the data plane has left, so
+    /// this is the same isolation guarantee measured one layer closer to the
+    /// reads that depend on it.
     #[test]
     fn co_resident_deploy_bindings_keep_tokens_and_schema_entries_isolated() {
         const APP: &str = "app_same";
@@ -457,60 +469,63 @@ mod tests {
         const PINNED: &str = "deploy_pinned";
         const CURRENT: &str = "deploy_current";
 
-        // Replacing the context no longer drops the introspected entries: the
-        // live-metadata cache is process-wide now, owned by `DbService` rather
-        // than by whichever thread got there first. Give this fixture its own
-        // resource key instead, so its entries share the map with every other
-        // test's without colliding.
-        //
-        // NOT `process_wide().clear()`. This binary runs its tests in parallel,
-        // so a global clear here would wipe a concurrently-running test's
-        // entries mid-assertion - trading a fixture-isolation problem for a
-        // flake that only shows up under load.
-        const FIXTURE_URL: &str = "postgres://db-v8-co-resident-fixture/db";
-        crate::context::with_mut(|c| {
-            *c = crate::context::ThreadDbContext::new();
-            c.install_db_resources(
-                FIXTURE_URL,
-                crate::service::DbResourceKey::for_url(FIXTURE_URL),
-                crate::service::select_backend(FIXTURE_URL).expect("fixture URL"),
-                crate::live_metadata::process_wide(),
-            );
-        });
+        // The descriptor store is PER-THREAD, so replacing this thread's
+        // context is the whole isolation this fixture needs — it cannot reach
+        // a concurrently-running test on another thread.
+        crate::reset_context_for_tests();
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
         let pinned_binding = DbBinding::new(APP, PINNED);
-        crate::context::with(|c| {
-            c.cache_introspected_schema(
-                &pinned_binding,
-                COLLECTION,
-                Some(std::sync::Arc::new(json!({ "marker": "pinned" }))),
-            );
-        });
+        crate::cache_schema_for_deploy_for_tests(
+            &pinned_binding,
+            COLLECTION,
+            json!({ "marker": { "type": "string" } }),
+        );
         pinned_runtime.exit_isolate();
+
+        // Before the current deploy installs anything, its own receiver must
+        // resolve NOTHING for the collection the pinned deploy declared.
+        assert_eq!(
+            resolve_collection_binding(&pinned_runtime, &pinned_collection),
+            (
+                PINNED.to_string(),
+                Some(json!({ "marker": { "type": "string" } }))
+            ),
+            "the pinned deploy must resolve the entry it installed",
+        );
 
         let current_runtime = runtime_for_deploy(APP, CURRENT);
         let current_collection = mint_collection_binding(&current_runtime, APP, COLLECTION);
+        assert_eq!(
+            resolve_collection_binding(&current_runtime, &current_collection),
+            (CURRENT.to_string(), None),
+            "the current deploy must not read the pinned deploy's descriptor entry",
+        );
+
         let current_binding = DbBinding::new(APP, CURRENT);
-        crate::context::with(|c| {
-            c.cache_introspected_schema(
-                &current_binding,
-                COLLECTION,
-                Some(std::sync::Arc::new(json!({ "marker": "current" }))),
-            );
-        });
+        crate::cache_schema_for_deploy_for_tests(
+            &current_binding,
+            COLLECTION,
+            json!({ "other": { "type": "string" } }),
+        );
         current_runtime.exit_isolate();
 
         assert_eq!(
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
-            (PINNED.to_string(), Some(json!({ "marker": "pinned" }))),
-            "minting the current deploy redirected the pinned binding",
+            (
+                PINNED.to_string(),
+                Some(json!({ "marker": { "type": "string" } }))
+            ),
+            "installing the current deploy redirected the pinned binding",
         );
         assert_eq!(
             resolve_collection_binding(&current_runtime, &current_collection),
-            (CURRENT.to_string(), Some(json!({ "marker": "current" }))),
-            "the current binding must retain its own deploy token and cache entry",
+            (
+                CURRENT.to_string(),
+                Some(json!({ "other": { "type": "string" } }))
+            ),
+            "the current binding must retain its own deploy token and descriptor entry",
         );
     }
 

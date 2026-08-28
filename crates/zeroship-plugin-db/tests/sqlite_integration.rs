@@ -30,6 +30,7 @@ mod support;
 mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
+use zeroship_plugin_db::binding::DbBinding;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
@@ -2597,14 +2598,22 @@ fn vector_search_returns_k_nearest_sqlite() {
         let dims = 8usize;
         backend
             .pool_exec(
-                "CREATE TABLE \"vector_topk\".\"docs\" (\
-                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                   embedding BLOB CHECK(length(embedding) = 32) NOT NULL\
-                 )",
+                &format!(
+                    "CREATE TABLE \"vector_topk\".\"docs\" (\
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       embedding BLOB CHECK(length(embedding) = 32) NOT NULL, \
+                       {SYSTEM_COLUMNS_SQLITE_TAIL}\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE TABLE docs");
+        zeroship_plugin_db::cache_schema_for_tests(
+            "vector_topk",
+            "docs",
+            serde_json::json!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+        );
 
         // Create the vec0 vtable + mirror triggers BEFORE inserting
         // rows. With the triggers in place, every INSERT into the
@@ -2632,7 +2641,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         let query = mk_unit_vec(0, dims);
         let rows = backend
             .vector_search(
-                "vector_topk",
+                &DbBinding::cold_start("vector_topk"),
                 "docs",
                 "embedding",
                 &query,
@@ -2740,15 +2749,26 @@ fn vector_search_respects_filter_sqlite() {
         // 4-d column = 16-byte CHECK.
         backend
             .pool_exec(
-                "CREATE TABLE \"vector_filter\".\"docs\" (\
-                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                   tenant TEXT NOT NULL, \
-                   embedding BLOB CHECK(length(embedding) = 16) NOT NULL\
-                 )",
+                &format!(
+                    "CREATE TABLE \"vector_filter\".\"docs\" (\
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       tenant TEXT NOT NULL, \
+                       embedding BLOB CHECK(length(embedding) = 16) NOT NULL, \
+                       {SYSTEM_COLUMNS_SQLITE_TAIL}\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE TABLE docs");
+        zeroship_plugin_db::cache_schema_for_tests(
+            "vector_filter",
+            "docs",
+            serde_json::json!({
+                "tenant": { "type": "string" },
+                "embedding": { "type": "vector", "vectorDims": 4 },
+            }),
+        );
 
         // Create vec0 + triggers BEFORE inserts so the mirror fires
         // for every row.
@@ -2793,7 +2813,7 @@ fn vector_search_respects_filter_sqlite() {
         let filter = serde_json::json!({ "tenant": { "$eq": "a" } });
         let rows = backend
             .vector_search(
-                "vector_filter",
+                &DbBinding::cold_start("vector_filter"),
                 "docs",
                 "embedding",
                 &query,
@@ -2840,15 +2860,26 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
 
         backend
             .pool_exec(
-                "CREATE TABLE \"vector_math\".\"docs\" (\
-                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                   emb_cos BLOB CHECK(length(emb_cos) = 16) NOT NULL, \
-                   emb_l2  BLOB CHECK(length(emb_l2)  = 16) NOT NULL\
-                 )",
+                &format!(
+                    "CREATE TABLE \"vector_math\".\"docs\" (\
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       emb_cos BLOB CHECK(length(emb_cos) = 16) NOT NULL, \
+                       emb_l2  BLOB CHECK(length(emb_l2)  = 16) NOT NULL, \
+                       {SYSTEM_COLUMNS_SQLITE_TAIL}\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE TABLE docs");
+        zeroship_plugin_db::cache_schema_for_tests(
+            "vector_math",
+            "docs",
+            serde_json::json!({
+                "emb_cos": { "type": "vector", "vectorDims": 4 },
+                "emb_l2": { "type": "vector", "vectorDims": 4 },
+            }),
+        );
 
         backend
             .ensure_vector_index("vector_math", "docs", "emb_cos", 4, VectorMetric::Cosine)
@@ -2887,7 +2918,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         // Query the cosine distance from row 1 (v1) to v2.
         let cos_rows = backend
             .vector_search(
-                "vector_math",
+                &DbBinding::cold_start("vector_math"),
                 "docs",
                 "emb_cos",
                 &v1,
@@ -2899,7 +2930,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             .expect("cosine search");
         let l2_rows = backend
             .vector_search(
-                "vector_math",
+                &DbBinding::cold_start("vector_math"),
                 "docs",
                 "emb_l2",
                 &v1,
@@ -2985,14 +3016,22 @@ fn near_returns_within_radius() {
         // emitter.
         backend
             .pool_exec(
-                "CREATE TABLE \"near_radius\".\"places\" (\
-                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                   location BLOB CHECK(length(location) = 16) NOT NULL\
-                 )",
+                &format!(
+                    "CREATE TABLE \"near_radius\".\"places\" (\
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       location BLOB CHECK(length(location) = 16) NOT NULL, \
+                       {SYSTEM_COLUMNS_SQLITE_TAIL}\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE TABLE places");
+        zeroship_plugin_db::cache_schema_for_tests(
+            "near_radius",
+            "places",
+            serde_json::json!({ "location": { "type": "geoPoint" } }),
+        );
 
         let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
         // 10 points: 5 within ~1km (small lat/lng offsets) and 5
@@ -3028,7 +3067,7 @@ fn near_returns_within_radius() {
 
         let rows = backend
             .spatial_near(
-                "near_radius",
+                &DbBinding::cold_start("near_radius"),
                 "places",
                 "location",
                 london,
@@ -3258,6 +3297,20 @@ const SYSTEM_COLUMNS_SQLITE: &str = r#"
   updated_by TEXT NULL,
   version INTEGER NOT NULL DEFAULT 1,
   deleted_at TEXT NULL"#;
+
+/// The six non-`id` system columns, for a fixture that keeps its own `id`
+/// declaration. The vector / spatial fixtures use an `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` rowid so their assertions can name `id: 1`, but they still
+/// need the other six: the implicit read projection those searches build names
+/// all seven system columns unconditionally, and a table missing them is not a
+/// table the data plane can read.
+const SYSTEM_COLUMNS_SQLITE_TAIL: &str = "\
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+  created_by TEXT NULL, \
+  updated_by TEXT NULL, \
+  version INTEGER NOT NULL DEFAULT 1, \
+  deleted_at TEXT NULL";
 
 /// The three system indexes every confined table carries.
 fn system_indexes_sqlite(app_id: &str, collection: &str) -> String {
@@ -5603,7 +5656,7 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             None,
             None,
             None,
-            Some(&schema),
+            &schema,
         )
         .expect("build_find_with_schema");
         assert!(
@@ -5684,7 +5737,7 @@ fn aliased_select_skips_kind_none_sqlite() {
         None,
         None,
         None,
-        Some(&schema),
+        &schema,
     )
     .expect("build_find_with_schema");
     assert!(
@@ -6424,7 +6477,7 @@ fn unmask_with_auto_actor_returns_plaintext() {
             actor: Some(serde_json::json!({ "kind": "auto", "id": null })),
             reason: Some("integration test".to_string()),
         };
-        let result = unmask::dispatch_unmask(app_id, args)
+        let result = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect("dispatch_unmask must succeed for auto actor");
         assert_eq!(
@@ -6490,7 +6543,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
         };
-        let err = unmask::dispatch_unmask(app_id, args)
+        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
         match err {
@@ -6535,7 +6588,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             actor: Some(serde_json::json!({ "kind": "auto" })),
             reason: None,
         };
-        let err = unmask::dispatch_unmask(app_id, args)
+        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("unmask of non-masked column must refuse");
         match err {
@@ -6576,7 +6629,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "doctor_x" })),
             reason: Some("chart review".to_string()),
         };
-        let _err = unmask::dispatch_unmask(app_id, args)
+        let _err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("user actor denied");
 
@@ -6702,7 +6755,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: Some("user requested own data".to_string()),
         };
-        let result = unmask::dispatch_unmask(app_id, args)
+        let result = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect("policy grants user → pii; unmask must succeed");
         assert_eq!(result.plaintext, plaintext);
@@ -6748,7 +6801,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
         };
-        let err = unmask::dispatch_unmask(app_id, args)
+        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("policy does not allow user → pii; must refuse");
         match err {
@@ -6793,7 +6846,7 @@ fn unmask_default_deny_when_no_policy() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
         };
-        let err = unmask::dispatch_unmask(app_id, args)
+        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("no policy + non-auto actor → default-deny");
         match err {
@@ -6879,7 +6932,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             actor: Some(serde_json::json!({ "kind": "support", "id": "sup_1" })),
             reason: None,
         };
-        let err = unmask::dispatch_unmask(app_id, args1.clone())
+        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args1.clone())
             .await
             .expect_err("no policy → default deny for support");
         match err {
@@ -6901,7 +6954,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         // We still get `unmask_not_found` because no row exists, but
         // that's the path AFTER the auth check — the absence of
         // `unmask_not_permitted` is the pin.
-        let err = unmask::dispatch_unmask(app_id, args1)
+        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args1)
             .await
             .expect_err("auth passes; SELECT misses");
         match err {
@@ -7696,7 +7749,7 @@ fn bulk_unmask_end_to_end() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
             reason: Some("ops dashboard".into()),
         };
-        let result = dispatch_bulk_unmask(app_id, args)
+        let result = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect("bulk unmask");
         // Plaintext recovered for every pair.
@@ -7767,7 +7820,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
             reason: None,
         };
-        let err = dispatch_bulk_unmask(app_id, args)
+        let err = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("bulk must refuse atomically");
         match err {
@@ -7810,7 +7863,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             actor: Some(serde_json::json!({ "kind": "auto" })),
             reason: None,
         };
-        let err = dispatch_bulk_unmask(app_id, args)
+        let err = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
             .await
             .expect_err("unknown column must refuse");
         match err {
@@ -7890,7 +7943,7 @@ fn per_query_unmask_hint_end_to_end() {
         let reason = Some("dashboard view".to_string());
 
         // Step 1 — upfront auth fence.
-        authorize_query_hint(app_id, collection, &["ssn".to_string()], &actor, &reason)
+        authorize_query_hint(&DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &actor, &reason)
             .await
             .expect("authorize_query_hint must succeed");
 
@@ -7910,7 +7963,7 @@ fn per_query_unmask_hint_end_to_end() {
                 "_meta": { "collection": "users", "row_pk": "u1", "column": "ssn" },
             },
         })];
-        dispatch_unmask_for_query(app_id, collection, &["ssn".to_string()], &mut rows)
+        dispatch_unmask_for_query(&DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &mut rows)
             .await
             .expect("dispatch_unmask_for_query");
 
@@ -7930,7 +7983,7 @@ fn per_query_unmask_hint_end_to_end() {
         );
 
         // Step 3 — granted audit row lands.
-        audit_query_hint_granted(app_id, collection, &["ssn".to_string()], &actor, &reason)
+        audit_query_hint_granted(&DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &actor, &reason)
             .await
             .expect("audit");
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
@@ -7965,7 +8018,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 
         let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
         let err = authorize_query_hint(
-            app_id, collection, &["ssn".to_string()], &actor, &None,
+            &DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &actor, &None,
         )
         .await
         .expect_err("must refuse");
@@ -8002,7 +8055,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         let actor = Some(serde_json::json!({ "kind": "auto" }));
         let err = authorize_query_hint(
-            app_id,
+            &DbBinding::cold_start(app_id),
             collection,
             &["does_not_exist".to_string()],
             &actor,
@@ -8304,7 +8357,15 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         // `updated_by`; the DB fires its DEFAULT for the timestamps +
         // version.
         let mut doc = serde_json::json!({ "title": "PR 3 hello" });
-        apply_system_fields_on_insert(&mut doc, "app_demo", "posts", Some("usr_actor_e2e"));
+        // The pass takes the collection's descriptor entry (the write pipeline
+        // resolves it once per op and hands it down); the only thing it reads
+        // out of it is a declared `t.id(prefix)`, and this one declares none.
+        apply_system_fields_on_insert(
+            &mut doc,
+            &serde_json::json!({ "title": { "type": "string", "required": true } }),
+            "posts",
+            Some("usr_actor_e2e"),
+        );
 
         // The minted id must carry the `post_` prefix (collection-name
         // derived since the schema didn't declare an `idPrefix`).
@@ -8440,7 +8501,15 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             "title": "fk-ok",
             "authorId": "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
         });
-        apply_system_fields_on_insert(&mut post_doc, "app_demo", "posts", None);
+        apply_system_fields_on_insert(
+            &mut post_doc,
+            &serde_json::json!({
+                "title": {"type": "string", "required": true},
+                "authorId": {"type": "ref", "refTarget": "users"},
+            }),
+            "posts",
+            None,
+        );
         let built = build_insert_with_dialect("app_demo", "posts", &post_doc, SqlDialect::Sqlite)
             .expect("build posts insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
@@ -9063,7 +9132,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             None,
             None,
             None,
-            None,
+            &serde_json::json!({ "title": { "type": "string" } }),
             &[],
             true,
         )
@@ -9079,7 +9148,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             None,
             None,
             None,
-            None,
+            &serde_json::json!({ "title": { "type": "string" } }),
             &[],
             false,
         )
@@ -9263,7 +9332,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             None,
             None,
             None,
-            None,
+            &serde_json::json!({ "title": { "type": "string" } }),
             &[],
             true,
         )
@@ -9297,7 +9366,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             None,
             None,
             None,
-            None,
+            &serde_json::json!({ "title": { "type": "string" } }),
             &[],
             false,
         )

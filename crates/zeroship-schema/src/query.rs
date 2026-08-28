@@ -918,24 +918,29 @@ pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn schema_declares_readable_field(schema_hint: Option<&Value>, name: &str) -> bool {
+fn schema_declares_readable_field(schema_hint: &Value, name: &str) -> bool {
     schema_hint
-        .and_then(Value::as_object)
+        .as_object()
         .map(|obj| obj.contains_key(name) && !is_schema_metadata_key(name))
         .unwrap_or(false)
 }
 
-fn validate_read_identifier(name: &str, schema_hint: Option<&Value>) -> Result<(), QueryError> {
+/// **L24** — the read-identifier allowlist.
+///
+/// There is no permissive arm. Until this took a mandatory schema it raised
+/// `InvalidIdent` only `if schema_hint.is_some()`, so a caller that had not yet
+/// resolved a schema had EVERY field name accepted into `select` and `orderBy`
+/// - including a mask sibling or any other internal physical column. The schema
+/// is now a value the caller must already hold, so "not yet resolved" cannot be
+/// expressed here at all.
+fn validate_read_identifier(name: &str, schema_hint: &Value) -> Result<(), QueryError> {
     validate_field_name(name)?;
     if SYSTEM_FIELD_NAMES.contains(&name) || schema_declares_readable_field(schema_hint, name) {
         return Ok(());
     }
-    if schema_hint.is_some() {
-        return Err(QueryError::InvalidIdent(format!(
-            "field '{name}' is not a readable schema field; readable fields are declared schema fields plus the public system fields"
-        )));
-    }
-    Ok(())
+    Err(QueryError::InvalidIdent(format!(
+        "field '{name}' is not a readable schema field; readable fields are declared schema fields plus the public system fields"
+    )))
 }
 
 fn validate_limit_bound(name: &str, value: i64, max: i64) -> Result<(), QueryError> {
@@ -2825,24 +2830,15 @@ fn def_to_constraints_for_dialect(
 // Query builders
 // ---------------------------------------------------------------------------
 
-/// Build a SELECT query: `SELECT [cols|*] FROM "app_id"."collection" WHERE ... LIMIT ... OFFSET ...`
+/// The empty read schema: a collection that declares no creator-visible field.
 ///
-/// Thin shim around [`build_find_with_schema`] that passes `None` for the
-/// schema — the legacy CRUD entry point. Callers that have a cached schema
-/// available (the orchestrator's `dispatch_find`) should prefer
-/// [`build_find_with_schema`] so the SELECT clause can
-/// substitute `"<col>_masked" AS "<col>"` for every masked column
-/// ("default reads serve from the masked sibling").
-pub fn build_find(
-    app_id: &str,
-    collection: &str,
-    filter: &Value,
-    limit: Option<i64>,
-    offset: Option<i64>,
-    order_by: Option<&Value>,
-    select: Option<&Value>,
-) -> Result<BuiltQuery, QueryError> {
-    build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
+/// **L24** — this is what "no fields" looks like now, and it is FAIL-CLOSED: a
+/// read against it projects the seven platform system columns and nothing else,
+/// and every non-system identifier in `select` / `orderBy` is refused. It is not
+/// a stand-in for an unresolved schema; the only production caller is
+/// [`build_write_target_probe`], which selects `id` alone.
+pub fn empty_read_schema() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 /// Build the bounded id probe used before a write fans out per matching row.
@@ -2859,6 +2855,10 @@ pub fn build_write_target_probe(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     let select = serde_json::json!(["id"]);
+    // `id` is a platform system field, so the EMPTY read schema is the correct
+    // and complete one for this probe: it declares no creator field, and this
+    // query projects none.
+    let probe_schema = empty_read_schema();
     let mut built = build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
         app_id,
         collection,
@@ -2867,7 +2867,7 @@ pub fn build_write_target_probe(
         None,
         None,
         Some(&select),
-        None,
+        &probe_schema,
         &[],
         false,
         dialect,
@@ -2979,7 +2979,7 @@ pub fn build_find_with_schema(
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_find_with_schema_and_unmask(
         app_id,
@@ -3040,7 +3040,7 @@ pub fn build_find_with_schema_and_unmask(
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_columns: &[String],
 ) -> Result<BuiltQuery, QueryError> {
     build_find_with_schema_and_unmask_and_soft_delete(
@@ -3071,7 +3071,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_columns: &[String],
     filter_soft_deleted: bool,
     dialect: SqlDialect,
@@ -3101,7 +3101,7 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_columns: &[String],
     filter_soft_deleted: bool,
     dialect: SqlDialect,
@@ -3180,7 +3180,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete(
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_columns: &[String],
     filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
@@ -3229,7 +3229,7 @@ fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool)
 /// that have no per-query unmask hint to thread through.
 pub fn build_masked_aware_select_expr(
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<String, QueryError> {
     build_masked_aware_select_expr_with_unmask(select, schema_hint, &[])
 }
@@ -3246,26 +3246,21 @@ pub fn build_masked_aware_select_expr(
 /// back to the un-masked shape: the parent ciphertext/plaintext column
 /// rides out of SQL and only gets corrected later in the read pipeline.
 ///
-/// Instead, when any masked column exists we expand to an explicit
-/// qualified list:
+/// It always expands to an explicit qualified list:
 /// - `t."id" AS "id"` first,
 /// - `t."<col>_masked" AS "<col>"` for masked columns,
 /// - `t."<col>" AS "<col>"` for non-masked columns.
 ///
-/// When the schema cache is warm we always expand to the allowlisted
-/// public column set so read paths cannot surface internal physical
-/// columns. Only a cold schema cache falls back to `t.*`.
+/// **L24** — there is no `t.*` arm any more. It used to be taken whenever the
+/// schema had not been resolved yet, which is precisely when the search paths
+/// served the raw parent column and every internal physical column.
 pub fn build_masked_aware_select_expr_for_table_alias(
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     table_alias: &str,
-) -> String {
-    let qalias = quote_ident(table_alias);
+) -> Result<String, QueryError> {
     let empty_unmask: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let Some(parts) = implicit_read_projection_parts(schema_hint, &empty_unmask, Some(table_alias))
-    else {
-        return format!("{qalias}.*");
-    };
-    parts.join(", ")
+    let parts = implicit_read_projection_parts(schema_hint, &empty_unmask, Some(table_alias))?;
+    Ok(parts.join(", "))
 }
 
 /// Compose the SELECT column-list expression, accounting
@@ -3286,7 +3281,7 @@ pub fn build_masked_aware_select_expr_for_table_alias(
 ///    through to `*`.
 fn build_masked_aware_select_expr_with_unmask(
     select: Option<&Value>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_columns: &[String],
 ) -> Result<String, QueryError> {
     let unmask_set: std::collections::HashSet<&str> =
@@ -3309,11 +3304,7 @@ fn build_masked_aware_select_expr_with_unmask(
         }
     }
 
-    if let Some(parts) = implicit_read_projection_parts(schema_hint, &unmask_set, None) {
-        return Ok(parts.join(", "));
-    }
-
-    Ok("*".to_string())
+    Ok(implicit_read_projection_parts(schema_hint, &unmask_set, None)?.join(", "))
 }
 
 fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
@@ -3325,15 +3316,15 @@ fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
 
 fn project_read_field(
     field: &str,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_set: &std::collections::HashSet<&str>,
     table_alias: Option<&str>,
 ) -> String {
     let logical = quote_ident(field);
-    let source = if unmask_set.contains(field) || !column_is_masked(field, schema_hint) {
+    let source = if unmask_set.contains(field) {
         qualified_read_field(table_alias, field)
     } else {
-        qualified_read_field(table_alias, &format!("{field}_masked"))
+        qualified_read_field(table_alias, &read_column_for(field, schema_hint))
     };
     if table_alias.is_some() || source != logical {
         format!("{source} AS {logical}")
@@ -3342,12 +3333,25 @@ fn project_read_field(
     }
 }
 
+/// **L24** — the explicit read allowlist. TOTAL: it has no "no schema" arm.
+///
+/// Every caller previously treated `None` here as "emit `*`", which is the
+/// projection failing open: mask siblings, raw columns and every other
+/// platform-emitted physical column ride out of SQL. The schema is now a value
+/// the caller holds, and a non-object one is an error rather than a fallback,
+/// so there is no input to this function that produces an unrestricted
+/// projection.
 fn implicit_read_projection_parts(
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     unmask_set: &std::collections::HashSet<&str>,
     table_alias: Option<&str>,
-) -> Option<Vec<String>> {
-    let schema_obj = schema_hint.and_then(Value::as_object)?;
+) -> Result<Vec<String>, QueryError> {
+    let schema_obj = schema_hint.as_object().ok_or_else(|| {
+        QueryError::InvalidFilter(
+            "read schema must be a field-map object; a read cannot be projected without one"
+                .to_string(),
+        )
+    })?;
     let mut parts = Vec::with_capacity(SYSTEM_FIELD_NAMES.len() + schema_obj.len());
     for field in SYSTEM_FIELD_NAMES {
         parts.push(project_read_field(field, schema_hint, unmask_set, table_alias));
@@ -3358,15 +3362,15 @@ fn implicit_read_projection_parts(
         }
         parts.push(project_read_field(field, schema_hint, unmask_set, table_alias));
     }
-    Some(parts)
+    Ok(parts)
 }
 
 /// Does the column named `name` declare a non-`none`
 /// `.mask({...})` entry on `schema_hint`? Returns `false` when the
 /// schema is missing, the column is absent from it, or the mask is the
 /// explicit opt-out (`kind: "none"`).
-pub fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
-    let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
+pub fn column_is_masked(name: &str, schema_hint: &Value) -> bool {
+    let Some(schema_obj) = schema_hint.as_object() else {
         return false;
     };
     let Some(def) = schema_obj.get(name) else {
@@ -3377,6 +3381,39 @@ pub fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
     };
     let kind = mask.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
     kind != "none"
+}
+
+/// The PHYSICAL column every read surface must serve `field` from.
+///
+/// This is the SINGLE derivation site for the masked-sibling mapping. The
+/// implicit projection, an explicit `select`, `$group.by`, the aggregate
+/// accumulators, `$having`, `distinct` and `orderBy` all route through it,
+/// because disagreeing is not cosmetic: an `ORDER BY` over a column the
+/// `SELECT` does not return is a sort over a value the caller cannot read, and
+/// with `limit`/`offset` that is a binary search over hidden data (L26).
+///
+/// The name is READ from the descriptor's `storage.valueColumn` when the field
+/// carries one, and only derived by suffixing when it does not. The descriptor
+/// stamps that block from the DDL emitter's own
+/// `mask_sibling_column_for_field`
+/// (`crates/zeroship-migrate-core/src/render/gen_types.rs:285-318`), so the two
+/// cannot drift, and a later flip of which physical column holds the readable
+/// value moves this function's answer without touching a single caller.
+pub fn read_column_for(field: &str, schema_hint: &Value) -> String {
+    let declared = schema_hint
+        .as_object()
+        .and_then(|obj| obj.get(field))
+        .and_then(|def| def.get("storage"))
+        .and_then(|storage| storage.get("valueColumn"))
+        .and_then(Value::as_str);
+    match declared {
+        Some(column) => column.to_string(),
+        // No `storage` block: either the field is unmasked (it reads from
+        // itself) or the schema predates the storage projection, in which case
+        // the sibling convention is the emitter's own.
+        None if column_is_masked(field, schema_hint) => format!("{field}_masked"),
+        None => field.to_string(),
+    }
 }
 
 /// **SEC-4** — the column SQL expression to read for `field` inside an
@@ -3391,12 +3428,8 @@ pub fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
 /// never lower to the bare plaintext column. Returns a quoted identifier
 /// (the sibling when masked, the field itself otherwise) — NOT aliased,
 /// since the aggregate builder applies its own `AS` where appropriate.
-pub fn aggregate_read_ident(field: &str, schema_hint: Option<&Value>) -> String {
-    if column_is_masked(field, schema_hint) {
-        quote_ident(&format!("{field}_masked"))
-    } else {
-        quote_ident(field)
-    }
+pub fn aggregate_read_ident(field: &str, schema_hint: &Value) -> String {
+    quote_ident(&read_column_for(field, schema_hint))
 }
 
 /// **SEC-4** — push one `$group.by` field's SELECT projection and GROUP
@@ -3406,18 +3439,18 @@ pub fn aggregate_read_ident(field: &str, schema_hint: Option<&Value>) -> String 
 /// column projects + groups by the bare quoted column.
 fn push_group_by_field(
     field: &str,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     select_cols: &mut Vec<String>,
     group_by_cols: &mut Vec<String>,
 ) {
     let logical = quote_ident(field);
-    if column_is_masked(field, schema_hint) {
-        let sibling = quote_ident(&format!("{field}_masked"));
-        select_cols.push(format!("{sibling} AS {logical}"));
-        group_by_cols.push(sibling);
-    } else {
+    let read = quote_ident(&read_column_for(field, schema_hint));
+    if read == logical {
         select_cols.push(logical.clone());
         group_by_cols.push(logical);
+    } else {
+        select_cols.push(format!("{read} AS {logical}"));
+        group_by_cols.push(read);
     }
 }
 
@@ -4546,8 +4579,9 @@ pub fn build_aggregate(
     app_id: &str,
     collection: &str,
     pipeline: &Value,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_aggregate_with_soft_delete(app_id, collection, pipeline, false)
+    build_aggregate_with_soft_delete(app_id, collection, pipeline, false, schema_hint)
 }
 
 /// Aggregate builder with the soft-delete auto-filter.
@@ -4560,13 +4594,14 @@ pub fn build_aggregate_with_soft_delete(
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_aggregate_with_soft_delete_with_dialect(
         app_id,
         collection,
         pipeline,
         filter_soft_deleted,
-        None,
+        schema_hint,
         SqlDialect::Postgres,
     )
 }
@@ -4577,7 +4612,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
@@ -4772,9 +4807,9 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
 
     let select_expr = if select_cols.is_empty() {
         let empty_unmask: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        implicit_read_projection_parts(schema_hint, &empty_unmask, None)
-            .map(|parts| parts.join(", "))
-            .unwrap_or_else(|| "*".to_string())
+        // L24: no `*` fallback. An aggregate with no projection stage returns
+        // the same allowlist a plain read does.
+        implicit_read_projection_parts(schema_hint, &empty_unmask, None)?.join(", ")
     } else {
         select_cols.join(", ")
     };
@@ -4821,8 +4856,9 @@ pub fn build_distinct(
     collection: &str,
     field: &str,
     filter: &Value,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_distinct_with_soft_delete(app_id, collection, field, filter, false)
+    build_distinct_with_soft_delete(app_id, collection, field, filter, false, schema_hint)
 }
 
 /// DISTINCT builder with the soft-delete auto-filter.
@@ -4832,6 +4868,7 @@ pub fn build_distinct_with_soft_delete(
     field: &str,
     filter: &Value,
     filter_soft_deleted: bool,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_distinct_with_soft_delete_with_dialect(
         app_id,
@@ -4839,7 +4876,7 @@ pub fn build_distinct_with_soft_delete(
         field,
         filter,
         filter_soft_deleted,
-        None,
+        schema_hint,
         SqlDialect::Postgres,
     )
 }
@@ -4851,7 +4888,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     field: &str,
     filter: &Value,
     filter_soft_deleted: bool,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
@@ -4861,11 +4898,11 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
     let col = quote_ident(field);
-    let select_expr = if column_is_masked(field, schema_hint) {
-        let sibling = format!("{field}_masked");
-        format!("{} AS {col}", quote_ident(&sibling))
-    } else {
+    let read = quote_ident(&read_column_for(field, schema_hint));
+    let select_expr = if read == col {
         col.clone()
+    } else {
+        format!("{read} AS {col}")
     };
 
     let mut params: Vec<String> = Vec::new();
@@ -4919,7 +4956,7 @@ pub fn build_vector_search(
     k: usize,
     metric: crate::descriptors::VectorMetric,
     filter: &Value,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -5008,7 +5045,7 @@ pub fn build_spatial_near(
     radius_m: f64,
     filter: &Value,
     limit: Option<usize>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -5058,7 +5095,7 @@ fn build_having(
     filter: &Value,
     params: &mut Vec<String>,
     agg_exprs: &std::collections::HashMap<String, String>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<String, QueryError> {
     validate_clause_budget(filter, ClauseBudgetKind::Having)?;
     build_having_inner(filter, params, agg_exprs, schema_hint)
@@ -5068,7 +5105,7 @@ fn build_having_inner(
     filter: &Value,
     params: &mut Vec<String>,
     agg_exprs: &std::collections::HashMap<String, String>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<String, QueryError> {
     match filter {
         Value::Null => Ok(String::new()),
@@ -5471,26 +5508,43 @@ fn build_order_by(order: &Value) -> Result<String, QueryError> {
 
 #[cfg(test)]
 fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<String, QueryError> {
-    build_order_by_with_validator(order, dialect, validate_field_name)
-}
-
-fn build_order_by_read_with_dialect(
-    order: &Value,
-    dialect: SqlDialect,
-    schema_hint: Option<&Value>,
-) -> Result<String, QueryError> {
-    build_order_by_with_validator(order, dialect, |field| {
-        validate_read_identifier(field, schema_hint)
+    // The DDL/no-schema arm: it names the declared column because there is no
+    // read surface to disagree with. Test-only; every production ORDER BY goes
+    // through `build_order_by_read_with_dialect`.
+    build_order_by_with_validator(order, dialect, validate_field_name, |field| {
+        field.to_string()
     })
 }
 
-fn build_order_by_with_validator<F>(
+/// **L26** — the READ-path ORDER BY builder.
+///
+/// The sort term is resolved through [`read_column_for`], the same function the
+/// projection uses. Before that, this emitted the bare declared name while the
+/// SELECT served the masked sibling, so `orderBy: { ssn: 1 }` ordered rows by
+/// the value the mask hides - observable through `limit`/`offset` as a binary
+/// search over data the caller cannot read.
+fn build_order_by_read_with_dialect(
+    order: &Value,
+    dialect: SqlDialect,
+    schema_hint: &Value,
+) -> Result<String, QueryError> {
+    build_order_by_with_validator(
+        order,
+        dialect,
+        |field| validate_read_identifier(field, schema_hint),
+        |field| read_column_for(field, schema_hint),
+    )
+}
+
+fn build_order_by_with_validator<F, R>(
     order: &Value,
     dialect: SqlDialect,
     mut validate: F,
+    mut read_column: R,
 ) -> Result<String, QueryError>
 where
     F: FnMut(&str) -> Result<(), QueryError>,
+    R: FnMut(&str) -> String,
 {
     match order {
         Value::Object(map) => {
@@ -5498,7 +5552,7 @@ where
             for (key, val) in map {
                 validate(key)?;
                 let descending = matches!(val.as_i64(), Some(n) if n < 0);
-                parts.push(build_order_term(key, descending, dialect));
+                parts.push(build_order_term(&read_column(key), descending, dialect));
             }
             Ok(parts.join(", "))
         }
@@ -5518,7 +5572,7 @@ where
                 })?;
                 validate(field)?;
                 let descending = matches!(pair[1].as_i64(), Some(n) if n < 0);
-                parts.push(build_order_term(field, descending, dialect));
+                parts.push(build_order_term(&read_column(field), descending, dialect));
             }
             Ok(parts.join(", "))
         }
@@ -5539,7 +5593,7 @@ fn build_aggregate_order_by(
     order: &Value,
     dialect: SqlDialect,
     agg_exprs: &std::collections::HashMap<String, String>,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> Result<String, QueryError> {
     let term = |field: &str, descending: bool| -> Result<String, QueryError> {
         if agg_exprs.contains_key(field) {
@@ -5692,7 +5746,7 @@ fn build_order_term_with_schema(
     field: &str,
     descending: bool,
     dialect: SqlDialect,
-    schema_hint: Option<&Value>,
+    schema_hint: &Value,
 ) -> String {
     build_order_term_expr(&aggregate_read_ident(field, schema_hint), descending, dialect)
 }
@@ -5982,11 +6036,80 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The read schema the filter/order/limit-shape tests below build against.
+    ///
+    /// `build_find` used to exist in the production API as a shim that passed
+    /// `None` for the schema; it had no production caller (measured: only this
+    /// module, `crates/zeroship-plugin-db/tests/integration.rs` and
+    /// `crates/zeroship-plugin-db/benches/bench_query_build.rs`) and it was the
+    /// only way to reach the `SELECT *` arm L24 is about. It is gone. These
+    /// tests are about WHERE / ORDER BY / LIMIT shape, so they declare the
+    /// columns they name and let the projection be the ordinary allowlist.
+    fn tschema() -> Value {
+        json!({
+            "age":        { "type": "number" },
+            "amount":     { "type": "number" },
+            "bio":        { "type": "string" },
+            "body":       { "type": "string" },
+            "category":   { "type": "string" },
+            "city":       { "type": "string" },
+            "country":    { "type": "string" },
+            "department": { "type": "string" },
+            "email":      { "type": "string" },
+            "name":       { "type": "string" },
+            "optional":   { "type": "string" },
+            "price":      { "type": "number" },
+            "revenue":    { "type": "number" },
+            "role":       { "type": "string" },
+            "salary":     { "type": "number" },
+            "score":      { "type": "number" },
+            "status":     { "type": "string" },
+            "tags":       { "type": "array" },
+            "title":      { "type": "string" },
+            "views":      { "type": "number" },
+        })
+    }
+
+    /// The projection [`tschema`] produces, as it appears in every SELECT built
+    /// from it. Spelled once so a change to the system-field set or to
+    /// `tschema` is a one-line edit rather than a sweep.
+    fn tselect() -> String {
+        let empty: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        format!(
+            "SELECT {}",
+            implicit_read_projection_parts(&tschema(), &empty, None)
+                .expect("tschema is an object")
+                .join(", ")
+        )
+    }
+
+    /// Test-local stand-in for the deleted `build_find`, over [`tschema`].
+    fn build_find(
+        app_id: &str,
+        collection: &str,
+        filter: &Value,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        order_by: Option<&Value>,
+        select: Option<&Value>,
+    ) -> Result<BuiltQuery, QueryError> {
+        build_find_with_schema(
+            app_id,
+            collection,
+            filter,
+            limit,
+            offset,
+            order_by,
+            select,
+            &tschema(),
+        )
+    }
+
     #[test]
     fn test_simple_eq_filter() {
         let filter = json!({"name": "alice"});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" = $1"#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users" WHERE "name" = $1"#, tselect()));
         assert_eq!(q.params, vec!["alice"]);
     }
 
@@ -6155,7 +6278,7 @@ mod tests {
     fn test_empty_filter() {
         let filter = json!({});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users""#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users""#, tselect()));
         assert!(q.params.is_empty());
     }
 
@@ -6163,7 +6286,7 @@ mod tests {
     fn test_null_filter() {
         let filter = Value::Null;
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users""#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users""#, tselect()));
     }
 
     #[test]
@@ -6210,7 +6333,7 @@ mod tests {
     fn test_ilike_operator() {
         let filter = json!({"name": {"$ilike": "%alice%"}});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" ILIKE $1"#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users" WHERE "name" ILIKE $1"#, tselect()));
         assert_eq!(q.params, vec!["%alice%"]);
     }
 
@@ -6225,7 +6348,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &tschema(),
             &[],
             false,
             SqlDialect::Sqlite,
@@ -6233,7 +6356,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             q.sql,
-            r#"SELECT * FROM "app1"."users" WHERE "name" LIKE $1 COLLATE NOCASE"#
+            format!(
+                r#"{} FROM "app1"."users" WHERE "name" LIKE $1 COLLATE NOCASE"#,
+                tselect()
+            )
         );
         assert_eq!(q.params, vec!["%alice%"]);
     }
@@ -6242,7 +6368,7 @@ mod tests {
     fn test_not_operator() {
         let filter = json!({"$not": {"role": "admin"}});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE NOT ("role" = $1)"#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users" WHERE NOT ("role" = $1)"#, tselect()));
         assert_eq!(q.params, vec!["admin"]);
     }
 
@@ -6565,13 +6691,13 @@ mod tests {
     fn test_find_without_select() {
         let filter = json!({});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert!(q.sql.starts_with(r#"SELECT * FROM"#), "sql: {}", q.sql);
+        assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
     }
 
     #[test]
     fn test_distinct() {
         let filter = json!({});
-        let q = build_distinct("app1", "users", "country", &filter).unwrap();
+        let q = build_distinct("app1", "users", "country", &filter, &tschema()).unwrap();
         assert!(
             q.sql.starts_with(r#"SELECT DISTINCT "country" FROM "app1"."users""#),
             "sql: {}",
@@ -6584,7 +6710,7 @@ mod tests {
     #[test]
     fn test_distinct_with_filter() {
         let filter = json!({"active": true});
-        let q = build_distinct("app1", "users", "role", &filter).unwrap();
+        let q = build_distinct("app1", "users", "role", &filter, &tschema()).unwrap();
         assert!(
             q.sql.contains(r#"SELECT DISTINCT "role" FROM "app1"."users" WHERE"#),
             "sql: {}",
@@ -6608,7 +6734,7 @@ mod tests {
             "email",
             &json!({}),
             false,
-            Some(&schema),
+            &schema,
             SqlDialect::Postgres,
         )
         .expect("build distinct with schema");
@@ -6633,7 +6759,7 @@ mod tests {
             {"$sort": {"count": -1}},
             {"$limit": 5}
         ]);
-        let q = build_aggregate("app1", "users", &pipeline).unwrap();
+        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains(r#"SELECT "country", COUNT(*) AS "count""#), "sql: {}", q.sql);
         assert!(q.sql.contains("WHERE"), "sql: {}", q.sql);
         assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
@@ -6646,7 +6772,7 @@ mod tests {
         let pipeline = json!([
             {"$group": {"by": ["country", "city"], "total": {"$sum": "revenue"}}}
         ]);
-        let q = build_aggregate("app1", "orders", &pipeline).unwrap();
+        let q = build_aggregate("app1", "orders", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains(r#"GROUP BY "country", "city""#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"SUM("revenue") AS "total""#), "sql: {}", q.sql);
     }
@@ -6657,7 +6783,7 @@ mod tests {
             {"$group": {"by": "category", "cnt": {"$count": true}}},
             {"$having": {"cnt": {"$gte": 10}}}
         ]);
-        let q = build_aggregate("app1", "products", &pipeline).unwrap();
+        let q = build_aggregate("app1", "products", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains("HAVING COUNT(*) >= $1"), "sql: {}", q.sql);
         assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["10"]);
@@ -6668,8 +6794,8 @@ mod tests {
         let pipeline = json!([
             {"$match": {"active": true}}
         ]);
-        let q = build_aggregate("app1", "users", &pipeline).unwrap();
-        assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
+        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
     }
 
@@ -6702,7 +6828,7 @@ mod tests {
         ]);
         let schema = mask_only_ssn_schema();
         let q = build_aggregate_with_soft_delete_with_dialect(
-            "app1", "users", &pipeline, false, Some(&schema), SqlDialect::Postgres,
+            "app1", "users", &pipeline, false, &schema, SqlDialect::Postgres,
         )
         .expect("build aggregate with schema");
 
@@ -6735,7 +6861,7 @@ mod tests {
         ]);
         let schema = mask_only_ssn_schema();
         let q = build_aggregate_with_soft_delete_with_dialect(
-            "app1", "users", &pipeline, false, Some(&schema), SqlDialect::Postgres,
+            "app1", "users", &pipeline, false, &schema, SqlDialect::Postgres,
         )
         .expect("build aggregate with schema");
 
@@ -6762,7 +6888,7 @@ mod tests {
                 {"$group": {"by": "tenant", "v": {op: "ssn"}}}
             ]);
             let q = build_aggregate_with_soft_delete_with_dialect(
-                "app1", "users", &pipeline, false, Some(&schema), SqlDialect::Postgres,
+                "app1", "users", &pipeline, false, &schema, SqlDialect::Postgres,
             )
             .unwrap_or_else(|e| panic!("build aggregate {op}: {e:?}"));
             assert!(
@@ -6893,7 +7019,7 @@ mod tests {
             None,
             Some(&order),
             None,
-            None,
+            &tschema(),
             &[],
             false,
             SqlDialect::Sqlite,
@@ -6935,7 +7061,7 @@ mod tests {
         // { field: null } → IS NULL (implicit $eq)
         let filter = json!({"bio": null});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "bio" IS NULL"#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users" WHERE "bio" IS NULL"#, tselect()));
         assert!(q.params.is_empty());
     }
 
@@ -6944,7 +7070,7 @@ mod tests {
         // { field: { $ne: null } } → IS NOT NULL
         let filter = json!({"bio": {"$ne": null}});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "bio" IS NOT NULL"#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users" WHERE "bio" IS NOT NULL"#, tselect()));
         assert!(q.params.is_empty());
     }
 
@@ -6973,7 +7099,7 @@ mod tests {
     fn test_like_operator() {
         let filter = json!({"name": {"$like": "ali%"}});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" LIKE $1"#);
+        assert_eq!(q.sql, format!(r#"{} FROM "app1"."users" WHERE "name" LIKE $1"#, tselect()));
         assert_eq!(q.params, vec!["ali%"]);
     }
 
@@ -7101,16 +7227,16 @@ mod tests {
         // The spec says "no $group → error", but the current code returns SELECT * FROM.
         // Test that the function at minimum returns without panicking and produces valid SQL.
         let pipeline = json!([]);
-        let q = build_aggregate("app1", "users", &pipeline).unwrap();
-        assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
+        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
     }
 
     #[test]
     fn test_aggregate_match_only() {
         // Only $match without $group → select * (same as no_group test)
         let pipeline = json!([{"$match": {"status": "active"}}]);
-        let q = build_aggregate("app1", "users", &pipeline).unwrap();
-        assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
+        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
         assert!(q.sql.contains("WHERE"), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["active"]);
@@ -7128,7 +7254,7 @@ mod tests {
                 "max_price": {"$max": "price"}
             }
         }]);
-        let q = build_aggregate("app1", "orders", &pipeline).unwrap();
+        let q = build_aggregate("app1", "orders", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains("COUNT(*)"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"SUM("amount")"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"AVG("price")"#), "sql: {}", q.sql);
@@ -7215,7 +7341,7 @@ mod tests {
         let pipeline = json!([
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
         // Without a preceding $sort, $first uses plain array_agg
         assert!(
             q.sql.contains(r#"(array_agg("name"))[1]"#),
@@ -7230,7 +7356,7 @@ mod tests {
             {"$sort": {"salary": -1}},
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
         // With a preceding $sort, $first threads the ORDER BY into array_agg
         assert!(
             q.sql.contains(r#"(array_agg("name" ORDER BY "salary" DESC NULLS FIRST))[1]"#),
@@ -7245,7 +7371,7 @@ mod tests {
             {"$sort": {"salary": -1, "name": 1}},
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
         // Multi-column sort should appear in the ORDER BY clause
         assert!(
             q.sql.contains(r#"array_agg("name" ORDER BY"#),
@@ -7275,7 +7401,7 @@ mod tests {
                 "cnt": {"$count": true}
             }}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
         // $first should have ORDER BY
         assert!(
             q.sql.contains(r#"array_agg("name" ORDER BY "salary" DESC NULLS FIRST)"#),
@@ -10919,7 +11045,7 @@ mod tests {
         });
         let filter = serde_json::json!({ "id": 7 });
         let bq = build_find_with_schema(
-            "app1", "users", &filter, Some(1), None, None, None, Some(&schema),
+            "app1", "users", &filter, Some(1), None, None, None, &schema,
         )
         .expect("build_find_with_schema ok");
 
@@ -10974,7 +11100,7 @@ mod tests {
         let filter = serde_json::json!({});
         let select = serde_json::json!(["id", "ssn"]);
         let bq = build_find_with_schema(
-            "app1", "users", &filter, None, None, None, Some(&select), Some(&schema),
+            "app1", "users", &filter, None, None, None, Some(&select), &schema,
         )
         .expect("build_find_with_schema ok");
         assert!(
@@ -11012,7 +11138,7 @@ mod tests {
         let filter = serde_json::json!({});
         let unmask: Vec<String> = vec!["ssn".to_string()];
         let bq = build_find_with_schema_and_unmask(
-            "app1", "users", &filter, None, None, None, None, Some(&schema), &unmask,
+            "app1", "users", &filter, None, None, None, None, &schema, &unmask,
         )
         .expect("build_find_with_schema_and_unmask ok");
 
@@ -11042,7 +11168,7 @@ mod tests {
         });
         let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
         let err = build_find_with_schema(
-            "app1", "users", &filter, None, None, None, None, Some(&schema),
+            "app1", "users", &filter, None, None, None, None, &schema,
         )
         .expect_err("filter by sibling must be refused");
         let msg = format!("{err}");
@@ -11064,7 +11190,7 @@ mod tests {
         });
         let filter = serde_json::json!({});
         let bq = build_find_with_schema(
-            "app1", "users", &filter, None, None, None, None, Some(&schema),
+            "app1", "users", &filter, None, None, None, None, &schema,
         )
         .unwrap();
         // SELECT * is never emitted when any column is masked.
@@ -11075,6 +11201,202 @@ mod tests {
         );
         assert!(bq.sql.contains("\"ssn_masked\" AS \"ssn\""));
         assert!(bq.sql.contains("\"id\""));
+    }
+
+    /// **L24, arm 1** — the read projection is TOTAL. There is no schema value
+    /// that produces `SELECT *`.
+    ///
+    /// The defect this replaces: `implicit_read_projection_parts` returned
+    /// `None` for an absent schema and
+    /// `build_masked_aware_select_expr_with_unmask` fell through to a bare `*`,
+    /// so the allowlist that keeps mask siblings, raw columns and every other
+    /// platform-emitted column out of a result set simply stopped applying -
+    /// exactly when the schema had not arrived yet. Measured before the fix:
+    /// `build_find_with_schema(..., None)` returned
+    /// `SELECT * FROM "app1"."users"`.
+    ///
+    /// The absent case is no longer expressible: the parameter is `&Value`, not
+    /// `Option<&Value>`. The weakest schema a caller can now supply is the
+    /// EMPTY one, and this pins that even THAT fails closed.
+    #[test]
+    fn the_weakest_possible_schema_still_projects_an_explicit_allowlist() {
+        let bq = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            None,
+            &empty_read_schema(),
+        )
+        .unwrap();
+        assert!(
+            !bq.sql.contains('*'),
+            "the empty schema must still project an explicit list; got {}",
+            bq.sql,
+        );
+        for field in SYSTEM_FIELD_NAMES {
+            assert!(
+                bq.sql.contains(&quote_ident(field)),
+                "the system field {field} must be projected; got {}",
+                bq.sql,
+            );
+        }
+    }
+
+    /// **L24, arm 2** — the read-identifier allowlist has no permissive arm.
+    ///
+    /// `validate_read_identifier` used to raise `InvalidIdent` only `if
+    /// schema_hint.is_some()`. Measured before the fix, a `select` of an
+    /// undeclared field with no schema returned
+    /// `SELECT "not_a_declared_field" FROM "app1"."users"`. The empty schema is
+    /// the closest a caller can now come to "no schema", and it refuses.
+    #[test]
+    fn an_undeclared_identifier_is_refused_under_the_empty_schema() {
+        let refused = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            Some(&serde_json::json!(["not_a_declared_field"])),
+            &empty_read_schema(),
+        );
+        assert!(
+            matches!(refused, Err(QueryError::InvalidIdent(_))),
+            "an undeclared identifier must be refused; got {:?}",
+            refused.map(|bq| bq.sql),
+        );
+    }
+
+    /// **L24, arm 3** — a schema value that is not a field map is an ERROR, not
+    /// a fallback. This is the one remaining way a caller could smuggle
+    /// "absent" through a `&Value`, and it is closed.
+    #[test]
+    fn a_non_object_schema_is_an_error_not_an_unrestricted_projection() {
+        for bad in [Value::Null, json!([]), json!("users"), json!(7)] {
+            let refused = build_find_with_schema(
+                "app1",
+                "users",
+                &serde_json::json!({}),
+                None,
+                None,
+                None,
+                None,
+                &bad,
+            );
+            assert!(
+                refused.is_err(),
+                "a non-object schema ({bad}) must be refused; got {:?}",
+                refused.map(|bq| bq.sql),
+            );
+        }
+    }
+
+    /// The same property on the SEARCH projection
+    /// (`build_masked_aware_select_expr_for_table_alias`), which had its own
+    /// `"t".*` fallback on the identical condition.
+    #[test]
+    fn the_table_alias_projection_has_no_star_arm() {
+        let expanded = build_masked_aware_select_expr_for_table_alias(&empty_read_schema(), "t")
+            .expect("the empty schema is a field map");
+        assert!(
+            !expanded.contains('*'),
+            "the aliased projection must never expand to `t.*`; got {expanded}",
+        );
+        assert!(
+            build_masked_aware_select_expr_for_table_alias(&Value::Null, "t").is_err(),
+            "a non-object schema must be refused rather than expanded to `t.*`",
+        );
+    }
+
+    /// The masked schema both L26 arms are built from. It carries the v2
+    /// descriptor's `storage` block, because that is what a `.zship` deploy
+    /// actually caches (`crates/zeroship-migrate-core/src/render/gen_types.rs:327-360`
+    /// stamps it; `sdks/bootstrap/src/install-schema.ts:369-372` spreads it into
+    /// the `registerModel` payload verbatim).
+    fn l26_masked_schema() -> Value {
+        serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "pci" },
+                "storage": {
+                    "valueColumn": "ssn_masked",
+                    "rawColumn": "ssn",
+                    "rawFilterable": false,
+                    "rawSortable": false,
+                    "rawProjectable": false
+                }
+            },
+        })
+    }
+
+    /// **L26** — `orderBy` on a masked column must sort by the SAME physical
+    /// column the projection reads.
+    ///
+    /// Before the fix, `build_order_by_with_validator` emitted the bare
+    /// DECLARED name through `build_order_term` while the projection served the
+    /// masked sibling, so `find({ orderBy: { ssn: 1 } })` ordered rows by the
+    /// plaintext/ciphertext the mask exists to hide. With `limit`/`offset` that
+    /// is a binary search over a value the caller may never read.
+    ///
+    /// The assertion is written against [`read_column_for`], NOT against the
+    /// literal `ssn_masked`, so it stays correct after the masking flip moves
+    /// the readable value into the declared name and the raw value into
+    /// `ssn_raw`.
+    #[test]
+    fn order_by_on_a_masked_column_sorts_by_the_column_the_projection_reads() {
+        let schema = l26_masked_schema();
+        let read = read_column_for("ssn", &schema);
+        let bq = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            Some(10),
+            None,
+            Some(&serde_json::json!({ "ssn": 1 })),
+            None,
+            &schema,
+        )
+        .unwrap();
+        assert!(
+            bq.sql.contains(&format!("ORDER BY {} ASC", quote_ident(&read))),
+            "orderBy must sort by the projected column {read:?}; got {}",
+            bq.sql,
+        );
+        // And it must not sort by the authoritative column, whichever that is.
+        let raw = schema["ssn"]["storage"]["rawColumn"].as_str().unwrap();
+        assert!(
+            !bq.sql.contains(&format!("ORDER BY {} ", quote_ident(raw))),
+            "orderBy must never name the raw column {raw:?}; got {}",
+            bq.sql,
+        );
+    }
+
+    /// The array form of `orderBy` takes a different arm of
+    /// `build_order_by_with_validator` and had the same defect.
+    #[test]
+    fn order_by_array_form_on_a_masked_column_sorts_by_the_projected_column() {
+        let schema = l26_masked_schema();
+        let read = read_column_for("ssn", &schema);
+        let bq = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            None,
+            None,
+            Some(&serde_json::json!([["ssn", -1]])),
+            None,
+            &schema,
+        )
+        .unwrap();
+        assert!(
+            bq.sql.contains(&format!("ORDER BY {} DESC", quote_ident(&read))),
+            "orderBy array form must sort by the projected column {read:?}; got {}",
+            bq.sql,
+        );
     }
 
     #[test]
@@ -11092,7 +11414,7 @@ mod tests {
             5,
             crate::descriptors::VectorMetric::Cosine,
             &serde_json::json!({}),
-            Some(&schema),
+            &schema,
         )
         .expect("vector search sql");
         assert!(
@@ -11122,7 +11444,7 @@ mod tests {
             1000.0,
             &serde_json::json!({}),
             Some(10),
-            Some(&schema),
+            &schema,
         )
         .expect("spatial search sql");
         assert!(
@@ -11150,7 +11472,7 @@ mod tests {
             None,
             None,
             None,
-            Some(&schema),
+            &schema,
         )
         .expect("find projection");
         assert!(
@@ -11183,7 +11505,7 @@ mod tests {
             None,
             None,
             Some(&serde_json::json!(["ssn_masked"])),
-            Some(&schema),
+            &schema,
         )
         .expect_err("select on masked sibling must be refused");
         assert!(matches!(select_err, QueryError::InvalidIdent(_)));
@@ -11196,7 +11518,7 @@ mod tests {
             None,
             Some(&serde_json::json!({ "ssn_masked": 1 })),
             None,
-            Some(&schema),
+            &schema,
         )
         .expect_err("sort on masked sibling must be refused");
         assert!(matches!(sort_err, QueryError::InvalidIdent(_)));
@@ -11207,7 +11529,7 @@ mod tests {
             "ssn_masked",
             &serde_json::json!({}),
             false,
-            Some(&schema),
+            &schema,
             SqlDialect::Postgres,
         )
         .expect_err("distinct on masked sibling must be refused");
@@ -11221,7 +11543,7 @@ mod tests {
                 { "$sort": { "ssn_masked": 1 } }
             ]),
             false,
-            Some(&schema),
+            &schema,
             SqlDialect::Postgres,
         )
         .expect_err("aggregate sort on masked sibling must be refused");
@@ -11241,7 +11563,7 @@ mod tests {
             None,
             None,
             None,
-            Some(&schema),
+            &schema,
         )
         .expect_err("find.limit over the cap must be rejected");
         assert!(matches!(err, QueryError::InvalidFilter(_)));
@@ -11264,7 +11586,7 @@ mod tests {
             MAX_SEARCH_LIMIT + 1,
             crate::descriptors::VectorMetric::Cosine,
             &serde_json::json!({}),
-            Some(&schema),
+            &schema,
         )
         .expect_err("search.k over the cap must be rejected");
         assert!(matches!(err, QueryError::InvalidFilter(_)));
@@ -11291,7 +11613,7 @@ mod tests {
             None,
             None,
             None,
-            Some(&schema),
+            &schema,
         )
         .expect_err("pathological nesting must be rejected");
         assert!(matches!(err, QueryError::InvalidFilter(_)));
@@ -11488,7 +11810,7 @@ mod tests {
     fn build_find_with_soft_delete_flag_appends_filter() {
         let filter = serde_json::json!({ "title": "hi" });
         let q = build_find_with_schema_and_unmask_and_soft_delete(
-            "app1", "posts", &filter, None, None, None, None, None, &[], true,
+            "app1", "posts", &filter, None, None, None, None, &tschema(), &[], true,
         )
         .unwrap();
         assert!(
@@ -11502,11 +11824,11 @@ mod tests {
     fn build_find_with_soft_delete_flag_off_is_byte_identical_to_legacy() {
         let filter = serde_json::json!({ "title": "hi" });
         let q_legacy = build_find_with_schema_and_unmask(
-            "app1", "posts", &filter, None, None, None, None, None, &[],
+            "app1", "posts", &filter, None, None, None, None, &tschema(), &[],
         )
         .unwrap();
         let q_new = build_find_with_schema_and_unmask_and_soft_delete(
-            "app1", "posts", &filter, None, None, None, None, None, &[], false,
+            "app1", "posts", &filter, None, None, None, None, &tschema(), &[], false,
         )
         .unwrap();
         assert_eq!(q_legacy.sql, q_new.sql, "back-compat: identical SQL");
@@ -11517,7 +11839,7 @@ mod tests {
     fn build_find_empty_filter_with_soft_delete_flag_emits_lone_predicate() {
         let filter = serde_json::json!({});
         let q = build_find_with_schema_and_unmask_and_soft_delete(
-            "app1", "posts", &filter, None, None, None, None, None, &[], true,
+            "app1", "posts", &filter, None, None, None, None, &tschema(), &[], true,
         )
         .unwrap();
         assert!(
@@ -11542,7 +11864,7 @@ mod tests {
             { "$match": { "country": "US" } },
             { "$group": { "by": "city", "n": { "$count": 1 } } },
         ]);
-        let q = build_aggregate_with_soft_delete("app1", "users", &pipeline, true).unwrap();
+        let q = build_aggregate_with_soft_delete("app1", "users", &pipeline, true, &tschema()).unwrap();
         assert!(
             q.sql.contains("WHERE ") && q.sql.contains("AND \"deleted_at\" IS NULL"),
             "aggregate WHERE must compose creator $match AND soft-delete: {}",
@@ -11553,7 +11875,7 @@ mod tests {
     #[test]
     fn build_distinct_with_soft_delete_appends_filter() {
         let filter = serde_json::json!({});
-        let q = build_distinct_with_soft_delete("app1", "users", "country", &filter, true).unwrap();
+        let q = build_distinct_with_soft_delete("app1", "users", "country", &filter, true, &tschema()).unwrap();
         assert!(q.sql.contains("WHERE \"deleted_at\" IS NULL"));
     }
 

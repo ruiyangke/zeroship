@@ -37,6 +37,7 @@ use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_plugin_db::backend::ChangeStream;
+use zeroship_plugin_db::binding::DbBinding;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 
@@ -101,6 +102,13 @@ async fn setup(pool: &Pool) {
         .unwrap();
     pool.execute(
         &format!(
+            // The last four columns are the platform system fields the
+            // migration engine injects into every real creator table
+            // (`query::SYSTEM_FIELD_NAMES`). This fixture omitted them for as
+            // long as the implicit read projection was `SELECT *`; it is now an
+            // explicit list of the seven system columns plus the declared
+            // fields, so a table missing them is not a table `find` can serve.
+            // Adding them makes the fixture look like what production reads.
             r#"CREATE TABLE "{SCHEMA}"."notes" (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -109,7 +117,11 @@ async fn setup(pool: &Pool) {
                 views INTEGER DEFAULT 0,
                 tags JSONB DEFAULT '[]'::jsonb,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW()
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_by TEXT,
+                updated_by TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                deleted_at TIMESTAMPTZ
             )"#
         ),
         &[],
@@ -297,6 +309,37 @@ fn connections_do_not_outlive_the_runtime_that_opened_them() {
 
 use zeroship_plugin_db::query::*;
 
+/// The descriptor entry for the `notes` fixture table, in the same
+/// `{ <column>: FieldDef }` shape `installSchema` hands `registerModel` and
+/// `crate::descriptor::collection_schema` returns.
+///
+/// The read builders take it as the projection allowlist and the read-identifier
+/// allowlist: `build_find_with_schema` expands to `"id"` plus the six other
+/// platform system columns plus one term per field declared here, and refuses
+/// any `select` / `orderBy` / `distinct` / `$group.by` identifier that is not in
+/// it. The seven system fields are implicit — they are never declared here, and
+/// `setup()` above creates all seven on the table.
+fn notes_schema() -> Value {
+    json!({
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "category": { "type": "string" },
+        "views": { "type": "int" },
+        "tags": { "type": "json" },
+    })
+}
+
+/// The descriptor entry for the `weather` fixture table used by the Postgres
+/// docs HAVING example. Aggregate builds its own SELECT from `$group`, so this
+/// only has to declare the identifiers the pipeline names.
+fn weather_schema() -> Value {
+    json!({
+        "city": { "type": "string" },
+        "temp_lo": { "type": "int" },
+        "temp_hi": { "type": "int" },
+    })
+}
+
 /// Postgres and the dev SQLite tier must hand `env.db` callers the same JSON.
 ///
 /// NOT `#[ignore]`, and that is the point of this test's history. It carried
@@ -440,7 +483,7 @@ async fn insert_and_find() {
     assert!(inserted[0]["id"].as_i64().unwrap() > 0);
 
     // Find
-    let bq = build_find(SCHEMA, "notes", &json!({}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "Hello");
@@ -601,12 +644,12 @@ async fn update_many_round_trip() {
     assert_eq!(updated.len(), 3);
 
     // Verify food unchanged
-    let bq = build_find(SCHEMA, "notes", &json!({"category": "food"}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"category": "food"}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows[0]["views"], 0);
 
     // Verify tech updated
-    let bq = build_find(SCHEMA, "notes", &json!({"category": "tech"}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"category": "tech"}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     for row in &rows {
         assert_eq!(row["views"], 1);
@@ -678,27 +721,27 @@ async fn filter_comparison_operators() {
     exec_mutation(&pool, bq).await;
 
     // $gt 25
-    let bq = build_find(SCHEMA, "notes", &json!({"views": {"$gt": 25}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"views": {"$gt": 25}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
 
     // $lte 20
-    let bq = build_find(SCHEMA, "notes", &json!({"views": {"$lte": 20}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"views": {"$lte": 20}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
 
     // $in
-    let bq = build_find(SCHEMA, "notes", &json!({"category": {"$in": ["tech", "food"]}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"category": {"$in": ["tech", "food"]}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 4);
 
     // $nin
-    let bq = build_find(SCHEMA, "notes", &json!({"category": {"$nin": ["food"]}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"category": {"$nin": ["food"]}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
 
     // $ne
-    let bq = build_find(SCHEMA, "notes", &json!({"category": {"$ne": "food"}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"category": {"$ne": "food"}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
     release_pg(pool).await;
@@ -723,18 +766,18 @@ async fn filter_logical_operators() {
     exec_mutation(&pool, bq).await;
 
     // $and: tech AND views > 20
-    let bq = build_find(SCHEMA, "notes", &json!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "B");
 
     // $or: tech OR views > 20
-    let bq = build_find(SCHEMA, "notes", &json!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2); // A and B
 
     // $not: NOT food
-    let bq = build_find(SCHEMA, "notes", &json!({"$not": {"category": "food"}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"$not": {"category": "food"}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
     release_pg(pool).await;
@@ -759,12 +802,12 @@ async fn filter_pattern_operators() {
     exec_mutation(&pool, bq).await;
 
     // $like (case sensitive)
-    let bq = build_find(SCHEMA, "notes", &json!({"title": {"$like": "Hello%"}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"title": {"$like": "Hello%"}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
 
     // $ilike (case insensitive)
-    let bq = build_find(SCHEMA, "notes", &json!({"title": {"$ilike": "%hello%"}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"title": {"$ilike": "%hello%"}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
     release_pg(pool).await;
@@ -789,14 +832,14 @@ async fn find_with_options() {
     exec_mutation(&pool, bq).await;
 
     // Order by views ASC, limit 2
-    let bq = build_find(SCHEMA, "notes", &json!({}), Some(2), None, Some(&json!({"views": 1})), None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({}), Some(2), None, Some(&json!({"views": 1})), None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["title"], "A");
     assert_eq!(rows[1]["title"], "B");
 
     // Order by views DESC, limit 1, offset 1
-    let bq = build_find(SCHEMA, "notes", &json!({}), Some(1), Some(1), Some(&json!({"views": -1})), None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({}), Some(1), Some(1), Some(&json!({"views": -1})), None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "B"); // 2nd highest
@@ -816,7 +859,17 @@ async fn find_with_projection() {
     let bq = build_insert(SCHEMA, "notes", &json!({"title": "Proj", "body": "secret", "category": "tech"})).unwrap();
     exec_mutation(&pool, bq).await;
 
-    let bq = build_find(SCHEMA, "notes", &json!({}), None, None, None, Some(&json!(["title", "category"]))).unwrap();
+    let bq = build_find_with_schema(
+        SCHEMA,
+        "notes",
+        &json!({}),
+        None,
+        None,
+        None,
+        Some(&json!(["title", "category"])),
+        &notes_schema(),
+    )
+    .unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "Proj");
@@ -846,7 +899,7 @@ async fn distinct_values() {
     let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
-    let bq = build_distinct(SCHEMA, "notes", "category", &json!({})).unwrap();
+    let bq = build_distinct(SCHEMA, "notes", "category", &json!({}), &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     let values: Vec<&str> = rows.iter().map(|r| r["category"].as_str().unwrap()).collect();
     assert_eq!(values.len(), 3);
@@ -855,7 +908,7 @@ async fn distinct_values() {
     assert!(values.contains(&"science"));
 
     // Distinct with filter
-    let bq = build_distinct(SCHEMA, "notes", "category", &json!({"category": {"$ne": "science"}})).unwrap();
+    let bq = build_distinct(SCHEMA, "notes", "category", &json!({"category": {"$ne": "science"}}), &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 2);
     release_pg(pool).await;
@@ -924,7 +977,7 @@ async fn aggregate_full() {
         }},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(SCHEMA, "notes", &pipeline).unwrap();
+    let bq = build_aggregate(SCHEMA, "notes", &pipeline, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["category"], "tech");
@@ -961,7 +1014,7 @@ async fn aggregate_multi_group() {
         }},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(SCHEMA, "notes", &pipeline).unwrap();
+    let bq = build_aggregate(SCHEMA, "notes", &pipeline, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     // tech/rust=2, tech/go=1, food/pasta=1
     assert_eq!(rows.len(), 3);
@@ -997,7 +1050,7 @@ async fn aggregate_having() {
         {"$having": {"cnt": {"$gt": 1}}},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(SCHEMA, "notes", &pipeline).unwrap();
+    let bq = build_aggregate(SCHEMA, "notes", &pipeline, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     // Only tech has count > 1
     assert_eq!(rows.len(), 1);
@@ -1024,19 +1077,19 @@ async fn null_handling() {
     exec_mutation(&pool, bq).await;
 
     // Find where body IS NULL
-    let bq = build_find(SCHEMA, "notes", &json!({"body": null}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"body": null}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "NoBody");
 
     // Find where body IS NOT NULL
-    let bq = build_find(SCHEMA, "notes", &json!({"body": {"$ne": null}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"body": {"$ne": null}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "WithBody");
 
     // $exists: true
-    let bq = build_find(SCHEMA, "notes", &json!({"body": {"$exists": true}}), None, None, None, None).unwrap();
+    let bq = build_find_with_schema(SCHEMA, "notes", &json!({"body": {"$exists": true}}), None, None, None, None, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["title"], "WithBody");
@@ -1133,7 +1186,7 @@ async fn aggregate_having_postgres_docs_example() {
         }},
         {"$having": {"max_temp": {"$lt": 42}}}
     ]);
-    let bq = build_aggregate(SCHEMA, "weather", &pipeline).unwrap();
+    let bq = build_aggregate(SCHEMA, "weather", &pipeline, &weather_schema()).unwrap();
 
     // Verify SQL has the resolved expression, not the alias
     assert!(bq.sql.contains("HAVING MAX(\"temp_lo\") < $"), "sql: {}", bq.sql);
@@ -3497,11 +3550,20 @@ async fn vector_search_returns_k_nearest() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // The six non-`id` platform system columns are part of every real creator
+    // table and are named unconditionally by the implicit read projection the
+    // vector search builds, so the fixture carries them too.
     pool.execute(
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
-               embedding vector(8) NOT NULL\
+               embedding vector(8) NOT NULL, \
+               created_at TIMESTAMPTZ DEFAULT NOW(), \
+               updated_at TIMESTAMPTZ DEFAULT NOW(), \
+               created_by TEXT, \
+               updated_by TEXT, \
+               version INTEGER NOT NULL DEFAULT 1, \
+               deleted_at TIMESTAMPTZ\
              )"
         ),
         &[],
@@ -3554,9 +3616,16 @@ async fn vector_search_returns_k_nearest() {
     // distance ties between FP-close vectors can re-order across builds.
     let query = mk_unit(0, dims);
     let backend = PostgresBackend::new(pool.clone(), url.clone());
+    // The search's projection is the descriptor's field list; install the entry
+    // this deploy would have installed via `registerModel`.
+    zeroship_plugin_db::cache_schema_for_tests(
+        app,
+        coll,
+        json!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+    );
     let rows = VectorIndex::vector_search(
         &backend,
-        app,
+        &DbBinding::cold_start(app),
         coll,
         "embedding",
         &query,
@@ -3637,9 +3706,13 @@ async fn pgvector_extension_missing_reports_typed_error() {
 
     // Also exercise vector_search — the SDK branches on
     // `e.code === "vector_extension_missing"` from BOTH entry points.
+    // No descriptor entry is installed for `vector_missing`, and that is
+    // deliberate: `ensure_pgvector_available` runs BEFORE the schema resolve,
+    // so the extension error must still be the one that surfaces. If the order
+    // ever flipped, this would fail with `collection_not_declared` instead.
     let search_err = VectorIndex::vector_search(
         &backend,
-        "vector_missing",
+        &DbBinding::cold_start("vector_missing"),
         "any",
         "any",
         &[0.0f32; 8],
@@ -3654,7 +3727,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
     // SHARED, cluster-/db-wide object (the `vector` extension lives in
     // `public`, not in a per-app schema), so leaving it dropped breaks every
     // vector-dependent test ordered after this one in a single-threaded run
-    // (e.g. `p4_round_trip_encrypted_masked_vector_via_introspected_metadata`,
+    // (e.g. `p4_round_trip_encrypted_masked_vector_via_descriptor_metadata`,
     // which `registerModel`s a `vector` column). Restore happens before the
     // assertions so a failed assertion can never leak the dropped state.
     pool.execute("CREATE EXTENSION IF NOT EXISTS vector", &[])
@@ -3805,17 +3878,30 @@ async fn near_returns_within_radius() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // System columns for the same reason as the vector fixture above: the
+    // spatial base query projects the descriptor's field list plus all seven.
     pool.execute(
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
-               location geography(POINT, 4326) NOT NULL\
+               location geography(POINT, 4326) NOT NULL, \
+               created_at TIMESTAMPTZ DEFAULT NOW(), \
+               updated_at TIMESTAMPTZ DEFAULT NOW(), \
+               created_by TEXT, \
+               updated_by TEXT, \
+               version INTEGER NOT NULL DEFAULT 1, \
+               deleted_at TIMESTAMPTZ\
              )"
         ),
         &[],
     )
     .await
     .unwrap();
+    zeroship_plugin_db::cache_schema_for_tests(
+        app,
+        coll,
+        json!({ "location": { "type": "geoPoint" } }),
+    );
 
     let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
     // 10 points: 5 within ~1km of London (small lat/lng offsets) and
@@ -3854,7 +3940,7 @@ async fn near_returns_within_radius() {
     let backend = PostgresBackend::new(pool.clone(), url.clone());
     let rows = SpatialIndex::spatial_near(
         &backend,
-        app,
+        &DbBinding::cold_start(app),
         coll,
         "location",
         london,
@@ -3928,9 +4014,11 @@ async fn postgis_extension_missing_reports_typed_error() {
         other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
     }
 
+    // No descriptor entry, deliberately: the extension probe runs BEFORE the
+    // schema resolve, so this must still surface `postgis_extension_missing`.
     let err = SpatialIndex::spatial_near(
         &backend,
-        "postgis_missing",
+        &DbBinding::cold_start("postgis_missing"),
         "any",
         "any",
         GeoPoint { lat: 0.0, lng: 0.0 },
@@ -4264,17 +4352,29 @@ async fn encrypted_deterministic_equality_lookup() {
 }
 
 /// Round-trip e2e proof that schema creation and CRUD cohere: a collection
-/// with an `encrypted` + a `masked` + a `vector` field, schema CREATED via
-/// the real `registerModel` (which writes the `zsenc`/`__zsmask` sentinels),
-/// then CRUD driven ENTIRELY by the introspection-sourced metadata:
+/// with an `encrypted` + a `masked` + a `vector` field, table created the way
+/// the migration engine creates it, then CRUD driven ENTIRELY by the RUNTIME
+/// DESCRIPTOR:
 ///   - insert through the REAL write pipeline -> AEAD-encrypts the encrypted
-///     column and populates the masked sibling (metadata from introspection);
+///     column and populates the masked sibling;
 ///   - read raw rows back, finalize through the REAL read pipeline -> decrypts
 ///     the encrypted column to plaintext and wraps the masked column.
-/// Nothing here consults the declared schema for the crypto/mask decisions --
-/// the seam is `crud::introspect_schema::runtime_schema_for`, exercised faithfully.
+///
+/// **The metadata source changed and the round trip did not.** This test used to
+/// plant `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` sentinels and
+/// assert the data plane RECOVERED the encryption mode and mask kind from the
+/// live catalog. That recovery is deleted: the sentinels were emitted by the
+/// migration engine out of the same DSL the descriptor is folded from, so the
+/// catalog could only ever agree with the descriptor or be stale, and the read
+/// cost one whole-schema catalog walk per cold collection. The metadata is now
+/// INSTALLED, by `cache_schema_for_tests` from a descriptor-shaped field map --
+/// the same call `register_model_dispatch` makes off
+/// `globalThis.__zsRuntimeDescriptor`. Everything after that line is unchanged,
+/// so what this still proves is what it always mattered for: the encrypt/mask
+/// write stages and the decrypt/mask-wrap read stages agree, against a real
+/// Postgres table, end to end.
 #[compio::test]
-async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
+async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let _keys = with_root_key("default", &"d".repeat(64));
@@ -4298,9 +4398,8 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         "embedding": {"type": "vector", "vectorDims": 3, "vectorMetric": "cosine"},
     });
 
-    // registerModel creates the table AND writes the sentinels
-    // (zsenc COMMENT on `ssn`, __zsmask COMMENT on `phone_masked`).
-    // Raw SQL, with the sentinels the introspected round trip depends on.
+    // The table the migration engine would have created, sibling column
+    // included. No `COMMENT ON COLUMN` sentinels: nothing reads them any more.
     //
     // ONE THING HERE IS NOT A FAITHFUL REPRODUCTION, and it is called out rather
     // than hidden: `embedding` gets a bare `vector(3)` column and NO ANN index.
@@ -4320,29 +4419,23 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
   "phone_masked" TEXT,
   "embedding" vector(3)
 );
-{idx}
-COMMENT ON COLUMN "{app}"."people"."ssn" IS 'zsenc:randomised:default:string';
-COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classification=pci';"#,
+{idx}"#,
         idx = pg_system_indexes(app, "people"),
     ))
     .await
     .unwrap_or_else(|e| panic!("p4 people fixture failed: {e}"));
 
-    // Install the pool into the per-isolate context so
-    // `runtime_schema_for` can introspect, and mark the model registered (the
-    // cold-schema gate) — exactly what the production register path does.
+    // Install the pool into the per-isolate context so the pipelines' own SQL
+    // lands on this database, and install the DESCRIPTOR ENTRY the deploy would
+    // have installed — exactly what the production register path does.
     zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
-    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+    zeroship_plugin_db::cache_schema_for_tests(app, "people", schema.clone());
 
-    // Sanity: the introspected runtime schema recovers BOTH goodies — proving
-    // the data-access metadata comes from the live catalog + sentinels.
-    let introspected =
-        zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
-            .await
-            .expect("introspect")
-            .expect("people has goodies");
-    assert_eq!(introspected["ssn"]["encrypted"]["mode"], "randomised");
-    assert_eq!(introspected["phone"]["mask"]["kind"], "last4");
+    // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
+    let resolved = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .expect("the descriptor entry this deploy installed must resolve");
+    assert_eq!(resolved["ssn"]["encrypted"]["mode"], "randomised");
+    assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE (real pipeline, introspected metadata) -----
     let mut docs = json!([{
@@ -4554,12 +4647,16 @@ async fn p5_pg_register_model_issues_no_runtime_ddl() {
 }
 
 /// Behaviour-identical CRUD with NO runtime DDL (a). The engine creates
-/// the schema at deploy (here simulated by a one-shot pipeline build that emits
-/// the same DDL + `zsenc`/`__zsmask` sentinels the relocated engine produces).
-/// Then the production PG dispatch runs and must NOT touch the schema (audit row
-/// count is unchanged), yet encryption + mask CRUD still round-trip end-to-end
-/// driven by the INTROSPECTED metadata -- proving the data plane is
+/// the schema at deploy (here simulated by the same DDL the relocated engine
+/// emits). Then the production PG dispatch runs and must NOT touch the schema
+/// (audit row count is unchanged), yet encryption + mask CRUD still round-trip
+/// end-to-end driven by the RUNTIME DESCRIPTOR -- proving the data plane is
 /// intact while the runtime applied nothing.
+///
+/// The `zsenc` / `__zsmask` column-comment sentinels this fixture used to plant
+/// are gone with the catalog read that recovered them; see
+/// `p4_round_trip_encrypted_masked_vector_via_descriptor_metadata` for the full
+/// reasoning. The round trip below is unchanged.
 #[compio::test]
 async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     let url = require_pg().await;
@@ -4583,14 +4680,9 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
         },
     });
 
-    // === Simulate the engine/deploy-apply: create the table + sentinels. ===
-    // This is the SAME DDL/sentinel emission the relocated engine uses;
-    // we drive it once via the pipeline to stand in for the deploy-time apply.
-    // The deploy stand-in, as raw SQL. The `COMMENT ON COLUMN` sentinels are
-    // load-bearing, not decoration: `runtime_schema_for` reads them back to
-    // learn that `ssn` is encrypted and `phone_masked` carries a last4/pci mask.
-    // Drop them and this test still creates a table, but the round trip it
-    // exists to prove silently stops happening.
+    // === Simulate the engine/deploy-apply: create the table. ===
+    // The SAME DDL shape the relocated engine emits, including the masked
+    // sibling column, standing in for the deploy-time apply.
     pool.batch_execute(&format!(
         r#"CREATE SCHEMA IF NOT EXISTS "{app}";
 CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
@@ -4599,9 +4691,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
   "phone" TEXT,
   "phone_masked" TEXT
 );
-{idx}
-COMMENT ON COLUMN "{app}"."people"."ssn" IS 'zsenc:randomised:default:string';
-COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classification=pci';"#,
+{idx}"#,
         idx = pg_system_indexes(app, "people"),
     ))
     .await
@@ -4645,21 +4735,19 @@ COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classi
         "P5 PG cutover: the runtime dispatch must add ZERO DDL audit rows"
     );
 
-    // Readiness contract: mark the model (the dispatch caller does this in prod;
-    // the via-dispatch seam stops at `exec_register_model`, so mirror it here),
-    // exactly like the round-trip test above does.
-    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+    // The descriptor install the dispatch CALLER performs in production. The
+    // via-dispatch seam above stops at `exec_register_model` (the database half,
+    // which on PG is a no-op by design), so the entry has to be installed here
+    // for the collection to be serveable at all.
+    zeroship_plugin_db::cache_schema_for_tests(app, "people", schema.clone());
 
-    // The introspected runtime schema recovers BOTH goodies from the live catalog
-    // + the engine's sentinels — no declared schema consulted for crypto/mask.
-    let introspected = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
-        .await
-        .expect("introspect")
-        .expect("people has goodies");
-    assert_eq!(introspected["ssn"]["encrypted"]["mode"], "randomised");
-    assert_eq!(introspected["phone"]["mask"]["kind"], "last4");
+    // The resolution the CRUD passes will perform returns BOTH goodies.
+    let resolved = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .expect("the descriptor entry this deploy installed must resolve");
+    assert_eq!(resolved["ssn"]["encrypted"]["mode"], "randomised");
+    assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
-    // ----- WRITE via the real pipeline (introspected metadata) -----
+    // ----- WRITE via the real pipeline (descriptor metadata) -----
     let mut docs = json!([{
         "id": "psn_p5_1",
         "name": "Grace",
@@ -5719,13 +5807,24 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
-               embedding vector(2) NOT NULL\
+               embedding vector(2) NOT NULL, \
+               created_at TIMESTAMPTZ DEFAULT NOW(), \
+               updated_at TIMESTAMPTZ DEFAULT NOW(), \
+               created_by TEXT, \
+               updated_by TEXT, \
+               version INTEGER NOT NULL DEFAULT 1, \
+               deleted_at TIMESTAMPTZ\
              )"
         ),
         &[],
     )
     .await
     .unwrap();
+    zeroship_plugin_db::cache_schema_for_tests(
+        app,
+        coll,
+        json!({ "embedding": { "type": "vector", "vectorDims": 2 } }),
+    );
     admin_pool.execute(
         &format!(
             "INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::vector)"
@@ -5761,7 +5860,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     let backend = PostgresBackend::new(login_pool.clone(), login_url);
     let rows = VectorIndex::vector_search(
         &backend,
-        app,
+        &DbBinding::cold_start(app),
         coll,
         "embedding",
         &[1.0, 0.0],
@@ -5809,13 +5908,24 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
-               location geography(POINT, 4326) NOT NULL\
+               location geography(POINT, 4326) NOT NULL, \
+               created_at TIMESTAMPTZ DEFAULT NOW(), \
+               updated_at TIMESTAMPTZ DEFAULT NOW(), \
+               created_by TEXT, \
+               updated_by TEXT, \
+               version INTEGER NOT NULL DEFAULT 1, \
+               deleted_at TIMESTAMPTZ\
              )"
         ),
         &[],
     )
     .await
     .unwrap();
+    zeroship_plugin_db::cache_schema_for_tests(
+        app,
+        coll,
+        json!({ "location": { "type": "geoPoint" } }),
+    );
     admin_pool.execute(
         &format!(
             "INSERT INTO \"{app}\".\"{coll}\" (location) \
@@ -5852,7 +5962,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     let backend = PostgresBackend::new(login_pool.clone(), login_url);
     let rows = SpatialIndex::spatial_near(
         &backend,
-        app,
+        &DbBinding::cold_start(app),
         coll,
         "location",
         GeoPoint {
@@ -5954,7 +6064,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
-        app,
+        &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
@@ -6053,7 +6163,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
 
     // A role the declared policy grants reads through.
     let granted = unmask::dispatch_unmask(
-        app,
+        &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
@@ -6070,7 +6180,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // test would pass on an implementation that authorized everything,
     // which is exactly the failure mode a cache-only policy could hide.
     let err = unmask::dispatch_unmask(
-        app,
+        &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
