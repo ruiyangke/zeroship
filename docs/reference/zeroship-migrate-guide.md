@@ -926,7 +926,7 @@ Two checksum front doors share a `fold_common` tail (`migration.rs:500-542`): **
 
 ### 6.7 The golden corpus and the schema gate
 
-Two anti-drift artifacts pin the contract (mechanics in [§12](#12-testing--operating)): **`op-ir.schema.json`** — the JSON Schema of `MigrationIr`, emitted by `schemars::schema_for!`, gated against the on-disk file (`UPDATE_SCHEMA=1` regenerates); and **the golden corpus** (`tests/op_fixtures/`, 21 `.mig.js`/`.golden.json` pairs) driving `op_round_trip.rs`'s three gates (golden byte-stability, JS↔Rust value-checksum round-trip, variant exhaustiveness pinned at 53).
+Two anti-drift artifacts pin the contract (mechanics in [§12](#12-testing--operating)): **`op-ir.schema.json`** — the JSON Schema of `MigrationIr`, emitted by `schemars::schema_for!`, gated against the on-disk file (regenerate with `cargo test -p zeroship-migrate --test ir_contract -- --ignored update_ir_envelope_schema`); and **the golden corpus** (`tests/op_fixtures/`, 21 `.mig.js`/`.golden.json` pairs) driving `op_round_trip.rs`'s three gates (golden byte-stability, JS↔Rust value-checksum round-trip, variant exhaustiveness pinned at 53).
 
 ### 6.8 How JS authoring maps to IR nodes
 
@@ -1697,7 +1697,7 @@ the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.7 Other golden/preview gates
 
-- **SQL preview goldens** (`third_party/zero-migrate/crates/zeroship-migrate/tests/sql_preview.rs`, DB-free): renders a `REPRESENTATIVE_IR` for all three dialects, byte-compares against `tests/golden/sql_preview_{pg,sqlite,mysql}.txt`, and asserts **faithfulness** (each statement byte-identical to `IrAuthor::lower_steps`), **no fabrication** (DB-state-dependent ops emit `-- [runtime-resolved]`), and **no DB connection**. `UPDATE_PREVIEW_GOLDENS=1` regenerates.
+- **SQL preview goldens** (`third_party/zero-migrate/crates/zeroship-migrate/tests/sql_preview.rs`, DB-free): renders a `REPRESENTATIVE_IR` for all three dialects, byte-compares against `tests/golden/sql_preview_{pg,sqlite,mysql}.txt`, and asserts **faithfulness** (each statement byte-identical to `IrAuthor::lower_steps`), **no fabrication** (DB-state-dependent ops emit `-- [runtime-resolved]`), and **no DB connection**. Regenerate per dialect with `cargo test -p zeroship-migrate --test ir_contract -- --ignored update_golden_pg` (or `update_golden_sqlite` / `update_golden_mysql`) - finer-grained than the single switch it replaced, which rewrote all three at once.
 - **Golden execution traces** (`golden_trace_pg.rs`/`golden_trace_sqlite.rs` → `tests/golden-traces/*.txt`): capture a full apply trace + resulting schema against live PG/SQLite. `assert_frozen` panics if the fixture is absent (a first-run capture is reviewed + committed, never self-blessed). The PG destructive-refusal trace is asserted identical across an oracle leg and a live leg.
 - **Generated-TS `.d.ts` goldens** (`gen_types_dts_golden.rs`) + a `tsc` gate (`gen_types_dts_tsc_gate.rs`).
 
