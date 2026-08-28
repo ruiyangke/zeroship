@@ -18,8 +18,14 @@
 # absent Postgres or an absent compio runtime; the worst case was seven
 # `zeroship-worker` `handler::tests::workflow_advance_*` tests, which were
 # silent in two independent ways at once -- uncounted when they skipped, and in
-# NEITHER gate suite (`zeroship-worker` is run by neither run_auth_suite.sh nor
-# run_billing_suite.sh) when they failed.
+# NO gate suite at all when they failed.
+#
+# THE SECOND HALF IS FIXED AS OF 2026-08-28 and this note would otherwise read
+# as a live claim about the tree. Those seven are now
+# `handler::workflow_live_tests::*` behind `--features live-db-tests`, and
+# `tests/run_worker_suite.sh` provisions a migrated database and runs them; CI
+# runs it as `worker-live-gate`. They are still not in run_auth_suite.sh or
+# run_billing_suite.sh, and no longer need to be.
 #
 # WHY A GATE AND NOT JUST ADDING THE MARKER. Adding it to those sixteen files
 # fixes today and nothing else. The census's blindness is structural: its
