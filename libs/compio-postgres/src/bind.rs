@@ -2,10 +2,12 @@
 
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
-use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
+use crate::connection::RequestMessages;
+use crate::portal::{self, PortalScope};
 use crate::types::BorrowToSql;
 use crate::{Column, Error, Portal, Statement, prepare, query};
 use fallible_iterator::FallibleIterator;
+use futures_channel::oneshot;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,9 +15,11 @@ use std::sync::{Arc, Weak};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// Own a portal after its bind is enqueued and until the `Portal` is built.
-/// Without this guard, cancellation in any response await would leave a named
-/// portal alive until the surrounding transaction ended.
+/// Own a portal after `BindComplete` and until the `Portal` is built.
+///
+/// A rejected Bind never owns its requested name, so arming this before
+/// `BindComplete` would let an error path close the pre-existing portal whose
+/// name caused the rejection.
 struct PortalCleanup {
     client: Weak<InnerClient>,
     name: Option<String>,
@@ -39,18 +43,7 @@ impl Drop for PortalCleanup {
         let (Some(client), Some(name)) = (self.client.upgrade(), self.name.take()) else {
             return;
         };
-        let buf = client.with_buf(|buf| -> Result<_, Error> {
-            frontend::close(b'P', &name, buf).map_err(Error::encode)?;
-            frontend::sync(buf);
-            Ok(buf.split().freeze())
-        });
-        if let Ok(buf) = buf {
-            let _ = client.send_with(
-                RequestMessages::Single(FrontendMessage::Raw(buf)),
-                RequestDisposition::Housekeeping,
-                TransactionEffect::Neutral,
-            );
-        }
+        portal::close_portal(&client, &name);
     }
 }
 
@@ -59,6 +52,7 @@ pub async fn bind<P, I>(
     statement: Statement,
     params: I,
     unnamed_sql: Option<&str>,
+    scope: PortalScope,
 ) -> Result<Portal, Error>
 where
     P: BorrowToSql,
@@ -66,6 +60,7 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     let name = format!("p{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
+    let unnamed = unnamed_sql.is_some();
     let buf = client.with_buf(|buf| {
         if let Some(sql) = unnamed_sql {
             frontend::parse(
@@ -88,9 +83,29 @@ where
         RequestMessages::Single(FrontendMessage::Raw(buf)),
         &statement,
     )?;
-    let cleanup = PortalCleanup::new(client, &name);
+    let client = Arc::clone(client);
+    let (sender, receiver) = oneshot::channel();
+    compio::runtime::spawn(async move {
+        let result = finish_bind(client, statement, &mut responses, name, unnamed, scope).await;
+        // If the caller abandoned bind(), dropping an awarded Portal performs
+        // the Close(P). A rejection carries no Portal and therefore closes
+        // nothing.
+        let _ = sender.send(result);
+    })
+    .detach();
 
-    if unnamed_sql.is_some() {
+    receiver.await.unwrap_or_else(|_| Err(Error::closed()))
+}
+
+async fn finish_bind(
+    client: Arc<InnerClient>,
+    statement: Statement,
+    responses: &mut crate::client::Responses,
+    name: String,
+    unnamed: bool,
+    scope: PortalScope,
+) -> Result<Portal, Error> {
+    if unnamed {
         let message = match responses.next().await {
             Ok(message) => message,
             Err(error) => {
@@ -114,8 +129,9 @@ where
         Message::BindComplete => {}
         _ => return Err(Error::unexpected_message()),
     }
+    let cleanup = PortalCleanup::new(&client, &name);
 
-    let row_description = if unnamed_sql.is_some() {
+    let row_description = if unnamed {
         match responses.next().await? {
             Message::RowDescription(body) => Some(body),
             Message::NoData => None,
@@ -134,7 +150,7 @@ where
         _ => return Err(Error::unexpected_message()),
     }
 
-    let statement = if unnamed_sql.is_some() {
+    let statement = if unnamed {
         let mut columns = Vec::new();
         if let Some(row_description) = row_description {
             let mut fields = row_description.fields();
@@ -144,7 +160,7 @@ where
                     table_oid: Some(field.table_oid()).filter(|oid| *oid != 0),
                     column_id: Some(field.column_id()).filter(|id| *id != 0),
                     type_modifier: field.type_modifier(),
-                    r#type: prepare::get_type(client, field.type_oid()).await?,
+                    r#type: prepare::get_type(&client, field.type_oid()).await?,
                 });
             }
         }
@@ -158,7 +174,7 @@ where
     };
 
     let name = cleanup.disarm();
-    Ok(Portal::new(client, name, statement))
+    Ok(Portal::new(&client, name, statement, scope))
 }
 
 #[cfg(test)]
@@ -203,6 +219,7 @@ mod tests {
             statement,
             std::iter::empty::<i32>(),
             unnamed.then_some("SELECT 1"),
+            crate::portal::PortalScope::new(),
         );
         let respond = async {
             let mut request = receiver
