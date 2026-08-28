@@ -4535,6 +4535,11 @@ const FD_PROBE_ITERATIONS: usize = 20;
 /// below and the identity table in the doc comment.
 const LEAKED_RUNTIME_FDS: i64 = 2;
 
+#[cfg(not(feature = "suite-over-tls"))]
+const ONE_CONNECTION_ABRUPT_FDS: i64 = 1 + LEAKED_RUNTIME_FDS;
+#[cfg(feature = "suite-over-tls")]
+const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
+
 /// The descriptor half of the invariant above, which `crate::release` does NOT
 /// fix and is not trying to.
 ///
@@ -4547,8 +4552,8 @@ const LEAKED_RUNTIME_FDS: i64 = 2;
 ///
 /// Re-measured 2026-08-20 by reading `/proc/self/fd` targets rather than
 /// counting entries, over 24 create/drop cycles in a process doing nothing
-/// else. One detached connection per runtime leaks exactly three, and they are
-/// not three sockets:
+/// else. Over plaintext, one detached connection per runtime leaks exactly
+/// three, and they are not three sockets:
 ///
 /// ```text
 /// anon_inode:[io_uring]   the ring
@@ -4563,6 +4568,13 @@ const LEAKED_RUNTIME_FDS: i64 = 2;
 /// prior version of this asserted `<= 3`, a number that is only the truth at
 /// one connection per runtime; a two-connection test would have tripped it,
 /// and the message told the reader to raise the bound.
+///
+/// TLS has a different exact one-connection shape. After its synchronous
+/// `close_notify` plus socket shutdown, the measured remainder is the eventfd
+/// and socket, `[2,2,2,...]`, with no ring descriptor. Two TLS connections
+/// still measure four, and the drained arm still measures zero. The
+/// mode-specific assertion below remains exact; it is not an upper bound that
+/// can hide a new descriptor.
 ///
 /// The mechanism is not postgres and is not this crate. A bare
 /// `compio::net::TcpStream` read on a detached task leaks the same three.
@@ -4659,9 +4671,9 @@ fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
         "the isolated child failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
 
-    // One connection per runtime, undrained: the ring, its eventfd, and the
-    // socket.
-    assert_leak_per_runtime(&stdout, "one-connection", 1 + LEAKED_RUNTIME_FDS);
+    // One connection per runtime, undrained. Plaintext retains the ring,
+    // eventfd, and socket; TLS retains only the eventfd and socket.
+    assert_leak_per_runtime(&stdout, "one-connection", ONE_CONNECTION_ABRUPT_FDS);
     // Two, undrained. This is the arm the old flat budget of three would have
     // failed, and the reason the expectation is a law rather than a number.
     assert_leak_per_runtime(&stdout, "two-connections", 2 + LEAKED_RUNTIME_FDS);
