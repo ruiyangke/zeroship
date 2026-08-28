@@ -9,7 +9,6 @@ mod handler;
 mod health;
 mod sync;
 mod cache;
-mod db_posture;
 mod metrics;
 mod logs;
 mod slot_reaper;
@@ -443,7 +442,7 @@ fn main() -> std::io::Result<()> {
         .name("zeroship-worker")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
-    if let Err(error) = db_posture::validate_database_url(&db_url).await {
+    if let Err(error) = zeroship_worker::db_posture::validate_database_url(&db_url).await {
         tracing::error!(%error, "worker: refusing unsafe database authority");
         std::process::exit(1);
     }
