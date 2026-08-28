@@ -79,6 +79,6 @@ export { translateAggregatePipeline } from "./utils";
 
 // P5.5 PR 5 — defineMaskPolicy() pending-slot drain. The bootstrap
 // runtime-entry calls `_flushPendingMaskPolicy()` once at app init and
-// flushes the returned policy through `zeroship.db.setMaskPolicy`.
+// flushes the returned policy through `__platform.setMaskPolicy`.
 export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy";
 export type { MaskPolicy } from "./policy";

@@ -20,30 +20,25 @@
 //!
 //! ## Key sources
 //!
-//! Sourcing splits in two. [`LocalKeySource`] resolves a root without
-//! touching a database: either [`LocalKeySource::EnvVar`]
-//! (`ZEROSHIP_COLUMN_KEY_<KEYID>`, which covers SQLite - no
-//! admin-schema sidecar there - and the PG dev-parity case) or
+//! There is exactly one kind of source and it never touches a
+//! database: [`LocalKeySource`] is either [`LocalKeySource::EnvVar`]
+//! (`ZEROSHIP_COLUMN_KEY_<KEYID>`, hex) or
 //! [`LocalKeySource::Supplied`], where the operator hands the process
 //! the root bytes directly instead of exporting them into the
-//! environment. [`KeySource`] wraps that: either the local source
-//! alone, or the PG path, which asks
-//! `__zeroship_admin.get_column_key($1)` and falls back to a local
-//! source when that returns NULL or errors.
+//! environment. **Both backends resolve identically** - the PG arm is
+//! not a variant of the `SQLite` arm, it is the same code.
 //!
-//! **The PG arm currently resolves nothing.** The getter and its
-//! `__zeroship_admin.column_keys` table were installed only by
-//! `auth::bootstrap::ensure_admin_schema`, deleted on 2026-08-27 with
-//! the rest of the admin schema. The call now always errors and the
-//! fallback always wins, so PG behaves exactly like SQLite. Whether
-//! the PG arm gets a new home (an app-schema table, an external KMS)
-//! or is deleted outright is an open operator decision - it is NOT
-//! resolved by pretending the getter is still there.
-//!
-//! The fallback is a `LocalKeySource` by TYPE, not by convention: a PG
-//! lookup can never be the fallback for another PG lookup, so the
-//! chain is at most one round-trip deep and there is no unreachable
-//! arm to write.
+//! There used to be a second variant, `KeySource::PgAdminTable`, which
+//! asked `__zeroship_admin.get_column_key($1)` and fell back to a
+//! local source. Per-column keys held in the database were removed by
+//! operator decision (2026-08-27) together with the admin schema that
+//! installed the getter, and the variant was deleted with them. It is
+//! NOT waiting for a new home in the app's own schema: a key the
+//! worker can read is a key the worker's tenant can read, so storing
+//! it where the worker reaches buys no boundary at all -- see
+//! AGENTS.md, "Privilege follows the PROCESS, not the function". Root
+//! key material reaches the process out of band, and the HKDF salt by
+//! `app_id` below is what makes it per-tenant.
 //!
 //! ## Parsing vs. sourcing
 //!
@@ -177,15 +172,19 @@ fn normalise_key_id(key_id: &str) -> String {
     key_id.to_ascii_lowercase()
 }
 
-/// A root-key source that resolves without a database round-trip.
+/// Source of root key material. Every variant resolves in-process,
+/// with no database round-trip -- that is the whole type, not a subset
+/// of it. Both the Postgres and the `SQLite` backend use this directly.
 ///
-/// Both variants are complete sources in their own right AND are the only
-/// things that may sit behind [`KeySource::PgAdminTable`]'s NULL fallback.
+/// A `KeySource` wrapper enum used to sit above this one, carrying a
+/// second `PgAdminTable` variant that read the root out of Postgres.
+/// It was deleted on 2026-08-27 with the admin schema it queried; see
+/// the module header for why the PG arm is gone rather than rehomed.
 #[derive(Debug)]
 #[non_exhaustive] // Future local variants (a sealed file, an in-process KMS client) slot in here.
 pub enum LocalKeySource {
     /// Read 32-byte root keys from `ZEROSHIP_COLUMN_KEY_<KEYID>` env
-    /// vars (hex-encoded). SQLite tier + PG dev parity.
+    /// vars (hex-encoded).
     EnvVar,
     /// Read roots handed to the process directly. `Rc` because the
     /// installer keeps a handle: supplied keys can be added or withdrawn
@@ -194,67 +193,23 @@ pub enum LocalKeySource {
 }
 
 impl LocalKeySource {
+    /// Roots come from `ZEROSHIP_COLUMN_KEY_<KEYID>`.
+    #[must_use]
+    pub const fn env_var() -> Self {
+        Self::EnvVar
+    }
+
+    /// Roots come from bytes the caller already holds.
+    #[must_use]
+    pub const fn supplied(keys: Rc<SuppliedRootKeys>) -> Self {
+        Self::Supplied(keys)
+    }
+
     fn lookup_root(&self, key_id: &str) -> Result<[u8; 32], DbError> {
         match self {
             Self::EnvVar => env_lookup_root(key_id),
             Self::Supplied(keys) => keys.lookup(key_id),
         }
-    }
-}
-
-/// Source of root key material.
-///
-/// [`Self::Local`] is the SQLite / dev-parity path and the
-/// operator-supplied path. [`Self::PgAdminTable`] is the PG path:
-///   1. Calls `__zeroship_admin.get_column_key($1)`.
-///   2. If that returns NULL or errors, **falls back to its `fallback`
-///      local source**.
-///
-/// Since the admin schema was deleted (2026-08-27) nothing installs
-/// that getter, so step 1 always fails and step 2 always runs.
-///
-/// `PgAdminTable` is instantiated by `PostgresBackend::new`; the
-/// SQLite tier uses `Local`.
-#[derive(Debug)]
-#[non_exhaustive] // Future variants (Vault, KMS, ...) slot in here.
-pub enum KeySource {
-    /// Resolve locally, with no database round-trip.
-    Local(LocalKeySource),
-    /// PG source. Reads `__zeroship_admin.column_keys` via a
-    /// `get_column_key` getter that NOTHING NOW INSTALLS - it came
-    /// from `auth::bootstrap::ensure_admin_schema`, deleted 2026-08-27.
-    /// So this always falls through to `fallback`.
-    PgAdminTable {
-        /// Pool the SECURITY DEFINER getter is called on.
-        pool: Rc<compio_postgres::Pool>,
-        /// Consulted only when the getter returns NULL.
-        fallback: LocalKeySource,
-    },
-}
-
-impl KeySource {
-    /// Roots come from `ZEROSHIP_COLUMN_KEY_<KEYID>`.
-    #[must_use]
-    pub fn env_var() -> Self {
-        Self::Local(LocalKeySource::EnvVar)
-    }
-
-    /// Roots come from bytes the caller already holds.
-    #[must_use]
-    pub fn supplied(keys: Rc<SuppliedRootKeys>) -> Self {
-        Self::Local(LocalKeySource::Supplied(keys))
-    }
-
-    /// Admin table first, `fallback` behind it. There is no
-    /// `pg_admin_table(pool)` shorthand: the PG backend always names the
-    /// fallback it wants, because "which local source is behind the
-    /// getter" is exactly the decision this type exists to make explicit.
-    #[must_use]
-    pub fn pg_admin_table_with_fallback(
-        pool: Rc<compio_postgres::Pool>,
-        fallback: LocalKeySource,
-    ) -> Self {
-        Self::PgAdminTable { pool, fallback }
     }
 }
 
@@ -265,7 +220,7 @@ impl KeySource {
 /// The PG impl wires through this.
 pub struct KeyStore {
     cache: RefCell<HashMap<(String, String), AeadKey>>,
-    sourcing: KeySource,
+    sourcing: LocalKeySource,
     /// Process-local hit/miss counter for the
     /// "default-read does not load a column key" closeout gate
     /// (§11). Every call to [`KeyStore::resolve`] bumps this; a hit
@@ -294,7 +249,7 @@ impl std::fmt::Debug for KeyStore {
 
 impl KeyStore {
     #[must_use]
-    pub fn new(sourcing: KeySource) -> Self {
+    pub fn new(sourcing: LocalKeySource) -> Self {
         Self {
             cache: RefCell::new(HashMap::new()),
             sourcing,
@@ -317,10 +272,12 @@ impl KeyStore {
     }
 
     /// Look up or derive the [`AeadKey`] for `(app_id, key_id)`.
-    /// Async signature for parity with the `PgAdminTable` variant
-    /// (which has to `.await` a SECURITY DEFINER round-trip); the
-    /// `EnvVar` source is sync internally and the body never `.await`s.
-    #[allow(clippy::unused_async)] // The PgAdminTable variant awaits.
+    ///
+    /// The body never `.await`s -- every source resolves in-process.
+    /// The signature stays async because this is what
+    /// [`crate::backend::EncryptedColumn::resolve_key`] calls, and that
+    /// trait method is async on both backends.
+    #[allow(clippy::unused_async)] // Shape is fixed by the EncryptedColumn trait.
     pub async fn resolve(&self, app_id: &str, key_id: &str) -> Result<AeadKey, DbError> {
         // Increment BEFORE the cache lookup so a
         // resolve-attempt is counted regardless of cache hit/miss.
@@ -336,25 +293,7 @@ impl KeyStore {
                 return Ok(k.clone());
             }
         }
-        let root = Zeroizing::new(match &self.sourcing {
-            KeySource::Local(local) => local.lookup_root(key_id)?,
-            KeySource::PgAdminTable { pool, fallback } => {
-                // PG-prod path: call the SECURITY DEFINER getter. Only a NULL
-                // result (table empty, key id missing, table itself missing) —
-                // i.e. `Ok(None)` - falls back to the local source, so a
-                // pre-migration app still resolves a key.
-                match pg_admin_lookup_root(pool, key_id).await {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => fallback.lookup_root(key_id)?,
-                    // DB-10: a GENUINE getter fault (permission denied, connection
-                    // error, SQL failure) must SURFACE — not silently downgrade to
-                    // whatever the fallback source happens to hold, which
-                    // could be a stale/test key and would produce wrong-key
-                    // encrypt/decrypt with no signal. Propagate it.
-                    Err(e) => return Err(e),
-                }
-            }
-        });
+        let root = Zeroizing::new(self.sourcing.lookup_root(key_id)?);
         let key = derive_key(&root, app_id)?;
         self.cache.borrow_mut().insert(
             (app_id.to_string(), key_id.to_string()),
@@ -468,63 +407,6 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
     }
 }
 
-/// PG production root-key fetcher.
-///
-/// Calls `__zeroship_admin.get_column_key($1)`. Returns `Ok(Some(bytes))`
-/// on a successful lookup, `Ok(None)` when the getter returns NULL, and
-/// `Err(...)` when the call itself failed. Callers fall through to the
-/// local source on `Ok(None)` OR `Err(_)`.
-///
-/// **Today that is always `Err(_)`:** the getter was installed only by
-/// `auth::bootstrap::ensure_admin_schema` (deleted 2026-08-27), so the
-/// function does not exist on any database. This body is left intact
-/// rather than removed because choosing where PG column roots come
-/// from instead is a design decision, not a deletion.
-///
-/// The function returns the raw 32-byte root; HKDF expansion happens
-/// in `derive_key`.
-async fn pg_admin_lookup_root(
-    pool: &compio_postgres::Pool,
-    key_id: &str,
-) -> Result<Option<[u8; 32]>, DbError> {
-    // The getter returns `bytea`, and compio-postgres surfaces result
-    // columns in binary format. Read the raw bytes directly; an empty
-    // result set OR a NULL value → `Ok(None)`.
-    let rows = pool
-        .query_text_params(
-            "SELECT __zeroship_admin.get_column_key($1)",
-            &[key_id],
-        )
-        .await
-        .map_err(|e| DbError::Configuration {
-            code: "column_key_not_configured",
-            message: format!(
-                "PG getter call failed for key_id '{key_id}': {e}"
-            ),
-            hint: Some(
-                "Set ZEROSHIP_COLUMN_KEY_<KEYID> or supply the root directly; \
-                 there is no admin-schema getter any more"
-                    .to_string(),
-            ),
-        })?;
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-    // `try_get` returns `Err` for NULL (a `WasNull` typed error) and
-    // for type mismatches; either way we treat the row as "no key
-    // present" and let the caller fall through to the local source.
-    // `Row::get` would panic on NULL.
-    let decoded = match row.try_get::<_, Vec<u8>>(0) {
-        Ok(bytes) => Zeroizing::new(bytes),
-        Err(_) => return Ok(None),
-    };
-    if decoded.len() != 32 {
-        return Ok(None);
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&decoded);
-    Ok(Some(out))
-}
 
 // These tests plant no environment. Malformed-input cases call
 // `parse_root_key` directly, and every case that needs a RESOLVABLE key
@@ -544,7 +426,7 @@ mod tests {
                 .with_hex(key_id, hex)
                 .expect("fixture root key must parse"),
         );
-        (KeyStore::new(KeySource::supplied(Rc::clone(&keys))), keys)
+        (KeyStore::new(LocalKeySource::supplied(Rc::clone(&keys))), keys)
     }
 
     /// `derive_key` is deterministic: same `(root, app_id)` always
@@ -698,7 +580,7 @@ mod tests {
     #[test]
     fn missing_supplied_key_yields_typed_error() {
         let keys = Rc::new(SuppliedRootKeys::new());
-        let store = KeyStore::new(KeySource::supplied(Rc::clone(&keys)));
+        let store = KeyStore::new(LocalKeySource::supplied(Rc::clone(&keys)));
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         let err = rt
             .block_on(async { store.resolve("app_x", "never_supplied").await })
@@ -819,7 +701,7 @@ mod tests {
     /// Freshly-constructed `KeyStore` reports zero lookups.
     #[test]
     fn key_store_lookups_count_starts_at_zero() {
-        let store = KeyStore::new(KeySource::env_var());
+        let store = KeyStore::new(LocalKeySource::env_var());
         assert_eq!(store.lookups_count(), 0);
     }
 
@@ -868,7 +750,7 @@ mod tests {
     /// path TRIED to load a key, not whether the load succeeded.
     #[test]
     fn key_store_lookups_count_bumps_on_failed_resolve() {
-        let store = KeyStore::new(KeySource::supplied(Rc::new(SuppliedRootKeys::new())));
+        let store = KeyStore::new(LocalKeySource::supplied(Rc::new(SuppliedRootKeys::new())));
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
 
         // The source holds no roots at all, so this resolve cannot succeed.

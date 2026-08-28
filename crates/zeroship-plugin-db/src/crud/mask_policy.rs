@@ -3,37 +3,42 @@
 //!
 //! The unmask authorization path (`crate::crud::unmask::check_unmask_authorization`)
 //! reads a per-app [`MaskPolicy`] cached on the per-isolate context
-//! (`ThreadDbContext::mask_policies`). The cache is
-//! seeded from durable storage:
+//! (`ThreadDbContext::mask_policies`).
 //!
-//! - **PG** (selected at runtime by a `postgres://` url):
-//!   `__zeroship_admin.get_mask_policy(app_id)` /
-//!   `set_mask_policy(app_id, policy)`.
+//! ## Where the policy comes from
 //!
-//!   **This arm is broken and needs a home, not a repair.** Both
-//!   routines and the `__zeroship_admin.mask_policies` table behind
-//!   them were installed only by
-//!   `auth::bootstrap::ensure_admin_schema`, which was `cfg(test,
-//!   feature = "test-helpers")` - so they never existed in a shipped
-//!   worker even before that function was deleted on 2026-08-27. Per
-//!   AGENTS.md a policy the worker both reads and writes is not
-//!   privileged state and belongs in the APP'S OWN SCHEMA under
-//!   ordinary parameterised SQL, exactly like
-//!   `__zeroship_audit_unmask` (see `crate::crud::unmask`). Making
-//!   that move is an operator decision, so the calls below are left
-//!   pointing at the deleted routines rather than quietly rehomed.
+//! **The creator's own source, at boot, and nowhere else on the PG
+//! arm.** The app declares `defineMaskPolicy()`; `installSchema` flushes
+//! it through the `__platform.setMaskPolicy` native op once per isolate
+//! during startup; [`dispatch_set_mask_policy`] validates it and installs
+//! it in the per-isolate cache. Redeploy is the only way to change it,
+//! which is what "managed in the codebase, immutable at runtime" means.
+//! App JS cannot reach the op: it hangs off the `ZS_PLATFORM` V8 private
+//! symbol (see `crate::v8_classes::db_platform`).
 //!
-//! - **SQLite** (selected at runtime by a `sqlite://` url): a sidecar JSON file at
-//!   `<db_dir>/mask_policies.json`. Reads/writes run off-thread via
-//!   `compio::runtime::spawn_blocking`, and a per-file process-local
-//!   mutex serialises concurrent writers so the read/modify/write cycle
-//!   cannot interleave and tear the JSON payload.
+//! There is no durable policy store on PG. There used to be:
+//! `__zeroship_admin.get_mask_policy(app_id)` /
+//! `set_mask_policy(app_id, policy)`, a pair of `SECURITY DEFINER`
+//! routines over an `__zeroship_admin.mask_policies` table. Installed
+//! only by `auth::bootstrap::ensure_admin_schema`, which was `cfg(test,
+//! feature = "test-helpers")` - so they never existed in a shipped
+//! worker even before that function was deleted on 2026-08-27. They were
+//! removed, not rehomed, by operator decision the same day: the worker
+//! both read and wrote this state, so it was never privileged (AGENTS.md,
+//! "Privilege follows the PROCESS, not the function"), and a policy
+//! re-declared from the bundle on every boot has nothing for a durable
+//! store to add.
 //!
-//! The SDK calls [`dispatch_set_mask_policy`] once at app boot via the
-//! `zeroship.db.setMaskPolicy` native op (registered on [`crate::v8_classes::db::Db`]).
-//! After the storage write succeeds the in-process cache is refreshed
-//! write-through so a subsequent unmask on the same isolate sees the
-//! new policy without a re-read.
+//! **SQLite still carries one** (selected at runtime by a `sqlite://`
+//! url): a sidecar JSON file at `<db_dir>/mask_policies.json`, written
+//! and re-read through [`persist_sqlite`] / [`load_sqlite`] off-thread
+//! via `compio::runtime::spawn_blocking`, with a per-file process-local
+//! mutex serialising writers. By the decision above that store is also
+//! surplus - the boot-time declaration already seeds the cache, so the
+//! sidecar is a write plus a redundant read - but removing it was
+//! explicitly out of scope for the change that deleted the PG arm. The
+//! two backends therefore DISAGREE on durability today, and only SQLite
+//! is out of step.
 //!
 //! ### The `auto` actor fallback rule
 //!
@@ -215,22 +220,22 @@ impl MaskPolicy {
 // `setMaskPolicy` dispatcher — write through storage + refresh cache.
 // ---------------------------------------------------------------------------
 
-/// Public dispatch entry for `zeroship.db.setMaskPolicy`.
+/// Boot-time installer for `__platform.setMaskPolicy`.
 ///
 /// 1. Validate the policy JSON via [`MaskPolicy::from_json`] (both shape
 ///    + classification taxonomy).
-/// 2. Persist:
-///    - **PG**: `__zeroship_admin.set_mask_policy` - a routine nothing
-///      installs any more; see the module header.
-///    - **SQLite**: read sidecar JSON, update the app's entry, atomic
-///      write back via `<file>.tmp + rename`.
-/// 3. Refresh the in-process cache on
-///    `ThreadDbContext::mask_policies` so the next
-///    unmask sees the new policy without a re-read.
+/// 2. Install it in the per-isolate cache on
+///    `ThreadDbContext::mask_policies`, so the next unmask on this
+///    isolate sees it.
+/// 3. On SQLite only, additionally write the sidecar JSON file. PG
+///    persists nothing - see the module header for why the durable PG
+///    store was deleted rather than rehomed.
 ///
-/// Idempotent: re-running with the same policy is a no-op for the cache
-/// (it overwrites with the same bytes) and a single UPSERT/file rewrite
-/// for storage.
+/// Idempotent: re-running with the same policy overwrites the cache with
+/// the same bytes and rewrites the same sidecar.
+///
+/// Not reachable from app JS. The op lives on the `DbPlatform` handle
+/// behind a V8 private symbol, and `installSchema` is its only caller.
 pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(), DbError> {
     let policy = MaskPolicy::from_json(&policy_v)?;
 
@@ -238,17 +243,16 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
         DbError::config("not_configured", "db: backend not initialized")
     })?;
 
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_postgres() {
-        persist_pg(pg, app_id, &policy).await?;
-        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
+    // ---- PG arm: cache only, no storage round-trip ----
+    if backend.as_postgres().is_some() {
+        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy)));
         return Ok(());
     }
 
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_sqlite() {
         persist_sqlite(sq, app_id, &policy).await?;
-        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
+        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy)));
         return Ok(());
     }
     Err(DbError::Configuration {
@@ -256,64 +260,6 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
         message: "db: no backend arm available for setMaskPolicy".to_string(),
         hint: None,
     })
-}
-
-// ---------------------------------------------------------------------------
-// PG persistence
-// ---------------------------------------------------------------------------
-
-/// PG storage write through `__zeroship_admin.set_mask_policy(app_id,
-/// policy)`. The policy arrives as canonical JSON; PG receives it as
-/// JSONB via a text parameter (`::jsonb` cast inside the function body
-/// — the wire is text only).
-///
-/// The routine has no installer (module header); this call fails on
-/// every database.
-async fn persist_pg(
-    pg: &crate::backend::PostgresBackend,
-    app_id: &str,
-    policy: &MaskPolicy,
-) -> Result<(), DbError> {
-    use crate::backend::PgSqlExecutor as _;
-    let pool = pg.pool_handle();
-    let policy_text = policy.to_json().to_string();
-    let sql = "SELECT __zeroship_admin.set_mask_policy($1, $2::jsonb)";
-    pool.query_text_params(sql, &[app_id, &policy_text])
-        .await
-        .map_err(|e| crate::error::DbError::from_pg(&e))?;
-    Ok(())
-}
-
-/// PG storage read through `__zeroship_admin.get_mask_policy(app_id)`.
-/// Returns `None` when the app has no policy row.
-///
-/// The routine has no installer (module header); this call fails on
-/// every database.
-pub async fn load_pg(
-    pg: &crate::backend::PostgresBackend,
-    app_id: &str,
-) -> Result<Option<MaskPolicy>, DbError> {
-    use crate::backend::PgSqlExecutor as _;
-    let pool = pg.pool_handle();
-    let rows = pool
-        .query_text_params(
-            "SELECT __zeroship_admin.get_mask_policy($1)::text",
-            &[app_id],
-        )
-        .await
-        .map_err(|e| crate::error::DbError::from_pg(&e))?;
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    let text: Option<&str> = rows[0]
-        .try_get::<_, Option<&str>>(0)
-        .map_err(|e| DbError::internal(format!("load mask policy: get column: {e}")))?;
-    let Some(text) = text else {
-        return Ok(None);
-    };
-    let v: Value = serde_json::from_str(text)
-        .map_err(|e| DbError::internal(format!("load mask policy: parse JSON: {e}")))?;
-    Ok(Some(MaskPolicy::from_json(&v)?))
 }
 
 // ---------------------------------------------------------------------------
