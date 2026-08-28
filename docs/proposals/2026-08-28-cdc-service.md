@@ -1985,6 +1985,31 @@ Stated as gaps rather than written as facts elsewhere in this document.
   prototyped, and it changes a subscriber-side contract.
 - **Behaviour of non-transactional `pg_logical_emit_message`.** 8.4. Not used and
   not tested.
+
+- **`messages 'true'` is REQUIRED on `START_REPLICATION`, and omitting it drops
+  the schema-change signal silently.** Measured on PostgreSQL 17.11. One
+  transaction containing `insert`, a transactional
+  `pg_logical_emit_message(true, 'zsschema', 'epoch=7')`, and a second `insert`,
+  decoded twice from the same slot:
+
+  | decode options | message types | payload present |
+  | --- | --- | --- |
+  | `proto_version`, `publication_names` | `Begin Relation Insert Insert Commit` | **no** |
+  | the same plus `messages 'true'` | `Begin Relation Insert **Message** Insert Commit` | yes |
+
+  Two consequences, and the first is the dangerous one:
+
+  1. **Without the option the stream is well-formed and complete-looking.** No
+     error, no gap, no diagnostic - the `Message` frame simply is not there. A
+     relay that forgets it would decode data changes correctly forever while
+     every schema-change signal vanished, and section 8's whole mechanism would
+     be silently inert. The option belongs in the `START_REPLICATION` construction
+     with a test that fails when it is absent, not in a comment.
+  2. **With the option, section 8's ordering claim holds as measured.** The
+     `Message` frame appears *between* the two inserts, at the point in the
+     transaction where it was emitted - so the marker really is ordered by the
+     WAL rather than by a side channel, which is what lets it dissolve the
+     carrier problem instead of moving it.
 - **Whether `ntex` v3's response streaming and `cyper`'s `stream` feature compose
   into a long-lived push channel in practice.** Both are present in the workspace
   (`Cargo.toml:45`, `:48`) and `cyper`'s `stream` feature is enabled; no code was
