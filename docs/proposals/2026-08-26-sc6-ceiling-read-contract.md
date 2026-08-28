@@ -405,7 +405,7 @@ absent from it. Every reviewer, and every earlier analysis in this document,
 reasoned about what the flip makes unreadable and not about what it leaves
 returnable.
 
-### What this decision now owes (four items)
+### What this decision now owes (five items)
 
 1. **Lookup by real value must survive.** "Find the account for this SSN" is the
    common case for a masked column, and after this change it cannot be expressed
@@ -439,10 +439,66 @@ returnable.
    explicit, audited request - but it is a visible change and belongs in
    `docs/reference/db.md` beside the mask kinds, so a creator learns it when
    they declare the mask rather than when a query silently stops matching.
-4. **The AAD binds the column name.** `canonical_aad(collection, column,
-   row_pk)` means renaming the physical column changes the tag, so this is a
-   migration-engine change and not only a runtime one. Free pre-launch; not free
-   later.
+4. ~~**The AAD binds the column name.**~~ **RETRACTED 2026-08-28 - it binds the
+   LOGICAL FIELD KEY, and the flip is therefore not a re-encrypt.** Measured:
+   `canonical_aad(collection, &col, ..)` receives `col` from
+   `for (col, def) in schema_obj.iter()` (`crud/encryption_pass.rs:173`,
+   `:200-207`), the schema field key - not `storage.rawColumn`. Same at `:337`
+   and `crud/unmask.rs:452-458`. The two are the same string today for every
+   masked+encrypted field, so the distinction was invisible.
+
+   The false constraint is asserted as fact in a doc comment
+   (`migrate-core/src/render/gen_types.rs:160-169`). **Correct that comment in
+   the same commit as any flip work**, or the next reader "fixes" the AAD to
+   match it and destroys every ciphertext in the deployment.
+
+   **Neither branch is right, though.** Binding the bare logical name stops being
+   sufficient the moment item 2's keyed lookup column lands: two encrypted
+   columns then share one logical field and one AAD, so swapping their contents
+   passes tag verification. **Bind the logical field name plus a stable role
+   discriminator (`value` | `lookup`).** A role survives renames; a physical name
+   does not.
+5. **The flip swaps which column carries the declared TYPE and the whole
+   constraint set** - added 2026-08-28, and absent from every document in this
+   set until now, including the 966-line write-path specification.
+
+   `.mask()` is legal on string, number and bytes, and every mask kind returns a
+   **String**. Today that is harmless: the sibling is bare `TEXT` while the
+   field's own column keeps its declared type and everything
+   `def_to_constraints_for_dialect` attaches (`query.rs:2719-2827`) - `NOT NULL`,
+   `DEFAULT`, range `CHECK`, literal `CHECK`, enum `CHECK`. Post-flip the logical
+   column holds `'***'`:
+
+   - `t.number().mask(...)` leaves `ssn` as `DOUBLE PRECISION`; writing `'***'`
+     is a hard error.
+   - `t.string().enum([...]).mask(...)` leaves `CHECK ("ssn" IN (...))`, which
+     refuses `'***'`. **Every write fails.**
+   - encrypted+masked leaves `ssn` as `BYTEA`.
+
+   **And the migration engine cannot see the change.** The column-additions
+   branch is name-only "no matter how its declared type has changed"
+   (`migrate-core/src/schema/diff.rs:856-882`, its own comment), and the
+   `RewriteColumnType` arm keys strictly off the `encrypted` toggle (`:894-900`).
+   The flip moves neither the name nor that toggle, **so the differ emits
+   nothing**, and the runtime writes a mask string into a numeric or binary
+   column.
+
+   For an EXISTING table a double rename is free, because types and constraints
+   travel with the renamed columns:
+
+   ```sql
+   ALTER TABLE t RENAME COLUMN ssn        TO <raw>;  -- free the logical name first
+   ALTER TABLE t RENAME COLUMN ssn_masked TO ssn;
+   ```
+
+   For a NEW table, `build_create_table_with_fks_for_dialect` must emit the
+   declared type and constraints under the **raw** name and a bare `TEXT` sibling
+   under the **logical** name. Nothing does that today.
+
+   **This is the item that makes the flip's migration hand-authored with nothing
+   verifying it** - which operator decision 9 identifies as the flip's one
+   surviving cost, and why it owes a mutation-proved test before it runs
+   anywhere.
 
 ## Joined reads
 
