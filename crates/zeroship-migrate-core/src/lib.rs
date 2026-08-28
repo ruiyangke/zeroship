@@ -350,14 +350,19 @@ pub use render::fold::{
 pub use zeroship_migrate_policy::EffectivePolicy;
 // The `gen-types` schema-artifact emitter: fold a schema source (op.* migrations or
 // a declared `CollectionDescriptor` set) into the two co-emitted projections
-// (`schema.runtime.json` v1 descriptor + generated `env.db.ts`), plus the in-memory
+// (`schema.runtime.json` v2 descriptor + generated `env.db.ts`), plus the in-memory
 // `--check` drift gate. Both sources route through the SAME renderer, so output is
 // byte-identical for equivalent schemas.
+//
+// `FieldStorage` and `AuxiliaryObject` ride on this line rather than staying reachable
+// only through `render::gen_types::`: they are what a consumer reads INSTEAD of
+// formatting a physical column name, so the type it deserializes into belongs in the
+// one vocabulary an embedding host already names.
 pub use render::gen_types::{
     check_artifacts, diff_artifacts, render_artifacts, render_artifacts_from_descriptors,
-    render_schema_export, render_schema_export_from_descriptors, CheckDiff, GenTypesError,
-    GeneratedArtifacts, SchemaExport, DEFAULT_PROJECT_SCHEMA, ENV_DTS_FILE,
-    RUNTIME_DESCRIPTOR_FILE,
+    render_schema_export, render_schema_export_from_descriptors, AuxiliaryObject, CheckDiff,
+    FieldStorage, GenTypesError, GeneratedArtifacts, SchemaExport, DEFAULT_PROJECT_SCHEMA,
+    ENV_DTS_FILE, RUNTIME_DESCRIPTOR_FILE,
 };
 // The OPEN dialect identity and the backend contract keyed by it. A backend is
 // named by a `DialectId`, describes itself with a `BackendDescriptor`, and is

@@ -483,9 +483,24 @@ function isGeneratedArtifact(file: string, existing: string): boolean {
   return file === MIGRATIONS_IR_FILE && isMigrationsIrArtifact(existing);
 }
 
+/**
+ * Is this file one WE wrote, as opposed to something a creator hand-authored?
+ *
+ * Deliberately version-AGNOSTIC: any numeric `version` over a `collections` record is
+ * ours. Pinning this to the current version looks tighter and is actively wrong, because
+ * the recogniser gates OVERWRITING - so a version bump would make every committed
+ * artifact unrecognisable, and `gen-types` would refuse to regenerate the very files the
+ * bump had just made stale. Measured: pinning it to 2 refused all 8 loadable committed
+ * artifacts with "refusing to overwrite creator-owned schema.runtime.json", and the only
+ * way out was to hand-edit each file to the new version first.
+ *
+ * "Is this file ours" and "is this file CURRENT" are different questions. The second one
+ * belongs to the drift gate (`--check`), which compares bytes and has a fresh render to
+ * compare against; this one only has the file.
+ */
 function isRuntimeDescriptorArtifact(text: string): boolean {
   const parsed = parseObject(text);
-  return parsed?.version === 1 && isRecord(parsed.collections);
+  return typeof parsed?.version === "number" && isRecord(parsed.collections);
 }
 
 function isMigrationsIrArtifact(text: string): boolean {

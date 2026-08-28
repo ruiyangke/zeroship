@@ -213,7 +213,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       if (
         value != null &&
         typeof value === "object" &&
-        (value as { version?: unknown }).version === 1 &&
+        (value as { version?: unknown }).version === 2 &&
         (value as { collections?: unknown }).collections != null &&
         typeof (value as { collections?: unknown }).collections === "object" &&
         !Array.isArray((value as { collections?: unknown }).collections)
@@ -244,7 +244,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         return out;
       }
       throw new Error(
-        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v1 object with { version: 1, collections }",
+        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
       );
     };
     const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;

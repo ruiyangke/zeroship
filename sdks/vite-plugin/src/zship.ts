@@ -934,13 +934,13 @@ function validateRuntimeDescriptorValue(value: unknown): void {
   if (
     value === null ||
     typeof value !== "object" ||
-    (value as { version?: unknown }).version !== 1 ||
+    (value as { version?: unknown }).version !== 2 ||
     (value as { collections?: unknown }).collections === null ||
     typeof (value as { collections?: unknown }).collections !== "object" ||
     Array.isArray((value as { collections?: unknown }).collections)
   ) {
     throw new Error(
-      "zship: runtime_descriptor must be RuntimeSchemaDescriptor v1 with { version: 1, collections }"
+      "zship: runtime_descriptor must be RuntimeSchemaDescriptor v2 with { version: 2, collections }"
     );
   }
   for (const [name, rawCollection] of Object.entries(

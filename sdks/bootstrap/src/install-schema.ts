@@ -132,13 +132,20 @@ export type NormalizedSchema = Record<string, FieldDef>;
  * **Migration-first cutover (P5 S3)** — the bundled runtime schema source.
  *
  * The migration fold emits `schema.runtime.json` and the runtime carries it in
- * `manifest.runtime_descriptor`. v1 is `{ version: 1, collections: { ... } }`:
+ * `manifest.runtime_descriptor`. v2 is `{ version: 2, collections: { ... } }`:
  * each collection carries already-resolved wire `FieldDef`s (snake_case
  * columns, system fields included), runtime options, and plain named indexes.
- * v1 is the sole runtime schema source.
+ * v2 is the sole runtime schema source.
+ *
+ * **v2 over v1 because the guarantee changed, not because the shape grew.** Every
+ * `FieldDef` in a v2 descriptor carries a `storage` block naming the physical column
+ * a default projection reads and, when they differ, the column holding the
+ * authoritative value. A consumer that stops formatting `\`${col}_masked\`` depends on
+ * that being true of every field it is handed, and a committed v1 artifact does not
+ * carry it. Refusing a v1 descriptor outright is the whole reason the number moved.
  */
 type RuntimeStrictness = "strict" | "lenient" | "off";
-type RuntimeCollectionDescriptorV1 = {
+type RuntimeCollectionDescriptorV2 = {
   fields: Record<string, FieldDef>;
   options: {
     softDelete: boolean;
@@ -148,24 +155,24 @@ type RuntimeCollectionDescriptorV1 = {
   indexes: readonly NamedIndexSpec[];
 };
 export type RuntimeSchemaDescriptor = {
-  version: 1;
-  collections: Record<string, RuntimeCollectionDescriptorV1>;
+  version: 2;
+  collections: Record<string, RuntimeCollectionDescriptorV2>;
 };
 
-function assertRuntimeDescriptorV1(
+function assertRuntimeDescriptorV2(
   descriptor: RuntimeSchemaDescriptor | undefined,
-): { version: 1; collections: Record<string, RuntimeCollectionDescriptorV1> } | null {
+): { version: 2; collections: Record<string, RuntimeCollectionDescriptorV2> } | null {
   if (descriptor === undefined) return null;
   if (
     descriptor === null ||
     typeof descriptor !== "object" ||
-    (descriptor as { version?: unknown }).version !== 1 ||
+    (descriptor as { version?: unknown }).version !== 2 ||
     typeof (descriptor as { collections?: unknown }).collections !== "object" ||
     (descriptor as { collections?: unknown }).collections === null
   ) {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v1 object with { version: 1, collections }",
+        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
       ),
       { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
     );
@@ -229,7 +236,7 @@ function assertRuntimeDescriptorV1(
     }
   }
 
-  return descriptor as { version: 1; collections: Record<string, RuntimeCollectionDescriptorV1> };
+  return descriptor as { version: 2; collections: Record<string, RuntimeCollectionDescriptorV2> };
 }
 
 function invalidRuntimeDescriptor(detail: string): Error & { code: "INVALID_RUNTIME_DESCRIPTOR" } {
@@ -242,10 +249,10 @@ function invalidRuntimeDescriptor(detail: string): Error & { code: "INVALID_RUNT
 function runtimeDescriptorFields(
   descriptor: RuntimeSchemaDescriptor | undefined,
 ): Record<string, Record<string, FieldDef>> | null {
-  const v1 = assertRuntimeDescriptorV1(descriptor);
-  if (v1 !== null) {
+  const v2 = assertRuntimeDescriptorV2(descriptor);
+  if (v2 !== null) {
     const out: Record<string, Record<string, FieldDef>> = {};
-    for (const [name, collection] of Object.entries(v1.collections)) {
+    for (const [name, collection] of Object.entries(v2.collections)) {
       out[name] = collection.fields;
     }
     return out;
@@ -1194,11 +1201,11 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.asIs;
 
-  // **Migration-first cutover (P5 S6)** — descriptor v1 is the only runtime
+  // **Migration-first cutover (P5 S6)** — descriptor v2 is the only runtime
   // schema source. The declared first argument is ignored. An absent descriptor
-  // installs no collections; a present but non-v1 descriptor is a hard error.
+  // installs no collections; a present but non-v2 descriptor is a hard error.
   const descriptor = options?.descriptor;
-  const descriptorV1 = assertRuntimeDescriptorV1(descriptor);
+  const descriptorV2 = assertRuntimeDescriptorV2(descriptor);
   const descriptorFields = runtimeDescriptorFields(descriptor);
   const source: T =
     descriptorFields !== null
@@ -1269,7 +1276,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     strictness?: RuntimeStrictness;
     indexes: readonly NamedIndexSpec[];
   } => {
-    const fromDescriptor = descriptorV1?.collections[name];
+    const fromDescriptor = descriptorV2?.collections[name];
     if (fromDescriptor !== undefined) {
       return {
         softDelete: fromDescriptor.options?.softDelete ?? false,

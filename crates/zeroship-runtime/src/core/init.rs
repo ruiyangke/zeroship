@@ -3731,10 +3731,10 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
     let Some(root) = value.as_object() else {
         return Err("runtime: manifest.runtime_descriptor must be a JSON object".into());
     };
-    if root.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+    if root.get("version").and_then(serde_json::Value::as_u64) != Some(2) {
         return Err(
-            "runtime: manifest.runtime_descriptor must be RuntimeSchemaDescriptor v1 \
-             (expected version: 1)"
+            "runtime: manifest.runtime_descriptor must be RuntimeSchemaDescriptor v2 \
+             (expected version: 2)"
                 .into(),
         );
     }
