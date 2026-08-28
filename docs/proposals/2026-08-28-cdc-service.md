@@ -1,53 +1,32 @@
 # The CDC service
 
-Written 2026-08-28. The operator decided on 2026-08-28 that this service is
-built (`docs/proposals/2026-08-26-runtime-db-binding-00-index.md:51-56`). This
-document specifies it. It does not re-argue whether to build it.
+This document specifies the CDC relay service. The decision to build it is
+recorded in `docs/proposals/2026-08-26-runtime-db-binding-00-index.md:51-56`;
+this page does not re-argue it.
 
 **Working name:** `zeroship-cdc`. One binary, one process, executes no creator
 code.
-
-**Revised 2026-08-28**, after an adversarial review, a second opinion and an
-eight-system prior-art study. Ten findings are folded into the sections they
-bite, not listed at the top: the dedup rule (6.3), the keepalive clamp (6.3),
-timeline validation (6.4), the publication bracket and its collapse to one
-shared publication (3.6), where the projection is computed (3.7), the
-SQLite/Postgres polarity in the deletion table (4), slow consumers (5.4), ring
-sizing (5.5), the degradation vocabulary (5.6), per-app fault isolation (7.5)
-and what the relay measures (7.6). Sections 12, 13 and 14 changed with them.
-The finding register is `2026-08-26-runtime-db-binding-00-index.md`, section
-"L12: DECIDED".
-
-The revision also **overturns the fix the review prescribed for 6.3**. The
-review said per-change LSNs are monotone and a one-field change would do. They
-are not, in two independent ways, both measured here. See 6.3 and 13(e).
 
 ---
 
 ## 0. How to read the citations in this document
 
 Every `file:line` below was opened in this worktree
-(`/home/ruiyang/Projects/appbase/.worktrees/dbbind-impl`), on the working tree
-as it stands. **The migration service crate was renamed on 2026-08-28**
-(`8f69c7e53`, `refactor(migrate)!: fold the pg session into the service and
-rename it migrate-server`): every citation that said `crates/zeroship-migrated/`
-now says `crates/zeroship-migrate-server/`, and the line numbers were re-opened
-rather than carried across.
+(`/home/ruiyang/Projects/appbase/.worktrees/dbbind-impl`), on the working tree as
+it stands. The migration service crate is `crates/zeroship-migrate-server/`
+(renamed from `zeroship-migrated` in `8f69c7e53`).
 
-PostgreSQL behaviour claims marked **MEASURED** come from two rounds. The
-original round used a throwaway `postgres:16` container (16.15,
-`-c wal_level=logical`). The revision round used a throwaway `postgres:18`
-container (**PostgreSQL 18.4**, Debian build, `-c wal_level=logical`) started
-and destroyed inside the revising session; every transcript from that round says
-18.4 in its own sentence. Anything I did not run or open is marked
-**unverified** and says so in its own sentence rather than being written as
-fact.
+PostgreSQL behaviour claims marked **MEASURED** come from throwaway containers
+started and destroyed inside the sessions that wrote this page: `postgres:16`
+(16.15) and `postgres:18` (18.4, Debian build), both with
+`-c wal_level=logical`. Each transcript names its version. Anything not run or
+opened is marked **unverified** and says so in its own sentence rather than being
+written as fact.
 
-Two things this document deliberately does not carry: any latency figure (see
-section 11, which specifies how to obtain one) and any re-derivation of the
-decode multiplier, which the index records as structural and already verified in
-the PostgreSQL sources. **Section 11 grew a queueing arm and a slow-consumer
-arm** in the revision; it still contains no number.
+Two things this document deliberately does not carry: any latency figure (section
+11 specifies how to obtain one) and any re-derivation of the decode multiplier,
+which the index records as structural and already verified in the PostgreSQL
+sources.
 
 ---
 
@@ -67,7 +46,7 @@ arm** in the revision; it still contains no number.
 | How big is the ring? | Byte depth, frame cap and time depth, per app, plus a cluster cap that evicts from the largest ring | 5.5 |
 | What if a change cannot be represented? | A `Gap` frame for that row, not a `Resync` for the app. Plus a `Truncate` frame and a three-way value encoding that distinguishes NULL from unavailable | 5.6 |
 | Leader election | One `pg_try_advisory_lock` per cluster, session-scoped, over `compio-postgres`. One database is shared by every app, so this is one leader, not one per app | 6 |
-| At-least-once dedup key | `(commit_lsn, change_index)`, lexicographic. **Not** the per-change LSN: measured to go backwards between transactions and to collapse under `heap_multi_insert` | 6.3 |
+| At-least-once dedup key | `(commit_lsn, change_index)`, lexicographic. The per-change LSN is unusable: measured to go backwards between transactions and to collapse under `heap_multi_insert` | 6.3 |
 | What invalidates a watermark? | A `systemid` or `timeline` change from `IDENTIFY_SYSTEM`. **Not** a leader-term bump, which is a routine failover producing only duplicates | 6.4 |
 | Failure behaviour | `max_slot_wal_keep_size` bounds WAL; slot invalidation becomes `Resync`; the subscriber contract absorbs `Resync` on the live-query path and forces the creator to handle it on the raw path | 7 |
 | Blast radius of one tenant | Bounded by construction: a total per-app step, no `catch_unwind`, and a degraded app is quarantined without stopping the slot | 7.5 |
@@ -78,8 +57,7 @@ arm** in the revision; it still contains no number.
 
 ## 2. What the service closes, restated against the code
 
-Three findings close because consumption moves out of the worker process. All
-three are re-verified here rather than relayed.
+Three findings close because consumption moves out of the worker process.
 
 ### 2.1 L30: the worker holds REPLICATION and BYPASSRLS
 
@@ -99,41 +77,39 @@ ALTER ROLE zeroship_workflow_owner WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATER
 `zeroship_worker` is the login role of the process that runs creator code
 (`crates/zeroship-worker/src/config.rs:59-60`, one `worker.database_url` for the
 whole process, not one per app). The service takes both attributes: the relay's
-own login role holds `REPLICATION`, and `zeroship_worker` drops
-`REPLICATION` and `BYPASSRLS` in the same migration that provisions the relay's
-role.
+own login role holds `REPLICATION`, and `zeroship_worker` drops `REPLICATION`
+and `BYPASSRLS` in the same migration that provisions the relay's role.
 
-`BYPASSRLS` is a separate grant from `REPLICATION` and is not required to
-consume a slot. It is in the same statement and drops with it. I did **not**
-verify what else in the tree depends on `zeroship_worker` holding `BYPASSRLS`;
-that is a required pre-flight check before writing the migration, not a claim.
+`BYPASSRLS` is a separate grant from `REPLICATION` and is not required to consume
+a slot. It is in the same statement and drops with it. What else in the tree
+depends on `zeroship_worker` holding `BYPASSRLS` is **not verified**; enumerating
+those consumers is a required pre-flight check before writing the migration.
 
 ### 2.2 L12b: an abandoned slot
 
 Slot names are per `(app, worker)`:
 `crates/zeroship-plugin-db/src/replication.rs:114-121` composes
-`__zs_slot_<sha14(app)>__<sha10(worker)>`. `crates/zeroship-plugin-db/src/slot_reaper.rs`
-exists (593 lines) to sweep the ones nobody owns any more, on a one-hour
-inactivity threshold (`:28`) with a two-lock worker lease (`:116-125`,
-`:182-198`) and a fleet-leader election (`:171-180`). With O(1) service-owned
-slots there is no per-worker slot to abandon. The file is deleted, not ported.
+`__zs_slot_<sha14(app)>__<sha10(worker)>`.
+`crates/zeroship-plugin-db/src/slot_reaper.rs` exists (593 lines) to sweep the
+ones nobody owns any more, on a one-hour inactivity threshold (`:28`) with a
+two-lock worker lease (`:116-125`, `:182-198`) and a fleet-leader election
+(`:171-180`). With O(1) service-owned slots there is no per-worker slot to
+abandon. The file is deleted, not ported.
 
 ### 2.3 The mask-only leak, stated precisely
 
-The index and the defect register both describe this. The precise shape, which
-matters for what the fix has to cover, is that **the name leaks to creators
-today and the value does not, but the value is in the process and one call site
-from the wire.**
+The precise shape, which matters for what the fix has to cover, is that **the
+name leaks to creators today and the value does not, but the value is in the
+process and one call site from the wire.**
 
 - `crates/zeroship-plugin-db/src/wal_consumer.rs` contains **zero** occurrences
-  of `mask`, `wrap_row_on_read` or `apply_mask`. Measured:
-  `grep -c -i "mask\|wrap_row_on_read\|apply_mask"` returns `0`. `tuple_to_map`
-  (`:662-681`) zips every physical column the server sent into
-  `new_tuple`.
+  of `mask`, `wrap_row_on_read` or `apply_mask`
+  (`grep -c -i "mask\|wrap_row_on_read\|apply_mask"` returns `0`). `tuple_to_map`
+  (`:662-681`) zips every physical column the server sent into `new_tuple`.
 - `changed_columns` on the WAL path is every column of the cached relation
   (`wal_consumer.rs:629-633`, `rel.columns.iter().map(|c| c.name.clone())`).
-- `changed_columns` on the local-emit path is every key of the `RETURNING *`
-  row minus exactly two literals (`crates/zeroship-plugin-db/src/exec.rs:518-524`,
+- `changed_columns` on the local-emit path is every key of the `RETURNING *` row
+  minus exactly two literals (`crates/zeroship-plugin-db/src/exec.rs:518-524`,
   `.filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))`). That is a
   blacklist of two names.
 - The tuple on the local-emit path is every key of the same row
@@ -142,8 +118,8 @@ from the wire.**
   `emit_for_rows(&rows, ...)` at `exec.rs:438`; the caller passes the same rows
   to `read_pipeline::apply` afterwards at
   `crates/zeroship-plugin-db/src/crud/mod.rs:799`. So the broker event is built
-  from the raw row, not the masked one. This ordering is the mechanism, and it
-  is a stronger statement than "`exec.rs:531-541` maps every key".
+  from the raw row, not the masked one. This ordering is the mechanism, and it is
+  a stronger statement than "`exec.rs:531-541` maps every key".
 - `changed_columns` reaches JavaScript. `message_to_json`
   (`crates/zeroship-plugin-db/src/broker.rs:937-946`) emits
   `{"kind","op","collection","pk","columns"}`, and
@@ -154,17 +130,17 @@ from the wire.**
   `crates/` for `new_tuple` and discarding constructors and tests:
   `broker.rs:290` (`entry.matches(&event.new_tuple)`, predicate evaluation) and
   `broker.rs:995` (`"row": ev.new_tuple` inside `ws_frame_for_change`).
-- **`ws_frame_for_change` has no production caller.** Grepped
+- **`ws_frame_for_change` has no production caller.** Grepping
   `ws_frame_for_change`, `ws_frame_for_control` and `ws_frame(` across the repo
-  excluding `target/`, `node_modules/` and `.git/`: the only hits in
-  `crates/` and `sdks/` are the definitions at `broker.rs:986`, `:1004`, `:1024`,
-  the internal dispatch at `:1026-1027`, and tests at `:1479`, `:1491-1492`,
-  `:1524`, `:1531`, `:1906`. `docs/reviews/2026-08-28-flip-write-path.md:355`
-  reached the same conclusion independently and specifies deleting it.
+  excluding `target/`, `node_modules/` and `.git/`: the only hits in `crates/`
+  and `sdks/` are the definitions at `broker.rs:986`, `:1004`, `:1024`, the
+  internal dispatch at `:1026-1027`, and tests at `:1479`, `:1491-1492`, `:1524`,
+  `:1531`, `:1906`. `docs/reviews/2026-08-28-flip-write-path.md:355` reached the
+  same conclusion independently and specifies deleting it.
 
-So the live creator-visible leak today is **the column name**, and the value
-leak is a loaded gun rather than a discharged one. Both must be closed, and the
-one mechanism in section 3 closes both.
+So the live creator-visible leak today is **the column name**, and the value leak
+is a loaded gun rather than a discharged one. Both must be closed, and the one
+mechanism in section 3 closes both.
 
 ---
 
@@ -183,8 +159,8 @@ reconciles it to an explicit table list after every apply:
 and a test at `:125-154` asserts the DDL names each table explicitly and does
 **not** use `FOR TABLES IN SCHEMA` (the assertion is `:138`). The change is to
 extend `publication_membership_sql` from `tables: &[String]` (`:33`) to a wire
-set of `(table, columns)` pairs - and, per 3.6, to stop emitting `SET TABLE`
-at all.
+set of `(table, columns)` pairs - and, per 3.6, to stop emitting `SET TABLE` at
+all.
 
 The column list is a **whitelist over declared fields**, computed positively:
 
@@ -198,22 +174,21 @@ wire_columns(collection) =
 `storage.valueColumn` is the descriptor's own field-to-physical-column mapping,
 the same block `read_column_for` reads on the query side
 (`crates/zeroship-schema/src/query.rs:3402-3417`, which reads
-`storage.valueColumn` and only falls back to suffixing when the block is
-absent). For a mask-only field today `valueColumn` is the `_masked` sibling; the
-plaintext parent is not in the set. Post-flip the parent holds the mask and
+`storage.valueColumn` and only falls back to suffixing when the block is absent).
+For a mask-only field today `valueColumn` is the `_masked` sibling; the plaintext
+parent is not in the set. Post-flip the parent holds the mask and
 `storage.rawColumn` holds plaintext, and `rawColumn` is still not in the set,
 because the set is built from `valueColumn` and nothing else.
 
-The set is computed by the migration service, which has just folded the
-migration and therefore holds the declared field set with its mask and
-encryption flags. It is not derived from a string suffix at any point. **Where
-exactly that fold happens, and why the service cannot read a descriptor it never
-receives, is 3.7.**
+The set is computed by the migration service, which has just folded the migration
+and therefore holds the declared field set with its mask and encryption flags. It
+is not derived from a string suffix at any point. **Where exactly that fold
+happens, and why the service cannot read a descriptor it never receives, is 3.7.**
 
 ### 3.2 MEASURED: the column list removes the name as well as the value
 
-This is the load-bearing claim, and it is the reason one mechanism satisfies
-both halves of the inherited requirement. Transcript, PostgreSQL 16.15,
+This is the load-bearing claim, and it is the reason one mechanism satisfies both
+halves of the inherited requirement. Transcript, PostgreSQL 16.15,
 `proto_version=1` (the version `wal_consumer.rs:383` requests today):
 
 ```sql
@@ -234,9 +209,9 @@ C\000\000\000\000\000^AQ\261\250\000\000\000\000^AQ\261\330\000^B\375^Y\211\217\
 ```
 
 Read the `R` (Relation) frame: column count `\002`, then `id` and `ssn_masked`.
-**`ssn` is not in the Relation message.** Read the `I` (Insert) frame: two
-tuple values, `1` and `***-**-6789`. The string `123-45-6789` does not occur
-anywhere in the stream.
+**`ssn` is not in the Relation message.** Read the `I` (Insert) frame: two tuple
+values, `1` and `***-**-6789`. The string `123-45-6789` does not occur anywhere
+in the stream.
 
 `changed_columns` is built from the relation cache, which is built from the
 `Relation` message (`wal_consumer.rs:511-526` populates it, `:629-633` maps it).
@@ -254,13 +229,13 @@ The next `R` frame is byte-identical to the one above (`id`, `ssn_masked`), and
 the `I` frame carries two values, `2` and `***-**-9999`. Neither the new column
 name, nor its value, nor the new plaintext appears.
 
-This is the property that the current `_masked` stripper does not have and
-cannot have. `format!("{col}_masked")` is a blacklist keyed on a derived name:
-it knows exactly one sibling name (`crud/mask_pass.rs:469`, and its write-side
-twin at `:150`, both cited in the index and not re-opened here), so anything
-that is not spelled that way survives. A publication column list is a whitelist
-over the columns the migration service decided to publish, and everything not on
-it is absent by default, including columns that do not exist yet.
+This is the property that the current `_masked` stripper does not have and cannot
+have. `format!("{col}_masked")` is a blacklist keyed on a derived name: it knows
+exactly one sibling name (`crud/mask_pass.rs:469`, and its write-side twin at
+`:150`), so anything that is not spelled that way survives. A publication column
+list is a whitelist over the columns the migration service decided to publish,
+and everything not on it is absent by default, including columns that do not
+exist yet.
 
 ### 3.4 Why a future code path cannot bypass it
 
@@ -291,14 +266,13 @@ constructors are:
 The newtype does not create the guarantee. Its job is to make every producer
 **name** which guarantee it is relying on, so that a third producer cannot be
 written that relies on none. That is the same move
-`docs/reviews/2026-08-28-flip-write-path.md:368` makes with `RawRows` on the
-read path, and it is worth stating plainly that on the relay arm the constructor
-is close to a no-op.
+`docs/reviews/2026-08-28-flip-write-path.md:368` makes with `RawRows` on the read
+path, and on the relay arm the constructor is close to a no-op.
 
 ### 3.5 What the column list costs, and it is not free
 
-Three measured consequences. All three are real hazards and the design has to
-carry them explicitly.
+Three measured consequences. All three are real hazards and the design carries
+them explicitly.
 
 **(a) A column-list mistake is a WRITE OUTAGE, not a read failure.** MEASURED:
 
@@ -320,7 +294,7 @@ is why `replica_identity_columns(collection)` is a UNION term in the formula at
 3.1 rather than an assumption, and why section 10 requires a test that omits it
 and asserts the write fails.
 
-**The SQLSTATE is `42P10`.** Re-MEASURED on PostgreSQL 18.4 with
+**The SQLSTATE is `42P10`.** MEASURED on PostgreSQL 18.4 with
 `\set VERBOSITY verbose`, against a table published as `(ssn_masked)` only:
 
 ```
@@ -348,8 +322,8 @@ This matters because the tree already recommends the other branch.
 that "a subscription filtered on a non-key column can miss a delete. Fixing that
 needs REPLICA IDENTITY FULL on published tables". **The two improvements are
 mutually exclusive.** This design chooses the column list and accepts that a
-DELETE carries only the replica-identity columns. Section 5.3 says how
-"row left the view" is answered without a full before-image.
+DELETE carries only the replica-identity columns. Section 5.3 says how "row left
+the view" is answered without a full before-image.
 
 **(c) Two publications with different column lists on one table break decode.**
 MEASURED, and the failure arrives at decode time rather than DDL time:
@@ -359,12 +333,13 @@ ERROR:  cannot use different column lists for table "public.t" in different publ
 CONTEXT:  slot "s3", output plugin "pgoutput", in the change callback, associated LSN 0/156AB40
 ```
 
-App tables live in the app's own schema (`zeroship-schema/src/query.rs:1026-1028`,
-`CREATE SCHEMA IF NOT EXISTS <app>`), and under 3.6 there is exactly ONE
-publication in the cluster, so each table belongs to exactly one publication and
-this cannot arise from the intended shape. It can arise from an operator or a
-test creating a second publication over a creator table, so the relay must treat
-this SQLSTATE as fatal and name the table rather than reconnecting into it.
+App tables live in the app's own schema
+(`zeroship-schema/src/query.rs:1026-1028`, `CREATE SCHEMA IF NOT EXISTS <app>`),
+and under 3.6 there is exactly ONE publication in the cluster, so each table
+belongs to exactly one publication and this cannot arise from the intended shape.
+It can arise from an operator or a test creating a second publication over a
+creator table, so the relay must treat this SQLSTATE as fatal and name the table
+rather than reconnecting into it.
 
 ### 3.6 One publication, and reconciliation BRACKETS the DDL
 
@@ -376,9 +351,9 @@ options struct built at `:380-386`; the driver's field is
 `StartReplicationOptions::publication_names`
 (`libs/compio-postgres/src/replication.rs:852`), interpolated into the command
 string once at `:741` and never revisited). It cannot be changed on a running
-stream. A publication per app therefore means restarting the ONE cluster
-stream every time any tenant is created, which is a cross-tenant availability
-coupling introduced for a naming convenience.
+stream. A publication per app therefore means restarting the ONE cluster stream
+every time any tenant is created, which is a cross-tenant availability coupling
+introduced for a naming convenience.
 
 MEASURED, PostgreSQL 18.4. One publication `zs_cdc` over two tenant schemas -
 `app_alpha.notes (id, ssn_masked)` and `app_beta.items (id, label)`, the state
@@ -426,8 +401,8 @@ a table that was already published keeps streaming through the membership change
 `publication_membership_sql` emits `ALTER PUBLICATION {p} SET TABLE {members}`
 (`crates/zeroship-migrate-server/src/publication.rs:46`), and `members` is
 computed from `creator_table_query()` filtered to ONE app's schema (`:15-24`,
-`WHERE n.nspname = $1`, threaded at `:91-93`). `SET TABLE` is a full replace.
-Two tenants migrating concurrently would each replace the publication's whole
+`WHERE n.nspname = $1`, threaded at `:91-93`). `SET TABLE` is a full replace. Two
+tenants migrating concurrently would each replace the publication's whole
 membership with their own view, and each would silently remove the other's tables
 from CDC. The failure is silent on both sides: the removed tenant's live queries
 simply stop updating.
@@ -440,7 +415,7 @@ buys nothing across tenants. With ONE publication that key becomes a constant, s
 it serialises every tenant's reconciliation cluster-wide - and a serialised full
 replace is still a full replace. Last writer wins cleanly instead of racily. Keep
 the lock; it is exactly the mutual exclusion a shared object needs. Replace the
-statement it protects.
+statement it protects. (Its cluster-wide serialisation is an accepted cost: 12.7.)
 
 **(iii) A published column is a catalog dependency.** MEASURED, 18.4, on a table
 published as `(id, b, ssn_masked)`:
@@ -489,7 +464,7 @@ first and third are their own transactions on the migration connection.
 
 MEASURED, 18.4, with `zs_cdc` holding `app_alpha.notes (id, body, ssn_masked)`
 and `app_beta.items (id, label)`. This is the **shrink** transaction and the DDL
-that follows it, which is the pair the current post-apply order cannot express:
+that follows it, which is the pair the post-apply-only order cannot express:
 
 ```sql
 BEGIN;
@@ -513,10 +488,10 @@ column list are byte-identical before and after**, which is the control for (ii)
 the same edit expressed as `SET TABLE` computed from alpha's view would have left
 `zs_cdc` holding alpha's tables and nothing else.
 
-The marker is shown here because this transcript is where its interaction with
-`ALTER PUBLICATION` was measured; in the specification it belongs to the **widen**
-transaction, and 8.3 says why. The widen step is the same two statements with
-`new_wire` in place of the intersection.
+The marker appears in the shrink transcript above only because that is where its
+interaction with `ALTER PUBLICATION` was measured; in the specification it belongs
+to the **widen** transaction, and 8.3 says why. The widen step is the same two
+statements with `new_wire` in place of the intersection.
 
 Four mechanics that the statement "use ADD/DROP instead of SET" hides, all
 measured on 18.4:
@@ -528,15 +503,17 @@ measured on 18.4:
   is transactional, so the pair is atomic and no concurrent decoder observes the
   table absent.
 - **The drop set must be read from the catalog, not computed from the declared
-  set.** `ALTER PUBLICATION ... DROP TABLE` on a relation that exists but is not a
-  member is `ERROR: 42704: relation "unpub" is not part of the publication`
+  set.** `ALTER PUBLICATION ... DROP TABLE` on a relation that exists but is not
+  a member is `ERROR: 42704: relation "unpub" is not part of the publication`
   (`PublicationDropTables, publicationcmds.c:1918`), and on a relation that does
   not exist at all is `ERROR: 42P01`. There is no `IF EXISTS`. The reconciler
   reads
   `SELECT tablename, attnames FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2`
   and diffs against the declared wire set. **`attnames` is the right catalog
-  column** - measured directly, which closes the open question section 14 used to
-  carry about `pg_publication_rel.prattrs`.
+  column**, measured directly: it returns `{id,ssn_masked}` for a column-list
+  publication, follows a `RENAME COLUMN`, and returns zero rows once
+  `DROP COLUMN ... CASCADE` has removed the table. `pg_publication_rel.prattrs`
+  is not needed.
 - **An empty column list is unrepresentable, and 3.1's UNION is what makes that
   safe.** PostgreSQL has no empty column-list form. Because
   `replica_identity_columns(collection)` is a UNION term in the formula, the
@@ -547,8 +524,8 @@ measured on 18.4:
   intact and `attnames` became `{id,caption}` - `prattrs` stores attnums, so the
   catalog follows the rename. But the wire NAME the relay sees changes, so the
   epoch marker still has to fire. And `DROP TABLE` of a whole relation removes
-  membership silently, which is what the existing comment at `publication.rs:47-49`
-  already says and which measurement confirms.
+  membership silently, which is what the existing comment at
+  `publication.rs:47-49` already says and which measurement confirms.
 
 **Two consequences of the bracket, stated rather than discovered later.**
 
@@ -564,13 +541,13 @@ observable. It self-heals, because the reconciler recomputes the full wire set
 from the declared set on every apply rather than applying a delta. The operator
 signal is 7.6's `cdc_published_columns` against the app's declared wire set.
 
-**This also fixes the marker landing one transaction late.** In the pre-revision
-shape the marker was emitted inside `reconcile_in_transaction`, which runs after
-`apply_sealed` - so a change written between the DDL commit and the reconcile
-commit was decoded under the OLD publication and delivered BEFORE the epoch
-marker that describes it. Under the bracket the marker is in the widen
-transaction and the window before it publishes the intersection, so no frame ever
-crosses an epoch boundary in the wrong direction.
+The bracket also keeps the epoch marker on the right side of the DDL. A marker
+emitted in a reconcile that ran only after `apply_sealed` would arrive after
+changes written between the DDL commit and the reconcile commit, so those changes
+would be decoded under the old publication and delivered *before* the marker
+describing them. Under the bracket the marker is in the widen transaction and the
+window before it publishes the intersection, so no frame ever crosses an epoch
+boundary in the wrong direction.
 
 ### 3.7 The migration service holds the IR, not the descriptor
 
@@ -582,8 +559,8 @@ carries `kind` (`:51`), `descriptor_sha256` (`:69`), `documents: Vec<IrDocument>
 (`:70`) and `policy` (`:72`). The field whose name promises a descriptor is a
 lowercase-hex sha256 (`:52-53`), documented at `:55-68` as a deploy-ordering
 anchor - the control plane refuses to make a deploy live unless the manifest's
-`runtime_descriptor.hash` matches it. Nothing can be projected from a digest.
-And `publication_membership_sql` takes `tables: &[String]` (`publication.rs:33`) -
+`runtime_descriptor.hash` matches it. Nothing can be projected from a digest. And
+`publication_membership_sql` takes `tables: &[String]` (`publication.rs:33`) -
 table names, no fields.
 
 The service does hold the material, because the descriptor and the DDL are folded
@@ -599,21 +576,21 @@ one call** that decides whether a field has a second physical column and what it
 is named - `mask_sibling_column_for_field(field, def)` returns the `_masked`
 sibling for a masked field and the field's own name otherwise (`:296-316`).
 
-**Specification.** `apply_bundle_ir_postgres` (`apply.rs:1059-1108`) already
-walks the document set file by file; it accumulates the policy-resolved ops it
-produces at `:1143`, folds them ONCE through `render_schema_export`
-(`gen_types.rs:548`), and reads `wire_columns` off the resulting `SchemaExport`
-(`gen_types.rs:528-538`), whose `collections` field (`:537`) is the typed
-`CollectionDescriptor` set kept beside the artifacts - the shape the projection
-wants, stopped before the flattening.
+**Specification.** `apply_bundle_ir_postgres` (`apply.rs:1059-1108`) already walks
+the document set file by file; it accumulates the policy-resolved ops it produces
+at `:1143`, folds them ONCE through `render_schema_export` (`gen_types.rs:548`),
+and reads `wire_columns` off the resulting `SchemaExport` (`gen_types.rs:528-538`),
+whose `collections` field (`:537`) is the typed `CollectionDescriptor` set kept
+beside the artifacts - the shape the projection wants, stopped before the
+flattening.
 
-That fold runs ONCE per apply and yields the NEW wire set. The widen step
-(3.6, step 3) applies it directly. The shrink step (step 1) intersects it with
-the LIVE published set read from `pg_publication_tables`, not with a second fold
-of the pre-apply ops: the catalog is what the server will actually enforce, a
-re-fold is only what the service believes about it, and 3.6's drop-set rule
-already requires reading the catalog because `ALTER PUBLICATION ... DROP TABLE`
-has no `IF EXISTS`.
+That fold runs ONCE per apply and yields the NEW wire set. The widen step (3.6,
+step 3) applies it directly. The shrink step (step 1) intersects it with the LIVE
+published set read from `pg_publication_tables`, not with a second fold of the
+pre-apply ops: the catalog is what the server will actually enforce, a re-fold is
+only what the service believes about it, and 3.6's drop-set rule already requires
+reading the catalog because `ALTER PUBLICATION ... DROP TABLE` has no
+`IF EXISTS`.
 
 Two things this forbids. The service must not re-derive the sibling name -
 `format!("{col}_masked")` at eight sites is the defect this whole line of work
@@ -624,10 +601,10 @@ descriptor over HTTP from the build: that would reintroduce the staleness window
 12.3 rejects, over a network hop, on the path that gates creator writes.
 
 `descriptor_sha256` stops being the only thing tying the projection to the
-descriptor, which is a side benefit worth naming: `:64-68` says outright that the
-hash "proves ordering, not truth", because a creator who hand-edits both
-generated files can make them agree about a lie. A projection folded server-side
-from the ops the server is about to apply is not client-declared.
+descriptor: `:64-68` says outright that the hash "proves ordering, not truth",
+because a creator who hand-edits both generated files can make them agree about a
+lie. A projection folded server-side from the ops the server is about to apply is
+not client-declared.
 
 ---
 
@@ -651,7 +628,7 @@ wire types (see 5.2).
 | `broker.rs` (1,915 lines) | **Stays in `zeroship-plugin-db`.** It is the in-process routing table, and its consumers are V8 subscription wrappers on the same thread. `ws_frame_for_change`, `ws_frame_for_control` and `ws_frame` (`:986-1029`) are deleted per 2.3. |
 | `read_set.rs` (586 lines) | **Stays.** Capture happens inside `ctx.db.find` in the isolate, gated on the procedure kind (`:33-39`). It cannot leave the process that runs the query handler. |
 | `cdc_lifecycle.rs` (523 lines) | **Stays**, reshaped. The refcounted per-app lease (`acquire` at `:87-111`, `release` at `:113-157`) still decides when this worker needs `app_id`'s stream. `RunningConsumer::Postgres(WalConsumerHandle)` (`:25-30`) becomes a handle on the relay subscription rather than on a local task. |
-| `exec.rs` emit path | **Deleted outright, and it is the Postgres path.** See below - the polarity is the opposite of what it looks like. |
+| `exec.rs` emit path | **Deleted outright, and it is the Postgres path.** See below. |
 
 **The local-emit path serves POSTGRES, not SQLite, so it is deleted rather than
 retained.** `backend_publishes_committed_changes()` is
@@ -659,8 +636,8 @@ retained.** `backend_publishes_committed_changes()` is
 is TRUE on SQLite - and `emit_for_rows` **returns early** on it (`:494-500`, with
 the comment "SQLite has a commit-time CDC publisher wired through the writer
 actor's preupdate/commit hooks ... on SQLite it races the CDC publisher and
-produces duplicate identical live snapshots"). SQLite builds its `ChangeEvent`
-in `backend/sqlite/cdc.rs` and publishes it straight to the broker
+produces duplicate identical live snapshots"). SQLite builds its `ChangeEvent` in
+`backend/sqlite/cdc.rs` and publishes it straight to the broker
 (`cdc.rs:632-641`), never reaching `emit_for_rows`.
 
 So the delete is:
@@ -675,12 +652,12 @@ So the delete is:
   callers are `queue_or_emit` and `drain_pending_emits_on_commit`;
 - the `pending_emits` slot on the isolate context, and with it **nine call sites
   in the transaction settle path** - `transaction/mod.rs:638`, `:766`, `:862`,
-  `:1245`, `:1258`, `:1281`, `:1290`, `:1295`, `:1304`, plus the import at
-  `:101` - and the two test hooks at `lib.rs:768` and `:777`.
+  `:1245`, `:1258`, `:1281`, `:1290`, `:1295`, `:1304`, plus the import at `:101`
+  - and the two test hooks at `lib.rs:768` and `:777`.
 
-That last bullet is the reason to state the polarity precisely rather than fix
-the sentence: reading the table the wrong way round makes this look like a
-three-function edit inside `exec.rs`, and it reaches the transaction settle path.
+That last bullet is why the polarity has to be read carefully before scoping the
+work: this is not a three-function edit inside `exec.rs`, it reaches the
+transaction settle path.
 
 **Why deleting it is not optional.** It is a second producer of the same event
 with a *different* projection: a two-name blacklist (`exec.rs:522`,
@@ -699,52 +676,51 @@ protocol, and with it the reason its process needs `REPLICATION`.
 
 `ChangeStream` (`crates/zeroship-plugin-db/src/backend/mod.rs:946-989`) survives
 as a capability trait with a changed Postgres implementation: `spawn_consumer`
-becomes "subscribe to the relay", `deprovision` becomes "tell the relay to
-forget this app". (Aside, because the index repeats it: `backend/mod.rs` declares
-**16** `pub trait`s, not five. The module doc at `:38-49` says "five" and then
-lists four. `ChangeStream` is at `:946`.)
+becomes "subscribe to the relay", `deprovision` becomes "tell the relay to forget
+this app". Note when navigating that file: its module doc at `:38-49` says it
+declares "five" traits and then lists four; it declares **16**, and
+`ChangeStream` is at `:946`.
 
 ---
 
 ## 5. The worker/relay wire contract
 
 `ChangeEvent` (`broker.rs:81-119`) crosses a process boundary now. Today it is a
-Rust struct passed by `Arc` inside one process (`broker.rs:756-759` wraps it
-once and clones the `Arc` per subscriber), so it has never needed an encoding.
+Rust struct passed by `Arc` inside one process (`broker.rs:756-759` wraps it once
+and clones the `Arc` per subscriber), so it has never needed an encoding.
 
 ### 5.1 `zeroship-stream` is not the carrier, and the reasons are in its source
 
 The register's C2 argument cites `StreamTransport`'s `partition_key` ordering
 guarantee (`crates/zeroship-stream/src/transport.rs:32-37`) and the existence of
-memory and Redpanda adapters. Both are true. The crate is still the wrong
-carrier for CDC fan-out, for four reasons, each read out of the code rather than
+memory and Redpanda adapters. Both are true. The crate is still the wrong carrier
+for CDC fan-out, for four reasons, each read out of the code rather than
 inferred.
 
 **(a) A consumer group partitions; live-query fan-out broadcasts.** The trait is
 explicitly a Kafka-family consumer-group contract: "consumer groups assign each
-partition to one consumer in steady state" (`transport.rs:35`), and the
-Redpanda adapter subscribes with a `group.id` (`adapters/redpanda.rs:244`,
-`:253-256`). If every worker joins one group, each event is delivered to exactly
-one worker. If each worker gets its own group, the broker holds one consumer
-group per worker and each worker consumes every app's events. The second is the
-tenant-isolation regression that option B was rejected for
+partition to one consumer in steady state" (`transport.rs:35`), and the Redpanda
+adapter subscribes with a `group.id` (`adapters/redpanda.rs:244`, `:253-256`). If
+every worker joins one group, each event is delivered to exactly one worker. If
+each worker gets its own group, the broker holds one consumer group per worker
+and each worker consumes every app's events. The second is the tenant-isolation
+regression that option B was rejected for
 (`...-defect-register.md:1107-1113`).
 
 **(b) `poll` takes no topic.** `async fn poll(&self, max: usize)`
-(`transport.rs:48`). The topic is fixed at construction
-(`redpanda.rs:151-166` `RedpandaConfig::topic`, `:255` `subscribe(&[topic])`).
-A per-app topic therefore means a per-app `RedpandaTransport`, which means a per-app
-librdkafka producer, consumer, and C thread set. `Cargo.toml:201-204` describes
-the adapter as running "over librdkafka's own C threads".
+(`transport.rs:48`). The topic is fixed at construction (`redpanda.rs:151-166`
+`RedpandaConfig::topic`, `:255` `subscribe(&[topic])`). A per-app topic therefore
+means a per-app `RedpandaTransport`, which means a per-app librdkafka producer,
+consumer, and C thread set. `Cargo.toml:201-204` describes the adapter as running
+"over librdkafka's own C threads".
 
 **(c) `publish` is a blocking spin with one broker round trip per record.**
 `redpanda.rs:297-325`: a `sync_channel(1)` per record, then
 `loop { self.producer.poll(Duration::from_millis(10)); rx.try_recv() ... }`
-inside an `async fn`, with `acks=all` and `enable.idempotence=true`
-(`:231-233`). There is no batch API on the trait. That is a synchronous stall on
-a compio thread, per row, for a carrier that would sit on the write-notification
-path. It is fine for the billing outbox it was built for; it is not a CDC
-carrier.
+inside an `async fn`, with `acks=all` and `enable.idempotence=true` (`:231-233`).
+There is no batch API on the trait. That is a synchronous stall on a compio
+thread, per row, for a carrier that would sit on the write-notification path. It
+is fine for the billing outbox it was built for; it is not a CDC carrier.
 
 **(d) The transport is plaintext and unauthenticated by construction, and the
 payload class would change.** `redpanda.rs:106-135` states it: no TLS, no SASL,
@@ -757,8 +733,8 @@ without reintroducing tokio - `redpanda.rs:137-148` says exactly how, and that
 `ssl` was never a default feature so `default-features = false` is not what
 removed it - but it has not been done, and it is a prerequisite, not a footnote.
 
-**What `zeroship-stream` remains right for:** the durable usage/billing outbox
-it exists for. Nothing here proposes changing it. If a later revision wants the
+**What `zeroship-stream` remains right for:** the durable usage/billing outbox it
+exists for. Nothing here proposes changing it. If a later revision wants the
 relay's spool to be durable across relay restarts, `zeroship-stream` with a
 per-app topic and (d) fixed is the candidate to re-evaluate; section 7 explains
 why the first version does not need it.
@@ -788,11 +764,11 @@ problem is the same: column names must not repeat per row.
 costs its values plus a small header rather than its values plus its column
 names.
 
-**`(commit_lsn, change_index)` is the dedup key, and it is two fields rather than
-one for reasons measured in 6.3.** `commit_lsn` is the LSN of the transaction's
-commit record and is available on the FIRST frame of the transaction, not only at
-the end: `PgOutputMessage::Begin` carries `final_lsn`, documented as "LSN of the
-commit record (NOT the begin record)"
+**`(commit_lsn, change_index)` is the dedup key**, for the reasons measured in
+6.3. `commit_lsn` is the LSN of the transaction's commit record and is available
+on the FIRST frame of the transaction, not only at the end:
+`PgOutputMessage::Begin` carries `final_lsn`, documented as "LSN of the commit
+record (NOT the begin record)"
 (`libs/compio-postgres/src/replication.rs:1879-1886`), and `Commit.commit_lsn`
 (`:1891-1892`) is the same value. So the relay stamps it as it decodes, without
 buffering the transaction. `change_index` is the relay's own 0-based count of
@@ -818,8 +794,8 @@ server the peer service `zeroship-migrate-server` already uses
 default-features = false, features = ["rustls", "json", "stream"] }`
 (`Cargo.toml:48`) is the client, its `stream` feature is on, and
 `crates/zeroship-worker/Cargo.toml:39` already names it. Authentication is a
-service assertion (`crates/zeroship-core/src/service_assertion.rs`), which is
-the tree's existing service-to-service identity mechanism.
+service assertion (`crates/zeroship-core/src/service_assertion.rs`), which is the
+tree's existing service-to-service identity mechanism.
 
 Push rather than poll, because the point of the service is to reduce end-to-end
 latency relative to WAL-to-worker, and a poll interval is a latency floor chosen
@@ -843,24 +819,19 @@ The broker's current answer is to test the predicate against both tuples
 that leaves a subscriber's view would silently stop updating.
 
 The replacement: the subscription keeps the bounded set of pks it has delivered
-into the subscriber's current view. An event whose pk is in that set is
-delivered regardless of whether the new tuple matches the predicate, so the
-subscriber learns the row left. The set is bounded by the query's page size;
-overflow emits `Resync`, which the broker already models
-(`broker.rs:318-340`) and the live-query client already absorbs (7.3).
+into the subscriber's current view. An event whose pk is in that set is delivered
+regardless of whether the new tuple matches the predicate, so the subscriber
+learns the row left. The set is bounded by the query's page size; overflow emits
+`Resync`, which the broker already models (`broker.rs:318-340`) and the
+live-query client already absorbs (7.3).
 
-I have **not** prototyped this, and it is the one part of the design where the
-subscriber-side contract changes shape rather than moving. It is called out
-again in section 12.
+This is **not prototyped**, and it is the one part of the design where the
+subscriber-side contract changes shape rather than moving (12.4, 13).
 
 ### 5.4 Slow consumers: the relay sheds, it never blocks
 
-The design as first written was push-only with no statement about a worker that
-stops reading its HTTP body. That is the omission with the largest blast radius
-in this document, because of what it is coupled to.
-
-**The invariant, and everything else in this subsection is a consequence of it:
-a consumer must never be able to reach the slot.** The ring writer is also what
+**The invariant, and everything else in this subsection is a consequence of it: a
+consumer must never be able to reach the slot.** The ring writer is also what
 advances `highest_durable_lsn`, and `highest_durable_lsn` is what confirms the
 slot (6.3). A ring writer that can be blocked by a subscriber is a subscriber
 that can stop LSN confirmation, and a slot that stops confirming grows WAL for
@@ -883,18 +854,17 @@ code it replaces.
 
 Specification:
 
-- **The ring writer's `push` is not `async` and takes `&self`.** That is the
-  seam that enforces the invariant in code rather than in prose: if it ever needs
-  to be `.await`ed, the invariant is gone and the compiler says so at every call
+- **The ring writer's `push` is not `async` and takes `&self`.** That is the seam
+  that enforces the invariant in code rather than in prose: if it ever needs to
+  be `.await`ed, the invariant is gone and the compiler says so at every call
   site.
 - **Each subscribing worker connection owns a read cursor into the app's ring and
   its own bounded egress buffer.** Fan-out is done by the connection tasks
   reading their cursors, not by the writer walking a subscriber list. So the
   writer's cost per frame is O(1) in subscriber count.
-- **A cursor that falls behind the ring's tail gets `Resync(app_id,
-  RingOverrun)` and jumps to the head.** It is not disconnected. Disconnecting
-  makes the worker re-register and re-lease, which is more work under load, not
-  less.
+- **A cursor that falls behind the ring's tail gets `Resync(app_id, RingOverrun)`
+  and jumps to the head.** It is not disconnected. Disconnecting makes the worker
+  re-register and re-lease, which is more work under load, not less.
 - **A connection whose egress buffer has been full for longer than
   `slow_consumer_timeout` is CLOSED.** The worker reconnects and receives
   `Resync`. Closing beats holding: a socket the peer is not reading is relay
@@ -907,13 +877,12 @@ Specification:
 There is one honest cost. Under this policy a worker that is merely slow rather
 than wedged gets `Resync` storms, and on the live-query path each `Resync` is a
 full refetch (7.3). A slow subscriber is therefore converted into database read
-load. That is the right trade - read load is bounded by the app's own spend
-limit and WAL growth is not - but it is a trade, and 12.10 argues it.
+load. That is the right trade - read load is bounded by the app's own spend limit
+and WAL growth is not - but it is a trade, and 12.10 argues it.
 
 ### 5.5 Ring sizing
 
-Named in seven places in the first draft and dimensioned in none. Four numbers,
-all operator configuration, all with defaults:
+Four numbers, all operator configuration, all with defaults:
 
 | knob | bounds | why this one |
 | --- | --- | --- |
@@ -927,16 +896,14 @@ app's `resync_pending`. **There is no drop-the-newest arm**: the newest frame is
 the one a live query most needs, and a policy that discards it converts a burst
 into a permanently stale view rather than a refetch.
 
-Comparable retention windows, quoted from the prior-art study and **unverified by
-me**: Salesforce Change Data Capture retains 72 hours, Kinesis Data Streams 24
-hours by default, DynamoDB Streams 24 hours, and Neon runs a slot reaper on a
-40-hour threshold. **None of them is a target.** Those are durable log products
-whose retention IS the product. This ring is a fan-out buffer in front of a slot
-that PostgreSQL is already retaining WAL for, and the durable log is the WAL. The
+The retention windows of durable-log products - Salesforce CDC 72 hours, Kinesis
+and DynamoDB Streams 24 hours by default, Neon's 40-hour slot reaper, all
+**unverified** and relayed from the prior-art study - are **not** targets. Their
+retention *is* the product. This ring is a fan-out buffer in front of a slot that
+PostgreSQL is already retaining WAL for, and the durable log is the WAL. The
 right first value is the one that makes `Resync` rare for a worker restarting
-normally and never lets one tenant's burst evict another's - which is measured
-(section 11: worker restart time, per-app write rate), not chosen from a vendor's
-number.
+normally and never lets one tenant's burst evict another's, which is derived from
+section 11's worker-restart and per-app-write-rate measurements.
 
 What forbids simply making the ring large: RSS is the resource one tenant can
 exhaust for all of them, and 7.5 exists because of that. A bigger ring buys
@@ -944,12 +911,11 @@ disconnect tolerance and sells fault isolation.
 
 ### 5.6 The vocabulary for what the relay cannot represent
 
-Today the only lossy signal is `Resync`, and it is a total per-app reset -
-`resume_app_with_resync` pushes it to every subscription of an app
-(`broker.rs:724-746`). That is the right frame for "the ring lost your position".
-It is the wrong frame for at least three things the relay will meet, and the
-prior art made all three first-class: Salesforce has `GAP_UPDATE` and
-`GAP_OVERFLOW` as distinct event types, and Debezium ships a configurable
+`Resync` is a total per-app reset - `resume_app_with_resync` pushes it to every
+subscription of an app (`broker.rs:724-746`). That is the right frame for "the
+ring lost your position". It is the wrong frame for three things the relay will
+meet, and the prior art made all three first-class: Salesforce has `GAP_UPDATE`
+and `GAP_OVERFLOW` as distinct event types, and Debezium ships a configurable
 `unavailable.value.placeholder`.
 
 1. **One change for one row that cannot be represented.** A value over the frame
@@ -972,8 +938,8 @@ So, beside `Resync`:
 | `Truncate` | `(app_id, collections)` | every row of these collections is gone |
 
 and inside `Change`, `CellValue` is `Value(Bytes) | Null | Unavailable` rather
-than `Option<Bytes>`. **Encoding "the server did not send it" the same way as
-"it is NULL" is the same class of collapse section 3 exists to prevent**: a
+than `Option<Bytes>`. **Encoding "the server did not send it" the same way as "it
+is NULL" is the same class of collapse section 3 exists to prevent**: a
 downstream consumer that cannot tell them apart will eventually write the wrong
 one into a cache and call it a value.
 
@@ -1025,25 +991,25 @@ here so the next reader does not have to re-derive it.
 connection, over `compio-postgres`. The pattern is already in the tree and
 already compio: `slot_reaper.rs:171-180` runs
 `SELECT pg_try_advisory_lock($1::INT4, $2::INT4) AS acquired` for fleet-leader
-election with namespace and key constants at `:37-38`, and
-`:149-169` are the take and release helpers. PostgreSQL releases a session
-advisory lock when the session ends, so a crashed leader releases without a
-lease timer, a heartbeat, or a clock.
+election with namespace and key constants at `:37-38`, and `:149-169` are the
+take and release helpers. PostgreSQL releases a session advisory lock when the
+session ends, so a crashed leader releases without a lease timer, a heartbeat, or
+a clock.
 
 Non-leaders retry on an interval and serve nothing. There is exactly one holder
 of the slot at a time, which is also what PostgreSQL enforces independently: a
 logical slot admits one active consumer (`replication.rs:107-113` states this as
 the reason per-worker slots existed).
 
-A `leader term` is minted from a monotonic counter in the platform schema on
-each acquisition, and it rides in the `Hello` frame. A worker that sees a term
-lower than the one it has already seen refuses the connection. This is the guard
+A `leader term` is minted from a monotonic counter in the platform schema on each
+acquisition, and it rides in the `Hello` frame. A worker that sees a term lower
+than the one it has already seen refuses the connection. This is the guard
 against a partitioned old leader that still holds a TCP connection to a worker;
 without it, two relays could deliver interleaved streams and the dedup in 6.3
 would silently drop the newer one.
 
 **That is the term's only job.** It does NOT reset a worker's dedup watermark -
-6.3 says why the earlier draft's rule was backwards.
+6.4 owns that rule.
 
 **Zero tokio.** Every component named is already compio: `compio-postgres` for
 the lock and the replication connection, `compio::time::sleep` for backoff
@@ -1086,26 +1052,27 @@ then free to recycle it.
 relay has drained everything, the two are equal, and the idle-slot protection is
 unchanged.
 
-**Put the clamp on the operation, not on that call site.** `advance_lsn` is
-called from three places in the same loop - `:441` (keepalive), `:454`
+**Put the clamp on the operation, not on one call site.** `advance_lsn` is called
+from three places in the same loop - `:441` (keepalive), `:454`
 (`Commit.end_lsn`) and `:495` (mid-transaction `wal_end`) - and the third has the
 same defect for the same reason. The comment at `:459-494` argues that a
 mid-transaction position cannot suppress replay of the transaction *in progress*,
 which remains true; what it does not cover is that the position also sits past
 every EARLIER transaction's commit record, and under the relay those earlier
-transactions' frames may still be in flight to the ring. So the relay owns one
-`confirm(pos)` helper that clamps, and the three sites call it. At `:454` the
-clamp is a no-op by construction, because the commit is only confirmed after that
-transaction's frames are durable - which is the invariant to assert in a test
-rather than a coincidence to rely on.
+transactions' frames may still be in flight to the ring. Fixing only the
+keepalive arm produces a relay that confirms unreplayable WAL just during
+long-running transactions - rarer, harder to reproduce, identical in consequence.
+So the relay owns one `confirm(pos)` helper that clamps, and the three sites call
+it. At `:454` the clamp is a no-op by construction, because the commit is only
+confirmed after that transaction's frames are durable - which is the invariant to
+assert in a test rather than a coincidence to rely on.
 
-**At-least-once and dedup. The key is `(commit_lsn, change_index)`, not the
-per-change LSN.** The review that produced this revision prescribed the
-per-change LSN and stated it is monotone within and across transactions. It is
-neither, and both failures are measured on PostgreSQL 18.4.
+**At-least-once and dedup. The key is `(commit_lsn, change_index)`.** The
+per-change LSN cannot be the key, and both reasons are measured on PostgreSQL
+18.4.
 
-*Within* a transaction, the ordinary case is fine. Three single-row `INSERT`s in
-one transaction:
+*Within* a transaction, the ordinary case looks fine. Three single-row `INSERT`s
+in one transaction:
 
 ```
     lsn    | xid | frame
@@ -1117,16 +1084,15 @@ one transaction:
  0/178B2F0 | 755 | C
 ```
 
-Three distinct change LSNs, and the review's transcript agrees. (Note in passing
-that the first change shares the LSN of `B` and `R`; only `Change` frames are
-compared, so that does not matter, but it is the first sign that these LSNs are
-positions rather than identifiers.)
+Three distinct change LSNs. (Note in passing that the first change shares the LSN
+of `B` and `R`; only `Change` frames are compared, so that does not matter, but
+it is the first sign that these LSNs are positions rather than identifiers.)
 
-**Failure one: change LSNs go BACKWARDS between transactions.** Logical decoding
-delivers transactions in COMMIT order, but a change's LSN is its position in the
-WAL, which is INSERTION order. Two overlapping transactions therefore arrive with
-their changes out of LSN order. MEASURED, 18.4 - session A opens a transaction and
-holds it, session B inserts and commits, then A commits:
+**Change LSNs go BACKWARDS between transactions.** Logical decoding delivers
+transactions in COMMIT order, but a change's LSN is its position in the WAL,
+which is INSERTION order. Two overlapping transactions therefore arrive with
+their changes out of LSN order. MEASURED, 18.4 - session A opens a transaction
+and holds it, session B inserts and commits, then A commits:
 
 ```
     lsn    | xid | frame
@@ -1142,14 +1108,12 @@ holds it, session B inserts and commits, then A commits:
 The second delivered `Change` carries `0/17DCE60`, which is **lower** than the
 first delivered `Change`'s `0/17DCEF0`. "Keep the highest and drop anything at or
 below" discards row 10 permanently, on two ordinary concurrent writers, with no
-error anywhere. This is worse than the bug it was meant to fix: the original rule
-lost every row of a transaction after the first, which a test with a two-row
-transaction finds immediately; this one loses a row only under write concurrency,
-which is the shape no unit test has.
+error anywhere. The single-writer transcript above cannot see this, which is why
+10.3 requires a concurrency arm.
 
-**Failure two: `heap_multi_insert` collapses many changes onto one LSN.**
-MEASURED, 18.4, same table, same publication, same slot, same session, same three
-rows - one variable changed, the statement that writes them:
+**`heap_multi_insert` collapses many changes onto one LSN.** MEASURED, 18.4, same
+table, same publication, same slot, same session, same three rows - one variable
+changed, the statement that writes them:
 
 ```sql
 INSERT INTO t (id,a) VALUES (1,'x'),(2,'y'),(3,'z') RETURNING id;
@@ -1179,7 +1143,7 @@ where B commits at `0/17DCFB0` and is delivered first while A commits at
 `0/17DCFE0` and is delivered second, in spite of A's change being earlier in the
 WAL. Within one transaction `commit_lsn` is constant and `change_index` strictly
 increases by construction. So the pair is strictly monotone in delivery order,
-and the rule is unchanged in shape:
+and the rule is:
 
 > The worker keeps the highest `(commit_lsn, change_index)` it has applied per
 > app and drops anything lexicographically at or below it. One comparison of a
@@ -1196,34 +1160,34 @@ so stamping it costs no buffering.
 `transactionKey` + `sequenceNumber`). It solves transaction *reconstruction*
 across a lossy replay-id bus. We have one ordered stream per slot and never need
 to reassemble a transaction from unordered pieces, so `transactionKey` buys
-nothing. Two fields, not three - but two, not one, and the review's reason for one
-was wrong rather than merely optimistic.
+nothing. Two fields, not three.
 
 **Ordering.** pgoutput delivers changes in commit order within one slot, so
-per-app order is preserved by construction as long as the relay does not
-reorder. The relay must therefore not fan out across threads per app in a way
-that can reorder; one ring per app with a single writer is the constraint, and
-it is the reason the ring is per app rather than global.
+per-app order is preserved by construction as long as the relay does not reorder.
+The relay must therefore not fan out across threads per app in a way that can
+reorder; one ring per app with a single writer is the constraint, and it is the
+reason the ring is per app rather than global.
 
-### 6.4 What actually invalidates a watermark: the timeline
+### 6.4 What invalidates a watermark: the timeline
 
-The first draft said the worker resets its watermark when the `Hello` term
-increases. **That is backwards on both halves.**
+**A worker resets its per-app dedup watermark exactly when the `systemid` or the
+`timeline` in `Hello` differs from the last `Hello` it accepted, and at no other
+time.** In particular, an increased leader term does not reset it.
 
-It fires when nothing is wrong. A new leader resumes from the slot's
-`confirmed_flush_lsn` (`replication.rs:269`, `SetupOutcome.confirmed_flush_lsn`
-at `:294-298`), so every frame it replays is one the worker has already applied -
-exactly what the monotone rule drops for free. Resetting the watermark turns
-every routine leader change into a duplicate storm delivered into creator code,
-and a failover is the moment you least want extra load.
+Resetting on a leader term would fire when nothing is wrong. A new leader resumes
+from the slot's `confirmed_flush_lsn` (`replication.rs:269`,
+`SetupOutcome.confirmed_flush_lsn` at `:294-298`), so every frame it replays is
+one the worker has already applied - exactly what the monotone rule drops for
+free. Resetting there turns every routine leader change into a duplicate storm
+delivered into creator code, at the moment you least want extra load.
 
-And it misses the case that genuinely invalidates a watermark. **LSNs are
-positions on a timeline, and a timeline change makes them mean something else.**
-After a promotion or a point-in-time recovery, WAL after the divergence point is
+The timeline is what genuinely invalidates a watermark. **LSNs are positions on a
+timeline, and a timeline change makes them mean something else.** After a
+promotion or a point-in-time recovery, WAL after the divergence point is
 different WAL at the same numeric positions. A watermark carried across that
-boundary silently suppresses new changes whose LSNs happen to sit below it. This
-document, as first written, never read the timeline at all. Materialize gates its
-CDC source on `publication_details.timeline_id` for precisely this.
+boundary silently suppresses new changes whose LSNs happen to sit below it.
+Materialize gates its CDC source on `publication_details.timeline_id` for
+precisely this.
 
 **The relay already fetches the answer and throws it away.**
 `ReplicationConnection::identify_system` returns
@@ -1245,19 +1209,19 @@ Specification:
   a smaller event than a `systemid` change, because reused LSNs are more
   dangerous than absent ones: absent LSNs error, reused ones are silently
   accepted.
-- `Hello` carries `(systemid, timeline)`. The worker resets its per-app watermark
-  **exactly** when either differs from the last `Hello` it accepted, and at no
-  other time. The leader term stays where it belongs, refusing an older leader's
-  connection (6.2).
+- `Hello` carries `(systemid, timeline)`; the worker's reset rule is the one at
+  the top of this subsection. The leader term stays where it belongs, refusing an
+  older leader's connection (6.2).
 - A relay that wants this check without a replication connection has an SQL
   oracle: `SELECT timeline_id FROM pg_control_checkpoint()`. MEASURED on 18.4, it
   returns `1` on a fresh cluster. Useful for the watchdog surface; the
   replication connection's own `IDENTIFY_SYSTEM` is the authority, because it is
   the same connection the stream runs on.
 
-I have **not** produced a timeline change - that needs a standby and a promotion,
-and section 14 records it as a gap. What is verified is that the value is on the
-connection the relay already opens and is currently dropped on the floor.
+A real timeline change was **not produced** - that needs a standby and a
+promotion, and section 13 records it as a gap. What is verified is that the value
+is on the connection the relay already opens and is currently dropped on the
+floor.
 
 ---
 
@@ -1319,24 +1283,24 @@ DETAIL:  This slot has been invalidated because it exceeded the maximum reserved
 LOCATION:  CreateDecodingContext, logical.c:607
 ```
 
-So with the GUC set, a down relay costs bounded disk and a lost slot instead of
-a full disk. The relay's restart path reads `wal_status` (already modelled:
-`SlotHealth.wal_status` at `replication.rs:331-335`, documented values
-`reserved` / `extended` / `unreserved` / `lost`), and on `lost` it drops the
-slot, recreates it, and emits `Resync` for every app.
+So with the GUC set, a down relay costs bounded disk and a lost slot instead of a
+full disk. The relay's restart path reads `wal_status` (already modelled:
+`SlotHealth.wal_status` at `replication.rs:331-335`, documented values `reserved`
+/ `extended` / `unreserved` / `lost`), and on `lost` it drops the slot, recreates
+it, and emits `Resync` for every app.
 
 Note that `restart_lsn` becomes NULL on invalidation, which makes
 `watchdog_query`'s `lag_bytes` CASE (`replication.rs:370-372`) return NULL. The
 `wal_status` column is the only surviving signal, which is why it exists and why
 the relay must not key its health check on lag alone.
 
-**The value to set is an operator decision, not a constant in this document.**
-It has to be chosen against the cluster's WAL volume and the relay's worst
+**The value to set is an operator decision, not a constant in this document.** It
+has to be chosen against the cluster's WAL volume and the relay's worst
 acceptable downtime. What this document fixes is that it must not be `-1`.
 
 ### 7.3 Does the subscriber contract genuinely absorb `Resync`?
 
-Checked, and the answer differs between the two subscriber surfaces.
+The answer differs between the two subscriber surfaces.
 
 **Live queries: yes, genuinely.** `sdks/db/src/live.ts:333-338`:
 
@@ -1348,10 +1312,10 @@ await rerun();
 ```
 
 There is no separate code path. A `Resync` costs one refetch, which is the same
-work a `change` already causes, so a burst of Resyncs is a burst of refetches
-and not a correctness problem. Note that `rerun()` fires on **every** change
-event too, so the live-query path is already refetch-per-event; a Resync is not
-a degradation there at all.
+work a `change` already causes, so a burst of Resyncs is a burst of refetches and
+not a correctness problem. Note that `rerun()` fires on **every** change event
+too, so the live-query path is already refetch-per-event; a Resync is not a
+degradation there at all.
 
 **Raw `db.subscribe`: no, it is the creator's problem.** `SubscriptionEvent`
 (`sdks/db/src/subscribe.ts:38-54`) surfaces `{kind: "resync"}` with the doc
@@ -1361,33 +1325,33 @@ comment "Bounded queue overflowed; client must re-fetch". A creator who writes
 contract the creator can get wrong, not a mechanism that absorbs anything.
 
 So the honest statement is: **the mechanism the design relies on is real on the
-path the design serves (live queries), and is a documented obligation on the
-raw path.** If the raw path is meant to be relied on under a relay, its
-`Resync` needs to become something a creator cannot ignore, and that is a
-separate decision this document does not make.
+path the design serves (live queries), and is a documented obligation on the raw
+path.** If the raw path is meant to be relied on under a relay, its `Resync`
+needs to become something a creator cannot ignore, and that is a separate
+decision this document does not make.
 
 ### 7.4 The current fatal-error classifier does not know about invalidation
 
-`is_fatal` (`wal_consumer.rs:743-760`) matches on lowercased substrings:
-`58p01`, `does not exist` conjoined with `replication slot` or `publication`,
-and `invalid slot name`. The invalidation error measured in 7.2 is SQLSTATE
-`55000` with the message "can no longer get changes from replication slot".
-**None of the three arms match it**, so today's supervisor would classify it as
-transient and retry it forever at the 30-second cap
-(`wal_consumer.rs:712`, `MAX_BACKOFF`). The relay's classifier must key on
-SQLSTATE, and `55000` from `START_REPLICATION` must route to the drop-recreate-
-Resync path rather than to backoff.
+`is_fatal` (`wal_consumer.rs:743-760`) matches on lowercased substrings: `58p01`,
+`does not exist` conjoined with `replication slot` or `publication`, and
+`invalid slot name`. The invalidation error measured in 7.2 is SQLSTATE `55000`
+with the message "can no longer get changes from replication slot". **None of the
+three arms match it**, so today's supervisor would classify it as transient and
+retry it forever at the 30-second cap (`wal_consumer.rs:712`, `MAX_BACKOFF`). The
+relay's classifier must key on SQLSTATE, and `55000` from `START_REPLICATION`
+must route to the drop-recreate-Resync path rather than to backoff.
 
 There is a collision to be careful about: `replication.rs:229-247` already maps
-SQLSTATE `55000` to `Configuration { code: "wal_level_not_logical", hint: "set
-wal_level=logical in postgresql.conf and restart" }`, with a comment asserting
-that `55000` "is the canonical SQLSTATE when wal_level != logical". It is the
-canonical SQLSTATE for `object_not_in_prerequisite_state` in general, and
-section 7.2 shows a second, entirely different condition that raises it. In situ
-today that mapping is on `pg_create_logical_replication_slot` only, so it is not
-currently wrong; the comment's general claim is, and a relay that reuses the
-mapping on `START_REPLICATION` would tell an operator with a full WAL disk to go
-set `wal_level`.
+SQLSTATE `55000` to
+`Configuration { code: "wal_level_not_logical", hint: "set wal_level=logical in postgresql.conf and restart" }`,
+with a comment asserting that `55000` "is the canonical SQLSTATE when
+wal_level != logical". It is the canonical SQLSTATE for
+`object_not_in_prerequisite_state` in general, and section 7.2 shows a second,
+entirely different condition that raises it. In situ today that mapping is on
+`pg_create_logical_replication_slot` only, so it is not currently wrong; the
+comment's general claim is, and a relay that reuses the mapping on
+`START_REPLICATION` would tell an operator with a full WAL disk to go set
+`wal_level`.
 
 ### 7.5 Per-app fault isolation inside one process
 
@@ -1408,11 +1372,11 @@ Five rules, in the order they bind:
   be a crash in decoding.
 - **Every per-app step is total.** A per-app step returns `Result`, and its error
   becomes a `Gap` (5.6) or a `Resync` for that app. It does not return `()` and
-  panic instead. This is checkable rather than aspirational: `clippy::unwrap_used`,
-  `clippy::expect_used` and `clippy::indexing_slicing` at deny level on the relay
-  crate, which `./tests/clippy_gate.sh` already runs under `--all-features`.
-  A compile-time rule is cheaper than a catch-and-continue arm and does not
-  create a second, quieter control path.
+  panic instead. This is checkable rather than aspirational:
+  `clippy::unwrap_used`, `clippy::expect_used` and `clippy::indexing_slicing` at
+  deny level on the relay crate, which `./tests/clippy_gate.sh` already runs under
+  `--all-features`. A compile-time rule is cheaper than a catch-and-continue arm
+  and does not create a second, quieter control path.
 - **A panic that still happens kills the process, deliberately. Do not
   `catch_unwind` per-app work.** compio is one runtime; catching a panic inside a
   task leaves whatever it was mutating in an unknown state, and the state here is
@@ -1460,6 +1424,10 @@ The signals that are not blind are relay-side and per app:
 | `cdc_published_columns{app,collection}` | The bracket's failure window (3.6): a published set that is a strict subset of the declared wire set, with no migration in flight, means a shrink whose widen never ran |
 | `cdc_leader{relay_id,term}`, `cdc_slot_wal_status` | The two facts an operator needs before reading any of the above |
 
+The exact label sets above will drift once the relay is written; the durable
+content is the paragraph explaining why `confirmed_flush_lsn` is blind. If the
+table and the paragraph ever disagree, believe the paragraph.
+
 One PostgreSQL-side number IS honest: **`restart_lsn` lag, not
 `confirmed_flush_lsn` lag.** `restart_lsn` is pinned by the oldest transaction
 the server still needs and the client cannot move it - the measurement is already
@@ -1476,11 +1444,9 @@ creator-visible namespace - `replication_ops.rs` is deleted for that reason
 
 ## 8. The schema-change signal
 
-**Question asked: does a long-lived relay stamping `(app, incarnation)` at
-produce time dissolve the WAL-epoch carrier problem, or merely move it?**
-
-**Stamping from a cached map merely moves it. Emitting the marker into the WAL
-dissolves it. The design does the second.**
+**A relay stamping `(app, incarnation)` from a cached map merely moves the
+epoch-carrier problem. Emitting the marker into the WAL dissolves it. The design
+does the second.**
 
 ### 8.1 Why stamping from a cache only moves the problem
 
@@ -1493,9 +1459,9 @@ The failure is silent and its window is exactly the decode lag, which is the
 quantity this whole service is trying to make small and variable.
 
 It is also homeless: decision 7 deleted `__zeroship_admin` entirely and there is
-no `app_schema_state` to read (`AppIncarnationId` occurs **0** times in
-`crates/` and `sdks/`, measured). Stamping from a cache means inventing the
-table decision 7 removed.
+no `app_schema_state` to read (`AppIncarnationId` occurs **0** times in `crates/`
+and `sdks/`, measured). Stamping from a cache means inventing the table decision
+7 removed.
 
 ### 8.2 The mechanism that dissolves it
 
@@ -1505,8 +1471,8 @@ pgoutput delivers them as an `M` frame. The driver already decodes them:
 `PgOutputMessage::Message { xid, flags, lsn, prefix, content }` at
 `libs/compio-postgres/src/replication.rs:2043-2050`, requested by
 `StartReplicationOptions::messages` at `:860-863` ("Deliver
-`pg_logical_emit_message` payloads as `PgOutputMessage::Message`. Off, the
-server omits them and the decoder's `M` arm never runs.").
+`pg_logical_emit_message` payloads as `PgOutputMessage::Message`. Off, the server
+omits them and the decoder's `M` arm never runs.").
 
 MEASURED, PostgreSQL 16.15, `proto_version=1`:
 
@@ -1532,15 +1498,13 @@ C ...
 
 and with `messages` omitted (which is what `wal_consumer.rs:380-386` requests
 today, since it sets only `slot_name`, `start_lsn`, `proto_version` and
-`publication_names` and takes `..Default::default()` for the rest), the same
-peek returns only the INSERT transaction. The message transaction is skipped
-entirely.
+`publication_names` and takes `..Default::default()` for the rest), the same peek
+returns only the INSERT transaction. The message transaction is skipped entirely.
 
 Three properties fall out of that transcript:
 
-1. The marker is delivered **even though it belongs to no publication**. It
-   needs no membership decision and cannot be forgotten by publication
-   reconciliation.
+1. The marker is delivered **even though it belongs to no publication**. It needs
+   no membership decision and cannot be forgotten by publication reconciliation.
 2. It is ordered **before** the data that follows it, by the WAL, with no clock
    and no cache.
 3. The `ALTER TABLE ... ADD COLUMN` in the same transaction did not widen the
@@ -1549,9 +1513,10 @@ Three properties fall out of that transcript:
 ### 8.3 Where it is emitted
 
 Inside the **widen** transaction of 3.6's bracket - the descendant of today's
-`reconcile_in_transaction` (`crates/zeroship-migrate-server/src/publication.rs:79-110`),
-which `reconcile_app_publication` already wraps in `BEGIN` / `COMMIT` (`:64` and
-`:69`, with the `ROLLBACK` arm at `:74`) and which already runs on the privileged
+`reconcile_in_transaction`
+(`crates/zeroship-migrate-server/src/publication.rs:79-110`), which
+`reconcile_app_publication` already wraps in `BEGIN` / `COMMIT` (`:64` and `:69`,
+with the `ROLLBACK` arm at `:74`) and which already runs on the privileged
 migration connection after a successful apply (`:54-58`). Then "the publication
 reached its new shape" and "the epoch advanced" are the same WAL event, and the
 relay learns both from the same frame.
@@ -1566,23 +1531,22 @@ the new column list.
 
 ### 8.4 Honest limits
 
-The relay must request `messages: true`, which today's options struct defaults
-to false. That is a one-field change but it is a change, and a relay that omits
-it sees no markers and no error. The gate in section 10 must assert the option
-is set, not merely that markers are handled.
+The relay must request `messages: true`, which today's options struct defaults to
+false. That is a one-field change but it is a change, and a relay that omits it
+sees no markers and no error. The gate in section 10 must assert the option is
+set, not merely that markers are handled.
 
 And the marker is only as reliable as the widen transaction emitting it. That is
 a *guarded* property, not an unrepresentable one, in the vocabulary
 `docs/reviews/2026-08-28-flip-write-path.md:670-682` uses. It is one function in
 one privileged service, which is the smallest surface available, but it is not
-zero. The bracket narrows it a little further than the pre-revision shape did: a
-widen that does not run leaves the publication measurably shrunk (7.6's
-`cdc_published_columns`), so a missing marker has a second, independent
-observable rather than being pure silence.
+zero. The bracket narrows it a little further: a widen that does not run leaves
+the publication measurably shrunk (7.6's `cdc_published_columns`), so a missing
+marker has a second, independent observable rather than being pure silence.
 
-I did **not** verify what a non-transactional message
-(`pg_logical_emit_message(false, ...)`) does relative to the enclosing
-transaction, and this design does not use one.
+The behaviour of a non-transactional message
+(`pg_logical_emit_message(false, ...)`) relative to the enclosing transaction is
+**not verified**, and this design does not use one.
 
 ---
 
@@ -1590,39 +1554,14 @@ transaction, and this design does not use one.
 
 From `...-00-index.md:66-90`.
 
-1. **A wire projection that is a WHITELIST over declared fields, covering
-   `changed_columns`.** Section 3. Publication column lists, computed from
-   `storage.valueColumn` over declared fields unioned with the replica identity,
-   applied by `zeroship-migrate-server` as DDL, from the same policy-resolved
-   fold that produces the DDL (3.7). Measured to remove both the value and the
-   name (3.2) and to exclude new columns by default (3.3). One shared publication
-   whose membership is edited by `DROP TABLE` + `ADD TABLE`, bracketing the DDL
-   (3.6). Second, independent defence for the SQLite arm via a `ProjectedTuple`
-   newtype (3.4).
-
-2. **A test fixture for the MASK-ONLY shape that fails on a plaintext parent.**
-   Section 10.2.
-
-3. **The schema-change signal.** Section 8. Dissolved, not moved, by
-   `pg_logical_emit_message` inside the bracket's widen transaction.
-
-4. **Leader election and resume, without tokio.** Section 6. One
-   `pg_try_advisory_lock` per cluster over `compio-postgres`, following the
-   in-tree pattern at `slot_reaper.rs:171-180`; resume from
-   `confirmed_flush_lsn` using the mechanism that already exists at
-   `replication.rs:269` and `change_stream_pg.rs:186`; at-least-once with a
-   per-app monotone `(commit_lsn, change_index)` watermark, reset on a
-   `systemid` or `timeline` change and at no other time (6.3, 6.4). The
-   one-database claim is verified in 6.1 from six independent places.
-
-5. **`max_slot_wal_keep_size` must be set.** Section 7.2, with the measured
-   before-and-after and the `context = sighup` detail that makes it a reload
-   rather than a restart. Plus 7.4: the current fatal classifier cannot see the
-   resulting error, so setting the GUC without fixing the classifier converts a
-   full disk into an infinite retry loop.
-
-6. **Measure the added latency; do not estimate it.** Section 11. No figure
-   appears in this document.
+| requirement | where |
+| --- | --- |
+| A wire projection that is a WHITELIST over declared fields, covering `changed_columns` | Section 3. Publication column lists computed from `storage.valueColumn` over declared fields unioned with the replica identity (3.1), folded server-side from the same policy-resolved ops as the DDL (3.7), one shared publication bracketing the DDL (3.6), plus the `ProjectedTuple` newtype for the SQLite arm (3.4) |
+| A test fixture for the MASK-ONLY shape that fails on a plaintext parent | 10.2 |
+| The schema-change signal | Section 8: `pg_logical_emit_message` in the widen transaction |
+| Leader election and resume, without tokio | Section 6: one `pg_try_advisory_lock` per cluster over `compio-postgres`; resume from `confirmed_flush_lsn`; `(commit_lsn, change_index)` watermark reset only on a `systemid` or `timeline` change |
+| `max_slot_wal_keep_size` must be set | 7.2, plus 7.4 - setting the GUC without fixing the fatal classifier converts a full disk into an infinite retry loop |
+| Measure the added latency; do not estimate it | Section 11. No figure appears in this document |
 
 ---
 
@@ -1630,22 +1569,21 @@ From `...-00-index.md:66-90`.
 
 ### 10.1 What the existing test rules on
 
-`broker.rs:1863-1914`, `cdc_event_carries_masked_value_for_masked_columns`.
-Read in full. Its fixture is three lines of `HashMap::insert` at `:1872-1875`
-with `parent_ciphertext_text = "\\x0123456789abcdef0123456789abcdef"` at
-`:1868`, a BYTEA hex text-encoding. Its first two assertions (`:1888-1897`) read
-back the two values the test itself just inserted into the map: they are
-tautological with respect to any production code. Its third (`:1898-1902`)
-asserts no value equals a plaintext the test never put in. Only the last third
-(`:1906-1913`) touches production code, and what it touches is
-`ws_frame_for_change`, which section 2.3 shows has no production caller and
-which this design deletes.
+`broker.rs:1863-1914`, `cdc_event_carries_masked_value_for_masked_columns`. Its
+fixture is three lines of `HashMap::insert` at `:1872-1875` with
+`parent_ciphertext_text = "\\x0123456789abcdef0123456789abcdef"` at `:1868`, a
+BYTEA hex text-encoding. Its first two assertions (`:1888-1897`) read back the
+two values the test itself just inserted into the map: they are tautological with
+respect to any production code. Its third (`:1898-1902`) asserts no value equals
+a plaintext the test never put in. Only the last third (`:1906-1913`) touches
+production code, and what it touches is `ws_frame_for_change`, which section 2.3
+shows has no production caller and which this design deletes.
 
 Its own comment says what it is for (`:1859-1860`): "A regression that wires
 decrypt-on-CDC would land the plaintext in `new_tuple["ssn"]` and flip this
-assertion." That is a real property, on the safe (ciphertext) shape, under a
-name that claims the general one. It never constructs a mask-only field and it
-never runs a producer.
+assertion." That is a real property, on the safe (ciphertext) shape, under a name
+that claims the general one. It never constructs a mask-only field and it never
+runs a producer.
 
 **It is deleted, not extended.** Extending it would keep the name.
 
@@ -1655,27 +1593,27 @@ The replacement is an integration test against a live PostgreSQL, and it must
 fail on a plaintext parent. Shape:
 
 1. Apply a real migration declaring a collection with a **mask-only** field
-   (`t.string().mask(...)`, no `.encrypt()`), through the real migration path,
-   so the DDL and the publication reconciliation both run. A declared schema
-   built in the test does not satisfy this; the design's own acceptance criterion
+   (`t.string().mask(...)`, no `.encrypt()`), through the real migration path, so
+   the DDL and the publication reconciliation both run. A declared schema built
+   in the test does not satisfy this; the design's own acceptance criterion
    already says so (`...-design.md:1581-1584`: "the test creates the column
    through a real migration and reads a real WAL event - a hand-built
    `ChangeEvent` fixture does not satisfy it").
-2. Assert the publication's column list. `SELECT attnames FROM
-   pg_publication_tables WHERE ...` must contain the mask sibling and the
-   replica identity, and must **not** contain the plaintext parent.
+2. Assert the publication's column list.
+   `SELECT attnames FROM pg_publication_tables WHERE ...` must contain the mask
+   sibling and the replica identity, and must **not** contain the plaintext
+   parent.
 3. INSERT a row whose plaintext value is a distinctive sentinel.
 4. Consume the relay's own output frames, not a hand-built event. Assert:
    - the sentinel does not appear in any frame, at the byte level, not by key
      lookup (`!frame_bytes.windows(n).any(|w| w == sentinel)`);
-   - the parent column **name** does not appear in the `Relation` frame or in
-     any `changed_columns`;
+   - the parent column **name** does not appear in the `Relation` frame or in any
+     `changed_columns`;
    - the mask sibling's value **does** appear, so the test cannot pass by
      delivering nothing.
 
 That last arm is the control. Without it, a relay that drops every event passes
-every other assertion. This is the one-variable-control discipline the
-verification record already argues for.
+every other assertion.
 
 **The mutation that must make it fail:** remove the column list from
 `publication_membership_sql` so the publication is `FOR TABLE s.t` again. Arm 2
@@ -1691,17 +1629,17 @@ looking in the wrong place.
   behaviour rather than to a belief about it.
 - **`REPLICA IDENTITY FULL` incompatibility.** A test that sets FULL on a
   column-list-published table and asserts the write fails, referencing
-  `wal_consumer.rs:551-560` so the next reader who acts on that comment finds
-  the counter-evidence.
+  `wal_consumer.rs:551-560` so the next reader who acts on that comment finds the
+  counter-evidence.
 - **Two publications, one table.** Assert the relay classifies "cannot use
   different column lists" as fatal and names the table.
 - **New column defaults out.** `ADD COLUMN`, insert, assert absent from the
   frames. This is 3.3 as a regression test, and it is the arm that fails if
   someone ever "fixes" the publication to use `FOR TABLES IN SCHEMA`.
-- **Epoch marker.** A migration that changes a collection must produce an
-  `Epoch` frame ordered before the next `Change` frame for that app. Include a
-  negative arm asserting `StartReplicationOptions::messages` is `true`, because
-  a relay that omits it sees no markers and no error (8.4).
+- **Epoch marker.** A migration that changes a collection must produce an `Epoch`
+  frame ordered before the next `Change` frame for that app. Include a negative
+  arm asserting `StartReplicationOptions::messages` is `true`, because a relay
+  that omits it sees no markers and no error (8.4).
 - **Slot invalidation.** Set `max_slot_wal_keep_size` small, stop the relay,
   churn WAL, restart the relay, assert `wal_status = 'lost'` is observed and a
   `Resync` reaches every affected subscription. Assert the SQLSTATE-`55000`
@@ -1733,11 +1671,11 @@ looking in the wrong place.
   values are equal there. If that arm ever goes red, the durability ordering in
   6.3 has been broken somewhere else.
 - **The publication bracket.** A migration that removes `.mask()` from a field.
-  Assert it succeeds (today it aborts with `2BP01`), that the published column
-  set is the intersection between shrink and widen, and that the epoch marker
-  arrives in the widen transaction. **Mutation: move the reconcile back to
-  after the DDL and assert the migration fails**, which is the only way to prove
-  the bracket is what fixed it.
+  Assert it succeeds (without the bracket it aborts with `2BP01`), that the
+  published column set is the intersection between shrink and widen, and that the
+  epoch marker arrives in the widen transaction. **Mutation: move the reconcile
+  back to after the DDL and assert the migration fails**, which is the only way
+  to prove the bracket is what fixed it.
 - **Two tenants, one publication.** Reconcile app A while app B's tables are
   members; assert B's `attnames` are byte-identical before and after. Mutation:
   restore `ALTER PUBLICATION ... SET TABLE` and assert B's tables disappear. This
@@ -1756,9 +1694,9 @@ looking in the wrong place.
   `Null`.
 - **Gate arms.** Per `AGENTS.md`, every arm of the gate script declares the
   number of items it ruled on and a floor. The floor that matters here is the
-  number of published columns the projection test inspected: an arm that
-  inspects zero columns prints exactly what a clean tree prints. The
-  slow-consumer arm's floor is stated with it above, for the same reason.
+  number of published columns the projection test inspected: an arm that inspects
+  zero columns prints exactly what a clean tree prints. The slow-consumer arm's
+  floor is stated with it above, for the same reason.
 
 ---
 
@@ -1791,8 +1729,8 @@ buries the one quantity the service controls inside one it does not.
 
 **Baseline.** The same measurement against today's in-worker consumer, which has
 the same `t0` and `t1` and whose `t3` is `broker::publish` in the same process.
-Without that arm the number is unanchored: the question is not "how long does
-the relay take" but "how much longer than today".
+Without that arm the number is unanchored: the question is not "how long does the
+relay take" but "how much longer than today".
 
 **Load shape.** At minimum: one app with one subscriber (latency floor); one app
 with a write burst larger than the ring (the Resync boundary); N apps writing
@@ -1802,7 +1740,7 @@ a deliberately stalled subscriber alongside N healthy ones**, reporting the
 healthy apps' distribution, which is the only run that can show whether 5.4's
 invariant holds under load rather than in a unit test.
 
-**Two measurements that are inputs, not results.** Section 5.5 says its knobs are
+**Two measurements that are inputs, not results.** Section 5.5's knobs are
 derived rather than chosen, so derive them:
 
 - **Worker restart time**, wall clock from process exit to first frame consumed
@@ -1819,15 +1757,19 @@ Neither is a latency figure and neither is in this document.
 fast on average and stalls for 200ms on the librdkafka pattern in 5.1(c) has a
 fine mean.
 
-**What would invalidate the result.** A run where the relay and the workers
-share a machine with the database, since io_uring completion queues and the WAL
-writer then contend; and a run where no subscriber exists, since
-`has_subscribers` (`wal_consumer.rs:618-620`, `broker.rs:550-558`) short-circuits
-before the expensive work and would measure the short-circuit.
+**What would invalidate the result.** A run where the relay and the workers share
+a machine with the database, since io_uring completion queues and the WAL writer
+then contend; and a run where no subscriber exists, since `has_subscribers`
+(`wal_consumer.rs:618-620`, `broker.rs:550-558`) short-circuits before the
+expensive work and would measure the short-circuit.
 
 ---
 
-## 12. Arguing against this design
+## 12. Accepted costs, and the arguments against this design
+
+Everything in this section is a cost taken deliberately. None of it is a defect
+list, and none of it should be "fixed" without re-opening the decision it belongs
+to.
 
 ### 12.1 The relay is a single point of failure for every live query on the cluster
 
@@ -1835,8 +1777,8 @@ Today a worker's CDC failure affects that worker's apps. Under this design one
 process being wedged stops every live query on the cluster, and the leader lock
 means a second instance is a standby, not a second consumer. The failover time is
 bounded below by how fast PostgreSQL notices the dead session and releases the
-advisory lock, which is a TCP-keepalive-shaped quantity I have **not** measured
-and which is not obviously fast.
+advisory lock, which is a TCP-keepalive-shaped quantity, **not measured**, and
+not obviously fast.
 
 The mitigation is honest but partial: `pg_terminate_backend` on the stale session
 is available to an operator, and a standby that repeatedly fails to acquire can
@@ -1844,7 +1786,7 @@ escalate. Neither is automatic.
 
 ### 12.2 It is the new bottleneck, and it is a single decode plus a single fan-out
 
-One decode per database is the floor the index instructs me to accept. But the
+One decode per database is the floor the index instructs us to accept. But the
 relay also does the fan-out, and fan-out is `O(apps x subscribing workers)` in
 one process. The per-app-slot design was `O(apps x workers)` in *decode*, which
 is worse, but it was spread across processes. A relay that saturates one core on
@@ -1869,41 +1811,40 @@ and it is the single strongest argument against the column-list approach.
 The alternative that avoids it is to keep the publication wide and filter in the
 relay from a descriptor the relay fetches. That trades an availability risk for a
 confidentiality risk, plus a staleness window on every deploy, plus a new
-coupling from the relay to the deploy pipeline. I think that is the wrong trade
-for this platform, but it is a trade and not a free win.
+coupling from the relay to the deploy pipeline. That is the wrong trade for this
+platform, but it is a trade and not a free win.
 
 ### 12.4 `REPLICA IDENTITY FULL` is now permanently unavailable
 
 3.5(b). The tree's own comment recommends it as the fix for a real defect
 (deletes and non-key-column filters). This design forecloses it and replaces it
-with a subscriber-side pk-membership set (5.3) that I have not prototyped. If
-that replacement turns out to need unbounded state, the design has traded a
-working fix for an idea.
+with a subscriber-side pk-membership set (5.3) that is not prototyped. If that
+replacement turns out to need unbounded state, the design has traded a working
+fix for an idea.
 
 ### 12.5 The wire is one more format to keep in sync
 
 `zeroship-cdc-wire` is a fourth serialisation boundary in this subsystem, after
 pgoutput, the broker's JSON, and the SDK's TypeScript types. Pre-launch that is
-cheap; it is still four places a column-name change has to land - and the
-revision added three frames and a three-way cell encoding to it (5.6), so the
-count of things that must land in all four places went up.
+cheap; it is still four places a column-name change has to land, and 5.6's three
+extra frames plus the three-way cell encoding widen each of them.
 
-### 12.6 The dedup key now depends on the relay reproducing its own numbering
+### 12.6 The dedup key depends on the relay reproducing its own numbering
 
 `change_index` is the relay's count, not the server's. Correctness rests on
 pgoutput replaying a transaction's changes in the same order every time it
 replays them - argued from the reorder buffer's structure in 6.3, **not
-measured**, and recorded as a gap in section 14. If that ever fails, the failure
+measured**, and recorded as a gap in section 13. If that ever fails, the failure
 mode is a silently dropped row under replay, which is the same class of defect
 the key was introduced to fix, arriving from a different direction.
 
-There is a strictly safer alternative I did not take: dedup at whole-transaction
+There is a strictly safer alternative not taken: dedup at whole-transaction
 granularity, dropping every frame of a transaction whose `commit_lsn` is at or
 below the watermark, and advancing only at a transaction-boundary frame. That
 needs no index and no determinism assumption. It costs a boundary frame in the
 wire format and it re-delivers a whole transaction when the relay dies
-mid-transaction, which the live-query path absorbs and the raw path does not. I
-chose the index because it is exact; the argument for the boundary frame is that
+mid-transaction, which the live-query path absorbs and the raw path does not. The
+index is chosen because it is exact; the argument for the boundary frame is that
 it is exact *without a premise*.
 
 ### 12.7 The bracket makes a migration's publication work three times bigger
@@ -1915,207 +1856,111 @@ other tenant's on that lock, where before they only serialised per app. It also
 introduces a state - shrunk, not yet widened - that did not exist before and that
 an operator can now find in production. Both are real costs, and the alternative
 is a migration that aborts whenever a creator removes `.mask()` from a field,
-which is worse. But "reconcile once, after" was simpler and this is not.
+which is worse.
 
-### 12.8 The relay's failure policy is now three interacting knobs and a lint
+### 12.8 The relay's failure policy is three interacting knobs and a lint
 
-5.4, 5.5 and 7.5 added `slow_consumer_timeout`, four ring dimensions,
-`resync_storm_threshold`, `resync_storm_window`, and a deny-level lint set. The
-pre-revision document had none of these, which was wrong - it had no policy at
-all - but "no knobs" deploys correctly by construction and "seven knobs" has a
-wrong setting for every one of them. An operator who sets `ring_bytes_per_app`
-too low converts normal traffic into a `Resync` storm, which 5.4 converts into
-database read load, which is charged to the tenant. The mitigation is 11's
-derivation, and a derivation nobody runs is a default nobody chose.
+5.4, 5.5 and 7.5 introduce `slow_consumer_timeout`, four ring dimensions,
+`resync_storm_threshold`, `resync_storm_window`, and a deny-level lint set. "No
+knobs" deploys correctly by construction and "seven knobs" has a wrong setting
+for every one of them. An operator who sets `ring_bytes_per_app` too low converts
+normal traffic into a `Resync` storm, which 5.4 converts into database read load,
+which is charged to the tenant. The mitigation is section 11's derivation, and a
+derivation nobody runs is a default nobody chose.
 
 ### 12.9 Three more frames the raw subscriber can ignore
 
 7.3 already says `db.subscribe`'s `Resync` is a documented obligation a creator
 can silently get wrong. 5.6 adds `Gap` and `Truncate` and turns cell values
-three-way, so there are now three ways to diverge instead of one, all on the same
-path, all still absorbed for free by live queries and by nothing else. The
-honest reading is that 5.6 improved the *relay's* vocabulary and made the raw
-subscriber contract's existing hole wider. Closing it is still the separate
-decision 7.3 declines to make, and it is now more overdue.
+three-way, so there are three ways to diverge instead of one, all on the same
+path, all still absorbed for free by live queries and by nothing else. 5.6
+improves the *relay's* vocabulary and makes the raw subscriber contract's
+existing hole wider. Closing it is still the separate decision 7.3 declines to
+make, and it is now more overdue.
 
-### 12.10 Where the revision over-specifies
+### 12.10 Where this design over-specifies
 
-Three places, and I would defend two of them.
+Three places, two of them defensible.
 
-- **The non-`async` `push` (5.4).** This is a real seam and it holds, because the
-  compiler enforces it at every call site. Keep.
+- **The non-`async` `push` (5.4).** A real seam that holds, because the compiler
+  enforces it at every call site. Keep.
 - **The closed `Gap.reason` enum (5.6).** Defensible on the same grounds as the
   rest of section 3: an open string is where a physical column name reappears.
   Keep, and accept that a fourth reason means a wire-format change.
-- **The deny-level lints in 7.5.** This one I would not defend hard. A lint is a
-  rule with an `#[allow]` escape, and the first genuinely awkward indexing site
-  will get one. It is a nudge dressed as an invariant. The property that actually
-  holds is the one below it - that a panic kills the process rather than
-  poisoning a tenant - and the lints only reduce how often that happens.
+- **The deny-level lints in 7.5.** Weakest of the three. A lint is a rule with an
+  `#[allow]` escape, and the first genuinely awkward indexing site will get one.
+  It is a nudge dressed as an invariant. The property that actually holds is the
+  one below it - that a panic kills the process rather than poisoning a tenant -
+  and the lints only reduce how often that happens.
 
-There is also a general over-specification risk in 7.6: naming six metrics by
-exact label set is the kind of detail that goes stale the moment the relay is
-written, and the durable content is the paragraph above them explaining why
-`confirmed_flush_lsn` is blind. If the table and the paragraph ever disagree,
-believe the paragraph.
-
-### 12.11 What would make me choose differently
+### 12.11 What would make a different choice right
 
 - **If `zeroship-stream` grew a topic argument on `poll`, a batch publish, and
   TLS**, the case for a bespoke push channel weakens considerably, and the
-  durable-spool version of section 7 becomes available at low cost. That is
-  three changes to one crate, all of which its own comments already contemplate.
+  durable-spool version of section 7 becomes available at low cost. That is three
+  changes to one crate, all of which its own comments already contemplate.
 - **If the platform ever splits into per-app databases**, the whole design
   inverts: one leader per cluster becomes one leader per database, the advisory
   lock becomes per-database, and the decode multiplier argument changes shape
   entirely. Section 6.1 verifies today's answer; it is not a permanent one.
 - **If live queries turn out to be a niche feature** rather than a headline one,
   a per-worker slot with `max_replication_slots` raised (option D) is a smaller
-  system and the credential problem could be solved by giving the *worker* a
-  second, `REPLICATION`-only login role used by a dedicated thread. I do not
-  believe that is a boundary, per the AGENTS.md invariant, and I would argue
-  against it; but it is the cheap option and someone will propose it.
+  system, and the credential problem could be solved by giving the *worker* a
+  second, `REPLICATION`-only login role used by a dedicated thread. That is not a
+  boundary, per the AGENTS.md privilege invariant, and this design argues against
+  it; but it is the cheap option and someone will propose it.
 
 ---
 
-## 13. Findings a reviewer would miss
-
-Eight, in descending order of how badly they would bite. **(e) through (h) came
-out of making the revision** and were raised by nobody - not the adversarial
-review, not the second opinion, not the prior-art study.
-
-**(e) A per-change LSN goes BACKWARDS between transactions, so the fix the review
-prescribed for 6.3 loses rows under ordinary write concurrency.** Measured in
-6.3: with two overlapping transactions, the second one delivered carries a change
-LSN of `0/17DCE60` after the first delivered `0/17DCEF0`. Logical decoding orders
-transactions by COMMIT and changes by WAL INSERTION, and those two orders differ
-whenever two writers overlap. A reviewer misses this because the within-one-
-transaction transcript - the one everybody ran, including the review - looks
-perfect: three rows, three ascending LSNs. **The single-writer case cannot
-distinguish a monotone key from a non-monotone one.** The general lesson is
-narrower than CDC: a probe that exercises one writer cannot rule on an ordering
-property of a system whose ordering is defined by concurrency.
-
-**(f) `heap_multi_insert` puts many changes at ONE LSN, so per-change LSNs are
-not even distinct within a transaction.** Measured in 6.3 with a paired control
-that differs in one variable: three rows via multi-`VALUES` `INSERT` get three
-LSNs, the same three rows via `COPY` get one. `env.db` emits the `INSERT` shape
-(`query.rs:4013-4157`), so this is unreachable from creator writes today - which
-is exactly why it would survive review and every test anyone would write, and
-then arrive the first time anything does a bulk load.
-
-**(g) The advisory lock in `reconcile_in_transaction` looks like the fix for the
-shared-publication race and is not.** `publication.rs:84-89` already takes
-`pg_advisory_xact_lock` on the publication name. Collapse the publication to one
-and that key becomes a constant, so the lock starts serialising every tenant's
-migration cluster-wide - a real and unremarked scalability change - while doing
-nothing at all about the actual defect, because serialising a full `SET TABLE`
-replace just means the last tenant wins cleanly instead of racily. A reviewer who
-greps for locking finds the lock, sees mutual exclusion, and stops.
-
-**(h) The confirmation clamp is needed at three call sites, and the review named
-one.** `wal_consumer.rs:441` is the keepalive arm the review found. `:495`
-reports a mid-transaction `wal_end` and has the same defect under the relay's
-changed durability promise, and the long comment at `:459-494` reads as a
-clearance for it because it disproves a *different* worry (that the position
-could suppress replay of the transaction in progress). Fixing the named site and
-leaving `:495` produces a relay that confirms unreplayable WAL only during
-long-running transactions - rarer, harder to reproduce, and identical in
-consequence. The clamp belongs on `advance_lsn`, not on an arm of a match.
-
-**(a) The publication column list is enforced on the WRITE path.** Everyone
-reading "publication" thinks "read side, replication only". Measured in 3.5(a):
-a column list that does not cover the replica identity makes `UPDATE` and
-`DELETE` fail with `cannot update table`, and this is accepted at DDL time with
-no warning. A design review that treats the column list as purely a projection
-will not put the replica-identity union in the formula, and the defect will
-surface as creator write outages after a deploy.
-
-**(b) The column list and `REPLICA IDENTITY FULL` are mutually exclusive, and the
-tree recommends the one this design forecloses.** 3.5(b), and
-`wal_consumer.rs:551-560` is the recommendation. Two improvements that each look
-independently correct cannot both land.
-
-**(c) The value leak and the name leak are on different paths, and only the name
-one is live.** 2.3. `ws_frame_for_change` is the only production function that
-puts `ev.new_tuple` on a wire (`broker.rs:995`) and nothing calls it; the
-creator-visible surface is `message_to_json` (`:937-946` via
-`v8_classes/subscription.rs:158`), which carries `columns` and not `row`. A
-reviewer who reads "CDC ships mask-only plaintext" and greps for the serialiser
-will find `ws_frame_for_change`, conclude the leak is live in the creator's
-hands, and mis-scope the urgency in one direction; a reviewer who then notices it
-is uncalled will conclude the whole finding is theoretical and mis-scope it in
-the other. Both are wrong. The name is live. The value is loaded.
-
-**(d) The existing contract test's first two assertions are tautological.**
-10.1. `broker.rs:1888-1897` reads back the exact strings `:1872-1875` inserted.
-This is not "a real test on the wrong shape"; two thirds of it is a test on
-nothing at all, and the third that touches production code touches a function
-with no callers. A reviewer scanning for "is there a test?" finds one with an
-excellent name.
-
----
-
-## 14. What I did not verify
+## 13. What is not verified
 
 Stated as gaps rather than written as facts elsewhere in this document.
 
 - **Whether anything depends on `zeroship_worker` holding `BYPASSRLS`.** Section
   2.1 asserts only that the attribute is granted in one statement with
-  `REPLICATION`. I did not enumerate consumers.
+  `REPLICATION`. The consumers were not enumerated.
 - **The advisory-lock release latency after a hard leader kill.** 12.1. It is
-  TCP-keepalive-shaped and I ran no experiment.
+  TCP-keepalive-shaped and no experiment was run.
 - **The pk-membership replacement for `old_tuple`.** 5.3. Specified, not
   prototyped, and it changes a subscriber-side contract.
-- **Behaviour of non-transactional `pg_logical_emit_message`.** 8.4. Not used
-  and not tested.
-- **Whether `ntex` v3's response streaming and `cyper`'s `stream` feature
-  compose into a long-lived push channel in practice.** Both are present in the
-  workspace (`Cargo.toml:45`, `:48`) and `cyper`'s `stream` feature is enabled;
-  I wrote no code against them.
+- **Behaviour of non-transactional `pg_logical_emit_message`.** 8.4. Not used and
+  not tested.
+- **Whether `ntex` v3's response streaming and `cyper`'s `stream` feature compose
+  into a long-lived push channel in practice.** Both are present in the workspace
+  (`Cargo.toml:45`, `:48`) and `cyper`'s `stream` feature is enabled; no code was
+  written against them.
 - **The relay's own memory profile under a large `logical_decoding_work_mem`
-  transaction.** Measured `boot_val` is 64MB per slot (7.2) but I did not test
-  a spilling transaction through the ring.
+  transaction.** Measured `boot_val` is 64MB per slot (7.2), but a spilling
+  transaction was not driven through the ring.
 - **Anything about MySQL or the SQLite actor beyond the CDC publisher's shape**
   at `backend/sqlite/cdc.rs:604-639`.
-
-Added by the 2026-08-28 revision:
-
 - **Whether pgoutput replays a transaction's changes in a stable order across
   repeated replays of the same transaction.** 6.3's `change_index` depends on it.
   Argued from the reorder buffer replaying in WAL order and from
   `heap_multi_insert` tuples being ordered within their record; **not measured**,
   and 12.6 names the alternative that does not need it.
 - **A real PostgreSQL timeline change.** 6.4 specifies reading and gating on it.
-  I read `IdentifySystem.timeline` in the driver
-  (`libs/compio-postgres/src/replication.rs:818`), confirmed `wal_consumer.rs:377`
-  discards it, and measured `pg_control_checkpoint().timeline_id` returning `1` on
-  a fresh 18.4 cluster. I did not stand up a standby, promote it, or observe LSN
-  reuse across the divergence point.
+  `IdentifySystem.timeline` was read in the driver
+  (`libs/compio-postgres/src/replication.rs:818`), `wal_consumer.rs:377` was
+  confirmed to discard it, and `pg_control_checkpoint().timeline_id` was measured
+  returning `1` on a fresh 18.4 cluster. No standby was stood up or promoted, and
+  LSN reuse across a divergence point was not observed.
 - **Whether `heap_multi_insert` is reachable from any path this platform runs
   today.** The collapse is measured (6.3); its reachability is not.
   `env.db.insertMany` emits multi-`VALUES` (`query.rs:4013-4157`), which does not
-  collapse, and I did not enumerate every other writer - the migration engine, any
-  future backfill, `CREATE TABLE AS` inside a creator migration.
+  collapse, and the other writers - the migration engine, any future backfill,
+  `CREATE TABLE AS` inside a creator migration - were not enumerated.
 - **Whether `ALTER PUBLICATION ... DROP TABLE` + `ADD TABLE` in one transaction
   is invisible to a CONCURRENTLY DECODING consumer**, as opposed to invisible to
   a later catalog read. 3.6 measures the catalog outcome and the mid-stream
-  `ADD TABLE` pickup separately; it does not measure a decoder running through the
-  swap. The reasoning is that `ALTER PUBLICATION` is transactional and pgoutput
-  reads the catalog at the decoding snapshot, so the pair is atomic to it - which
-  is an argument, not a transcript.
+  `ADD TABLE` pickup separately; it does not measure a decoder running through
+  the swap. The reasoning is that `ALTER PUBLICATION` is transactional and
+  pgoutput reads the catalog at the decoding snapshot, so the pair is atomic to
+  it - which is an argument, not a transcript.
 - **Everything in 5.4, 5.5, 7.5 and 7.6 is specification, not observation.** No
   ring exists to overrun, no consumer exists to stall, no metric exists to read.
-  Those four subsections state policy the implementation must satisfy and the
-  tests in 10.3 are how it gets checked; nothing in them is a measurement.
+  Those four subsections state policy the implementation must satisfy, and the
+  tests in 10.3 are how it gets checked.
 - **The Vitess, Supabase, Salesforce, Kinesis, DynamoDB, Neon, Debezium and
-  Materialize claims are relayed from the prior-art study and unverified by me.**
-  They are cited as prior art shaping a decision, never as evidence about this
-  code.
-
-Closed by the revision, and recorded so nobody re-opens it: **`pg_publication_tables.attnames`
-IS the right catalog column** for 10.2 step 2. Measured directly on 18.4 -
-`SELECT pubname, tablename, attnames FROM pg_publication_tables` returns
-`{id,ssn_masked}` for a column-list publication, follows a `RENAME COLUMN`, and
-returns zero rows once `DROP COLUMN ... CASCADE` has removed the table.
-`pg_publication_rel.prattrs` is not needed.
+  Materialize claims are relayed from the prior-art study and unverified.** They
+  are cited as prior art shaping a decision, never as evidence about this code.

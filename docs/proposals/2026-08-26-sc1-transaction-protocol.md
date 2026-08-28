@@ -6,106 +6,50 @@
 `docs/proposals/2026-08-26-runtime-db-binding-design.md`
 
 **Read the set from:**
-`docs/proposals/2026-08-26-runtime-db-binding-00-index.md`. Live defects cited
-here by number (L8, and the `L` numbers generally) live in
-`docs/proposals/2026-08-26-runtime-db-binding-defect-register.md`.
+`docs/proposals/2026-08-26-runtime-db-binding-00-index.md`. Defects cited here
+by `L` number live in
+`docs/proposals/2026-08-26-runtime-db-binding-defect-register.md`, or, once
+closed, in `docs/proposals/2026-08-26-runtime-db-binding-defects-closed.md` -
+L8 is closed and resolves there.
 
 **Gates:** step 9 of that document (the owned transaction registry and state
 machine) and the randomized-encryption atomicity that depends on it.
 
-It no longer gates the L8 fix: that landed on main in `42c925de7` while this
-document was being written, so the settle path already judges its terminal
-command tag. This contract inherits that behaviour rather than introducing it.
-
 ---
 
-## Known scope divergence: the executable form is larger than this contract
+## Terminal delivery does not survive process death
 
-An exhaustive, executable form of this protocol was written out against this
-design and is preserved at `docs/reviews/dbbind-2026-08-26/dbbind-r7-codex.md`
-(untracked, beside these drafts). "Where the full transition matrix lives",
-below, says why that matrix is not inlined here. This section says the thing a
-reader has to know before either document is used for planning: **the two
-disagree about how large the design is.**
+**Terminal delivery is an in-memory gate. There is no durable transaction
+registry and no durable fence-job system, and neither is a deliverable of this
+contract.**
 
-Measured 2026-08-27, `grep -cE 'supervisor|FenceJobRegistry'` over that
-12,113-line artifact matches **122 lines**. They invoke a *supervisor*, a
-`FenceJobRegistry`, and durable fence jobs with a recovery scan - a component
-that owns terminal delivery so that "actor/publisher death is irrelevant". The
-same expression over this contract matches only the lines of this section,
-which name the component and specify none of it, and the codebase contains
-**zero** occurrences of `FenceJobRegistry`.
+The question that decides this is who waits for a transaction's terminal
+verdict across a process restart. The only candidate that could force a durable
+registry is a workflow step, and the workflow layer already owns that failure
+mode: durable workflows keep a journal (`StepCheckpoint`, `StepOutcome`,
+`StepResult` at `crates/zeroship-control/src/cron/workflow_engine.rs:35`;
+`JournalStepRecord` at `sdks/workflows/src/journal.ts:64`) and refuse I/O
+outside a journaled step by construction (`journal.ts:30`, and `:32` for
+timers). A creator transaction inside a workflow therefore runs inside a
+journaled step, and process death is handled by replay against that journal.
+Adding a durable registry here would put a second durable job system underneath
+one that already exists and already owns this failure mode.
 
-An earlier draft of this passage gave the figure as "105 lines" and said this
-contract "contains **zero** lines mentioning either word". Neither survived
-re-measurement: the count did not reproduce, and the zero-lines claim was
-falsified by the paragraph that made it. The instrument is named above so the
-next reader re-runs it instead of inheriting it. The codebase half held.
+**Accepted cost, deliberately taken:** a transaction inside a workflow step is
+**at-least-once**. If the step commits and the process dies before the journal
+records the outcome, replay re-runs the step. That is the workflow layer's
+idempotency contract and belongs in `docs/reference/workflows.md`. Solving it
+here would be solving it in the wrong layer, and twice.
 
-That is not a criticism of the artifact. Making the protocol genuinely
-executable across process death plausibly *does* require durable terminal
-delivery, and it is better to learn that from a document than from an outage.
-But it means the artifact is not "SC-1 written out in full" - it is **a
-substantially larger system than SC-1 describes**, resting on infrastructure
-that neither exists nor is budgeted anywhere in this design set.
+The decision is reversible in the cheap direction: a registry can be added
+later without redesigning the reducer, whereas building one and then finding
+the journal already covered the case cannot be undone as cheaply.
 
-Two consequences, and the second is the one that matters for sequencing:
+*Open check: only the workflow path was enumerated, as the strongest candidate.
+Whether any NON-workflow durable consumer awaits a transaction terminal is
+unverified.*
 
-1. This contract owes an explicit answer on whether terminal delivery must
-   survive process death at all. If it must, a durable job registry is a named
-   deliverable with its own storage, its own supervisor and its own failure
-   modes - not an implementation detail of the reducer. If it need not, the
-   artifact's cutoff machinery is over-built and the simpler in-memory gate
-   described below is the design.
-2. **A scope divergence this size is exactly what a step estimate misses.** The
-   implementation step for SC-1 currently reads as "write the reducer". On the
-   artifact's reading it is "write the reducer, plus a durable job system".
-   Discovering that during implementation rather than here is how a step that
-   was scoped as days becomes weeks.
-
-### Evidence bearing on that question, gathered 2026-08-28
-
-The open question is *who is waiting for the terminal verdict*. If nothing
-durable awaits it, the in-memory gate is the design and the artifact's cutoff
-machinery is over-built.
-
-**The one candidate that could have forced a durable registry is a workflow
-step, and it does not - because the layer above already carries the durability.**
-
-- Durable workflows keep a **journal**: `StepCheckpoint`, `StepOutcome` and
-  `StepResult` (`crates/zeroship-control/src/cron/workflow_engine.rs:35`),
-  `JournalStepRecord` (`sdks/workflows/src/journal.ts:64`).
-- **All I/O is forced inside a journaled step.** The workflow body refuses
-  direct I/O by construction - *"workflow bodies may not perform I/O directly -
-  move fetch(...) inside step.run(...) or use step.sideEffect(...)"*
-  (`journal.ts:30`), with the same treatment for timers (`:32`).
-- `crates/zeroship-plugin-workflow/src/` contains exactly **one** `transaction`
-  reference, `client.transaction()` at `claim.rs:68` - the platform's own claim
-  record, not a creator's `db.transaction()`.
-
-So a creator transaction inside a workflow runs **inside a journaled step**, and
-process death is handled by replay against that journal. Adding a durable
-`FenceJobRegistry` to this contract would put a **second durable job system
-underneath one that already exists** and already owns this failure mode.
-
-**Therefore the recommended answer is NO: terminal delivery need not survive
-process death, and the simpler in-memory gate below is the design.**
-
-**The caveat, stated rather than fixed here.** If a step commits and the process
-dies before the journal records the outcome, replay re-runs the step - so a
-transaction inside a step is **at-least-once**. That is the workflow layer's
-idempotency contract and belongs in `docs/reference/workflows.md`, not in this
-protocol. Solving it here would be solving it in the wrong layer, and twice.
-
-**Reversibility is why this is the cheap answer to give now:** the registry can
-be added later without redesigning the reducer. The reverse - building it and
-discovering the journal already covered the case - cannot be undone as cheaply.
-
-*Unverified: whether any NON-workflow durable consumer awaits a transaction
-terminal. I checked the workflow path because it was the strongest candidate;
-I did not enumerate every caller.*
-
-### Terms this contract uses but does not define
+## Terms this contract uses but does not define
 
 Four pieces of vocabulary appear in the rules, the guard order and the
 invariants below without ever being defined - not here, and not in any other
@@ -125,16 +69,15 @@ them is a decision this document has not made:
   3 together with a `(kind, generation)` pair, an atomic claim and a diagnostic
   outcome for a wrong pair. The slot's own protocol is not written down here.
 
-All four are specified in the r7 artifact named above, which is where they were
-drawn from. That artifact is untracked, so this contract currently rests on
+All four are specified in the r7 artifact named under "Where the full transition
+matrix lives", which is untracked - so this contract currently rests on
 vocabulary a reader of the tracked set cannot resolve.
 
 ## Why this is a document and not a discovery
 
-Round 3 established that a black-box test suite **underdetermines** this
-protocol: a suite that never states whether two same-app top-level transactions
-serialise passes just as happily on either answer. And the answer is
-user-visible - it decides what
+A black-box test suite **underdetermines** this protocol: a suite that never
+states whether two same-app top-level transactions serialise passes just as
+happily on either answer. And the answer is user-visible - it decides what
 `Promise.all([db.transaction(a), db.transaction(b)])` does.
 
 The existing code already made that choice, deliberately, and says so
@@ -147,11 +90,7 @@ The existing code already made that choice, deliberately, and says so
 > second and succeeds", which is what a creator writing
 > `Promise.all([db.transaction(a), db.transaction(b)])` means.
 
-**That behaviour is preserved.** This contract does not silently delete it, and
-the parent proposal's earlier claim that "every transaction slot and claim" can
-be keyed by `(runtime_instance_id, tx_id)` is withdrawn for the claim half:
-unique transaction ids never contend, so keying admission by them would remove
-the serialisation above without anyone deciding to.
+**That behaviour is preserved.** This contract does not silently delete it.
 
 ## Two identities, deliberately distinct
 
@@ -168,8 +107,13 @@ incarnations the way a durable key can.
 
 **Admission identity** decides whether a transaction may *start*; a second one
 holding the same key waits. That is what preserves the documented `Promise.all`
-semantics above. **The key differs by backend, and that is Fork A's decision
-rather than an oversight**: SQLite serializes across isolates sharing one actor,
+semantics above. **Admission must not be keyed by `tx_id`.** Unique transaction
+ids never contend, so keying admission by them removes that serialisation
+without anyone deciding to - which is why the two identities are separate keys
+rather than one.
+
+**The admission key differs by backend, and that is Fork A's decision rather
+than an oversight**: SQLite serializes across isolates sharing one actor,
 because SC-2 gives an attached app file exactly one transaction connection. The
 `incarnation` component is Fork C's - without it a queue entry created by the
 previous app instance can be admitted against the new one. **The authority
@@ -193,16 +137,14 @@ reaches the acceptance shape: non-contention between two same-app transactions
 in different isolates is a **PostgreSQL-only** arm, because on SQLite they
 deliberately do contend.
 
-An earlier draft stated non-contention as a backend-neutral arm, which could
-not pass on SQLite on any implementation: SC-5 has current and deploy-pinned
-isolates on one OS thread resolve the same `DbThreadResources` (`sc5:36-42`)
-and SC-2 gives each attached app file exactly one `tx_conn` (`sc2:55-61`) -
-two admitted transactions, one connection. It was a PostgreSQL property
-inherited onto a backend that cannot serve it.
+Stating that arm backend-neutrally would make it unpassable on SQLite under any
+implementation: SC-5 has current and deploy-pinned isolates on one OS thread
+resolve the same `DbThreadResources` (`sc5:36-42`) and SC-2 gives each attached
+app file exactly one `tx_conn` (`sc2:55-61`) - two admitted transactions, one
+connection.
 
 The alternative - a bounded set of SQLite transaction connections keyed by
-`TxKey` - is rejected, and both round-6 reviewers rejected it independently
-for reasons that compound:
+`TxKey` - is rejected, for three reasons that compound:
 
 - the worker **refuses SQLite DSNs** outright
   (`crates/zeroship-worker/src/main.rs:105-116`), and deploy-pinned isolates
@@ -261,13 +203,10 @@ the empty slot as proof that terminal SQL ran.
   state, not a bookkeeping flag.
 
   **A `COMMIT` from `Poisoned` is reachable and must be handled, not
-  forbidden.** An earlier draft said "only `ROLLBACK` is legal" and then, four
-  lines later, described a `COMMIT` being sent from this state - a
-  contradiction. The
-  reachable truth: a creator callback can swallow the error and resolve, so the
+  forbidden.** A creator callback can swallow the error and resolve, so the
   orchestrator issues `COMMIT`; PostgreSQL accepts it and answers with the tag
   `ROLLBACK`. The transition is legal, its outcome is **failure**, and the
-  machine records it as such. That is exactly the L8 case, now covered by
+  machine records it as such. That is the L8 case, covered by
   `commit_that_postgres_rolled_back_must_not_report_success_l8`.
 
   A **savepoint** rollback does *not* leave `Poisoned` terminal: `ROLLBACK TO
@@ -291,46 +230,43 @@ the empty slot as proof that terminal SQL ran.
    settle arriving while the state is `InFlight` **waits for the operation to
    return the client**; only a state of `Settled` ends a settle early.
 
-2. **Terminal SQL inspects its command tag** - already true, and this contract
-   must not regress it. A `COMMIT` answered `ROLLBACK` is a failed transaction,
-   not a successful one. Before `42c925de7` the raw path discarded the tag and a
-   rolled-back transaction was reported to the creator as committed; that is now
-   fixed and covered by
-   `commit_that_postgres_rolled_back_must_not_report_success_l8`. The check is
-   scoped to the PostgreSQL `COMMIT` arm deliberately: `RELEASE` answers with
-   the tag `RELEASE`, so a broader "anything but COMMIT is a failure" test would
-   reject every healthy nested commit.
+2. **Terminal SQL inspects its command tag.** This is already true - the settle
+   path judges its terminal command tag, covered by
+   `commit_that_postgres_rolled_back_must_not_report_success_l8` - and this
+   contract must not regress it. A `COMMIT` answered `ROLLBACK` is a failed
+   transaction, not a successful one. The check is scoped to the PostgreSQL
+   `COMMIT` arm deliberately: `RELEASE` answers with the tag `RELEASE`, so a
+   broader "anything but COMMIT is a failure" test would reject every healthy
+   nested commit.
 
 3. **Pending effects are discarded unless the commit is confirmed** - which is
    already the behaviour, and this rule exists to keep it rather than to fix it.
-   An earlier draft claimed the early-return path "publishes change events for
-   writes the database discarded". That is **false**: `clear_pending_emits` is
-   documented as clearing the queue "without firing any events"
+   `clear_pending_emits` clears the queue "without firing any events"
    (`crates/zeroship-plugin-db/src/exec.rs:615-621`), and every settle arm other
-   than `(true, Ok)` calls it. The queue is dropped, not published.
+   than `(true, Ok)` calls it; the queue is dropped, not published.
 
-   The rule still belongs here, because the state machine must not *introduce*
-   the defect: an effect buffer keyed per transaction, published only from a
+   The rule belongs here because the state machine must not *introduce* the
+   defect: an effect buffer keyed per transaction, published only from a
    confirmed-commit arm, is what preserves today's behaviour once settlement
    stops being a single early-return.
 
 4. **The deadline is enforced by an independent timer, not by the settle path.**
-   The parent proposal's earlier wording ("a deadline enforced by the settle
-   path") was circular: a body that never settles never reaches the settle path.
-   The timer is armed at `Starting` and fires regardless of callback behaviour,
-   moving the transaction to `Poisoned` and then `Settling` with a rollback.
+   A deadline enforced by the settle path is circular - a body that never
+   settles never reaches the settle path. The timer is armed at `Starting` and
+   fires regardless of callback behaviour, moving the transaction to `Poisoned`
+   and then `Settling` with a rollback.
 
 5. **Cancellation before `BEGIN` returns must not leak the admission claim.** An
    RAII guard is armed at admission and disarmed only once the client is
    installed. Today the claim can outlive the isolate, leaving later
-   transactions for that app parked indefinitely.
+   transactions for that app parked indefinitely. That defect is labelled
+   **DBR-11**.
 
-   That defect is labelled **DBR-11** here, and the label resolves to nothing:
-   `DBR-11` occurs in no other document of this set, and the defect has no `L`
-   number in the register. DBR-03, DBR-04/05 and DBR-06 at least reappear in the
-   design document; DBR-11 does not. The label is kept rather than invented
-   away, because dropping it would lose the only handle the defect has - but it
-   is **owed** either a definition of the DBR numbering or a register row.
+**The `DBR-` numbering resolves to nothing in the tracked set.** `DBR-03`,
+`DBR-04/05`, `DBR-06` and `DBR-11` occur in no other document of this set, and
+these defects carry no `L` number in the register. The labels are kept because
+they are the only handle the defects have, but the numbering is **owed** either
+a definition or register rows.
 
 ## Frames and effects
 
@@ -339,8 +275,10 @@ frame may issue data SQL, open a child, or close. The root frame is created
 only once `BEGIN` is confirmed; a child is inserted as `Opening` before
 `SAVEPOINT` is sent and becomes `Open` only when that command succeeds.
 
-**Effects are per-frame, not per-app**, and their fate is a property of how the
-frame closed:
+**Effects are per-frame, not per-app** - a flat app-keyed buffer lets a
+top-level `COMMIT` drain a rolled-back child's queue and tell a subscriber
+about a row that does not exist - and their fate is a property of how the frame
+closed:
 
 | Frame closes by | The frame's queued effects |
 | --- | --- |
@@ -351,28 +289,22 @@ frame closed:
 | confirmed **root** commit | detached and published |
 | every other terminal outcome | every frame buffer discarded |
 
-The release-after-rollback row is not padding, and omitting it was a real gap:
-it is the edge that decides **whether the frame still exists**. A rolled-back
-frame is not closed until its `RELEASE` lands, so until then the transaction is
-not `Idle` and the frame is not available for new work - a point the state table
-must agree with rather than reporting `Idle` the moment `ROLLBACK TO` returns.
+The release-after-rollback row decides **whether the frame still exists**. A
+rolled-back frame is not closed until its `RELEASE` lands, so until then the
+transaction is not `Idle` and the frame is not available for new work - a point
+the state table must agree with rather than reporting `Idle` the moment
+`ROLLBACK TO` returns.
 
 **Ordering is contract, not implementation detail.** The frame's fate is applied
 **after** the statement succeeds, never before. Discarding on the assumption
 that `ROLLBACK TO` will succeed makes the failure row above unachievable - the
 diagnostic evidence it calls for is already gone by the time the failure is
-known. The shipped code did exactly that and has been corrected: the settle path
-now takes the frame's watermark, runs the statement, and only then applies the
-fate.
+known. The settle path takes the frame's watermark, runs the statement, and only
+then applies the fate.
 
-This is not speculative. A flat, app-keyed effect buffer with no frame scoping
-was the shipped behaviour, the nested settle arm never touched it, and the
-top-level `COMMIT` drained all of it - so a subscriber was told about a row that
-had been rolled back and did not exist. That defect is now **proven and fixed**
-(`fix(db): discard a rolled-back savepoint's queued change events`), with a
-regression test that fails on the pre-fix code. The shipped fix is the minimal
-form of this table - a watermark per frame into one buffer; the per-frame `Vec`
-above is the same contract with a cleaner representation.
+What ships today is the minimal form of this table: a watermark per frame into
+one shared buffer. The per-frame `Vec` above is the same contract with a cleaner
+representation, and an implementer may keep either as long as the fates match.
 
 ### Savepoint names are monotonic, never depth-derived
 
@@ -413,14 +345,21 @@ state enum, the closed event and completion enums, the complete legal transition
 table, the exhaustive illegal matrix with a typed error per cell, the deadline
 slot protocol, and the terminal outcome table. It is preserved at
 `docs/reviews/dbbind-2026-08-26/dbbind-r7-codex.md` (untracked, beside these
-drafts). An implementer should work from that; a reviewer should work from this.
+drafts). An implementer should work from that for the matrix; a reviewer should
+work from this.
 
-If the two ever disagree, **this document is not automatically right** - it is
-the more readable one, which is a different property. The invariants below are
-the arbiter, because they are the part a property test can actually check.
+**It is not SC-1 written out in full, and the difference is a scope trap.** That
+artifact invokes a *supervisor*, a `FenceJobRegistry` and durable fence jobs
+with a recovery scan, so that actor or publisher death is irrelevant to terminal
+delivery. **This contract does not adopt any of it** - see "Terminal delivery
+does not survive process death". `FenceJobRegistry` occurs nowhere in the
+codebase; do not build one because the artifact names it. Treating that
+machinery as part of the step is what turns "write the reducer" into "write the
+reducer, plus a durable job system".
 
-They already disagree, and by how much is recorded at the top of this document
-under "Known scope divergence".
+Where the two disagree elsewhere, **this document is not automatically right** -
+it is the more readable one, which is a different property. The invariants below
+are the arbiter, because they are the part a property test can actually check.
 
 ## Guard order is normative, not an implementation detail
 
@@ -464,8 +403,7 @@ Two consequences that are contract rather than style:
 - **Every illegal matrix cell has a type-correct error path.** Reply channels
   carry `Result<_, TxProtocolError>`, so a rejection is a value the caller
   receives - never an out-of-band log line. A protocol whose illegal transitions
-  are only observable in a worker log is not executable, and this document has
-  already been bitten once by a diagnostic that went to a discarded stream.
+  are only observable in a worker log is not executable.
 
 ## One gate for every forcing publisher, not just caller cancellation
 
@@ -547,7 +485,10 @@ database.
     `RELEASE`; a rolled-back child has `ROLLBACK TO` **before** `RELEASE`.
 11. **Effect locality.** Success appends only to the current frame; release
     moves the exact child sequence to the parent; a confirmed rollback-to
-    discards exactly the child sequence **and no parent effect**.
+    discards exactly the child sequence **and no parent effect**. When a frame's
+    watermark is missing the buffer is left alone rather than truncated to zero,
+    because truncating would discard parent effects: over-publishing is a bug,
+    and silently dropping a committed row's event is a worse one.
 12. **Commit-only publication.** Nothing publishes unless the root **intent was
     commit** AND the root finish result was committed, and a confirmed commit
     publishes every retained effect exactly once, in order. A `Committed`
@@ -560,8 +501,9 @@ database.
     returns the parent to `Idle`; otherwise **only root settlement** can end it.
 14. **Poisoned commit.** A `COMMIT` answered `ROLLBACK` never resolves a
     creator promise and never publishes an effect. This one is not speculative -
-    it is defect **L8 in the defect register**, and its reachable case is
-    already covered by a live regression test
+    it is defect **L8**, now closed
+    (`docs/proposals/2026-08-26-runtime-db-binding-defects-closed.md`), and its
+    reachable case is already covered by a live regression test
     (`crates/zeroship-plugin-db/tests/native_transaction.rs:977`,
     "L8 REVEAL: a transaction PostgreSQL rolled back must not be reported as a
     successful commit"). It is listed here so the property test inherits the
@@ -582,20 +524,15 @@ what may happen when two things arrive at once - a settlement racing a command,
 a commit racing a poison - which is exactly where a hand-written implementation
 diverges from its own table.
 
-Invariant 11 is the one the shipped fix already leans on: when a frame's
-watermark is missing the buffer is left alone rather than truncated to zero,
-precisely because truncating would discard parent effects. Over-publishing is a
-bug; silently dropping a committed row's event is a worse one.
-
 ## Acceptance shape
 
 ### The invocation these arms require
 
 Every citation of a `native_transaction` arm in this document - invariant 14's
-included - **only counts under a specific invocation**, and this is exactly the
-trap the fourth defect class describes - "A fourth: the arm that was never
+included - **only counts under a specific invocation**, which is exactly the
+trap the fourth defect class describes ("A fourth: the arm that was never
 built", in
-`docs/proposals/2026-08-26-runtime-db-binding-verification-record.md`.
+`docs/proposals/2026-08-26-runtime-db-binding-verification-record.md`).
 `native_transaction` declares `required-features = ["test-helpers"]`, so a
 plain `cargo test -p zeroship-plugin-db` filters the whole target out and never
 builds it. The command that runs it is
@@ -616,12 +553,11 @@ A state table plus one test per illegal transition, and explicitly:
   frame remain diagnostically present, nothing publishes, the transaction
   poisons, and root cleanup finally discards them.
 
-  This arm exists because the success-path arm below **cannot fail against a
-  premature discard** - which is not hypothetical, it is what the shipped code
-  did until `5b9bcbd49`. The successful-rollback regression test was green the
-  whole time the failure path was destroying the evidence this contract requires
-  it to keep. A table with two rows needs an arm for each row; asserting only
-  the row that already passes measures nothing about the other.
+  This arm is required because the success-path arm below **cannot fail against
+  a premature discard** - a successful-rollback regression test stays green
+  while the failure path destroys the evidence this contract requires it to
+  keep. A table with two rows needs an arm for each row; asserting only the row
+  that already passes measures nothing about the other.
 - **a rolled-back frame's effects are never published**, asserted with a live
   subscriber present. The subscriber is load-bearing: the emit path returns
   early unless `broker::has_subscribers(app, collection)`
@@ -644,24 +580,18 @@ A state table plus one test per illegal transition, and explicitly:
   the waiting while still landing both writes. The only discriminating
   observable is the mutual exclusion itself - a detectable non-overlap of the
   two critical sections - which this arm must therefore require explicitly.
-  This document's "Why this is a document and not a discovery" argues that a
-  black-box suite cannot see this property; leaving the arm in the weaker form
-  conceded exactly that point.
 
-  **It is worse than "cannot fail in principle" - it is already written, and
-  already green.** The probe exists (`examples/db-todos/src/index.ts:569-599`
-  starts the pair in one `Promise.all`) and the dev-vs-deployed gate already
-  asserts all three halves of it:
+  The black-box form of it is **already written and already green**: the probe
+  exists (`examples/db-todos/src/index.ts:569-599` starts the pair in one
+  `Promise.all`) and the dev-vs-deployed gate asserts all three halves -
   `want cxPar 'two transactions in one Promise.all: leg 1 commits'`,
   `... leg 2 commits`, and `... both concurrent transactions left their row`
-  (`tests/e2e_dev_vs_deployed_db.sh:1215-1217`). Those verdicts were RED when
-  first written on 2026-08-10 and are green now, so they were a real measurement
-  of the gap they were built for - and are worth **keeping as a preservation
-  property** for exactly that reason. What they cannot be is acceptance for the
-  work this document proposes: they would stay green if none of it were done.
+  (`tests/e2e_dev_vs_deployed_db.sh:1215-1217`). Keep those as a **preservation
+  property**. They cannot be acceptance for the work this document proposes:
+  they would stay green if none of it were done.
 
-  So the arm needs a **discriminating partner**, and the partner has to be
-  named concretely rather than gestured at. Two forms qualify:
+  So the arm needs a **discriminating partner**, named concretely rather than
+  gestured at. Two forms qualify:
 
   1. **Inspect the new state.** Assert on the `TxKey`/state reducer directly -
      that admission is keyed by the identity this document defines, and that a

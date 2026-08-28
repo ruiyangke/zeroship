@@ -1,10 +1,9 @@
 # Runtime DB binding: replace `registerModel` with construction-time binding
 
-**Date:** 2026-08-26, restructured 2026-08-28.
+**Date:** 2026-08-26.
 
-**Status:** direction settled. Three of the eleven implementation steps have
-landed; the cutover that deletes `registerModel` has not. One decision blocks
-(L12, the replication-slot ceiling) and four questions are open. See
+**Status:** direction settled. Several of the implementation steps have landed;
+the cutover that deletes `registerModel` has not. Four questions are open. See
 [What is open](#6-what-is-open-and-what-blocks-each).
 
 **Scope:** `zeroship-plugin-db`, runtime and worker initialization,
@@ -18,27 +17,18 @@ is no alias, no compatibility mode, and no dual registration path.
 
 ## How to read this document
 
-**This document states only what is true now.** It carries no struck-through
-text and no "an earlier draft said". The history - forty-three retractions,
-ten operator decisions, and the measurements that settled each - is in
+This document states the design as it now is. The superseded record - every
+retraction, the operator decisions in the order they were taken, and the
+measurements that settled each - is
 `docs/proposals/2026-08-26-runtime-db-binding-decision-log.md`. That is not an
-appendix: several findings exist nowhere else in the tree, and a claim in this
-document that looks under-argued usually has its argument there.
+appendix: several findings exist nowhere else in the tree, and a claim here that
+looks under-argued usually has its argument there.
 
-**On the numbers.** Every figure below says what it counts and against what
-boundary, so it can be re-derived rather than trusted. Figures re-derived
-against the tree on 2026-08-28 at `0e785d5fc` are marked **(measured
-2026-08-28)**. Figures inherited from the v4 document and not re-derived in this
-pass are marked **(carried forward, unverified)** - keep them, but do not argue
-from them.
-
-**Citations drift, and they have.** Line numbers here were re-checked in the
-same pass; three that the v4 document carried had already moved under the
-implementation commits (`Pool::connect(&url, 8)` from `lib.rs:862` to
-`lib.rs:998`, the per-deprovision pool from `:904` to `lib.rs:698`, and the
-"~200 isolates per OS thread" note from `exec.rs:1273` to `exec.rs:1321`).
-Citations inside the decision log are historical evidence, correct against the
-tree on the date of their entry, and are deliberately not re-pointed.
+Every figure below says what it counts and against what boundary, so it can be
+re-derived rather than trusted. A figure marked **(unverified)** was not
+re-derived against the current tree - keep it, but do not argue from it. Line
+citations age against the tree; the ones in the decision log are historical
+evidence and are deliberately not re-pointed.
 
 ---
 
@@ -98,8 +88,8 @@ alter runtime schema state or supply a security policy.
   does not match the descriptor the worker was built for, before the worker
   serves a request.
 
-In scope, having been out of scope in v1: the transaction settlement machine,
-randomized-encryption atomicity, and the V8 decode budget.
+In scope: the transaction settlement machine, randomized-encryption atomicity,
+and the V8 decode budget.
 
 ---
 
@@ -111,12 +101,14 @@ randomized-encryption atomicity, and the V8 decode budget.
 | D2 | **PITR targets are control-plane state** | The data plane neither reads nor acts on a recovery target; the SPI member that wrote one goes with the table | 3.8 |
 | D3 | **The mask policy is code-managed and immutable at runtime** | Declared in the creator codebase, folded at build time, delivered through the artifact/init channel, fixed for the isolate's life | 3.11 |
 | D4 | **The operator ceiling is worker configuration** | Immutable per isolate, changed by rolling the workers. Effective permission is `ceiling INTERSECT draft`, computed once at binding construction | 3.11 |
-| D5 | **Privilege follows the PROCESS, not the function** | A repository key invariant (`AGENTS.md`, landed in `196622c9b`). No signed session the worker presents on its own behalf; CDC slot and publication ownership belongs to the CDC relay | 3.2 |
+| D5 | **Privilege follows the PROCESS, not the function** | A repository key invariant (`AGENTS.md`, landed in `196622c9b`). No signed session the worker presents on its own behalf; CDC slot and publication ownership belongs to the CDC service | 3.2 |
 | D6 | **`__zeroship_admin` is deleted entirely, and there is no schema epoch** | The runtime descriptor is the authority. This is the JPA/Hibernate model: the mapping comes from the code, not from introspection | 3.1 |
 | D7 | **The data plane performs NO live introspection** | The descriptor is the sole authority for schema and the data plane never reads the catalog | 3.1 |
 | D8 | **There is no `storage.aadColumn`** | The AEAD binds the physical column the descriptor already records. The surviving constraint is that moving an encrypted value is a re-encrypt, not a rename | 3.11 |
 | D9 | **Deterministic encryption mode stays as-is** | Not built out, not deleted. Deferred | 6, "Deterministic encryption" |
 | D10 | **Connections always come from a pool** | Pooled checkout is the rule. Logical replication connections are the one exception, and the rule for them is bound-and-account | 3.12 |
+| D11 | **No DDL in the data plane** | Schema change belongs to `zeroship-migrate`. Every DDL-emitting path leaves `zeroship-plugin-db` | Invariant 5, step 6 |
+| D12 | **The descriptor must not get wrong** | The deploy pipeline enforces the ordering it currently only describes, and the masking storage flip lands as a second line of defence | 3.1, 6 |
 
 Each decision's history - what it replaced, what argued for the replaced shape,
 and why that argument failed - is one entry in the decision log.
@@ -170,22 +162,26 @@ backend, in shipped code (`descriptor.rs:30-32`).
 
 **What this costs, stated because nothing else in this document covers it.**
 
-- **A well-formed descriptor that is wrong about the database is not detected.**
-  If a deploy goes live before its migration applies, the descriptor says `ssn`
-  is the masked column while the database still holds the real value there, and
-  the runtime serves plaintext believing it is masked. There is no epoch to
-  mismatch, no introspection to contradict it, and no validation pass to refuse
-  the boot. **The deploy pipeline's ordering guarantee is therefore an
+- **A well-formed descriptor that is wrong about the database is not detected at
+  runtime.** If a deploy goes live before its migration applies, the descriptor
+  says `ssn` is the masked column while the database still holds the real value
+  there, and the runtime serves plaintext believing it is masked. There is no
+  epoch to mismatch, no introspection to contradict it, and no validation pass
+  to refuse the boot. **The deploy pipeline's ordering guarantee is therefore an
   invariant, not a description**: "PostgreSQL migrations are applied before a
-  deploy becomes live" is now what the whole masking story rests on.
-- **Mid-life drift is not detected.** A migration applied while a worker runs,
-  with no deploy, leaves that worker serving against a database its descriptor
-  no longer describes until it restarts. This is Hibernate's behaviour too. A
-  restore has the same effect, so **roll the workers after a restore** is a
-  procedure rather than a mechanism.
-- **Subscribers lose their schema-change signal.** A subscriber crossing a
-  migration or a restore has nothing in the event stream that says the schema
-  changed, and nothing in this design set replaces it.
+  deploy becomes live" is what the whole masking story rests on. Under D12 that
+  guarantee becomes an enforced precondition on the statement that makes a
+  deploy live, designed in
+  `docs/proposals/2026-08-28-deploy-schema-precondition.md` and **not yet
+  implemented**.
+- **Mid-life drift is not detected by the worker.** A migration applied while a
+  worker runs, with no deploy, leaves that worker serving against a database its
+  descriptor no longer describes until it restarts. This is Hibernate's
+  behaviour too. A restore has the same effect, so **roll the workers after a
+  restore** is a procedure rather than a mechanism. The signal that lets a
+  consumer notice either event is the in-WAL incarnation marker specified in
+  `docs/proposals/2026-08-28-cdc-service.md` section 8; nothing in the data
+  plane replaces it.
 
 ### 3.2 Privilege follows the process
 
@@ -198,7 +194,7 @@ they bear here:
   schema, written by ordinary parameterised SQL, with provenance enforced at the
   Rust call boundary.
 - **If it must be privileged, it belongs to a separate service** that does not
-  execute creator code - the migration service, the CDC relay, the control
+  execute creator code - the migration service, the CDC service, the control
   plane. Never to a function the worker calls.
 
 The tree contains both the proof and the counter-example.
@@ -208,21 +204,20 @@ PID-keyed session table - and **refuses it**, because app code has no raw SQL
 access and the worker pool is the only writer. The counter-example is DB-3: app
 JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to
 read its own PII/PHI/PCI at will, patched by `sanitize_app_actor` stripping
-reserved system kinds (`crates/zeroship-plugin-db/src/crud/unmask.rs:277`,
-**measured 2026-08-28**; the v4 document cited `:282-303`). That is not a bug
-the shape happened to have; it is what the shape produces.
+reserved system kinds (`crates/zeroship-plugin-db/src/crud/unmask.rs:277`). That
+is not a bug the shape happened to have; it is what the shape produces.
 
 **Consequences taken.** There is no HMAC session anchor and no `SessionMinter`.
 CDC slot and publication creation requires `REPLICATION` or superuser, so it
-belongs to the CDC relay service rather than to a wrapper the worker calls -
-**the relay is not designed here**; it is deferred with L12.
+belongs to the CDC service, specified in
+`docs/proposals/2026-08-28-cdc-service.md` and not here.
 
-**A fact that made the answer available before the decision was taken: SQLite
-has no `session_ctx` at all**, and says so in its own words - downstream audit
-paths "bind context through the session actor's per-call state instead"
-(`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:1652-1655`, carried
-forward, unverified). Two tiers disagreeing about where identity is enforced is
-either a contract-parity break or evidence that one of them is sufficient.
+**SQLite has no `session_ctx` at all**, and says so in its own words -
+downstream audit paths "bind context through the session actor's per-call state
+instead" (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:1652-1655`,
+unverified). Two tiers disagreeing about where identity is enforced is either a
+contract-parity break or evidence that one of them is sufficient; here it is the
+second.
 
 **The cost.** There is no in-database record of which actor a worker was acting
 as. A future requirement for SQL-side provenance - a second client on the same
@@ -272,9 +267,8 @@ not. Both are one cheap read, measured together on PG 16.14 via
 
 **Nothing in production reads the domain today.** `pg_control_system()` occurs
 exactly three times in the tree, all in one driver integration test
-(`libs/compio-postgres/tests/suite/replication_live.rs:458-483`, carried
-forward, unverified), so the step that lands this must land the reader, not
-merely the columns.
+(`libs/compio-postgres/tests/suite/replication_live.rs:458-483`, unverified), so
+the step that lands this must land the reader, not merely the columns.
 
 **The binding has two states, and the transition is part of the contract.** The
 authority domain is observed rather than supplied, because a value handed in by
@@ -349,11 +343,10 @@ cannot launder unverified bytes. `DbRuntimeIdentity` carries no descriptor hash,
 because nothing reads one.
 
 **A descriptor cutover has a build artifact in its blast radius that no
-`git status` shows.** When the descriptor version moved, boot failed with
-`expected v1` against a correct v2 descriptor because `sdks/bootstrap/dist/` was
-stale - the committed `src/` was on v2 and the gitignored build output was not.
-`@zeroship/db`'s dist came back byte-identical, so bootstrap was the only
-staleness.
+`git status` shows.** When the descriptor version moves, boot fails with
+`expected v1` against a correct v2 descriptor if `sdks/bootstrap/dist/` is stale
+- the committed `src/` on v2 and the gitignored build output not. `@zeroship/db`'s
+dist rebuilt byte-identical, so bootstrap was the only staleness.
 
 ### 3.6 Plugin initialization
 
@@ -380,7 +373,7 @@ exist today: `NativePlugin::build_instance` currently receives only an app id
 and is infallible (`plugin.rs:76-82`, `:224-235`), the worker passes a
 descriptor string plus a global (`cache.rs:366-408`), and `ServerOptions` has no
 artifact bag (`serve.rs:45-71`). That plumbing is part of the step, not a
-detail. (All four carried forward, unverified.)
+detail. (All four unverified.)
 
 ### 3.7 Private pre-user binding
 
@@ -432,7 +425,7 @@ namespace**. `ModuleRegistry` gains a private map and a reverse identity index.
 - `import.meta` is not a path today (no host callback is installed); a gate arm
   keeps it that way.
 
-(Citations in this subsection are carried forward, unverified.)
+(Citations in this subsection are unverified.)
 
 The generated private module imports `bindDbCollections` and `descriptorJson`
 and calls the former. The bridge exports **only immutable data** - no policy
@@ -455,18 +448,18 @@ Neutral types: `DbBackendFactory`, `DbBackend`, `OpSession`, `DbTransaction`,
 `PrepareRequest`, `DbPlan`, `DbValue`, `DbRows`, route tokens, neutral
 `DbError`. One name per type.
 
-**Ownership.** A session owns its resources and carries no borrows. v1's sketch
-returned a session borrowing the pool checkout and then declared `finish`
-returning a `'static` future, which cannot compile. The choice is an **owned
-pooled lease**, which requires `Pool::get_owned(self: &Rc<Self>) ->
-OwnedPooledClient` preserving the borrowed wrapper's return and timeout
-behaviour. `PgOpSession` drives raw `BEGIN`/`COMMIT`/`ROLLBACK`; it must **not**
-store `Transaction<'_>`, which holds `&'a mut Client` (`transaction.rs:21-30`).
+**Ownership.** A session owns its resources and carries no borrows. A session
+that borrows its pool checkout cannot then offer a `finish` returning a
+`'static` future - that does not compile - so the choice is an **owned pooled
+lease**, which requires `Pool::get_owned(self: &Rc<Self>) -> OwnedPooledClient`
+preserving the borrowed wrapper's return and timeout behaviour. `PgOpSession`
+drives raw `BEGIN`/`COMMIT`/`ROLLBACK`; it must **not** store
+`Transaction<'_>`, which holds `&'a mut Client` (`transaction.rs:21-30`).
 
 Raw transaction control carries an obligation the borrowing wrapper already
 discharges: PostgreSQL may answer `COMMIT` with a `ROLLBACK` tag, which
-`transaction.rs:54-59` detects. That check has since shipped on the plugin side
-as `exec_terminal_on_tx` (`transaction/mod.rs:139`).
+`transaction.rs:54-59` detects. That check has shipped on the plugin side as
+`exec_terminal_on_tx` (`transaction/mod.rs:139`).
 
 **Explicit transactions** are a first-class owned object per SC-1, with registry
 identity `(runtime_instance_id, tx_id)` and a **separate, explicitly chosen
@@ -481,44 +474,38 @@ concurrency.
 pause, schema-pending, shutdown), key provision, audit insertion (insert-only,
 never DDL), and operator lifecycle. Each neutral, each with stated ownership and
 signatures in SC-3's ledger. Any feature lacking one is deleted rather than left
-reaching for a concrete backend.
+reaching for a concrete backend. **These are not query shapes and cannot be
+expressed as a `DbPlan`** - CDC lifecycle, key management, operator deletion,
+backup/restore and persistent transaction ownership all need their own
+signatures.
 
 **The SPI carries no policy-store capability and no PITR capability.** Policy
 ownership is resolved before the isolate exists (D3), so an SPI capability for
 it would reinstate the owner this design removes; and D2 deletes
 `Backup::pitr_replay` (`crates/zeroship-plugin-db/src/backend/mod.rs:1370`)
 along with its PostgreSQL implementation, which does nothing but
-`INSERT INTO __zeroship_admin.pitr_targets` (now `backend/postgres.rs:1727`,
-**measured 2026-08-28**; the v4 document cited `:1702-1718`), and its SQLite
-stub (`backend/sqlite/mod.rs:2362`).
+`INSERT INTO __zeroship_admin.pitr_targets` (`backend/postgres.rs:1727`), and
+its SQLite stub (`backend/sqlite/mod.rs:2362`).
 
 **`DbPlan` is defined by SC-3.** This document does not contain the grammar and
-does not claim to.
+does not claim to. Its shared core and read family exist on disk as
+`crates/zeroship-data-plan`, which depends on nothing and needs no database.
 
 #### What the SPI must cover
 
-`BackendHandle`'s 78 textual references are not 78 operational callers (carried
-forward, unverified). The operational set is `exec.rs` (route selection,
-publication), `crud/mod.rs` (dialect selection, search dispatch,
-key/encryption dispatch), `crud/read_pipeline.rs` (key resolution, decryption),
-`crud/mask_policy.rs`, `crud/unmask.rs` (policy/row fetch, key, audit),
-`crud/mask_drift.rs`, `transaction/mod.rs`, `cdc_lifecycle.rs`,
-`register_model/mod.rs` (deleted by the cutover), and `drop_namespace.rs`.
+`BackendHandle`'s 78 textual references are not 78 operational callers
+(unverified). The operational set is `exec.rs` (route selection, publication),
+`crud/mod.rs` (dialect selection, search dispatch, key/encryption dispatch),
+`crud/read_pipeline.rs` (key resolution, decryption), `crud/mask_policy.rs`,
+`crud/unmask.rs` (policy/row fetch, key, audit), `crud/mask_drift.rs`,
+`transaction/mod.rs`, `cdc_lifecycle.rs`, `register_model/mod.rs` (deleted by
+the cutover), and `drop_namespace.rs`.
 
-Most of those are not query shapes. CDC lifecycle, key management, operator
-deletion, backup/restore and persistent transaction ownership cannot be
-expressed as a `DbPlan`, and v1's claim that they could is withdrawn.
-
-**Two schema sources exist today and they are not equals**, which is what makes
-the cutover smaller than a raw grep suggests. The SQL *builders* read the
-declared cache; only the read/write *pipelines* read the introspected one.
-`runtime_schema_for` had exactly **four** production call sites -
-`crud/read_pipeline.rs:71`, `crud/write_pipeline.rs:116`, `:368` and `:380` -
-and every other raw-grep hit was a doc comment, a `*_for_tests` helper
-(`crud/mod.rs:2486-2494`, `v8_classes/collection.rs:53`, `v8_classes/db.rs:449`)
-or the definition itself (`crud/introspect_schema.rs:104`). Those four are now
-gone with the module; the surviving `*_for_tests` helpers are at
-`crud/mod.rs:2491` and `v8_classes/collection.rs:57` (**measured 2026-08-28**).
+**The SQL builders read the declared schema; nothing reads an introspected one.**
+`runtime_schema_for` and its four production call sites went with the
+introspection module. What survives is test-only: `*_for_tests` helpers at
+`crud/mod.rs:2491` and `v8_classes/collection.rs:57`. That asymmetry is why the
+cutover is smaller than a raw grep for schema readers suggests.
 
 #### Module layout
 
@@ -554,15 +541,14 @@ The end state removes `zeroship-plugin-db`'s dependency on `zeroship-schema`.
 **`zeroship-schema` has exactly one consumer, and `AGENTS.md` is wrong about
 it.** The landing page's crate index says the crate is "reused by the migration
 engine (write/diff) + plugin-db's data plane (read/introspect)". The first half
-is stale: manifests declaring `zeroship-schema` are its own `Cargo.toml` and
+is stale: the manifests declaring `zeroship-schema` are its own `Cargo.toml` and
 `crates/zeroship-plugin-db/Cargo.toml`, and that is all; source files
 referencing `zeroship_schema` are only under `crates/zeroship-plugin-db`. The
-in-sourced engine carries its own schema layer
-(`zeroship-migrate-backend`, `zeroship-migrate-core/src/schema/`) and its own
-live introspection
+in-sourced engine carries its own schema layer (`zeroship-migrate-backend`,
+`zeroship-migrate-core/src/schema/`) and its own live introspection
 (`crates/zeroship-migrate-postgres/src/backend/drift_sql.rs`). **That correction
 must land in `AGENTS.md`**: a wrong line in the landing page gets repeated by
-everyone who reads the landing page, and it was repeated into a decision brief.
+everyone who reads the landing page, and it has been.
 
 *(One measurement trap: `grep -rl zeroship_schema` also matches
 `crates/zeroship-control/tests/registry_schema_test.rs`. That hit is a test
@@ -572,18 +558,17 @@ behaviour.)*
 
 Retirement is not a bullet point. The crate is **15,357 lines across 7 modules**
 - `descriptors.rs`, `diff.rs`, `error.rs`, `ident.rs`, `lib.rs`,
-`mask_codec.rs`, `query.rs` (**measured 2026-08-28**; the v4 document carried
-15,034). `query.rs` alone is **12,104 lines**, which is worth stating because
-the SC-3 justification that "runtime builders alone are ~3,100 lines
-(`:2907-6011`), against DDL/schema rendering at `:1019-2905`" describes a file
-roughly half this size and **those ranges no longer locate anything**. One of
-the crate's surfaces is security-critical:
+`mask_codec.rs`, `query.rs`. `query.rs` alone is **12,104 lines**, which matters
+because SC-3's justification quotes line ranges from a file roughly half this
+size (`:2907-6011` for the runtime builders, `:1019-2905` for DDL rendering);
+**those ranges no longer locate anything** and must be re-derived before they
+are used to scope work. One of the crate's surfaces is security-critical:
 `validate_collection`'s reserved-`__zeroship` prefix check
-(`crates/zeroship-schema/src/query.rs:648-652`) is the sole guardian of the
+(`crates/zeroship-schema/src/query.rs:650-654`) is the sole guardian of the
 namespace this design relies on. `diff::read_live_schema` and
 `diff::estimate_row_count` (`crates/zeroship-schema/src/lib.rs:22-23`) lost
-their only consumer when introspection was deleted. The other five modules still
-have plugin-db callers that nobody has audited:
+their only data-plane consumer when introspection was deleted. The other five
+modules still have plugin-db callers that nobody has audited:
 
 | module | references from `crates/zeroship-plugin-db/src` |
 | --- | ---: |
@@ -593,9 +578,8 @@ have plugin-db callers that nobody has audited:
 | `query` | 4 |
 | `descriptors` | 3 |
 
-(Counts carried forward from 2026-08-27, unverified in this pass.) Retirement
-happens when SC-3's ledger reaches zero unported entries **and** that audit is
-done, not when one inventory moves.
+(Counts unverified.) Retirement happens when SC-3's ledger reaches zero unported
+entries **and** that audit is done, not when one inventory moves.
 
 ### 3.9 Operation context and total decode
 
@@ -665,8 +649,9 @@ reasoning; the call at `:501`). The real producer is
 context. `publish` and `deliver_event` are synchronous functions with no
 session, no pool and no `async` (`broker.rs:565`, `:745`, `:836`), so nothing
 the delivery path needs may require a round trip. The WAL tuple carries no
-platform metadata of its own (`broker.rs:80-115`). (Carried forward,
-unverified.)
+platform metadata of its own (`broker.rs:80-115`). (Unverified.) Under the CDC
+service the projection moves into the publication column list, so the excluded
+bytes never reach the wire; the wire contract is that document's, not this one's.
 
 The existing schema-pending window (`broker.rs:790-796`, guard at
 `backend/mod.rs:1527`) has no production caller.
@@ -723,7 +708,7 @@ arm in section 8 pairs it with a granted-path control.
   (`sdks/db/src/policy.ts`), and the `_flushPendingMaskPolicy` /
   `_peekPendingMaskPolicy` drain re-exported at `sdks/db/src/internal.ts:80-83`;
 - the `zeroship.db.setMaskPolicy` native op
-  (`crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:145-155`);
+  (`crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:145`);
 - `dispatch_set_mask_policy` (`crates/zeroship-plugin-db/src/crud/mask_policy.rs:224`);
 - the SQLite JSON sidecar - `mask_policies.json` under the backend's db
   directory, reached only by `persist_sqlite` / `load_sqlite`
@@ -747,21 +732,22 @@ answered. That also closes a defect nobody had counted:
 and the last boot to run wins for both.
 
 **Precedent, and one difference in it that must not be copied by accident.**
-`crates/zeroship-migrated/src/policy.rs` already implements operator-ceiling
-meet creator-draft for migrations: the model at `:1-25`, the monorepo-owned
-CONFINED default ceiling as a TOML document compiled in via `include_str!` at
-`:48-59`, and the compose at `:119-122`. Masking should look like its neighbour
-rather than invent a second shape. But `migrated`'s compose is
+`crates/zeroship-migrate-server/src/policy.rs` already implements
+operator-ceiling meet creator-draft for migrations: the model at `:1-25`, the
+monorepo-owned CONFINED default ceiling as a TOML document compiled in via
+`include_str!` at `:48-59`, and the compose at `:119-122`. Masking should look
+like its neighbour rather than invent a second shape. But that compose is
 **escalation-reject** - "a draft grant looser than the ceiling permits is
-rejected, never clamped" (`policy.rs:16-17`, `:120-121`) - while masking's meet
+rejected, never clamped" (`policy.rs:16-17`, `:119-121`) - while masking's meet
 **clamps**. Both are defensible and they are not interchangeable: reject
 surfaces the creator's mistake at deploy time, clamp lets a deploy succeed with
 less access than it asked for. That ceiling is also **DDL-knobs-only**: its key
 set is `CREATE TABLE` / `CREATE SCHEMA` / `RENAME` / destructive-ops / RLS
 (`policy.rs:32-35`), with no vocabulary for mask classifications, so sharing the
 store would put two unrelated policies under one name. And its staleness
-response is `ApprovalStaleCeiling` -> "re-submit required" (`apply.rs:192-199`),
-which is right for a migration awaiting approval and wrong here.
+response is `ApprovalStaleCeiling` -> "re-submit required"
+(`crates/zeroship-migrate-server/src/apply.rs:214-221`), which is right for a
+migration awaiting approval and wrong here.
 
 **Costs, stated because a section listing only benefits is not finished:**
 
@@ -847,11 +833,10 @@ which is the whole argument for settling it now.
 
 Production call sites of `canonical_aad` are **five**, all in plugin-db:
 `crud/mask_drift.rs:570`, `crud/encryption_pass.rs:200` and `:337`,
-`crud/mask_backfill.rs:154`, `crud/unmask.rs:457`. A raw grep reports 28, but 23
-are tests, and the two in `crud/write_pipeline.rs` (`:743`, `:951`) that pass a
-hardcoded `"ssn"` sit below the `#[cfg(test)]` at `:628` - worth stating,
-because a hardcoded column name in the write pipeline would be a defect and it
-is not one. (Carried forward from 2026-08-27, unverified.)
+`crud/mask_backfill.rs:154`, `crud/unmask.rs:457`. The two further occurrences in
+`crud/write_pipeline.rs` (`:743`, `:951`) that pass a hardcoded `"ssn"` sit below
+the `#[cfg(test)]` at `:628` - worth stating, because a hardcoded column name in
+the write pipeline would be a defect and it is not one. (Unverified.)
 
 ### 3.12 Transactions and connections
 
@@ -878,14 +863,13 @@ internal transaction so behaviour does not change with encryption mode.
 rather than a refactor.** Today `acquire_dedicated_client` opens a brand new TCP
 connection per transaction - `compio_postgres::connect` directly, then a
 detached task per connection
-(`crates/zeroship-plugin-db/src/backend/postgres.rs:161-174`, carried forward,
-unverified). It never touches the pool, so the current concurrent-transaction
-ceiling is *unbounded*, and a worker multiplexing ~200 isolates per OS thread
-(`crates/zeroship-plugin-db/src/exec.rs:1321`, **measured 2026-08-28**) that
-each open a transaction opens ~200 connections.
+(`crates/zeroship-plugin-db/src/backend/postgres.rs:161-174`, unverified). It
+never touches the pool, so the current concurrent-transaction ceiling is
+*unbounded*, and a worker multiplexing ~200 isolates per OS thread
+(`crates/zeroship-plugin-db/src/exec.rs:1321`) that each open a transaction opens
+~200 connections.
 
-Three sites create connections today and only one is a pool checkout (**measured
-2026-08-28**):
+Three sites create connections today and only one is a pool checkout:
 
 - `crates/zeroship-plugin-db/src/lib.rs:998` - `Pool::connect(&url, 8)`, the
   shared data pool. This one is already right.
@@ -898,7 +882,8 @@ Three sites create connections today and only one is a pool checkout (**measured
   a genuine exception**: a logical replication session is opened with the
   `replication=database` startup parameter and stays in streaming protocol mode
   for its whole life, so there is nothing for a pool to multiplex. The rule for
-  it is not "pool it" but **bound and account for it**, which is L12.
+  it is not "pool it" but **bound and account for it**; under L12 that
+  connection moves to the CDC service and becomes O(1) per cluster.
 
 **The inversion D10 buys, and what it still owes.** Before, one app could
 exhaust `max_connections` and take the cluster down for every tenant everywhere;
@@ -1008,15 +993,14 @@ and bound the cache with zeroizing eviction keyed on the full identity.
 kilobytes; a V8 isolate is orders of magnitude larger, so metadata entries
 should **outnumber** isolate entries under an independent, larger, byte-capped
 bound. `max_isolates` defaults to 200 per thread
-(`crates/zeroship-worker/src/config.rs:129`, carried forward, unverified), and
-under LRU churn - and under CHWBL spill oscillation - evict-then-reload is the
-common case at target scale, so coupling metadata lifetime 1:1 to isolate
-lifetime would re-buy the cost it removes. Mechanically the hint IS deliverable
-for the LRU arm, since `evict_lru` runs on the owning thread, the same thread as
-the DB context; the deprovision arm is not, and today no eviction path calls
-into plugin-db at all - the only reference to plugin-db anywhere in
-`crates/zeroship-worker/src/cache.rs` is the `DbPlugin::new` construction at
-`:219`.
+(`crates/zeroship-worker/src/config.rs:129`, unverified), and under LRU churn -
+and under CHWBL spill oscillation - evict-then-reload is the common case at
+target scale, so coupling metadata lifetime 1:1 to isolate lifetime would re-buy
+the cost it removes. Mechanically the hint IS deliverable for the LRU arm, since
+`evict_lru` runs on the owning thread, the same thread as the DB context; the
+deprovision arm is not, and today no eviction path calls into plugin-db at all -
+the only reference to plugin-db anywhere in `crates/zeroship-worker/src/cache.rs`
+is the `DbPlugin::new` construction at `:219`.
 
 **The plugin set is memoised per thread, not process-wide**, which is why a
 process-wide cache currently has no owner: `build_runtime` calls `plugin_set()`
@@ -1077,33 +1061,49 @@ rather than the contract describing the code.
 4. **Security metadata fails closed.** A missing, invalid or unparseable
    descriptor prevents data SQL. Boot fails; no operation runs against metadata
    that could not be understood. **What this does not cover is a descriptor that
-   is well-formed and wrong about the database** - nothing covers that now, and
-   it is the honest cost recorded in 3.1 rather than something the wording can
-   be tightened around.
-5. **No data-plane path executes DDL**, enforced by *deleting* the lazy-DDL
-   sites rather than by a classifier that may never traverse them.
+   is well-formed and wrong about the database** - at runtime nothing covers
+   that, which is why D12 puts the check in the deploy pipeline and the flip
+   behind it.
+5. **No data-plane path executes DDL (D11).** Schema change belongs to
+   `zeroship-migrate`; a runtime that can alter schema is a runtime that can
+   disagree with the descriptor describing it. This is enforced by *deleting*
+   the DDL-emitting paths, not by a classifier that may never traverse them.
 
-   **The enumeration, measured 2026-08-28** (this was owed and unwritten in
-   every earlier revision, which asserted "three" and named one). Six
-   `CREATE TABLE IF NOT EXISTS` statements in
-   `crates/zeroship-plugin-db/src/`, creating **three** tables, each with a
-   PostgreSQL arm and a SQLite arm, none `cfg`-gated:
+   The live index-creation surface is two statements, both in the PostgreSQL
+   backend: `CREATE INDEX CONCURRENTLY ... USING ivfflat`
+   (`crates/zeroship-plugin-db/src/backend/postgres.rs:518`, from
+   `ensure_vector_index`) and `... USING GIST` (`:668`, from
+   `ensure_spatial_index`). They move into the migration path, so a `.vector()`
+   or `.spatial()` field declares its index the way every other index is
+   declared, and then `ensure_vector_index`, `ensure_spatial_index`,
+   `create_index_with_recovery` and `create_index_with_recovery_audited` are
+   deleted.
+
+   **`__zeroship_migrations` is not a migration record; it is the provenance log
+   for exactly that DDL**, written only from `create_index_with_recovery_audited`.
+   Once the index creation leaves, nothing writes it, and `audit.rs` goes with it
+   together with the `Backend` methods `ensure_audit_table`, `write_audit_row`
+   and `next_schema_version` and their SQLite arms. Deleting the table before the
+   writer would keep the writer and drop its provenance, which is what
+   `audit.rs:20-42` exists to guarantee - so the order is index first, table
+   second. Removing the name from creator schemas also frees it for the engine
+   journal.
+
+   The `CREATE TABLE IF NOT EXISTS` statements that go with the DDL exit, all in
+   `crates/zeroship-plugin-db/src/`, are six over three tables:
 
    | table | PostgreSQL | SQLite |
    | --- | --- | --- |
-   | `"<app>"."__zeroship_migrations"` | `audit.rs:236` | `backend/sqlite/mod.rs:1292` |
+   | `"<app>"."__zeroship_migrations"` | `audit.rs:236` | `backend/sqlite/mod.rs:1298` |
    | `"<app>"."__zeroship_audit_mask_drift"` | `crud/mask_drift.rs:793` | `crud/mask_drift.rs:827` |
    | `"<app>"."__zeroship_audit_unmask"` | `crud/unmask.rs:850` | `crud/unmask.rs:901` |
 
    The unmask table is created from `ensure_audit_unmask_table`
-   (`crud/unmask.rs:838`), called at `crud/unmask.rs:732` inside
-   `write_audit_unmask_row`, which is reached from the **denied** path
-   (`:405`) and the granted one (`:428`), and from two further callers
-   (`:1217`, `:1446`).
-
-   `"<app>"."__zeroship_migrations"` also lives in the app's own schema, is
-   therefore rewound by a restore, and cannot be the authority any recovery path
-   compares against (`audit.rs:227`, writing at `audit.rs:234`).
+   (`crud/unmask.rs:838`), called at `:732` inside `write_audit_unmask_row`,
+   which is reached from the **denied** path (`:405`), the granted one (`:428`),
+   and two further callers (`:1217`, `:1446`). Audit insertion survives as an
+   insert-only SPI capability (3.8); the table it writes is provisioned by the
+   migration service, never lazily by the data plane.
 6. **Raw JavaScript does not mean unverified plaintext.**
 7. **No creator-reachable platform capability exists.**
 8. **A private module is invisible, not allowlisted.** Secrecy of a specifier is
@@ -1138,54 +1138,36 @@ Also landed, from step 2: total V8 decode with `DecodeError` (`v8_bridge.rs:165`
 and the `COMMIT`-answered-`ROLLBACK` command-tag check in `exec_terminal_on_tx`
 (`transaction/mod.rs:139`).
 
-### Five of these SHAs are not on this branch
+**Six of these SHAs are not on this branch.** Each of `4c8e84134`, `5b9bcbd49`,
+`72a3dc04b`, `fc2c889db` and `f44bcf6b6` - and `22c4d75f1`, cited in SC-5 for
+the plugin-set fix - resolves to a commit under `git cat-file -t` and fails
+`git merge-base --is-ancestor <sha> HEAD`. **Their content is present**: L10's
+rename is in the tree, with `ThreadDbContext` occurring 45 times in
+`crates/zeroship-plugin-db/src/context.rs` and zero `IsolateDbContext` residue
+anywhere under `crates/zeroship-plugin-db/src/`. The work reached this branch
+under different hashes.
 
-**Measured 2026-08-28 against `0e785d5fc`.** Each of `4c8e84134`, `5b9bcbd49`,
-`72a3dc04b`, `fc2c889db` and `f44bcf6b6` resolves under `git cat-file -t` to a
-commit, and for each `git merge-base --is-ancestor <sha> HEAD` **fails**. None
-of them appears anywhere in `git log HEAD`. The same is true of `22c4d75f1`,
-cited in SC-5 for the plugin-set fix.
-
-**Their content is present.** L10's rename is in the tree - `ThreadDbContext`
-occurs 45 times in `crates/zeroship-plugin-db/src/context.rs` with zero
-`IsolateDbContext` residue anywhere under `crates/zeroship-plugin-db/src/`. So
-the work reached this branch under different hashes, and the rows above are
-right about *what* landed and wrong about *which commit* landed it.
-
-**This exact failure has already cost this document set once**, and the index
-records it: a re-check run against `f44bcf6b6` produced three confidently-cited
-"not closed" findings whose line numbers were real line numbers **of the wrong
-tree**, and a page that had the correct status was edited to agree with them. **A
-wrong measurement corrected a right document**, which is the direction that does
-the most damage.
-
-The check that distinguishes the two cases is
-`git merge-base --is-ancestor <sha> HEAD`, **not reading the commit** - because a
-dangling commit reads perfectly. Treat every SHA in this table as an answer to
-"which commit landed this" and never as evidence for "is this fix in the tree";
-the second question is answered by looking at the tree.
+Two rules follow, and both have already been paid for once. A dangling commit
+reads perfectly, so **reading a commit does not tell you whether it is in the
+tree** - `git merge-base --is-ancestor` does. And every SHA in this table
+answers "which commit landed this" and never "is this fix in the tree"; the
+second question is answered by looking at the tree.
 
 **Steps 3 and 5a are recorded as landed on the branch** - `OwnedPooledClient`
 plus the SQLite actor's reservation/cancel/terminal protocol, and `DbService`
 ownership - each reviewed adversarially with every finding closed. **No commit
-SHA is recorded for either**, in this document or the index, so unlike the table
-above they cannot be checked with `git merge-base --is-ancestor`. Carried
-forward, unverified; the SHAs are owed.
+SHA is recorded for either**, so unlike the table above they cannot be checked
+with `git merge-base --is-ancestor`. Unverified; the SHAs are owed.
 
 **What is exactly zero:** the private module map, the artifact/init channel, the
 `DbIsolateBinding` itself, the deletion of `registerModel`, the mask-policy
 artifact wire, the operator ceiling as worker configuration, Fork C's identity
-substrate, `DbPlan` and its ledger, the SC-4 dev mechanism, and the masking
-storage flip. `crates/zeroship-plugin-db/src/register_model/mod.rs` and
-`v8_classes/db_platform.rs`'s `setMaskPolicy` (`:145`) are both still live
-(**measured 2026-08-28**).
-
-**A caution on that list.** "SC-1 through SC-6 are at zero" was carried in this
-document set for a week and was true of the *contracts*; it is now misleading,
-because SC-5's service ownership partly landed as step 5a while SC-5 as a
-contract is still unimplemented, and because the decisions those contracts
-carried are not at zero. Read the list above as naming mechanisms, not
-documents.
+substrate, `DbPlan`'s remaining families and its ledger, the SC-4 dev mechanism,
+and the masking storage flip. `crates/zeroship-plugin-db/src/register_model/mod.rs`
+and `v8_classes/db_platform.rs`'s `setMaskPolicy` (`:145`) are both still live.
+That list names mechanisms, not documents: `DbPlan`'s shared core and read family
+exist as `crates/zeroship-data-plan`, and SC-5's service ownership partly landed
+as step 5a while SC-5 as a contract is unimplemented.
 
 **One coverage gap opened by `632c1d1fa`, stated because it is invisible from a
 green suite.** `distributed_live` was the tree's only live boot of a V8 isolate
@@ -1201,29 +1183,40 @@ isolate against a real PostgreSQL.** That path is covered only by unit tests
 
 ## 6. What is open, and what blocks each
 
-### Blocking: L12, the replication-slot ceiling
+### Decided: L12, the replication-slot ceiling, is a new CDC service
 
 Live subscriptions cost one PostgreSQL logical replication slot per
 `(app x worker)`, against a server-wide ceiling of 10 on a restart-only GUC,
-where each slot is also a walsender competing for `max_connections`.
+where each slot is also a walsender competing for `max_connections`. The ceiling
+is the weaker half of the argument: slots on one database do not partition
+decoding work, they replicate it - measured on pg16, five slots created at one
+LSN, one workload of 40,000 rows producing 68MB of WAL, each slot decoded in
+turn, total 1,335ms against 309ms for one slot, a ratio of 4.32 out of a
+possible 5.00, each slot decoding the same 40,002 changes. Ten subscribed apps
+on one database pay ten full decodes of every transaction and up to 640MB of
+decode buffers (`logical_decoding_work_mem` 64MB per slot). The cost is
+`O(apps x total_WAL)` where the information is `O(total_WAL)`.
 
-**And the ceiling is the weaker half of the argument.** Slots on one database do
-not partition decoding work, they replicate it - measured, pg16,
-`tmp/measure_decode_multiplier.sh`: five slots created at one LSN, one workload
-of 40,000 rows producing 68MB of WAL, each slot decoded in turn, total 1,335ms
-against 309ms for one slot - a ratio of 4.32 out of a possible 5.00, with each
-slot decoding the same 40,002 changes. Ten subscribed apps on one database pay
-ten full decodes of every transaction and up to 640MB of decode buffers
-(`logical_decoding_work_mem` 64MB per slot) to hand each app about a tenth of
-the rows. The cost is `O(apps x total_WAL)` where the information is
-`O(total_WAL)`.
+The decisive argument is not slot count but a credential: consuming a logical
+slot requires `REPLICATION` on the connecting role, there is no narrower grant,
+and this platform grants it - with `BYPASSRLS` - to the login role of the
+process that executes creator code
+(`db/migrations-ts/20260818000200_worker_database_authority.ts:35`). That is a
+present-tense violation of D5, and only moving WAL consumption into a process
+that runs no creator code lets `zeroship_worker` drop both attributes.
 
-**What it blocks:** finalising SC-3 and starting the IR implementation. Building
-the IR against the current transport means building it twice.
+**A dedicated CDC service owning O(1) slots is being built**, specified in
+`docs/proposals/2026-08-28-cdc-service.md`. This design set hands it three
+requirements it must carry: a wire projection that is a whitelist over declared
+fields (including the broker's `changed_columns`), a fixture for the mask-only
+shape, and the schema-change signal that decisions D6/D7 left subscribers
+without.
 
-The four options and a recommendation - a dedicated CDC relay owning O(1) slots,
-which also closes the abandoned-slot cluster outage by construction rather than
-by reaping - are in the defect register. Nothing has decided it.
+**What this leaves blocked in SC-3:** the relation family's live-query lowering
+and the effects family (the publication a committed mutation owes the broker)
+follow the service's wire contract. The shared normative core, read, write,
+search and unmask families have no transport dependency, and the existence proof
+is `crates/zeroship-data-plan`.
 
 ### Open: Fork C's identity state has no home
 
@@ -1253,91 +1246,74 @@ properties, which are the ones the deleted design paid for:
 **Until this is decided, Fork C is specified and unhomed, and the identity
 substrate step cannot be written.**
 
-### Open: the masking storage flip, and a review that recommends against it
+### Decided and blocked: the masking storage flip
 
-The flip - `ssn` holds the masked value, `ssn_raw` holds the real one - is
-recorded as decided in SC-6 and **is not in the tree**:
-`mask_sibling_column_for_field` still returns `format!("{field}_masked")`
-(`crates/zeroship-migrate-core/src/schema/query.rs:2155`) and nothing anywhere
-spells `_raw`.
+Under D12 the flip - `ssn` holds the masked value, `ssn_raw` holds the real one -
+lands as the second line of defence behind the deploy-ordering precondition. Its
+value is precise and worth stating, because it is the only mechanism that covers
+the one failure with no runtime check: `read_pipeline::apply` runs the mask pass
+only `if schema_has_masked_columns(&schema)`, and that predicate reads the
+descriptor (`crud/mod.rs:2590-2602`), so a descriptor that has not caught up
+returns the parent column untouched - plaintext today, and the mask post-flip.
 
-**Its write path was specified on 2026-08-28
-(`docs/reviews/2026-08-28-flip-write-path.md`), and that specification's author
-recommends the flip be cancelled.** That recommendation is recorded here as the
-open question it is, not as a settled direction:
+**It is not in the tree.** `mask_sibling_column_for_field` still returns
+`format!("{field}_masked")` in both copies
+(`crates/zeroship-migrate-backend/src/schema.rs:557`,
+`crates/zeroship-schema/src/query.rs:2151`) and nothing anywhere spells `_raw`.
 
-- The flip's unique benefit, after the author's analysis, is **one narrowed
-  descriptor-staleness window**. A stale descriptor already fails closed on
-  three of four stages - it skips the decrypt stage
-  (`crates/zeroship-plugin-db/src/crud/encryption_pass.rs:279-281`), skips the
-  mask wrap (`crud/mask_pass.rs:438-441`), and would have the field stripped
-  from the row by the specified row-surface filter. The flip hardens the fourth.
-- Against that: three silent write-correctness inversions to fix (upsert
-  duplicate-insert and upsert clobber; live-query subscriptions stop firing;
-  unique constraints enforce the wrong thing), one data-loss hazard to design
-  around (two passes writing one key with no ordering contract), one AEAD
-  invariant held by convention, a migration of every masked column in every
-  collection, and the deletion of equality-by-real-value until a second, larger
-  design ships to restore it.
-- **Most of that specification is not flip work.** Sections 4.1 (the row-surface
-  filter), 4.2 (naming the raw column something every existing validator already
-  refuses), 4.5 (the PostgreSQL introspector's silent fall-through) and the
-  `_masked`-to-`storage` conversion all fix defects that exist in the current
-  layout: `RETURNING *` returns plaintext under `ssn` **today**, the PostgreSQL
-  introspector discards sentinels silently **today**, and `rawProjectable`
-  describes a gate nothing can enforce **today**.
+**It must not be implemented until its write path is guarded.** SC-6 owns the
+blocking list and `docs/reviews/2026-08-28-flip-write-path.md` is the
+specification: three silent write-correctness inversions (upsert duplicate-insert
+and upsert clobber; live-query subscriptions stop firing; unique constraints
+enforce the wrong thing), one data-loss hazard (two passes writing one key with
+no ordering contract), one AEAD invariant held by convention, a swap of which
+column carries the declared type and the whole constraint set - which the
+migration engine's differ is structurally blind to - and the loss of
+equality-by-real-value until the keyed lookup column
+(`docs/reviews/2026-08-27-query-by-plaintext.md`) ships.
 
-**Three numbers the blocking note rested on are wrong, and the corrected forms
-are stated here with their boundaries so nobody re-derives the wrong one.**
+**Much of that specification is not flip work**, and those parts should land
+whether or not the flip does. `RETURNING *` returns plaintext under `ssn`
+**today**; the PostgreSQL introspector discards sentinels silently **today**;
+`rawProjectable` describes a gate nothing can enforce **today**. Three facts
+about the current code bound that work:
 
-1. **`RETURNING *` in `crates/zeroship-schema/src/query.rs`** (**measured
-   2026-08-28**). `grep -c` returns **34**. The only boundary that matters is
-   `mod tests` at `query.rs:6035` (its `#[cfg(test)]` attribute is `:6034`);
-   **14** hits are at or after it and are test assertions. Of the **20** before
-   it, **12 sit inside emitted SQL string literals** - `:3584` (insert),
-   `:4005` (updateOne), `:4157` (insertMany), `:4228` (updateMany), `:4254`
-   (deleteMany), `:4290` (deleteOne), `:4445` `:4483` `:4525` `:4557`
-   (soft-delete and restore, one and many), `:5937` (upsert), `:6020`
-   (findOrCreate) - and **8 are `///` doc comments** (`:3498`, `:3934`, `:4013`,
-   `:4166`, `:4234`, `:4259`, `:4403`, `:5801`). Two other `#[cfg(test)]`
-   markers exist earlier - `mod schema_renderer_tests` at `:572-582` and single
-   functions at `:5504` and `:5509` - and **none contains a hit**, so they do
-   not move the count; splitting there yields a clean-looking and meaningless
-   17/17. Twenty *functions* reach the twelve emitting sites, because six are
-   thin delegating wrappers.
-2. **`strip_encryption_markers` does not retain the raw column on the read
-   path.** It is `#[cfg(any(test, feature = "test-helpers"))]`
-   (`crates/zeroship-plugin-db/src/crud/encryption_pass.rs:501`, **measured
-   2026-08-28**) and it strips `__zsbin__` markers from a **write** document
-   before binding. **The outward leak is real and arrives by a different, worse
-   route**: nothing on the production read path removes an unknown key from a
-   returned row. The only key removal is `mask_pass::wrap_row_on_read`, which
-   removes exactly `format!("{col}_masked")` (`crud/mask_pass.rs:469`,
-   `:480-482`), so a raw column survives to `mapResultDoc`
-   (`sdks/db/src/utils.ts:28-33`). And `decrypt_row_on_read` gates decryption on
-   the same hardcoded sibling name (`crud/encryption_pass.rs:295-301`), so
-   post-flip an encrypted+masked field would skip decryption entirely and reach
-   JS as base64 ciphertext, while a mask-only field reaches JS as plaintext.
-3. **The SQLite introspector's missing `else` is test-gated and the same defect
-   IS production on PostgreSQL.** `parse_mask_sentinels`
-   (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:2201`) and its only
-   caller, the `SchemaIntrospect for SqliteBackend` impl (`:804`), are both
-   `#[cfg(any(test, feature = "test-helpers"))]` (**measured 2026-08-28**); the
-   dev tier never runs it. The production instance is `read_live_schema`, which
-   filters on the suffix at `crates/zeroship-schema/src/diff.rs:671`
+1. **Twelve SQL-emitting `RETURNING *` sites** in
+   `crates/zeroship-schema/src/query.rs` (12,104 lines; `mod tests` begins at
+   `:6035`): `:3584` (insert), `:4005` (updateOne), `:4157` (insertMany),
+   `:4228` (updateMany), `:4254` (deleteMany), `:4290` (deleteOne), `:4445`
+   `:4483` `:4525` `:4557` (soft-delete and restore, one and many), `:5937`
+   (upsert), `:6020` (findOrCreate). Twenty *functions* reach those twelve
+   sites, because six are thin delegating wrappers.
+2. **Nothing on the production read path removes an unknown key from a returned
+   row.** The only key removal is `mask_pass::wrap_row_on_read`, which removes
+   exactly `format!("{col}_masked")` (`crud/mask_pass.rs:469`, `:480-482`), so a
+   raw column survives to `mapResultDoc` (`sdks/db/src/utils.ts:28-33`). And
+   `decrypt_row_on_read` gates decryption on the same hardcoded sibling name
+   (`crud/encryption_pass.rs:295-301`), so post-flip an encrypted+masked field
+   would skip decryption entirely and reach JS as base64 ciphertext, while a
+   mask-only field reaches JS as plaintext. (`strip_encryption_markers` is not
+   this path: it is `#[cfg(any(test, feature = "test-helpers"))]` at
+   `crud/encryption_pass.rs:501` and strips `__zsbin__` markers from a *write*
+   document before binding.)
+3. **A `__zsmask:` sentinel on a column not ending `_masked` is discarded with
+   no warning.** `read_live_schema` filters on the suffix at
+   `crates/zeroship-schema/src/diff.rs:671`
    (`if comment.starts_with("__zsmask:") && column.ends_with("_masked")`) and
-   strips it at `:716`. **A `__zsmask:` sentinel on a column not ending
-   `_masked` falls through both `if`s and is discarded with no warning**, while
-   the malformed-sentinel arm ten lines below warns loudly (`:737-744`). That
-   arm runs, and it feeds the migration engine's diff.
+   strips it at `:716`; a non-matching column falls through both `if`s while the
+   malformed-sentinel arm ten lines below warns loudly (`:737-744`). That arm is
+   production and feeds the migration engine's diff. The SQLite equivalent,
+   `parse_mask_sentinels` (`backend/sqlite/mod.rs:2201`) and its only caller the
+   `SchemaIntrospect for SqliteBackend` impl (`:804`), are both
+   `#[cfg(any(test, feature = "test-helpers"))]` and the dev tier never runs
+   them.
 
-Three further items the flip owes if it proceeds, unchanged: lookup by real
-value must survive or the feature is closed rather than secured; constraints and
-indexes must follow the raw column, except that `.unique()` on a
-randomised-encrypted field must stay refused at declare time
-(`sdks/db/src/types.ts:1153-1160`) because ciphertext equality enforces nothing;
-and the creator-visible behaviour change owes `docs/reference/db.md` an entry
-beside the mask kinds.
+Three further items the flip owes: lookup by real value must survive or the
+feature is closed rather than secured; constraints and indexes must follow the
+raw column, except that `.unique()` on a randomised-encrypted field must stay
+refused at declare time (`sdks/db/src/types.ts:1153-1160`) because ciphertext
+equality enforces nothing; and the creator-visible behaviour change owes
+`docs/reference/db.md` an entry beside the mask kinds.
 
 ### Open: deterministic encryption mode (D9)
 
@@ -1346,7 +1322,7 @@ surface**, which is the only surface a creator has: `ColType::Encrypted { of }`
 (`crates/zeroship-migrate-ir/src/ir.rs:670`) carries the inner type and nothing
 else - its own doc says "Migration-first authoring supports default-mode
 encryption only" - and lowering **hardcodes** `"mode": "randomised"` at
-`crates/zeroship-migrate-core/src/render/lower.rs:9513`. Since the committed
+`crates/zeroship-migrate-core/src/render/lower.rs:9514`. Since the committed
 migration set is the schema source of truth
 (`docs/reference/zeroship-standard.md`), this is not a feature missing its query
 half; it is a code path no creator input can reach.
@@ -1374,30 +1350,6 @@ source, and what the dev and `zeroship serve` vectors read are not specified
 anywhere in this document set.** SC-5 owns the composition point; nothing owns
 the source.
 
-### Open: `platform-cli` does not compile (L28)
-
-`cargo build -p zeroship-migrate-adapter --features platform-cli` has not
-compiled since `0b1896a90` republished the engine. It produces
-`zeroship-platform-migrate`, which 26 harnesses under `tests/` invoke via
-`zs_platform_migrate`, so every e2e gate in the sequence below is unrunnable
-until it is resolved. **The decision is port-or-delete**, and the operator has
-already asked whether the crate is needed at all: porting `platform.rs` to the
-restructured API is real work, deleting the crate is real work, and **doing the
-port first and the deletion second is the only ordering that is certainly
-wasted.**
-
-**Related, and already paid:** all 35 platform migrations were rewritten in
-`d92efa740`, so every released checksum moved -
-`20260702000200_control_tables.ts` hashed `02519586...` in the deployed journal
-and `ed4e670a...` in the tree. `released_platform_migrations_keep_their_released_bytes`
-therefore fails for all 34 released files, correctly, and the corpus cannot be
-applied to the deployed database until `baseline` is adopted. That verb now
-exists (`2690b5a16`); the engine had `record_baseline`
-(`journal_sql.rs:1586`) and `ops::squash` all along, and what was missing was
-the CLI surface. `db/released_migrations.tsv` is deliberately untouched - it
-records what a deployed database applied and is rewritten from the real journal
-by `deploy/scripts/deploy-remote.sh`, not by anyone editing the tree.
-
 ### Open: SC-1's executable form is larger than SC-1
 
 The round-7 protocol artifact
@@ -1416,10 +1368,6 @@ Dependency-ordered. Generated declarations, fixtures, reference docs and gates
 **co-land with each contract change**; repository policy requires every
 producer, consumer, fixture and reference doc in the same patch.
 
-**Step 0 - resolve L28 (port or delete `zeroship-migrate-adapter`).** It is not
-a defect to fix in passing; it is a fork the sequence cannot route around,
-because 26 harnesses cannot run until it clears.
-
 1. **Fix the live defects that are genuinely independent**, each with its own
    regression test. Independent today: **L4, and only L4.** L1, L2, L3 and L6
    are coupled to later steps by their own intended end states - L1/L2 end in
@@ -1432,13 +1380,12 @@ because 26 harnesses cannot run until it clears.
 3. **Landed** (no SHA recorded - see section 5). `OwnedPooledClient` and the
    SQLite actor's reservation/cancel/rollback primitives.
 
-   **This step was not behaviour-neutral, and an earlier plan said it was** -
-   SC-2 deliberately changes two documented, creator-visible behaviours (3.13),
-   and D10 changes the capacity model (3.12). Whether the
-   `docs/reference/sqlite-divergences.md` entry it retires actually co-landed is
-   **not verified here**, and the three questions D10 leaves open (3.12) are
-   **not recorded as answered anywhere**. Both are owed against a step already
-   marked done.
+   **This step was not behaviour-neutral.** SC-2 deliberately changes two
+   documented, creator-visible behaviours (3.13), and D10 changes the capacity
+   model (3.12). Whether the `docs/reference/sqlite-divergences.md` entry it
+   retires co-landed is **not verified**, and the three questions D10 leaves
+   open (3.12) are **not recorded as answered anywhere**. Both are owed against
+   a step already marked done.
 4. **Write SC-3**: the normative IR, source ledger, and parity harness.
 5. **5a (behaviour-neutral): `DbService` ownership landed** (SC-5, no SHA
    recorded). The artifact/init channel it was grouped with did **not** land and
@@ -1501,43 +1448,49 @@ because 26 harnesses cannot run until it clears.
       attaches (`exec.rs:352-372`).
 
    All four replacements land in 5c or the step is not done.
-6. **Fail closed on a missing, invalid or unparseable descriptor, at boot**, per
-   invariant 4. (This step was much larger before D6 and D7; what remains is the
-   boot check.)
-7. **Land the writer/recovery/deprovision protocol, audit provisioning, and the
+6. **Move DDL out of the data plane (D11)**, in the order invariant 5 states:
+   vector and spatial index creation into the migration path first, then the
+   four index helpers, then `audit.rs` and its `Backend` methods, then the lazy
+   `CREATE TABLE IF NOT EXISTS` sites once the migration service provisions the
+   two audit tables.
+7. **Fail closed on a missing, invalid or unparseable descriptor, at boot**, per
+   invariant 4. What remains here is the boot check.
+8. **Land the writer/recovery/deprovision protocol, audit provisioning, and the
    dev migration paths.** This survives as a **migration-service** concern - it
    is how a schema change is applied safely - and it is **blocked on Fork C**
    (section 6), because deprovision and recreation are the part whose state has
-   lost its home. Restore is bound by the same protocol: it must
-   re-provision the per-app role and both `ALTER DEFAULT PRIVILEGES ... IN
-   SCHEMA` entries (`apply.rs:1699-1706`), without which every table a *future*
-   migration creates carries no grant; re-establish schema ownership, which
-   `pg_restore --no-owner` leaves on the restoring login role; re-provision the
-   per-app platform tables the `CASCADE` destroyed; and re-run publication
-   reconciliation, without which subscriptions silently stop forever. The
-   current terminal arm - release the lock with the schema empty
-   (`postgres.rs:1806-1821`) - is not acceptable. A restore that silently
-   replaces the unmask audit trail with an older one is an **audit-erasure
-   primitive**, and the rewind is recorded as an operator-visible event.
+   lost its home. Restore is bound by the same protocol: it must re-provision
+   the per-app role and both `ALTER DEFAULT PRIVILEGES ... IN SCHEMA` entries
+   (`crates/zeroship-migrate-server/src/apply.rs:1748-1751`), without which every
+   table a *future* migration creates carries no grant; re-establish schema
+   ownership, which `pg_restore --no-owner` leaves on the restoring login role;
+   re-provision the per-app platform tables the `CASCADE` destroyed; and re-run
+   publication reconciliation, without which subscriptions silently stop
+   forever. The current terminal arm - release the lock with the schema empty
+   (`crates/zeroship-plugin-db/src/backend/postgres.rs:1806-1821`) - is not
+   acceptable. A restore that silently replaces the unmask audit trail with an
+   older one is an **audit-erasure primitive**, and the rewind is recorded as an
+   operator-visible event.
 
    **The signature change is the point.** `apply_ir_documents` currently takes a
    **DSN** and opens its own session inside
-   (`crates/zeroship-migrated/src/apply.rs:235-236`, connect at `:437`), so a
-   caller has nothing to scope a transition to. It takes an already-connected
-   session instead, and the caller owns the whole transition. The engine already
-   takes its own project advisory lock (`apply.rs:1053-1059`), and app roles
-   `INHERIT IN ROLE` the app-role template (`apply.rs:1686`).
-8. **Land per-subscription projection.** It is a masking and descriptor concern
-   and is unaffected by D6/D7. **What is now unowned is a real loss rather than
-   a simplification:** a subscriber crossing a migration or a restore has no
-   signal that the schema changed, and nothing replaces it.
-9. **Land the owned transaction registry and state machine (SC-1)** and
-   randomized atomicity.
-10. **Port plan families and non-query capabilities.** Requires step 4 to have
+   (`crates/zeroship-migrate-server/src/apply.rs:258-259`, connect at `:460`),
+   so a caller has nothing to scope a transition to. It takes an
+   already-connected session instead, and the caller owns the whole transition.
+   The engine already takes its own project advisory lock (`apply.rs:1053-1057`,
+   acquired at `:1080-1087`), and app roles `INHERIT IN ROLE` the app-role
+   template (`apply.rs:1732`).
+9. **Land per-subscription projection.** It is a masking and descriptor concern
+   and is unaffected by D6/D7. The schema-change signal a subscriber needs
+   across a migration or a restore is the CDC service's in-WAL marker, not this
+   step's.
+10. **Land the owned transaction registry and state machine (SC-1)** and
+    randomized atomicity.
+11. **Port plan families and non-query capabilities.** Requires step 4 to have
     produced the normative types, not the family sketch: SC-3 says in its own
     words that it is not a finished grammar, and it inventories only `query.rs`
     while this document hands it the non-query capability signatures too.
-11. **Delete `BackendHandle` and the thread-local caches, and retire
+12. **Delete `BackendHandle` and the thread-local caches, and retire
     `zeroship-schema`**, when SC-3's ledger reaches zero **and** the five-module
     audit in 3.8 is done. The `AGENTS.md` correction lands here at the latest.
 
@@ -1574,9 +1527,10 @@ projection. A filter key whose getter throws fails the operation and never
 produces a predicate that is a strict subset of the declared filter.
 
 **One arm that should exist and cannot.** A descriptor that is well-formed but
-does not match the database is not detected. That is the deploy-ordering failure
-in 3.1. An arm for it needs the deferred DDL-validation feature; writing one
-against today's design would be writing an arm nothing can pass.
+does not match the database is not detected at runtime. That is the
+deploy-ordering failure in 3.1, and its arm belongs to the deploy precondition
+and the flip, not here; writing one against today's runtime would be writing an
+arm nothing can pass.
 
 **Delivery.** A mask-only field's plaintext never appears in a CDC event, WS
 frame, or live-query payload; the test creates the column through a real
@@ -1594,12 +1548,12 @@ in an isolate is persisted or read.
 
 **Cost.** A warm autocommit operation issues at most **three** server round
 trips, pinned **after** the step that ports the plan families rather than
-before. **That bound is now loose rather than wrong, and the arm is
-non-discriminating in the direction that matters:** with no epoch read and no
-per-operation lease in `prepare`, a warm operation does strictly less than three,
-so the arm would pass on an implementation that reintroduced a metadata round
-trip. **The arm must be re-derived from what `prepare` still does - session
-setup - and that measurement has not been made.**
+before. **That bound is loose, and the arm is non-discriminating in the
+direction that matters:** with no epoch read and no per-operation lease in
+`prepare`, a warm operation does strictly less than three, so the arm would pass
+on an implementation that reintroduced a metadata round trip. **The arm must be
+re-derived from what `prepare` still does - session setup - and that measurement
+has not been made.**
 
 The pool has **two** validation sources, not one, and both are excluded from the
 count and asserted separately: a dirty checkout runs a validation `simple_query`
@@ -1618,7 +1572,7 @@ rollback (SC-2). Not "cancels and rolls back" unconditionally, which cannot pass
 **Module boundary.** `backend/api.rs` exists (it does not today) and no driver
 types appear above it; one file names both backends. `zeroship-plugin-db` has no
 `zeroship-schema` dependency and SC-3's ledger has no unported entries. **No
-data-plane path executes DDL**, enforced by deleting the six sites enumerated in
+data-plane path executes DDL**, enforced by deleting the sites enumerated in
 invariant 5 rather than only by a classifier.
 
 **Gates.** Every arm declares the number of items it ruled on and a floor that
@@ -1640,7 +1594,7 @@ has already hit:
 
 | Risk | Mitigation |
 | --- | --- |
-| A deploy goes live before its migration applies | The pipeline's ordering guarantee is an invariant (3.1). Nothing at runtime detects a violation; the deferred DDL-validation feature is what would |
+| A deploy goes live before its migration applies | The pipeline's ordering guarantee is an invariant (3.1); D12 makes it an enforced precondition, with the flip behind it. Nothing at runtime detects a violation |
 | A migration is applied while workers run | Roll the workers. Stated as a procedure because there is no mechanism (3.1) |
 | Resolution rules drift between backends | Resolution lives in `frontend/metadata.rs`; backends emit neutral facts and share parity fixtures |
 | Pinned code incompatible with new schema | Bounded by `max_pinned_isolates_per_app`; force-eviction is the lever |
@@ -1663,10 +1617,10 @@ descriptor only** - pins authorization to old code, which is why the ceiling is
 a separate half.
 
 **A database-resident schema epoch, with a shared lease and per-operation live
-introspection.** This was the design until 2026-08-27. It is rejected because
-its whole job was to make a second authority trustworthy and cheap, and there is
-no second authority. The evidence that settled it, and the two measured results
-worth keeping from it, are in the decision log.
+introspection.** Rejected because its whole job was to make a second authority
+trustworthy and cheap, and there is no second authority. The evidence that
+settled it, and the two measured results worth keeping from it, are in the
+decision log.
 
 **A userspace cross-process flock lease for SQLite** - rebuilds what WAL
 snapshot isolation already provides, and brings its own starvation and
@@ -1693,10 +1647,10 @@ model-registration phase.
 
 **One creator-visible change owes `docs/reference/db.md` an entry now**, beside
 the mask kinds: `defineMaskPolicy` is gone and policy is declared in the
-codebase instead. A second is owed **only if the storage flip proceeds**:
-equality search by real value (`find({ssn: "123-45-6789"})`) stops matching. A
-creator should learn either one when they declare the mask, not when a call
-stops working.
+codebase instead. A second lands with the storage flip: equality search by real
+value (`find({ssn: "123-45-6789"})`) stops matching until the keyed lookup
+column ships. A creator should learn either one when they declare the mask, not
+when a call stops working.
 
 ---
 
@@ -1706,17 +1660,17 @@ stops working.
 | --- | --- |
 | Build collection wrappers | Synchronous private pre-user binding |
 | Hold declared logical metadata | Isolate-owned immutable `DbIsolateBinding` |
-| Verify physical/security metadata | **Nobody, at runtime.** The descriptor asserts it; the deploy pipeline's ordering guarantee is what makes the assertion true; a deferred DDL-validation feature is what would check it |
+| Verify physical/security metadata | **Nobody, at runtime.** The descriptor asserts it; the deploy pipeline's enforced ordering is what makes the assertion true; the storage flip is the second line of defence |
 | Select configured backend | The single `backend/factory.rs` composition point |
 | Lower and execute a plan | The selected concrete backend |
 | Attach SQLite app database | SQLite session preparation |
-| Apply schema | Migration service / explicit dev migration path |
+| Apply schema, and emit any DDL | Migration service / explicit dev migration path |
 | Gate request readiness | Nothing; construction completes before creator evaluation |
 | Apply mask policy | Worker configuration (operator ceiling) meet deploy artifact (creator draft), resolved once at binding construction |
 | Custody of column encryption keys | Derived from the platform master key at the service; no key table, no getter |
 | Record a PITR target | Control plane |
 | Establish per-request identity | The Rust call boundary in the worker; no SQL-side session |
-| Own replication slots and publications | The CDC relay service (deferred, L12) |
+| Own replication slots and publications | The CDC service |
 | Fence a stale handle across deprovision | **Unhomed.** Fork C is specified; its storage is open (section 6) |
 
 Schema is applied before runtime, bindings are constructed with the runtime, and
@@ -1729,23 +1683,26 @@ every data operation reads the descriptor its deploy was built with.
 | Document | What it is |
 | --- | --- |
 | `2026-08-26-runtime-db-binding-00-index.md` | The set's landing page: what each document is for and what is undecided |
-| `2026-08-26-runtime-db-binding-decision-log.md` | **The history of this document.** Every decision and correction, newest first, with the evidence that settled it |
+| `2026-08-26-runtime-db-binding-decision-log.md` | The superseded record: every decision and correction, newest first, with the evidence that settled it |
 | `2026-08-26-runtime-db-binding-defect-register.md` | Defects in existing code that this design touches, with their status. The most perishable file in the set |
+| `2026-08-26-runtime-db-binding-defects-closed.md` | The closed defects, each with its closing commit and evidence |
 | `2026-08-26-runtime-db-binding-verification-record.md` | How this codebase's tests report green while ruling on nothing. The most durable |
 | `2026-08-26-sc1-transaction-protocol.md` | Transaction state machine, frames and effects, guard order, property invariants |
 | `2026-08-26-sc2-sqlite-actor-protocol.md` | SQLite actor: reservations, the four cancellation interleavings, the terminal classifier |
-| `2026-08-26-sc3-dbplan-ir-and-ledger.md` | The `DbPlan` IR, its source ledger, the parity harness. Least reviewed, blocked on L12 |
+| `2026-08-26-sc3-dbplan-ir-and-ledger.md` | The `DbPlan` IR, its source ledger, the parity harness |
 | `2026-08-26-sc4-dev-and-hmr-mechanism.md` | Dev tier and hot reload. Thinnest |
 | `2026-08-26-sc5-service-ownership.md` | `DbService`, process-wide cache, per-thread driver resources, the durable app incarnation. **Fork C is specified here, not in SC-6** |
 | `2026-08-26-sc6-ceiling-read-contract.md` | The ceiling meet, joined reads, and the masking storage flip |
+| `2026-08-28-cdc-service.md` | The CDC service that owns WAL consumption, the wire projection, and the schema-change signal |
+| `2026-08-28-deploy-schema-precondition.md` | Refusing to make a deploy live until its migrations have applied |
 
 Reviews this design depends on:
 
 | Review | What it settles |
 | --- | --- |
 | `docs/reviews/2026-08-27-descriptor-specification.md` | Every data-plane consumer of a schema fact, classified. The bucket "genuinely requires the live database" came back empty of schema facts, which is what made D7 implementable rather than hoped-for |
-| `docs/reviews/2026-08-27-query-by-plaintext.md` | A keyed blind-index column plus a `findByUnmasked` verb: the flip's owed item 1 |
-| `docs/reviews/2026-08-28-flip-write-path.md` | The flip's write path, the three corrected numbers in section 6, and the argument that the flip should be cancelled |
+| `docs/reviews/2026-08-27-query-by-plaintext.md` | A keyed blind-index column plus a `findByUnmasked` verb: the flip's owed lookup item |
+| `docs/reviews/2026-08-28-flip-write-path.md` | The flip's write path and what it must fix before it can be implemented |
 | `docs/reviews/2026-08-28-sqlite-authority-row.md` | The SQLite authority row's fate |
 | `docs/reviews/2026-08-27-migrate-crate-survey.md` | The migrate crates' boundaries |
 | `docs/reviews/dbbind-2026-08-26/` | Seven review rounds plus a performance round, three independent reviewers apiece |
