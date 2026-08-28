@@ -77,37 +77,49 @@ hashes that can never agree, and the failure looks like the guard misfiring.
 
 | | request ledger | engine journal |
 | --- | --- | --- |
-| table | `zeroship.migrated_migrations` | `"<app_uuid>_migrations".schema_migrations` |
+| table | `zeroship.app_schema_applies` | `"<app_id>".__zeroship_schema_migrations` |
 | readable by control | **yes** | no |
 
-`zeroship_control` holds `select, insert, update` on `migrated_migrations`
+`zeroship_control` holds `select, insert, update` on `app_schema_applies`
 (`db/migrations-ts/20260702000900_grants.ts:25`) and had never issued a query
 against it. So this is one column and one SQL predicate - not a new service
 call, a new grant, or a new cross-service dependency. It is also why the guard
 survives the migration service being down: the predicate reads control's own
 database on control's own connection.
 
-The engine journal is per-app, created on the superuser provisioning DSN, and
-the migrator role is explicitly revoked from the meta schema
-(`crates/zeroship-migrate-server/src/provisioning.rs`, step 5). No platform
-service reads it.
+The engine journal is per-app and now lives **in the app's own schema**, which
+the migrator role owns. Owner privileges are implicit and cannot be revoked, so
+a creator can destroy their own journal
+(`crates/zeroship-migrate-server/src/provisioning.rs:164-171`, where the old
+meta-schema `REVOKE` is deleted and the reasoning recorded). That is not a gap
+this guard should close - it is the reason the guard reads control's ledger
+instead of the journal.
 
 ## The ledger column
 
-`descriptor_sha256 text` on `zeroship.migrated_migrations`, added by
-`db/migrations-ts/20260828000000_migrated_descriptor_sha256.ts`.
+`descriptor_sha256 text NOT NULL` on `zeroship.app_schema_applies`
+(`db/migrations-ts/20260702000200_control_tables.ts:94`), declared **with the
+table** rather than added by a later migration. The corpus is rewritten
+pre-release rather than appended to, so there is no era of rows lacking the
+column and no nullable-column arm to reason about.
 
-**Nullable, and the NULL is fail-closed.** Rows written before the column
-existed carry NULL and the predicate compares with `=`, which is NULL for a NULL
-row and never true. An app whose newest applied row predates the column cannot
-deploy until it migrates once more. `IS NOT DISTINCT FROM` would let a manifest
-with *no* descriptor past a NULL row, which is exactly the bypass the second arm
-exists to close.
+**The NULL the predicate tests is the MANIFEST's, not the row's.** `$4` is the
+hash the deploy carries. A manifest with no descriptor must find no applied row
+at all; a manifest with one must equal the newest applied row. Because the
+column is `NOT NULL`, `=` is total and `IS NOT DISTINCT FROM` would only
+weaken it - it would let a manifest with no descriptor past an applied row,
+which is the bypass the first arm exists to close.
 
 **One row per apply request, not per applied migration.** `insert_pending` and
 `insert_auto_approved` both stamp `request.descriptor_sha256`
 (`crates/zeroship-migrate-server/src/apply.rs:517` and `:573`). See the cost
 section: this is a requirement, not an accident.
+
+**`applied_versions json NOT NULL DEFAULT []`** (`:96`) carries what the engine
+reported as applied for that request. It is what makes the per-request row safe:
+an engine upgrade that changes descriptor bytes without changing any schema
+writes a row with `[]`, so "nothing advanced" is distinguishable from "the
+schema moved" instead of halting every app's next deploy forever.
 
 `ApplyMigrationsRequest.descriptor_sha256` (`apply.rs:69`) is required and
 validated as lowercase sha256 hex at the door (`is_sha256_hex`, `apply.rs:1570`,
@@ -121,10 +133,10 @@ naming the field and a 409 nobody can explain.
 
 ```
 AND CASE WHEN $4::text IS NULL
-         THEN NOT EXISTS (SELECT 1 FROM zeroship.migrated_migrations
+         THEN NOT EXISTS (SELECT 1 FROM zeroship.app_schema_applies
                            WHERE app_id = $3 AND status = 'applied')
          ELSE $4::text = (SELECT m.descriptor_sha256
-                            FROM zeroship.migrated_migrations m
+                            FROM zeroship.app_schema_applies m
                            WHERE m.app_id = $3 AND m.status = 'applied'
                            ORDER BY m.applied_at DESC NULLS LAST,
                                     m.submitted_at DESC, m.migration_id DESC
