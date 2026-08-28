@@ -534,6 +534,29 @@ symptom, and this is the shape where a regression would be invisible: the pool
 refuses either way, and only the CAUSE distinguishes "the server is full" from
 "something went wrong".
 
+RE-MEASURED 2026-08-28 at `bcd6dcb69` with the committed
+`examples/chaos_slots.rs`, which reports BOTH arms because they are different
+measurements:
+
+```text
+SLOTS held=15 then refused: db error | FATAL: sorry, too many clients already
+SLOTS connect refused after 1.106469ms: db error | FATAL: sorry, too many clients already
+SLOTS pool build refused after 505.091402ms: db error | FATAL: sorry, too many clients already
+SLOTS recovered: SELECT 42 = 42, live=1
+```
+
+**Quote the arm, not just the number.** A direct connect is single-shot by
+design and refuses in about a millisecond; pool warm-up retries three times,
+sleeping 100ms then 400ms between failures, so its refusal costs about 505ms.
+The earlier transcripts above are the POOL arm. Reading a 1.1ms direct refusal
+against a 505ms pool figure looks like a 380x regression and is neither.
+
+That 505ms is also an independent check on the backoff itself: two sleeps, not
+three. `connect_with_retry` guards its sleep with `if attempt < 2`, so the
+`delay *= 4` that would produce a third 1.6s wait is computed and discarded. A
+run near 2.1s would mean that guard had been lost. The rustdoc claimed the
+1.6s sleep happened until 2026-08-28.
+
 ## Limits of the measurement
 
 **The RSS rule fails only on a MONOTONIC climb** - the check is
