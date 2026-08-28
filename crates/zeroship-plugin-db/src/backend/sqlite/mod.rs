@@ -13,9 +13,8 @@
 //!   and SQLite sides, 6 hooks).
 //! - `LockManager` (in-process HashMap) + `SchemaIntrospect`
 //!   (PRAGMA walk).
-//! - `IndexBuilder` + `SqliteAuditWriter` capability + cross-app FK
-//!   parse-time check + `impl Backend for SqliteBackend` + the
-//!   SQLite integration-test mirror.
+//! - cross-app FK parse-time check + `impl Backend for SqliteBackend`
+//!   + the SQLite integration-test mirror.
 //!
 //! Every sub-trait carries a real (non-stub) impl, so the composition
 //! marker `impl Backend for SqliteBackend {}` is added at the bottom
@@ -33,12 +32,10 @@ use tempfile::TempDir;
 
 use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::backend::{AuditWriter, IndexBuilder, SchemaIntrospect};
+use crate::backend::SchemaIntrospect;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::Backend;
 use crate::error::DbError;
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::query::IndexSpec;
 
 // `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
 // `preupdate_hook` install + worker->compio publisher integration).
@@ -80,7 +77,7 @@ pub(crate) mod vector;
 // SQLite-side `SessionMinter` helpers - HMAC-SHA256 + bounded LRU
 // nonce cache. The `impl SessionMinter for SqliteBackend` block
 // lives at the bottom of THIS file (mirrors
-// the AuditWriter/IndexBuilder convention); the helpers live in
+// the other capability-impl blocks' convention); the helpers live in
 // `session_minter.rs` so the cryptography stays out of the
 // orchestration body.
 pub(crate) mod session_minter;
@@ -224,11 +221,6 @@ impl SqliteBackend {
         self.cdc_name_cache_invalidations
             .borrow_mut()
             .insert((app_id.to_string(), collection.to_string()));
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
-        self.session.exec_batch(sql).await
     }
 
     pub(crate) async fn query_json(
@@ -1025,8 +1017,7 @@ impl SchemaIntrospect for SqliteBackend {
                         // analogue to PG's `indisvalid` (which can be
                         // false after a failed `CREATE INDEX
                         // CONCURRENTLY`). Mark every observed index
-                        // valid; the IndexBuilder retry logic does
-                        // not need a tri-state.
+                        // valid; nothing downstream needs a tri-state.
                         is_valid: true,
                     },
                 );
@@ -1136,308 +1127,6 @@ impl SchemaIntrospect for SqliteBackend {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-impl IndexBuilder for SqliteBackend {
-    /// Atomic `CREATE [UNIQUE] INDEX IF NOT EXISTS` against the per-app
-    /// attached database. Per plan §3.5, SQLite has no `CREATE INDEX
-    /// CONCURRENTLY` analogue — the operation is atomic from the
-    /// engine's view, so the PG arm's INVALID-recovery retry loop has
-    /// no peer here. Either the statement succeeds or it surfaces a
-    /// classified failure on the first attempt.
-    ///
-    /// **Error envelope** (plan §3.5 + §15.7): when `error::from_sqlite`
-    /// classifies the failure as a unique-constraint violation
-    /// (`SQLITE_CONSTRAINT_UNIQUE`, extended code 2067), this method
-    /// writes a `unique_violation` audit row through [`AuditWriter`]
-    /// then returns the canonical [`DbError::SchemaRefused`] envelope
-    /// the SDK already parses on the PG side
-    /// (`backend/postgres.rs::create_index_with_recovery_audited` line
-    /// ~577) — the wire shape is identical so a creator's
-    /// `e.code === "validation_refused"` branch handles both backends
-    /// unchanged. Non-unique-constraint failures propagate verbatim;
-    /// the typed `DbError` variant `error::from_sqlite` returned still
-    /// stamps the canonical `.code` at the V8 boundary.
-    ///
-    /// **Conflicting-key extraction divergence** (plan §3.5): SQLite's
-    /// `SQLITE_CONSTRAINT_UNIQUE` error does not carry the conflicting
-    /// row's key value (contrast PG's 23505, which embeds it in the
-    /// detail field). The envelope therefore reports
-    /// `conflicting_keys: []` and points the SDK at the read path for
-    /// the offending rows. Documented as an acceptable dev-tier
-    /// divergence in the implementation plan.
-    async fn create_index_with_recovery(
-        &self,
-        app_id: &str,
-        collection: &str,
-        spec: &IndexSpec,
-        deploy_id: &str,
-        schema_version: i32,
-    ) -> Result<(), DbError> {
-        let sql = {
-            let built = self.build_create_index(spec, false);
-            if !built.is_empty() {
-                built
-            } else {
-                let q_app = self.quote_ident(app_id);
-                let q_coll = self.quote_ident(collection);
-                let q_idx = self.quote_ident(&spec.name);
-                let cols_quoted: Vec<String> =
-                    spec.columns.iter().map(|c| self.quote_ident(c)).collect();
-                let col_list = cols_quoted.join(", ");
-                let unique_kw = if spec.unique { "UNIQUE " } else { "" };
-                format!(
-                    "CREATE {unique_kw}INDEX IF NOT EXISTS {q_app}.{q_idx} ON {q_coll} ({col_list})"
-                )
-            }
-        };
-
-        match self.session.exec(&sql, &[]).await {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                // `session.exec` already routed the rusqlite error
-                // through `error::from_sqlite`, which maps a unique-
-                // constraint violation to `DbError::SchemaRefused {
-                // code: "unique_violation", ... }`. We inspect that
-                // structural shape here so the `unique_violation`
-                // branch can also write the matching audit row + emit
-                // a wire-compatible envelope (the PG arm builds it via
-                // `create_index_with_recovery_audited`'s `refuse`
-                // closure; we do the same shape inline).
-                let unique_violation = matches!(
-                    &err,
-                    DbError::SchemaRefused { code, .. } if *code == "unique_violation"
-                );
-                if !unique_violation {
-                    // Not a unique-constraint violation — propagate the
-                    // classified error verbatim. The variant's `.code`
-                    // already routes through `to_op_error` at the V8
-                    // boundary.
-                    return Err(err);
-                }
-
-                // Best-effort audit write. A failure to write the audit
-                // row must not mask the underlying `unique_violation`
-                // — the SDK's wire contract is the SchemaRefused
-                // envelope below.
-                let audit_row = crate::audit::AuditRow {
-                    collection: collection.to_string(),
-                    phase: crate::audit::Phase::Ddl,
-                    change_class: if spec.unique {
-                        crate::audit::ChangeClass::Compatible
-                    } else {
-                        crate::audit::ChangeClass::Additive
-                    },
-                    change_kind: "index_retry".to_string(),
-                    details: serde_json::json!({
-                        "reason": "data_violation",
-                        "index_name": spec.name,
-                        "columns": spec.columns,
-                        "unique": spec.unique,
-                        "sqlite_extended_code": "SQLITE_CONSTRAINT_UNIQUE",
-                    }),
-                    ddl_sql: Some(sql.clone()),
-                    status: crate::audit::InitialStatus::Running,
-                    deploy_id: deploy_id.to_string(),
-                    schema_version,
-                    actor: crate::audit::ActorKind::Auto,
-                };
-                if let Err(audit_err) =
-                    AuditWriter::write_audit_row(self, app_id, &audit_row).await
-                {
-                    tracing::warn!(
-                        app_id = %app_id,
-                        index = %spec.name,
-                        audit_err = %audit_err,
-                        "SqliteBackend::create_index_with_recovery: audit write failed; \
-                         falling through to SchemaRefused envelope",
-                    );
-                }
-
-                // Wire-compatible envelope. The shape matches the PG
-                // arm's `refuse(json!({...}))` body in
-                // `backend/postgres.rs::create_index_with_recovery_audited`
-                // so SDK callers see identical bytes regardless of
-                // backend. `conflicting_keys: []` documents the SQLite
-                // divergence (the engine does not carry the conflicting
-                // row's key value through its error API).
-                let envelope = serde_json::json!({
-                    "code": "validation_refused",
-                    "change_kind": "index_retry",
-                    "collection": collection,
-                    "constraint": if spec.unique { "unique" } else { "index" },
-                    "index": spec.name,
-                    "columns": spec.columns,
-                    "conflicting_keys": [],
-                    "message": err.to_string(),
-                    "hint": "SQLite does not surface the conflicting row's key value; \
-                             query the collection on the indexed columns to locate the duplicate.",
-                });
-                let envelope_json = serde_json::to_string(&envelope).unwrap_or_else(|_| {
-                    String::from(
-                        "{\"code\":\"validation_refused\",\
-                         \"reason\":\"envelope serialisation failed\"}",
-                    )
-                });
-                Err(DbError::SchemaRefused {
-                    code: "validation_refused",
-                    envelope_json,
-                })
-            }
-        }
-    }
-}
-
-// Full `AuditWriter` capability for the SQLite register-model
-// pipeline - provisioning, `next_schema_version`, row insert, and
-// terminal-status updates all route through the session actor.
-#[cfg(any(test, feature = "test-helpers"))]
-impl AuditWriter for SqliteBackend {
-    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
-        let q_app = self.quote_ident(app_id);
-        let ddl = format!(
-            "CREATE TABLE IF NOT EXISTS {q_app}.\"__zeroship_migrations\" (\
-                 id                INTEGER PRIMARY KEY, \
-                 collection        TEXT NOT NULL, \
-                 phase             TEXT NOT NULL, \
-                 change_class      TEXT NOT NULL, \
-                 change_kind       TEXT NOT NULL, \
-                 details           TEXT NOT NULL, \
-                 ddl_sql           TEXT, \
-                 created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                 updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
-                 applied_at        TEXT, \
-                 applied_by_kind   TEXT NOT NULL, \
-                 applied_by_id     TEXT, \
-                 deploy_id         TEXT NOT NULL, \
-                 parent_id         INTEGER REFERENCES \"__zeroship_migrations\"(id), \
-                 schema_version    INTEGER NOT NULL, \
-                 status            TEXT NOT NULL, \
-                 error             TEXT, \
-                 duration_ms       INTEGER, \
-                 validate_cursor   INTEGER, \
-                 owner_session_id  TEXT, \
-                 last_heartbeat_at TEXT, \
-                 dead_letter_pks   TEXT, \
-                 audit_generation  INTEGER NOT NULL DEFAULT 0, \
-                 CONSTRAINT __zeroship_migrations_phase_chk CHECK (phase IN ('ddl','validation','backfill','audit')), \
-                 CONSTRAINT __zeroship_migrations_class_chk CHECK (change_class IN ('additive','compatible','destructive')), \
-                 CONSTRAINT __zeroship_migrations_status_chk CHECK (status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back','validation_refused'))\
-             );\
-             CREATE INDEX IF NOT EXISTS {q_app}.\"__zeroship_migrations_deploy_idx\" \
-                 ON \"__zeroship_migrations\" (deploy_id);\
-             CREATE INDEX IF NOT EXISTS {q_app}.\"__zeroship_migrations_updated_at_idx\" \
-                 ON \"__zeroship_migrations\" (updated_at DESC);"
-        );
-        self.session.exec_batch(&ddl).await
-    }
-
-    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
-        let q_app = self.quote_ident(app_id);
-        let sql = format!(
-            "SELECT COALESCE(MAX(schema_version), 0) + 1 \
-             FROM {q_app}.\"__zeroship_migrations\" \
-             WHERE phase = 'ddl' AND status = 'applied'"
-        );
-        let rows = self.session.query(&sql, &[]).await?;
-        let value = rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|cell| cell.as_deref())
-            .ok_or_else(|| DbError::internal("sqlite audit: missing schema_version row"))?;
-        value.parse::<i32>().map_err(|e| {
-            DbError::internal(format!(
-                "sqlite audit: invalid schema_version {value:?}: {e}"
-            ))
-        })
-    }
-
-    async fn write_audit_row_returning_id(
-        &self,
-        app_id: &str,
-        row: &crate::audit::AuditRow,
-    ) -> Result<i64, DbError> {
-        let q_app = self.quote_ident(app_id);
-        let sql = format!(
-            "INSERT INTO {q_app}.\"__zeroship_migrations\" \
-                (collection, phase, change_class, change_kind, details, \
-                 ddl_sql, status, deploy_id, applied_by_kind, schema_version) \
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
-            RETURNING id"
-        );
-
-        let details_str = row.details.to_string();
-        let schema_version_str = row.schema_version.to_string();
-        let ddl_sql_str = row.ddl_sql.clone().unwrap_or_default();
-        let params: [&str; 10] = [
-            row.collection.as_str(),
-            row.phase.as_sql(),
-            row.change_class.as_sql(),
-            row.change_kind.as_str(),
-            details_str.as_str(),
-            ddl_sql_str.as_str(),
-            row.status.as_sql(),
-            row.deploy_id.as_str(),
-            row.actor.as_sql(),
-            schema_version_str.as_str(),
-        ];
-
-        let rows = self.session.query(&sql, &params).await?;
-        let value = rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|cell| cell.as_deref())
-            .ok_or_else(|| DbError::internal("sqlite audit: missing inserted id"))?;
-        value.parse::<i64>().map_err(|e| {
-            DbError::internal(format!("sqlite audit: invalid inserted id {value:?}: {e}"))
-        })
-    }
-
-    async fn update_audit_status(
-        &self,
-        app_id: &str,
-        id: i64,
-        new_status: crate::audit::TerminalStatus,
-        error: Option<&str>,
-    ) -> Result<bool, DbError> {
-        let q_app = self.quote_ident(app_id);
-        let id_str = id.to_string();
-        let status = new_status.as_sql();
-
-        let rows = if let Some(err) = error {
-            let sql = format!(
-                "UPDATE {q_app}.\"__zeroship_migrations\" \
-                 SET status = ?2, \
-                     error = ?3, \
-                     updated_at = CURRENT_TIMESTAMP, \
-                     applied_at = CASE \
-                         WHEN ?2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL \
-                         THEN CURRENT_TIMESTAMP \
-                         ELSE applied_at \
-                     END \
-                 WHERE id = ?1 AND status IN ('running','pending') \
-                 RETURNING id"
-            );
-            self.session.query(&sql, &[id_str.as_str(), status, err]).await?
-        } else {
-            let sql = format!(
-                "UPDATE {q_app}.\"__zeroship_migrations\" \
-                 SET status = ?2, \
-                     updated_at = CURRENT_TIMESTAMP, \
-                     applied_at = CASE \
-                         WHEN ?2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL \
-                         THEN CURRENT_TIMESTAMP \
-                         ELSE applied_at \
-                     END \
-                 WHERE id = ?1 AND status IN ('running','pending') \
-                 RETURNING id"
-            );
-            self.session.query(&sql, &[id_str.as_str(), status]).await?
-        };
-
-        Ok(!rows.is_empty())
-    }
-}
-
 impl DialectBuilder for SqliteBackend {
     // The backend forwards every dialect call to the `SqliteDialect`
     // ZST so consumers can hold an `&SqliteBackend` and reach the
@@ -1455,11 +1144,6 @@ impl DialectBuilder for SqliteBackend {
     }
 
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn build_create_index(&self, spec: &IndexSpec, online: bool) -> String {
-        SqliteDialect.build_create_index(spec, online)
-    }
-
     fn map_zs_type(&self, zs_type: &str, opts: &Value) -> String {
         SqliteDialect.map_zs_type(zs_type, opts)
     }
@@ -1475,7 +1159,7 @@ impl DialectBuilder for SqliteBackend {
 
 // `Backend` composition marker. Every sub-trait
 // (`SqlExecutor`, `LockManager`,
-// `SchemaIntrospect`, `IndexBuilder`) now carries a real (non-stub)
+// `SchemaIntrospect`) now carries a real (non-stub)
 // impl above, and the super-trait relaxation that dropped the
 // `Client = compio_postgres::Client` pin from `Backend` cleared the
 // last obstacle. The marker is the one-liner the design names -
@@ -1684,21 +1368,33 @@ impl crate::backend::SessionMinter for SqliteBackend {
 // INSERT path lands writes there, the CDC preupdate hook observes
 // them, and the trigger fans the row out to the vec0 index.
 //
-// Two methods:
-//   * `ensure_vector_index` — runs five idempotent statements:
-//       1. CREATE VIRTUAL TABLE IF NOT EXISTS `<coll>__vec_<col>` USING vec0(...)
-//       2. Initial population INSERT INTO __vec_<col> SELECT FROM `<coll>`
-//          (guarded by a sqlite_master presence probe so we only seed once)
-//       3. AFTER INSERT trigger `<coll>__vec_<col>_ai`
-//       4. AFTER DELETE trigger `<coll>__vec_<col>_ad`
-//       5. AFTER UPDATE OF cols trigger `<coll>__vec_<col>_au`
-//     Inner-product metric is rejected via [`vector::reject_inner_product`]
-//     — vec0 supports cosine + L2 only.
-//   * `vector_search` — emits a JOIN against the vec0 vtable on
-//     rowid, MATCHes the query vector through vec0's KNN operator,
-//     orders by `v.distance`, applies the filter via the standard
-//     `build_find` machinery, and decodes the result rows through the
-//     session actor's `query_typed` path.
+// One method: `vector_search` — emits a JOIN against the vec0 vtable on
+// rowid, MATCHes the query vector through vec0's KNN operator, orders by
+// `v.distance`, applies the filter via the standard `build_find`
+// machinery, and decodes the result rows through the session actor's
+// `query_typed` path. Inner-product is rejected up front via
+// [`vector::reject_inner_product`] — vec0 supports cosine + L2 only.
+//
+// **This arm does NOT create the vec0 vtable or its mirror triggers, and
+// nothing else in the tree does either.** `ensure_vector_index` used to,
+// behind `#[cfg(any(test, feature = "test-helpers"))]`, so it never ran
+// in a shipped binary; it is deleted rather than kept as data-plane DDL.
+// The runtime descriptor NAMES the shadow relation and its three triggers
+// (`AuxiliaryObject::ShadowTable`, `zeroship-migrate-core/src/render/
+// gen_types.rs:219` and `auxiliary_objects` at `:255`), which the JOIN
+// below relies on, but the engine emits no DDL for it: the SQLite renderer
+// folds a vector field's index to a plain B-tree
+// (`zeroship-migrate-sqlite/src/schema.rs:98`), and the engine states outright
+// that it never authors a virtual table
+// (`zeroship-migrate-backend/src/error.rs:270`). So `vector_search` on SQLite
+// fails with "no such table" against any database the migration engine
+// produced. That gap is REAL and PRE-EXISTING.
+//
+// One thing the engine DOES get right about it already: on a vec0 vtable it
+// finds live but undeclared, the drop pass fails closed with
+// `DropOfVirtualTable` (`error.rs:291`) rather than cascading the shadow
+// tables away. So authoring the relation is the only half still missing - a
+// migration that creates it will not be undone by the next diff.
 //
 // **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
 // BEFORE the row mutation, AFTER triggers fire after, both run inside
@@ -1706,83 +1402,6 @@ impl crate::backend::SessionMinter for SqliteBackend {
 // vec0 index already updated at COMMIT time.
 
 impl crate::backend::VectorIndex for SqliteBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    /// Idempotently create the vec0 virtual table + mirror triggers
-    /// for `<app>.<collection>.<column>`. Runs five statements in
-    /// order: CREATE VIRTUAL TABLE, gated initial population, three
-    /// AFTER triggers. The CREATE VIRTUAL TABLE / CREATE TRIGGER
-    /// statements ARE idempotent via `IF NOT EXISTS`; the population
-    /// step is gated by a `sqlite_master` probe so it runs exactly
-    /// once at vtable-creation time.
-    ///
-    /// **Metric**: cosine or L2 land in the vec0 vtable declaration
-    /// (`distance_metric=cosine|l2`). Inner product is not a
-    /// vec0-native metric — `VectorMetric::InnerProduct` surfaces as
-    /// a typed `vector_unsupported_metric` Configuration error. The
-    /// SDK can branch on the wire code; PG callers continue to
-    /// support all three metrics via pgvector opclasses.
-    async fn ensure_vector_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        column: &str,
-        dims: i32,
-        metric: crate::backend::VectorMetric,
-    ) -> Result<(), DbError> {
-        // 0. Reject inner-product up-front (vec0 only supports cosine
-        //    + L2 at vtable-creation time).
-        vector::reject_inner_product(metric)?;
-
-        // 1. Probe whether the vec0 vtable already exists. If yes, we
-        //    skip the initial-population INSERT (it's NOT idempotent —
-        //    running it twice doubles the index payload). The CREATE
-        //    VIRTUAL TABLE / CREATE TRIGGER statements ARE idempotent
-        //    via `IF NOT EXISTS` so we re-run them unconditionally.
-        let vec_table = vector::vec_table_name(collection, column);
-        let probe_sql = format!(
-            "SELECT 1 FROM {qschema}.sqlite_master \
-             WHERE type = 'table' AND name = '{esc_name}'",
-            qschema = SqliteDialect.quote_ident(app_id),
-            // The probe's `name = '<lit>'` is a single-quoted SQL
-            // literal — escape any embedded `'` by doubling. The
-            // collection + column names were validated at the SDK
-            // boundary.
-            esc_name = vec_table.replace('\'', "''"),
-        );
-        let existing = self.session.query(&probe_sql, &[]).await?;
-        let vtable_exists = !existing.is_empty();
-
-        // 2. CREATE VIRTUAL TABLE IF NOT EXISTS — emits the vec0 vtable
-        //    with the documented `float[N] distance_metric=...` shape.
-        let create_sql =
-            vector::build_create_vec0_sql(app_id, collection, column, dims, metric);
-        self.session.exec(&create_sql, &[]).await?;
-
-        // 3. Initial population — only if the vtable did NOT exist
-        //    before this call. Skipping the re-population is the only
-        //    reason we needed the sqlite_master probe; the rest of
-        //    the DDL is idempotent.
-        if !vtable_exists {
-            let populate_sql =
-                vector::build_initial_population_sql(app_id, collection, column);
-            // `session.exec` returns the rusqlite `Connection::changes()`
-            // value — we don't care about the count here, only the
-            // failure path (e.g. no such base table / column). The
-            // typed `DbError` propagates via `?`.
-            self.session.exec(&populate_sql, &[]).await?;
-        }
-
-        // 4-6. AFTER triggers (idempotent via `IF NOT EXISTS`).
-        let insert_trg = vector::build_insert_trigger_sql(app_id, collection, column);
-        self.session.exec(&insert_trg, &[]).await?;
-        let delete_trg = vector::build_delete_trigger_sql(app_id, collection, column);
-        self.session.exec(&delete_trg, &[]).await?;
-        let update_trg = vector::build_update_trigger_sql(app_id, collection, column);
-        self.session.exec(&update_trg, &[]).await?;
-
-        Ok(())
-    }
-
     /// vec0-powered top-k vector search. Composes a SQL of the form
     ///
     /// ```sql
@@ -1811,11 +1430,11 @@ impl crate::backend::VectorIndex for SqliteBackend {
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let app_id = binding.app_id();
-        // Reject inner-product before issuing any SQL — vec0 vtables
-        // can't be created with `distance_metric=ip`, so a stale
-        // ensure_vector_index call would have failed earlier; this
-        // catches a direct vector_search call (no prior ensure) that
-        // asks for IP.
+        // Reject inner-product before issuing any SQL — a vec0 vtable
+        // cannot be declared with `distance_metric=ip`, so no shadow
+        // relation this search could join to would ever answer an IP
+        // query. Refuse with the typed code rather than emitting SQL
+        // that fails on a missing operator.
         vector::reject_inner_product(metric)?;
 
         // Build the filter WHERE clause via the shared lowering. The
@@ -1900,10 +1519,8 @@ fn build_spatial_near_base_query(
 // flat scan is acceptable at dev scale; production spatial workloads
 // run on PostGIS via the PG arm.
 //
-// Two methods:
-//   * `ensure_spatial_index` — no-op. Flat scan needs no index; the
-//     CHECK constraint on the `geoPoint` BLOB column is emitted by
-//     [`spatial::sqlite_geopoint_column_ddl`] at column-DDL time.
+// One method (the flat scan needs no index at all, so there was never
+// anything for an `ensure_spatial_index` to do on this arm):
 //   * `spatial_near` — SELECT all rows matching `filter` via the
 //     session actor's `query_typed`, decode each row's `column` blob
 //     via `spatial::blob_to_point`, compute `haversine_m(point, row_point)`,
@@ -1912,16 +1529,6 @@ fn build_spatial_near_base_query(
 //     field.
 
 impl crate::backend::SpatialIndex for SqliteBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_spatial_index(
-        &self,
-        _app_id: &str,
-        _collection: &str,
-        _column: &str,
-    ) -> Result<(), DbError> {
-        Ok(())
-    }
-
     async fn spatial_near(
         &self,
         binding: &crate::binding::DbBinding,
@@ -2809,10 +2416,7 @@ mod tests {
     //! the bound itself is the assertion.
 
     use super::*;
-    use crate::backend::{
-        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager,
-        SchemaIntrospect, SqlExecutor,
-    };
+    use crate::backend::{Backend, DialectBuilder, LockManager, SchemaIntrospect, SqlExecutor};
 
     #[test]
     fn memory_backend_tempdir_is_removed_on_drop() {
@@ -2888,22 +2492,8 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    fn assert_sqlite_backend_impls_index_builder() {
-        fn assert_impl<T: IndexBuilder>() {}
-        assert_impl::<SqliteBackend>();
-    }
-
     fn assert_sqlite_backend_impls_dialect_builder() {
         fn assert_impl<T: DialectBuilder>() {}
-        assert_impl::<SqliteBackend>();
-    }
-
-    /// `AuditWriter` capability - pin the impl wire so a
-    /// future refactor that detaches the trait-impl block from this
-    /// type fails compilation here, not at the `IndexBuilder`
-    /// consumer site that pulls the audit row through.
-    fn assert_sqlite_backend_impls_audit_writer() {
-        fn assert_impl<T: AuditWriter>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -3177,9 +2767,7 @@ mod tests {
         let _ = assert_sqlite_backend_impls_lock_manager as fn();
         let _ = assert_sqlite_backend_impls_namespace_manager as fn();
         let _ = assert_sqlite_backend_impls_schema_introspect as fn();
-        let _ = assert_sqlite_backend_impls_index_builder as fn();
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
-        let _ = assert_sqlite_backend_impls_audit_writer as fn();
         #[cfg(feature = "test-helpers")]
         let _ = assert_sqlite_backend_impls_session_minter as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
