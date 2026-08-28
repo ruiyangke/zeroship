@@ -217,6 +217,13 @@ compio-postgres = { path = "libs/compio-postgres" }
 compio-redis = { path = "libs/compio-redis" }
 compio-s3 = { path = "libs/compio-s3" }
 zeroship-schema = { path = "crates/zeroship-schema" }
+# SC-3's `DbPlan`: the runtime query plan in which a fragment of SQL text is not
+# a representable value. A true leaf - it declares no dependencies of its own,
+# which is what lets the whole grammar be built and tested without a database, a
+# runtime or an isolate, and what makes `Serialize` impossible to derive on a
+# plan rather than merely discouraged. Nothing consumes it yet; porting
+# `zeroship-schema`'s runtime query builders onto it is a later step.
+zeroship-data-plan = { path = "crates/zeroship-data-plan" }
 # Phase F: the monorepo's native-PG producer (`CompioPgSession`) for the published
 # `zeroship-migrate` engine's driver-neutral `SqlSession` seam. This adapter — together
 # with the published `zeroship-migrate` engine below — is the sole migration path now;
