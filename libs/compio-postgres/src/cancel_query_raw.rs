@@ -98,40 +98,6 @@ where
     wait_for_server_close(stream).await
 }
 
-/// Send and flush a cancel packet, returning its half-closed connection.
-///
-/// Returning the stream lets pool recovery wait for the postmaster's EOF
-/// outside `connect_timeout`. That setting remains clock (4), not a socket read
-/// deadline; the pool's separately bounded recovery grace owns the EOF wait.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn send_cancel_request_with_encryption<S, T>(
-    stream: S,
-    encryption: connect_tls::Encryption,
-    mode: SslMode,
-    negotiation: SslNegotiation,
-    tls: T,
-    has_hostname: bool,
-    process_id: i32,
-    secret_key: CancelKey,
-) -> Result<MaybeTlsStream<S, T::Stream>, Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: TlsConnect<S>,
-{
-    send_cancel_request(
-        stream,
-        encryption,
-        mode,
-        negotiation,
-        tls,
-        has_hostname,
-        process_id,
-        secret_key,
-        false,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 /// Send a cancel packet over the exact transport recorded for a live session.
 pub(crate) async fn send_cancel_request_with_exact_encryption<S, T>(

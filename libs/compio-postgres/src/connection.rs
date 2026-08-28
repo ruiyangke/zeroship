@@ -160,7 +160,6 @@ struct PendingResponse {
     sender: mpsc::Sender<ResponseMessages>,
     messages: ResponseMessages,
     disposition: RequestDisposition,
-    request_server_error: RequestServerError,
 }
 
 impl Drop for Response {
@@ -1534,7 +1533,6 @@ impl Dispatch<'_> {
                     sender: response.sender.clone(),
                     messages,
                     disposition: response.disposition,
-                    request_server_error: Arc::clone(&response.request_server_error),
                 });
                 if !request_complete {
                     self.responses.push_front(response);
@@ -4248,7 +4246,6 @@ mod tests {
             sender,
             messages: ResponseMessages::Raw(BackendMessages::empty()),
             disposition: RequestDisposition::Awaited,
-            request_server_error: Arc::default(),
         }]);
         let write_error = Error::io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
@@ -5309,12 +5306,10 @@ mod tests {
                 .is_err(),
             "the pending response sender was not backpressured"
         );
-        let blocked_request_server_error = Arc::default();
         let mut pending_responses = VecDeque::from([PendingResponse {
             sender: blocked_sender,
             messages: ResponseMessages::Raw(BackendMessages::empty()),
             disposition: RequestDisposition::Awaited,
-            request_server_error: Arc::clone(&blocked_request_server_error),
         }]);
         let parameters = Mutex::new(HashMap::new());
         let tx_status = AtomicU8::new(b'I');
@@ -5360,10 +5355,13 @@ mod tests {
             !error.is_closed(),
             "the preserved server diagnosis still classified the session as a local close"
         );
-        assert!(
-            blocked_request_server_error.lock().is_none(),
-            "the later ErrorResponse was attributed to the earlier blocked request"
-        );
+        // There was an assertion here that the later ErrorResponse was not
+        // attributed to the earlier blocked request, reading an Arc handed to
+        // that `PendingResponse`. It could never fail: a batch becomes a
+        // `PendingResponse` only once it is detached from its `Response`, and
+        // every `remember_server_error` call site takes a `Response`, so
+        // nothing could write through that handle. The property is structural,
+        // not a runtime outcome, and the field it read is gone.
         assert!(
             terminal_server_error.lock().is_none(),
             "a nonterminal request error leaked into the connection-global diagnosis"
@@ -6671,7 +6669,6 @@ mod tests {
                 "STASHED",
             ))])),
             disposition: RequestDisposition::Awaited,
-            request_server_error: Arc::default(),
         }]);
 
         // The consumer now catches up, which un-parks `P`'s own handle. This is
