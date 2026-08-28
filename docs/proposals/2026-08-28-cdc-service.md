@@ -2038,13 +2038,31 @@ Stated as gaps rather than written as facts elsewhere in this document.
   reachable by a creator today, without any new feature. 12.6's
   ordering-free alternative is therefore a genuine fallback, not a
   belt-and-braces option.
-- **Whether `ALTER PUBLICATION ... DROP TABLE` + `ADD TABLE` in one transaction
-  is invisible to a CONCURRENTLY DECODING consumer**, as opposed to invisible to
-  a later catalog read. 3.6 measures the catalog outcome and the mid-stream
-  `ADD TABLE` pickup separately; it does not measure a decoder running through
-  the swap. The reasoning is that `ALTER PUBLICATION` is transactional and
-  pgoutput reads the catalog at the decoding snapshot, so the pair is atomic to
-  it - which is an argument, not a transcript.
+- **The swap IS atomic to a decoder running through it. Measured, and it
+  exposed a limit the argument did not predict.** On PostgreSQL 17.11: a table
+  published with `(id, pub, secret)`, a row inserted, then
+  `BEGIN; ALTER PUBLICATION p DROP TABLE t; ALTER PUBLICATION p ADD TABLE t (id,
+  pub); COMMIT;`, then a second row. Decoding the whole range from a slot created
+  before the swap gives `Begin Relation Insert Commit` twice - **two
+  transactions, not three.** The DDL transaction emits no change messages at all,
+  and each data transaction carries its own `Relation` message reflecting the
+  column list in force at that WAL position. The catalog afterwards reads
+  `id,pub`.
+
+  **The limit: the projection is prospective, not retroactive.** In the same
+  decode, the pre-swap row still carries `secret` and the post-swap row does not.
+  So "PostgreSQL never puts the excluded bytes on the wire" holds for changes
+  decoded *after* the shrink, and **not** for changes already in the WAL when it
+  ran. A relay resuming from a watermark older than a shrink will emit the old,
+  wider column set for everything between that watermark and the swap.
+
+  That is not a defect in the bracketing - 3.6's shrink-before/widen-after exists
+  to survive `2BP01`, and it does. But the security claim in section 1's table
+  needs the qualifier: newly classifying a column narrows the wire **from the
+  swap forward**, and the bytes already written stay readable to any consumer
+  that can replay across them. Retroactive redaction is not a thing logical
+  decoding offers; if it is required, it is a slot-reset plus a resync, not a
+  publication edit.
 - **Everything in 5.4, 5.5, 7.5 and 7.6 is specification, not observation.** No
   ring exists to overrun, no consumer exists to stall, no metric exists to read.
   Those four subsections state policy the implementation must satisfy, and the
