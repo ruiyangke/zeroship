@@ -1961,8 +1961,26 @@ Stated as gaps rather than written as facts elsewhere in this document.
   posture check should then require their **absence**. Whether `BYPASSRLS` was
   ever needed for decoding at all is a separate question worth asking at that
   point: the walsender plans no queries, and RLS is a planner-level filter.
-- **The advisory-lock release latency after a hard leader kill.** 12.1. It is
-  TCP-keepalive-shaped and no experiment was run.
+- **The advisory-lock release latency after a hard leader kill.** 12.1. Still
+  unmeasured, but the experiment is now specified, because an attempt showed the
+  obvious version measures the wrong thing. **Three kill shapes are not
+  equivalent:**
+  1. *Killing the client process* (including `SIGKILL`) closes its socket, so
+     the kernel sends `FIN`, the backend sees EOF and the session-scoped lock
+     releases in about a round trip. This is the fast path and it tells you
+     nothing about the case of interest.
+  2. *`SIGKILL` on the backend* is not a leader kill at all - the postmaster
+     treats it as a crash and restarts every backend in the cluster.
+  3. *Node or network loss*, where no `FIN` is ever sent, is the real case. The
+     server keeps the session until TCP gives up, which is what makes the answer
+     keepalive-shaped.
+  So the experiment must partition the network (`docker network disconnect`, or
+  an `iptables ... -j DROP`), never kill a process, and it must run against a
+  **dedicated** cluster: shape 2 restarts every backend, which would void any
+  other suite sharing the server. The answer is then governed by
+  `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count` on
+  the server side, and those settings - not the kill - are what the measurement
+  should vary.
 - **The pk-membership replacement for `old_tuple`.** 5.3. Specified, not
   prototyped, and it changes a subscriber-side contract.
 - **Behaviour of non-transactional `pg_logical_emit_message`.** 8.4. Not used and
