@@ -1,4 +1,4 @@
-import { grant, revoke } from "@zeroship/migrate";
+import { grant, revoke } from "zero-migrate";
 
 export default {
   name: "grants",

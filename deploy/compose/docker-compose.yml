@@ -169,11 +169,18 @@ services:
   #
   # The apply is idempotent: every journal version is a hash of owner_app plus the
   # migration name, so a re-run re-derives the same versions and skips every
-  # applied file. Measured 2026-08-28 on the host against a fresh PostgreSQL
-  # 17.11: 35 files applied, then an immediate second run applied none and exited
-  # 0. Destructive in-place evolutions in the committed set are approved by
+  # applied file. Measured 2026-08-28 on the host against a PostgreSQL 17.11
+  # cluster created for the run: 35 of 35 files applied and exit 0, then an
+  # immediate second run reported `"applied":[]` for all 35 and exited 0.
+  # Destructive in-place evolutions in the committed set are approved by
   # construction (`--approve`) - this operator-side one-shot treats the committed
   # migrations as the intended apply.
+  #
+  # THAT SENTENCE PREVIOUSLY CLAIMED THE SAME RESULT AND WAS NOT A MEASUREMENT.
+  # On the day it was written the corpus could not be applied by any Node applier:
+  # all 35 files imported `@zeroship/migrate`, which resolves to nothing outside
+  # the V8 module map of a binary that had just been deleted. It is re-derived now
+  # by `tests/platform_migration_corpus_gate.sh` rather than asserted here.
   #
   # A DATABASE THE OLD BINARY MIGRATED NEEDS ONE MANUAL ADOPTION, and it is
   # deliberately not automatic. Its journal holds versions this corpus does not
@@ -195,11 +202,23 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ../../db/migrations-ts:/db/migrations-ts:ro
+      # THE CORPUS IS NOT MOUNTED, and that is deliberate. It used to be, at
+      # `/db/migrations-ts`. A mount of the host directory carries the 35 `.ts`
+      # files and nothing they can resolve `import ... from "zero-migrate"`
+      # against, because the link that satisfies it lives in the member's own
+      # `node_modules` - which is gitignored, host-local, and absent on any
+      # machine that has not run `pnpm install`. So the mount turned a baked,
+      # self-contained image into one whose apply depended on the host's install
+      # state. The image bakes the corpus WITH its resolution link
+      # (`/app/db/migrations-ts`, see the `migrate` stage); editing a migration
+      # now costs a rebuild, which is the correct price for a file that is pinned
+      # to the same commit as the code.
+      #
       # The Platform charter and the table-to-owner registry: the two files that
       # decide what a platform migration may do. They are BAKED INTO the image as
       # well; these mounts are the dev-loop convenience that lets a charter edit
-      # take effect without a rebuild, exactly like the corpus mount above.
+      # take effect without a rebuild. They are plain data the CLI reads by
+      # absolute path, so they carry none of the resolution hazard above.
       - ../../policies/platform.policy.toml:/policies/platform.policy.toml:ro
       - ../../policies/platform-table-owners.json:/policies/platform-table-owners.json:ro
       # The privileged DSN, as a PATH like every other credential here. It was
@@ -229,8 +248,14 @@ services:
       # corpus spells `schema: "zeroship"` 562 times, and the CLI derives its
       # advisory-lock key from the schema, so there was nothing a second name
       # could select.
+      # `/app/db/migrations-ts`, not `/db/migrations-ts`. The corpus resolves its
+      # DSL import by Node's upward walk, so it has to sit above the pnpm store at
+      # `/app/node_modules`; at `/db` the walk finds nothing. This is also the
+      # entrypoint's default, so the flag is redundant - it stays spelled out
+      # because a wrong path here fails loudly at the first file rather than
+      # silently applying a different corpus.
       - --migrations-dir
-      - /db/migrations-ts
+      - /app/db/migrations-ts
       - --database-url-file
       - /etc/zeroship/secrets/migrate-dsn
     # NO `security_opt: seccomp:unconfined` ANY MORE, and its removal is the point

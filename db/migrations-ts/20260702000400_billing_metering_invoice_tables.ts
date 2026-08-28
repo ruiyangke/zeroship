@@ -1,4 +1,4 @@
-import { table, t, now } from "@zeroship/migrate";
+import { table, t, now } from "zero-migrate";
 
 export default {
   name: "billing_metering_invoice_tables",

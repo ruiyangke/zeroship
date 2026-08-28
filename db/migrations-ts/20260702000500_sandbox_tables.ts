@@ -1,4 +1,4 @@
-import { table, t, now } from "@zeroship/migrate";
+import { table, t, now } from "zero-migrate";
 
 export default {
   name: "sandbox_tables",

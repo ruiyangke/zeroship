@@ -1,4 +1,4 @@
-import { grant } from "@zeroship/migrate";
+import { grant } from "zero-migrate";
 
 // `zeroship_auth` could never run its own retention sweep.
 //

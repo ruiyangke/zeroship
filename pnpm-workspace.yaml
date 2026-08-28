@@ -14,6 +14,24 @@ packages:
   # resolves it as `workspace:*` and pnpm links the built `.node`. It is compiled
   # by `napi build` rather than tsup, but is otherwise an ordinary member.
   - "crates/zeroship-migrate-node"
+  # The platform schema corpus. A member for TWO load-bearing reasons, neither of
+  # them publishing (it is `private: true` and has no build, test or check script):
+  #
+  #   1. RESOLUTION. The 35 `.ts` files `import ... from "zero-migrate"`, and the
+  #      `zero-migrate` CLI loads them with a plain `import()` under tsx - no
+  #      bundler, no alias, no NODE_PATH - so the specifier resolves by Node's
+  #      upward walk from `db/migrations-ts/`. Membership is what puts a
+  #      `zero-migrate` link in `db/migrations-ts/node_modules`, one step up.
+  #      Without it the walk reaches the repo root, whose `node_modules` holds no
+  #      `zero-migrate` (the root manifest declares no dependencies), and the
+  #      apply dies on file #1 with `Cannot find package`.
+  #   2. MODULE KIND. `package.json` `"type": "module"` is also what makes tsx
+  #      read those files as ESM. With no `package.json` above them they are
+  #      treated as CJS and fail with `Cannot require() ES Module ... in a cycle`.
+  #
+  # Both were live defects until 2026-08-28; `tests/platform_migration_corpus_gate.sh`
+  # rules on them.
+  - "db/migrations-ts"
 
 # Packages permitted to run lifecycle scripts. pnpm 11 renamed this from
 # `onlyBuiltDependencies` (a list) to `allowBuilds` (a map), and writes the

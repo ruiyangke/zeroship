@@ -77,14 +77,19 @@ async function importPlatformCorpusMigration(relativePath: string): Promise<{ sc
     `from "zero-migrate"`,
     `from "${indexUrl}"`,
   );
-  // The platform corpus is swept in a later job. Wrap its phase as `schema()` only
-  // in this package-local test process; production deliberately has no `up()` alias.
-  // Requiring the legacy spelling makes this bridge fail once that sweep lands,
-  // so it cannot become accidental compatibility code.
+  // THE SWEEP LANDED. This used to resolve `up()` and assert it existed, with a
+  // comment predicting it would "fail once that sweep lands" - d92efa740 swept the
+  // corpus to `schema()` and it did, silently, because the specifier rewrite above
+  // also stopped matching (the corpus said `@zeroship/migrate` then) so the import
+  // failed before the assertion was ever reached. Both halves are repaired here:
+  // the corpus now spells `zero-migrate`, and this resolves the member it exports.
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
-  const legacy = (await import(dataUrl)) as { up?: () => void; default?: { up?: () => void } };
-  const phase = typeof legacy.up === "function" ? legacy.up : legacy.default?.up;
-  assert.ok(phase, `${relativePath} must export its pending legacy up() phase`);
+  const mod = (await import(dataUrl)) as {
+    schema?: () => void;
+    default?: { schema?: () => void };
+  };
+  const phase = typeof mod.schema === "function" ? mod.schema : mod.default?.schema;
+  assert.ok(phase, `${relativePath} must export a schema() phase`);
   return { schema: phase };
 }
 
@@ -2801,10 +2806,12 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
   const migration = await importPlatformCorpusMigration(corpusRel);
   const ops = record(() => migration.schema());
   const domainOps = ops.filter((op) => op.op === "createDomain");
+  // `zeroship`, which is what the corpus spells. It read `zero_migrate` while the
+  // import above was failing, so nothing ever compared it to the file.
   const inDomain = (name: string, elems: string[]) => ({
     op: "createDomain",
     name,
-    schema: "zero_migrate",
+    schema: "zeroship",
     as: "text",
     check: { node: "inList", expr: { node: "colRef", name: "VALUE" }, elems, negated: false },
   });
@@ -2827,7 +2834,7 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
     {
       op: "createDomain",
       name: "billing_period",
-      schema: "zero_migrate",
+      schema: "zeroship",
       as: "date",
       check: {
         node: "binOp",
@@ -2856,6 +2863,7 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
       "refund_status_drift",
       "dispute_status_drift",
       "missing_dispute",
+      "provider_reject",
     ]),
     inDomain("reconciliation_finding_severity", ["low", "medium", "high"]),
     inDomain("refund_destination", ["cash", "credit"]),

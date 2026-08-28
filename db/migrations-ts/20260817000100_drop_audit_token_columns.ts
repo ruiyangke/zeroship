@@ -1,4 +1,4 @@
-import { table } from "@zeroship/migrate";
+import { table } from "zero-migrate";
 
 // Both columns recorded the `zeroship.permission_tokens` row a request
 // authenticated with. A PAT was the only bearer that ever carried one - an

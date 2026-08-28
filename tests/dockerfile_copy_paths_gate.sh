@@ -149,12 +149,23 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # floor of 14 that had gone slack by one, so a tree that LOST a COPY source still
 # cleared it - which is why this is exact.
 #
-# The four new sources are the `migrate` stage the compose one-shot builds, added
-# when the platform schema moved off the deleted `zeroship-platform-migrate`
-# binary and onto the `zero-migrate` CLI: the pnpm store and package tree the CLI
-# resolves through, the charter and table-owner registry it applies under, and its
-# entrypoint wrapper.
-EXPECT_RAN=19
+# The four sources before that were the `migrate` stage the compose one-shot
+# builds, added when the platform schema moved off the deleted
+# `zeroship-platform-migrate` binary and onto the `zero-migrate` CLI: the pnpm
+# store and package tree the CLI resolves through, the charter and table-owner
+# registry it applies under, and its entrypoint wrapper.
+#
+# RE-MEASURED 2026-08-28 (later the same day): 29. The `sdks` stage gained eleven
+# context sources when the `migrate` target was built for the FIRST time and did
+# not work - `Cargo.toml` and `Cargo.lock` plus the addon's eight remaining local
+# crates (its `cargo metadata` closure is nine, one of which was already copied),
+# without which `napi build` cannot find a workspace root, and `db/migrations-ts`,
+# which is now a pnpm workspace member. One source left the count in exchange: the
+# migrate stage's corpus COPY became `COPY --from=sdks`, which is not a context
+# source, because the corpus has to arrive carrying the `node_modules` link that
+# resolves its `zero-migrate` import. 19 + 11 - 1 = 29, plus `libs/` (the root
+# manifest's second members glob refuses to match nothing) = 30.
+EXPECT_RAN=30
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

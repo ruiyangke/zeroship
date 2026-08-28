@@ -58,12 +58,46 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-async function importPlatformCorpusMigration(relativePath: string): Promise<{ up(): void }> {
+// Record a REAL platform migration through THIS package's recorder.
+//
+// This is the closest thing the tree has to a drift detector between the two DSL
+// implementations: the corpus in `db/migrations-ts/` is authored for, and applied
+// by, `zero-migrate`, and this bridge replays one of its files through
+// `@zeroship/migrate` and asserts the op stream below. If the two recorders ever
+// disagree about how a domain check lowers, this is where it shows up.
+//
+// IT IS NOT A GUARANTEE THAT THEY AGREE, and must not be read as one: it covers
+// ONE file of 35 and only its `createDomain` ops. Nothing derives one package
+// from the other; see the header of tests/platform_migration_corpus_gate.sh.
+//
+// The corpus spells its import `zero-migrate`. It said `@zeroship/migrate` until
+// 2026-08-28, which was a name no applier outside a deleted binary's V8 module
+// map could resolve - the platform could not migrate its own database for as long
+// as it stood. Rewriting that specifier onto this package's own entry is what
+// makes the file record HERE instead.
+async function importPlatformCorpusMigration(
+  relativePath: string,
+): Promise<{ schema(): void }> {
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
   const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
-  const source = (await readFile(sourcePath, "utf8")).replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`);
+  const source = (await readFile(sourcePath, "utf8")).replaceAll(
+    `from "zero-migrate"`,
+    `from "${indexUrl}"`,
+  );
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
-  return import(dataUrl) as Promise<{ up(): void }>;
+  const mod = (await import(dataUrl)) as {
+    schema?: () => void;
+    default?: { schema?: () => void };
+  };
+  // `schema()` as a named export or on the default object - the two locations the
+  // host recorder resolves. `up()` is deliberately NOT accepted: the corpus was
+  // swept to `schema()` by d92efa740, and this helper kept calling `up()`
+  // afterwards, so the test threw `migration.up is not a function` on every run
+  // from that commit until 2026-08-28. Naming the member the corpus actually
+  // exports is what keeps that from being re-introduced silently.
+  const phase = typeof mod.schema === "function" ? mod.schema : mod.default?.schema;
+  assert.ok(phase, `${relativePath} must export a schema() phase`);
+  return { schema: phase };
 }
 
 function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any; byteValue: any }) => void): any[] {
@@ -1639,7 +1673,7 @@ test("domain check validation rejects raw non-VALUE colRefs", () => {
 
 test("platform corpus domain checks record byte-identical VALUE colRef ops", async () => {
   const migration = await importPlatformCorpusMigration("db/migrations-ts/20260702000100_schema_roles_extensions.ts");
-  const ops = record(() => migration.up());
+  const ops = record(() => migration.schema());
   const domainOps = ops.filter((op) => op.op === "createDomain");
   const inDomain = (name: string, elems: string[]) => ({
     op: "createDomain",

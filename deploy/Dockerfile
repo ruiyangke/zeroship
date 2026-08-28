@@ -89,7 +89,52 @@ COPY examples/ examples/
 # The engine's crates were a submodule under third_party/ and are now ordinary
 # members, so these two COPYs replace the one that brought the submodule in.
 COPY packages/ packages/
+# THE CARGO WORKSPACE ROOT AND THE ADDON'S CRATE CLOSURE. Without both, this
+# stage cannot build at all, and until 2026-08-28 it never had been - the stage
+# comment further down said so outright ("NOT MEASURED: THIS STAGE HAS NOT BEEN
+# BUILT"). Two failures, in order, each found by building `--target migrate`:
+#
+#   1. `zeroship-migrate-node/Cargo.toml` inherits `edition` from
+#      `[workspace.package]`, so with no root manifest `napi build` ->
+#      `cargo metadata` fails with "error inheriting `edition` from workspace root
+#      manifest's `workspace.package.edition` / failed to find a workspace root",
+#      and `pnpm build` dies on its FIRST filter.
+#   2. With the root manifest but not the crates it depends on: "failed to load
+#      manifest for dependency `zeroship-migrate`".
+#
+# The nine crates below are the addon's LOCAL closure, computed from
+# `cargo metadata --manifest-path crates/zeroship-migrate-node/Cargo.toml` rather
+# than guessed. They are listed one per line instead of globbed because
+# `COPY crates/zeroship-migrate* crates/` FLATTENS matched directories into the
+# destination, which silently produces a tree cargo cannot read.
+#
+# The workspace `members` globs are `crates/*` and `libs/*`; they match exactly
+# these nine and nothing respectively, and a glob matching less is not an error.
+# A tenth crate entering the closure fails this build loudly, which is the point.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/zeroship-migrate/ crates/zeroship-migrate/
+COPY crates/zeroship-migrate-backend/ crates/zeroship-migrate-backend/
+COPY crates/zeroship-migrate-core/ crates/zeroship-migrate-core/
+COPY crates/zeroship-migrate-ir/ crates/zeroship-migrate-ir/
+COPY crates/zeroship-migrate-mysql/ crates/zeroship-migrate-mysql/
 COPY crates/zeroship-migrate-node/ crates/zeroship-migrate-node/
+COPY crates/zeroship-migrate-policy/ crates/zeroship-migrate-policy/
+COPY crates/zeroship-migrate-postgres/ crates/zeroship-migrate-postgres/
+COPY crates/zeroship-migrate-sqlite/ crates/zeroship-migrate-sqlite/
+# `libs/` (4.6 MB of standalone driver source, no path deps, nothing here builds
+# it) exists ONLY to satisfy the root manifest's second members glob. Cargo does
+# not treat a glob that matches nothing as empty - it falls back to the literal
+# path and reports "failed to load manifest for workspace member /build/libs/*".
+# Measured 2026-08-28 on a scratch workspace: absent -> exit 101; present but
+# EMPTY -> exit 101 with the identical message; populated -> exit 0. So `mkdir
+# libs` would not have worked and the directory has to arrive with crates in it.
+COPY libs/ libs/
+# The platform schema corpus is a workspace member too (pnpm-workspace.yaml says
+# why), so --frozen-lockfile needs it present or the install fails on a missing
+# importer. Copying it HERE rather than only in the `migrate` stage is also what
+# produces `db/migrations-ts/node_modules/zero-migrate` - the link the corpus's
+# own `import ... from "zero-migrate"` resolves through.
+COPY db/migrations-ts/ db/migrations-ts/
 RUN pnpm install --frozen-lockfile
 # Root build script only builds sdks/* (topo: @zeroship/db ->
 # @zeroship/bootstrap -> rest); it does not touch apps/ or examples/.
@@ -226,6 +271,17 @@ COPY --from=builder /build/target/release/zeroship-migrate-server /usr/local/bin
 # The migration SOURCE, baked in rather than bind-mounted, so a host running this
 # image does not also have to hold the source tree and the migrations are pinned
 # to the same commit as the code.
+#
+# THIS COPY IS NOT THE PLATFORM APPLY PATH, and nothing in this image can apply
+# it. The runtime stage has no Node, so the `zero-migrate` CLI cannot run here at
+# all; and these files sit at `/db` with no `node_modules` above them, so their
+# `import ... from "zero-migrate"` would not resolve even if it could. The
+# platform one-shot is the separate `migrate` stage below, which places the same
+# corpus at `/app/db/migrations-ts` for exactly that reason. As of 2026-08-28 no
+# compose service reads this path (`grep -n '/db/migrations-ts'` over
+# deploy/compose/docker-compose.yml finds only comments), so it is a candidate for
+# deletion - left in place here because proving nothing outside deploy/ reads it
+# is a separate piece of work from restoring the apply.
 COPY db/migrations-ts /db/migrations-ts
 
 # ---------------------------------------------------------------------------
@@ -250,11 +306,35 @@ COPY db/migrations-ts /db/migrations-ts
 # prune is smaller and is a SEPARATE change - it needs its own verification, and
 # an image that resolves is worth more than a smaller one that does not.
 #
-# NOT MEASURED: THIS STAGE HAS NOT BEEN BUILT. The workspace it copies is the one
-# proved on the host (35 of 35 migrations applied to a fresh PostgreSQL 17.11,
-# and an immediate re-run applied none), but that run used the host's
-# node_modules rather than this COPY set. The `--version` line below is what
-# turns a resolution mistake into a build failure instead of a deploy failure.
+# WHY THE CORPUS LIVES UNDER /app AND NOT AT /db. It used to be copied to
+# `/db/migrations-ts` while `node_modules` sat at `/app/node_modules`, and that
+# layout cannot work: the CLI loads each migration with a plain `import()` under
+# tsx, so `import ... from "zero-migrate"` resolves by Node's UPWARD WALK from the
+# migration's own directory - `/db/migrations-ts/node_modules`, `/db/node_modules`,
+# `/node_modules` - none of which exist. There was also no `package.json` at `/db`
+# or `/`, so tsx read the `.ts` files as CJS and failed with `Cannot require() ES
+# Module ... in a cycle` before resolution was even reached.
+#
+# Copying it to `/app/db/migrations-ts` fixes both at once and needs no env var:
+# the member's own `node_modules/zero-migrate` comes across as the RELATIVE
+# symlink pnpm wrote (`../../../packages/zero-migrate`), which resolves here to
+# `/app/packages/zero-migrate` because the repo-relative layout is preserved; and
+# `db/migrations-ts/package.json` supplies `"type": "module"`.
+#
+# MEASURED 2026-08-28, and this is the first time this target has ever been
+# built. `docker build --target migrate`, then the image run against an empty
+# database on a fresh PostgreSQL 17.11: 35 of 35 files applied and exit 0,
+# producing 104 tables, 63 functions and the schemas `public`, `service_authn`,
+# `zeroship`, `zeroship_migrations` - byte-identical counts to the host apply. An
+# immediate second run of the image reported `"applied":[]` for all 35 and exited
+# 0. `tests/platform_migration_corpus_gate.sh --with-container` is that run.
+#
+# Getting here took three build failures that no one had seen, because nothing had
+# ever built this: the missing Cargo workspace root, the addon's missing crate
+# closure, and `libs/`. See the `sdks` stage.
+#
+# The `--version` line below still earns its keep - it turns a resolution mistake
+# into a build failure - but it is no longer the only thing behind this target.
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim AS migrate
 WORKDIR /app
@@ -262,11 +342,13 @@ COPY --from=sdks /build/node_modules /app/node_modules
 COPY --from=sdks /build/packages /app/packages
 COPY --from=sdks /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
 COPY --from=sdks /build/package.json /build/pnpm-workspace.yaml /app/
-# The corpus plus the two files that decide what a platform migration may do: the
-# Platform charter (the guard and executor posture) and the table-to-owner
-# registry, without which every op is refused as targeting a table owned by
-# nobody.
-COPY db/migrations-ts /db/migrations-ts
+# The corpus, from the `sdks` stage rather than the build context, so its
+# `node_modules/zero-migrate` link comes with it. Copying it from the context
+# would bring the 35 `.ts` files and NOTHING to resolve their import against.
+COPY --from=sdks /build/db/migrations-ts /app/db/migrations-ts
+# The two files that decide what a platform migration may do: the Platform charter
+# (the guard and executor posture) and the table-to-owner registry, without which
+# every op is refused as targeting a table owned by nobody.
 COPY policies/platform.policy.toml /policies/platform.policy.toml
 COPY policies/platform-table-owners.json /policies/platform-table-owners.json
 # The entrypoint. It takes `--database-url-file PATH` - the same spelling the

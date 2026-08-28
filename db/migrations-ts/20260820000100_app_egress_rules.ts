@@ -1,4 +1,4 @@
-import { table, t, now, grant } from "@zeroship/migrate";
+import { table, t, now, grant } from "zero-migrate";
 
 // `zeroship.app_net_grants` is replaced, not altered. Its `(app_id, host,
 // port)` shape no longer fits twice over: a rule's destination is now a DNS

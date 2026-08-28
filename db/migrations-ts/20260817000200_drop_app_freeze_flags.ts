@@ -1,4 +1,4 @@
-import { table } from "@zeroship/migrate";
+import { table } from "zero-migrate";
 
 // Both columns were operator freeze levers, written only by the two admin
 // routes deleted in the same change and read only by the Cedar entity builder.

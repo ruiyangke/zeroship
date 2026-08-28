@@ -1,4 +1,4 @@
-import { table, t, now, grant } from "@zeroship/migrate";
+import { table, t, now, grant } from "zero-migrate";
 
 // The workflow scheduler store was created at RUNTIME, which no least-privilege
 // deployment can do.

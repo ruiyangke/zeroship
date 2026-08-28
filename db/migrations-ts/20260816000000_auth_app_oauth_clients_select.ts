@@ -1,4 +1,4 @@
-import { grant } from "@zeroship/migrate";
+import { grant } from "zero-migrate";
 
 // Auth resolves an OAuth client's optional app extension when it selects the
 // token subject policy. The first-party CLI registration check also proves the
