@@ -19,6 +19,16 @@
 //! So the extraction is reproduced here, character for character, and pinned
 //! to `PLATFORM_SECRETS`. If the table's spelling changes, this goes red and
 //! names the script.
+//!
+//! WHAT THIS TEST ITSELF MISSED, repaired 2026-08-28. It asserted the script
+//! contained the pattern *including the path* - as one literal, spelled
+//! `crates/core/src/config/secrets.rs`. When the reorg renamed every crate
+//! directory to `crates/zeroship-<name>/`, that made this test a PIN ON THE
+//! BROKEN SPELLING: it required the script to keep naming a file that no longer
+//! existed, and stayed green while the roll's guard read nothing. The pattern
+//! was pinned; the path's *existence* never was. So the path is now asserted
+//! separately from the pattern, and asserted to RESOLVE - a check bound to a
+//! string is bound to the wrong thing when the string is a filename.
 
 use std::path::Path;
 
@@ -26,6 +36,10 @@ use zeroship_core::config::PLATFORM_SECRETS;
 
 const SECRETS_RS: &str = "src/config/secrets.rs";
 const SCRIPT: &str = "../../deploy/scripts/deploy-remote.sh";
+/// The path as the SCRIPT spells it - repo-root-relative, which is where the
+/// script runs. `SECRETS_RS` above is the same file relative to this crate,
+/// which is where cargo runs. Both must name the same file; that is asserted.
+const SECRETS_RS_FROM_ROOT: &str = "crates/zeroship-core/src/config/secrets.rs";
 
 /// The Rust twin of `sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p'`.
 fn scrape(source: &str) -> Vec<String> {
@@ -72,8 +86,42 @@ fn the_deploy_scripts_sed_still_yields_the_whole_table() {
     let script = std::fs::read_to_string(Path::new(SCRIPT))
         .unwrap_or_else(|e| panic!("read {SCRIPT}: {e}"));
     assert!(
-        script.contains(r#"sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/core/src/config/secrets.rs"#),
+        script.contains(r#"sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p'"#),
         "{SCRIPT} no longer runs the extraction this test reproduces; update both together"
+    );
+
+    // ...and must be pointing it at THIS file. Pinning the pattern alone is
+    // what let the reorg move the target out from under a live deploy guard
+    // while every test stayed green.
+    assert!(
+        script.contains(SECRETS_RS_FROM_ROOT),
+        "{SCRIPT} no longer names {SECRETS_RS_FROM_ROOT}; its generated-secret \
+         extraction is pointed at some other file (or none), and an extraction \
+         that reads nothing compares clean against anything"
+    );
+
+    // And that path must RESOLVE. This is the assertion whose absence was the
+    // whole defect: a `contains` on a filename is satisfied by a filename that
+    // is merely SPELLED in the script, present or not. Checked from the repo
+    // root, because that is the directory the script runs in.
+    let root = Path::new(SCRIPT)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("SCRIPT is three levels below the repo root");
+    assert!(
+        root.join(SECRETS_RS_FROM_ROOT).is_file(),
+        "{SCRIPT} scrapes {SECRETS_RS_FROM_ROOT}, which does not exist. Every \
+         roll runs that sed over a missing file and reads ZERO generated-secret \
+         names. Crate directories are 'crates/zeroship-<name>/'."
+    );
+
+    // The two spellings must be the same file, or this test could pass on one
+    // while the script reads the other.
+    assert_eq!(
+        std::fs::read_to_string(root.join(SECRETS_RS_FROM_ROOT)).unwrap(),
+        source,
+        "{SECRETS_RS} and {SECRETS_RS_FROM_ROOT} are not the same file"
     );
 }
 

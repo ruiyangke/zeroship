@@ -42,7 +42,7 @@ RAN=0
 pass() { PASS=$((PASS + 1)); RAN=$((RAN + 1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL + 1)); RAN=$((RAN + 1)); echo "  FAIL $1"; }
 
-DISPATCH="crates/gateway/src/router/dispatch.rs"
+DISPATCH="crates/zeroship-gateway/src/router/dispatch.rs"
 WSDOC="docs/reference/websocket-design.md"
 
 # --- the arm-1 machinery, as functions so --self-test can drive it ---------

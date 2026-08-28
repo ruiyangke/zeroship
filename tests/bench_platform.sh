@@ -36,7 +36,7 @@ for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-bench-
         echo "      Build it before benchmarking; a missing service is started into" >&2
         echo "      /dev/null here and would surface only as an unreachable port." >&2
         echo "      zeroship-bench-server + echo-server carry" >&2
-        echo "      required-features = [\"bench-bins\"] (crates/runtime/Cargo.toml:98-106)," >&2
+        echo "      required-features = [\"bench-bins\"] (crates/zeroship-runtime/Cargo.toml:98-106)," >&2
         echo "      so a plain \`cargo build --release\` does NOT produce them. Build with:" >&2
         echo "        cargo build --release -p zeroship-runtime --features bench-bins --bins" >&2
         exit 2

@@ -364,7 +364,7 @@ else
        does not declare:$undeclared
        This is a NEW ambient environment read in the tests, which the operator
        rule forbids and which clippy's disallowed_methods and
-       crates/core/tests/config_env_access_gate.rs both pass - see this file's
+       crates/zeroship-core/tests/config_env_access_gate.rs both pass - see this file's
        header for why. State the value as a typed argument, or if it must reach
        a child BINARY, give it to that child as a command prefix
        (\`NAME=v cargo test ...\` or \`Command::env\`), which this gate permits.

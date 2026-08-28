@@ -120,7 +120,7 @@ skip_shaped_lines() {
 # have been waved through with the report header. It now matches the header
 # SHAPE as well as the path.
 ALLOW=(
-  'crates/runtime/tests/wpt_[a-z_]+\.rs:[0-9]+:.*=== Skipped|the WPT runners own report header, which precedes their own census'
+  'crates/zeroship-runtime/tests/wpt_[a-z_]+\.rs:[0-9]+:.*=== Skipped|the WPT runners own report header, which precedes their own census'
 )
 
 self_test() {
@@ -349,7 +349,7 @@ number anybody watches moves.
 Three fixes, in order of preference:
 
   1. Make it FAIL. Postgres and Redis are not optional for this workspace --
-     see the policy in crates/test-support/src/lib.rs. If the test cannot run
+     see the policy in crates/zeroship-test-support/src/lib.rs. If the test cannot run
      without a backend, panic with the address it dialled and
      tests/provision_test_backends.sh, do not skip. This is what most of the
      original sixteen became.

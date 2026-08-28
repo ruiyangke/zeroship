@@ -3828,7 +3828,7 @@ SQL
       a creator SEES (nothing) and does NOT establish that the log rail is
       broken, because it cannot show any JS ran. sdks/bootstrap/src/dispatcher.ts
       :55-58 records that an unparseable body is rejected by the RUST parser
-      (crates/runtime/src/core/runtime.rs::parse_rpc_body) before the JS
+      (crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_body) before the JS
       dispatcher, and a request that never reached JS printed nothing, so
       nothing arriving is expected rather than symptomatic. CAVEAT, unresolved:
       that comment is about a BODY and this probe uses the query string, so
@@ -4201,7 +4201,7 @@ else
       Every assertion below would pass over an app that was already gone or a
       schema that was never created. FAILED SETUP, not a pass. If this recurs,
       the per-app schema is no longer named by app_id -- check
-      crates/plugin-db/src/drop_namespace.rs and the migrated apply path."
+      crates/zeroship-plugin-db/src/drop_namespace.rs and the migrated apply path."
   fi
 
   # PUT THE SECOND CASCADE BLOCKER IN PLAY, so a fix for the first one cannot
@@ -4324,7 +4324,7 @@ else
     fail "the per-app Postgres schema SURVIVED the delete -- schema(s)=$DEL_NSP_POST table(s)=$DEL_TBL_POST
       (was $DEL_TBL_PRE before). purge_app deletes the manifest keyspace and the
       zeroship.apps/oauth_clients rows and stops; nothing calls
-      crates/plugin-db/src/drop_namespace.rs, whose only callers are plugin-db's
+      crates/zeroship-plugin-db/src/drop_namespace.rs, whose only callers are plugin-db's
       own integration tests. The creator's data outlives the app. See #330.
       AND IT IS NOT MERELY THAT THE DELETE FAILED FIRST. MEASURED directly on
       the golden database, in a transaction that was rolled back: with both

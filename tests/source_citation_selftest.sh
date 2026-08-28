@@ -38,8 +38,8 @@ SCAN=tests/source_citation_scan.sh
 # Planted inside a real scanned root so the probe exercises the same resolution
 # path a genuine citation would. A temp file outside the tree would prove
 # nothing: the scan would never look at it.
-PROBE=crates/core/src/zz_citation_selftest_probe.rs
-CITATION="crates/core/src/this_file_does_not_exist_zz.rs"
+PROBE=crates/zeroship-core/src/zz_citation_selftest_probe.rs
+CITATION="crates/zeroship-core/src/this_file_does_not_exist_zz.rs"
 
 # The doc-side probe. In `docs/reference/` rather than at the docs root on
 # purpose: a probe in a directory the exclusion list names would be filtered out
@@ -49,7 +49,7 @@ CITATION="crates/core/src/this_file_does_not_exist_zz.rs"
 # is. The citation is written with a `../` prefix so the doc-relative resolution
 # arm is what has to reject it - the arm that does not exist on the source side.
 DOC_PROBE=docs/reference/zz-citation-selftest-probe.md
-DOC_CITATION="../../crates/core/src/this_doc_citation_does_not_exist_zz.rs"
+DOC_CITATION="../../crates/zeroship-core/src/this_doc_citation_does_not_exist_zz.rs"
 
 # The build-state probe (direction 5). An UNTRACKED file that EXISTS, cited from
 # a scanned root. That combination is the whole subject: it resolves here and
@@ -58,13 +58,13 @@ DOC_CITATION="../../crates/core/src/this_doc_citation_does_not_exist_zz.rs"
 # A path of its own rather than reusing one of the real `dist/` citations,
 # because those are already reported - a probe indistinguishable from the
 # standing output would pass whether or not the probe did anything.
-BUILD_PROBE=crates/core/src/zz_buildstate_selftest_probe.rs
+BUILD_PROBE=crates/zeroship-core/src/zz_buildstate_selftest_probe.rs
 BUILD_DIR=examples/zz-buildstate-selftest/dist
 BUILD_TARGET="$BUILD_DIR/probe.js"
 # A TRACKED file, cited the same way, as the discrimination control: the report
 # must name the untracked one and NOT this, or it is just listing everything
 # that resolved.
-TRACKED_CITATION="crates/core/src/typed_id.rs"
+TRACKED_CITATION="crates/zeroship-core/src/typed_id.rs"
 
 cleanup() {
   rm -f "$PROBE" "$DOC_PROBE" "$BUILD_PROBE"
