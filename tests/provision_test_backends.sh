@@ -111,7 +111,7 @@ fatal() { echo "FATAL: $*" >&2; exit 1; }
 #   error while interpolating services.worker.environment.ZEROSHIP_WORKER_KEY:
 #   required variable ZEROSHIP_WORKER_KEY is missing a value: run zeroship dev init
 # Compose interpolates the WHOLE file before it selects services, so the `:?`
-# guards on the PLATFORM services (auth, control, gateway, worker, migrated)
+# guards on the PLATFORM services (auth, control, gateway, worker, migrate-server)
 # reject a run that would not have started any of them. Those guards are right
 # and stay: booting the platform with junk credentials is exactly what they
 # exist to stop.
@@ -301,7 +301,7 @@ fi
 #
 # WHY IT IS GENERATED AND GITIGNORED RATHER THAN COMMITTED. Every DSN leaf in
 # the schema is `secret`-classed - checked against the compiled contract dump,
-# all eight of auth/control/gateway/migrated(x2)/worker(x2)/workflow_scheduler.
+# all eight of auth/control/gateway/migrate-server(x2)/worker(x2)/workflow_scheduler.
 # Check 8 of tests/config_name_alignment_gate.sh fails ANY tracked *.toml
 # holding a literal at a secret-classed leaf and states it will never carry an
 # exception list. Committing this file with a real DSN was tried and rejected:
@@ -333,7 +333,7 @@ database_url = "$PG_DSN"
 [gateway]
 database_url = "$PG_DSN"
 
-[migrated]
+[migrate_server]
 database_url = "$PG_DSN"
 
 [worker]

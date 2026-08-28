@@ -11,7 +11,7 @@ silently crosses review boundaries. Cite findings from this review as
 
 Out of scope by operator instruction (active edit): `sdks/db`, `sdks/migrate`,
 `sdks/bootstrap`, `crates/plugin-db`, `crates/zeroship-schema`,
-`crates/migrated`, `crates/zeroship-migrate-adapter`, `db/`,
+`crates/zeroship-migrate-server`, `crates/zeroship-migrate-adapter`, `db/`,
 `docs/reference/db.md`. Where a gateway finding touches one of those the
 dependency is stated and the trail stops there.
 

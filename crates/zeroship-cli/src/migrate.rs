@@ -22,7 +22,7 @@
 //! `SET LOCAL ROLE` to on every `env.db` call
 //! (`crates/plugin-db/src/auth/bootstrap.rs`). Nothing else in the platform
 //! creates that role - `migrated`'s apply path is its only producer
-//! (`crates/migrated/src/apply.rs`). Deploy an app that uses `env.db` without
+//! (`crates/zeroship-migrate-server/src/apply.rs`). Deploy an app that uses `env.db` without
 //! applying its migrations and the FIRST database call fails with
 //! `role "app_..._role" does not exist`, which reaches the end user as
 //! `{"message":"internal error"}`. Before this command there was no supported

@@ -126,7 +126,7 @@
 # found nothing print the same thing" confusion the whole file is built around.
 #
 # MEASURED on main at 6d3ca2d84, with the two-feature list this gate used to
-# carry (`zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`):
+# carry (`zeroship-control/live-db-tests,zeroship-migrate-server/live-db-tests`):
 #
 #   declared non-default features across the 30 members   28
 #   features that resolution enabled                      10
@@ -252,7 +252,7 @@ gate_arms_init clippy
 # run cannot lint different sets of targets, and `cargo metadata` below is asked
 # with the SAME flag so the two cannot disagree about what was in scope.
 #
-# It was `--features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`
+# It was `--features zeroship-control/live-db-tests,zeroship-migrate-server/live-db-tests`
 # until 2026-08-20, carried over verbatim from the ci.yml step this replaced:
 #
 #   `--all-targets` only reaches targets whose `required-features` are

@@ -102,7 +102,7 @@ pub const PLATFORM_SECRETS: &[PlatformSecret] = &[
         validate: validate_worker_key,
     },
     PlatformSecret {
-        env: "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY",
+        env: "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY",
         strength: SecretStrength::Unrestricted,
         validate: require_nonempty,
     },
@@ -165,7 +165,7 @@ fn reject_known_weak(label: &str, value: &str, denylist: &[&str]) -> Result<(), 
 ///
 /// The floorless validator: the only thing it rules on is
 /// [`is_unset_credential`], so `ZEROSHIP_CONTROL_KEY` and
-/// `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` - the two
+/// `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` - the two
 /// [`SecretStrength::Unrestricted`] rows - get the sentinel refusal and nothing
 /// else. That is the whole reason the sentinel cannot be left to the length
 /// floor: these two have none.

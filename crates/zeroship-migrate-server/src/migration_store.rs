@@ -666,7 +666,7 @@ mod tests {
              it creates only its own migrated_migrations table.\n\
              Point it at one, e.g. run `tests/provision_test_backends.sh` to provision \
              a migrated test database and generate the TOML overlay, then:\n  \
-             cargo test -p zeroship-migrated --features live-db-tests\n\
+             cargo test -p zeroship-migrate-server --features live-db-tests\n\
              The DSN comes from `zeroship_core::config::test_database_url()`, which \
              panics naming that command when nothing is configured.",
             missing.join(", zeroship."),

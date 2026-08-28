@@ -2,22 +2,22 @@
 //!
 //! `POST /api/apps/{id}/migrations/apply` authorizes the caller for the app
 //! named in ITS OWN path segment and then forwards the request to
-//! `zeroship-migrated`'s `POST /v1/apps/{app_id}/migrations/apply`.
+//! `zeroship-migrate-server`'s `POST /v1/apps/{app_id}/migrations/apply`.
 //!
 //! # Why control is in this path at all
 //!
 //! `migrated` already authenticates and authorizes creators correctly:
-//! `crates/migrated/src/api.rs` verifies the bearer and requires
-//! `Action::AppsDeploy` on the app, and `crates/migrated/src/auth.rs`
+//! `crates/zeroship-migrate-server/src/api.rs` verifies the bearer and requires
+//! `Action::AppsDeploy` on the app, and `crates/zeroship-migrate-server/src/auth.rs`
 //! additionally requires a `role = 'owner'` row in `zeroship.app_members`. A
 //! creator's own bearer is a first-class caller there, not an operator-only
 //! surface: `migrated` builds a `zeroship_authn::BearerVerifier` over the
 //! platform OP's issuer and JWKS (`--auth-platform-issuer` /
-//! `--auth-platform-jwks-url`, `crates/migrated/src/main.rs`), which is the
+//! `--auth-platform-jwks-url`, `crates/zeroship-migrate-server/src/main.rs`), which is the
 //! same OP that issued the token control just verified.
 //!
 //! THIS PARAGRAPH SAID SOMETHING ELSE until 2026-08-20: that the two agree
-//! because compose points them at one `ZEROSHIP_MIGRATED_SIGNING_KEY_FILE`,
+//! because compose points them at one `ZEROSHIP_MIGRATE_SERVER_SIGNING_KEY_FILE`,
 //! quoted from the compose file. 8e365f478 deleted control's PAT signing key
 //! and that compose line with it, so the quotation named a line that no longer
 //! exists and the mechanism it described was gone. What makes the two agree is
@@ -117,7 +117,7 @@ pub async fn apply_migrations(
     };
 
     match forward_apply(
-        &state.migrated_url,
+        &state.migrate_server_url,
         &uid,
         bearer,
         &authz.request_id,
@@ -172,7 +172,7 @@ pub(crate) struct ForwardedResponse {
 /// `app_id` is a `Uuid`, not a string, so the downstream path segment cannot
 /// carry anything the caller wrote.
 async fn forward_apply(
-    migrated_url: &str,
+    migrate_server_url: &str,
     app_id: &Uuid,
     bearer: &str,
     request_id: &str,
@@ -180,7 +180,7 @@ async fn forward_apply(
 ) -> Result<ForwardedResponse, String> {
     let url = format!(
         "{}/v1/apps/{app_id}/migrations/apply",
-        migrated_url.trim_end_matches('/')
+        migrate_server_url.trim_end_matches('/')
     );
     let client = cyper::Client::new();
     let builder = client

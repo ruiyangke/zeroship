@@ -15,11 +15,11 @@ use ntex::web::{self, test, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
-use zeroship_migrated::auth::{
+use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
-use zeroship_migrated::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
-use zeroship_migrated::MigrationServiceState;
+use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
+use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
@@ -383,7 +383,7 @@ fn state_for_with_ceiling_version(
 fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
     let app_id = Uuid::now_v7();
     let parse = |body: &str| {
-        policy_config.parse_draft(&zeroship_migrated::policy::CreatorPolicyDraft {
+        policy_config.parse_draft(&zeroship_migrate_server::policy::CreatorPolicyDraft {
             filename: MIGRATE_POLICY_FILENAME,
             body,
         })
@@ -538,7 +538,7 @@ fn with_policy(mut request: Value, body: &str) -> Value {
 // II.6 load gate refuses ANY document raising one above its default
 // (`DeclaredOnlyNonDefault`), in an operator ceiling or a creator draft alike. The
 // grant was dropped from the shipped ceilings and the `policy.rs` unit tests on
-// 2026-08-10 (see `crates/migrated/policies/confined.policy.toml`) and not from
+// 2026-08-10 (see `crates/zeroship-migrate-server/policies/confined.policy.toml`) and not from
 // here, so every test that PUT this fixture got a 422 for a parse failure instead
 // of exercising the behaviour its name claims. `assert_policy_fixtures_are_current`
 // below is what makes the next such removal fail as a stale fixture.
@@ -857,7 +857,7 @@ async fn policy_api_submits_gets_and_lists_versioned_policy_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -938,7 +938,7 @@ async fn policy_api_rejects_escalating_draft_at_submit_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -978,7 +978,7 @@ async fn policy_api_rejects_malformed_toml_at_submit_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1016,7 +1016,7 @@ async fn policy_api_rejects_cross_app_get_and_put() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1051,7 +1051,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1160,7 +1160,7 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1230,7 +1230,7 @@ async fn destructive_apply_requires_operator_approval_then_applies_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1360,7 +1360,7 @@ async fn on_destructive_gates_destructive_migration_only_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1414,8 +1414,8 @@ async fn on_destructive_gates_destructive_migration_only_pg() {
 // approved_checksum = X) → drift-detected revert (approved_checksum ≠ X') → pending.
 #[ntex::test]
 async fn store_state_machine_plan_approve_and_content_drift_revert_pg() {
-    use zeroship_migrated::migration_store::{MigrationStore, StoreMigrationInput};
-    use zeroship_migrated::policy::ManagedPosture;
+    use zeroship_migrate_server::migration_store::{MigrationStore, StoreMigrationInput};
+    use zeroship_migrate_server::policy::ManagedPosture;
     use zeroship_migrate::DestructiveOps;
 
     let conn = admin_conn().await;
@@ -1527,7 +1527,7 @@ async fn approval_repreflight_engine_error_audits_rejected_preflight_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1644,7 +1644,7 @@ async fn approval_refuses_stale_ceiling_after_operator_tightening_pg() {
     let svc_v1 = test::init_service(
         web::App::new()
             .state(state_v1)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1674,7 +1674,7 @@ async fn approval_refuses_stale_ceiling_after_operator_tightening_pg() {
     let svc_v2 = test::init_service(
         web::App::new()
             .state(state_v2)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
     let approve = test::TestRequest::post()
@@ -1753,7 +1753,7 @@ async fn approval_repreflight_refuses_when_current_policy_changes_reviewed_scope
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1857,7 +1857,7 @@ async fn apply_api_uses_stored_current_policy_when_no_inline_draft_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1902,7 +1902,7 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1937,7 +1937,7 @@ async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1963,7 +1963,7 @@ async fn apply_api_rejects_bearer_for_different_app() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -1991,7 +1991,7 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -2049,7 +2049,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -2111,7 +2111,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -2146,7 +2146,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -2286,7 +2286,7 @@ async fn authz_receives_the_callers_request_id_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 
@@ -2336,7 +2336,7 @@ async fn resubmitting_a_gated_migration_reuses_the_pending_row_pg() {
     let svc = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
 

@@ -180,8 +180,8 @@ that three other platform audit tables have:
 them.
 
 **VERIFIED.** Every migration-apply outcome writes a
-`migrated_migration_audit` row - `crates/migrated/src/apply.rs` calls
-`record_audit` at ten sites, and `crates/migrated/src/migration_store.rs:301` is
+`migrated_migration_audit` row - `crates/zeroship-migrate-server/src/apply.rs` calls
+`record_audit` at ten sites, and `crates/zeroship-migrate-server/src/migration_store.rs:301` is
 the single `INSERT`. So the trigger fires for every app that has ever applied a
 migration, which is every app that has a schema to drop. **The set of apps whose
 schemas need dropping and the set of apps whose delete cannot complete are the

@@ -81,7 +81,7 @@ pub struct ControlSettings {
     #[config(name = "control.gateway_url", default = "http://localhost".to_owned())]
     pub gateway_url: Operational<String>,
 
-    /// Migration-service (`zeroship-migrated`) internal base URL.
+    /// Migration-service (`zeroship-migrate-server`) internal base URL.
     ///
     /// `POST /api/apps/{id}/migrations/apply` forwards here. It is an INTERNAL
     /// address by construction: migrated holds the superuser provisioning DSN
@@ -89,8 +89,8 @@ pub struct ControlSettings {
     /// (`deploy/compose/docker-compose.yml`, the `migrated` service), so this
     /// hop is the only creator-reachable route to it. The default matches that
     /// compose port.
-    #[config(name = "control.migrated_url", default = "http://localhost:9091".to_owned())]
-    pub migrated_url: Operational<String>,
+    #[config(name = "control.migrate_server_url", default = "http://localhost:9091".to_owned())]
+    pub migrate_server_url: Operational<String>,
 
     /// Provider used as the usage meter.
     #[config(name = "control.meter_provider", default = "lite".to_owned())]

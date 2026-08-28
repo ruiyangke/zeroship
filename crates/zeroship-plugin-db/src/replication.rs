@@ -182,7 +182,7 @@ pub async fn ensure_worker_slot(
                 "replication: publication {pub_name} is missing for app {app_id}"
             ),
             hint: Some(
-                "apply the app migrations so zeroship-migrated reconciles the publication"
+                "apply the app migrations so zeroship-migrate-server reconciles the publication"
                     .to_string(),
             ),
         });

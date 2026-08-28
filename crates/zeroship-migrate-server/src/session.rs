@@ -1,14 +1,15 @@
-//! `zeroship-migrate-adapter` - the monorepo's native-PG producer for the
-//! published `zero-migrate` engine's driver seam.
+//! `CompioPgSession` - this service's native-PG producer for the published
+//! `zero-migrate` engine's driver seam.
 //!
 //! The standalone [`zeroship_migrate`] engine is runtime-free and driver-free: its
-//! Postgres apply path (the generic [`PostgresBackend`](zeroship_migrate::PostgresBackend),
-//! the `<D: SqlSession>` journal/drift/precondition/baseline free functions, and
-//! the `<D: SqlSession>` executor) is generic over the driver-neutral
+//! Postgres apply path (the generic
+//! [`PostgresBackend`](zeroship_migrate_postgres::PostgresBackend), the
+//! `<D: SqlSession>` journal/drift/precondition/baseline free functions, and the
+//! `<D: SqlSession>` executor) is generic over the driver-neutral
 //! [`zeroship_migrate::driver::SqlSession`] seam. The engine ships NO native Rust
 //! network Postgres driver - the production producer is the napi/Node `pg` host.
 //!
-//! This crate supplies the MONOREPO's producer: [`CompioPgSession`], a newtype
+//! This module supplies the MONOREPO's producer: [`CompioPgSession`], a newtype
 //! wrapping [`compio_postgres::Client`] that implements [`SqlSession`], mapping the
 //! neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] seam types onto the platform's
 //! io_uring PG driver. This lets the engine's apply flow run over the platform's
@@ -17,17 +18,20 @@
 //! The newtype exists to satisfy Rust's orphan rule: both
 //! `compio_postgres::Client` and [`SqlSession`] are foreign to this crate, so a
 //! bare `impl SqlSession for compio_postgres::Client` is disallowed. The newtype
-//! is the clean, allowed carrier.
+//! is the clean, allowed carrier. THE ORPHAN RULE IS SATISFIED BY THE NEWTYPE
+//! BEING LOCAL, NOT BY IT LIVING IN A CRATE OF ITS OWN, which is why this is a
+//! module of the one crate that drives it rather than a crate of its own.
 //!
 //! # Lower IR through the GUARDED door only
 //!
 //! The engine exposes five lowering entry points and they are not equivalent.
 //! Use `IrAuthor::load_and_lower_guarded` (or `load_and_lower`), which routes
-//! through `model::load::load_ir_document_authorized`. THIS CRATE NO LONGER LOWERS
-//! ANYTHING - it is the session newtype and nothing else since the platform one-shot
-//! was deleted on 2026-08-28 - so the in-tree consumer to read is
-//! `crates/zeroship-migrated/src/apply.rs:1082` and `:1227`. The note stays because
-//! the seam this crate exposes is what those callers drive.
+//! through `model::load::load_ir_document_authorized`. THIS MODULE LOWERS
+//! NOTHING - it is the session newtype and nothing else - so the consumers to
+//! read are this crate's own `apply::apply_one_ir_file_postgres` and
+//! `apply::preflight_ir_documents`, the two `load_and_lower_guarded` call sites.
+//! The note stays because the seam this module exposes is what those callers
+//! drive. They are named rather than cited by line number, which cannot rot.
 //!
 //! `IrAuthor::lower`, `lower_plan` and `lower_steps` take an ALREADY-deserialized
 //! `MigrationIr` and do NOT run the loader. What that actually costs is narrower
@@ -92,7 +96,7 @@
 //! these are too - but a prior is not a measurement, and absence must not be
 //! inferred for them without finding the behaviour rather than the symbol.
 //!
-//! Deserializing IR directly is fine as a PRE-PASS - `crates/migrated`
+//! Deserializing IR directly is fine as a PRE-PASS - this crate
 //! deserializes to resolve table-shape policy and re-serializes, then hands the
 //! resolved bytes to the guarded door, which is the same shape the engine's own
 //! Node addon uses. What must not happen is deserialize-then-lower.
@@ -103,7 +107,7 @@
 //! the bypass is currently avoided by convention, not by construction.
 //!
 //! The mapping is a near-mechanical port of the engine's own
-//! `third_party/zero-migrate/crates/zeroship-migrate/src/apply/backend/postgres/session.rs`
+//! `crates/zeroship-migrate-postgres/src/backend/session.rs`
 //! `PgSession` impl (whose neutral `Seam*` types are the SAME shape as the standalone's
 //! `driver::*` types, renamed): `batch_execute -> batch`, `execute -> exec`,
 //! `query`/`query_one` unchanged; the `SeamBind -> Value`/`SeamRow`/`SeamError`
@@ -155,7 +159,7 @@ impl CompioPgSession {
         let (client, connection) = compio_postgres::connect(dsn, compio_postgres::NoTls).await?;
         compio::runtime::spawn(async move {
             if let Err(e) = connection.run().await {
-                tracing::error!(error = %e, "zeroship-migrate-adapter: pg connection loop ended with error");
+                tracing::error!(error = %e, "zeroship-migrate-server: pg connection loop ended with error");
             }
         })
         .detach();
@@ -181,7 +185,7 @@ impl CompioPgSession {
         let (client, connection) = config.connect(compio_postgres::NoTls).await?;
         compio::runtime::spawn(async move {
             if let Err(e) = connection.run().await {
-                tracing::error!(error = %e, "zeroship-migrate-adapter: pg connection loop ended with error");
+                tracing::error!(error = %e, "zeroship-migrate-server: pg connection loop ended with error");
             }
         })
         .detach();
@@ -199,7 +203,7 @@ impl CompioPgSession {
 // ---------------------------------------------------------------------------
 // Neutral-type mapping - the FIRST monorepo producer of every `driver::*` type.
 // Ported from
-// `third_party/zero-migrate/crates/zeroship-migrate/src/apply/backend/postgres/session.rs`.
+// `crates/zeroship-migrate-postgres/src/backend/session.rs`.
 // ---------------------------------------------------------------------------
 
 /// `compio_postgres::Error -> driver::DbError`. The engine treats the error
@@ -373,14 +377,17 @@ fn cell_to_value(row: &PgRow, idx: usize, ty: &Type) -> Result<Value, DbError> {
 
     // Arrays first: `text[]` (and any `Kind::Array` whose element is text-family)
     // -> `TextArray`. Also catches `information_schema` array domains.
-    if let Kind::Array(elem) = base.kind()
-        && is_text_family(resolve_domain(elem))
-    {
-        return match row.try_get::<_, Option<Vec<Option<String>>>>(idx) {
-            Ok(Some(v)) => Ok(Value::TextArray(v)),
-            Ok(None) => Ok(Value::Null),
-            Err(e) => Err(DbError::message(format!("decode text[] cell: {e}"))),
-        };
+    //
+    // Nested `if`s rather than an `if let ... && ...` chain: this crate is edition
+    // 2021 and let chains need 2024. Same evaluation order, same short circuit.
+    if let Kind::Array(elem) = base.kind() {
+        if is_text_family(resolve_domain(elem)) {
+            return match row.try_get::<_, Option<Vec<Option<String>>>>(idx) {
+                Ok(Some(v)) => Ok(Value::TextArray(v)),
+                Ok(None) => Ok(Value::Null),
+                Err(e) => Err(DbError::message(format!("decode text[] cell: {e}"))),
+            };
+        }
     }
 
     match *base {

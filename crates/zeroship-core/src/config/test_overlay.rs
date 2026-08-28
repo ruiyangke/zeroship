@@ -18,8 +18,8 @@
 //! WHY THE FILE IS GENERATED AND GITIGNORED, which is the one place this
 //! diverges from the obvious shape. Every DSN leaf in the schema is
 //! `secret`-classed - `auth.database_url`, `control.database_url`,
-//! `gateway.database_url`, `migrated.database_url`,
-//! `migrated.provision_database_url`, `worker.database_url`, `worker.kv_url`,
+//! `gateway.database_url`, `migrate_server.database_url`,
+//! `migrate_server.provision_database_url`, `worker.database_url`, `worker.kv_url`,
 //! `workflow_scheduler.database_url`, verified against the compiled contract
 //! dump. Check 8 of `tests/config_name_alignment_gate.sh` fails any TRACKED
 //! `*.toml` holding a literal at a secret-classed leaf, and it says in terms

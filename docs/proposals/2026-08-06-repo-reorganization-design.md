@@ -79,7 +79,7 @@ machinery STAY.** Only the backfill-specific surface is removed (see Phase 4).
 
 ### P5 — Docs drift: `AGENTS.md` points at a crate that no longer exists
 `AGENTS.md` (task router + crate index) references **`crates/zeroship-migrate/`**,
-which was split into `crates/migrated` (creator migration service) +
+which was split into `crates/zeroship-migrate-server` (creator migration service) +
 `crates/zeroship-migrate-adapter` + `crates/zeroship-schema` (leaf schema authority)
 + the `third_party/zero-migrate` submodule. The landing page must match the tree.
 

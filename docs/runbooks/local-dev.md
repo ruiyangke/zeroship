@@ -162,7 +162,7 @@ Notes:
   use compiled defaults even if that file exists (`ZEROSHIP_NO_CONFIG=1` does the
   same). The worker exposes neither selector and never discovers an overlay;
   this prevents it from reading operator credentials. All five server binaries
-  answer `--check-config`, including `zeroship-migrated`. A missing well-known file is
+  answer `--check-config`, including `zeroship-migrate-server`. A missing well-known file is
   fine (defaults apply); a present-but-broken one is a hard startup error. Dev
   usually just passes `--config deploy/ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
   rather than installing into `/etc`.

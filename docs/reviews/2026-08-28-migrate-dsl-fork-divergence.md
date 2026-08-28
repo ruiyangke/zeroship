@@ -97,6 +97,6 @@ schema**. That is the immediate consequence and the reason this note exists.
 ## What this note does not establish
 
 Whether creator-facing migrations are affected. They travel a different path
-(`crates/zeroship-migrated`) and were not measured here. The two divergences
+(`crates/zeroship-migrate-server`) and were not measured here. The two divergences
 above are the two the platform corpus happens to exercise; the forks are ~30 KB
 apart in source and nothing here bounds what else differs.

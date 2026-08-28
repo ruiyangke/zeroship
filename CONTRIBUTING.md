@@ -120,7 +120,7 @@ tests/run_auth_suite.sh         # the auth live-database gate. Uses a SHARED
                                 # refused. docs/runbooks/local-dev.md says why.
 tests/run_billing_suite.sh      # provisions the DB + runs every live-database suite
                                 # (everything behind the `live-db-tests` feature
-                                #  in zeroship-control / zeroship-migrated)
+                                #  in zeroship-control / zeroship-migrate-server)
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it

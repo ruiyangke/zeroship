@@ -1527,20 +1527,20 @@ VERIFIED walk-through:
    (`crates/control/src/migrations_api.rs:70-118`).
 2. Control forwards that raw bearer and request ID to the configured Migrated
    URL (`crates/control/src/migrations_api.rs:147-196`). The shipped compose URL
-   is plain `http://migrated:9091`
+   is plain `http://migrate-server:9091`
    (`deploy/compose/docker-compose.yml:305-316`).
 3. Migrated extracts the bearer and independently invokes the shared
    `BearerVerifier`, preserving the caller's scope-derived wrapper policy and
    the owner lifecycle check, then requires Cedar `AppsDeploy` plus app
-   ownership before applying (`crates/migrated/src/api.rs:79-108`,
-   `crates/migrated/src/auth.rs`, `ControlPlaneAuthenticator::verify_action`).
+   ownership before applying (`crates/zeroship-migrate-server/src/api.rs:79-108`,
+   `crates/zeroship-migrate-server/src/auth.rs`, `ControlPlaneAuthenticator::verify_action`).
    Auth signs the platform OAuth JWTs and Supabase signs the GoTrue JWTs
    (`crates/auth/src/oidc/issuer.rs:453-473`,
    `crates/core/src/auth_provider/supabase.rs:312-390`); since the PAT class
    was deleted (section 4.1) Migrated holds no signing key at all. Unlike
    Control, Migrated configures a platform-only OAuth provider, so a Supabase
    bearer accepted by Control fails here (`crates/control/src/main.rs`,
-   `crates/migrated/src/main.rs`); see Finding 17. It signs no replacement
+   `crates/zeroship-migrate-server/src/main.rs`); see Finding 17. It signs no replacement
    credential.
 
 ### 4.3 Workflow signal-capability issuance
@@ -1686,8 +1686,8 @@ VERIFIED walk-through:
    (`crates/control/src/config.rs:328-341`,
    `crates/gateway/src/config.rs:44-50`,
    `crates/worker/src/config.rs:54-64`,
-   `crates/migrated/src/config.rs:101-103`,
-   `crates/migrated/src/main.rs:86-106`). Gateway uses it for route sync and
+   `crates/zeroship-migrate-server/src/config.rs:101-103`,
+   `crates/zeroship-migrate-server/src/main.rs:86-106`). Gateway uses it for route sync and
    Worker uses it for versions and decrypted app environment fetches
    (`crates/gateway/src/sync.rs:174-200`,
    `crates/worker/src/sync.rs:466-485`,
@@ -2097,7 +2097,7 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Gateway OIDC stash | Gateway HMAC signer | Gateway callback | 10m | Yes, key rotation | One automatic RP callback (`crates/gateway/src/oidc_rp.rs:148-311`, `crates/gateway/src/oidc_rp.rs:1017-1041`) |
 | OP device and user codes | Auth | Auth OP token and shared device page | 10m, one use | No supported early revoke; consume or expiry | RFC 8628 OP grant (`crates/auth/src/oidc/device_token.rs:124-187`, `crates/auth/src/oidc/device_token.rs:298-518`) |
 | Control device and user codes | Control | Control poll and Auth device page | 10m, one use | No supported early revoke; consume or expiry | `zeroship login` approval (`crates/control/src/device_handlers.rs:152-222`, `crates/control/src/device_handlers.rs:304-536`) |
-| CLI platform access JWT | Auth, requested by Control | Control or Migrated OAuth verifier | 12h maximum | No supported recall path; a family marker would be honored and lifecycle is checked | Fixed deploy-scope subset (`crates/control/src/device_handlers.rs:70-89`, `crates/authn/src/lib.rs:320-376`, `crates/core/src/device_grant.rs:34-43`, `crates/migrated/src/main.rs:166-179`) |
+| CLI platform access JWT | Auth, requested by Control | Control or Migrated OAuth verifier | 12h maximum | No supported recall path; a family marker would be honored and lifecycle is checked | Fixed deploy-scope subset (`crates/control/src/device_handlers.rs:70-89`, `crates/authn/src/lib.rs:320-376`, `crates/core/src/device_grant.rs:34-43`, `crates/zeroship-migrate-server/src/main.rs:166-179`) |
 | Supabase GoTrue bearer | Configured Supabase project | Control Supabase verifier | Provider JWT lifetime | No local recall | General Control access under mapped grants and Cedar, including device approval (`crates/core/src/auth_provider/supabase.rs:312-390`, `crates/authn/src/lib.rs:378-445`, `crates/control/src/device_handlers.rs:815-958`) |
 | `ZeroShip-User` | Gateway HMAC signer | Worker | 60s, request-ID bound | No, no independent row | Identity for exactly one dispatch (`crates/core/src/auth/mod.rs:322-433`) |
 | `worker_key` bearer | Operator config | Worker | Config lifetime | Yes, global rotation | Gateway dispatch and Control log retrieval (`crates/worker/src/handler.rs:67-116`, `crates/control/src/api.rs:2162-2222`) |
@@ -2119,7 +2119,7 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Gateway | App route, cookie validity, OP JWT validity, pairwise projection, route auth level/scopes, request identity HMAC, public signal transport | Signature/type/issuer/expiry, app/client/audience, CSRF for cookie mutation, family marker when DB is configured, and route policy; it does not validate `wst_` (`crates/gateway/src/router/auth.rs:142-460`, `crates/gateway/src/router/auth.rs:654-1021`, `crates/gateway/src/signal_ingress.rs:67-125`) |
 | Control plus authn/authz | Creator principal, OAuth provider result, current owner authority, the scope-derived wrapper policy | Bearer cryptography and DB state and principal lifecycle; owner/wrapper Cedar only where a handler calls `require`. Every accepted bearer now carries a wrapper built from the closed scope vocabulary, so one Cedar action is unreachable, Finding 30 (`crates/authn/src/lib.rs`, `BearerVerifier::verify_bearer` and `oauth_guard_from_bearer`; `crates/control/src/authz_guard.rs`, `AuthzGuard::require`) |
 | Control workflow API | App-scoped operations and signed `wst_` claims; master and per-app HMAC keys | Mint requires app-scoped HMAC and live target; ingress requires Gateway `control_key`, then capability HMAC, expiry, type, target, epoch, and replay (`crates/control/src/workflow_instance_api.rs:326-405`, `crates/control/src/workflow_instance_api.rs:2129-2266`, `crates/control/src/workflow_instance_api.rs:2317-2587`) |
-| Migrated plus authn/authz | Independently verified creator principal and migration policy result | Reverify the forwarded raw bearer, active principal, app ownership, Cedar deploy action, and operator-ceiling intersection (`crates/migrated/src/api.rs:79-108`; `crates/migrated/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and `authorize`; `crates/migrated/src/policy.rs:110-133`, `crates/migrated/src/apply.rs:214-239`) |
+| Migrated plus authn/authz | Independently verified creator principal and migration policy result | Reverify the forwarded raw bearer, active principal, app ownership, Cedar deploy action, and operator-ceiling intersection (`crates/zeroship-migrate-server/src/api.rs:79-108`; `crates/zeroship-migrate-server/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and `authorize`; `crates/zeroship-migrate-server/src/policy.rs:110-133`, `crates/zeroship-migrate-server/src/apply.rs:214-239`) |
 | External signal caller | A plaintext `wst_` capability and its permitted payload | Present the capability in the JSON body; Gateway proves nothing about it and Control proves HMAC, expiry, type, target, epoch, and replay (`crates/gateway/src/signal_ingress.rs:67-125`, `crates/control/src/workflow_instance_api.rs:2317-2587`) |
 | Control scheduler | Workflow run and app IDs in the advance JSON body | It currently proves no caller identity to Gateway; see Finding 15 (`crates/control/src/cron/workflow_engine.rs:194-232`, `crates/gateway/src/router/dispatch.rs:99-160`) |
 | Worker | A `worker_key` holder and an optional fresh request-bound identity assertion; topology expects Gateway | Always prove shared bearer; only when a user header exists, prove HMAC, request UUID, and age before V8 entry (`crates/worker/src/handler.rs:67-116`, `crates/worker/src/handler.rs:205-220`, `crates/worker/src/logs.rs:48-56`) |
@@ -2525,10 +2525,10 @@ that can reach Gateway.
 ### 16. RESOLVED BY DELETION: Migrated loaded the PAT private signing key only to verify
 
 What was found: Migrated required Control's PAT signing-key file
-(`--signing-key-file` / `ZEROSHIP_MIGRATED_SIGNING_KEY_FILE`) and built a full
+(`--signing-key-file` / `ZEROSHIP_MIGRATE_SERVER_SIGNING_KEY_FILE`) and built a full
 `PatIssuer` from it. That type retained the PKCS#8 private bytes and exposed
 issuance as well as verification, yet Migrated passed it only into the shared
-bearer verifier. Search method: `rg 'pat_issuer|PatIssuer|\.issue\(' crates/migrated/src`
+bearer verifier. Search method: `rg 'pat_issuer|PatIssuer|\.issue\(' crates/zeroship-migrate-server/src`
 found construction, verifier injection and tests, but no issuance call. The
 INFERRED remedy recorded at the time was to hand Migrated a public verification
 key instead, restoring the Control-signer / Migrated-verifier custody split.
@@ -2537,7 +2537,7 @@ RESOLVED BY DELETION rather than by splitting the key: `PatIssuer` no longer
 exists, and both Migrated's and Control's `--signing-key-file` inputs were
 removed with it, since building a `PatIssuer` was the only thing either did
 with one. Migrated now holds no signing key at all and verifies platform OAuth
-bearers through the OP's published JWKS (`crates/migrated/src/main.rs`). Note
+bearers through the OP's published JWKS (`crates/zeroship-migrate-server/src/main.rs`). Note
 that Gateway's identically named `--signing-key-file` is a different consumer -
 it signs app-session wrapper tokens - and is untouched.
 
@@ -2549,7 +2549,7 @@ Supabase and, when configured, the platform OP
 authorizes a migration apply, it forwards the caller's raw bearer unchanged
 (`crates/control/src/migrations_api.rs:70-118`,
 `crates/control/src/migrations_api.rs:147-196`). Migrated independently builds a
-platform-only provider (`crates/migrated/src/main.rs:217-237`).
+platform-only provider (`crates/zeroship-migrate-server/src/main.rs:217-237`).
 
 INFERRED impact: a Supabase bearer that is valid for general Control operations
 and passes `AppsDeploy` is rejected by Migrated, so the parallel verifier
@@ -2839,8 +2839,8 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   `crates/runtime/src/core/runtime.rs:3357-3405`). A workspace search found only
   its definition.
 - `migrated` declares `control_key` but uses it only for configured-state
-  reporting (`crates/migrated/src/config.rs:101-103`,
-  `crates/migrated/src/main.rs:100-106`). A crate-scoped search found no request
+  reporting (`crates/zeroship-migrate-server/src/config.rs:101-103`,
+  `crates/zeroship-migrate-server/src/main.rs:100-106`). A crate-scoped search found no request
   authentication use.
 - `BearerVerifier.trusted_oauth_clients` is stored and exposed but not used in
   bearer verification (`crates/authn/src/lib.rs:173-203`). Searches for the
@@ -2946,14 +2946,14 @@ GoTrue arm derives it from `principal_grants` parsed through the same
 therefore drawn entirely from the 16-scope vocabulary, and the missing action
 cannot appear in either. Migrated reaches `enforce` through the same
 `BearerVerifier` and copies the same wrapper into its `AuthzContext`
-(`crates/migrated/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and
+(`crates/zeroship-migrate-server/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and
 `authorize`).
 
 INFERRED impact: the second evaluation denies `migrations:approve` for every
 authenticated caller, so Migrated's migration-approval route is unreachable by
-anyone. It is registered (`crates/migrated/src/api.rs:25-26`) and its handler
+anyone. It is registered (`crates/zeroship-migrate-server/src/api.rs:25-26`) and its handler
 requires that action before doing anything else
-(`crates/migrated/src/api.rs:124-140`). That route is exactly the operator-only
+(`crates/zeroship-migrate-server/src/api.rs:124-140`). That route is exactly the operator-only
 approval gate a creator holding `apps:deploy` is supposed to be unable to
 self-satisfy; it is now equally unusable by the operator.
 
@@ -2978,7 +2978,7 @@ existing operator-only resource, or move
 behind a separate operator credential class is an open design decision, and
 picking one in a documentation pass would be picking it by accident. Note that
 the re-gating answer is not a drop-in here: `migrations:approve` is deliberately
-exempt from Migrated's app-owner check (`crates/migrated/src/auth.rs:169`,
+exempt from Migrated's app-owner check (`crates/zeroship-migrate-server/src/auth.rs:169`,
 `requires_app_owner`), so whatever replaces it has to keep the action
 operator-only rather than owner-satisfiable. Search method:
 `rg 'AppsApproveMigration|migrations:approve' crates/` returned the action

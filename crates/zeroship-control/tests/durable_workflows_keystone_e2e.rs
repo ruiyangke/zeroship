@@ -236,7 +236,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "http://127.0.0.1:9".to_string(),
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
-            migrated_url: "http://127.0.0.1:9".to_string(),
+            migrate_server_url: "http://127.0.0.1:9".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -529,7 +529,7 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 /// crates/zeroship-plugin-db/src/exec.rs:522-542), so the effective privileges
 /// are that role's, not `zeroship_worker`'s. In production the role, the
 /// membership edge and the grants are all created by `migrated`'s apply
-/// (crates/zeroship-migrated/src/apply.rs:1669-1712, :1638-1649). THIS HARNESS
+/// (crates/zeroship-migrate-server/src/apply.rs:1669-1712, :1638-1649). THIS HARNESS
 /// DOES NOT RUN `migrated` - it deploys a `.zship` with `dev-provision` and
 /// nothing else - so the statements below are that apply's runtime half,
 /// reproduced. They are a deliberate mirror, not an invention: keep them in step

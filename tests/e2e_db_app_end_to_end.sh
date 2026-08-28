@@ -6,7 +6,7 @@
 #   1. committed op.* migrations -> committed generated descriptor artifacts
 #   2. vite builds a .zship whose manifest carries runtime_descriptor
 #   3. zeroship deploy uploads that .zship
-#   4. zeroship-migrated applies recorded IR to the app's Postgres schema
+#   4. zeroship-migrate-server applies recorded IR to the app's Postgres schema
 #   5. gateway -> worker -> env.db insert/find succeeds on the deployed app
 #   6. db_reads/db_writes reach usage_aggregates and are included in charge
 #
@@ -41,7 +41,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrated; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
@@ -58,14 +58,14 @@ JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js
 ZEROSHIP_CONTROL_PORT=9186
 ZEROSHIP_WORKER_PORT=8086
 ZEROSHIP_GATEWAY_PORT=8076
-ZEROSHIP_MIGRATED_PORT=9086
+ZEROSHIP_MIGRATE_SERVER_PORT=9086
 PG_PORT=5486
 RP_PORT=19186
 PGC=zs-e2e-dbapp-pg
 RPC=zs-e2e-dbapp-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
-MIGRATED_URL="http://localhost:$ZEROSHIP_MIGRATED_PORT"
+MIGRATE_SERVER_URL="http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"
 USAGE_TOPIC="zeroship-usage-dbapp-e2e"
 APP_HOST="db-hitcounter.localhost"
@@ -132,7 +132,7 @@ cleanup(){
 }
 trap cleanup EXIT
 
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -259,7 +259,7 @@ e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" \
-  --migrated-url "$MIGRATED_URL" \
+  --migrate-server-url "$MIGRATE_SERVER_URL" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
@@ -267,11 +267,11 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control"; tail -40 "$WORK/control.log"; exit 1; }
 
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && pass "zeroship-migrated healthy" || { fail "migrated"; tail -40 "$WORK/migrated.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && pass "zeroship-migrate-server healthy" || { fail "migrated"; tail -40 "$WORK/migrated.log"; exit 1; }
 
 # The worker takes NO `--config` - 9b205f6ed removed its TOML overlay source as
 # a credential boundary - and no longer needs one: the usage-stream settings are

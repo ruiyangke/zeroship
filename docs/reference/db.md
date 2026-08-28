@@ -487,7 +487,7 @@ answer lives. Four things hold there, in order:
    `CODE_CROSS_SCHEMA`), and the rendered SQL is swept again by the guard's
    `check_cross_schema`
    (`third_party/zero-migrate/crates/zero-migrate-guard/src/guard/mod.rs:2288`).
-4. Underneath all of it, `crates/migrated` derives the target schema from the
+4. Underneath all of it, `crates/zeroship-migrate-server` derives the target schema from the
    app id server-side (`src/apply.rs:413`) -- no author input reaches it -- and
    applies under a `NOLOGIN`/`NOSUPERUSER` per-app role whose `search_path` and
    grants reach that schema only (`src/provisioning.rs:104-208`).

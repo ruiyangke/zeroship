@@ -211,7 +211,7 @@ CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{MATRIX_APP_ID}"."{
 /// # What this reproduces, and what it does NOT
 ///
 /// Same caveat as the SQLite helper, in the same direction, plus one more.
-/// `crates/zeroship-migrated` replays AUTHORED migration-IR envelopes; this
+/// `crates/zeroship-migrate-server` replays AUTHORED migration-IR envelopes; this
 /// runs a rendered CREATE. So a defect in envelope lowering, in journal
 /// versioning, or in the recorder is invisible on both legs. AND, since the
 /// engine left: this table's `id` / `created_by` / `updated_by` are `text`,
@@ -258,7 +258,7 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
         // server log, surfacing to the caller as a bare `500 internal error`.
         //
         // Provisioning that role is part of the deploy-time apply, not an
-        // afterthought: `crates/zeroship-migrated` grants exactly this
+        // afterthought: `crates/zeroship-migrate-server` grants exactly this
         // (`GRANT USAGE ON SCHEMA ... TO <role>` + table/sequence privileges,
         // `apply.rs`) immediately after its own apply, for the same reason. Here
         // the equivalent step is plugin-db's own `ensure_per_app_role`, which

@@ -110,18 +110,16 @@ const FORMER_SUBJECT_FILE: &str = "zeroship-migrate-core/src/render/lower.rs";
 /// names the vendors are two crates now, so `crates/` holds nine entries and the walk
 /// must find all of them.
 ///
-/// RAISED 9 -> 10: `zeroship-migrate-adapter` came into scope when the engine was grafted
-/// into the product workspace, where the adapter already lived under the engine's name.
+/// WHAT THIS COUNTS, because the number alone would hide it. The walk takes ENGINE
+/// roots — see [`is_engine_crate`] in `core_does_not_spell_a_vendors_bytes.rs`, which
+/// this file's sibling census defines and which is deliberately the SAME rule,
+/// because two censuses disagreeing about what the engine is would be worse than
+/// either being wrong. `crates/` holds 38 entries, so a floor stated over `crates/*`
+/// would pass on 38 without asserting anything at all.
 ///
-/// What this counts changed with that graft, and the number alone would have hidden it.
-/// The walk now takes ENGINE roots — see [`is_engine_crate`] in
-/// `core_does_not_spell_a_vendors_bytes.rs`, which this file's sibling census defines
-/// and which is deliberately the SAME rule, because two censuses disagreeing about
-/// what the engine is would be worse than either being wrong. Before the graft
-/// `crates/*` and "the engine" were the same set, so saying `crates/*` cost nothing;
-/// afterwards `crates/` holds 38 entries and the floor `>= 9` passed on 38 without
-/// asserting anything at all.
-const WORKSPACE_CRATE_FLOOR: usize = 10;
+/// NINE is the engine set, and this constant is kept in lockstep with the sibling
+/// census's constant of the same name.
+const WORKSPACE_CRATE_FLOOR: usize = 9;
 
 /// The subject itself. `render_sqlite_trigger_op` is the entry point
 /// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are

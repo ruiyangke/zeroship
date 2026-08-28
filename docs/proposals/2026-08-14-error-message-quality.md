@@ -249,7 +249,7 @@ The `leak` regex tag returned 833 hits, 52 in err/log positions in non-test
 files. **This tag is heavily false-positive and its raw count should not be
 quoted.** Inspection showed the bulk are SQL DDL strings matching on `_role` or
 `information_schema` -- e.g. `crates/plugin-db/src/auth/bootstrap.rs:147,160,728`
-(`CREATE SCHEMA`, `GRANT EXECUTE`), `crates/migrated/src/provisioning.rs:123`.
+(`CREATE SCHEMA`, `GRANT EXECUTE`), `crates/zeroship-migrate-server/src/provisioning.rs:123`.
 These are SQL being *built*, not messages being *shown*.
 
 The real leak risk is not literal, it is passthrough (Finding A).
@@ -378,7 +378,7 @@ exposures (VERIFIED by the tracing agent, spot-checked by me):
   lift the runtime's local `request_id`, and relabeling that counter would not
   make it a joinable trace identity.
 
-**The cleanest existing model** is `crates/migrated/src/api.rs:321-345`: stable
+**The cleanest existing model** is `crates/zeroship-migrate-server/src/api.rs:321-345`: stable
 slug in `"error"`, human text in `"detail"`, blanked at 5xx and verbatim at 4xx,
 raw error to `tracing`. It is the only place in the tree that gets the split
 right in one shape.
@@ -553,7 +553,7 @@ pervasive the habit is.)
   pass `--token=<PAT>`, or set ZEROSHIP_TOKEN" (three exact next actions).
 - `sdks/vite-plugin/src/dev-server.ts:431-436` -- names the missing collections,
   the exact next command (`pnpm migrate`), and the db path. (Contains an em-dash.)
-- `crates/migrated/src/api.rs:321-345` -- the correct two-audience split.
+- `crates/zeroship-migrate-server/src/api.rs:321-345` -- the correct two-audience split.
 
 **The test that proves a diagnostic names a real variable**, which is the
 enforcement model for Section 6:

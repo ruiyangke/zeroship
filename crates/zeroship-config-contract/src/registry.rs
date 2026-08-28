@@ -42,7 +42,7 @@ pub const DECLARING_BINARIES: [&str; 6] = [
     "zeroship-auth",
     "zeroship-control",
     "zeroship-gate",
-    "zeroship-migrated",
+    "zeroship-migrate-server",
     "zeroship-worker",
     "zeroship-workflow-scheduler",
 ];
@@ -54,7 +54,7 @@ pub fn platform_specs() -> Vec<ConfigSpec> {
     specs.extend_from_slice(zeroship_auth::config::AuthSettings::SPECS);
     specs.extend_from_slice(zeroship_control::config::ControlSettings::SPECS);
     specs.extend_from_slice(zeroship_gateway::config::GateSettings::SPECS);
-    specs.extend_from_slice(zeroship_migrated::config::MigratedSettings::SPECS);
+    specs.extend_from_slice(zeroship_migrate_server::config::MigrateServerSettings::SPECS);
     specs.extend_from_slice(zeroship_worker::config::WorkerSettings::SPECS);
     specs.extend_from_slice(zeroship_workflow_scheduler::config::SchedulerSettings::SPECS);
     specs

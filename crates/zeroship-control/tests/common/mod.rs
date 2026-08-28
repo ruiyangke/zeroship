@@ -278,7 +278,7 @@ fn platform_jwks_body() -> String {
 /// Call it AFTER inserting the app row and BEFORE `PgStore::provision`.
 #[allow(dead_code)]
 pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &Uuid) {
-    zeroship_migrated::provisioning::provision_workflow_journal_schema(pg, app_id)
+    zeroship_migrate_server::provisioning::provision_workflow_journal_schema(pg, app_id)
         .await
         .expect("provision app workflow journal schema");
 }

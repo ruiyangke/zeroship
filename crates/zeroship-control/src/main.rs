@@ -382,7 +382,7 @@ fn main() -> std::io::Result<()> {
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
-    let migrated_url = settings.migrated_url.get().trim_end_matches('/').to_string();
+    let migrate_server_url = settings.migrate_server_url.get().trim_end_matches('/').to_string();
     let worker_key = settings.worker_key.expose_str().to_owned();
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
@@ -581,7 +581,7 @@ fn main() -> std::io::Result<()> {
         );
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
-        report.field("migrated_url", CheckValue::Plain(migrated_url.clone()));
+        report.field("migrate_server_url", CheckValue::Plain(migrate_server_url.clone()));
         report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
@@ -988,7 +988,7 @@ fn main() -> std::io::Result<()> {
         stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
         stripe_base_url,
         gateway_url,
-        migrated_url,
+        migrate_server_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)

@@ -94,7 +94,7 @@ pub struct FileConfig {
     pub worker: WorkerSection,
     /// Migration-service settings.
     #[serde(default)]
-    pub migrated: MigratedSection,
+    pub migrate_server: MigrateServerSection,
     /// Platform-schema migrate one-shot settings.
     #[serde(default)]
     pub platform_migrate: PlatformMigrateSection,
@@ -140,7 +140,7 @@ pub struct ControlSection {
     /// Gateway internal base URL for the workflow dispatch seam.
     pub gateway_url: Option<String>,
     /// Migration-service base URL the creator-facing apply endpoint forwards to.
-    pub migrated_url: Option<String>,
+    pub migrate_server_url: Option<String>,
     /// Usage meter provider.
     pub meter_provider: Option<String>,
     /// Invoicer provider.
@@ -263,7 +263,7 @@ pub struct WorkerSection {
 /// See [`ControlSection`].
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct MigratedSection {
+pub struct MigrateServerSection {
     /// `PostgreSQL` DSN for the migration service.
     pub database_url: Option<String>,
     /// Privileged provisioning DSN (CREATEROLE + CREATE on the database).
@@ -806,7 +806,7 @@ log_format = "json"
         // A per-binary secret sits in that binary's table.
         assert!(config.control.master_key.is_some());
         assert!(config.gateway.stash_signing_key.is_some());
-        assert!(config.migrated.policy_seal_key.is_some());
+        assert!(config.migrate_server.policy_seal_key.is_some());
 
         // Every reference in the tracked example must be a FILE reference: the
         // schemes this step deleted are the ones an operator would otherwise
@@ -1069,7 +1069,7 @@ db_pool_size = 16
 threads = 4
 max_isolates = 200
 
-[migrated]
+[migrate_server]
 port = 9091
 
 [workflow_scheduler]
@@ -1086,7 +1086,7 @@ relay_smtp_tls = "starttls"
         assert_eq!(config.control.port, Some(9090));
         assert_eq!(config.gateway.db_pool_size, Some(16));
         assert_eq!(config.worker.threads, Some(4));
-        assert_eq!(config.migrated.port, Some(9091));
+        assert_eq!(config.migrate_server.port, Some(9091));
         assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
         assert_eq!(config.auth.addr.as_deref(), Some("0.0.0.0:9092"));
         assert_eq!(config.auth.provider.as_deref(), Some("native"));

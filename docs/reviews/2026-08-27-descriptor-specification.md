@@ -967,7 +967,7 @@ of a lossless cold read.
 
 **Why it loses:** the fact is guaranteed by SEQUENCING, not discovered by
 reading. `register_model/mod.rs:141-172` states the contract in full: on
-PostgreSQL `zeroship-migrated` creates and migrates the per-app schema before
+PostgreSQL `zeroship-migrate-server` creates and migrates the per-app schema before
 go-live via `POST /v1/apps/{id}/migrations/apply`; on SQLite the vite dev server
 applies the committed migrations before spawning the runtime. "So `registerModel`
 reaches a schema that is already in place, on both dialects." A fact the deploy

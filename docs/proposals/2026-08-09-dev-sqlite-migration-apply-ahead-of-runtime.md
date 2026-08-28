@@ -122,7 +122,7 @@ interface ApplyIrSqliteRequest {
   backend derives from `db_dir` + `zs-<app_id>.sqlite` (dev app_id `default`;
   `run_sqlite_via_engine` builds the same paths from `backend_a.db_dir()`).
 - **Charter** (`CONFINED_APPLY_CHARTER_TOML`): grants + the confined `[[inject]]`.
-  Mirrors `crates/migrated/policies/confined.policy.toml` **minus** the two rejected
+  Mirrors `crates/zeroship-migrate-server/policies/confined.policy.toml` **minus** the two rejected
   timeout grants. The `[[inject]]` MUST carry the `created_at`/`updated_at` = `now()`
   and `version` = 1 defaults or the first insert fails NOT NULL (the data plane never
   sends them):
@@ -301,7 +301,7 @@ authority — the same category error as A.
 
 - Addon verb: `zeroship-migrate-node` `applyIrSqlite` / `ApplyIrSqliteRequest` /
   `ApplyReply` (`third_party/zero-migrate/crates/zeroship-migrate-node/index.d.ts`).
-- Confined apply charter to mirror: `crates/migrated/policies/confined.policy.toml`.
+- Confined apply charter to mirror: `crates/zeroship-migrate-server/policies/confined.policy.toml`.
 - Postgres register no-op to mirror: `crates/plugin-db/src/register_model/mod.rs`.
 - The SQLite register-drives-engine path to retire:
   `crates/plugin-db/src/register_model/sqlite_engine.rs`.

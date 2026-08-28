@@ -169,7 +169,7 @@ ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8300}"
 # three-service stack could still measure the 401, but it could not tell a
 # platform 401 from "this harness never gave the app a database" -- and a
 # comparison whose deployed side is crippled by the harness proves nothing.
-ZEROSHIP_MIGRATED_PORT="${ZEROSHIP_MIGRATED_PORT:-9490}"
+ZEROSHIP_MIGRATE_SERVER_PORT="${ZEROSHIP_MIGRATE_SERVER_PORT:-9490}"
 REDIS_PORT="${REDIS_PORT:-6390}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-zs-golden-redis}"
 ZEROSHIP_CONTROL_KEY="gp-ck"
@@ -346,7 +346,7 @@ trap cleanup EXIT
 # about the product, and emitting one would shift GOLDEN_MIN_PASSED for a
 # reason unrelated to coverage.
 gp_missing_bins=()
-for _b in dev-provision zeroship zeroship-control zeroship-gate zeroship-migrated \
+for _b in dev-provision zeroship zeroship-control zeroship-gate zeroship-migrate-server \
          zeroship-worker; do
   [ -x "$BIN/$_b" ] || gp_missing_bins+=("$_b")
 done
@@ -356,7 +356,7 @@ if [ "${#gp_missing_bins[@]}" -gt 0 ]; then
   echo "      Nothing below would measure the platform: the services never start." >&2
   echo "      Build them with:" >&2
   echo "        cargo build --release -p zeroship-control -p zeroship-worker \\" >&2
-  echo "          -p zeroship-gateway -p zeroship -p zeroship-migrated --bins" >&2
+  echo "          -p zeroship-gateway -p zeroship -p zeroship-migrate-server --bins" >&2
   exit 2
 fi
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || {
@@ -501,7 +501,7 @@ fi
 # is crippled by the harness, and every divergence step 10 reports would be the
 # harness's, not the platform's.
 step 2 "Bring up the stack"
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 rm -rf /tmp/gp-bundles /tmp/gp-storage /tmp/gp-migrated-tmp
 mkdir -p /tmp/gp-storage
 
@@ -943,7 +943,7 @@ e2e_export_database_urls "$DB_URL"
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store /tmp/gp-bundles \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --audit-retention-check-secs 1 >/tmp/gp-control.log 2>&1 & PIDS+=($!)
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
   --tmp-dir /tmp/gp-migrated-tmp \
   >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
@@ -1037,7 +1037,7 @@ sleep 3
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null && pass "control healthy" || { fail "control down"; tail -20 /tmp/gp-control.log; exit 1; }
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz"  >/dev/null && pass "worker healthy"  || { fail "worker down";  tail -20 /tmp/gp-worker.log; exit 1; }
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
-curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null && pass "zeroship-migrated healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
+curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null && pass "zeroship-migrate-server healthy" || { fail "migrated down"; tail -20 /tmp/gp-migrated.log; exit 1; }
 
 # --- 2b. The OPERATOR config seam: control's DSN through the overlay ---
 #
@@ -2579,10 +2579,10 @@ fi
 # so it is BLIND BY CONSTRUCTION to the exact naming seam this step exists to
 # catch. This closes it inside golden_path.sh itself: build db-todos through
 # the real vite-plugin, deploy it, apply ITS OWN migrations through
-# zeroship-migrated (the path #162 lived in), drive the SAME two RPC calls
+# zeroship-migrate-server (the path #162 lived in), drive the SAME two RPC calls
 # through the gateway, and diff the RESULT against the dev run above -
 # following step 10's pattern (mint a platform-admin bearer,
-# dev-provision, POST the recorded IR to zeroship-migrated) rather than
+# dev-provision, POST the recorded IR to zeroship-migrate-server) rather than
 # inventing a new one.
 #
 # A SEPARATE creator/bearer and a separate app name ("dbtodos9") from step 11's
@@ -2666,12 +2666,12 @@ SQL
     # produce a body with no descriptor at all, and the deploy activation below
     # would then be refused for a reason that has nothing to do with the app.
     DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
+      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_TOKEN" \
       --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
     DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
     if [ "$DB9_APPLY_CODE" = "200" ] && [ "${DB9_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
-      pass "db-todos' own migrations applied through zeroship-migrated to the deployed app (applied=$DB9_APPLIED ops)"
+      pass "db-todos' own migrations applied through zeroship-migrate-server to the deployed app (applied=$DB9_APPLIED ops)"
       # NOW the deploy can go live: the app's newest applied migration records
       # the descriptor this artifact carries. Same command, minus the flag. No
       # new `pass` here on purpose - the floor at the bottom of this file is an
@@ -2687,7 +2687,7 @@ SQL
         fail "db-todos migrations applied but the deploy did not go live: ${DB9_ACT:0:300}"
       fi
     else
-      fail "zeroship-migrated could not apply db-todos' migrations for the deployed leg (http=$DB9_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos9-apply.json)"
+      fail "zeroship-migrate-server could not apply db-todos' migrations for the deployed leg (http=$DB9_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos9-apply.json)"
     fi
   fi
 else
@@ -3014,7 +3014,7 @@ if [ -z "$SC_APP_ID" ] || [ -z "$SC_API_KEY" ]; then
 else
   # Mint a platform-admin bearer from the harness's own issuer, signed with the
   # key it publishes. The .zship carries the DESCRIPTOR only; migrations travel through
-  # zeroship-migrated, which is the real deployed path -- a hand-rolled CREATE
+  # zeroship-migrate-server, which is the real deployed path -- a hand-rolled CREATE
   # TABLE here would test nothing.
   # `apps:delete` is here for step 12 (teardown) and for nothing else. It was
   # ABSENT until 2026-08-11 and its absence read as a product defect: step 12's
@@ -3046,12 +3046,12 @@ SQL
   # re-recording here carries no descriptor and the activation below would be
   # refused for a reason unrelated to the app.
   SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
-    "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
+    "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
     --data-binary @"$SCAFFOLD/generated/zeroship/migrations.ir.json")"
   SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
   if [ "$SC_APPLY_CODE" = "200" ] && [ "${SC_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
-    pass "the scaffold's own migrations applied through zeroship-migrated (applied=$SC_APPLIED ops)"
+    pass "the scaffold's own migrations applied through zeroship-migrate-server (applied=$SC_APPLIED ops)"
     # Activate now that the schema matches. No new `pass`: the floor is an exact
     # measurement and every probe below needs the app serving anyway.
     SC_ACT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" 2>&1)
@@ -3063,7 +3063,7 @@ SQL
       fail "the scaffold's migrations applied but the deploy did not go live: ${SC_ACT:0:300}"
     fi
   else
-    fail "zeroship-migrated could not apply the scaffold's migrations (http=$SC_APPLY_CODE): $(head -c 200 /tmp/gp-scaffold-apply.json)"
+    fail "zeroship-migrate-server could not apply the scaffold's migrations (http=$SC_APPLY_CODE): $(head -c 200 /tmp/gp-scaffold-apply.json)"
   fi
   sleep 5   # gateway route-sync poll
 fi
@@ -3389,7 +3389,7 @@ else
     fail "could not provision db-todos: ${DB_OUT:0:200}"
   else
     # Same creator as step 10, so the bearer already minted is accepted; only the
-    # membership row is per-app. Migrations travel through zeroship-migrated --
+    # membership row is per-app. Migrations travel through zeroship-migrate-server --
     # a hand-rolled CREATE TABLE here would create the table with whatever
     # collation THIS script chose, which is precisely the thing under test.
     docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
@@ -3399,12 +3399,12 @@ SQL
     # .zship's manifest is content-addressed by, which the activation below
     # requires. A re-recording of the same sources carries no descriptor.
     DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
+      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
       --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
     DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
     if [ "$DB_APPLY_CODE" = "200" ] && [ "${DB_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
-      pass "db-todos migrations applied through zeroship-migrated (applied=$DB_APPLIED ops)"
+      pass "db-todos migrations applied through zeroship-migrate-server (applied=$DB_APPLIED ops)"
       DB_ACT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
       DB_LIVE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
         "select coalesce(deploy_hash,'') from zeroship.apps where id = '$DB_APP_ID'" | tr -d '[:space:]')
@@ -3415,7 +3415,7 @@ SQL
         fail "db-todos migrations applied but the deploy did not go live: ${DB_ACT:0:300}"
       fi
     else
-      fail "zeroship-migrated could not apply db-todos' migrations (http=$DB_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos-apply.json)"
+      fail "zeroship-migrate-server could not apply db-todos' migrations (http=$DB_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos-apply.json)"
     fi
   fi
 fi
@@ -3581,7 +3581,7 @@ else
       pass "deployed: sort({id:-1}) returned byte order over a population that discriminates collations" ;;
     *)
       fail "deployed: sort({id:-1}) is NOT creation order -- $ORD_DEP_V
-      The deployed \`id\` column is created by zeroship-migrated and inherits the
+      The deployed \`id\` column is created by zeroship-migrate-server and inherits the
       database collation (en_US.utf8); SQLite sorts BINARY. Fix is COLLATE \"C\"
       on typed-id text columns in the DDL. See #255 and
       docs/reference/sqlite-divergences.md." ;;
@@ -4013,12 +4013,12 @@ else
     # what the deploy below is checked against. Re-recording the sources here
     # would produce a body with no descriptor and the deploy would be refused.
     AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
+      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
       -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
       --data-binary @"$ROOT/examples/auth-notes-db/generated/zeroship/migrations.ir.json")
     AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
     { [ "$AN_APPLY" = "200" ] && [ "${AN_APPLIED:-0}" -ge 1 ] 2>/dev/null; } \
-      && pass "14: notes migration applied through zeroship-migrated (applied=$AN_APPLIED ops)" \
+      && pass "14: notes migration applied through zeroship-migrate-server (applied=$AN_APPLIED ops)" \
       || fail "14: migrated could not apply (http=$AN_APPLY applied=${AN_APPLIED:-0}): $(head -c 200 /tmp/gp-notes-apply.json)"
 
     if ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
@@ -4143,7 +4143,7 @@ gp_close_step
 # of its side-effecting state" and then enumerates exactly two steps: the
 # manifest keyspace, and `registry.delete_app` (which DELETEs zeroship.apps +
 # zeroship.oauth_clients in one txn and nothing else). The app's own Postgres
-# schema -- the creator's tables and rows, created by zeroship-migrated -- is
+# schema -- the creator's tables and rows, created by zeroship-migrate-server -- is
 # named in neither step. The teardown that WOULD remove it exists
 # (crates/plugin-db/src/drop_namespace.rs, 7 steps, slot -> publication ->
 # schema -> role) and has no production caller: its only callers are plugin-db's
@@ -4155,7 +4155,7 @@ gp_close_step
 #
 # THE VEHICLE IS scaffoldapp, deliberately, and it must be the LAST thing this
 # file touches: it is the only app here that has a real per-app schema applied
-# through the real zeroship-migrated (step 10c) AND an owner bearer that can
+# through the real zeroship-migrate-server (step 10c) AND an owner bearer that can
 # authorize AppsDelete (SC_TOKEN, the app_members row written at step 10c).
 step 12 "Teardown: the creator deletes the app, and its state goes with it"
 if [ -z "${SC_APP_ID:-}" ] || [ -z "${SC_TOKEN:-}" ]; then
@@ -4169,11 +4169,11 @@ else
     "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
   # An app gets THREE schemas, and the pattern has to name all three or the
   # residue this step reports is smaller than the residue that exists:
-  #   `<app_id>`             the creator's tables (crates/migrated apply)
+  #   `<app_id>`             the creator's tables (crates/zeroship-migrate-server apply)
   #   `<app_id>_migrations`  the engine journal
   #                          (third_party/zero-migrate .../conn.rs, `{schema}_migrations`)
   #   `app_<app_id>`         the workflow journal's 5 __zeroship_workflow_* tables
-  #                          (crates/migrated/src/provisioning.rs:214)
+  #                          (crates/zeroship-migrate-server/src/provisioning.rs:214)
   # A `like '<app_id>%'` matches the first two and NOT the third, because the
   # third is PREFIXED. It undercounted for that reason until 2026-08-20.
   # MEASURED on the golden database: 2 tables in the first and 5 in the second.
@@ -4479,7 +4479,7 @@ gp_close_step
 #
 # Steps 1-10 were byte-identical across all three (2,6,1,2,1,7,7,3,6,14), so the
 # +3 is step 11's three green outcomes: db-todos builds, its migrations apply
-# through zeroship-migrated, and the DEV tier returns byte order. The two reds
+# through zeroship-migrate-server, and the DEV tier returns byte order. The two reds
 # are the deployed tier and the tier diff, and they are THE DELIVERABLE, exactly
 # like step 10's six.
 #
@@ -4501,7 +4501,7 @@ gp_close_step
 # row 11 never closed it either: its harness drives db-hitcounter, whose one
 # column has no case boundary, so it is blind BY CONSTRUCTION to the naming
 # seam this step exists to catch). Step 9 now builds db-todos, deploys it,
-# applies its own migrations through zeroship-migrated, and diffs the SAME
+# applies its own migrations through zeroship-migrate-server, and diffs the SAME
 # camelCase-insert and FK-eager-load calls against the dev results already
 # captured -- 8 new outcomes (6->14), all green unmutated. Read off a clean
 # four-service run:
@@ -4804,7 +4804,7 @@ if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
   echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
   echo "        That is the defect, not a broken gate. See docs/pilot/e2e-scenarios.md."
   echo "  NOTE: step 11's two reds are RED AT HEAD BY DESIGN too -- the deployed \`id\` column is"
-  echo "        created by zeroship-migrated and inherits the database collation, so ORDER BY id"
+  echo "        created by zeroship-migrate-server and inherits the database collation, so ORDER BY id"
   echo "        is not creation order there. Blocked on the engine (#255); see the mail"
   echo "        ZEROSHIP-2026-08-10-189 in ~/.claude/inter-projects.md."
 fi

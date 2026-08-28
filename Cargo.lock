@@ -7306,7 +7306,7 @@ dependencies = [
  "zeroship-control",
  "zeroship-core",
  "zeroship-gateway",
- "zeroship-migrated",
+ "zeroship-migrate-server",
  "zeroship-worker",
  "zeroship-workflow-scheduler",
 ]
@@ -7368,7 +7368,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
- "zeroship-migrated",
+ "zeroship-migrate-server",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-stream",
@@ -7535,23 +7535,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-migrate-adapter"
-version = "0.1.0"
-dependencies = [
- "compio",
- "compio-postgres",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "v8",
- "zeroship-core",
- "zeroship-migrate",
- "zeroship-runtime",
- "zeroship-test-support",
-]
-
-[[package]]
 name = "zeroship-migrate-backend"
 version = "0.1.0"
 dependencies = [
@@ -7679,25 +7662,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-migrate-sqlite"
-version = "0.1.0"
-dependencies = [
- "compio",
- "flume 0.11.1",
- "hex",
- "rusqlite",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "zeroship-migrate-backend",
- "zeroship-migrate-ir",
- "zeroship-migrate-policy",
-]
-
-[[package]]
-name = "zeroship-migrated"
+name = "zeroship-migrate-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -7716,15 +7681,35 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "v8",
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
  "zeroship-migrate",
- "zeroship-migrate-adapter",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
+ "zeroship-runtime",
+ "zeroship-test-support",
+]
+
+[[package]]
+name = "zeroship-migrate-sqlite"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "flume 0.11.1",
+ "hex",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
 ]
 
 [[package]]
@@ -7752,8 +7737,7 @@ dependencies = [
  "zeroize",
  "zeroship-core",
  "zeroship-metering",
- "zeroship-migrate-adapter",
- "zeroship-migrated",
+ "zeroship-migrate-server",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-runtime-macros",

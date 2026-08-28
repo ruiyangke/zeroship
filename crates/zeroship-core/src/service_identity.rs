@@ -381,8 +381,8 @@ impl ServiceEndpoint {
 pub mod endpoints {
     use super::ServiceEndpoint;
 
-    pub const MIGRATED_APPLY_MIGRATIONS: ServiceEndpoint = ServiceEndpoint::new(
-        "migrated",
+    pub const MIGRATE_SERVER_APPLY_MIGRATIONS: ServiceEndpoint = ServiceEndpoint::new(
+        "migrate-server",
         "POST",
         "/v1/apps/{app_id}/migrations/apply",
     );
@@ -466,8 +466,8 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/control"),
                 &[
-                    // Migrated also requires delegated creator AppsDeploy.
-                    endpoints::MIGRATED_APPLY_MIGRATIONS,
+                    // The migration service also requires delegated creator AppsDeploy.
+                    endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
                     endpoints::WORKER_APP_LOGS,
                 ],
@@ -477,7 +477,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 // Registered third-party BCL targets are checked dynamically.
                 &[endpoints::GATEWAY_BACKCHANNEL_LOGOUT],
             ),
-            ServiceAuthorization::new(principal("svc/migrated"), &[]),
+            ServiceAuthorization::new(principal("svc/migrate-server"), &[]),
             ServiceAuthorization::new(
                 principal("svc/gateway"),
                 &[

@@ -1,6 +1,6 @@
 # Migration subsystem — security + correctness review (2026-07-27)
 
-Scope: `crates/migrated/*`, `crates/zeroship-migrate-adapter/*`, `sdks/migrate/src/host/*` +
+Scope: `crates/zeroship-migrate-server/*`, `crates/zeroship-migrate-adapter/*`, `sdks/migrate/src/host/*` +
 `host-recorder.ts`, `db/migrations-ts/*`. Vendored engine `third_party/zero-migrate`
 reviewed only at the SEAM (how the adapter invokes + trusts it). Pre-launch, no back-compat.
 
@@ -23,7 +23,7 @@ gate, and operator-only approve are all sound — see "What holds up" at the end
 ## HIGH
 
 ### H1. Preflight → approval-classification → store-write runs OUTSIDE the app advisory lock; concurrent applies of the same app race the classification
-`crates/migrated/src/apply.rs:417-637` (preflight + `insert_pending`/`insert_auto_approved`)
+`crates/zeroship-migrate-server/src/apply.rs:417-637` (preflight + `insert_pending`/`insert_auto_approved`)
 vs `:677` (`apply_sealed`, where the lock is first acquired at `:945-949`).
 
 The project advisory lock (`pg_advisory_lock(hashtext(project_id))`, engine
@@ -72,8 +72,8 @@ commit the credential equal to the rolename.
 ## MEDIUM
 
 ### M1. `provision_runtime_app_role` issues role/grant DDL without the `tuple concurrently updated` retry the rest of provisioning uses
-`crates/migrated/src/apply.rs:1470-1509` (raw `conn.batch_execute`) vs
-`crates/migrated/src/provisioning.rs:61-81` (`exec_retry`, 8 attempts).
+`crates/zeroship-migrate-server/src/apply.rs:1470-1509` (raw `conn.batch_execute`) vs
+`crates/zeroship-migrate-server/src/provisioning.rs:61-81` (`exec_retry`, 8 attempts).
 
 `provision_runtime_app_role` runs as admin OUTSIDE the app advisory lock (called at
 `apply.rs:674` before the lock is taken). Concurrent applies for two DIFFERENT apps both
@@ -85,7 +85,7 @@ transient `tuple concurrently updated` here fails the whole apply with a 503
 Fix: route these two `batch_execute`s through `exec_retry` (or the same helper).
 
 ### M2. Approval-required migrations accumulate as unbounded `pending_approval` rows with no submit-side dedup or rate limit
-`crates/migrated/src/apply.rs:203` (`Uuid::now_v7()` per request) + `:425 insert_pending`.
+`crates/zeroship-migrate-server/src/apply.rs:203` (`Uuid::now_v7()` per request) + `:425 insert_pending`.
 
 Every apply of a gated (destructive) migration inserts a fresh `pending_approval` row keyed
 by a new `migration_id`. An owner (or a prompt-injected AI acting as them) can POST the same
@@ -98,7 +98,7 @@ Fix: dedup pending submissions on `(app_id, content_checksum)` — return the ex
 `migration_id` instead of inserting a duplicate — and/or cap open pending rows per app.
 
 ### M3. `revert_to_pending` (TOCTOU drift arm) is unguarded on current status — can resurrect a terminal row
-`crates/migrated/src/migration_store.rs:138-156`.
+`crates/zeroship-migrate-server/src/migration_store.rs:138-156`.
 
 `revert_to_pending` runs `UPDATE … SET status='pending_approval' … WHERE app_id=$1 AND
 migration_id=$2` with NO `AND status = 'approved'` guard, unlike `mark_approved` (`:123`,
@@ -111,7 +111,7 @@ Fix: add `AND status = 'approved'` to the `WHERE` and treat 0-rows-updated as a 
 matching the guarded style of `mark_approved`.
 
 ### M4. `mark_applied` / `mark_rejected` are unguarded on status and can clobber each other on the error path
-`crates/migrated/src/migration_store.rs:158-195`.
+`crates/zeroship-migrate-server/src/migration_store.rs:158-195`.
 
 Both update purely on `(app_id, migration_id)` with no status precondition. On the apply
 error path (`apply.rs:748 mark_migration_failed → mark_rejected`) a migration that the
@@ -125,7 +125,7 @@ Fix: guard these transitions on the expected prior status, and/or reconcile term
 from the engine journal outcome rather than the Rust-side error alone.
 
 ### M5. `MigrationStore` / `AppPolicyStore` open a fresh un-pooled connection per operation
-`crates/migrated/src/migration_store.rs:232-243`, `policy_store.rs:159-170`.
+`crates/zeroship-migrate-server/src/migration_store.rs:232-243`, `policy_store.rs:159-170`.
 
 Every `insert_*`, `record_audit`, `mark_*`, `get_*` does a full
 `compio_postgres::connect` + spawn/detach run-loop. A single apply performs ~5-8 store
@@ -138,7 +138,7 @@ Fix: hold one pooled/shared client on `MigrationServiceState` (the service alrea
 long-lived `control_pg` for authz — reuse that pattern for the stores).
 
 ### M6. Auth infrastructure errors on the ownership lookup fail-OPEN into a 500 but the classification leaks intent; token verification uses a random per-call request-id defeating replay correlation
-`crates/migrated/src/auth.rs:122-124`, `:149-159`.
+`crates/zeroship-migrate-server/src/auth.rs:122-124`, `:149-159`.
 
 Two smaller issues:
 (a) `verify_bearer(token, None, Uuid::new_v4().to_string())` mints a throwaway request-id per
@@ -158,7 +158,7 @@ Fix: thread the real inbound request id (if the platform propagates one) into
 ## LOW
 
 ### L1. Seal HMAC is in-process-only tamper detection, not a cross-trust boundary — the doc comment is honest but the audit trail implies more
-`crates/migrated/src/apply.rs:644-663`, `policy.rs:147-173`.
+`crates/zeroship-migrate-server/src/apply.rs:644-663`, `policy.rs:147-173`.
 
 The sealed policy is minted and verified within the SAME process/request (`seal_effective_for_app`
 → `verify` a few lines later). It provides zero protection against an attacker who controls
@@ -169,7 +169,7 @@ an auditor into thinking the seal is an attestation. Keep, but ensure ops docs d
 overstate the seal's authority.
 
 ### L2. `quote_lit` only escapes single quotes; role/schema names flow into `DO $$ … EXECUTE format-string $$` blocks
-`crates/migrated/src/apply.rs:1460-1509`, `provisioning.rs:54-56`.
+`crates/zeroship-migrate-server/src/apply.rs:1460-1509`, `provisioning.rs:54-56`.
 
 `quote_lit` does `value.replace('\'', "''")` and is used to build `rolname = '{…}'`
 comparisons and `EXECUTE 'CREATE ROLE {ident}…'` strings inside `DO` blocks. The inputs are
@@ -182,7 +182,7 @@ input ever became non-UUID, `'{role_lit}'` could break out. Defense-in-depth: us
 `format('%I', …)` / `quote_ident()` inside the `DO` block rather than pre-interpolating.
 
 ### L3. `mac_key`/seal key accepts any-length key incl. empty-in-prod-if-misconfigured only guarded at CLI layer
-`crates/migrated/src/policy.rs:69-76`, `main.rs:244-257`.
+`crates/zeroship-migrate-server/src/policy.rs:69-76`, `main.rs:244-257`.
 
 `ManagedPolicyConfig::new` takes `impl Into<Vec<u8>>` with no minimum-length check; the only
 32-byte-ish enforcement is the CLI refusing an empty key unless `--dev-insecure`. A caller
@@ -191,7 +191,7 @@ because H2/L1 note the seal is in-process anyway. Fix: enforce a minimum key len
 `ManagedPolicyConfig::new`.
 
 ### L4. `discover_ir_files` / `discover_ts_files` sort by full `PathBuf` including the tempdir prefix
-`crates/migrated/src/apply.rs:812-835`, `platform.rs:164-187`.
+`crates/zeroship-migrate-server/src/apply.rs:812-835`, `platform.rs:164-187`.
 
 Ordering is `ir_files.sort()` on the full path. Because all files share the same tempdir
 parent (`write_ir_documents`, `apply.rs:1304`), the sort reduces to filename order, which is

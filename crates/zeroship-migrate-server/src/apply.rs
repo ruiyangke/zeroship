@@ -20,7 +20,7 @@ use zeroship_migrate_postgres::role::migrator_role_name;
 use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 use zeroship_migrate_ir::policy_approval::{migration_requires_approval, ApprovalLevel};
 use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
-use zeroship_migrate_adapter::CompioPgSession;
+use crate::session::CompioPgSession;
 
 /// The backends this host hands to every engine entry point.
 ///
@@ -1458,7 +1458,7 @@ fn write_ir_documents(
     validate_request_shape(request)?;
     std::fs::create_dir_all(tmp_root).map_err(ApplyRequestError::TempDir)?;
     let dir = tempfile::Builder::new()
-        .prefix("zeroship-migrated-")
+        .prefix("zeroship-migrate-server-")
         .tempdir_in(tmp_root)
         .map_err(ApplyRequestError::TempDir)?;
 

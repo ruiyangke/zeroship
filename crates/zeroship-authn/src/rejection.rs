@@ -12,7 +12,7 @@
 //!
 //! That splits an `InternalError` in two. A caller that RENDERS it reads the
 //! status the constructor chose; a caller that ASKS it for its status reads
-//! 500. `zeroship-migrated` asks (`crates/migrated/src/auth.rs`,
+//! 500. `zeroship-migrate-server` asks (`crates/zeroship-migrate-server/src/auth.rs`,
 //! `map_bearer_error`), so every 401 authn produced arrived there as a 500 and
 //! was classified as broken infrastructure rather than a rejected credential.
 //!
@@ -115,7 +115,7 @@ mod tests {
 
     /// Callers do not hold an `AuthnRejection`; they hold the `web::Error` it
     /// was boxed into, and read the status back through `as_response_error()`.
-    /// That is the exact expression `zeroship-migrated`'s `map_bearer_error`
+    /// That is the exact expression `zeroship-migrate-server`'s `map_bearer_error`
     /// evaluates, so this asserts the boxing does not lose the status.
     ///
     /// It does not assert anything about which rejection any given authn path

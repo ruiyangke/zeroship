@@ -49,7 +49,7 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 : "${ZEROSHIP_CONTROL_PORT:=9131}"
 : "${ZEROSHIP_WORKER_PORT:=8091}"
 : "${ZEROSHIP_GATEWAY_PORT:=8021}"
-: "${ZEROSHIP_MIGRATED_PORT:=9231}"
+: "${ZEROSHIP_MIGRATE_SERVER_PORT:=9231}"
 # 5461 was taken by an unrelated container on the machine this was written on.
 # The band below is checked free; every value is overridable.
 : "${PG_PORT:=5471}"
@@ -74,7 +74,7 @@ echo "============================================"
 echo "  zeroship E2E - deploy and migrate from zeroship.jsonc"
 echo "============================================"
 
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrated; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
@@ -117,7 +117,7 @@ echo "=== start control, migrated, worker, and gateway ==="
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do
   lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -144,8 +144,8 @@ boot() {  # boot <label> <readyz-port> -- <cmd...>
 
 boot control $ZEROSHIP_CONTROL_PORT -- "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" \
-  --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT"
-boot migrated $ZEROSHIP_MIGRATED_PORT -- "$BIN/zeroship-migrated" --port $ZEROSHIP_MIGRATED_PORT \
+  --migrate-server-url "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
+boot migrated $ZEROSHIP_MIGRATE_SERVER_PORT -- "$BIN/zeroship-migrate-server" --port $ZEROSHIP_MIGRATE_SERVER_PORT \
   --tmp-dir "$WORK/migrated-tmp"
 boot worker $ZEROSHIP_WORKER_PORT -- "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" --poll-interval 2

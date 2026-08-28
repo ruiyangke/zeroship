@@ -7,7 +7,7 @@ use zeroship_core::service_identity::{
 
 /// Every operation the catalog names, in one place for the table-wide guards.
 const CATALOG: [ServiceEndpoint; 13] = [
-    endpoints::MIGRATED_APPLY_MIGRATIONS,
+    endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
@@ -26,7 +26,7 @@ const CATALOG: [ServiceEndpoint; 13] = [
 const PRINCIPALS: [&str; 5] = [
     "svc/control",
     "svc/auth",
-    "svc/migrated",
+    "svc/migrate-server",
     "svc/gateway",
     "svc/worker",
 ];
@@ -71,8 +71,8 @@ fn assert_endpoint(
 fn endpoint_catalog_records_exact_measured_operations() {
     for (endpoint, destination, method, path_template) in [
         (
-            endpoints::MIGRATED_APPLY_MIGRATIONS,
-            "migrated",
+            endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
+            "migrate-server",
             "POST",
             "/v1/apps/{app_id}/migrations/apply",
         ),
@@ -161,7 +161,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     assert_allowlist_row(
         "svc/control",
         &[
-            endpoints::MIGRATED_APPLY_MIGRATIONS,
+            endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
             endpoints::GATEWAY_WORKFLOW_ADVANCE,
             endpoints::WORKER_APP_LOGS,
         ],
@@ -172,7 +172,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         &[endpoints::GATEWAY_BACKCHANNEL_LOGOUT],
         &all,
     );
-    assert_allowlist_row("svc/migrated", &[], &all);
+    assert_allowlist_row("svc/migrate-server", &[], &all);
     assert_allowlist_row(
         "svc/gateway",
         &[
@@ -201,12 +201,12 @@ fn authorization_keys_on_individual_compound_identity() {
     let unknown = identity("zeroship.ai", "svc/unknown");
     let wrong_domain = identity("attacker.example", "svc/control");
 
-    assert!(authorize(&control, endpoints::MIGRATED_APPLY_MIGRATIONS));
-    assert!(!authorize(&auth, endpoints::MIGRATED_APPLY_MIGRATIONS));
-    assert!(!authorize(&unknown, endpoints::MIGRATED_APPLY_MIGRATIONS));
+    assert!(authorize(&control, endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS));
+    assert!(!authorize(&auth, endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS));
+    assert!(!authorize(&unknown, endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS));
     assert!(!authorize(
         &wrong_domain,
-        endpoints::MIGRATED_APPLY_MIGRATIONS
+        endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS
     ));
 }
 

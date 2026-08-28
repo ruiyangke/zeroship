@@ -94,9 +94,8 @@ pub struct AppNetPolicyLimits {
     ///
     /// A migration to add it was written and then DELETED rather than
     /// rewritten: the engine cannot lower a JSON-object `setColumnDefault`
-    /// ("json value defaults need live column type",
-    /// `cargo test -p zeroship-migrate-adapter --features platform-cli
-    /// --test platform_migrate`). Do not re-add one - there is nothing to buy.
+    /// ("json value defaults need live column type"). Do not re-add one - there
+    /// is nothing to buy.
     #[serde(default = "free_tier_max_grants")]
     pub max_grants: u32,
 }

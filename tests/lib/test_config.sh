@@ -16,7 +16,7 @@
 #   tests/run_billing_suite.sh:124-127  the same four lines again
 #
 # and then exported the resulting DSN under whichever names the crates it ran
-# happened to read - AUTH_DB_URL, CONTROL_TEST_DB, MIGRATED_TEST_DB,
+# happened to read - AUTH_DB_URL, CONTROL_TEST_DB, MIGRATE_SERVER_TEST_DB,
 # GATEWAY_ANCHORS_DB_URL, GATEWAY_POOL_SMOKE_URL. Two copies of the address
 # drift; five names for one value means a crate whose name nobody exported runs
 # against nothing and reports passes.

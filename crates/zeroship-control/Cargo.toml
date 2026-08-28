@@ -138,7 +138,7 @@ zeroship-runtime = { workspace = true }
 # `provisioning::provision_workflow_journal_schema` rather than a CREATE SCHEMA
 # of their own, so the seeded app carries production's privilege shape (owner
 # `zeroship_workflow_owner`) instead of a test-only one.
-zeroship-migrated = { workspace = true }
+zeroship-migrate-server = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }

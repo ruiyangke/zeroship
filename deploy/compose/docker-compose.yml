@@ -299,7 +299,7 @@ services:
       start_period: 30s
     environment:
       # Control's OWN least-priv DSN. The gateway's, the worker's and
-      # migrated's are DIFFERENT settings with different roles, so they have
+      # migrate-server's are DIFFERENT settings with different roles, so they have
       # different canonical names; there is no shared `ZEROSHIP_DATABASE_URL`
       # middle name for all four to inherit and disagree about.
       ZEROSHIP_CONTROL_DATABASE_URL: ${ZEROSHIP_CONTROL_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
@@ -327,17 +327,17 @@ services:
       # it validates stays the public issuer above.
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
       # NO provisioning DSN here. The privileged CREATE SCHEMA / CREATE ROLE
-      # work belongs to `migrated`, which is the only code that reads one; this
+      # work belongs to `migrate-server`, which is the only code that reads one; this
       # service used to carry it and nothing consumed it.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_CONTROL_MASTER_KEY: ${ZEROSHIP_CONTROL_MASTER_KEY:?run zeroship dev init}
       # Where `POST /api/apps/{id}/migrations/apply` forwards. This is the
-      # compose-network address of the `migrated` service below, NOT the
+      # compose-network address of the `migrate-server` service below, NOT the
       # loopback publish (`127.0.0.1:9091`) an operator tunnels to - control
       # reaches it as a peer container. The compiled default is localhost, which
       # is right for a single-host dev run and wrong inside a container, so it
       # is spelled here rather than inherited.
-      ZEROSHIP_CONTROL_MIGRATED_URL: ${ZEROSHIP_CONTROL_MIGRATED_URL:-http://migrated:9091}
+      ZEROSHIP_CONTROL_MIGRATE_SERVER_URL: ${ZEROSHIP_CONTROL_MIGRATE_SERVER_URL:-http://migrate-server:9091}
       # control ALSO needs the worker key: it refuses to start without one,
       # because it calls the worker's admin endpoints. MUST match the worker's
       # value - it is ONE setting with several consumers, which is why it has
@@ -417,18 +417,18 @@ services:
   # SUCCEEDS, the gateway serves the app, and only then does every env.db call
   # fail against tables nothing ever created. The tell was already in this file:
   # a provisioning DSN was set on `control`, and the ONLY code that reads one
-  # is crates/migrated/src/main.rs - a service that was not here.
+  # is crates/zeroship-migrate-server/src/main.rs - a service that was not here.
   #
-  # LOOPBACK by default (ZEROSHIP_MIGRATED_BIND): like gateway and auth, nothing outside
+  # LOOPBACK by default (ZEROSHIP_MIGRATE_SERVER_BIND): like gateway and auth, nothing outside
   # the compose network should reach it. Creators drive it through control, and
   # the operator drives it over an SSH tunnel.
-  migrated:
+  migrate-server:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
     image: zeroship-platform:dev
     command: >
-      zeroship-migrated
+      zeroship-migrate-server
         --port 9091
         --bind 0.0.0.0
     # /readyz opens a Postgres connection on the policy-store DSN - the same
@@ -444,7 +444,7 @@ services:
       - "127.0.0.1:9091:9091"
     environment:
       # Least-priv role for reading control-plane authz data (who owns the app).
-      ZEROSHIP_MIGRATED_DATABASE_URL: ${ZEROSHIP_MIGRATED_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
+      ZEROSHIP_MIGRATE_SERVER_DATABASE_URL: ${ZEROSHIP_MIGRATE_SERVER_DATABASE_URL:-postgres://zeroship_control:zeroship_control@postgres:5432/zeroship}
       # SUPERUSER DSN, and the reason this service exists: applying an app's
       # migrations means CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
       # which the least-priv role above cannot do.
@@ -461,32 +461,32 @@ services:
       # check 6d now does, and it derives the superuser's name from the
       # postgres service in this same file rather than from a list.
       #
-      # ONE SOURCE, not two. `migrate` and `migrated` need the SAME privileged
+      # ONE SOURCE, not two. `migrate` and `migrate-server` need the SAME privileged
       # credential against the SAME cluster, and until this change they took it
       # from different places: an operator who repointed secrets/migrate-dsn at
       # a real database - which crates/cli/src/dev.rs invites, writing the file
       # only when absent so a repointed value survives re-runs - moved the
-      # platform migration one-shot and left `migrated` still provisioning
+      # platform migration one-shot and left `migrate-server` still provisioning
       # against the in-compose postgres. That is a divergence with no signal.
       #
       # `urn:zeroship:file:<path>` is the environment-surface spelling of a
       # `--<name>-file` flag: crates/core/src/config/names.rs resolves it
       # through the same read_secret_file() the flag uses, so the owner-only
       # (0600) permission refusal applies here too.
-      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn}
+      ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL:-urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn}
       # The SAME internal key every other service reads, under the SAME name.
       # It used to be spelled differently here, which is precisely the split
       # this migration removed.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       # Seals the server-composed migration policy. It is stable across restarts
       # and independent from the platform encryption and transport keys.
-      ZEROSHIP_MIGRATED_POLICY_SEAL_KEY: ${ZEROSHIP_MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}
+      ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: ${ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY:?run zeroship dev init}
       # OAuth issuer topology, not a relaxed security posture. This is the
       # trust anchor - the `iss` a platform token must carry - so it is the
       # public name and stays that way.
       ZEROSHIP_AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
       # The key fetch is an OUTBOUND call, so it gets the address on this
-      # network rather than the public name. migrated does not mint, so it has
+      # network rather than the public name. migrate-server does not mint, so it has
       # no mint URL; this is the only outbound platform-OP target it has.
       # Compose used to leave this unset, which defaulted it to
       # `{issuer}/.well-known/jwks.json` and sent it out through the edge.
@@ -612,7 +612,7 @@ services:
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. ZEROSHIP_WORKER_KEY must match the
     # gateway's. The worker logs in as the constrained zeroship_worker role.
-    # zeroship-migrated creates app roles, workflow schemas, and publications;
+    # zeroship-migrate-server creates app roles, workflow schemas, and publications;
     # the worker receives only runtime-role membership, its narrow workflow
     # owner membership, and REPLICATION for per-worker logical slots. It has no
     # write privilege on any zeroship system relation.

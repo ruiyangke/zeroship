@@ -205,7 +205,7 @@ echo ""
 
 echo "=== Build ==="
 if cargo build -p zeroship-control -p zeroship-gateway -p zeroship-auth \
-    -p zeroship-worker -p zeroship-migrated >"$TMPDIR/build.log" 2>&1; then
+    -p zeroship-worker -p zeroship-migrate-server >"$TMPDIR/build.log" 2>&1; then
     pass "built debug web binaries"
 else
     fail "built debug web binaries"
@@ -218,7 +218,7 @@ CONTROL="$BIN/zeroship-control"
 GATEWAY="$BIN/zeroship-gate"
 AUTH="$BIN/zeroship-auth"
 WORKER="$BIN/zeroship-worker"
-MIGRATED="$BIN/zeroship-migrated"
+MIGRATE_SERVER="$BIN/zeroship-migrate-server"
 
 # --check-config exercises the same mandatory guards as real startup. Supply
 # real, strong inputs so these cases vary only the setting each one names.
@@ -274,13 +274,13 @@ WORKER_RUN=(
 )
 WORKER_COMMON=()
 
-MIGRATED_RUN=(
+MIGRATE_SERVER_RUN=(
     env
     ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX"
-    ZEROSHIP_MIGRATED_POLICY_SEAL_KEY="$STRONG_HEX"
-    "$MIGRATED"
+    ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY="$STRONG_HEX"
+    "$MIGRATE_SERVER"
 )
-MIGRATED_COMMON=()
+MIGRATE_SERVER_COMMON=()
 
 # Launch one named binary with its own environment prefix and its own remaining
 # flags. Exists because a secret is supplied by an ENVIRONMENT NAME, which has
@@ -294,7 +294,7 @@ run_one() {
         gateway) run_cmd "$label" "${GATEWAY_RUN[@]}" "$@" "${GATEWAY_COMMON[@]}" ;;
         auth) run_cmd "$label" "${AUTH_RUN[@]}" "$@" ;;
         worker) run_cmd "$label" "${WORKER_RUN[@]}" "$@" ;;
-        migrated) run_cmd "$label" "${MIGRATED_RUN[@]}" "$@" ;;
+        migrated) run_cmd "$label" "${MIGRATE_SERVER_RUN[@]}" "$@" ;;
         *) fail "run_one: unknown target $target"; return 1 ;;
     esac
 }
@@ -711,17 +711,17 @@ echo "=== Case 15: migrated's --check-config has no side effects ==="
 # migrated used to create its tmp dir, dial the control DSN and bind a listener
 # unconditionally. The dry run must do none of that: point --tmp-dir at a path
 # that does not exist and require it STILL does not exist afterwards.
-MIGRATED_TMP="$TMPDIR/migrated-must-not-exist"
+MIGRATE_SERVER_TMP="$TMPDIR/migrated-must-not-exist"
 run_cmd migrated-no-side-effects env \
     ZEROSHIP_CONTROL_KEY="$STRONG_HEX" \
-    ZEROSHIP_MIGRATED_POLICY_SEAL_KEY="$STRONG_HEX" \
-    ZEROSHIP_MIGRATED_DATABASE_URL="postgres://127.0.0.1:1/nonexistent" \
-    "$MIGRATED" --check-config \
-    --config "$TMPDIR/shared.toml" --tmp-dir "$MIGRATED_TMP"
+    ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY="$STRONG_HEX" \
+    ZEROSHIP_MIGRATE_SERVER_DATABASE_URL="postgres://127.0.0.1:1/nonexistent" \
+    "$MIGRATE_SERVER" --check-config \
+    --config "$TMPDIR/shared.toml" --tmp-dir "$MIGRATE_SERVER_TMP"
 show_last_output
 expect_status 0 "migrated exits 0 without a reachable database"
-if [ -e "$MIGRATED_TMP" ]; then
-    fail "migrated --check-config created $MIGRATED_TMP"
+if [ -e "$MIGRATE_SERVER_TMP" ]; then
+    fail "migrated --check-config created $MIGRATE_SERVER_TMP"
 else
     pass "migrated --check-config created no directory"
 fi

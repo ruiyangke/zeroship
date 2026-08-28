@@ -79,7 +79,7 @@
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker \
-#       -p zeroship-gateway -p zeroship -p zeroship-migrated --bins
+#       -p zeroship-gateway -p zeroship -p zeroship-migrate-server --bins
 #   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   docker (this script starts and destroys its own ephemeral Postgres)
 #   pnpm install in examples/db-todos
@@ -99,7 +99,7 @@ WORK="$(mktemp -d -t zs-devdeploy-db-XXXXXX)"
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9393}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
-ZEROSHIP_MIGRATED_PORT="${ZEROSHIP_MIGRATED_PORT:-9493}"
+ZEROSHIP_MIGRATE_SERVER_PORT="${ZEROSHIP_MIGRATE_SERVER_PORT:-9493}"
 DEV_PORT="${DEV_PORT:-3021}"
 # VITE's own port. DEV_PORT above is the RUNTIME port. vite was silently taking
 # its :5173 global default, which nothing here declared, tracked or freed, so a
@@ -167,7 +167,7 @@ command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || {
   exit 2
 }
 for b in zeroship zeroship-control zeroship-gate zeroship-worker \
-         zeroship-migrated dev-provision; do
+         zeroship-migrate-server dev-provision; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b -- see the prereqs in this file's header"; exit 2; }
 done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI -- see the prereqs in this file's header"; exit 2; }
@@ -182,8 +182,8 @@ RECORDER="$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js"
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-plugin-db/src crates/zeroship-schema/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrated/src sdks/db/src" \
-  "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-migrated dev-provision" \
+  "crates/zeroship-plugin-db/src crates/zeroship-schema/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrate-server/src sdks/db/src" \
+  "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-migrate-server dev-provision" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
 echo "=== dev vs deployed (db-todos, env.db) ==="
@@ -734,7 +734,7 @@ render "$WORK/dev.raw" "$WORK/dev.txt"
 # --- 3. deployed side ------------------------------------------------------
 echo ""
 echo "--- 3. deployed (gateway -> worker -> PostgreSQL) ---"
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -829,15 +829,15 @@ e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   > "$WORK/control.log" 2>&1 & PIDS+=($!)
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control did not come up"; tail -30 "$WORK/control.log"; exit 1; }
-for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 \
-  && pass "zeroship-migrated healthy" || { fail "migrated did not come up"; tail -30 "$WORK/migrated.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 \
+  && pass "zeroship-migrate-server healthy" || { fail "migrated did not come up"; tail -30 "$WORK/migrated.log"; exit 1; }
 
 # The worker needs --db: without it the env.db namespace is absent BY DESIGN
 # and every handler fails loudly, which would read as an app bug.
@@ -867,7 +867,7 @@ APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 [ -n "$API_KEY" ] || { fail "provision: $OUT"; exit 1; }
 
-# --- apply the creator's recorded migration IR through zeroship-migrated ---
+# --- apply the creator's recorded migration IR through zeroship-migrate-server ---
 # Same mechanism as tests/e2e_db_app_end_to_end.sh: the .zship carries the
 # DESCRIPTOR only; migrations travel through the migration service, which is
 # the real deployed path. A hand-rolled CREATE TABLE here would test nothing.
@@ -892,13 +892,13 @@ ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 IR_BODY="$APP/generated/zeroship/migrations.ir.json"
 [ -s "$IR_BODY" ] || { fail "the build left no $IR_BODY - run pnpm build in $APP"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' -X POST \
-  "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$APP_ID/migrations/apply" \
+  "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$APP_ID/migrations/apply" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   --data-binary @"$IR_BODY")"
 APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
 SKIPPED="$(jget '.skipped.length' < "$WORK/apply-response.json")"
 if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
-  pass "zeroship-migrated applied app IR (applied=$APPLIED skipped=${SKIPPED:-0})"
+  pass "zeroship-migrate-server applied app IR (applied=$APPLIED skipped=${SKIPPED:-0})"
 else
   fail "migrated apply failed (http=$APPLY_CODE)"
   cat "$WORK/apply-response.json"; tail -30 "$WORK/migrated.log"; exit 1

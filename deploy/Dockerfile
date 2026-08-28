@@ -2,7 +2,7 @@
 #
 # zeroship platform image - builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship (CLI), zeroship-migrated (the creator migration service).
+#   zeroship (CLI), zeroship-migrate-server (the creator migration service).
 #
 # THE PLATFORM MIGRATION ONE-SHOT IS NO LONGER A RUST BINARY IN THIS IMAGE.
 # `zeroship-platform-migrate` was deleted on 2026-08-28; the platform schema is
@@ -30,7 +30,7 @@
 #      (zeroship-mock-stripe, dev-provision) - see the `--bin` note at the
 #      cargo line for why they come along.
 #   3. `runtime` (ubuntu) ships SIX binaries: zeroship-control, zeroship-gate,
-#      zeroship-worker, zeroship-auth, zeroship, zeroship-migrated.
+#      zeroship-worker, zeroship-auth, zeroship, zeroship-migrate-server.
 #      It ships NO console - see the apps/ note in stage 1.
 #   3b. `migrate` (node:22-bookworm-slim) carries the `zero-migrate` CLI, the
 #      napi addon the node stage already built, the migration corpus and the
@@ -187,7 +187,7 @@ COPY --from=sdks /build/sdks/ sdks/
 #
 # `-p zeroship-migrate-adapter --features .../platform-cli` used to trail this
 # list. Both went with the binary: the adapter is a library-only crate now, and
-# it still gets built because zeroship-migrated depends on it for
+# it still gets built because zeroship-migrate-server depends on it for
 # `CompioPgSession`.
 RUN cargo build --release \
     -p zeroship-control \
@@ -195,7 +195,7 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
-    -p zeroship-migrated
+    -p zeroship-migrate-server
 
 # ---------------------------------------------------------------------------
 # Stage 3 - runtime image.
@@ -221,8 +221,8 @@ COPY --from=builder /build/target/release/zeroship /usr/local/bin/
 # the app serves its assets and RPCs, and every env.db call then fails against
 # tables that were never created. Compose even set the provisioning superuser
 # DSN this service needs on the CONTROL service - which has no code that reads
-# one; it is ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL and it belongs here.
-COPY --from=builder /build/target/release/zeroship-migrated /usr/local/bin/
+# one; it is ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL and it belongs here.
+COPY --from=builder /build/target/release/zeroship-migrate-server /usr/local/bin/
 # The migration SOURCE, baked in rather than bind-mounted, so a host running this
 # image does not also have to hold the source tree and the migrations are pinned
 # to the same commit as the code.

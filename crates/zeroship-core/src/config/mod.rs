@@ -56,7 +56,7 @@ pub use bootstrap::{
 };
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
 pub use file::{
-    AuthSection, ConfigError, ControlSection, FileConfig, GatewaySection, MigratedSection,
+    AuthSection, ConfigError, ControlSection, FileConfig, GatewaySection, MigrateServerSection,
     OauthClientRegistration, ObsSection, SchedulerSection, WorkerSection,
 };
 pub use names::{

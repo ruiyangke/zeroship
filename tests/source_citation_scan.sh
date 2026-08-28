@@ -145,7 +145,7 @@ DOC_EXCLUDED="archive decisions proposals superpowers reviews research"
 ALLOW="
 crates/auth/tests/common/mod.rs:tests/common.rs
 crates/runtime/tests/call_fetch_handler.rs:tests/http.rs
-crates/migrated/tests/typed_id_parity.rs:tests/core_id_parity.rs
+crates/zeroship-migrate-server/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
 crates/plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
 tests/golden_path.sh:tests/m0_gate.sh

@@ -233,7 +233,7 @@ tree hits are historical prose in `ISSUES.md` and `docs/archive/`.
 All FIVE binaries carry their own parser-rejection test, not three:
 `crates/control/src/main.rs:1685`, `crates/gateway/src/main.rs:769` and `:782`,
 `crates/worker/src/main.rs:665`, `crates/auth/src/config.rs:1226` and `:1237`,
-`crates/migrated/src/config.rs:152`. `crates/cli/tests/dev_init_test.rs:662` is
+`crates/zeroship-migrate-server/src/config.rs:152`. `crates/cli/tests/dev_init_test.rs:662` is
 the cross-crate backstop that keys on the clap DECLARATION, so a re-added flag
 fails even in a crate whose own suite was not run; it guards its own input list
 (`dev_init_test.rs:668`, `sources.len() > 50`) so it cannot pass over nothing.
