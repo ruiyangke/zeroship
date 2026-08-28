@@ -192,6 +192,17 @@ through `backend/sqlite/cdc.rs` - never reaches them. The design says they "stay
 only for the SQLite dev tier", which is backwards: deleting the Postgres arm
 means deleting these three **entirely**, and SQLite is untouched.
 
+**One reviewer-flagged risk RESOLVED, and it resolves structurally.** The wire
+projection reads `storage.valueColumn` and nothing else, while the read side
+(`read_column_for`, `query.rs:3402`) has a suffix *fallback* when the storage
+block is absent - so a descriptor missing `valueColumn` would leave the read side
+suffixing to `{field}_masked` while the wire side omitted the column entirely
+(over-restrictive, not a leak). Measured: it cannot happen. The descriptor's
+field is `pub value_column: String` (`migrate-core/src/render/gen_types.rs:178`),
+**not `Option<String>`**, and both construction arms set it - `:297` to the
+sibling for a masked field, `:310` to the field's own name otherwise. Absence is
+unrepresentable, so no test is owed.
+
 **A version trap in the recommended mitigation, found by measuring two servers.**
 `REVOKE EXECUTE ... FROM PUBLIC` must name the right overloads, and **the
 signature changed**: PG 16 has `pg_logical_emit_message(boolean,text,text)`;
