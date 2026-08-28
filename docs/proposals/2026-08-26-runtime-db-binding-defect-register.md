@@ -1287,9 +1287,30 @@ PostgreSQL offers no narrower grant. Do not attempt a partial fix here - a
 "privileged slot janitor the worker calls" is precisely the shape the invariant
 forbids, and narrowing the grant is impossible rather than merely awkward.
 
-**One part does NOT travel with the relay and stays open:** `BYPASSRLS` is
-unrelated to replication, and nothing in this set explains why the worker needs
-it. Dropping `REPLICATION` leaves that question exactly where it was.
+**One part does NOT travel with the relay**, and it now has an answer.
+`BYPASSRLS` is unrelated to replication, so dropping `REPLICATION` leaves it
+untouched. Measured 2026-08-28:
+
+- **No platform migration enables RLS.** `grep -c 'ROW LEVEL SECURITY\|CREATE POLICY'`
+  across every file in `db/migrations-ts/` returns zero matches.
+- **The declarative path cannot enable it.** `zeroship-migrate-backend` carries
+  an explicit refusal: *"the desired model records no per-table RLS, so nothing
+  here can render ENABLE ROW LEVEL SECURITY"* (`src/error.rs:503-512`).
+- **The policy charter denies creating one.** `assert_denied("CREATE POLICY p ON
+  project_acme.t USING (true)")` (`zeroship-migrate/tests/policy_charter/guard_security.rs:678`).
+
+**So `BYPASSRLS` on `zeroship_worker` currently bypasses nothing - there is no
+policy anywhere for it to bypass. It is dead privilege.**
+
+**And that is precisely why it should be dropped NOW rather than left.** RLS is
+not unreachable, only unused: the IR path has a `setRls` op and a
+`safety.require_rls` obligation (named in the same refusal above). The day any
+app enables RLS, a worker holding `BYPASSRLS` silently ignores it - a
+tenant-isolation bypass that arrives with no code change and no error, in a
+process that executes creator code. Removing a privilege that currently does
+nothing is free; removing it after something depends on it is a behaviour
+change, and leaving it is a trap armed for whoever first uses a supported
+feature.
 
 **Related, same file, not separately entered:** `BYPASSRLS` deserves its own
 justification even after the relay lands, since it is unrelated to replication
