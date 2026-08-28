@@ -775,3 +775,151 @@ async fn a_healthy_nested_commit_is_not_mistaken_for_a_rollback() {
     .await
     .expect("nested-commit control exceeded its watchdog");
 }
+
+/// A statement can succeed while its transaction's `COMMIT` fails: deferred
+/// constraints are checked only when `PostgreSQL` tries to make the transaction
+/// durable. `commit` must return that server error instead of reporting `Ok`.
+///
+/// The staged count is the control. It proves both duplicate inserts succeeded
+/// inside the transaction, so the error below came from the COMMIT round trip
+/// rather than from fixture setup.
+#[compio::test]
+async fn commit_propagates_a_deferred_constraint_failure() {
+    Box::pin(compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_deferred_commit_table");
+        let constraint = common::test_object_name("cpg_deferred_commit_constraint");
+        client
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE \"{table}\" (\
+                     value int4 NOT NULL, \
+                     CONSTRAINT \"{constraint}\" UNIQUE (value) \
+                         DEFERRABLE INITIALLY DEFERRED\
+                 )"
+            ))
+            .await
+            .unwrap();
+
+        let transaction = client.transaction().await.unwrap();
+        let inserted = transaction
+            .execute(&format!("INSERT INTO \"{table}\" VALUES (1), (1)"), &[])
+            .await;
+        let staged = transaction
+            .query_one(&format!("SELECT count(*)::int8 FROM \"{table}\""), &[])
+            .await
+            .map(|row| row.get::<_, i64>(0));
+        let outcome = transaction.commit().await;
+
+        let persisted = client
+            .query_one(&format!("SELECT count(*)::int8 FROM \"{table}\""), &[])
+            .await
+            .map(|row| row.get::<_, i64>(0));
+        let cleanup = client
+            .batch_execute(&format!("DROP TABLE \"{table}\""))
+            .await;
+
+        assert_eq!(
+            inserted.expect("the duplicate inserts failed before COMMIT"),
+            2,
+            "the fixture did not stage both duplicate rows"
+        );
+        assert_eq!(
+            staged.expect("the staged rows could not be counted before COMMIT"),
+            2,
+            "the fixture did not defer its UNIQUE constraint"
+        );
+        let error = outcome
+            .expect_err("commit() swallowed the deferred UNIQUE violation returned by PostgreSQL");
+        assert_eq!(
+            error.code(),
+            Some(&compio_postgres::error::SqlState::UNIQUE_VIOLATION),
+            "COMMIT failed for the wrong reason: {}",
+            common::error_chain(&error)
+        );
+        assert_eq!(
+            persisted.expect("the table was unusable after the failed COMMIT"),
+            0,
+            "PostgreSQL kept rows from the transaction whose COMMIT failed"
+        );
+        cleanup.expect("failed to clean up the deferred-constraint table");
+    }))
+    .await
+    .expect("deferred-COMMIT error test exceeded its watchdog");
+}
+
+/// `rollback` promises to return errors it encounters. Releasing the savepoint
+/// behind a live `Transaction` gives it a deterministic server-side error to
+/// report when it tries to roll back to that now-missing name.
+#[compio::test]
+async fn rollback_propagates_a_missing_savepoint_error() {
+    Box::pin(compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let name = common::test_object_name("cpg_missing_rollback_savepoint");
+        let mut transaction = client.transaction().await.unwrap();
+        let savepoint = transaction.savepoint(name.clone()).await.unwrap();
+
+        let release = savepoint
+            .batch_execute(&format!("RELEASE SAVEPOINT \"{name}\""))
+            .await;
+        let outcome = savepoint.rollback().await;
+        let cleanup = transaction.rollback().await;
+
+        release.expect("the fixture could not remove the savepoint before rollback()");
+        let error = outcome.expect_err("rollback() swallowed the server's missing-savepoint error");
+        assert_eq!(
+            error.code(),
+            Some(&compio_postgres::error::SqlState::S_E_INVALID_SPECIFICATION),
+            "rollback() failed for a reason other than the missing savepoint: {}",
+            common::error_chain(&error)
+        );
+        cleanup.expect("failed to roll back the outer transaction after the probe");
+    }))
+    .await
+    .expect("rollback error propagation test exceeded its watchdog");
+}
+
+/// Committing a nested transaction must release its server-side savepoint.
+/// Row persistence cannot prove that: an eventual outer COMMIT would preserve
+/// the same rows even if the inner RELEASE were skipped.
+///
+/// The first `ROLLBACK TO` is the control that proves the unique name exists
+/// before `commit`; the identical command must fail after `commit` consumes the
+/// nested transaction.
+#[compio::test]
+async fn committed_savepoint_is_removed_from_the_server_stack() {
+    Box::pin(compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let name = common::test_object_name("cpg_committed_savepoint_scope");
+        let mut transaction = client.transaction().await.unwrap();
+        let savepoint = transaction.savepoint(name.clone()).await.unwrap();
+        let probe = format!("ROLLBACK TO SAVEPOINT \"{name}\"");
+
+        let present = savepoint.batch_execute(&probe).await;
+        let commit = savepoint.commit().await;
+        let absent = transaction.batch_execute(&probe).await;
+        let cleanup = transaction.rollback().await;
+
+        present.expect("the live savepoint was not defined on the server");
+        commit.expect("the healthy nested transaction did not commit");
+        let error =
+            absent.expect_err("commit() returned without releasing its savepoint on the server");
+        assert_eq!(
+            error.code(),
+            Some(&compio_postgres::error::SqlState::S_E_INVALID_SPECIFICATION),
+            "the post-commit probe failed for a reason other than an absent savepoint: {}",
+            common::error_chain(&error)
+        );
+        cleanup.expect("failed to roll back the outer transaction after the probe");
+    }))
+    .await
+    .expect("nested savepoint release test exceeded its watchdog");
+}
