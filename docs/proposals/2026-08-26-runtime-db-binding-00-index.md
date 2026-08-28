@@ -355,10 +355,40 @@ two-row transaction delivers row 1 and drops row 2, silently and always.
 about exactly this - it annotated the second row "same commit, 2 rows: both
 applied, one LSN" while the stated rule drops it. The gloss hid the bug.*
 
-The fix needs a second discriminator: an in-transaction sequence, or an explicit
-transaction boundary frame. Salesforce solved the same problem with three header
-fields - `commitNumber` orders transactions, `transactionKey` brackets one,
-`sequenceNumber` orders within it.
+**CONFIRMED EMPIRICALLY, and the fix is one field - measured on PG 18.4**
+(`verify_lsn_dedup.sh`). Three rows in one transaction:
+
+```
+0/BAA70A58  BEGIN 202343
+0/BAA70A58  table public.t: INSERT: id:1      <- three DISTINCT
+0/BAA70B38  table public.t: INSERT: id:2         per-change LSNs
+0/BAA70BB8  table public.t: INSERT: id:3
+0/BAA70C68  COMMIT 202343                     <- ONE commit lsn
+```
+
+| check | result |
+| --- | --- |
+| distinct per-change LSNs within one transaction | **3** |
+| **control** - distinct COMMIT LSNs across 3 transactions | 3 (the probe can see LSNs) |
+
+**So the stream already carries a usable discriminator.** Stamping each `Change`
+frame with its **own** LSN rather than the transaction's commit LSN fixes the
+bug with no new field, no in-transaction sequence number, and no
+transaction-boundary frame - and per-change LSNs are monotone both within and
+across transactions, so the "drop at or below the watermark" rule keeps working
+unchanged.
+
+*The synthesis proposed importing Salesforce's three-header design
+(`commitNumber` + `transactionKey` + `sequenceNumber`). That solves a harder
+problem than we have: Salesforce needs transaction reconstruction across a
+lossy, replay-id-keyed bus. We need one monotone key, and PostgreSQL already
+emits it per change.*
+
+**One consequence to keep:** the design uses `commit_lsn` deliberately, because
+resume after a leader change starts from `confirmed_flush_lsn`, which is a
+commit boundary - so a replay re-delivers whole transactions. Per-change LSNs
+handle that correctly and more precisely: the worker drops already-applied rows
+individually rather than all-or-nothing per transaction.
 
 **8b. "Reset the watermark when the Hello term increases" is wrong, and
 backwards.** A new leader replaying from `confirmed_flush_lsn` produces only
