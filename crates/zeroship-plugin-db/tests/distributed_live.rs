@@ -45,6 +45,180 @@ use zeroship_runtime::{
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
+/// The deploy's `manifest.runtime_descriptor`, verbatim.
+///
+/// **Why the fixture carries one at all.** The data plane's sole schema
+/// authority is this document: `crate::descriptor::collection_schema`
+/// (`crates/zeroship-plugin-db/src/descriptor.rs:66-80`) resolves a collection
+/// out of the per-isolate store or refuses it with `collection_not_declared`,
+/// and the only writer of that store is `register_model_dispatch`
+/// (`crates/zeroship-plugin-db/src/register_model/mod.rs:104-106`), which
+/// `installSchema` drives off `globalThis.__zsRuntimeDescriptor`
+/// (`sdks/bootstrap/src/runtime-entry.ts:77-167`). A deploy that ships no
+/// descriptor is a schema-less app and gets no `env.db` collections - see
+/// `docs/reference/zeroship-standard.md`. This target used to reach `events`
+/// anyway, through a live-catalog fallback that no longer exists; shipping the
+/// descriptor is what makes it exercise the documented deploy shape instead.
+///
+/// **Provenance.** These bytes are the migration fold's own output, not a
+/// hand-invented shape that merely parses. They were produced by
+/// `zeroship_migrate::render_artifacts_from_descriptors` for the collection
+/// `events { title: t.string() /* required */ }` on the PostgreSQL dialect
+/// (`zeroship_migrate_postgres::DIALECT`), under the shipped platform charter
+/// (`policies/confined-system-shape.inject.toml` - the same seven system
+/// columns, primary key and three system indexes every creator table gets).
+/// That is why every field carries `readable`/`filterable`/`sortable`/
+/// `projectable` and a `storage` block naming its physical column
+/// (`crates/zeroship-migrate-core/src/render/gen_types.rs:327-360`), and why
+/// `version` is `2`: v1 is refused outright by `assertRuntimeDescriptorV2`
+/// (`sdks/bootstrap/src/install-schema.ts:162-179`) and by
+/// `validate_runtime_descriptor_value`
+/// (`crates/zeroship-runtime/src/core/init.rs:3734-3740`).
+///
+/// **It must agree with [`EVENTS_DDL`], column for column.** Nothing checks the
+/// descriptor against the catalog any more, so a field here that the table does
+/// not have surfaces as a Postgres `42703 column does not exist` at read time:
+/// `implicit_read_projection_parts`
+/// (`crates/zeroship-schema/src/query.rs:3344-3365`) projects the seven system
+/// fields plus every non-system key of this map, by name.
+const RUNTIME_DESCRIPTOR: &str = r#"{
+  "version": 2,
+  "collections": {
+    "events": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "id" }
+        },
+        "created_at": {
+          "type": "date",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "created_at" }
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "updated_at" }
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "created_by" }
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "updated_by" }
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "version" }
+        },
+        "deleted_at": {
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "deleted_at" }
+        },
+        "title": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": { "valueColumn": "title" }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        { "name": "events_deleted_at_idx", "fields": ["deleted_at"] },
+        { "name": "events_updated_at_idx", "fields": ["updated_at"] },
+        { "name": "events_created_by_idx", "fields": ["created_by"] }
+      ]
+    }
+  }
+}"#;
+
+/// The table [`RUNTIME_DESCRIPTOR`] describes, as `zeroship-migrated` would have
+/// created it.
+///
+/// The pairing with the descriptor is the point: eight columns for eight
+/// declared fields, in the same order, carrying the types the platform charter
+/// injects - `varchar(255)` for the three id-bearing system columns (which is
+/// what the `maxLength: 255` on each of them means), `timestamptz` for the three
+/// timestamps, `integer` for `version`, and unbounded `text` for `title`, the
+/// one field the descriptor gives no `maxLength`. The three indexes are the
+/// charter's `ix_deleted_at` / `ix_updated_at` / `ix_created_by` under the
+/// per-table names the engine emits.
+///
+/// The column list is checked against the live table by
+/// [`assert_descriptor_matches_table`] before the exercise starts; the types are
+/// not, and nothing in the tree checks them.
+///
+/// [`APP_SCHEMA_SLOT`] is the only placeholder; the caller substitutes the
+/// per-app schema name.
+const EVENTS_DDL: &str = r#"CREATE TABLE "APP_SCHEMA"."events" (
+    id VARCHAR(255) PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by VARCHAR(255) NULL,
+    updated_by VARCHAR(255) NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    deleted_at TIMESTAMPTZ NULL,
+    title TEXT NOT NULL
+)"#;
+
+/// The three system indexes [`RUNTIME_DESCRIPTOR`] declares, by the names it
+/// declares them under.
+const EVENTS_INDEX_DDL: [&str; 3] = [
+    r#"CREATE INDEX "events_deleted_at_idx" ON "APP_SCHEMA"."events" (deleted_at)"#,
+    r#"CREATE INDEX "events_updated_at_idx" ON "APP_SCHEMA"."events" (updated_at)"#,
+    r#"CREATE INDEX "events_created_by_idx" ON "APP_SCHEMA"."events" (created_by)"#,
+];
+
+/// The token [`EVENTS_DDL`] and [`EVENTS_INDEX_DDL`] carry where the per-app
+/// schema name goes.
+///
+/// Not `{app_id}`: a brace-delimited placeholder inside a plain string literal
+/// is what `clippy::literal_string_with_formatting_args` is looking for, and the
+/// two `.replace` call sites would each raise it.
+const APP_SCHEMA_SLOT: &str = "APP_SCHEMA";
+
 /// The database this target dials, or a panic naming the provisioner.
 ///
 /// It used to fall back to `127.0.0.1:5440/zeroship` -- the SHARED platform
@@ -82,6 +256,12 @@ fn runtime_for(
         .env_vars(env_vars)
         .plugins(plugins)
         .app_id(app_uuid)
+        // The worker vector's `RuntimeState.runtime_descriptor` slot
+        // (`crates/zeroship-worker/src/sync.rs:40-70` resolves the blob;
+        // `crates/zeroship-runtime/src/core/init.rs:3415-3434` validates it and
+        // exposes it as `globalThis.__zsRuntimeDescriptor`). All three isolates
+        // in this target are the same deploy, so they carry the same document.
+        .runtime_descriptor(Some(RUNTIME_DESCRIPTOR.to_string()))
         .build()
 }
 
@@ -528,6 +708,52 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
         .map(|row| row.get::<_, bool>("active")))
 }
 
+/// Refuse to run the exercise unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`]
+/// describe the same eight columns.
+///
+/// This is not belt-and-braces. The data plane BELIEVES the descriptor: it
+/// projects `SELECT` lists straight out of the declared field map
+/// (`crates/zeroship-schema/src/query.rs:3344-3365`) and reads no catalog at
+/// all, so a field the table lacks is a Postgres `42703` in the middle of the
+/// stream and a column the descriptor lacks is data silently never read. Either
+/// way the failure lands as a stalled or empty SSE frame, which is exactly what
+/// a real cross-isolate delivery bug looks like. Checking set equality up front
+/// makes the two indistinguishable cases distinguishable, and names which side
+/// is wrong.
+async fn assert_descriptor_matches_table(pool: &Pool, app_id: &str) -> Result<(), String> {
+    let descriptor: serde_json::Value = serde_json::from_str(RUNTIME_DESCRIPTOR)
+        .map_err(|error| format!("RUNTIME_DESCRIPTOR is not valid JSON: {error}"))?;
+    let mut declared = descriptor["collections"]["events"]["fields"]
+        .as_object()
+        .ok_or_else(|| "RUNTIME_DESCRIPTOR declares no `events.fields` object".to_string())?
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    declared.sort();
+
+    let rows = pool
+        .query_text_params(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = 'events'",
+            &[app_id],
+        )
+        .await
+        .map_err(|error| format!("read the events table's columns: {error}"))?;
+    let mut physical = rows
+        .iter()
+        .map(|row| row.get::<_, String>("column_name"))
+        .collect::<Vec<_>>();
+    physical.sort();
+
+    if declared != physical {
+        return Err(format!(
+            "the runtime descriptor and the events table disagree; \
+             descriptor declares {declared:?}, the table has {physical:?}"
+        ));
+    }
+    Ok(())
+}
+
 async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, String> {
     pool.query_text_params(
         "SELECT 1 FROM pg_publication WHERE pubname = $1",
@@ -659,23 +885,17 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         pool.execute(&format!("CREATE SCHEMA \"{app_id}\""), &[])
             .await
             .expect("create test schema");
-        pool.execute(
-            &format!(
-                r#"CREATE TABLE "{app_id}"."events" (
-                    id TEXT PRIMARY KEY,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    created_by TEXT NULL,
-                    updated_by TEXT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    deleted_at TIMESTAMPTZ NULL,
-                    title TEXT NOT NULL
-                )"#
-            ),
-            &[],
-        )
-        .await
-        .expect("create events table");
+        pool.execute(&EVENTS_DDL.replace(APP_SCHEMA_SLOT, &app_id), &[])
+            .await
+            .expect("create events table");
+        for index in EVENTS_INDEX_DDL {
+            pool.execute(&index.replace(APP_SCHEMA_SLOT, &app_id), &[])
+                .await
+                .expect("create events system index");
+        }
+        assert_descriptor_matches_table(&pool, &app_id)
+            .await
+            .expect("runtime descriptor agrees with the events table");
         provision_app_role(&pool, &app_id)
             .await
             .expect("provision per-app role");

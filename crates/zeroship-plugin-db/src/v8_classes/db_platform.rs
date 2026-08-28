@@ -135,7 +135,7 @@ impl DbPlatform {
         // consumer can disagree with cannot fail usefully - a malformed value
         // would be silently coerced to an empty default and then discarded.
         let _ = (&indexes, &declared);
-        Ok(register_model_dispatch(scope, self.binding.app_id(), &collection, schema_v).into())
+        Ok(register_model_dispatch(scope, &self.binding, &collection, schema_v).into())
     }
 
     /// `__platform.setMaskPolicy(policy)` — persist the

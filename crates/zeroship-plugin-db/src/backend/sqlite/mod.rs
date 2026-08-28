@@ -1796,7 +1796,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
     /// any) follow.
     async fn vector_search(
         &self,
-        app_id: &str,
+        binding: &crate::binding::DbBinding,
         collection: &str,
         column: &str,
         query: &[f32],
@@ -1804,6 +1804,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
         metric: crate::backend::VectorMetric,
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
+        let app_id = binding.app_id();
         // Reject inner-product before issuing any SQL — vec0 vtables
         // can't be created with `distance_metric=ip`, so a stale
         // ensure_vector_index call would have failed earlier; this
@@ -1843,7 +1844,10 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // filter; we append the `k` literal directly into the SQL
         // (it's a small integer, safe to format) so the param vec
         // doesn't need re-numbering.
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        // The base-table projection is the descriptor's field list; a
+        // collection this deploy does not declare is refused rather than
+        // searched with `t.*`.
+        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
         let sql = vector::build_vector_search_sql(
             app_id,
             collection,
@@ -1851,8 +1855,8 @@ impl crate::backend::VectorIndex for SqliteBackend {
             &query_hex,
             k,
             &where_expr,
-            schema_hint.as_ref(),
-        );
+            &schema_hint,
+        )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
         Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
@@ -1863,7 +1867,7 @@ fn build_spatial_near_base_query(
     app_id: &str,
     collection: &str,
     filter: &serde_json::Value,
-    schema_hint: Option<&serde_json::Value>,
+    schema_hint: &serde_json::Value,
 ) -> Result<crate::query::BuiltQuery, DbError> {
     crate::query::build_find_with_schema(
         app_id,
@@ -1914,7 +1918,7 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 
     async fn spatial_near(
         &self,
-        app_id: &str,
+        binding: &crate::binding::DbBinding,
         collection: &str,
         column: &str,
         point: crate::backend::GeoPoint,
@@ -1922,12 +1926,13 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         filter: &serde_json::Value,
         limit: Option<usize>,
     ) -> Result<Vec<serde_json::Value>, DbError> {
+        let app_id = binding.app_id();
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-        let bq = build_spatial_near_base_query(app_id, collection, filter, schema_hint.as_ref())?;
+        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+        let bq = build_spatial_near_base_query(app_id, collection, filter, &schema_hint)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&bq.sql, &param_refs).await?;
 
@@ -2830,20 +2835,19 @@ mod tests {
             },
             "location": { "type": "geoPoint" }
         });
-        let bq = build_spatial_near_base_query(
-            "app1",
-            "places",
-            &serde_json::json!({}),
-            Some(&schema),
-        )
-        .expect("spatial base query");
+        let bq = build_spatial_near_base_query("app1", "places", &serde_json::json!({}), &schema)
+            .expect("spatial base query");
         assert!(
             !bq.sql.starts_with("SELECT *"),
             "spatial base query must not use SELECT * when masked columns exist: {}",
             bq.sql,
         );
+        // Same derivation the builder used, rather than a literal sibling name
+        // — see the sibling assertion in `backend::sqlite::vector`'s tests.
+        let read = crate::query::read_column_for("ssn", &schema);
+        assert_eq!(read, "ssn_masked", "a masked column must read its sibling");
         assert!(
-            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            bq.sql.contains(&format!("\"{read}\" AS \"ssn\"")),
             "spatial base query must read the masked sibling: {}",
             bq.sql,
         );

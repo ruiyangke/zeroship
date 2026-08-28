@@ -112,26 +112,26 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
     truncated
 }
 
-/// Resolve the typed_id prefix for a given `(app_id, collection)`.
+/// Resolve the typed_id prefix for one collection.
 ///
-/// 1. Consult the [`crate::context::ThreadDbContext`] schema cache for
-///    a `t.id(prefix)`-declared `idPrefix` on the `id` field.
-/// 2. Fall back to [`derive_prefix_from_collection_name`].
+/// 1. Read the `t.id(prefix)`-declared `idPrefix` off the `id` field of the
+///    descriptor entry the caller resolved.
+/// 2. Fall back to [`derive_prefix_from_collection_name`] when the descriptor
+///    declares no explicit prefix.
 ///
-/// The cache lookup is cheap (a `HashMap` keyed by `"{app_id}:{collection}"`)
-/// and the schema is the same one [`crate::crud::encryption_pass`]
-/// reads — no extra wire calls.
-pub(crate) fn prefix_for_collection(app_id: &str, collection: &str) -> String {
-    let from_schema = crate::context::with(|ctx| {
-        ctx.schema_for(app_id, collection).and_then(|schema| {
-            schema
-                .get("id")
-                .and_then(|id_def| id_def.get("idPrefix"))
-                .and_then(|p| p.as_str())
-                .map(|s| s.to_string())
-        })
-    });
-    from_schema.unwrap_or_else(|| derive_prefix_from_collection_name(collection))
+/// `schema` is passed in rather than looked up. The write pipeline resolves the
+/// collection's entry once through [`crate::descriptor::collection_schema`] and
+/// hands it to every stage, so an undeclared collection is refused BEFORE any
+/// id is minted — a lookup here could only re-derive the same answer, or
+/// silently fall back to the derived prefix for a collection the write was
+/// about to be refused for anyway.
+pub(crate) fn prefix_for_collection(schema: &Value, collection: &str) -> String {
+    schema
+        .get("id")
+        .and_then(|id_def| id_def.get("idPrefix"))
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| derive_prefix_from_collection_name(collection))
 }
 
 /// Look up the current request's authenticated actor id (typed_id
@@ -176,33 +176,33 @@ pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) fn apply_system_fields_on_insert(
     doc: &mut Value,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
-    apply_system_fields_on_insert_impl(doc, app_id, collection, actor_id);
+    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id);
 }
 
 #[cfg(feature = "test-helpers")]
 pub fn apply_system_fields_on_insert(
     doc: &mut Value,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
-    apply_system_fields_on_insert_impl(doc, app_id, collection, actor_id);
+    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id);
 }
 
 fn apply_system_fields_on_insert_impl(
     doc: &mut Value,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
     let Some(obj) = doc.as_object_mut() else {
         return;
     };
-    inject_into_object(obj, app_id, collection, actor_id);
+    inject_into_object(obj, schema, collection, actor_id);
 }
 
 /// Run the auto-population pass over every doc in an `insertMany`
@@ -214,26 +214,26 @@ fn apply_system_fields_on_insert_impl(
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) fn apply_system_fields_on_insert_many(
     docs: &mut Value,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
-    apply_system_fields_on_insert_many_impl(docs, app_id, collection, actor_id);
+    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id);
 }
 
 #[cfg(feature = "test-helpers")]
 pub fn apply_system_fields_on_insert_many(
     docs: &mut Value,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
-    apply_system_fields_on_insert_many_impl(docs, app_id, collection, actor_id);
+    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id);
 }
 
 fn apply_system_fields_on_insert_many_impl(
     docs: &mut Value,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
@@ -242,20 +242,20 @@ fn apply_system_fields_on_insert_many_impl(
     };
     for doc in arr.iter_mut() {
         if let Some(obj) = doc.as_object_mut() {
-            inject_into_object(obj, app_id, collection, actor_id);
+            inject_into_object(obj, schema, collection, actor_id);
         }
     }
 }
 
 fn inject_into_object(
     obj: &mut Map<String, Value>,
-    app_id: &str,
+    schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) {
     // `id` — auto-mint when absent.
     if !obj.contains_key("id") {
-        let prefix = prefix_for_collection(app_id, collection);
+        let prefix = prefix_for_collection(schema, collection);
         let minted = zeroship_core::typed_id::generate(&prefix);
         obj.insert("id".to_string(), Value::String(minted));
     }
@@ -603,39 +603,41 @@ mod tests {
 
     // ---- declared idPrefix wins over derivation --------------------
 
+    /// A descriptor entry that declares no `t.id(prefix)`, so the auto-mint
+    /// pass falls through to [`derive_prefix_from_collection_name`]. The
+    /// pass takes the entry the write pipeline resolved, so a test that is
+    /// about derivation states "no declared prefix" as data rather than by
+    /// leaving a store empty.
+    fn schema_without_id_prefix() -> Value {
+        json!({ "title": { "type": "string" } })
+    }
+
+    /// A descriptor entry declaring `id: t.id("blog")`.
+    fn schema_with_blog_id_prefix() -> Value {
+        json!({
+            "id": { "type": "id", "idPrefix": "blog" },
+            "title": { "type": "string" },
+        })
+    }
+
     #[test]
     fn prefix_for_collection_reads_declared_id_prefix() {
-        // When the cached schema carries `id: t.id("blog")`,
+        // When the descriptor entry carries `id: t.id("blog")`,
         // `prefix_for_collection` returns the declared prefix instead of
         // deriving from the collection name.
-        let app_id = "p7_prefix_for_collection_reads_declared";
-        crate::cache_schema_for_tests(
-            app_id,
-            "posts",
-            json!({
-                "id": { "type": "id", "idPrefix": "blog" },
-                "title": { "type": "string" },
-            }),
+        assert_eq!(
+            prefix_for_collection(&schema_with_blog_id_prefix(), "posts"),
+            "blog"
         );
-        assert_eq!(prefix_for_collection(app_id, "posts"), "blog");
     }
 
     #[test]
     fn insert_auto_mints_id_with_declared_prefix() {
         // The auto-mint pass honours the declared `idPrefix`
-        // from the cached schema: a `posts` collection declaring
+        // from the descriptor entry: a `posts` collection declaring
         // `id: t.id("blog")` mints `blog_...` ids, not `post_...`.
-        let app_id = "p7_insert_auto_mints_declared_prefix";
-        crate::cache_schema_for_tests(
-            app_id,
-            "posts",
-            json!({
-                "id": { "type": "id", "idPrefix": "blog" },
-                "title": { "type": "string" },
-            }),
-        );
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, app_id, "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_with_blog_id_prefix(), "posts", None);
         let id = doc
             .get("id")
             .and_then(|v| v.as_str())
@@ -652,7 +654,7 @@ mod tests {
     #[test]
     fn insert_auto_mints_id_when_absent() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
         let id = doc
             .get("id")
             .and_then(|v| v.as_str())
@@ -668,7 +670,7 @@ mod tests {
     #[test]
     fn insert_respects_creator_supplied_id() {
         let mut doc = json!({ "id": "post_abc123", "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
         assert_eq!(
             doc.get("id").and_then(|v| v.as_str()),
             Some("post_abc123"),
@@ -679,18 +681,18 @@ mod tests {
     #[test]
     fn insert_minted_id_has_correct_prefix_for_collection_name() {
         let mut doc = json!({});
-        apply_system_fields_on_insert(&mut doc, "app1", "users", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "users", None);
         assert!(doc.get("id").unwrap().as_str().unwrap().starts_with("user_"));
 
         let mut doc2 = json!({});
-        apply_system_fields_on_insert(&mut doc2, "app1", "tasks", None);
+        apply_system_fields_on_insert(&mut doc2, &schema_without_id_prefix(), "tasks", None);
         assert!(doc2.get("id").unwrap().as_str().unwrap().starts_with("task_"));
     }
 
     #[test]
     fn insert_populates_created_by_from_actor() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_actor1"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_actor1"));
         assert_eq!(
             doc.get("created_by").and_then(|v| v.as_str()),
             Some("usr_actor1")
@@ -705,7 +707,7 @@ mod tests {
     #[test]
     fn insert_leaves_created_by_absent_when_no_actor() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
         assert!(
             !doc.as_object().unwrap().contains_key("created_by"),
             "no actor → no created_by injection (DB default NULL fires)"
@@ -722,7 +724,7 @@ mod tests {
             "title": "hi",
             "created_by": "usr_override",
         });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_session_actor"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_session_actor"));
         // Creator's explicit value wins over the session actor — same
         // pattern as `id` above (Q-SF-B).
         assert_eq!(
@@ -734,7 +736,7 @@ mod tests {
     #[test]
     fn insert_does_not_inject_created_at_or_updated_at_or_version() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_x"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
         let obj = doc.as_object().unwrap();
         assert!(!obj.contains_key("created_at"), "DB default must fire");
         assert!(!obj.contains_key("updated_at"), "DB default must fire");
@@ -749,7 +751,7 @@ mod tests {
             "version": 5,
             "created_at": 1700000000000_i64,
         });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
         // Creator-supplied overrides for the DB-defaulted columns flow
         // through untouched — migration code uses this to pre-seed
         // historical timestamps + version pointers.
@@ -763,9 +765,9 @@ mod tests {
     #[test]
     fn insert_pass_is_idempotent() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_x"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
         let id_after_first = doc.get("id").unwrap().as_str().unwrap().to_string();
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_y"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_y"));
         // Second pass must NOT re-mint id and must NOT overwrite
         // created_by — pass is "inject when absent".
         assert_eq!(
@@ -781,7 +783,7 @@ mod tests {
     #[test]
     fn insert_pass_non_object_doc_is_no_op() {
         let mut doc = json!("not an object");
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_x"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
         // Non-object docs pass through unchanged — the downstream
         // build_insert will reject them with a typed error.
         assert_eq!(doc, json!("not an object"));
@@ -795,7 +797,7 @@ mod tests {
             { "title": "a" },
             { "title": "b" },
         ]);
-        apply_system_fields_on_insert_many(&mut docs, "app1", "posts", Some("usr_x"));
+        apply_system_fields_on_insert_many(&mut docs, &schema_without_id_prefix(), "posts", Some("usr_x"));
         let arr = docs.as_array().unwrap();
         let id_a = arr[0].get("id").and_then(|v| v.as_str()).unwrap();
         let id_b = arr[1].get("id").and_then(|v| v.as_str()).unwrap();
@@ -819,7 +821,7 @@ mod tests {
             { "id": "post_keepme", "title": "a" },
             { "title": "b" },
         ]);
-        apply_system_fields_on_insert_many(&mut docs, "app1", "posts", None);
+        apply_system_fields_on_insert_many(&mut docs, &schema_without_id_prefix(), "posts", None);
         let arr = docs.as_array().unwrap();
         assert_eq!(
             arr[0].get("id").and_then(|v| v.as_str()),
@@ -840,7 +842,7 @@ mod tests {
     #[test]
     fn insert_pass_emits_three_extra_columns_when_actor_present() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_x"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
         let obj = doc.as_object().unwrap();
         // The 4 columns reaching INSERT: user-declared title + the 3
         // auto-injected system fields (id + created_by + updated_by).
@@ -860,7 +862,7 @@ mod tests {
     #[test]
     fn insert_pass_omits_actor_columns_when_no_actor() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
         let obj = doc.as_object().unwrap();
         // Only id is injected (auto-mint always runs).
         assert_eq!(obj.len(), 2, "doc keys: {:?}", obj.keys().collect::<Vec<_>>());
@@ -877,7 +879,7 @@ mod tests {
     fn insert_pass_followed_by_build_insert_emits_returning_star() {
         use crate::query::build_insert;
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, "app1", "posts", Some("usr_x"));
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
         let built = build_insert("app1", "posts", &doc).expect("build_insert");
         // RETURNING * pulls every column back — that's the contract the
         // SDK relies on to populate `Row<S>` with the DB-defaulted

@@ -110,17 +110,19 @@ pub(crate) async fn apply(
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
-    // The encrypt/mask write transforms are driven by metadata
-    // from LIVE introspection + the engine's sentinels (design §6), not the
-    // in-memory declared schema. Cached per (app, collection, deploy).
-    let schema = super::introspect_schema::runtime_schema_for(binding, collection).await?;
-    let stages = WriteStages::new(schema.as_deref());
+    // The encrypt/mask write transforms are driven by THE RUNTIME DESCRIPTOR
+    // this isolate was built from, not by a live catalog read. A collection the
+    // descriptor does not declare is refused here rather than written with the
+    // encryption and mask stages silently skipped - which is what an absent
+    // schema used to mean, on a write.
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
+    let stages = WriteStages::new(&schema);
 
     match mode {
         ApplyMode::Insert { actor_id } => {
             super::system_fields_pass::apply_system_fields_on_insert(
                 payload,
-                app_id,
+                &schema,
                 collection,
                 actor_id,
             );
@@ -133,7 +135,7 @@ pub(crate) async fn apply(
         ApplyMode::InsertMany { actor_id } => {
             super::system_fields_pass::apply_system_fields_on_insert_many(
                 payload,
-                app_id,
+                &schema,
                 collection,
                 actor_id,
             );
@@ -162,17 +164,16 @@ pub(crate) async fn apply(
             );
             super::system_fields_pass::apply_system_fields_on_insert(
                 payload,
-                app_id,
+                &schema,
                 collection,
                 actor_id,
             );
             rewrite_upsert_doc_id_to_existing_row_id(
                 payload,
-                binding,
                 route,
                 collection,
                 conflict_fields,
-                schema.as_deref(),
+                &schema,
             )
             .await?;
             let row_pk = row_pk_from_doc(payload);
@@ -185,7 +186,7 @@ pub(crate) async fn apply(
 }
 
 struct WriteStages<'a> {
-    schema: Option<&'a Value>,
+    schema: &'a Value,
     has_encrypted: bool,
     has_masked: bool,
     has_sqlite_binary: bool,
@@ -193,13 +194,12 @@ struct WriteStages<'a> {
 }
 
 impl<'a> WriteStages<'a> {
-    fn new(schema: Option<&'a Value>) -> Self {
+    fn new(schema: &'a Value) -> Self {
         Self {
-            has_encrypted: schema.is_some_and(super::schema_has_encrypted_columns),
-            has_masked: schema.is_some_and(super::schema_has_masked_columns),
-            has_sqlite_binary: schema.is_some_and(super::schema_has_sqlite_binary_columns),
-            has_plain_bytes: schema
-                .is_some_and(super::bytes_pass::schema_has_plain_bytes_columns),
+            has_encrypted: super::schema_has_encrypted_columns(schema),
+            has_masked: super::schema_has_masked_columns(schema),
+            has_sqlite_binary: super::schema_has_sqlite_binary_columns(schema),
+            has_plain_bytes: super::bytes_pass::schema_has_plain_bytes_columns(schema),
             schema,
         }
     }
@@ -217,9 +217,7 @@ impl<'a> WriteStages<'a> {
         row_pk: &str,
         row: &mut Value,
     ) -> Result<(), DbError> {
-        let Some(schema) = self.schema else {
-            return Ok(());
-        };
+        let schema = self.schema;
         if !self.any() {
             return Ok(());
         }
@@ -263,9 +261,7 @@ impl<'a> WriteStages<'a> {
         row_pk: &str,
         patch: &mut Value,
     ) -> Result<(), DbError> {
-        let Some(schema) = self.schema else {
-            return Ok(());
-        };
+        let schema = self.schema;
         if !self.any() {
             return Ok(());
         }
@@ -325,16 +321,22 @@ pub(crate) struct TargetRowId {
 /// to run on the same connection the update will. Reading it off the pool
 /// while the update ran in a transaction would resolve pre-transaction
 /// ids.
+///
+/// `schema` is the caller's already-resolved descriptor entry. The probe's own
+/// PROJECTION is `query::empty_read_schema()` (it selects `id` alone, a
+/// platform system field); this entry is only what the caller's FILTER is
+/// lowered against for SQLite booleans.
 pub(crate) async fn resolve_target_row_ids(
     route: &TxRoute,
     collection: &str,
     filter: &Value,
     limit: i64,
+    schema: &Value,
 ) -> Result<Vec<TargetRowId>, DbError> {
     let app_id = route.app_id();
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
-    super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut sql_filter);
+    super::maybe_lower_sqlite_boolean_filter(schema, &mut sql_filter);
     let built = query::build_write_target_probe(
         app_id,
         collection,
@@ -357,31 +359,24 @@ pub(crate) async fn resolve_target_row_ids(
         .collect())
 }
 
-pub(crate) async fn update_requires_per_row_encryption(
-    binding: &DbBinding,
-    collection: &str,
-    patch: &Value,
-) -> Result<bool, DbError> {
-    // Sourced from introspection (cached), not the declared
-    // schema. A failed introspection propagates rather than silently returning
-    // `false` (which would skip the per-row randomised-encryption path).
-    let Some(schema) = super::introspect_schema::runtime_schema_for(binding, collection).await?
-    else {
-        return Ok(false);
-    };
-    Ok(update_touches_randomised_encrypted_field(&schema, patch))
+/// Does this UPDATE touch a randomised-encrypted column?
+///
+/// The answer decides whether the dispatcher fans the update out per row (each
+/// row's ciphertext is bound to its own id through the AAD) or issues one
+/// multi-row statement. It reads THE DESCRIPTOR, which the caller resolved for
+/// the whole operation: a collection with no entry never reaches here, because
+/// `collection_schema` already refused it. Returning `false` on a missing
+/// schema is what the old `Option` shape did, and it would give every row in a
+/// batch the same AAD.
+pub(crate) fn update_requires_per_row_encryption(schema: &Value, patch: &Value) -> bool {
+    update_touches_randomised_encrypted_field(schema, patch)
 }
 
-pub(crate) async fn upsert_requires_conflict_probe(
-    binding: &DbBinding,
-    collection: &str,
-    doc: &Value,
-) -> Result<bool, DbError> {
-    let Some(schema) = super::introspect_schema::runtime_schema_for(binding, collection).await?
-    else {
-        return Ok(false);
-    };
-    Ok(doc_touches_randomised_encrypted_field(&schema, doc))
+/// The upsert twin of [`update_requires_per_row_encryption`]: a doc that writes
+/// a randomised-encrypted column needs the deterministic conflict probe run
+/// first, because its ciphertext cannot be compared for ON CONFLICT equality.
+pub(crate) fn upsert_requires_conflict_probe(schema: &Value, doc: &Value) -> bool {
+    doc_touches_randomised_encrypted_field(schema, doc)
 }
 
 fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> bool {
@@ -456,19 +451,15 @@ fn update_target(patch: &mut Value) -> &mut Value {
 
 async fn rewrite_upsert_doc_id_to_existing_row_id(
     doc: &mut Value,
-    binding: &DbBinding,
     route: &TxRoute,
     collection: &str,
     conflict_fields: &Value,
-    schema: Option<&Value>,
+    schema: &Value,
 ) -> Result<(), DbError> {
     let app_id = route.app_id();
-    if !upsert_requires_conflict_probe(binding, collection, doc).await? {
+    if !upsert_requires_conflict_probe(schema, doc) {
         return Ok(());
     }
-    let Some(schema) = schema else {
-        return Ok(());
-    };
     let Some(obj) = doc.as_object_mut() else {
         return Ok(());
     };
@@ -504,7 +495,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         .await?;
     }
     note_upsert_conflict_probe_for_tests();
-    super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
+    super::maybe_lower_sqlite_boolean_filter(schema, &mut filter);
     let built = query::build_conflict_probe_with_dialect(
         app_id,
         collection,

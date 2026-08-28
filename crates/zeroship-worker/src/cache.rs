@@ -465,9 +465,11 @@ fn build_runtime(
     let app_id_string = app_id.to_string();
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id_string.clone());
-    // **T6** — inject the per-app deploy/schema-version token so plugin-db's
-    // deploy-keyed introspection cache keys off the real deploy hash. Workflow
-    // replay also uses this slot, but with the run's pinned deploy hash.
+    // **T6** - inject the per-app deploy/schema-version token so plugin-db's
+    // deploy-keyed DESCRIPTOR STORE keys off the real deploy hash: a worker
+    // thread holding a pinned and a current isolate of one app must not serve
+    // one deploy's schema to the other. Workflow replay also uses this slot,
+    // but with the run's pinned deploy hash.
     if let Some(dh) = deploy_hash {
         env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
     }

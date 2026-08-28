@@ -101,9 +101,11 @@ pub(crate) fn vec_table_name(collection: &str, column: &str) -> String {
 
 /// Build the vec0 nearest-neighbour search SQL.
 ///
-/// When the cached schema declares masked columns, the base-table
-/// projection expands away from `t.*` so masked fields read from the
-/// `<col>_masked` sibling under their logical output name.
+/// The base-table projection is always an explicit list built from the
+/// descriptor's field map: `t."id" AS "id"` plus one term per declared field,
+/// with a masked field reading from its `storage.valueColumn` sibling under the
+/// logical output name. There is no `t.*` arm — an undeclared identifier or a
+/// non-object schema is a `QueryError`, surfaced here as a typed `DbError`.
 pub(crate) fn build_vector_search_sql(
     app_id: &str,
     collection: &str,
@@ -111,26 +113,27 @@ pub(crate) fn build_vector_search_sql(
     query_hex: &str,
     k: usize,
     where_expr: &str,
-    schema_hint: Option<&serde_json::Value>,
-) -> String {
+    schema_hint: &serde_json::Value,
+) -> Result<String, DbError> {
     let qschema = quote_ident(app_id);
     let qcoll = quote_ident(collection);
     let qvtab = quote_ident(&vec_table_name(collection, column));
     let qcol = quote_ident(column);
     let select_expr =
-        crate::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t");
+        crate::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t")
+            .map_err(DbError::from)?;
     let extra_filter = if where_expr.is_empty() {
         String::new()
     } else {
         format!(" AND {where_expr}")
     };
-    format!(
+    Ok(format!(
         "SELECT {select_expr}, v.distance AS _distance \
          FROM {qschema}.{qcoll} t \
          JOIN {qschema}.{qvtab} v ON t.rowid = v.rowid \
          WHERE v.{qcol} MATCH {query_hex} AND k = {k}{extra_filter} \
          ORDER BY v.distance"
-    )
+    ))
 }
 
 /// Build the `CREATE VIRTUAL TABLE IF NOT EXISTS … USING vec0(…)` DDL.
@@ -389,14 +392,21 @@ mod tests {
             "x'0011'",
             5,
             "",
-            Some(&schema),
-        );
+            &schema,
+        )
+        .expect("a declared schema must build");
         assert!(
             !sql.starts_with("SELECT t.*"),
             "vector search must not use t.* when masked columns exist: {sql}"
         );
+        // Asked of the SAME derivation the builder used, not of a literal:
+        // `read_column_for` prefers the descriptor's `storage.valueColumn` and
+        // only falls back to the `_masked` suffix, so a later flip of which
+        // physical column holds the readable value moves both sides together.
+        let read = crate::query::read_column_for("ssn", &schema);
+        assert_eq!(read, "ssn_masked", "a masked column must read its sibling");
         assert!(
-            sql.contains(r#""t"."ssn_masked" AS "ssn""#),
+            sql.contains(&format!(r#""t"."{read}" AS "ssn""#)),
             "vector search must read the masked sibling: {sql}"
         );
     }

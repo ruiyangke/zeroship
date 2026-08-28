@@ -44,18 +44,13 @@ pub(crate) struct ApplyResult {
 /// 4. wrap masked columns
 /// 5. apply per-query unmask overrides
 ///
-/// The cold-schema contract is intentional:
-///
-/// - schema-independent normalization still runs for the platform system
-///   timestamps (`created_at`, `updated_at`, `deleted_at`)
-/// - schema-driven coercions (`boolean`, `json`/`object`/`array`/`union`,
-///   `bytes`, non-system `date`/`calendarDate`) only run when the per-thread
-///   schema cache is warm
-/// - decrypt/mask/unmask metadata is schema-driven, so those stages only do
-///   useful work when the schema cache is present
-///
-/// This keeps raw-JS / pre-register reads lossless instead of guessing at
-/// ambiguous user data like `"{"ok":true}"` or `0/1` without a schema.
+/// There is no cold-schema arm. Every stage below is driven by the descriptor
+/// entry, and a collection this deploy's descriptor does not declare is refused
+/// before the first row is touched — it is not served with the coercion,
+/// decrypt and mask stages silently skipped. What used to be the "cold" case is
+/// now the `collection_not_declared` error, and what used to be a warm read of
+/// an EMPTY declared field map still behaves the same way it always did: the
+/// platform system timestamps normalize, and no creator field is coerced.
 pub(crate) async fn apply(
     binding: &DbBinding,
     collection: &str,
@@ -64,48 +59,41 @@ pub(crate) async fn apply(
 ) -> Result<ApplyResult, DbError> {
     let app_id = binding.app_id();
     // The runtime data-access metadata (column types, encrypted
-    // mode/keyId/wraps, mask kind/classification) is sourced from LIVE
-    // introspection + the engine's sentinels (design §6), NOT the in-memory
-    // declared schema. `runtime_schema_for` caches per (app, collection, deploy)
-    // so this is an introspection only on a cold/stale cache, not every read.
-    let schema = super::introspect_schema::runtime_schema_for(binding, collection)
-        .await?
-        .map(|schema| scope_schema(schema, &opts.schema_field_scope));
-    normalize_rows_on_read(schema.as_deref(), &mut rows)?;
+    // mode/keyId/wraps, mask kind/classification) comes from THE RUNTIME
+    // DESCRIPTOR this isolate was built from. It used to come from a live
+    // catalog read plus the migration engine's `zsenc:` / `__zsmask:` column
+    // comments - a round trip through the same DSL the descriptor is folded
+    // from, which recovered a strict subset of it and cost one whole-schema
+    // catalog walk per cold collection.
+    //
+    // The resolution is a `Result`, not an `Option`: a collection this deploy's
+    // descriptor does not declare is refused, never served with the schema
+    // stages silently skipped.
+    let schema = scope_schema(
+        crate::descriptor::collection_schema(binding, collection)?,
+        &opts.schema_field_scope,
+    );
+    normalize_rows_on_read(&schema, &mut rows)?;
 
-    if opts.apply_decrypt {
-        if let Some(schema) = schema.as_ref() {
-            if super::schema_has_encrypted_columns(schema) {
-                decrypt_rows_on_read(
-                    app_id,
-                    collection,
-                    schema,
-                    &mut rows,
-                    opts.unmask_columns,
-                )
-                .await?;
-            }
-        }
+    if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
+        decrypt_rows_on_read(app_id, collection, &schema, &mut rows, opts.unmask_columns).await?;
     }
 
-    let has_masked = if opts.wrap_masked {
-        if let Some(schema) = schema.as_ref() {
-            if super::schema_has_masked_columns(schema) {
-                wrap_masked_rows_on_read(collection, schema, &mut rows)?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+    let has_masked = if opts.wrap_masked && super::schema_has_masked_columns(&schema) {
+        wrap_masked_rows_on_read(collection, &schema, &mut rows)?;
+        true
     } else {
         false
     };
 
     if !opts.unmask_columns.is_empty() {
-        super::unmask::dispatch_unmask_for_query(app_id, collection, opts.unmask_columns, &mut rows)
-            .await?;
+        super::unmask::dispatch_unmask_for_query(
+            binding,
+            collection,
+            opts.unmask_columns,
+            &mut rows,
+        )
+        .await?;
     }
 
     Ok(ApplyResult { rows, has_masked })
@@ -131,14 +119,14 @@ fn scope_schema(schema: Arc<Value>, scope: &SchemaFieldScope<'_>) -> Arc<Value> 
     }
 }
 
-fn normalize_rows_on_read(schema: Option<&Value>, rows: &mut [Value]) -> Result<(), DbError> {
+fn normalize_rows_on_read(schema: &Value, rows: &mut [Value]) -> Result<(), DbError> {
     for row in rows.iter_mut() {
         normalize_row_on_read(schema, row)?;
     }
     Ok(())
 }
 
-fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), DbError> {
+fn normalize_row_on_read(schema: &Value, row: &mut Value) -> Result<(), DbError> {
     let Some(obj) = row.as_object_mut() else {
         return Ok(());
     };
@@ -149,7 +137,7 @@ fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), 
         }
 
         let Some(def) = schema
-            .and_then(Value::as_object)
+            .as_object()
             .and_then(|schema_obj| schema_obj.get(key))
             .and_then(Value::as_object)
         else {
@@ -429,7 +417,7 @@ mod tests {
             "published_at": "2026-05-07T01:02:03.004Z"
         });
 
-        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
+        normalize_row_on_read(&schema, &mut row).expect("normalize");
 
         assert_eq!(row["active"], Value::Bool(true));
         assert_eq!(row["prefs"], serde_json::json!({"theme":"dark"}));
@@ -452,13 +440,21 @@ mod tests {
             "secret": "AQID"
         });
 
-        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
+        normalize_row_on_read(&schema, &mut row).expect("normalize");
 
         assert_eq!(row["secret"], Value::String("AQID".to_string()));
     }
 
+    /// A descriptor entry that declares NO creator field still normalizes the
+    /// platform system timestamps, and coerces nothing else.
+    ///
+    /// This used to be spelled `normalize_row_on_read(None, ...)` — "no schema
+    /// at all". There is no such state any more: an undeclared collection is
+    /// refused by `apply` before a row is touched, and the empty field map
+    /// (`query::empty_read_schema()`) is the only remaining way to have zero
+    /// declared fields. The behaviour the test pins is unchanged.
     #[test]
-    fn normalize_row_on_read_without_schema_only_normalizes_system_timestamps() {
+    fn normalize_row_on_read_without_declared_fields_only_normalizes_system_timestamps() {
         let mut row = serde_json::json!({
             "created_at": "2026-05-07T01:02:03.004Z",
             "published_at": "2026-05-07T01:02:03.004Z",
@@ -466,7 +462,7 @@ mod tests {
             "prefs": "{\"theme\":\"dark\"}"
         });
 
-        normalize_row_on_read(None, &mut row).expect("normalize");
+        normalize_row_on_read(&crate::query::empty_read_schema(), &mut row).expect("normalize");
 
         assert_eq!(row["created_at"], serde_json::json!(1_778_115_723_004i64));
         assert_eq!(row["published_at"], Value::String("2026-05-07T01:02:03.004Z".to_string()));
@@ -500,7 +496,7 @@ mod tests {
             "active": 2
         });
 
-        let err = normalize_row_on_read(Some(&schema), &mut row)
+        let err = normalize_row_on_read(&schema, &mut row)
             .expect_err("declared boolean field must reject out-of-domain values");
         match err {
             DbError::Internal { message } => {
@@ -515,26 +511,24 @@ mod tests {
 
     #[test]
     fn scoped_schema_excludes_aggregate_alias_collisions() {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app_aggregate_scope",
-                "users",
-                serde_json::json!({
-                    "secret": {
-                        "type": "string",
-                        "encrypted": {
-                            "mode": "randomised",
-                            "keyId": "default",
-                            "wraps": "string"
-                        },
-                        "mask": {
-                            "kind": "last4",
-                            "classification": "spi"
-                        }
+        crate::cache_schema_for_tests(
+            "app_aggregate_scope",
+            "users",
+            serde_json::json!({
+                "secret": {
+                    "type": "string",
+                    "encrypted": {
+                        "mode": "randomised",
+                        "keyId": "default",
+                        "wraps": "string"
+                    },
+                    "mask": {
+                        "kind": "last4",
+                        "classification": "spi"
                     }
-                }),
-            );
-        });
+                }
+            }),
+        );
 
         let rows = vec![serde_json::json!({
             "secret": 3
@@ -561,18 +555,16 @@ mod tests {
 
     #[test]
     fn apply_can_skip_mask_wrapping_for_distinct_scalars() {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app_distinct_masked",
-                "users",
-                serde_json::json!({
-                    "email": {
-                        "type": "string",
-                        "mask": { "kind": "email", "classification": "pii" }
-                    }
-                }),
-            );
-        });
+        crate::cache_schema_for_tests(
+            "app_distinct_masked",
+            "users",
+            serde_json::json!({
+                "email": {
+                    "type": "string",
+                    "mask": { "kind": "email", "classification": "pii" }
+                }
+            }),
+        );
 
         let rows = vec![serde_json::json!({
             "email": "a***@example.com"

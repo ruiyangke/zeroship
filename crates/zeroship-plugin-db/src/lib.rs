@@ -78,7 +78,14 @@ zeroship_core::declare_env_consumer!(
 
 // Always pub:
 pub mod broker;
+// `binding` mirrors `backend` below: crate-private in release builds, `pub`
+// under `test-helpers` so the integration targets can name the `DbBinding` that
+// the descriptor store, the CRUD dispatchers and the search backends are keyed
+// by. It carries no behaviour beyond two owned strings.
+#[cfg(not(any(test, feature = "test-helpers")))]
 pub(crate) mod binding;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod binding;
 pub mod error;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
@@ -140,13 +147,12 @@ pub use zeroship_schema::diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 
-// The process-wide live-schema metadata cache `DbService` owns. `pub` for the
-// cache TYPE (it is reachable through `DbService::live_metadata`); its key and
-// accessors stay crate-private.
-pub mod live_metadata;
+// THE schema authority for the data plane: the runtime descriptor this isolate
+// was built from. One resolution function, no `Option`, no catalog read.
+pub(crate) mod descriptor;
 // Process-wide ownership of the `env.db` primitive: validated configuration,
-// the plugin prototype, the stable thread-resource key, the live-metadata
-// cache, and the neutral operator-lifecycle handle.
+// the plugin prototype, the stable thread-resource key, and the neutral
+// operator-lifecycle handle.
 pub mod service;
 
 // Cross-backend column-encryption surface. Always
@@ -330,16 +336,11 @@ pub struct DbPlugin {
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
     /// The service's stable thread-resource key. Stamped into the thread
     /// context on `register`, so every isolate this plugin serves — current and
-    /// deploy-pinned alike — resolves resources and live metadata under one
-    /// identity.
+    /// deploy-pinned alike — resolves resources under one identity.
     resource_key: service::DbResourceKey,
     /// The backend the service selected at composition. Carried so lazy pool
     /// init reads a decision rather than re-parsing the URL.
     backend: BackendUrl,
-    /// The service's process-wide live-metadata cache. Handed to the thread
-    /// context on `register` so the cache's owner is the service rather than
-    /// whichever thread got there first.
-    live_metadata: std::sync::Arc<live_metadata::LiveMetadataCache>,
 }
 
 impl std::fmt::Debug for DbPlugin {
@@ -360,7 +361,6 @@ impl DbPlugin {
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
         resource_key: service::DbResourceKey,
         backend: BackendUrl,
-        live_metadata: std::sync::Arc<live_metadata::LiveMetadataCache>,
     ) -> Self {
         Self {
             url,
@@ -368,7 +368,6 @@ impl DbPlugin {
             meter,
             resource_key,
             backend,
-            live_metadata,
         }
     }
 }
@@ -409,12 +408,7 @@ impl NativePlugin for DbPlugin {
         // build a fresh one for the new URL instead of silently aliasing
         // the first pool to the second URL.
         ctx_mut(|c| {
-            if c.install_db_resources(
-                &self.url,
-                self.resource_key,
-                self.backend.clone(),
-                std::sync::Arc::clone(&self.live_metadata),
-            ) {
+            if c.install_db_resources(&self.url, self.resource_key, self.backend.clone()) {
                 c.clear_pool();
             }
             c.set_cdc_worker_id(&self.worker_id);
@@ -492,9 +486,8 @@ pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
 pub fn set_db_url_for_tests(url: &str) {
     let key = service::DbResourceKey::for_url(url);
     let backend = service::select_backend(url).expect("test URL must be a supported backend");
-    let cache = live_metadata::process_wide();
     ctx_mut(|c| {
-        c.install_db_resources(url, key, backend, cache);
+        c.install_db_resources(url, key, backend);
     });
 }
 
@@ -507,9 +500,8 @@ pub fn set_db_url_for_tests(url: &str) {
 pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
     let key = service::DbResourceKey::for_url(url);
     let backend = service::select_backend(url).expect("test URL must be a supported backend");
-    let cache = live_metadata::process_wide();
     ctx_mut(|c| {
-        c.install_db_resources(url, key, backend, cache);
+        c.install_db_resources(url, key, backend);
         c.set_pool(pool);
     });
 }
@@ -526,22 +518,15 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 /// Also drops this thread's operator pools, which own live connections for the
 /// same reason.
 ///
-/// **It does NOT clear the process-wide live-metadata cache, and that is
-/// deliberate.** It did, briefly. `drain_pg()` is the teardown of essentially
-/// every Postgres integration test, and a test binary is multi-threaded unless
-/// the invocation says otherwise - so a process-global wipe here wipes a
-/// concurrently running test's entries mid-assertion, trading a fixture
-/// -isolation problem for a load-dependent flake. `v8_classes::db`'s
-/// `co_resident_deploy_bindings_keep_tokens_and_schema_entries_isolated` refuses
-/// the same call for the same reason and states it in full.
-///
-/// The remedy is the one that test uses: a fixture that needs its entries kept
-/// apart takes its own identity rather than emptying everyone's map. Every
-/// component of a [`live_metadata::LiveMetadataKey`] can supply that - a
-/// fixture-specific URL (and therefore [`service::DbResourceKey`]), app id, or
-/// deploy token - and `crud::introspect_schema::tests::ctx_for` is the worked
-/// example. The cache also holds no connection, so nothing about the
-/// connection-release contract above needs it emptied.
+/// Everything it clears is PER-THREAD: the descriptor store, the pool, the
+/// parked transaction client, the mask-policy cache. There is no process-global
+/// state left for it to wipe, and there must not be - `drain_pg()` is the
+/// teardown of essentially every Postgres integration test, and a test binary
+/// is multi-threaded unless the invocation says otherwise, so a process-global
+/// wipe here would empty a concurrently running test's entries mid-assertion.
+/// A fixture that needs its entries kept apart from another's takes its own
+/// identity ([`binding::DbBinding`]'s deploy token, or a fixture-specific URL
+/// and therefore [`service::DbResourceKey`]) rather than emptying a shared map.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn reset_context_for_tests() {
@@ -623,24 +608,45 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
     ctx_mut(|c| c.set_sqlite_backend(backend));
 }
 
-/// Test helper: cache a schema in the per-isolate
-/// context so the unmask dispatcher's `lookup_mask_meta` /
-/// `lookup_encryption_meta` calls find the column metadata. Mirrors
-/// the cache install the production `register_model` orchestrator
-/// performs on the SDK boundary.
+/// Test helper: install one collection's descriptor entry into this isolate's
+/// store, so the CRUD passes and the unmask dispatcher's `lookup_mask_meta` /
+/// `lookup_encryption_meta` resolve the column metadata. Mirrors the install
+/// the production `register_model_dispatch` performs on the SDK boundary, and
+/// `schema` is the same descriptor-shaped `{ <column>: FieldDef }` map
+/// `installSchema` hands it.
+///
+/// The entry lands under the COLD-START binding, which is what every test-side
+/// binding is (`crud::write_pipeline`'s fixture, the `_for_tests` seams in
+/// `crud`, `v8_classes::transaction`). A fixture that needs two deploys of one
+/// app kept apart uses [`cache_schema_for_deploy_for_tests`] instead.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
+    cache_schema_for_deploy_for_tests(
+        &binding::DbBinding::cold_start(app_id),
+        collection,
+        schema,
+    );
+}
+
+/// Test helper: [`cache_schema_for_tests`] for an explicit binding, so a
+/// fixture can install two deploys of one app and assert they do not see each
+/// other's descriptor entries.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn cache_schema_for_deploy_for_tests(
+    binding: &binding::DbBinding,
+    collection: &str,
+    schema: serde_json::Value,
+) {
     ctx_mut(|c| {
-        c.cache_schema(app_id, collection, schema);
-        // Production `register_model` BOTH caches the declared
-        // schema AND marks the model registered; the runtime schema resolver
-        // (`crud::introspect_schema::runtime_schema_for`) gates on
-        // `is_model_registered` to preserve the cold-schema contract. Mark it
-        // here too so this helper stays a faithful mirror of registration (a
-        // schema cached but not marked registered would never be consulted, an
-        // unfaithful half-state).
-        c.mark_model_registered(app_id, collection);
+        c.cache_schema(binding, collection, schema);
+        // Production `register_model_dispatch` BOTH installs the descriptor
+        // entry AND marks the model registered. `registerModel`'s own warm
+        // short-circuit reads that mark, so a helper that installed the schema
+        // without it would leave the isolate in a half-state production never
+        // reaches.
+        c.mark_model_registered(binding.app_id(), collection);
     });
 }
 

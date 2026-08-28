@@ -36,6 +36,7 @@
 
 use serde_json::Value;
 
+use crate::binding::DbBinding;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::MaskKind;
 use crate::error::DbError;
@@ -93,9 +94,11 @@ impl DriftReport {
 /// Drift-check one masked column on one collection.
 ///
 /// Algorithm (per the module doc-comment):
-/// 1. Resolve the column's `MaskKind` + optional `EncryptionMeta` from
-///    the cached schema. A column with no mask declaration returns an
-///    empty report (no-op).
+/// 1. Resolve the collection's descriptor entry, then the column's `MaskKind`
+///    and its optional `EncryptionMeta` from it. A column with no mask declaration
+///    returns an empty report (no-op); an UNDECLARED COLLECTION is a typed
+///    `collection_not_declared` error, not an empty report - a sweep must not
+///    report "nothing drifted" for a collection it could not read.
 /// 2. Sample rows: `SELECT id, <col>, <col>_masked FROM <coll>` with
 ///    a backend-appropriate sampling clause + a `LIMIT
 ///    MAX_SAMPLE_ROWS_PER_COLUMN`. Skips rows where parent OR sibling
@@ -124,9 +127,14 @@ pub async fn run_drift_check_for_column(
         });
     }
 
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(DriftReport::default());
-    };
+    // The drift check runs outside a V8 isolate (an operator sweep, and the
+    // integration suites), so it has no `Db` receiver to take a binding from
+    // and mints the cold-start one every test-side binding already is. The
+    // module is `#[cfg(any(test, feature = "test-helpers"))]` — no production
+    // build contains this function, so there is no deploy-pinned caller to be
+    // wrong about.
+    let binding = DbBinding::cold_start(app_id);
+    let schema = crate::descriptor::collection_schema(&binding, collection)?;
     let Some(col_meta) = lookup_drift_column_meta(&schema, column)? else {
         return Ok(DriftReport::default());
     };
@@ -1146,31 +1154,39 @@ mod tests {
         }
     }
 
+    /// An UNDECLARED collection is not a drift-free one.
+    ///
+    /// This used to assert an empty report: the schema lookup was an `Option`
+    /// and a miss short-circuited to `DriftReport::default()`, so a sweep over
+    /// a collection whose descriptor entry had not been installed reported
+    /// "0 sampled, 0 drifted" — indistinguishable from a clean column. The
+    /// descriptor is now the sole authority and the miss is typed, so the
+    /// property this pins is the one that matters to an operator reading the
+    /// sweep: an unresolvable collection is REPORTED, never silently passed.
     #[test]
-    fn run_drift_check_for_column_returns_empty_when_no_schema() {
-        // No schema cached for this app — drift check is a no-op.
+    fn run_drift_check_for_column_refuses_an_undeclared_collection() {
+        crate::reset_context_for_tests();
         let app = "drift_unit_no_schema_app";
         let runtime = compio::runtime::Runtime::new().unwrap();
-        let report = runtime
+        let err = runtime
             .block_on(run_drift_check_for_column(app, "users", "ssn", 1.0))
-            .unwrap();
-        assert_eq!(report.sampled, 0);
-        assert_eq!(report.drifted, 0);
-        assert!(report.samples.is_empty());
+            .expect_err("an undeclared collection must not report a clean sweep");
+        assert!(
+            format!("{err:?}").contains("collection_not_declared"),
+            "expected the typed descriptor refusal, got {err:?}",
+        );
     }
 
     #[test]
     fn run_drift_check_for_column_returns_empty_when_column_not_masked() {
-        // Schema cached but `ssn` carries no `mask` declaration.
+        // Descriptor entry installed but `ssn` carries no `mask` declaration.
         let app = "drift_unit_no_mask_app";
         let collection = "users";
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                app,
-                collection,
-                json!({ "ssn": { "type": "string" } }),
-            )
-        });
+        crate::cache_schema_for_tests(
+            app,
+            collection,
+            json!({ "ssn": { "type": "string" } }),
+        );
         let runtime = compio::runtime::Runtime::new().unwrap();
         let report = runtime
             .block_on(run_drift_check_for_column(app, collection, "ssn", 1.0))

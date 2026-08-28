@@ -47,6 +47,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_getter, v8_method};
 
+use crate::binding::DbBinding;
 use crate::crud::unmask::{
     dispatch_bulk_unmask, dispatch_unmask, BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs,
 };
@@ -67,10 +68,12 @@ use crate::v8_bridge::{runtime_state, setup_js_promise, v8_value_to_serde_json};
 /// sibling metadata and never mutated.
 #[derive(Debug)]
 pub struct MaskedValue {
-    /// The app_id this MaskedValue was minted under. Required so the
-    /// `unmask` round-trip routes back to the right tenant schema; not
-    /// exposed as a getter (per §4.1, no `app_id` on the public surface).
-    pub(crate) app_id: String,
+    /// The app-at-deploy identity this MaskedValue was minted under.
+    /// Required so the `unmask` round-trip routes back to the right tenant
+    /// schema AND resolves the column's mask/encryption metadata out of the
+    /// deploy that produced the row; not exposed as a getter (per §4.1, no
+    /// `app_id` on the public surface).
+    pub(crate) binding: DbBinding,
     /// The collection name (e.g. `"users"`).
     pub(crate) collection: String,
     /// Stringified row primary key (`"usr_..."` or the numeric id
@@ -117,7 +120,7 @@ impl MaskedValue {
     ///
     /// Per §4.1, the three native flat fields (`collection`, `row_pk`,
     /// `column`) are re-nested into the `_meta` shape the SDK consumes.
-    /// `app_id` stays internal — it never enters the
+    /// The binding stays internal — it never enters the
     /// type, never shows in creator hover.
     #[v8_getter]
     #[v8_name = "_meta"]
@@ -309,10 +312,10 @@ impl MaskedValue {
             actor,
             reason,
         };
-        let app = self.app_id.clone();
+        let binding = self.binding.clone();
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            match dispatch_unmask(&app, args).await {
+            match dispatch_unmask(&binding, args).await {
                 Ok(result) => {
                     if probe {
                         // canUnmask: success → resolve with `true`.
@@ -418,11 +421,11 @@ impl MaskedValue {
             actor,
             reason,
         };
-        let app = self.app_id.clone();
+        let binding = self.binding.clone();
         let row_pk = self.row_pk.clone();
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            match dispatch_bulk_unmask(&app, args).await {
+            match dispatch_bulk_unmask(&binding, args).await {
                 Ok(result) => {
                     // Project to the per-column map for THIS row — the
                     // SDK's `MaskedValue.unmask(cols)` overload expects
@@ -469,7 +472,7 @@ impl MaskedValue {
 /// later would still drop the Box via the Weak finalizer.
 pub(crate) fn mint_masked_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: String,
+    binding: DbBinding,
     collection: String,
     row_pk: String,
     column: String,
@@ -486,7 +489,7 @@ pub(crate) fn mint_masked_value<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = MaskedValue {
-        app_id,
+        binding,
         collection,
         row_pk,
         column,
@@ -528,12 +531,12 @@ pub(crate) fn mint_masked_value<'s>(
 /// itself has no knowledge of the sentinel shape — that information
 /// lives here.
 ///
-/// `app_id` is captured at call time (i.e. when the row serializer
+/// The binding is captured at call time (i.e. when the row serializer
 /// queues the OpResult) and threaded through via the function pointer;
-/// the runtime sees only `fn(scope, value) -> Option<value>`, so we
-/// read `app_id` out of the isolate's `SharedState` slot here. Every
-/// MaskedValue instance carries its app_id verbatim so cross-app
-/// instance reuse is impossible.
+/// the runtime sees only `fn(scope, value) -> Option<value>`, so we read
+/// `APP_ID` and `ZEROSHIP_DEPLOY_ID` out of the isolate's `SharedState` slot
+/// here. Every MaskedValue instance carries that pair verbatim, so neither
+/// cross-app nor cross-deploy instance reuse is possible.
 ///
 /// Returns `Some(new_value)` when the walk replaced at least one
 /// sub-object (the caller resolves with the new value); `None` when
@@ -556,14 +559,24 @@ pub fn rehydrate_masked_values<'s, 'a>(
     value: v8::Local<'s, v8::Value>,
 ) -> Option<v8::Local<'s, v8::Value>> {
     let state = runtime_state(scope);
-    let app_id = state
-        .borrow()
-        .env_vars
-        .get("APP_ID")
-        .cloned()
-        .unwrap_or_else(|| "default".to_string());
+    let binding = {
+        let env_vars = &state.borrow().env_vars;
+        let app_id = env_vars
+            .get("APP_ID")
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+        // Same two components `v8_classes::db::mint_db` captures, off the same
+        // slot: a pinned workflow isolate and a current isolate of one app hold
+        // different descriptor entries, so a `MaskedValue` minted in one must
+        // not resolve its column metadata out of the other.
+        let deploy_token = env_vars
+            .get("ZEROSHIP_DEPLOY_ID")
+            .cloned()
+            .unwrap_or_else(|| crate::binding::COLD_START_DEPLOY_TOKEN.to_string());
+        DbBinding::new(app_id, deploy_token)
+    };
     let mut walker = RehydrateWalker {
-        app_id,
+        binding,
         depth: 0,
         cap: 16,
     };
@@ -571,7 +584,7 @@ pub fn rehydrate_masked_values<'s, 'a>(
 }
 
 struct RehydrateWalker {
-    app_id: String,
+    binding: DbBinding,
     depth: usize,
     cap: usize,
 }
@@ -735,7 +748,7 @@ impl RehydrateWalker {
 
         let mv = mint_masked_value(
             scope,
-            self.app_id.clone(),
+            self.binding.clone(),
             collection,
             row_pk,
             column,
@@ -781,7 +794,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            "app_a".into(),
+            DbBinding::cold_start("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -838,9 +851,9 @@ mod tests {
 
         // Drive the walker directly (rehydrate_masked_values reads APP_ID from
         // the runtime SharedState, absent in a bare test isolate; the walker
-        // carries app_id itself and is the unit under test).
+        // carries the binding itself and is the unit under test).
         fn new_walker() -> RehydrateWalker {
-            RehydrateWalker { app_id: "app_a".to_string(), depth: 0, cap: 16 }
+            RehydrateWalker { binding: DbBinding::cold_start("app_a"), depth: 0, cap: 16 }
         }
 
         let forged = build_sentinel(scope, None);
@@ -872,7 +885,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            "app_a".into(),
+            DbBinding::cold_start("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -901,7 +914,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            "app_a".into(),
+            DbBinding::cold_start("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -938,7 +951,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            "app_a".into(),
+            DbBinding::cold_start("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -968,7 +981,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            "app_a".into(),
+            DbBinding::cold_start("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1048,7 +1061,7 @@ mod tests {
         // We just need to make sure the walker doesn't panic on a plain
         // object.
         let mut walker = RehydrateWalker {
-            app_id: "app_a".into(),
+            binding: DbBinding::cold_start("app_a"),
             depth: 0,
             cap: 16,
         };

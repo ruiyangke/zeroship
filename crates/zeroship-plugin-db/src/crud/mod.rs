@@ -102,7 +102,6 @@ pub(crate) mod system_fields_pass;
 pub mod system_fields_pass;
 
 mod bytes_pass;
-mod introspect_schema;
 mod read_pipeline;
 mod write_pipeline;
 
@@ -123,10 +122,12 @@ pub use write_pipeline::{
 /// dispatcher threw.
 ///
 /// `build_result` is the (already-evaluated) output of the
-/// `query::build_*` call. Builder errors are `QueryError` →
-/// `DbError::ValidationFailed` via the `From` impl — the resulting
-/// JS error carries `code = "invalid_filter"` / `"invalid_collection"`
-/// / `"invalid_identifier"`.
+/// schema-resolution + `query::build_*` chain. Builder errors are `QueryError`
+/// → `DbError::ValidationFailed` via the `From` impl — the resulting JS error
+/// carries `code = "invalid_filter"` / `"invalid_collection"` /
+/// `"invalid_identifier"`. It is a `DbError` rather than a `QueryError` so the
+/// same arm carries the descriptor's `collection_not_declared` refusal, which
+/// the sync half of a dispatcher folds in ahead of the builder call.
 ///
 /// `exec` runs against either the pool or the active
 /// `ThreadDbContext::tx_conns` (transparently —
@@ -138,7 +139,7 @@ pub use write_pipeline::{
 async fn run_op<R, EFut, Resolve>(
     resolver: v8::Global<v8::PromiseResolver>,
     request_id: Option<u64>,
-    build_result: Result<query::BuiltQuery, query::QueryError>,
+    build_result: Result<query::BuiltQuery, DbError>,
     exec: impl FnOnce(query::BuiltQuery) -> EFut,
     resolve: Resolve,
 ) -> OpResult
@@ -148,13 +149,7 @@ where
 {
     let bq = match build_result {
         Ok(bq) => bq,
-        Err(e) => {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
-                request_id,
-            };
-        }
+        Err(e) => return reject_op(resolver, request_id, e),
     };
     match exec(bq).await {
         Ok(v) => OpResult::JsValue {
@@ -162,11 +157,7 @@ where
             value: resolve(v),
             request_id,
         },
-        Err(e) => OpResult::JsValue {
-            resolver,
-            value: ResolveValue::RejectError(e.to_op_error()),
-            request_id,
-        },
+        Err(e) => reject_op(resolver, request_id, e),
     }
 }
 
@@ -177,65 +168,59 @@ fn current_sql_dialect() -> query::SqlDialect {
     }
 }
 
-fn maybe_lower_sqlite_boolean_doc(
-    app_id: &str,
-    collection: &str,
-    doc: &mut Value,
-) {
+// The four `maybe_lower_sqlite_boolean_*` helpers take the ALREADY-RESOLVED
+// descriptor entry rather than resolving one of their own. Each dispatch site
+// needs the schema anyway - the read builders take it, and the write pipeline
+// keys its encrypt/mask stages off it - so resolving once per operation both
+// removes a second store lookup and puts the `collection_not_declared` refusal
+// at ONE place per dispatch instead of silently returning here.
+
+fn maybe_lower_sqlite_boolean_doc(schema: &Value, doc: &mut Value) {
     if current_sql_dialect() != query::SqlDialect::Sqlite {
         return;
     }
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return;
-    };
-    lower_boolean_doc_with_schema(&schema, doc);
+    lower_boolean_doc_with_schema(schema, doc);
 }
 
-fn maybe_lower_sqlite_boolean_docs(
-    app_id: &str,
-    collection: &str,
-    docs: &mut Value,
-) {
+fn maybe_lower_sqlite_boolean_docs(schema: &Value, docs: &mut Value) {
     if current_sql_dialect() != query::SqlDialect::Sqlite {
         return;
     }
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return;
-    };
     let Some(arr) = docs.as_array_mut() else {
         return;
     };
     for doc in arr {
-        lower_boolean_doc_with_schema(&schema, doc);
+        lower_boolean_doc_with_schema(schema, doc);
     }
 }
 
-fn maybe_lower_sqlite_boolean_update(
-    app_id: &str,
-    collection: &str,
-    patch: &mut Value,
-) {
+fn maybe_lower_sqlite_boolean_update(schema: &Value, patch: &mut Value) {
     if current_sql_dialect() != query::SqlDialect::Sqlite {
         return;
     }
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return;
-    };
-    lower_boolean_update_with_schema(&schema, patch);
+    lower_boolean_update_with_schema(schema, patch);
 }
 
-fn maybe_lower_sqlite_boolean_filter(
-    app_id: &str,
-    collection: &str,
-    filter: &mut Value,
-) {
+fn maybe_lower_sqlite_boolean_filter(schema: &Value, filter: &mut Value) {
     if current_sql_dialect() != query::SqlDialect::Sqlite {
         return;
     }
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return;
-    };
-    lower_boolean_filter_with_schema(&schema, filter);
+    lower_boolean_filter_with_schema(schema, filter);
+}
+
+/// Pack a `DbError` into the rejection an already-allocated promise resolves
+/// with. The dispatchers below hit this shape once per failure arm; naming it
+/// keeps the schema-resolution arm to two lines.
+fn reject_op(
+    resolver: v8::Global<v8::PromiseResolver>,
+    request_id: Option<u64>,
+    err: DbError,
+) -> OpResult {
+    OpResult::JsValue {
+        resolver,
+        value: ResolveValue::RejectError(err.to_op_error()),
+        request_id,
+    }
 }
 
 fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
@@ -659,7 +644,7 @@ pub(crate) fn dispatch_find<'s>(
         // Upfront auth fence for the unmask hint.
         if !unmask_columns.is_empty() {
             if let Err(e) = crate::crud::unmask::authorize_query_hint(
-                &app,
+                &binding,
                 &coll,
                 &unmask_columns,
                 &unmask_actor,
@@ -667,23 +652,24 @@ pub(crate) fn dispatch_find<'s>(
             )
             .await
             {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
+                return reject_op(resolver, request_id, e);
             }
         }
 
-        // Fetch the cached schema BEFORE building SQL.
-        // When the schema declares masked columns, the SELECT clause
-        // emits `"<col>_masked" AS "<col>"` so the ciphertext column
-        // never leaves Postgres on a default read.
-        let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
+        // Resolve the descriptor entry BEFORE building SQL. It is the
+        // projection allowlist: the SELECT clause expands to `"id"` plus one
+        // term per declared field, with a masked column read through its
+        // sibling (`"<col>_masked" AS "<col>"`) so the ciphertext column never
+        // leaves the database on a default read. A collection this deploy does
+        // not declare is refused here.
+        let schema_hint = match crate::descriptor::collection_schema(&binding, &coll) {
+            Ok(schema) => schema,
+            Err(e) => return reject_op(resolver, request_id, e),
+        };
         // Soft-delete auto-filter gate.
         let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
         let mut sql_filter = filter;
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
+        maybe_lower_sqlite_boolean_filter(&schema_hint, &mut sql_filter);
         let built = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
             &app,
             &coll,
@@ -692,20 +678,14 @@ pub(crate) fn dispatch_find<'s>(
             offset,
             order_by.as_ref(),
             select.as_ref(),
-            schema_hint.as_ref(),
+            &schema_hint,
             &unmask_columns,
             filter_soft_deleted,
             current_sql_dialect(),
         );
         let bq = match built {
             Ok(bq) => bq,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
-                    request_id,
-                };
-            }
+            Err(e) => return reject_op(resolver, request_id, DbError::from(e)),
         };
         match exec_query(&route, bq).await {
             Ok(rows) => {
@@ -722,17 +702,11 @@ pub(crate) fn dispatch_find<'s>(
                 .await
                 {
                     Ok(result) => result,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
+                    Err(e) => return reject_op(resolver, request_id, e),
                 };
                 if !unmask_columns.is_empty() {
                     if let Err(e) = crate::crud::unmask::audit_query_hint_granted(
-                        &app,
+                        &binding,
                         &coll,
                         &unmask_columns,
                         &unmask_actor,
@@ -740,11 +714,7 @@ pub(crate) fn dispatch_find<'s>(
                     )
                     .await
                     {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
+                        return reject_op(resolver, request_id, e);
                     }
                 }
                 OpResult::JsValue {
@@ -807,13 +777,16 @@ pub(crate) fn dispatch_insert<'s>(
         )
         .await
         {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            };
+            return reject_op(resolver, request_id, e);
         }
-        maybe_lower_sqlite_boolean_doc(&app, &coll, &mut doc);
+        // `write_pipeline::apply` already refused an undeclared collection, so
+        // this resolution cannot fail here; it re-reads the same store entry
+        // rather than threading the schema back out through `apply`'s result.
+        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
+            Ok(schema) => schema,
+            Err(e) => return reject_op(resolver, request_id, e),
+        };
+        maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
         let built = query::build_insert_with_dialect(&app, &coll, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
@@ -884,13 +857,13 @@ pub(crate) fn dispatch_insert_many<'s>(
         )
         .await
         {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            };
+            return reject_op(resolver, request_id, e);
         }
-        maybe_lower_sqlite_boolean_docs(&app, &coll, &mut docs);
+        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
+            Ok(schema) => schema,
+            Err(e) => return reject_op(resolver, request_id, e),
+        };
+        maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
 
         let built =
             query::build_insert_many_with_dialect(&app, &coll, &docs, current_sql_dialect());
@@ -1004,37 +977,28 @@ pub(crate) fn dispatch_update_one<'s>(
             };
         }
 
-        // The per-row-randomised-encryption decision is sourced
-        // from live introspection (cached); an introspection failure rejects the
-        // op rather than silently skipping the per-row path.
+        // The descriptor entry for this collection. Everything below reads it:
+        // the per-row-randomised-encryption decision, the SQLite boolean
+        // lowering, and the target-row probe's filter. An undeclared collection
+        // rejects the op rather than silently skipping the per-row path.
+        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
+            Ok(schema) => schema,
+            Err(e) => return reject_op(resolver, request_id, e),
+        };
         let per_row_encrypted_update =
-            match write_pipeline::update_requires_per_row_encryption(&binding, &coll, &update).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(e.to_op_error()),
-                        request_id,
-                    };
-                }
-            };
+            write_pipeline::update_requires_per_row_encryption(&schema, &update);
         let target_row = if per_row_encrypted_update {
             let target_rows = match write_pipeline::resolve_target_row_ids(
                 &route,
                 &coll,
                 &filter,
                 1,
+                &schema,
             )
             .await
             {
                 Ok(rows) => rows,
-                Err(e) => {
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(e.to_op_error()),
-                        request_id,
-                    };
-                }
+                Err(e) => return reject_op(resolver, request_id, e),
             };
             let Some(target_row) = target_rows.first().cloned() else {
                 if let Some(expected_version) = cas_version {
@@ -1072,13 +1036,9 @@ pub(crate) fn dispatch_update_one<'s>(
         )
         .await
         {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            };
+            return reject_op(resolver, request_id, e);
         }
-        maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
+        maybe_lower_sqlite_boolean_update(&schema, &mut update);
         let sql_filter = if let Some(target_row) = target_row {
             let mut sql_filter = serde_json::json!({ "id": target_row.id_value });
             if let Some(expected_version) = cas_version {
@@ -1087,7 +1047,7 @@ pub(crate) fn dispatch_update_one<'s>(
             sql_filter
         } else {
             let mut sql_filter = filter.clone();
-            maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
+            maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
             sql_filter
         };
         // Auto-bump via the system-fields-aware builder.
@@ -1254,19 +1214,15 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
-        // Per-row-randomised-encryption decision from live
-        // introspection (cached); an introspection failure rejects the op.
+        // The descriptor entry, resolved once for the whole op: the per-row
+        // randomised-encryption decision, the SQLite boolean lowering and the
+        // target-row probe all read it. An undeclared collection rejects.
+        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
+            Ok(schema) => schema,
+            Err(e) => return reject_op(resolver, request_id, e),
+        };
         let per_row_encrypted_update =
-            match write_pipeline::update_requires_per_row_encryption(&binding, &coll, &update).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(e.to_op_error()),
-                        request_id,
-                    };
-                }
-            };
+            write_pipeline::update_requires_per_row_encryption(&schema, &update);
         let autobump = query::SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: actor_id.as_deref(),
@@ -1277,13 +1233,7 @@ pub(crate) fn dispatch_update_many<'s>(
         if per_row_encrypted_update {
             let frame = match crate::transaction::AtomicWriteFrame::begin(route).await {
                 Ok(frame) => frame,
-                Err(e) => {
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(e.to_op_error()),
-                        request_id,
-                    };
-                }
+                Err(e) => return reject_op(resolver, request_id, e),
             };
             let work_result: Result<usize, DbError> = async {
                 let target_rows = write_pipeline::resolve_target_row_ids(
@@ -1291,6 +1241,7 @@ pub(crate) fn dispatch_update_many<'s>(
                     &coll,
                     &filter,
                     query::MAX_QUERY_LIMIT + 1,
+                    &schema,
                 )
                 .await?;
                 let target_limit = usize::try_from(query::MAX_QUERY_LIMIT)
@@ -1339,7 +1290,7 @@ pub(crate) fn dispatch_update_many<'s>(
                         },
                     )
                     .await?;
-                    maybe_lower_sqlite_boolean_update(&app, &coll, &mut row_update);
+                    maybe_lower_sqlite_boolean_update(&schema, &mut row_update);
                     let mut row_filter = serde_json::json!({ "id": row_id });
                     if let Some(expected_version) = cas_version {
                         row_filter["version"] = Value::from(expected_version);
@@ -1408,15 +1359,11 @@ pub(crate) fn dispatch_update_many<'s>(
         )
         .await
         {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            };
+            return reject_op(resolver, request_id, e);
         }
-        maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
+        maybe_lower_sqlite_boolean_update(&schema, &mut update);
         let mut sql_filter = filter.clone();
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
+        maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
         let built = query::build_update_many_with_system_fields(
             &app,
             &coll,
@@ -1499,19 +1446,25 @@ pub(crate) fn dispatch_delete_one<'s>(
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let autobump = query::SystemFieldAutoBump {
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
-    let built = query::build_soft_delete_one_with_system_fields(
-        &app,
-        &coll,
-        &filter,
-        current_sql_dialect(),
-        &autobump,
-    );
+    // Resolve-then-build, folded into the one `Result` `run_op` already
+    // rejects on: an undeclared collection cannot be soft-deleted through a
+    // filter this deploy has no schema to lower.
+    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_soft_delete_one_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    });
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1550,19 +1503,22 @@ pub(crate) fn dispatch_delete_many<'s>(
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let autobump = query::SystemFieldAutoBump {
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
-    let built = query::build_soft_delete_many_with_system_fields(
-        &app,
-        &coll,
-        &filter,
-        current_sql_dialect(),
-        &autobump,
-    );
+    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_soft_delete_many_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    });
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1592,12 +1548,13 @@ pub(crate) fn dispatch_purge_one<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
-    let built =
-        query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect());
+    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect())
+            .map_err(DbError::from)
+    });
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
 
@@ -1636,9 +1593,11 @@ pub(crate) fn dispatch_purge_many<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
-    let built = query::build_delete_many(app_id, collection, &filter);
+    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_delete_many(app_id, collection, &filter).map_err(DbError::from)
+    });
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
@@ -1677,15 +1636,18 @@ pub(crate) fn dispatch_restore_one<'s>(
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-    let built = query::build_restore_one_with_system_fields(
-        &app,
-        &coll,
-        &filter,
-        current_sql_dialect(),
-        &autobump,
-    );
+    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_restore_one_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    });
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1730,15 +1692,18 @@ pub(crate) fn dispatch_restore_many<'s>(
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-    let built = query::build_restore_many_with_system_fields(
-        &app,
-        &coll,
-        &filter,
-        current_sql_dialect(),
-        &autobump,
-    );
+    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_restore_many_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    });
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1793,20 +1758,24 @@ pub(crate) fn dispatch_aggregate<'s>(
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
-    let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-    let built = query::build_aggregate_with_soft_delete_with_dialect(
-        app_id,
-        collection,
-        &pipeline,
-        filter_soft_deleted,
-        schema_hint.as_ref(),
-        current_sql_dialect(),
-    );
+    // The descriptor entry is the aggregate builder's identifier allowlist AND
+    // its masked-sibling map: `$group.by` / `$sum` / `$sort` on a masked column
+    // lower to the sibling, never the plaintext parent.
+    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+        query::build_aggregate_with_soft_delete_with_dialect(
+            app_id,
+            collection,
+            &pipeline,
+            filter_soft_deleted,
+            &schema,
+            current_sql_dialect(),
+        )
+        .map_err(DbError::from)
+    });
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1860,23 +1829,33 @@ pub(crate) fn dispatch_distinct<'s>(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
     let coll = collection.to_string();
-    let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-    let distinct_reads_masked_sibling = query::column_is_masked(field, schema_hint.as_ref());
+    // Whether the DISTINCT reads the masked sibling decides the read pipeline's
+    // decrypt stage below, so it is derived from the same entry the builder
+    // uses. An undeclared collection rejects before either.
+    let schema_hint = match crate::descriptor::collection_schema(&binding, collection) {
+        Ok(schema) => schema,
+        Err(e) => {
+            let rejected = async move { reject_op(resolver, request_id, e) };
+            state.borrow_mut().spawned_ops.push(Box::pin(rejected));
+            return promise;
+        }
+    };
+    let distinct_reads_masked_sibling = query::column_is_masked(field, &schema_hint);
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&schema_hint, &mut filter);
     let built = query::build_distinct_with_soft_delete_with_dialect(
         app_id,
         collection,
         field,
         &filter,
         filter_soft_deleted,
-        schema_hint.as_ref(),
+        &schema_hint,
         current_sql_dialect(),
-    );
+    )
+    .map_err(DbError::from);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1941,14 +1920,16 @@ pub(crate) fn dispatch_count<'s>(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = TxRoute::capture(scope, app_id);
-    let built =
-        query::build_count_with_soft_delete(app_id, collection, &filter, filter_soft_deleted);
+    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_count_with_soft_delete(app_id, collection, &filter, filter_soft_deleted)
+            .map_err(DbError::from)
+    });
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1999,13 +1980,13 @@ pub(crate) fn dispatch_upsert<'s>(
         )
         .await
         {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            };
+            return reject_op(resolver, request_id, e);
         }
-        maybe_lower_sqlite_boolean_doc(&app, &coll, &mut doc);
+        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
+            Ok(schema) => schema,
+            Err(e) => return reject_op(resolver, request_id, e),
+        };
+        maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
         let built = query::build_upsert_with_dialect(
             &app,
             &coll,
@@ -2080,7 +2061,6 @@ pub(crate) fn dispatch_search<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     use zeroship_runtime::state::OpError;
 
     let state = runtime_state(scope);
@@ -2182,9 +2162,26 @@ pub(crate) fn dispatch_search<'s>(
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let app = app_id.to_string();
     let coll = collection.to_string();
-    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
+    // The backend arms below resolve the same entry for their projection; this
+    // one is for the SQLite boolean lowering of the caller's filter. Refusing
+    // here keeps the rejection on the synchronous half, before the promise is
+    // handed a spawned op.
+    let schema = match crate::descriptor::collection_schema(&binding, collection) {
+        Ok(schema) => schema,
+        Err(e) => {
+            let op_err: OpError = e.to_op_error();
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                    request_id,
+                }
+            }));
+            return promise;
+        }
+    };
+    maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Reach the backend through the per-isolate context. The
@@ -2201,7 +2198,7 @@ pub(crate) fn dispatch_search<'s>(
                     .as_postgres()
                     .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
                 use crate::backend::VectorIndex as _;
-                pg.vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                pg.vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
                     .await
             };
             // SQLite arm routes through the pure-Rust flat-scan
@@ -2213,7 +2210,7 @@ pub(crate) fn dispatch_search<'s>(
             if let Some(sq) = backend.as_sqlite() {
                 use crate::backend::VectorIndex as _;
                 return sq
-                    .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                    .vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
                     .await;
             }
             pg_path().await
@@ -2279,7 +2276,6 @@ pub(crate) fn dispatch_near<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     use zeroship_runtime::state::OpError;
 
     let state = runtime_state(scope);
@@ -2353,9 +2349,15 @@ pub(crate) fn dispatch_near<'s>(
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
-    let app = app_id.to_string();
     let coll = collection.to_string();
-    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
+    // Same as `dispatch_search`: the backend arm resolves the entry again for
+    // its own projection; this one lowers the caller's filter, and refusing an
+    // undeclared collection here keeps the rejection synchronous.
+    let schema = match crate::descriptor::collection_schema(&binding, collection) {
+        Ok(schema) => schema,
+        Err(e) => reject_sync!(e),
+    };
+    maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
     let point = crate::backend::GeoPoint { lat, lng };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2372,14 +2374,14 @@ pub(crate) fn dispatch_near<'s>(
             if let Some(sq) = backend.as_sqlite() {
                 use crate::backend::SpatialIndex as _;
                 return sq
-                    .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
+                    .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
                     .await;
             }
             let pg = backend
                 .as_postgres()
                 .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
             use crate::backend::SpatialIndex as _;
-            pg.spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
+            pg.spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
                 .await
         }
         .await;
@@ -2459,7 +2461,7 @@ pub async fn prepare_insert_many_docs_for_write(
 /// Test helper that drives the REAL read pipeline
 /// (`read_pipeline::apply` with default options: decrypt + mask-wrap on) over a
 /// set of freshly-fetched rows, so a faithful round-trip e2e can exercise the
-/// introspection-sourced decrypt + mask-wrap path end-to-end (not an AEAD-unit
+/// descriptor-sourced decrypt + mask-wrap path end-to-end (not an AEAD-unit
 /// shim). Returns the finalized rows; `has_masked` is dropped (the caller
 /// asserts on the row contents).
 #[cfg(feature = "test-helpers")]
@@ -2479,21 +2481,19 @@ pub async fn finalize_rows_on_read_for_tests(
     Ok(result.rows)
 }
 
-/// Test helper that resolves the runtime data-access schema the way
-/// the CRUD passes do (live introspection + sentinels, cached). Lets a test
-/// assert the metadata actually came from the catalog, not the declared schema.
+/// Test helper that resolves the runtime data-access schema the way the CRUD
+/// passes do — through [`crate::descriptor::collection_schema`], the data
+/// plane's sole schema authority. Lets a test assert that the metadata the
+/// read/write passes will act on is exactly the descriptor entry the deploy
+/// installed, and that an undeclared collection is a typed refusal rather than
+/// an absent schema.
 #[cfg(feature = "test-helpers")]
-pub async fn runtime_schema_for_tests(
-    app_id: &str,
-    collection: &str,
-) -> Result<Option<Value>, DbError> {
+pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<Value, DbError> {
     let binding = DbBinding::cold_start(app_id);
-    // Deep-clone out of the shared cache: the helper's callers own and mutate
-    // their copy, and handing them the process-wide `Arc` would let one test
+    // Deep-clone out of the shared store: the helper's callers own and mutate
+    // their copy, and handing them the isolate's `Arc` would let one test
     // observe another's edit.
-    Ok(introspect_schema::runtime_schema_for(&binding, collection)
-        .await?
-        .map(|facts| (*facts).clone()))
+    crate::descriptor::collection_schema(&binding, collection).map(|facts| (*facts).clone())
 }
 
 /// Upsert's write-side prep. Unlike its `insert_many` sibling this is

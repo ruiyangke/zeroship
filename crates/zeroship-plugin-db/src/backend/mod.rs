@@ -59,6 +59,7 @@
 
 use std::rc::Rc;
 
+use crate::binding::DbBinding;
 use crate::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1136,7 +1137,7 @@ pub trait VectorIndex: 'static {
     #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat vector-search call shape; a params struct would just move the fields
     async fn vector_search(
         &self,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
         column: &str,
         query: &[f32],
@@ -1192,7 +1193,7 @@ pub trait SpatialIndex: 'static {
     #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat spatial-near call shape; a params struct would just move the fields
     async fn spatial_near(
         &self,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
         column: &str,
         point: GeoPoint,

@@ -42,6 +42,7 @@
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::binding::DbBinding;
 use crate::error::DbError;
 
 // ---------------------------------------------------------------------------
@@ -123,50 +124,37 @@ fn to_camel_case_alias(column: &str) -> String {
     out
 }
 
-fn resolve_schema_column(app_id: &str, collection: &str, column: &str) -> Result<Option<String>, DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(None);
-    };
-    let Some(obj) = schema.as_object() else {
-        return Ok(None);
-    };
+/// Map the caller's column spelling onto the name the descriptor declares.
+///
+/// `schema` is the caller's already-resolved descriptor entry: every entry
+/// point below resolves the collection ONCE through
+/// [`crate::descriptor::collection_schema`], so an undeclared collection is
+/// refused before any mask metadata is consulted. `None` here means the
+/// declared entry has no such column under any of the three spellings.
+fn resolve_schema_column(schema: &Value, column: &str) -> Option<String> {
+    let obj = schema.as_object()?;
     if obj.contains_key(column) {
-        return Ok(Some(column.to_string()));
+        return Some(column.to_string());
     }
     let snake = to_snake_case_alias(column);
     if snake != column && obj.contains_key(&snake) {
-        return Ok(Some(snake));
+        return Some(snake);
     }
     let camel = to_camel_case_alias(column);
     if camel != column && camel != snake && obj.contains_key(&camel) {
-        return Ok(Some(camel));
+        return Some(camel);
     }
-    Ok(None)
+    None
 }
 
-/// Walk the cached schema and return the mask metadata for `(collection,
-/// column)`, or `None` if the column has no `mask` block (or is opted
-/// out via `kind: "none"`).
-fn lookup_mask_meta(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-) -> Result<Option<ColumnMaskMeta>, DbError> {
-    let Some(canonical_column) = resolve_schema_column(app_id, collection, column)? else {
-        return Ok(None);
-    };
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(None);
-    };
-    let Some(obj) = schema.as_object() else {
-        return Ok(None);
-    };
-    let Some(def) = obj.get(&canonical_column) else {
-        return Ok(None);
-    };
-    let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
-        return Ok(None);
-    };
+/// Walk the descriptor entry and return the mask metadata for `column`, or
+/// `None` if the column has no `mask` block (or is opted out via
+/// `kind: "none"`).
+fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
+    let canonical_column = resolve_schema_column(schema, column)?;
+    let obj = schema.as_object()?;
+    let def = obj.get(&canonical_column)?;
+    let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
     if kind == "none" {
         // Explicit opt-out — the parent column stays plaintext on read,
@@ -174,17 +162,17 @@ fn lookup_mask_meta(
         // the SDK to construct an `.unmask()` call from). Surface as
         // "not masked" so the caller sees the same error code they
         // would for a non-masked column.
-        return Ok(None);
+        return None;
     }
     let classification = mask_meta
         .get("classification")
         .and_then(|v| v.as_str())
         .unwrap_or("pii")
         .to_string();
-    Ok(Some(ColumnMaskMeta {
+    Some(ColumnMaskMeta {
         canonical_column,
         classification,
-    }))
+    })
 }
 
 /// Encryption metadata for the target column (when present).
@@ -206,17 +194,13 @@ struct ColumnEncryptionMeta {
     wraps: &'static str,
 }
 
-/// Walk the cached schema and return the encryption metadata for
-/// `(collection, column)`, or `None` if the column has no `encrypted`
-/// block (mask-only / plaintext-storage case).
+/// Walk the descriptor entry and return the encryption metadata for `column`,
+/// or `None` if the column has no `encrypted` block (mask-only /
+/// plaintext-storage case).
 fn lookup_encryption_meta(
-    app_id: &str,
-    collection: &str,
+    schema: &Value,
     column: &str,
 ) -> Result<Option<ColumnEncryptionMeta>, DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(None);
-    };
     let Some(obj) = schema.as_object() else {
         return Ok(None);
     };
@@ -382,14 +366,20 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
 /// the dispatch flow without standing up V8; the production V8 glue
 /// in [`dispatch_unmask_field`] is the only crate-internal caller.
 pub async fn dispatch_unmask(
-    app_id: &str,
+    binding: &DbBinding,
     mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
+    let app_id = binding.app_id();
+    // Step 0 — the descriptor entry. Resolved once for the whole dispatch: the
+    // mask metadata, the column-spelling alias and the encryption metadata all
+    // read it, and a collection this deploy does not declare is refused here
+    // rather than reported as "column not masked".
+    let schema = crate::descriptor::collection_schema(binding, &args.collection)?;
     // Step 1 — mask metadata lookup. A column with no mask declaration
     // (or `kind: "none"` opt-out) cannot be unmasked — there's no
     // `MaskedValue` for the SDK to dispatch from, and we don't want a
     // forged RPC to silently read plaintext through this path.
-    let mask_meta = lookup_mask_meta(app_id, &args.collection, &args.column)?
+    let mask_meta = lookup_mask_meta(&schema, &args.column)
         .ok_or_else(|| DbError::ValidationFailed {
             code: "unmask_column_not_masked",
             message: format!(
@@ -426,7 +416,7 @@ pub async fn dispatch_unmask(
     }
 
     // Step 3 — fetch + decrypt (or fetch-plaintext).
-    let plaintext = match lookup_encryption_meta(app_id, &args.collection, &args.column)? {
+    let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
         Some(enc_meta) => fetch_and_decrypt(app_id, &args, &enc_meta).await?,
         None => fetch_plaintext_parent(app_id, &args).await?,
     };
@@ -1026,12 +1016,16 @@ pub struct BulkUnmaskResult {
 /// collections fail the call up-front before any audit row is written
 /// — the error surface is unchanged from the single-cell path.
 pub async fn dispatch_bulk_unmask(
-    app_id: &str,
+    binding: &DbBinding,
     args: BulkUnmaskArgs,
 ) -> Result<BulkUnmaskResult, DbError> {
     if args.items.is_empty() {
         return Ok(BulkUnmaskResult::default());
     }
+    let app_id = binding.app_id();
+
+    // ---- Step 0 — the descriptor entry, resolved once for every pair.
+    let schema = crate::descriptor::collection_schema(binding, &args.collection)?;
 
     // ---- Step 1 — load policy into cache, then resolve every (row,
     // col) pair's classification + check authorization.
@@ -1051,7 +1045,7 @@ pub async fn dispatch_bulk_unmask(
         let mut normalized_columns: Vec<(String, String)> = Vec::with_capacity(item.columns.len());
         let mut audit_columns: Vec<String> = Vec::with_capacity(item.columns.len());
         for col in &item.columns {
-            let mask_meta = lookup_mask_meta(app_id, &args.collection, col)?
+            let mask_meta = lookup_mask_meta(&schema, col)
                 .ok_or_else(|| DbError::ValidationFailed {
                     code: "unmask_column_not_masked",
                     message: format!(
@@ -1136,7 +1130,7 @@ pub async fn dispatch_bulk_unmask(
             // the FETCH helpers directly (not `dispatch_unmask`,
             // which would re-audit per pair). This is the
             // "wrap-over-many" pattern the proposal describes.
-            let plaintext = match lookup_encryption_meta(app_id, &args.collection, canonical_col)? {
+            let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
                 None => fetch_plaintext_parent(app_id, &single_args).await?,
             };
@@ -1244,7 +1238,7 @@ async fn write_audit_bulk_row(
 /// denied path writes one `denied` audit row covering the whole
 /// query.
 pub async fn authorize_query_hint(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
     actor: &Option<Value>,
@@ -1253,13 +1247,15 @@ pub async fn authorize_query_hint(
     if unmask_columns.is_empty() {
         return Ok(());
     }
+    let app_id = binding.app_id();
 
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
     ensure_mask_policy_cached(app_id).await?;
 
     let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
     let mut unauthorized: Vec<String> = Vec::new();
     for col in unmask_columns {
-        let mask_meta = lookup_mask_meta(app_id, collection, col)?
+        let mask_meta = lookup_mask_meta(&schema, col)
             .ok_or_else(|| DbError::ValidationFailed {
                 code: "unmask_column_not_masked",
                 message: format!(
@@ -1313,7 +1309,7 @@ pub async fn authorize_query_hint(
 /// Single row per query (NOT per row), so the audit-log volume scales
 /// with query count not row count.
 pub async fn audit_query_hint_granted(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
     actor: &Option<Value>,
@@ -1322,12 +1318,13 @@ pub async fn audit_query_hint_granted(
     if unmask_columns.is_empty() {
         return Ok(());
     }
-    // Re-resolve classifications for the audit row. Cheap — the
-    // schema lookup is a HashMap read.
+    let app_id = binding.app_id();
+    // Re-resolve classifications for the audit row. Cheap — the descriptor
+    // lookup is a HashMap read.
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
     let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
     for col in unmask_columns {
-        let mask_meta = lookup_mask_meta(app_id, collection, col)?;
-        let cls = mask_meta
+        let cls = lookup_mask_meta(&schema, col)
             .map(|m| m.classification)
             .unwrap_or_else(|| "pii".to_string());
         classifications.push(cls);
@@ -1359,7 +1356,7 @@ pub async fn audit_query_hint_granted(
 /// (the implicit primary key; aligns with `wrap_row_on_read`'s
 /// expectation).
 pub async fn dispatch_unmask_for_query(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
     rows: &mut [Value],
@@ -1367,6 +1364,8 @@ pub async fn dispatch_unmask_for_query(
     if unmask_columns.is_empty() {
         return Ok(());
     }
+    let app_id = binding.app_id();
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
     for row in rows.iter_mut() {
         let Some(row_pk) = row
             .get("id")
@@ -1394,7 +1393,7 @@ pub async fn dispatch_unmask_for_query(
                 actor: None,
                 reason: None,
             };
-            let plaintext = match lookup_encryption_meta(app_id, collection, col)? {
+            let plaintext = match lookup_encryption_meta(&schema, col)? {
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
                 None => fetch_plaintext_parent(app_id, &single_args).await?,
             };
@@ -1461,7 +1460,7 @@ use zeroship_runtime::state::{OpResult, ResolveValue};
 /// wrapping this entry point).
 pub(crate) fn dispatch_unmask_field<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: &DbBinding,
     args_v: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = crate::v8_bridge::runtime_state(scope);
@@ -1470,7 +1469,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
     // Parse the args eagerly so a malformed shape surfaces a typed
     // error synchronously rather than racing the spawn.
     let parsed = parse_args(&args_v);
-    let app = app_id.to_string();
+    let binding = binding.clone();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let args = match parsed {
@@ -1483,7 +1482,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 };
             }
         };
-        match dispatch_unmask(&app, args).await {
+        match dispatch_unmask(&binding, args).await {
             Ok(result) => {
                 // Wire shape: `{ plaintext: <string> }`. The SDK reads
                 // `result.plaintext` directly; for `wraps = bytes` the
@@ -1568,14 +1567,14 @@ fn require_string(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Str
 /// commonly `bulk_unmask_partial_unauthorized`).
 pub(crate) fn dispatch_bulk_unmask_field<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: &DbBinding,
     args_v: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = crate::v8_bridge::runtime_state(scope);
     let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
 
     let parsed = parse_bulk_args(&args_v);
-    let app = app_id.to_string();
+    let binding = binding.clone();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let args = match parsed {
@@ -1588,7 +1587,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 };
             }
         };
-        match dispatch_bulk_unmask(&app, args).await {
+        match dispatch_bulk_unmask(&binding, args).await {
             Ok(result) => {
                 // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
                 // `BTreeMap` serialises as a JSON object with sorted
@@ -1900,23 +1899,16 @@ mod tests {
 
     #[test]
     fn lookup_mask_meta_accepts_field_name_alias_for_snake_case_schema() {
-        let app_id = "lookup_mask_meta_alias_snake_case";
-        crate::cache_schema_for_tests(
-            app_id,
-            "users",
-            json!({
-                "contact_email": {
-                    "type": "string",
-                    "mask": {
-                        "kind": "email",
-                        "classification": "pii"
-                    }
+        let schema = json!({
+            "contact_email": {
+                "type": "string",
+                "mask": {
+                    "kind": "email",
+                    "classification": "pii"
                 }
-            }),
-        );
-        let meta = lookup_mask_meta(app_id, "users", "contactEmail")
-            .unwrap()
-            .expect("mask metadata");
+            }
+        });
+        let meta = lookup_mask_meta(&schema, "contactEmail").expect("mask metadata");
         assert_eq!(meta.canonical_column, "contact_email");
         assert_eq!(meta.classification, "pii");
     }
@@ -2135,7 +2127,7 @@ mod tests {
 
     #[test]
     fn bulk_unmask_empty_items_returns_empty_result() {
-        let app_id = "bulk_unit_empty_app";
+        let binding = DbBinding::cold_start("bulk_unit_empty_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let args = BulkUnmaskArgs {
             collection: "users".into(),
@@ -2143,16 +2135,29 @@ mod tests {
             actor: Some(json!({ "kind": "auto" })),
             reason: None,
         };
-        let result = runtime.block_on(dispatch_bulk_unmask(app_id, args)).unwrap();
+        let result = runtime
+            .block_on(dispatch_bulk_unmask(&binding, args))
+            .unwrap();
         assert!(result.results.is_empty());
     }
 
     #[test]
     fn bulk_unmask_unknown_column_returns_typed_error() {
-        // No schema cached for this app → every column lookup fails
-        // with `unmask_column_not_masked`. Pin the typed error code
-        // so SDK callers can branch on .code.
+        // The collection IS declared; the requested column is not one of its
+        // fields. That is the `unmask_column_not_masked` case, and it must stay
+        // distinguishable from `collection_not_declared` (see the sibling test
+        // below) — an SDK caller branches on `.code`.
+        //
+        // This used to reach the same code by declaring NOTHING, which the
+        // descriptor now refuses outright; asserting it that way would have
+        // stopped measuring the column check the moment the refusal landed.
         let app_id = "bulk_unit_unknown_column_app";
+        crate::cache_schema_for_tests(
+            app_id,
+            "users",
+            json!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+        );
+        let binding = DbBinding::cold_start(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
         let args = BulkUnmaskArgs {
             collection: "users".into(),
@@ -2163,7 +2168,9 @@ mod tests {
             actor: Some(json!({ "kind": "auto" })),
             reason: None,
         };
-        let err = runtime.block_on(dispatch_bulk_unmask(app_id, args)).unwrap_err();
+        let err = runtime
+            .block_on(dispatch_bulk_unmask(&binding, args))
+            .unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
@@ -2172,16 +2179,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bulk_unmask_undeclared_collection_returns_typed_error() {
+        // The counterpart to the test above: nothing declared at all is a
+        // DIFFERENT refusal, and conflating the two would let a bulk unmask
+        // against a collection this deploy cannot serve read as "no such
+        // masked column".
+        crate::reset_context_for_tests();
+        let binding = DbBinding::cold_start("bulk_unit_undeclared_app");
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let args = BulkUnmaskArgs {
+            collection: "users".into(),
+            items: vec![BulkUnmaskItem {
+                row_pk: "u1".into(),
+                columns: vec!["ssn".into()],
+            }],
+            actor: Some(json!({ "kind": "auto" })),
+            reason: None,
+        };
+        let err = runtime
+            .block_on(dispatch_bulk_unmask(&binding, args))
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("collection_not_declared"),
+            "expected the descriptor refusal, got {err:?}",
+        );
+    }
+
     // ---------------------------------------------------------------
     // authorize_query_hint unit behaviour
     // ---------------------------------------------------------------
 
     #[test]
     fn query_hint_empty_columns_no_op() {
-        let app_id = "qhint_unit_empty_app";
+        let binding = DbBinding::cold_start("qhint_unit_empty_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let ok = runtime.block_on(authorize_query_hint(
-            app_id,
+            &binding,
             "users",
             &[],
             &Some(json!({ "kind": "user" })),
@@ -2192,12 +2226,20 @@ mod tests {
 
     #[test]
     fn query_hint_unknown_column_returns_typed_error() {
-        // No schema cached → unknown column is the typed-error path.
+        // Declared collection, undeclared column — the typed-error path. See
+        // `bulk_unmask_unknown_column_returns_typed_error` for why this now
+        // installs a schema instead of relying on an empty store.
         let app_id = "qhint_unit_unknown_app";
+        crate::cache_schema_for_tests(
+            app_id,
+            "users",
+            json!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+        );
+        let binding = DbBinding::cold_start(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
         let err = runtime
             .block_on(authorize_query_hint(
-                app_id,
+                &binding,
                 "users",
                 &["nonexistent".to_string()],
                 &Some(json!({ "kind": "auto" })),
@@ -2214,12 +2256,12 @@ mod tests {
 
     #[test]
     fn dispatch_unmask_for_query_empty_columns_is_noop() {
-        let app_id = "qhint_unit_empty_dispatch_app";
+        let binding = DbBinding::cold_start("qhint_unit_empty_dispatch_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let mut rows = vec![json!({ "id": "u1", "name": "alice" })];
         let original = rows.clone();
         runtime
-            .block_on(dispatch_unmask_for_query(app_id, "users", &[], &mut rows))
+            .block_on(dispatch_unmask_for_query(&binding, "users", &[], &mut rows))
             .unwrap();
         assert_eq!(rows, original, "empty unmask columns must be a no-op");
     }

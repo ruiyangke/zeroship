@@ -58,10 +58,10 @@ use crate::v8_classes::collection::mint_collection;
 /// method is set on the view: the only members are collections. Manual
 /// abort = throw inside the callback; commit is implicit on resolve.
 ///
-/// When the schema cache is empty for `app_id` (no `registerModel` has
-/// run on this worker thread yet — e.g. a raw-JS deploy that opens a tx before
-/// declaring a schema), the view is an empty object. That is correct: a
-/// transaction with no declared collections has nothing to address
+/// When the descriptor store holds no entry for this BINDING (no
+/// `registerModel` has run on this worker thread yet — e.g. a raw-JS deploy
+/// that opens a tx before declaring a schema), the view is an empty object. That
+/// is correct: a transaction with no declared collections has nothing to address
 /// through `tx.<name>`; the creator can still drive raw work, and the
 /// commit/rollback envelope still applies.
 pub(crate) fn mint_tx_view<'s>(
@@ -69,18 +69,15 @@ pub(crate) fn mint_tx_view<'s>(
     binding: &DbBinding,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let view = v8::Object::new(scope);
-    let app_id = binding.app_id();
 
     // One tx-bound Collection per cached-schema collection. The list
     // mirrors `Db::collection(name)`'s minting; the binding to the open
     // tx is implicit (the `tx_conn` slot is set), so no per-object tx id
     // is threaded.
-    let collections: Vec<String> = crate::context::with(|c| {
-        c.cached_schemas_for_app(app_id)
-            .into_iter()
-            .map(|(name, _schema)| name)
-            .collect()
-    });
+    let collections: Vec<String> = crate::descriptor::declared_collections(binding)
+        .into_iter()
+        .map(|(name, _schema)| name)
+        .collect();
 
     for name in collections {
         let col = mint_collection(scope, name.clone(), binding.clone())?;

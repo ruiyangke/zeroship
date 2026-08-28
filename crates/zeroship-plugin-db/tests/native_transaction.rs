@@ -244,9 +244,19 @@ fn count_notes(url: &str) -> i64 {
     })
 }
 
+/// The table the deploy-time migration would have created for
+/// [`build_encrypted_users_src`]'s declared schema.
+///
+/// It used to end with `COMMENT ON COLUMN ... 'zsenc:randomised:<key>:string'`.
+/// That sentinel is gone with the catalog read that recovered it: the encryption
+/// metadata the CRUD passes act on now comes from the RUNTIME DESCRIPTOR, which
+/// in these tests is installed by the REAL `registerModel` the fixture's
+/// `setup` action runs. `key_id` is still a parameter because the JS schema and
+/// the test's supplied root key have to agree on it; nothing in the SQL below
+/// reads it any more.
 fn create_encrypted_users_table(url: &str, key_id: &str) {
     let url = url.to_string();
-    let key_id = key_id.to_string();
+    let _ = key_id;
     block_on(async move {
         zeroship_plugin_db::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
@@ -266,8 +276,7 @@ fn create_encrypted_users_table(url: &str, key_id: &str) {
 CREATE UNIQUE INDEX "users_email_key" ON "{APP_SCHEMA}"."users" (email);
 CREATE INDEX "users_deleted_at_idx" ON "{APP_SCHEMA}"."users" (deleted_at);
 CREATE INDEX "users_updated_at_idx" ON "{APP_SCHEMA}"."users" (updated_at);
-CREATE INDEX "users_created_by_idx" ON "{APP_SCHEMA}"."users" (created_by);
-COMMENT ON COLUMN "{APP_SCHEMA}"."users"."ssn" IS 'zsenc:randomised:{key_id}:string';"#
+CREATE INDEX "users_created_by_idx" ON "{APP_SCHEMA}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
@@ -525,10 +534,31 @@ setup.config = {{ kind: "action" }};
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Install the descriptor entry for the collection an "unmigrated app" test
+/// reads, so the read gets PAST the schema authority and reaches the database
+/// that was never migrated.
+///
+/// That is the shape being modelled: a deploy whose descriptor declares `notes`
+/// and whose per-app Postgres schema and role do not exist yet. Without the
+/// entry the read is refused by `collection_not_declared` first and the test
+/// stops measuring the provisioning remediation it exists for — which is
+/// exactly what happened when the descriptor became the sole authority.
+///
+/// The binding is the cold-start one because `dispatch_zs_for_app` injects no
+/// `ZEROSHIP_DEPLOY_ID`, so `mint_db` falls back to the same token.
+fn declare_notes_for_unmigrated_app(app_id: &str) {
+    zeroship_plugin_db::cache_schema_for_tests(
+        app_id,
+        "notes",
+        serde_json::json!({ "title": { "type": "string" } }),
+    );
+}
+
 #[test]
 fn unmigrated_app_autocommit_response_names_migrate() {
     let url = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
+    declare_notes_for_unmigrated_app(&app_id);
     let src = build_src(
         r#"
 function autocommitBeforeMigrate(_input, _ctx) {
@@ -597,6 +627,7 @@ const _procedures = { transactionBeforeMigrate };
 fn unmigrated_app_streaming_response_names_migrate() {
     let url = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
+    declare_notes_for_unmigrated_app(&app_id);
     let src = [
         r#"import { env } from "zeroship";"#,
         include_str!("../../../sdks/bootstrap/dist/fetch-handler.js"),
