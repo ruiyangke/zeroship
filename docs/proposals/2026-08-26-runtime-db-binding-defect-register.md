@@ -1235,6 +1235,57 @@ records the divergence from the shipped validator in its own comments; when the
 port lands, one of the two behaviours has to win explicitly rather than by
 whichever file the reader opened.
 
+### L30 (NEW 2026-08-28) - the worker holds REPLICATION and BYPASSRLS, which decision 5 forbids
+
+**The login role of the process that executes creator code holds two
+cluster-scoped privileges.** Verified by reading the migration:
+
+```sql
+ALTER ROLE zeroship_worker WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+  INHERIT REPLICATION BYPASSRLS
+-- db/migrations-ts/20260818000200_worker_database_authority.ts:35
+```
+
+Four lines below, the same file does the opposite for a role that does not need
+them - `zeroship_workflow_owner ... NOINHERIT NOREPLICATION NOBYPASSRLS`
+(`:39`) - so this is a deliberate grant, and the correct pattern is visible in
+the same file for contrast.
+
+**Why it is a defect and not a configuration choice.** `AGENTS.md`'s key
+invariant, adopted by operator decision on 2026-08-27, says a privileged
+capability held by the process running creator code "does not create a boundary;
+it creates the *appearance* of one, because everything behind that capability is
+reachable by whatever reaches the worker", and that anything genuinely privileged
+"belongs to a separate service that does not execute creator code". `REPLICATION`
+is cluster-wide - a replication connection is confined to one database only by
+the server's own decode loop, not by any grant on the role - and `BYPASSRLS`
+defeats row-level security outright. The worker is precisely the process the
+invariant names.
+
+**Why it cannot be fixed by narrowing the grant.** PostgreSQL has no finer
+permission for slot consumption: `CheckSlotPermissions` is
+`has_rolreplication(GetUserId())` and gates every slot function. So as long as
+the worker consumes WAL itself, the worker holds `REPLICATION`. The only
+remedy is to move consumption into a process that does not execute creator
+code - which is the CDC relay that decision 5 already assigns slot and
+publication ownership to.
+
+**This is the strongest argument for resolving L12, and the four-option analysis
+omits it.** That analysis weighs slot count and decode cost, and frames the
+choice between a per-worker demux and a relay as "cross-tenant leak risk versus
+none". Both of those options keep `REPLICATION` and `BYPASSRLS` on the
+creator-code process; only the relay removes them. The relay is therefore not
+merely the scaling answer - it is the only option that closes a violation that
+is live today.
+
+**Deliberately NOT fixed here.** Per the standing instruction to defer defect
+repair until the proposal implementation lands, and because the fix is the relay
+rather than an edit. Recorded so the L12 decision is made with it in view.
+
+**Related, same file, not separately entered:** `BYPASSRLS` deserves its own
+justification even after the relay lands, since it is unrelated to replication
+and nothing in this set explains why the worker needs it.
+
 ---
 
 ## Reclassified from v3: not live defects
