@@ -23,8 +23,11 @@
 //!
 //! The engine exposes five lowering entry points and they are not equivalent.
 //! Use `IrAuthor::load_and_lower_guarded` (or `load_and_lower`), which routes
-//! through `model::load::load_ir_document_authorized`. This crate does so at
-//! `platform.rs:387`; `crates/migrated` does so at `apply.rs:1082` and `:1227`.
+//! through `model::load::load_ir_document_authorized`. THIS CRATE NO LONGER LOWERS
+//! ANYTHING - it is the session newtype and nothing else since the platform one-shot
+//! was deleted on 2026-08-28 - so the in-tree consumer to read is
+//! `crates/zeroship-migrated/src/apply.rs:1082` and `:1227`. The note stays because
+//! the seam this crate exposes is what those callers drive.
 //!
 //! `IrAuthor::lower`, `lower_plan` and `lower_steps` take an ALREADY-deserialized
 //! `MigrationIr` and do NOT run the loader. What that actually costs is narrower
@@ -116,21 +119,6 @@ use compio_postgres::types::{to_sql_checked, Format, IsNull, Kind, ToSql, Type};
 use compio_postgres::types::private::BytesMut;
 use compio_postgres::{Client, Error as PgError, Row as PgRow};
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
-
-/// The `zeroship-platform-migrate` one-shot's generated configuration.
-///
-/// NOT behind `platform-cli`: `crates/config-contract` links this crate to reach
-/// `PlatformMigrateSettings::SPECS`, and the declaration carries no V8, so
-/// keeping it out of the feature keeps `zeroship-runtime` off the contract
-/// checker's dependency graph.
-pub mod config;
-
-/// Phase F Stage 4a - the platform-schema migrate path on the published engine
-/// (author `db/migrations-ts/*.ts` via zeroship-runtime V8 -> apply via
-/// zero-migrate over [`CompioPgSession`]). Feature-gated so the base library
-/// surface (Stage 1's adapter) stays V8-free.
-#[cfg(feature = "platform-cli")]
-pub mod platform;
 
 /// A monorepo-native [`SqlSession`] over a pinned [`compio_postgres::Client`].
 ///

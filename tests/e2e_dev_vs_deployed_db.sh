@@ -80,8 +80,7 @@
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker \
 #       -p zeroship-gateway -p zeroship -p zeroship-migrated --bins
-#   cargo build --release -p zeroship-migrate-adapter --features platform-cli \
-#       --bin zeroship-platform-migrate
+#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   docker (this script starts and destroys its own ephemeral Postgres)
 #   pnpm install in examples/db-todos
 # ---------------------------------------------------------------------------
@@ -168,9 +167,10 @@ command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || {
   exit 2
 }
 for b in zeroship zeroship-control zeroship-gate zeroship-worker \
-         zeroship-platform-migrate zeroship-migrated dev-provision; do
+         zeroship-migrated dev-provision; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b -- see the prereqs in this file's header"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI -- see the prereqs in this file's header"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 [ -f "$JOSE" ] || { echo "missing jose at $JOSE"; exit 2; }
 RECORDER="$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js"
@@ -809,7 +809,7 @@ docker exec "$PGC" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1 
   }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+zs_platform_migrate "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   && pass "platform migrations applied" \

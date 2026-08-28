@@ -13,7 +13,7 @@
 #
 # Prereqs (see docs/runbooks/local-dev.md):
 #   - service/CLI binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
-#   - migration binary: cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+#   - the zero-migrate CLI: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   - a Postgres reachable at $GOLDEN_PATH_DSN (default: the compose instance on :5440)
 #   - examples/starter deps installed (pnpm install) so `pnpm build` works
 # ---------------------------------------------------------------------------
@@ -347,20 +347,26 @@ trap cleanup EXIT
 # reason unrelated to coverage.
 gp_missing_bins=()
 for _b in dev-provision zeroship zeroship-control zeroship-gate zeroship-migrated \
-         zeroship-platform-migrate zeroship-worker; do
+         zeroship-worker; do
   [ -x "$BIN/$_b" ] || gp_missing_bins+=("$_b")
 done
 if [ "${#gp_missing_bins[@]}" -gt 0 ]; then
-  echo "  ✗ PREREQUISITE MISSING: ${#gp_missing_bins[@]} of 7 release binaries are absent from $BIN" >&2
+  echo "  ✗ PREREQUISITE MISSING: ${#gp_missing_bins[@]} of 6 release binaries are absent from $BIN" >&2
   for _b in "${gp_missing_bins[@]}"; do echo "      - $_b" >&2; done
   echo "      Nothing below would measure the platform: the services never start." >&2
   echo "      Build them with:" >&2
   echo "        cargo build --release -p zeroship-control -p zeroship-worker \\" >&2
   echo "          -p zeroship-gateway -p zeroship -p zeroship-migrated --bins" >&2
-  echo "        cargo build --release -p zeroship-migrate-adapter \\" >&2
-  echo "          --features platform-cli --bin zeroship-platform-migrate" >&2
   exit 2
 fi
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || {
+  echo "  PREREQUISITE MISSING: the zero-migrate CLI is absent from" >&2
+  echo "      $ROOT/packages/zero-migrate-cli/dist/cli-bin.js" >&2
+  echo "      The platform schema is never applied, so nothing below measures" >&2
+  echo "      the platform. Build it with:" >&2
+  echo "        pnpm install && pnpm build && pnpm --filter zero-migrate-cli build" >&2
+  exit 2
+}
 
 # --- HTTP probes that separate "listening" from "answered 2xx" -------------
 #
@@ -505,7 +511,7 @@ echo "  migrating a fresh $PG_DB ..."
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || \
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DB_URL" \
+zs_platform_migrate "$DB_URL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship \
     --project-id zeroship >/tmp/gp-migrate.log 2>&1 \

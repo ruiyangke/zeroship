@@ -51,15 +51,34 @@
 # -- an infrastructure error with NO test name attached, which reads like
 # flakiness or like the reader's own change.
 #
-# That is now handled INSIDE `zeroship-platform-migrate`, which takes a
-# cluster-wide advisory lock in a coordination database around exactly the
-# migrations whose SQL writes a shared catalog
-# (`crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs`). Nothing is
-# required of a caller of this file. It is recorded here because the measured
-# note above says concurrent runs are SAFE, and until that lock existed the
-# catalog race was a way they were not -- one that the 2026-08-17 two-auth-suite
-# measurement happened not to trigger, since the race is probabilistic rather
-# than certain.
+# NOTHING HANDLES THAT ANY MORE, AND THIS PARAGRAPH USED TO SAY SOMETHING DID.
+#
+# Until 2026-08-28 it read: "That is now handled INSIDE
+# `zeroship-platform-migrate`, which takes a cluster-wide advisory lock in a
+# coordination database around exactly the migrations whose SQL writes a shared
+# catalog." That was true, and the binary carrying the lock
+# (`crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs`, 451 lines) was
+# deleted with it when the platform schema moved to the `zero-migrate` CLI.
+#
+# WHAT THE CLI HAS INSTEAD, and why it is not the same thing. It brackets each
+# apply in `SELECT pg_advisory_lock(hashtext($1))` keyed on the project schema
+# (crates/zeroship-migrate-postgres/src/backend/session.rs:60-77). A PostgreSQL
+# advisory lock tag carries MyDatabaseId, so that lock is DATABASE-SCOPED: two
+# suites holding the same key in two scratch databases do not exclude each other
+# at all. It is also acquired and released PER MIGRATION FILE rather than once
+# per run (crates/zeroship-migrate-node/src/verbs.rs:332 and :453, driven by the
+# per-file loop in packages/zero-migrate-cli/src/cli.ts:1420), so even
+# same-database runs interleave at file boundaries.
+#
+# So the race described above is BACK. It is probabilistic rather than certain -
+# the 2026-08-17 two-auth-suite measurement did not trigger it - and the symptom
+# is an infrastructure error with no test name attached:
+#   ERROR:  tuple concurrently updated
+#   ERROR:  duplicate key value violates unique constraint "pg_authid_rolname_index"
+#   ERROR:  duplicate key ... "pg_db_role_setting_databaseid_rol_index"
+# If you see one of those while two suites are running, this is why. Nothing in
+# this file can prevent it; the fix belongs wherever the cluster-wide lock is
+# rebuilt, and today it is nowhere.
 #
 # tests/lib_scratch_db_selftest.sh covers both directions of both functions.
 # ============================================================================

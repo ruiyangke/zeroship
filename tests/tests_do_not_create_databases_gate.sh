@@ -50,15 +50,6 @@ gate_arms_init tests_do_not_create_databases
 #
 # RULED 2026-08-20, one file at a time, from what each test is FOR:
 ALLOW=(
-  # The subject under test IS the platform migration runner applied to a
-  # database that has never been migrated - including
-  # `concurrent_migrates_of_two_databases_on_one_cluster_both_succeed`, which
-  # exists to prove the cluster-global advisory lock in
-  # crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs works, and
-  # cannot be written without two databases on one cluster. The databases are
-  # per-run named and dropped by the same helper that makes them.
-  "crates/zeroship-migrate-adapter/tests/platform_migrate.rs|the runner under test applies to a virgin database, and the cluster-lock test needs two"
-
   # ONE test: `a_template_clone_is_not_blocked_by_the_previous_runtime`. Its
   # subject IS `CREATE DATABASE ... WITH TEMPLATE` - specifically that a
   # connection dropped by an earlier compio runtime does not leave a backend
@@ -89,12 +80,6 @@ ALLOW=(
   # is running against.
   "crates/control/tests/workflow_engine_test.rs|TRACKED VIOLATION: clones the live suite database per test; blocks sharing the billing database"
 
-  # Not database creation at all: a `const OBJECT_MARKERS` entry and the unit
-  # test asserting the classifier matches it. `sql_touches_cluster_global`
-  # decides whether a rendered migration statement writes a shared catalog; the
-  # string never reaches a server, and this file opens no connection.
-  "crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs|a string CLASSIFIED, never executed - the marker table for the cluster-lock router"
-
   # THIS GATE'S OWN PREMISE, in code. "The harness creates the database and
   # passes the DSN in" - zeroship-testkit IS that harness, and `admin.rs` holds
   # the one statement that does it, behind a trait whose whole point is that
@@ -116,8 +101,8 @@ ALLOW=(
 echo "==> Scanning Rust test code for CREATE DATABASE"
 
 # Candidates: everything under a `tests/` directory, plus any `src` file
-# carrying a `#[cfg(test)]` module. The second half matters - `cluster_lock.rs`
-# is a src file, and an inline test module is still test code.
+# carrying a `#[cfg(test)]` module. The second half matters - `zeroship-testkit/src/
+# admin.rs` is a src file, and an inline test module is still test code.
 #
 # No `-not -path './target/*'`: it was here and could not match. The roots are
 # `crates` and `libs`, so every path `find` emits starts `crates/` or `libs/`

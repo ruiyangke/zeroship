@@ -41,9 +41,10 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate zeroship-migrated; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrated; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null && command -v pnpm >/dev/null || {
   echo "need node/openssl/curl/pnpm"
   exit 2
@@ -207,7 +208,7 @@ MIG_LOG="$WORK/platform-migrate.log"
 # Post-extraction: platform schema is applied by zeroship-platform-migrate
 # (adapter, platform-cli). It authors via its own built-in V8 (no recorder child)
 # and drives the published zero-migrate engine over CompioPgSession.
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+zs_platform_migrate "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "platform migrate"; tail -30 "$MIG_LOG"; exit 1; }

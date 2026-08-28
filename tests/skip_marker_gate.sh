@@ -108,11 +108,6 @@ skip_shaped_lines() {
 # Each entry states why, because an allowlist without reasons becomes a list of
 # things nobody remembers refusing to check.
 #
-#   zeroship-platform-migrate.rs  a SHIPPING BINARY's progress output. It prints
-#     `  skipped  <name> (already applied)` per migration the journal already
-#     holds, on stdout, to an operator watching a deploy. There is no test and
-#     nothing to count.
-#
 #   crates/runtime/tests/wpt_*.rs  the WPT runners print their own `=== Skipped
 #     ===` REPORT HEADER, then list the upstream subtests they declined. That is
 #     a census of its own, already visible in the run output; marking the header
@@ -125,7 +120,6 @@ skip_shaped_lines() {
 # have been waved through with the report header. It now matches the header
 # SHAPE as well as the path.
 ALLOW=(
-  'crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate\.rs:[0-9]+:.*skipped  \{name\}|a shipping binary reporting an already-applied migration to an operator'
   'crates/runtime/tests/wpt_[a-z_]+\.rs:[0-9]+:.*=== Skipped|the WPT runners own report header, which precedes their own census'
 )
 
@@ -279,8 +273,16 @@ COUNT="$(n_lines "${OFFENDERS%$'\n'}")"
 # Direction 2, the one this gate did not have. `tests/tests_do_not_create_
 # databases_gate.sh` is the model: an exemption that no longer matches anything
 # must FAIL, or the ALLOW list silently becomes the whole world. It doubles as
-# this gate's positive control - both entries match today, so if the detector
-# breaks they stop matching and say so here as well as at the floor above.
+# this gate's positive control: an entry that stops matching is either code
+# that went away or a detector that broke, and both have to be said out loud.
+#
+# ONE ENTRY IS LEFT AND IT IS CURRENTLY FAILING HERE. The
+# zeroship-platform-migrate entry went with the binary it excused on
+# 2026-08-28. The surviving WPT entry still names `crates/runtime/tests/`; the
+# crate is `zeroship-runtime`, so the pattern matches nothing and this loop
+# says so. That break PREDATES the removal - measured 2026-08-28 with the
+# removed entry restored, this arm reads examined=0 either way, so the removal
+# took one dead entry out of two rather than causing the failure.
 N_STILL_MATCHING=0
 for entry in "${ALLOW[@]}"; do
   pattern="${entry%%|*}"
@@ -300,17 +302,21 @@ for entry in "${ALLOW[@]}"; do
 done
 
 # THE ARM THIS GATE ACTUALLY NEEDS, and the reason it exists at all: the
-# FORWARD count (COUNT below, "unruled") is 8 raw hits, 8 excused, 0 unruled -
-# genuinely zero today, because every current offender is legitimately excused.
+# FORWARD count (COUNT below, "unruled") was 8 raw hits, 8 excused, 0 unruled
+# on 2026-08-20, because every offender then was legitimately excused.
 # Declaring an arm on THAT number would be exactly the defect this file was
 # rewritten to stop being: a floor >=1 on a count that is honestly 0 would fail
 # every clean run, and a floor of 0 is refused by the library on purpose. So
 # this arm counts the REVERSE direction instead - how many ALLOW entries still
 # match something in $RAW, which is what direction 2 above rules on line by
-# line. 2 entries, both matching, measured 2026-08-20. Floor 1: a legitimate
-# cleanup can retire one exemption, but not both while $RAW is still nonempty
-# above, and this is the number that goes to 0 the same way arm 1 of
-# ws_subscription_stub_gate.sh did - a pattern that stops matching anything.
+# line. Floor 1: one entry is left, so that entry has to keep matching.
+#
+# MEASURED 2026-08-28: 7 raw, 0 excused, 7 unruled, and this arm at 0 - the
+# exact collapse it was built to announce, the same shape arm 1 of
+# ws_subscription_stub_gate.sh had. The pattern stopped matching because the
+# crate moved to `zeroship-runtime`, NOT because the report headers went away,
+# so the forward count's 7 unruled rows are not a finding about the tree
+# either. Fix the pattern; do not lower the floor.
 if ! gate_arm allow_entries_live "$N_STILL_MATCHING" 1; then
   echo "GATE CANNOT ANSWER: no ALLOW entry in this file still matches a raw"
   echo "  skip-shaped print. Either both were legitimately retired (the forward"

@@ -27,10 +27,13 @@ zeroship-gateway = { workspace = true }
 zeroship-migrated = { workspace = true }
 zeroship-worker = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
-# The seventh platform target: the `zeroship-platform-migrate` one-shot. Its
-# declaration lives in the library and is NOT behind `platform-cli`, so linking
-# it here brings in the configuration and not V8.
-zeroship-migrate-adapter = { workspace = true }
+# A SEVENTH ENTRY USED TO SIT HERE: `zeroship-migrate-adapter`, linked for the
+# `zeroship-platform-migrate` one-shot's declaration. Both the binary and the
+# `PlatformMigrateSettings` declaration were deleted on 2026-08-28 when the
+# platform schema moved to the `zero-migrate` CLI, so the dependency became
+# unused and is gone with them. `real_registry.rs` compares this set against the
+# `platform` targets cargo metadata reports, and that side lost the target too,
+# so the shrink is symmetric rather than the silent one that file warns about.
 clap = { workspace = true }
 cargo_metadata = { workspace = true }
 # `span-locations` is what gives the inventory a file:LINE column. Resolver 3

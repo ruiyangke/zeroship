@@ -36,8 +36,7 @@
 #
 # Requires: docker, openssl, node, and a release build including
 #   cargo build --release
-#   cargo build --release -p zeroship-migrate-adapter --features platform-cli \
-#         --bin zeroship-platform-migrate
+#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 # plus a built examples/db-todos (`pnpm --filter db-todos build` or `pnpm build`).
 # ---------------------------------------------------------------------------
 set -uo pipefail
@@ -75,9 +74,10 @@ echo "============================================"
 echo "  zeroship E2E - deploy and migrate from zeroship.jsonc"
 echo "============================================"
 
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate zeroship-migrated; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrated; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 SRC_APP="$ROOT/examples/db-todos"
 [ -f "$SRC_APP/dist/app.zship" ] || { echo "missing $SRC_APP/dist/app.zship - run: (cd $SRC_APP && pnpm build)"; exit 2; }
 [ -f "$JOSE_JS" ] || { echo "missing jose at $JOSE_JS"; exit 2; }
@@ -103,7 +103,7 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
     < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1
 
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-if zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+if zs_platform_migrate "$DBURL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship --project-id zeroship > "$WORK/platmig.log" 2>&1; then
   pass "platform migrations applied from scratch"
