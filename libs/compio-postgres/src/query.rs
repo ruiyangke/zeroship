@@ -448,22 +448,24 @@ pub async fn query_portal(
     portal: &Portal,
     max_rows: i32,
 ) -> Result<RowStream, Error> {
-    let buf = client.with_buf(|buf| {
-        frontend::execute(portal.name(), max_rows, buf).map_err(Error::encode)?;
-        frontend::sync(buf);
-        Ok(buf.split().freeze())
-    })?;
+    portal.with_live_on(client, || {
+        let buf = client.with_buf(|buf| {
+            frontend::execute(portal.name(), max_rows, buf).map_err(Error::encode)?;
+            frontend::sync(buf);
+            Ok(buf.split().freeze())
+        })?;
 
-    let responses = client.send_statement(
-        producerless_request(buf, portal.statement().may_enter_copy_in()),
-        portal.statement(),
-    )?;
+        let responses = client.send_statement(
+            producerless_request(buf, portal.statement().may_enter_copy_in()),
+            portal.statement(),
+        )?;
 
-    Ok(RowStream {
-        statement: portal.statement().clone(),
-        responses,
-        rows_affected: None,
-        copy_out_refused: false,
+        Ok(RowStream {
+            statement: portal.statement().clone(),
+            responses,
+            rows_affected: None,
+            copy_out_refused: false,
+        })
     })
 }
 

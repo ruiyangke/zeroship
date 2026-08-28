@@ -6,6 +6,7 @@
 
 use crate::Socket;
 use crate::copy_out::CopyOutStream;
+use crate::portal::PortalScope;
 use crate::query::RowStream;
 use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
@@ -26,6 +27,8 @@ use futures_util::TryStreamExt;
 pub struct Transaction<'a> {
     client: &'a mut Client,
     savepoint: Option<Savepoint>,
+    portal_scope: PortalScope,
+    parent_portal_scope: Option<PortalScope>,
     done: bool,
 }
 
@@ -97,6 +100,7 @@ impl Drop for Transaction<'_> {
 
         let name = self.savepoint.as_ref().map(|sp| sp.name.as_str());
         self.client.__private_api_rollback(name);
+        self.portal_scope.invalidate();
     }
 }
 
@@ -105,6 +109,8 @@ impl<'a> Transaction<'a> {
         Transaction {
             client,
             savepoint: None,
+            portal_scope: PortalScope::new(),
+            parent_portal_scope: None,
             done: false,
         }
     }
@@ -145,10 +151,12 @@ impl<'a> Transaction<'a> {
         if self.savepoint.is_some() && self.client.transaction_status().is_none() {
             self.client.simple_query("").await?;
         }
+        let nested_failed = self.savepoint.is_some()
+            && self.client.transaction_status() == Some(crate::TransactionStatus::Failed);
         let responses = if let Some(sp) = self.savepoint.as_ref() {
             let name = quote_identifier(&sp.name);
             let query = format!("RELEASE {name}");
-            if self.client.transaction_status() == Some(crate::TransactionStatus::Failed) {
+            if nested_failed {
                 crate::simple_query::start_batch_execute_with_error_cleanup(
                     self.client.inner(),
                     &query,
@@ -166,6 +174,15 @@ impl<'a> Transaction<'a> {
         // still being built leaves the transaction open on the server with
         // nothing left to undo it.
         self.done = true;
+        if let Some(parent) = self.parent_portal_scope.take() {
+            if nested_failed {
+                self.portal_scope.invalidate();
+            } else {
+                self.portal_scope.reparent(parent);
+            }
+        } else {
+            self.portal_scope.invalidate();
+        }
         let tag = crate::simple_query::finish_batch_execute_reporting_tag(responses).await?;
         // batch_execute awaited the command to completion - the
         // connection is in a known-clean state. Clear any dirty flag
@@ -201,6 +218,7 @@ impl<'a> Transaction<'a> {
         };
         let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
         self.done = true;
+        self.portal_scope.invalidate();
         let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {
             // Explicit rollback awaited to completion - the connection is
@@ -401,6 +419,7 @@ impl<'a> Transaction<'a> {
             execution.statement,
             params,
             execution.unnamed_sql,
+            self.portal_scope.clone(),
         )
         .await
     }
@@ -522,6 +541,8 @@ impl<'a> Transaction<'a> {
         Ok(Transaction {
             client: self.client,
             savepoint: Some(Savepoint { name, depth }),
+            portal_scope: PortalScope::new(),
+            parent_portal_scope: Some(self.portal_scope.clone()),
             done: false,
         })
     }

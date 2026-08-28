@@ -103,6 +103,7 @@ mod pool_lifetime;
 mod pool_session_state_carry;
 mod pool_transaction_isolation;
 mod portal_abandonment;
+mod portal_name_collision;
 mod portal_paging;
 mod prefer_attestation_fallback;
 mod protocol_version_live;
