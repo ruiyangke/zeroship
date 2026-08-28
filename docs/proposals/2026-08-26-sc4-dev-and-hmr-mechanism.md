@@ -3,19 +3,13 @@
 **Date:** 2026-08-26
 
 **Status:** DRAFT - required sub-contract of
-`docs/proposals/2026-08-26-runtime-db-binding-design.md`
+`docs/proposals/2026-08-26-runtime-db-binding-design.md`. **Decision 4 is
+implemented** (`8c6caa465`); decisions 1, 2 and 3 are not.
 
-**Gates:** merge 5c of that document, which is where the SC-4 dev mechanism is
-sequenced and which says in its own words that "deleting registration breaks dev
-unless SC-4 co-lands". Not 5b: 5b is the identity substrate.
-
-**Relationship to
-`docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`:
-UNDECIDED.** That proposal owns the dev tier's apply-ahead-of-runtime path -
-the same path Decision 1 rejects a Postgres URL from, and the same writer the
-dev epoch below assigns the first stable epoch row to. Whether this document
-supersedes it, depends on it, or assumes it already landed is recorded nowhere.
-This states the question; it does not answer it.
+**Gates:** merge 5c of that document, which lists "the SC-4 dev mechanism" and
+"deletion of registration" as one co-landing step (`design.md:1406-1408`). Not
+5b: 5b is the identity substrate and is blocked on Fork C's home
+(`design.md:1394-1397`).
 
 Read `2026-08-26-runtime-db-binding-00-index.md` first for what is settled, what
 is open, and what blocks what.
@@ -45,8 +39,7 @@ const reply = await applyMigrationsToDevSqlite({ root, migrationsDir, collection
 
 (`migrate-dev.ts:125-131`). The addon behind that call exposes only
 `applyIrSqlite`, which its own comment calls "the dev tier's schema authority"
-(`sdks/vite-plugin/src/gen-types/addon.ts:154`, declared at `:166`). An earlier
-draft of this document cited `:129,141`, which is unrelated reply-key triage.
+(`sdks/vite-plugin/src/gen-types/addon.ts:154`, declared at `:166`).
 
 So a developer who exports a Postgres `DATABASE_URL` gets their migrations
 applied to a **SQLite file**, and the command reports success. That is the worst
@@ -73,23 +66,33 @@ rather than implementation because:
 - rejection is honest and reversible - a later Postgres dev path replaces an
   error, whereas today's silent misapplication has to be discovered first.
 
-The check belongs where the URL is resolved, so **both** the dev server and the
-migrate command inherit it from one place.
+**The shared resolution point this decision needs already exists.** Both
+consumers go through one module, `sdks/vite-plugin/src/dev-database-url.ts`,
+whose header states that sharing the resolution is the whole point: the dev
+server imports `resolveDatabaseUrl` / `parseDotenvVars` / `logDatabaseUrlSource`
+(`dev-server.ts:56-59`, called at `:648` and `:928`) and the migrate CLI imports
+the same three (`migrate-dev.ts:32-34`, called at `:118`). **That module
+contains no scheme check** - `resolveDatabaseUrl` returns the first of shell,
+`.env`, default and inspects nothing (`dev-database-url.ts:47-59`). So what is
+owed is one branch there, not a new plumbing path, and both consumers inherit it
+by construction.
 
-**OWED: the error has no name.** This heading promises a *typed* error, the
-decision above says "named, actionable", and the acceptance arm below says "a
-named error" - and no code, type or symbol for it appears anywhere in this
-document or in the set. That is a gap worth flagging rather than filling here,
-because this same document names `SCHEMA_NOT_APPLIED` and
-`SCHEMA_METADATA_MISMATCH` precisely, in the very next section, so the omission
-reads as an oversight rather than a deliberate deferral. An implementer must not
-invent one silently: the name is part of the contract the dev server and the
-migrate command both inherit.
+**OWED: three error names, none of which exists as a symbol.** This heading
+promises a *typed* error and the decision says "named, actionable" - and no
+code, type or symbol for it appears in this document or in the set. Nor can an
+implementer copy the naming from the two names this document and the parent use
+as examples: **`SCHEMA_NOT_APPLIED` and `SCHEMA_METADATA_MISMATCH` occur zero
+times in `crates/` and `sdks/`** (measured 2026-08-28). They are specification
+names - the parent introduces `SCHEMA_NOT_APPLIED` for a missing app file in
+section 3.13 (`design.md:930-933`) - not existing symbols an implementer can
+reach for. All three names have to be minted, in one place, as part of the
+contract the dev server and the migrate command both inherit. An implementer
+must not invent them silently.
 
 ## Decision 2 - descriptor HMR restarts the runtime under supervision
 
-`serve.rs` builds one runtime under one accept loop
-(`crates/zeroship-runtime/src/core/serve.rs:1719-1795`). Two mechanisms could
+`serve.rs` builds one runtime under one accept loop (`run_single_worker`,
+`crates/zeroship-runtime/src/core/serve.rs:1719-1795`). Two mechanisms could
 give a fresh isolate on a descriptor change:
 
 - **a runtime manager**: hold the runtime behind a swappable handle, build the
@@ -112,13 +115,31 @@ metadata.
 This also deletes `resetSchemaInstalled` (`sdks/vite-plugin/src/dev-bootstrap/index.ts:121`,
 `:185`), which exists only to make the old in-place mutation scheme work.
 
-**OWED: the supervisor itself.** "Supervised restart" names no process, no
-restart trigger and no drain, and it does not define the **exposed supervisor
-generation counter** that this decision's own acceptance arm asserts against.
-That counter is not decoration: the arm below argues it is the only thing that
-makes Decision 2 testable at all, because the outcome half of the arm passes on
-the in-place mechanism this decision rejects. A decision whose test depends on
-an artifact the decision does not specify is not implementable as written.
+### Current position: the supervisor needs a specification, not an implementation
+
+"Supervised restart" names no process, no restart trigger and no drain, and it
+does not define the **exposed supervisor generation counter** that this
+decision's own acceptance arm asserts against. That counter is not decoration:
+the arm below argues it is the only thing that makes Decision 2 testable at all,
+because the outcome half of the arm passes on the in-place mechanism this
+decision rejects. **A decision whose test depends on an artifact the decision
+does not specify is not implementable as written.** The next move on Decision 2
+is to commission that specification - process, trigger, drain, counter - not to
+start building against this section.
+
+**A constraint on whoever writes it: the dev descriptor's only delivery path is
+the HMR re-apply this decision deletes.** The dev descriptor is not frozen at
+isolate construction; the dev vector re-applies it, and the channel is live end
+to end (measured 2026-08-28). `HMR_POLL_PATH`
+(`sdks/vite-plugin/src/constants.ts:5`) is served at `dev-server.ts:757` and
+carries `runtimeDescriptorJson` at `:763-775`; that field is filled by the
+watcher's regen in the `hotUpdate` branch (`dev-server.ts:1136-1137`), a
+different process from the `pnpm migrate` CLI that applies the schema. On the
+runtime side `dev-bootstrap/index.ts:173-174` polls it and `:183-185` applies
+the descriptor and calls `resetSchemaInstalled()`. If the supervisor deletes
+that re-apply before a working restart trigger exists, the dev tier has no
+descriptor delivery at all. Whoever lands the supervisor owns replacing this
+path in the same change.
 
 ## Decision 3 - the private module map does NOT apply in dev, and that is stated
 
@@ -126,102 +147,118 @@ This is a security-scope decision that must not be left implicit.
 
 In dev the module graph is **Vite's**, not `ModuleRegistry`'s, and
 `__zeroshipNodeBuiltin` remains installed because Vite's `fetchModule` is its
-only consumer. The parent proposal deletes that bridge from the **production**
-vector only.
+only consumer (`sdks/vite-plugin/src/environment.ts:64-68`; the bridge is
+installed unconditionally at `crates/zeroship-runtime/src/core/init.rs:2261-2268`,
+defined at `core/native_modules.rs:63-80`). The parent proposal deletes that
+bridge from the **production** vector only (`design.md:442-443`).
 
 So the dev vector does **not** carry the private module map, and the invariant
 that replaces it is different in kind. That replacement invariant is Decision 4,
 which is stated separately because it is a decision in its own right and
 produces this document's strongest acceptance arm.
 
-## Decision 4 - dev-ness is a typed input, never an ambient env read
+## Decision 4 - dev-ness is a typed input, never an ambient env read - IMPLEMENTED
 
-An earlier draft named the wrong invariant: "the dev vector is unreachable from
-a deployed isolate, asserted by a gate arm on the production constructor",
-pointing at `__zeroshipNodeBuiltin`. That is insufficient twice over.
-`__zeroshipNodeBuiltin` carries **no capability a deployed isolate does not
-already have** - it is an alias for the same `resolve_native` set production
-reaches by a plain `import`. Meanwhile the dev vector that *does* carry a
-capability is elsewhere and was unmentioned: SSRF validation is **skipped
-entirely** in dev -
+**The invariant: dev-ness is a typed input derived from the runtime's identity,
+never an ambient environment read.**
 
-> `// In dev mode, skip host/IP validation (allows localhost fetch to Vite).`
-> `if dev_mode_enabled() { return Ok(()); }`
+It is not `__zeroshipNodeBuiltin`'s absence from the production constructor.
+That symbol carries **no capability a deployed isolate does not already have** -
+it is an alias for the same `resolve_native` set production reaches by a plain
+`import`. The dev vector that *does* carry a capability is the SSRF gate, and
+until 2026-08-27 it resolved dev-ness from `declared_env!(dev, "ZEROSHIP_DEV",
+..)` and returned `Ok(())` for every host above the host lookup. An env var is
+not a construction boundary: `ZEROSHIP_DEV=1` exported into a production
+`zeroship-worker` turned validation off for every `fetch` that worker made.
 
-- and `dev_mode_enabled()` resolves an **ambient environment read**,
-`declared_env!(dev, "ZEROSHIP_DEV", ...)`. An env var is not a construction
-boundary.
-
-**The invariant is therefore: dev-ness is a typed input derived from the
-runtime's identity, never an ambient environment read.**
-
-The tree already states this principle, in the very place that would be hit by
-a leak (`crates/zeroship-worker/src/main.rs:112-113`):
+The tree already stated the opposite standard about the same process
+(`crates/zeroship-worker/src/main.rs:140-147`):
 
 > The authority is the worker's identity, not an env flag: SQLite is refused
 > even if `ZEROSHIP_DEV=1` leaked into a prod worker.
 
-That is the standard to meet, and the SSRF gate does not meet it today. The
-acceptance arm is correspondingly different: not "is a symbol absent from the
-production constructor", but **"does a deployed worker still enforce host/IP
-validation with `ZEROSHIP_DEV=1` present in its environment"** - a question the
-old arm could not even ask.
+**`8c6caa465` makes the SSRF gate meet it.** Two changes, both load-bearing:
 
-## The SQLite dev epoch
+- **The gate no longer reads the environment.** `dev_mode_enabled`
+  (`crates/zeroship-runtime/src/transport/ssrf.rs:70`) returns only what
+  `set_dev_mode` (`:119`) stored, and a process where nothing called it holds
+  `false`. The surviving environment read is a separate function,
+  `dev_mode_from_process_env` (`:89`), which no gate calls; its sole caller is
+  `cmd_serve` (`crates/zeroship-cli/src/main.rs:95`) - the binary that is the
+  dev tier by identity. `zeroship-worker` never calls it, which is what makes a
+  leaked `ZEROSHIP_DEV=1` inert there. The module states the rule at `:19-22`.
+- **The relaxation is loopback only.** The blanket early return is gone. All
+  three consultation points - `validate_url` / `validate_url_under` (`:239`,
+  `:249`), `SsrfResolver` (`:376`) and `transport::egress::filter_answer` - now
+  share one predicate, `is_blocked_ip_under_dev` (`:222`), so "what dev opens"
+  has one answer instead of three. Metadata, RFC1918, CGNAT and link-local stay
+  refused in dev.
 
-> **RETRACTED 2026-08-28 - this section's subject is deleted.** It depends on
-> SC-2's `__zeroship_state` authority row, which is retracted in full (SC-2, the
-> resolved block above "The SQLite epoch"; argument in
-> `docs/reviews/2026-08-28-sqlite-authority-row.md`). Three operator decisions
-> removed its parts: 7 deleted the schema epoch, 8 made the descriptor the sole
-> schema authority, and 4 homed `ceiling` as worker configuration.
->
-> **The change signal this section wanted already exists, and is better.** The
-> dev descriptor is NOT frozen at isolate construction - the dev vector
-> re-applies it on HMR, and that channel is live end to end, measured
-> 2026-08-28: `HMR_POLL_PATH` (`sdks/vite-plugin/src/constants.ts:5`) is served
-> at `dev-server.ts:757` and carries `runtimeDescriptorJson` at `:763-775`;
-> `dev-bootstrap/index.ts:174` polls it, `:184` applies it and calls
-> `resetSchemaInstalled()`. It is fed by the same command that applies the
-> migrations (`migrate-dev.ts:106-113`), so the signal arrives from the writer
-> rather than from a row a reader has to notice.
->
-> **The one way this retraction could become wrong**, recorded rather than
-> assumed away: if SC-4's owed supervisor deletes the HMR re-apply before a
-> working restart trigger exists, the drift window this epoch guarded becomes
-> real for the first time. Whoever lands that supervisor owns keeping a delivery
-> path for the dev descriptor.
+The arms are in the tree, each with an isolated-child-process twin because the
+cell is process-wide: `zeroship_dev_in_the_environment_cannot_disable_the_guard`
+(`ssrf.rs:507`), `dev_relaxation_is_loopback_only` (`:563`),
+`absent_dev_relaxation_fails_closed` (`:617`).
 
-Decision 1 makes this answerable, which is why the parent proposal deferred it
-here: the dev writer is always the SQLite apply path, so **it** writes the
-first stable epoch row, in the same transaction as its DDL, exactly as SC-2
-specifies for `__zeroship_state`. There is no second dev writer to coordinate
-with, because a Postgres dev URL no longer reaches this path at all.
+**`__zeroshipNodeBuiltin`-absence may still be asserted, but as a hygiene arm,
+never as the security arm** - it fences a symbol that carries no capability a
+deployed isolate lacks. Stated here because the checklist below is what an
+implementer is measured against, and shipping a rejected test in it is worse
+than never having written it.
 
-**OWED, and the gap is larger than one row.** This section names a writer and
-nothing else. It does not state the row's shape, and it does not give the dev
-analogue of the **authority domain**: the parent qualifies authority by
-`(system_identifier, timeline_id)`, which is a PostgreSQL construct with no
-SQLite counterpart, so on this tier the qualification is simply undefined. Nor
-does it carry the **incarnation** - SC-5 makes `AppIncarnationId` part of every
-binding and compares it before any data SQL, so a dev tier with an epoch and no
-incarnation cannot express the fence the rest of the set depends on. SC-2 owns
-`__zeroship_state`'s shape; what is owed here is the dev tier's answer for the
-two fields that shape carries beyond the epoch.
+## No dev epoch, and no dev authority domain
+
+There is nothing here to specify. SC-2 states that on this tier there is **no
+`__zeroship_state` row, no epoch, and no `AuthorityRead` command**; the runtime
+descriptor is the sole schema authority (SC-2, "No database-resident authority
+row on this tier"; the column-by-column argument is
+`docs/reviews/2026-08-28-sqlite-authority-row.md`). SC-2 also records that
+`(system_identifier, timeline_id)` identifies a PostgreSQL cluster and its
+recovery timeline, that a local file has neither, and that **the dev tier
+therefore has no PITR-resurrection defence** - the developer owns the bytes, and
+no scheme inside the file changes that.
+
+Decision 1 still matters to this: it makes the SQLite apply path the *only* dev
+writer, so there is no second writer to coordinate with.
+
+**Open: where a dev binding's incarnation comes from.** SC-5 makes
+`AppIncarnationId` part of every binding and compares it before any data SQL,
+and Fork C's storage is unhomed - the identity state lived in a platform-schema
+row that is deleted. SC-2 removes the file-resident option for this tier
+outright. Neither document answers what a dev binding carries. This states the
+question; it does not answer it.
+
+## Open questions with no owner yet
+
+- **The relationship to
+  `docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`.**
+  That proposal owns the dev tier's apply-ahead-of-runtime path - the same path
+  Decision 1 rejects a Postgres URL from. Whether this document supersedes it,
+  depends on it, or assumes it already landed **is recorded nowhere**: the only
+  cross-reference in `docs/proposals/` is this bullet (measured 2026-08-28), and
+  that proposal's own header still reads "PROPOSED - not implemented" while the
+  apply it describes exists as `pnpm migrate` (`migrate-dev.ts`) and the dev
+  server only reports rather than applies (`reportDevSchemaState`,
+  `dev-server.ts:392-444`). Someone owns reconciling those two statements; this
+  document does not.
+- **The dev and `zeroship serve` ceiling source.** `zeroship serve` and the Vite
+  dev vector are separate composition points from the worker, and neither this
+  document nor SC-5 covers them; a dev tier with no ceiling source plus SC-6's
+  "failure is denial" denies every non-`auto` unmask in dev, permanently. SC-6
+  owns the record (SC-6, "Owed: the dev and `zeroship serve` ceiling source is
+  not specified anywhere"); it is repeated here only so a reader of SC-4 knows
+  it exists.
 
 ## Acceptance shape
 
 - A Postgres `DATABASE_URL` in dev fails with a named error naming the tier
   limitation - and, specifically, **no SQLite file is created or written** as a
   side effect of that run.
-
-  **OWED, and it is the half that matches the argument.** Decision 1 is argued
-  from a *divergence* - migrations land in SQLite while the dev server hands the
-  runtime child `DATABASE_URL=<the Postgres URL>` (`dev-server.ts:938`) - and
-  this arm only covers the migrate command's side of it. The second arm this
-  decision needs is that **the runtime child is never started against a rejected
-  URL**. Without it the rejection can be implemented in one call site, which is
-  precisely the failure the decision says it is avoiding.
+- **The runtime child is never started against a rejected URL.** This is the
+  half that matches Decision 1's argument, which is a *divergence*: migrations
+  land in SQLite while the dev server hands the runtime child
+  `DATABASE_URL=<the Postgres URL>` (`dev-server.ts:938`). Without this arm the
+  rejection can be implemented in one call site, which is precisely the failure
+  the decision says it is avoiding.
 - After a descriptor-changing edit, a removed collection is absent from
   `env.db` on the next request - **and that request runs under a new
   runtime/isolate generation**, asserted against an exposed supervisor
@@ -232,26 +269,22 @@ two fields that shape carries beyond the epoch.
   restart: the dev bootstrap reapplies the descriptor and resets the latch
   (`sdks/vite-plugin/src/dev-bootstrap/index.ts:183-185`) and `installSchema`
   deletes stale names and defines the replacements
-  (`sdks/bootstrap/src/install-schema.ts:1475-1508`). So an arm asserting only
+  (`sdks/bootstrap/src/install-schema.ts:1489-1508`). So an arm asserting only
   absence **passes on the very mechanism this document rejected** - and would
   keep passing if someone renamed the latch while preserving the mutation.
 - After such an edit with no migration applied, DB operations fail closed rather
   than serving the previous descriptor's metadata.
+- On a **fresh** dev database, a data operation before any apply fails closed
+  under the tier's not-applied error. Distinct from the arm above: that one is a
+  database whose schema has drifted, this one is a database that has never been
+  migrated. Today the dev server only *reports* this state and keeps serving
+  (`reportDevSchemaState`, `dev-server.ts:392-444`), so the runtime-side failure
+  is the part that is owed - and it needs one of the three names Decision 1 owes.
 - `resetSchemaInstalled` has no callers.
-- **A deployed worker still enforces host/IP validation with `ZEROSHIP_DEV=1`
-  present in its environment.** This is the arm Decision 4 argues for, and it
-  replaces the `__zeroshipNodeBuiltin`-absence arm an earlier draft listed here.
-  Leaving that arm in the acceptance list while the body explains why it is
-  insufficient is worse than never having written it: the document would ship
-  its own rejected test as the thing an implementer is measured against, and
-  that implementer has no reason to read the body once the checklist looks
-  complete. The bypass is real and one branch deep -
-  `if dev_mode_enabled() { return Ok(()); }` in `validate_url`
-  (`crates/zeroship-runtime/src/transport/ssrf.rs:206-207`), reached through a
-  process-wide cell resolved from an ambient variable.
-
-  `__zeroshipNodeBuiltin`-absence may still be asserted, but as a **hygiene**
-  arm, never as the security arm - it fences a symbol that carries no capability
-  a deployed isolate lacks.
-- A fresh dev database gets its first stable epoch row from the SQLite apply
-  path, and a data operation before any apply fails with `SCHEMA_NOT_APPLIED`.
+- **LANDED** - a deployed worker still enforces host/IP validation with
+  `ZEROSHIP_DEV=1` present in its environment
+  (`zeroship_dev_in_the_environment_cannot_disable_the_guard`,
+  `crates/zeroship-runtime/src/transport/ssrf.rs:507`), the stated relaxation
+  opens loopback and nothing else (`:563`), and a process that stated no mode
+  runs the whole guard (`:617`). Each has an isolated-child-process twin at
+  `:543`, `:598`, `:628`.
