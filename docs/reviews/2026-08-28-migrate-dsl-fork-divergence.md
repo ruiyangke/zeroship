@@ -86,10 +86,24 @@ the committed `enums.ts` was free to sit stale. The census was also short in the
 other direction: the schema holds 33 closed string enums and the list named 29,
 omitting `ColumnCollation`, `IrClassification`, `IrMaskKind` and `VectorMetric`.
 
-`sdks/migrate/tests/ir-types-drift.test.ts` exists to catch exactly this and was
-itself already red: **21 passed / 7 failed** before the generator was repaired,
-**22 / 6** after. The one it gained is the regenerate-and-byte-compare subtest.
-The remaining six are the test's own hardcoded enum censuses, stale the same way.
+`sdks/migrate/tests/ir-types-drift.test.ts` exists to catch exactly this and is
+itself red.
+
+**At HEAD it measures 21 passed / 7 failed** (re-measured at `aec23423a`). An
+earlier note recorded **22 / 6** "after the generator was repaired"; that repair
+is not in the tree - neither committed nor working-tree - so 22 / 6 describes a
+state that does not exist here, and the regenerate-and-byte-compare subtest is
+still failing. Do not read it as the current baseline.
+
+The seven are not cosmetic. They are the IR grammar itself: `Op` variant tags,
+`Expr` node tags, `Precondition` variant names, closed string-enum tokens, `Op`
+variant **field sets** (removed and missing fields), orphan exported types, and
+the stale committed `generated/enums.ts`.
+
+That is the measured argument for severing rather than bridging: a bridge
+between two recorders whose variant tags and field sets already disagree would
+carry that disagreement into the platform's schema authoring, where it becomes
+IR the engine's parser can reject at apply time.
 
 ## What resolution would have to become
 
