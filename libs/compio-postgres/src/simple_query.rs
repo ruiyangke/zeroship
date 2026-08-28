@@ -22,24 +22,67 @@ use log::debug;
 use pin_project_lite::pin_project;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
+
+/// The wire format of a value returned by the simple query protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SimpleQueryFormat {
+    /// PostgreSQL's text representation.
+    Text,
+    /// PostgreSQL's type-specific binary representation.
+    Binary,
+}
+
+impl SimpleQueryFormat {
+    fn from_code(code: i16) -> Result<Self, Error> {
+        match code {
+            0 => Ok(Self::Text),
+            1 => Ok(Self::Binary),
+            _ => Err(Error::parse(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("RowDescription carries invalid format code {code}"),
+            ))),
+        }
+    }
+}
 
 /// Information about a column of a single query row.
 #[derive(Debug)]
 pub struct SimpleColumn {
     name: String,
+    type_oid: u32,
+    format: SimpleQueryFormat,
 }
 
 impl SimpleColumn {
-    pub(crate) fn new(name: String) -> SimpleColumn {
-        SimpleColumn { name }
+    pub(crate) fn new(name: String, type_oid: u32, format: SimpleQueryFormat) -> SimpleColumn {
+        SimpleColumn {
+            name,
+            type_oid,
+            format,
+        }
     }
 
     /// Returns the name of the column.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the PostgreSQL type OID of the column.
+    ///
+    /// This identifies the type-specific representation used by a
+    /// [`SimpleQueryFormat::Binary`] value.
+    pub fn type_oid(&self) -> u32 {
+        self.type_oid
+    }
+
+    /// Returns the wire format of the column's values.
+    pub fn format(&self) -> SimpleQueryFormat {
+        self.format
     }
 }
 
@@ -470,7 +513,11 @@ impl Stream for SimpleQueryStream {
                     let mut collected: Vec<SimpleColumn> =
                         Vec::with_capacity(fields.size_hint().0.min(MAX_TARGET_LIST_ENTRIES));
                     while let Some(field) = fields.next().map_err(Error::parse)? {
-                        collected.push(SimpleColumn::new(field.name().to_string()));
+                        collected.push(SimpleColumn::new(
+                            field.name().to_string(),
+                            field.type_oid(),
+                            SimpleQueryFormat::from_code(field.format())?,
+                        ));
                     }
                     let columns: Arc<[SimpleColumn]> = collected.into();
 
