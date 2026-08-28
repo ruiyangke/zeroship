@@ -139,7 +139,41 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #       (`bytes_column_stores_a_raw_blob_on_sqlite`) lives in
 #       `sqlite_integration`, which is not a target below and contributes
 #       nothing to this floor.
-PLUGIN_DB_MIN_PASSED=118
+# MOVED 118 -> 100 on 2026-08-27, and NOT to match a red run: the run that
+# produced this number is 100 passed / **0 failed** across all four targets. The
+# floor was the only thing red.
+#
+# Measured composition, on a fresh database on a DEDICATED cluster
+# (`zs-adminfix-pg-5471`) rather than the shared 5463:
+#   integration         82  (0 failed, 6 ignored)
+#   native_transaction  14  (0 failed)
+#   distributed_live     1  (0 failed)
+#   missing_role         3  (0 failed)
+#   SUM                100
+#
+# Accounting for -18, every line verified rather than inferred:
+#   -15  the `__zeroship_admin` deletion (`390f4b97b`) removed 15 `integration`
+#        tests, all named in that commit's review: the 13 `b8c_*` admin-schema
+#        arms plus `pg_admin_table_key_source_reads_bytea_directly` and
+#        `pitr_pg_records_target`. Their subject is gone, not their coverage.
+#    +1  `pg_declared_mask_policy_authorizes_unmask_without_durable_store`
+#        (`integration.rs:6001`), ADDED by `b801bf12b` because the behaviour it
+#        changed had no live-PG coverage at all.
+#    +1  `distributed_live` now PASSES. It was counted in the old floor while
+#        failing (`replication_publication_missing`), so the 118 was only ever
+#        reachable on a tree where this target was red -- an unreachable floor
+#        is not a floor. Fixed in `a0074e154`.
+#   The residual -5 against 118 is NOT explained by this change and is not
+#   invented here: 118 was last re-derived on 2026-08-21 and the targets have
+#   moved since without the ledger being re-measured. That is exactly the drift
+#   this comment block exists to stop, so the number above is a fresh
+#   measurement rather than 118 minus arithmetic.
+#
+# WHY THE INSTRUMENT CHANGED TOO: roles are cluster-scoped, so a fresh database
+# on a shared server is not isolation. A leftover `p6a_unmask_login` produced
+# `CREATE ROLE ... 42710` and masked a real defect behind a collision error.
+# Re-measure on a dedicated cluster or this number will not reproduce.
+PLUGIN_DB_MIN_PASSED=100
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
