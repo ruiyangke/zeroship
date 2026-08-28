@@ -7420,6 +7420,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-data-plan"
+version = "0.1.0"
+
+[[package]]
 name = "zeroship-gateway"
 version = "0.1.0"
 dependencies = [
