@@ -537,7 +537,35 @@ that never enters `read_pipeline` at all.** Verified:
 - `wal_consumer.rs` contains **zero** occurrences of `mask`, `wrap_row_on_read`
   or `apply_mask` - the WAL path has no mask awareness whatsoever, and
   `tuple_to_map` zips every physical column out of pgoutput.
-- `broker.rs` then puts that tuple on the wire under `"row"`.
+- `broker.rs:995` puts that tuple on a wire under `"row"` - **but that function
+  is not reachable in production.**
+
+**CORRECTED 2026-08-28, and this is the THIRD correction to the same question -
+the pattern is worth more than the answer.** The claim first said `RETURNING *`
+leaks plaintext to creators (wrong - the JS path re-masks). It was then
+corrected to "the CDC path leaks plaintext to every subscriber" (**also wrong**).
+Measured:
+
+- `ws_frame_for_change` (`broker.rs:986`) is called by exactly one non-test
+  function, `ws_frame` (`:1026`), and **`ws_frame` has no callers at all** - the
+  other `ws_frame` matches in the tree are `read_ws_frame` / `write_ws_frame` in
+  `zeroship-runtime/src/core/serve.rs`, unrelated functions.
+- The live creator surface is `v8_classes/subscription.rs:158` ->
+  `broker::message_to_json` (`:937-946`), which emits
+  `"columns": ev.changed_columns` and **no row values at all**.
+
+**So there is no value leak to subscribers today. What is live is a NAME
+exposure:** the changed-column list reaches creators, so today it can name
+`<col>_masked`, and post-flip it would name the raw column. That is a real
+requirement for the new CDC service's projection, and a much smaller finding
+than the two claims it replaces.
+
+**Why this kept going wrong is the useful part:** each revision traced the data
+one step further and stopped at the first function that *looked* like an exit,
+without asking whether anything calls it. `grep` for a definition answers
+spelling; only the caller graph answers reachability. Two of the three wrong
+answers were produced by reviewers with file:line evidence for every claim -
+correct citations, unasked question.
 
 So for a mask-only field the **parent column holds plaintext and reaches every
 subscriber, today.** Masking is independent of encryption: `read_pipeline::apply`
