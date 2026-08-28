@@ -348,6 +348,27 @@ or a lazily minted token is exactly the identity the fence exists to distinguish
 from, so an arm rewritten onto one passes on the hole it was written to close.
 `AppIncarnationId` occurs 0 times in the tree.
 
+### The fence's shape is settled; the axis it is keyed on is not
+
+A decoupling is under consideration in which one app holds several databases and
+several apps share one. Under it the thing needing a fence is the **database**,
+or the app-to-database grant, and not the app. The consequences for this list:
+
+- **Group 2 is unaffected**, and this is a second reason to build it first. Those
+  arms are facts about PostgreSQL recovery rather than about apps: a rewind that
+  leaves `(system_identifier, timeline_id)` byte-identical does so whoever owns
+  the database, and a paused standby serves rewound data to any reader.
+- **Group 3 is written against "the binding's identity"** - durable,
+  privileged-minted, tombstoned, domain-qualified, terminal on mismatch - rather
+  than against a per-app incarnation. `A` and `B` name two identities of one
+  lifecycle entity; *which* entity is the open question. No arm here should grow
+  an app-keyed fixture more elaborate than that, because the fixture is the part
+  that would be thrown away.
+- **Two arms are app-axis by nature and stay app-axis whatever is decided**: 3.5,
+  because an env snapshot belongs to an app and to no database, and 3.4, because
+  the pending set is the worker's own per-app teardown queue.
+- **One arm inverts**, and it is flagged in place at 1.4.
+
 ### The invocations
 
 Group 1 and 3's worker-side arms run under `cargo test -p zeroship-worker --lib`
@@ -466,12 +487,12 @@ asks its detached driver tasks to close, it does not wait for them.
 connect rather than the process holding two idle backends from its first deletion
 until exit. Do not "fix" this by keeping the pool installed.
 
-### 1.4 One `DbThreadResources` per thread for one app and incarnation
+### 1.4 One `DbThreadResources` per thread per resolved identity
 
 Two halves, and only one of them is buildable.
 
-**Buildable half (cardinality).** Current and deploy-pinned isolates for one app
-on one worker thread resolve **one** `Rc<DbThreadResources>`.
+**Buildable half (cardinality).** Current and deploy-pinned isolates resolving the
+same identity on one worker thread resolve **one** `Rc<DbThreadResources>`.
 
 - **Observable:** `Rc::ptr_eq`, with backend factory opens counted separately.
   Not a connection count: a pool of two and two pools of one are indistinguishable
@@ -488,10 +509,18 @@ on one worker thread resolve **one** `Rc<DbThreadResources>`.
 - The type has no occurrences in the tree, so this arm is buildable and has no
   subject yet.
 
-**Blocked: the lifecycle ledger and projection (discrimination).** Two
-incarnations of one app id, on one thread, resolve **different** resources. This
-is the half that matters, and the cardinality half passes without it on an
+**Blocked: the lifecycle ledger and projection (discrimination).** Two identities
+of one lifecycle entity, on one thread, resolve **different** resources. This is
+the half that matters, and the cardinality half passes without it on an
 implementation keyed by app id alone.
+
+**This is the arm that inverts if apps and databases decouple.** Today "one app on
+one thread" and "one database on one thread" are the same sentence, which is what
+makes an app-keyed fixture look adequate. Under a shared database they are
+opposites: two apps on one thread must share **one** `DbThreadResources`, and one
+app with two databases must hold **two**. An app-keyed map expresses neither.
+Write the fixture against the resolution key rather than against app ids; the
+`Rc::ptr_eq` observable is axis-free and survives either outcome.
 
 ### 1.5 The initialization singleflight
 
@@ -628,25 +657,32 @@ ledger.**
 
 Layer 1 (the control-owned append-only ledger, in its own recovery domain) and
 layer 2 (the worker-read-only projection) both have to exist before any arm here
-can run. Where an arm has a half that runs today, the half is named.
+can run. Where an arm has a half that runs today, the half is named. `A` and `B`
+are two identities of one lifecycle entity, per the axis note above; every arm
+here is stated so that the entity can change without the arm changing.
 
 ### 3.1 Two codes, two moments, one handle
 
 **Blocked: the ledger and the projection.**
 
-- **Set up:** an isolate holding a handle for incarnation A; the app deprovisioned,
-  so the ledger holds A's tombstone and the lifecycle service has written the
+- **Set up:** an isolate holding a handle for identity A; the entity retired, so
+  the ledger holds A's tombstone and the lifecycle service has written the
   projection.
-- **Executed:** (a) an operation on the stale handle while the app is still
-  deprovisioned; then (b) the app re-provisioned as incarnation B, and the same
-  handle used again.
+- **Executed:** (a) an operation on the stale handle while the entity is still
+  retired; then (b) the entity re-provisioned as identity B, and the same handle
+  used again.
 - **Observable:** (a) `APP_DEPROVISIONED`; (b) `STALE_APP_INCARNATION`. Both
   terminal, neither retried.
 - **Red when:** the tombstone is cleared on recreation - which turns (a) into a
   success and (b) into a success, because a descriptor-compatible recreated schema
   is reachable by the A handle - or when the two codes are collapsed into one.
 - An arm asserting only "denies" cannot tell (a) from (b), and the audit trail
-  needs to distinguish "the app is gone" from "the app came back without you".
+  needs to distinguish "it is gone" from "it came back without you".
+
+**The distinction is axis-free; the two code names are not.** What the arm rules
+on is a fence bearing the handle's *own* identity against a fence bearing a
+successor's, which is the same observable whether the entity is an app or a
+database. If the axis moves, the codes are renamed and this arm is untouched.
 
 ### 3.2 A deprovision does not abort an in-flight operation
 
@@ -672,17 +708,17 @@ Graceful deprovision and forced file detach are different events.
 
 **Blocked: the ledger, plus three record changes that do not exist.**
 
-- **Set up:** a workflow run created and made **durable under incarnation A,
-  before B exists**. That ordering is the entire arm: a run created after the
-  recreate carries B correctly on any implementation, including one that resolves
-  the incarnation at replay time rather than persisting it, so a same-incarnation
-  fixture cannot tell the two apart.
-- **Executed:** deprovision, re-provision as B, then attempt replay of the A run.
+- **Set up:** a workflow run created and made **durable under identity A, before B
+  exists**. That ordering is the entire arm: a run created after the recreate
+  carries B correctly on any implementation, including one that resolves the
+  identity at replay time rather than persisting it, so a same-identity fixture
+  cannot tell the two apart.
+- **Executed:** retire, re-provision as B, then attempt replay of the A run.
 - **Observable:** replay is refused and B's pinned isolate is never entered.
-- **Red when:** the incarnation is resolved at claim or replay time instead of
-  being persisted at creation. **A mutation replacing the persisted token with a
-  fresh lookup must turn this red**, and that mutation is the arm's only proof,
-  because the two implementations are indistinguishable on any run created after B.
+- **Red when:** the identity is resolved at claim or replay time instead of being
+  persisted at creation. **A mutation replacing the persisted token with a fresh
+  lookup must turn this red**, and that mutation is the arm's only proof, because
+  the two implementations are indistinguishable on any run created after B.
 - **The records that must change first:** `CandidateRun` carries `app_id`,
   `deploy_id` and `deploy_hash` and no lifecycle token
   (`crates/zeroship-plugin-workflow/src/claim.rs:38-52`), its claim query selects
@@ -690,11 +726,16 @@ Graceful deprovision and forced file detach are different events.
   `PinnedWorkflowKey { app_id, deploy_hash }`
   (`crates/zeroship-worker/src/cache.rs:29-32`).
 
-**Carrying the incarnation on the version poll does not discharge this.** The poll
-delivers the *current* incarnation; once B exists it returns B, and nothing can
+**Carrying the identity on the version poll does not discharge this.** The poll
+delivers the *current* identity; once B exists it returns B, and nothing can
 reconstruct that an already-durable journal belongs to A. Everything else in this
 contract fences a handle against the present; this is the one case that must fence
 it against the past.
+
+*Axis note: a run is created by an app and replays against a database, so under
+the decoupling the token persisted at creation is the identity of what the run
+BINDS TO, not of the app that started it. The arm is unchanged; the column it
+needs is on the same record either way.*
 
 ### 3.4 The worker's delayed deprovision does not act on the successor
 
@@ -708,10 +749,12 @@ it against the past.
   `HashSet<Uuid>` (`crates/zeroship-worker/src/sync.rs:137`, drained at
   `:163-167`) - so there is nothing to compare and the arm has no subject.
 
-### 3.5 A same-id recreation does not serve the previous incarnation's env snapshot
+### 3.5 A same-id recreation does not serve the previous app's env snapshot
 
-**Blocked: the incarnation, which is what the GC must key on. Buildable today as a
-failing reproducer, and it cannot go green before Fork C.**
+**Blocked: the identity the GC must key on. Buildable today as a failing
+reproducer, and it cannot go green before Fork C. App-axis by nature: an env
+snapshot belongs to an app and to no database, so the decoupling does not move
+it.**
 
 - **Set up:** an app with a cached env snapshot; its id leaves the control plane's
   version map and reappears.
@@ -725,7 +768,7 @@ failing reproducer, and it cannot go green before Fork C.**
   identity gap, and a fence on the DB door while the env door stays open is a
   fence around the wrong door.
 
-### 3.6 A restore does not resurrect a deprovisioned app's bindings
+### 3.6 A restore does not resurrect a retired entity's bindings
 
 **Blocked: the ledger; rows 1, 2 and 4 additionally on the reconcile procedure.**
 
@@ -737,11 +780,11 @@ shapes where the domain contributes nothing.
 
 - **Row 3 (promoting restore).** The domain moved. A binding bound to the
   pre-restore pair denies with `AUTHORITY_DOMAIN_MISMATCH`.
-  - **Red when:** the incarnation is unqualified. The arm must be shown to fail
-    against a bare token, or it is testing the token and not the defence.
-- **Rows 1, 2 and 4 (same-domain rewinds).** The app is **unavailable to workers**
-  until the projection has been reconciled from the ledger under a newly minted,
-  out-of-band authority generation.
+  - **Red when:** the identity is unqualified by the domain. The arm must be shown
+    to fail against a bare token, or it is testing the token and not the defence.
+- **Rows 1, 2 and 4 (same-domain rewinds).** The entity is **unavailable to
+  workers** until the projection has been reconciled from the ledger under a newly
+  minted, out-of-band authority generation.
   - **Observable:** a worker read denies before reconciliation and succeeds after,
     and the generation minted differs from the pre-restore one.
   - **Red when:** the implementation lets a worker proceed on an unchanged pair
@@ -760,8 +803,8 @@ platform performs, and never deleted by a recovery that reaches archive recovery
 **deleted by a restore that bypasses archive recovery**, which is why 3.6's
 reconcile exists.
 
-- **Set up:** a tombstone appended for incarnation A, then a recreation appending
-  B, which must not remove A's tombstone.
+- **Set up:** a tombstone appended for identity A, then a recreation appending B,
+  which must not remove A's tombstone.
 - **Executed:** the four restore rows of 2.1, each applied to the **application
   cluster**, plus a fifth row applying a restore to the **ledger's own** cluster.
 - **Observable:** rows 1 to 4 leave the ledger holding A's tombstone and B's head;
@@ -775,11 +818,14 @@ reconcile exists.
 
 **Blocked: the ledger.**
 
-- **Set up:** a ledger head at incarnation A.
+- **Set up:** a ledger head at identity A.
 - **Executed:** two concurrent recreate attempts, both expecting A.
 - **Observable:** exactly one appends B; the other is refused and appends nothing.
 - **Red when:** the head is a last-writer-wins update, under which both attempts
-  report success and one incarnation is lost.
+  report success and one identity is lost.
+
+The head is per lifecycle entity, so the decoupling changes how many heads the
+ledger holds and not what this arm asserts about one of them.
 
 ---
 
@@ -788,6 +834,12 @@ reconcile exists.
 Nothing external blocks these. Dev cannot exercise `APP_DEPROVISIONED`,
 `STALE_APP_INCARNATION` or `AUTHORITY_DOMAIN_MISMATCH`, for the reasons under
 "Dev carries a different type"; those need the PostgreSQL arms above.
+
+**This group is already on the database axis and the decoupling does not touch
+it.** The attach generation is minted by the connection owner and changes on
+detach or reattachment, so it fences a *file*, never an app. That is a point in
+favour of the sum type rather than a coincidence: the tier that was forced to
+name what it actually fences named the database.
 
 ### 4.1 An ordinary dev restart does not deny replay
 
