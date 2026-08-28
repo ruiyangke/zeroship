@@ -118,6 +118,7 @@ mod row_count_resync;
 mod service_live;
 mod simple_query_copy_chain_resync;
 mod simple_query_copy_resync;
+mod simple_query_protocol;
 mod sqlstate_identity;
 mod startup_options;
 mod target_session_attrs_live;

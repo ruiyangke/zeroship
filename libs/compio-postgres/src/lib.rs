@@ -194,7 +194,7 @@ pub use crate::pool::{Pool, PoolConfig, PoolHookFuture, PoolMetrics, PooledClien
 pub use crate::portal::Portal;
 pub use crate::query::RowStream;
 pub use crate::row::{Row, SimpleQueryRow};
-pub use crate::simple_query::{SimpleColumn, SimpleQueryStream};
+pub use crate::simple_query::{SimpleColumn, SimpleQueryFormat, SimpleQueryStream};
 pub use crate::socket::Socket;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;

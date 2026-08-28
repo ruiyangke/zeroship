@@ -3071,8 +3071,11 @@ impl Client {
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
     ///
     /// Statements should be separated by semicolons. If an error occurs, execution of the sequence will stop at that
-    /// point. The simple query protocol returns the values in rows as strings rather than in their binary encodings,
-    /// so the associated row type doesn't work with the `FromSql` trait.
+    /// point. The simple query protocol normally returns row values as text, so
+    /// the associated row type doesn't work with the `FromSql` trait. PostgreSQL
+    /// returns binary values for `FETCH` from a `BINARY` cursor; inspect their
+    /// [`crate::SimpleColumn`] metadata and read them with
+    /// [`crate::SimpleQueryRow::raw_value`].
     pub async fn simple_query(&self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
         self.simple_query_raw(query).await?.try_collect().await
     }
