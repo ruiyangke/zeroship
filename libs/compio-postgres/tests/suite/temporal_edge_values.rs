@@ -150,6 +150,40 @@ async fn system_time_larger_than_the_timestamp_wire_cannot_wrap() {
     assert_eq!(recovered, 41);
 }
 
+/// The seconds-to-microseconds multiply is itself an overflow site, and the
+/// case above does not reach it: `u64::MAX - 999_999` MICROSECONDS is only
+/// 18_446_744_073_708 seconds, so the product still fits `u64` and the refusal
+/// comes from the later `i64` narrowing instead.
+///
+/// `u64::MAX / 1_000_000` is 18_446_744_073_709, so one second beyond that
+/// overflows the multiply. Unguarded it wraps to a small number and sends a
+/// plausible timestamp the caller never asked for. MEASURED 2026-08-27:
+/// reverting the guard to `d.as_secs() * USEC_PER_SEC + ...` left every other
+/// case in this file green, which is why this one exists.
+#[compio::test]
+async fn system_time_beyond_the_microsecond_multiply_cannot_wrap() {
+    let client = connect_client().await;
+    let value = postgres_epoch()
+        .checked_add(Duration::from_secs(18_446_744_073_710))
+        .expect("the Linux SystemTime range contains the probe");
+
+    let error = client
+        .query_one("SELECT $1::timestamp", &[&value])
+        .await
+        .expect_err("a SystemTime whose microsecond count overflows u64 must be refused");
+    assert!(
+        common::error_chain(&error).contains("too large"),
+        "the serialization error must explain the range failure: {}",
+        common::error_chain(&error)
+    );
+
+    let recovered: i32 = client
+        .query_one_scalar("SELECT 43::int4", &[])
+        .await
+        .expect("a local serialization refusal must leave the connection usable");
+    assert_eq!(recovered, 43);
+}
+
 /// The negative endpoint used to narrow to `i64::MIN` and then panic while
 /// negating it. A value outside `PostgreSQL`'s finite range is an error, not a
 /// process abort.
