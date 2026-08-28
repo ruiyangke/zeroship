@@ -95,6 +95,64 @@ journal and none of it should be. The recommendation is not to delete the
 ledger - it is to stop using the ledger as the answer to *"what ran?"*, which is
 the one question it cannot answer correctly.
 
+## DECIDED 2026-08-28: the naming, with one correction
+
+Operator instruction: place creator migration records under
+`<app_schema>.zeroship_migrate_<table>`, and platform records under
+`zeroship_migrate.<table>`.
+
+**The platform half lands as instructed.** `zeroship_migrations` becomes
+`zeroship_migrate`, matching the renamed crate family.
+
+**The creator half cannot be inside `<app_schema>`, and the reason is
+ownership rather than grants.** `provisioning.rs:140-160` does three things to
+the app's project schema:
+
+```
+ALTER SCHEMA {proj} OWNER TO {role}                       -- step 3
+GRANT CREATE, USAGE ON SCHEMA {proj} TO {role}            -- step 4
+ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO {role} -- step 4b
+```
+
+The migrator role **owns** that schema. A PostgreSQL schema owner can `DROP` and
+`TRUNCATE` any table in it, and owner privileges are **implicit - they cannot be
+REVOKE'd away.** So a journal inside `<app_schema>` is a journal the tenant can
+delete or rewrite, which destroys exactly the property step 5 exists to hold:
+
+```
+REVOKE ALL ON ALL TABLES IN SCHEMA {meta} FROM {role}
+REVOKE ALL ON SCHEMA {meta} FROM {role}
+-- "journal is unforgeable by deny-by-absence"
+```
+
+**The separateness of the meta schema IS the mechanism.** It is not incidental
+placement.
+
+**Adopted instead - a sibling schema, same naming family:**
+
+| | before | after |
+| --- | --- | --- |
+| creator | `<app_uuid>_migrations.<table>` | **`<app_schema>_zeroship_migrate.<table>`** |
+| platform | `zeroship_migrations.<table>` | **`zeroship_migrate.<table>`** |
+
+One word different from the instruction, the same consistency gained, and the
+revoke keeps working untouched.
+
+### The shape that would have been better, and why it is blocked
+
+One shared `zeroship_migrate` schema holding **every** app's journal, rows
+partitioned by app, would be maximally consistent and would enable the
+consolidation above directly. It does not work today: **`schema_migrations` has
+no tenant column.** Its columns are `event_seq`, `event_kind`, `version`,
+`name`, `checksum`, `at`, `by`, `exec_ms`, `down`, `phase`, `outcome`, `kind`.
+A shared table would mix tenants with no way to separate them, and `version`
+would collide across apps.
+
+**So the engine's per-app isolation is carried by the schema name itself.** That
+is worth stating plainly because it constrains every future consolidation: any
+move to a shared journal must first add an owner column upstream, in the
+standalone engine, and that changes a published contract.
+
 ## The one thing to get right
 
 The grant must go to a **platform** role and must be **SELECT only**. Any grant
