@@ -782,3 +782,95 @@ serve, and each gets a row either way.
 - `zeroship-schema` is removed from `zeroship-plugin-db`'s manifest **only**
   when `unported` is zero, and the reserved-prefix check has landed in
   `shared/identifier.rs` with its own arm.
+
+---
+
+## Measured against the prior art (2026-08-28)
+
+Compared against Prisma, Arel, sqlglot, Calcite, Spark, Diesel, Ecto, SeaQuery
+and Convex. Figures below were measured by the reviewer against released
+software, not recalled.
+
+### The finding that is a REGRESSION, not a hardening request
+
+**Depth is the denial-of-service vector. Size is not. This crate bounds the
+wrong one.**
+
+Binary-searched against sqlglot 30.17.0 on CPython 3.13 at the default
+recursion limit: 43 nested function calls raise `RecursionError`; 49 nested
+parens; 54 nested `CASE`; 108 chained `NOT`. A **100,000-element `IN` list of
+589 KB parses fine in 2.33s**. So roughly a hundred bytes kills it and half a
+megabyte does not.
+
+`MAX_MEMBERSHIP_LIST_LEN` bounds the list. **Nothing bounds depth.**
+
+Three things make it serious:
+
+1. **Rust has no recursion limit**, so a deep tree is a stack overflow and an
+   abort - and the worker runs many apps per thread under LRU isolate eviction,
+   so that is the process and every co-tenanted app, not one failed request.
+2. **It cannot be fixed in the traversal.** `Predicate` derives `Ord` and
+   `Hash`, which recurse structurally, and the canonical path's `flat.sort()`
+   invokes them. So `canonical()`, `write_predicate()`, `mentions_aggregate()`
+   **and** the derived comparisons all recurse. Only a bound at CONSTRUCTION
+   covers all four.
+3. **The code this IR replaces already carries the bound**:
+   `MAX_FILTER_NESTING_DEPTH = 16` (`zeroship-schema/src/query.rs:604`, enforced
+   at `:5666`). The IR dropped it. That is the project's own recurring failure -
+   the bound stayed at the old call site instead of moving with the operation.
+
+**Precedent that this is easy to get wrong:** sqlglot was offered both bounds in
+one PR; `max_depth` was **rejected** and only `max_nodes` shipped, defaulting to
+disabled. A node-count cap cannot see a 43-deep tree.
+
+**Not live** - the IR has no callers yet.
+
+### Where this design beats the prior art, specifically
+
+- **No null literal.** Diesel's `eq(None)` silently matches nothing
+  (diesel#1306). Nullness as a node makes that unrepresentable.
+- **A projection slot that cannot hold a string.** That slot was
+  Sequelize CVE-2023-22578, CVSS 10.0.
+- **No `Deserialize`** - and the justification is stronger than the
+  wire-format one this document gives. sqlglot's `Expression.load()` calls
+  `__import__` on a dotted name taken **straight from the JSON payload**
+  (verified empirically). Deserialising an AST is an arbitrary-import surface.
+- **Unconditional identifier quoting.** sqlglot's `RESERVED_KEYWORDS` is
+  **empty for Postgres**, and `identify=False` is the default, so its identifier
+  soundness rests entirely on the parser having set `quoted=True` upstream.
+- **Constructor-enforced invariants.** sqlglot's `arg_types` is enforced only
+  under `if UNITTEST:`; `exp.EQ(this=col)` with a required argument missing
+  renders the malformed `'a ='` with no exception, and `Select` has 32 keys and
+  **zero** required.
+
+**The sentence worth keeping:** sqlglot can afford its raw nodes *because its
+producer is a parser, not an API. An IR whose producer is creator code cannot.*
+
+**And the strongest external validation of the no-raw-SQL thesis:** Prisma's
+tagged-template "safe raw" API is bypassable in one line of JavaScript
+(`stringsArray.raw = [query]`), documented by Prisma, unfixed for years.
+
+### The three decisions most likely to be regretted
+
+1. **No expression node, and specifically an expression-free `ORDER BY`.** This
+   is the exact restriction that created `Arel.sql`, and it already blocks the
+   shipped vector and spatial search.
+2. **Byte-identical SQL as the determinism contract.** Postgres identifies
+   queries by a structural jumble, Calcite by `RelDigest`, sqlglot and Ecto by a
+   separate cheap fingerprint generator. **Nobody targets text.** The cost here
+   is enum-declaration-order coupling becoming wire-visible. The better shape is
+   two generators: a cheap canonical fingerprint for identity, and an executable
+   renderer free to emit what suits the engine.
+3. **Roles validated but not carried**, plus no qualified column reference - the
+   latter means the relation family cannot land without breaking the shared
+   grammar this crate exists to protect.
+
+### An option declined rather than unconsidered
+
+**Convex** - the closest positional competitor, also untrusted app code, also no
+SQL surface - escapes into the **runtime**: its `.filter()` runs arbitrary
+TypeScript over a document range, explicitly not using the index. That is a
+fourth escape-hatch shape and the one most naturally available here, since this
+platform also runs JS. It is precisely what decision 2 refuses, because it
+filters after rows have left the tenant boundary. Recorded because a reviewer
+will otherwise propose it as though it were unexamined.
