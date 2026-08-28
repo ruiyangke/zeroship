@@ -1112,7 +1112,13 @@ pub fn runtime_app_role_name(app_id: &str) -> String {
 /// PROPORTION, not the count: on the dev database on 2026-08-28 every single
 /// `app_%_role` membership the worker held was `inherit_option = t` - 540 of
 /// 540. The count drifts with every test run and is recorded as a dated
-/// observation, not a figure to carry forward. Under that posture
+/// observation, not a figure to carry forward - and much of that population was
+/// this suite's own leak: `cleanup_app` dropped the migrator role but not the
+/// `app_<uuid>_role` or its workflow-journal schema, so one green 17-test run
+/// left 7 of each behind. Fixed in `9cf1b3fb4`; a later reading of 29 on the
+/// same database is the same posture over a smaller population, not a change in
+/// it. The worker's boot-time check walks every membership it holds, so the
+/// leak was inflating a production-shaped check on every run. Under that posture
 /// `SET LOCAL ROLE` only ever NARROWS: a statement that forgets it
 /// does not fail, it runs with cross-tenant reach. `WITH INHERIT FALSE` inverts
 /// the default so omission fails closed with `permission denied for schema`,
