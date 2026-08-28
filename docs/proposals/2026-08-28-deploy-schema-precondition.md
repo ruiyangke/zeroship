@@ -173,6 +173,74 @@ exact file where the test must live.
 packer hard-rejects anything but v2 (`zship.ts:937-943`). They are stale
 artifacts and would fail for a reason unrelated to the guard.
 
+## LANDED 2026-08-28 in `5d27e71c5`, and the implementation found a HOLE IN THIS SPEC
+
+**Two requirements this document states as independent are in direct tension,
+and together they re-open the rollback the "newest applied, not membership"
+rule was written to close.**
+
+- Section "The predicate" requires comparison against the **newest applied**
+  descriptor, because membership lets a rollback through.
+- Section "What this costs" requires the ledger row to be written **per
+  request**, not per applied migration, because otherwise an engine upgrade that
+  changes descriptor bytes halts every app's next deploy forever.
+
+Both are correct in isolation. Together they let a creator move the ledger head
+**backwards**:
+
+1. Re-run `zeroship migrate` with an **old** `migrations.ir.json` while the
+   database sits at N.
+2. `insert_auto_approved` records the old descriptor D1 (`apply.rs:539`).
+3. The engine skips every document - already journaled - so nothing applies.
+4. **`mark_applied` fires anyway.** Verified: it is on the `Ok(outcome)` arm at
+   `apply.rs:781` with no guard on whether `outcome.applied` is non-empty.
+5. The newest applied row now names D1 with `applied_at = now()`.
+6. The old build deploys and the guard admits it.
+
+**M2 does not close this.** A server-derived descriptor renders from the
+*submitted* documents, which are self-consistently old.
+
+**What does close it** is the end state this document's last bullet already
+names for a different reason: derive the descriptor from **the engine journal's
+applied set** rather than from anything the request declares - i.e. stop
+shipping the descriptor in the `.zship` at all and let the worker consume the
+one `migrated` derived. That is now the second independent argument for it.
+
+The shipped test
+`deploy_rolling_back_to_a_previously_applied_descriptor_is_refused` covers only
+the case where the creator does **not** re-migrate.
+
+### The landing cost is 8 test scripts, not the 2 this document named
+
+Measured by the implementer by scanning every harness that builds a `.zship`
+from an example carrying a `migrations/` directory. Six of them
+(`e2e_account_status_enforcement`, `e2e_lago_billing`,
+`e2e_multi_app_attribution`, `e2e_multi_metric_billing`, `e2e_openmeter_export`,
+`e2e_spend_state_transitions`) ship `examples/metering-probe`, which carries a
+descriptor, and **run no migration service at all** - so fixing them means
+adding a whole service to six harnesses.
+
+**And the two reorderable ones are worse than a reorder**, which is the finding
+this document should have had:
+`tests/e2e_db_app_end_to_end.sh:322-347` is a section headed **"THE PRE-MIGRATE
+CONTROL"** whose own prose says *"the app is deployed and serving, and its
+database schema does not exist yet. That is the state a creator reaches by
+following the documented chain up to `zeroship deploy`"*, and
+`tests/e2e_app_primitives.sh:330-372` asserts that a worker dispatch in that
+state returns `SCHEMA_NOT_PROVISIONED` carrying a `zeroship migrate` remedy.
+
+**Arm 1 abolishes that state for every descriptor-carrying app.** The runtime's
+carefully built loud-failure path becomes unreachable except for schema-less
+deploys. That is a real capability removed, it was not weighed here, and the two
+harnesses that documented the state are the evidence it was deliberate.
+
+**One point in arm 1's favour that this document also omitted:** a migration
+that fails mid-apply leaves the row `approved`/`rejected` while schema objects
+may already exist, because `migrated` provisions the schema before the engine
+runs. Under a weaker "allow when there is no applied row" rule, any descriptor
+could then go live over that partial schema. Arm 1 closes that, which is why the
+weaker rule is not the answer to the eight harnesses.
+
 ## What this costs, argued against itself
 
 - **It breaks the first deploy of every new database app.** `zeroship migrate`
