@@ -353,3 +353,50 @@ cross-version verdict was published from runs where a feature flag had silently
 redirected the DSN, so "both versions agreed perfectly" because both were one
 server. Any arm added here must print the server it reached, not the variable it
 read.
+
+---
+
+## Class 7: the fixture whose SUBJECT is not the claim
+## (named 2026-08-28, after three instances surfaced in one day)
+
+The five original classes are all about a check that **cannot fail**. This one is
+different and it is the hardest to see, because the test **does** exercise real
+production code, its assertions **are** true, and its name is **accurate about
+what it asserts**. What is wrong is the fixture: it cannot construct the state
+the surrounding claim is about.
+
+Three instances, all found 2026-08-28, all in code that had been reviewed:
+
+| the claim | the fixture | what it could not reach |
+| --- | --- | --- |
+| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`tests/sqlite_integration.rs:4191`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
+| CDC events carry the masked value for masked columns (`broker.rs:1863`) | parent column is `"\\x0123..."`, a BYTEA **ciphertext** literal | the leaking shape is a **mask-only** field, whose parent holds plaintext. The same assertion would fail on it; no fixture builds one |
+| SC-2 Decision 1: "WAL permits this concurrency" | unqualified `CREATE TABLE t` (`sqlite_integration.rs:9946`), and no `ATTACH` at all | the table lands in `main`, the WAL **control** database. Every app file is pinned to DELETE (`migrate-sqlite/src/backend/actor.rs:719-729`). The mechanism was proved on the wrong database |
+
+**What makes this class distinct from the other six.** A vacuous arm rules on
+zero items and a floor catches it. A wrong assertion is wrong on its own terms
+and a careful reader catches it. Here the arm rules on a real item, truthfully,
+and a careful reader **agrees with it** - because the reader checks whether the
+assertion follows from the fixture, which it does. Nobody checks whether the
+fixture can reach the case the *name* implies.
+
+**The name is what does the damage.** All three names describe the general
+property (`..._cap_rejects_...`, `cdc_event_carries_masked_value_for_masked_columns`,
+`an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction`) while the
+fixture covers one sub-case - and in all three the sub-case chosen was the
+**safe** one. A later reader greps the name, finds a green test, and stops.
+
+**The question that finds it**, and it is not any of the usual ones: *what state
+does this fixture make impossible?* Not "does it pass", not "is the assertion
+right", not even "is the code reached" - the code IS reached. Ask what the
+fixture excludes, then ask whether the excluded state is the one the claim is
+about.
+
+**A gate-arm floor cannot catch this**, and that is worth stating because the
+convention in `tests/lib/gate_arms.sh` is this repository's main defence. A floor
+counts items ruled on, and these arms rule on a real item. The countermeasure is
+narrower: **a test whose name states a general property owes either a fixture
+matrix over the property's cases, or a comment naming the cases it does not
+cover.** The third instance now carries exactly that, plus a second arm
+(`an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal`) pinning the
+excluded state so it fails loudly if it changes.
