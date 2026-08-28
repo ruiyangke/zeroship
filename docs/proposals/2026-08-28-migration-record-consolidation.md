@@ -98,7 +98,19 @@ DDL audit table that would have collided - disappears under operator decision
 10 (no DDL in the data plane), because its only writers are the two lazy index
 paths that decision removes. See the index, "Decision 10".
 
-## DECIDED 2026-08-28: remove all three platform records
+## DECIDED 2026-08-28: the whole `zeroship.migrated_*` family goes
+
+Five records removed, and with `migrated_app_policies` included the **entire
+`migrated_*` prefix disappears from the platform schema.** That also dissolves
+the naming fossil the crate rename created - `zeroship-migrate-server` writing
+tables called `migrated_*` - by removing the tables rather than renaming frozen
+objects.
+
+**What survives as the record of migrations: the engine journal, and nothing
+else.** Append-only, checksummed, immutability-triggered on the platform side,
+tenant-owned in the creator's own schema.
+
+
 
 **Operator: remove `zeroship.migrated_migrations`,
 `zeroship_migrations.platform_migration_files`, and
@@ -157,11 +169,37 @@ made tenant-owned journals acceptable in the first place.
   *"submit, approval, pending rejection, and apply outcomes"* - three of those
   four actions belong to the approval flow that is unreachable, and the fourth
   duplicates the journal;
-- **NOT `zeroship.migrated_app_policies`.** An earlier revision of this list
-  named it as a candidate; that was wrong. Measured: one INSERT and **four
-  SELECTs** in `policy_store.rs` (`:76`, `:81`, `:132`, `:143`, `:164`). It is
-  the creator policy-draft store, it is actively read, and it has nothing to do
-  with the approval workflow. **It stays;**
+- **`zeroship.migrated_app_policies`, and `policy_store.rs` with it.** Operator,
+  2026-08-28: *"we should not persist policy in the database ... even so, we
+  should not make it editable in the runtime, everything should be in the
+  crafting scope."*
+
+  **This is decision 3's principle applied to migration policy.** Decision 3
+  made the mask policy code-managed, folded at build time, delivered in the
+  artifact and fixed for the isolate's life. The same rule now holds for what a
+  creator's migrations may do: **no runtime-mutable policy anywhere.**
+
+  **The delivery path already exists and is the right one.**
+  `ApplyMigrationsRequest.policy: Option<PolicyDraftDocument>` carries the draft
+  **with the request** - i.e. from the creator's repository, at apply time.
+  `resolve_apply_policy` (`apply.rs:1208-1214`) already prefers it and never
+  touches the store when it is present. The table was a second, mutable copy of
+  something that should only ever arrive in the artifact.
+
+  **Removing it changes no behaviour today**, verified by tracing the whole
+  chain: the CLI sends no policy (zero policy references in
+  `crates/zeroship-cli/src/`), control proxies no policy route
+  (`migrations_api.rs`), and the only writer is `migrate-server`'s own endpoint
+  (`api.rs:211`) that no client reaches. So the table is empty, `get_current`
+  returns `None`, and every migration already composes against **the operator
+  ceiling alone**.
+
+  *An earlier revision of this list said "keep - four live readers". That was
+  wrong in an instructive way: those are live CODE PATHS reading an EMPTY table.
+  Grep found the callers and could not tell me the callers find nothing.*
+
+  Also delete the two read endpoints (`api.rs:245` `get`, `:262`
+  `list_versions`) and the write endpoint (`:211`).
 - `migration_store.rs`'s approval transitions (`insert_pending`, approve,
   reject) and the `status` state machine;
 - the `zeroship_control` grant on `migrated_migrations`
