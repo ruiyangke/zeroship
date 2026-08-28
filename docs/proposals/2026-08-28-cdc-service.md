@@ -1189,6 +1189,31 @@ boundary silently suppresses new changes whose LSNs happen to sit below it.
 Materialize gates its CDC source on `publication_details.timeline_id` for
 precisely this.
 
+**Measured on PostgreSQL 17.11, two runs differing in one variable - whether
+`recovery.signal` was present:**
+
+| recovery shape | `system_identifier` | `timeline` | data |
+| --- | --- | --- | --- |
+| basebackup + `recovery.signal` + promote | unchanged | **1 -> 2** | rewound |
+| SIGKILL, restart (crash recovery) | unchanged | **1, unchanged** | replayed |
+
+So the promoting case works: the timeline moves and the watermark is
+invalidated. **The non-promoting case does not, and it is a rewind this gate
+cannot see.** A new timeline is created only when *archive* recovery completes;
+crash recovery replays whatever WAL is on disk and comes up on the same pair. A
+filesystem, EBS, ZFS or LVM snapshot restored and started without
+`recovery.signal` therefore rewinds the WAL while `IDENTIFY_SYSTEM` reports an
+unchanged `(systemid, timeline)` - the relay resumes from its watermark against
+different WAL at the same positions, which is exactly the failure this section
+exists to prevent.
+
+That is an accepted bound, not a defect to patch here, and it must be stated
+rather than left implied: **the watermark is invalidated by every recovery that
+completes archive recovery, and by no other.** The operator rule that makes it
+true is that restores use `recovery.signal`. The same measurement and its
+consequences for identity are recorded in
+`2026-08-26-sc5-service-ownership.md`.
+
 **The relay already fetches the answer and throws it away.**
 `ReplicationConnection::identify_system` returns
 `IdentifySystem { systemid, timeline, xlogpos, dbname }`
@@ -1939,12 +1964,12 @@ Stated as gaps rather than written as facts elsewhere in this document.
   Argued from the reorder buffer replaying in WAL order and from
   `heap_multi_insert` tuples being ordered within their record; **not measured**,
   and 12.6 names the alternative that does not need it.
-- **A real PostgreSQL timeline change.** 6.4 specifies reading and gating on it.
-  `IdentifySystem.timeline` was read in the driver
-  (`libs/compio-postgres/src/replication.rs:818`), `wal_consumer.rs:377` was
-  confirmed to discard it, and `pg_control_checkpoint().timeline_id` was measured
-  returning `1` on a fresh 18.4 cluster. No standby was stood up or promoted, and
-  LSN reuse across a divergence point was not observed.
+- **LSN reuse across a divergence point.** The timeline change itself is now
+  measured - a basebackup restored with `recovery.signal` and promoted moves the
+  timeline `1 -> 2` on an unchanged `system_identifier`, and crash recovery moves
+  neither (6.4). What remains unobserved is a *consumer* resuming across that
+  divergence and encountering reused LSNs; the gate is specified and its input is
+  proved to move, but the failure it prevents has not been reproduced.
 - **Whether `heap_multi_insert` is reachable from any path this platform runs
   today.** The collapse is measured (6.3); its reachability is not.
   `env.db.insertMany` emits multi-`VALUES` (`query.rs:4013-4157`), which does not
