@@ -89,6 +89,41 @@ list the new service inherits.
    worker is the one genuine regression the service introduces, and no figure
    for it exists anywhere in this set.
 
+**The projection mechanism is a PUBLICATION COLUMN LIST, and it is verified on
+two PostgreSQL major versions.** The service design
+(`docs/proposals/2026-08-28-cdc-service.md`) proposes computing the list from
+`storage.valueColumn` over declared fields and applying it via
+`zeroship-migrated`, which already owns publication membership. Its author
+measured on 16.15; **I re-measured independently on 18.4**
+(`~/.claude/jobs/.../verify_column_list.sh`), because a single-version
+measurement cannot see a version-specific claim and this repository has a
+recorded incident where two "versions" agreed perfectly because both were one
+server:
+
+| check | 18.4 result |
+| --- | --- |
+| excluded column's **NAME** in the pgoutput `Relation` message | **absent** |
+| excluded column's **value** | **absent** |
+| **control** - same table, publication with NO column list | both **present** |
+| `ALTER TABLE ... ADD COLUMN` | publication unchanged; the new column does **not** enter |
+
+**The control is the load-bearing arm.** Without it, "absent" is equally
+consistent with a probe that cannot see the column at all - which is the exact
+shape of the four gates found examining nothing. It reports present, so the
+absences above are caused by the column list.
+
+Two consequences worth stating plainly: **one mechanism closes both the value
+and the name exposure**, because the name lives in the `Relation` message the
+list also prunes; and **new columns default OUT**, which is whitelist semantics
+by construction - a property the `format!("{col}_masked")` blacklist can never
+have.
+
+**The known cost, disclosed by the design's own author and not yet judged:** a
+column list that does not cover the replica identity is accepted SILENTLY at
+DDL time, and then every `UPDATE` and `DELETE` on that table fails. A projection
+bug becomes a creator write outage. Two reviewers are weighing whether that is
+disqualifying.
+
 **What it does NOT need to re-derive:** the decode multiplier is structural.
 Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
 filters run at commit replay, **after** decode, buffering and per-slot spill,
