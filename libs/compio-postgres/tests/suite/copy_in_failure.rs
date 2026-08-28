@@ -129,12 +129,13 @@ async fn terminated_copy() -> (Client, Client, i32, Pin<Box<CopyInSink<Bytes>>>)
         .query_one_scalar("SELECT pg_backend_pid()", &[])
         .await
         .expect("read the COPY backend PID");
+    let table = common::test_object_name("cpg_copy_producer_diagnosis");
     victim
-        .batch_execute("CREATE TEMPORARY TABLE cpg_copy_producer_diagnosis (v int)")
+        .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int)"))
         .await
         .expect("create the COPY termination fixture");
     let sink = victim
-        .copy_in("COPY cpg_copy_producer_diagnosis (v) FROM STDIN")
+        .copy_in(&format!("COPY {table} (v) FROM STDIN"))
         .await
         .expect("start COPY before terminating its backend");
     (victim, killer, pid, Box::pin(sink))

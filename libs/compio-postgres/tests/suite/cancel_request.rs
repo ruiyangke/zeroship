@@ -591,13 +591,14 @@ async fn cancel_during_copy_in_surfaces_57014_and_preserves_session() {
     let observer = connect(&url).await.unwrap();
     let pid = client.process_id();
     let token = client.cancel_token();
+    let table = common::test_object_name("cpg_cancel_copy_in");
 
     client
-        .batch_execute("CREATE TEMPORARY TABLE cpg_cancel_copy_in (v int4)")
+        .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int4)"))
         .await
         .expect("create COPY IN cancellation fixture");
     let sink = client
-        .copy_in::<_, Bytes>("COPY cpg_cancel_copy_in FROM STDIN")
+        .copy_in::<_, Bytes>(&format!("COPY {table} FROM STDIN"))
         .await
         .expect("enter COPY IN");
     let mut sink = Box::pin(sink);
@@ -625,7 +626,7 @@ async fn cancel_during_copy_in_surfaces_57014_and_preserves_session() {
     wait_until_copy_progress(&observer, pid, false).await;
     assert_client_still_works(&client).await;
     let stored: i64 = client
-        .query_one_scalar("SELECT count(*) FROM cpg_cancel_copy_in", &[])
+        .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
         .await
         .expect("count COPY IN rows after cancellation");
     assert_eq!(stored, 0, "cancelled COPY IN committed a partial load");

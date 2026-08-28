@@ -171,13 +171,10 @@ async fn stale_typeinfo_statement_failure_cleans_the_cache_for_the_next_lookup()
         let composite = connect(&url)
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        assert_stale_helpers_are_retired(
-            &composite,
-            "CREATE TEMP TABLE cpg_stale_composite (value int4)",
-            "SELECT NULL::pg_temp.cpg_stale_composite",
-            2,
-        )
-        .await;
+        let composite_name = common::test_object_name("cpg_stale_composite");
+        let composite_ddl = format!("CREATE TEMP TABLE {composite_name} (value int4)");
+        let composite_query = format!("SELECT NULL::pg_temp.{composite_name}");
+        assert_stale_helpers_are_retired(&composite, &composite_ddl, &composite_query, 2).await;
     })
     .await
     .expect("type-info cache cleanup test exceeded its watchdog");
