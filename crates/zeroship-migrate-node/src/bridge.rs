@@ -85,15 +85,16 @@ use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
 use crate::verbs::{
-    apply_ir_with_locked_backend, charter_layer_refs, effective_policy_from_wire_layers,
-    legacy_status_with_locked_backend, owner_app_project, parse_rollback_target, preview_dialect,
-    resolve_pending_with_locked_backend, rollback_with_locked_backend,
-    status_ir_with_locked_backend, ApplyDialect,
+    apply_ir_with_locked_backend, baseline_ir_with_locked_backend, charter_layer_refs,
+    effective_policy_from_wire_layers, legacy_status_with_locked_backend, owner_app_project,
+    parse_rollback_target, preview_dialect, resolve_pending_with_locked_backend,
+    rollback_with_locked_backend, status_ir_with_locked_backend, ApplyDialect,
 };
 use crate::wire::{
-    AdvisoryDto, ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo, GenArtifactsReply,
-    GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
-    PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest, StatusRequest,
+    AdvisoryDto, ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BaselineIrRequest, BuildInfo,
+    GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest,
+    LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest,
+    StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -1208,6 +1209,96 @@ pub fn status(
             ApplyDialect::Mysql => {
                 let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
                 legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
+            }
+        }
+    })
+}
+
+/// `baselineIr` - adopt a database the authored set has already been applied to,
+/// recording what a fresh apply WOULD have journaled without running any of it.
+///
+/// PostgreSQL only, and refused at the dialect rather than at the backend so the
+/// operator is told why: adoption is the records-not-run primitive, and MySQL and
+/// SQLite state their refusal of it on `MigrationBackend::record_adoption`.
+#[napi(ts_return_type = "Promise<BaselineReply>", catch_unwind)]
+pub fn baseline_ir(
+    env: Env,
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
+    host_driver: HostDriverFn,
+    req: BaselineIrRequest,
+) -> Result<Object<'static>> {
+    let BaselineIrRequest {
+        owner_app,
+        project_schema,
+        dialect,
+        registry,
+        envelopes,
+        charter_layers,
+        supersede_unmatched,
+        dry_run,
+        applied_by,
+    } = req;
+    let registry_json = serde_json::to_string(&registry)
+        .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
+    let envelope_json = envelopes
+        .into_iter()
+        .map(|mut envelope| {
+            crate::wire::restore_exact_integers(&mut envelope);
+            serde_json::to_string(&envelope)
+                .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // The dialect selects a BACKEND here, exactly as `statusIr` does, and decides
+    // nothing about capability. Which engines can adopt is stated by
+    // `MigrationBackend::record_adoption`, and the verb probes it with an empty
+    // record set before doing any work - so a backend that cannot adopt refuses
+    // immediately rather than after showing a preview it could never apply.
+    let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
+    let effective =
+        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
+
+    run_verb(env, host_driver, move |session| async move {
+        let cfg = ExecutorConfig::new(
+            owner_app_project(&project_schema),
+            project_schema.clone(),
+            effective,
+        );
+        match target {
+            ApplyDialect::Postgres => {
+                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
+                baseline_ir_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    &charter_layers,
+                    supersede_unmatched,
+                    dry_run,
+                    &applied_by,
+                )
+                .await
+            }
+            ApplyDialect::Mysql => {
+                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
+                baseline_ir_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    &charter_layers,
+                    supersede_unmatched,
+                    dry_run,
+                    &applied_by,
+                )
+                .await
             }
         }
     })

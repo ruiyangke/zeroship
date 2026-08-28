@@ -56,6 +56,7 @@ const FLAGS: Readonly<Record<string, string | null>> = {
   "--strict": null,
   "--explain": null,
   "--approve": null,
+  "--supersede-unmatched": null,
 };
 
 const VERBS = [
@@ -67,6 +68,7 @@ const VERBS = [
   "rollback",
   "resolve",
   "history",
+  "baseline",
 ] as const;
 
 function scratch(): string {
@@ -169,13 +171,13 @@ test("--approve is refused by the verbs that approve nothing", () => {
       );
       assert.match(
         text,
-        /apply, rollback, or resolve/,
+        /apply, rollback, resolve, or baseline/,
         `and the refusal must name the commands it does belong to; got: ${text}`,
       );
     }
     // The control: the three verbs that DO consume it must still take it, or the
     // refusal above would be indistinguishable from breaking the flag outright.
-    for (const verb of ["apply", "rollback", "resolve"] as const) {
+    for (const verb of ["apply", "rollback", "resolve", "baseline"] as const) {
       const { ok, text } = accepts(work, verb, "--approve");
       assert.equal(ok, true, `${verb} must still accept --approve; got: ${text}`);
     }

@@ -960,6 +960,22 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         ))
     }
 
+    async fn record_adoption(
+        &self,
+        _cfg: &ExecutorConfig,
+        _records: &[zeroship_migrate_backend::journal::BaselineRecord<'_>],
+    ) -> Result<(), ApplyError> {
+        // Adoption is the records-not-run primitive applied to a whole corpus, and
+        // that primitive is unwired here for the same reason `record_squash` and
+        // `baseline_one` are: MySQL has no baseline machinery. Refused explicitly
+        // rather than left to a default, so "MySQL cannot adopt" is a stated posture
+        // and not a silent no-op that journals nothing and reports success.
+        Err(ApplyError::Backend(
+            "mysql backend: project adoption (records-not-run baseline) is not supported on MySQL"
+                .to_string(),
+        ))
+    }
+
     async fn rebuild_one(
         &self,
         spec: &TableRebuildSpec,

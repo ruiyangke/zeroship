@@ -659,6 +659,82 @@ pub struct HistoryReply {
 }
 
 // ---------------------------------------------------------------------------
+// `baselineIr` - adopt an existing database's schema as already-applied history.
+// ---------------------------------------------------------------------------
+
+/// The typed request for adopting a database the authored set has already been
+/// applied to by some other means.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct BaselineIrRequest {
+    /// The deploying app id stamped during guarded lowering. It is folded into
+    /// every step checksum, so it must match what a later `status` will use or the
+    /// recorded events reconcile as drift.
+    pub owner_app: String,
+    /// The confined project schema.
+    pub project_schema: String,
+    /// `"postgres"` selects the journal backend. Adoption is the records-not-run
+    /// primitive, which only the PostgreSQL backend implements.
+    pub dialect: String,
+    /// The project's table-ownership registry.
+    pub registry: std::collections::HashMap<String, String>,
+    /// The COMPLETE ordered authored set, oldest first. A prefix would record a
+    /// prefix and leave the rest pending, which is not adoption.
+    pub envelopes: Vec<JsonValue>,
+    /// Required ordered policy charters, identical to the `applyIr` lowering input.
+    pub charter_layers: Vec<String>,
+    /// Attach supersession edges over the net-applied journal rows this set does
+    /// not account for. Without it those rows are reported and NOTHING is written:
+    /// superseding a row is a permanent reinterpretation of another tool's history,
+    /// so it is never implied by asking to adopt.
+    pub supersede_unmatched: bool,
+    /// Compute and report the full event set WITHOUT writing any of it. This is the
+    /// same code path the write takes, so the preview cannot drift from the act.
+    pub dry_run: bool,
+    /// The actor recorded in the journal.
+    pub applied_by: String,
+}
+
+/// One records-not-run `completed` event an adoption writes.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Clone)]
+pub struct BaselineStepDto {
+    /// The journal identity a fresh apply of this step would have recorded.
+    pub version: String,
+    /// The step's label, as the journal records it.
+    pub name: String,
+    /// `"baseline"`, or `"squash"` for the one event carrying the supersession
+    /// edges (`superseded_versions` honours edges only from a `squash`).
+    pub kind: String,
+}
+
+/// The typed reply for `baselineIr`.
+///
+/// Reports the complete event set whether or not it was written, because the
+/// operator gate lives in the CLI: a preview and a write must be describable by one
+/// shape, or the thing an operator approves is not the thing that happens.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Clone)]
+pub struct BaselineReply {
+    /// The events written, in the order they were recorded - or, when nothing was
+    /// written, the events that WOULD have been.
+    pub recorded: Vec<BaselineStepDto>,
+    /// Step identities the journal already holds under the same checksum. These are
+    /// skipped, which is what makes a repeated adoption a no-op.
+    pub already_recorded: Vec<String>,
+    /// Net-applied journal rows no supplied plan accounts for - the same set
+    /// `status` reports as `unexpectedJournal`.
+    pub unmatched: Vec<String>,
+    /// The subset of `unmatched` actually recorded as supersession edges. Empty
+    /// unless the request asked for it AND the write happened.
+    pub superseded: Vec<String>,
+    /// Whether anything was journaled. `false` for a dry run, for an adoption with
+    /// nothing left to record, and for one held back by unreported unmatched rows.
+    pub wrote: bool,
+}
+
+// ---------------------------------------------------------------------------
 // `genArtifacts` - the sync, DB-free schema-artifact emitter verb.
 // ---------------------------------------------------------------------------
 

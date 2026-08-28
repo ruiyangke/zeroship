@@ -19,8 +19,9 @@ use zeroship_migrate_mysql::DIALECT as MYSQL;
 use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 use crate::wire::{
-    ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
-    PlanStatusStepDto, ProjectLockHolderDto, RollbackReply, StatusReply, UnexpectedJournalEntryDto,
+    ApplyPendingContractDto, ApplyReply, BaselineReply, BaselineStepDto, BlockedPlanDto,
+    PendingContractStatusDto, PlanStatusDto, PlanStatusStepDto, ProjectLockHolderDto,
+    RollbackReply, StatusReply, UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -1146,6 +1147,329 @@ pub fn owner_app_project(project_schema: &str) -> String {
     project_schema.to_string()
 }
 
+
+/// One records-not-run journal event an adoption would write, owning its own
+/// strings so the borrowed [`journal::BaselineRecord`] set can be built from it.
+struct AdoptionRow {
+    version: String,
+    name: String,
+    checksum: String,
+    /// `'squash'` for the one event that carries the supersession edges,
+    /// `'baseline'` for every other. The distinction is load-bearing:
+    /// `superseded_versions` honours edges only from a NET-APPLIED event whose
+    /// recorded `kind` is `'squash'`, so stamping every row `'baseline'` would
+    /// write edges nothing reads.
+    kind: &'static str,
+    supersedes: Vec<String>,
+}
+
+/// Adopt an existing database: record what applying the authored set from nothing
+/// would have journaled, WITHOUT running any of it, inside one project-lock bracket.
+///
+/// # Why the plans are lowered against an EMPTY schema
+///
+/// Every other verb lowers against the live catalog. This one cannot, and the
+/// reason is the situation it exists for. Adoption is invoked on a database whose
+/// schema is ALREADY the corpus's output and whose journal does not say so, and
+/// lowering an unjournaled `createTable` against a catalog that already holds the
+/// table fails the pending-schema projection outright ("failed to project pending
+/// schema"). The identities this verb must journal would be unreachable behind that
+/// refusal - the lowering needed to compute them is the lowering the adopted state
+/// breaks.
+///
+/// So the basis is `SchemaSnapshot::default()` with an empty journal: exactly what
+/// a FRESH apply of the same ordered envelopes sees, which is exactly the history
+/// the operator is asserting already ran. The identities that basis produces are
+/// the ones a later `status` reconciles against, because once these events exist
+/// every step has completed journal evidence and status no longer projects anything.
+///
+/// # What is verified, and what is asserted
+///
+/// VERIFIED, under the lock: the corpus's projected final schema is folded from the
+/// same ops (`fold_ops_onto` over an empty base) and every table in it must exist in
+/// the live catalog; no step may already be journaled under a DIFFERENT checksum; no
+/// step may be mid-flight; and journal rows the corpus does not account for are
+/// reported by name.
+///
+/// ASSERTED BY THE OPERATOR, and NOT checked: that the live schema is the RESULT of
+/// this corpus rather than merely compatible with it. Column types, indexes,
+/// constraints and data are not compared. That is why the caller gates this on an
+/// explicit approval and why the reply enumerates every event before it is written.
+#[allow(clippy::too_many_arguments)]
+pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    envelope_json: &[String],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    charter_layers: &[String],
+    supersede_unmatched: bool,
+    dry_run: bool,
+    applied_by: &str,
+) -> std::result::Result<BaselineReply, String> {
+    let charter_refs = charter_layer_refs(charter_layers);
+    // Waiting, not try-acquire: adoption WRITES, so it is a peer of the deploy it
+    // would race rather than a reader that can decline and report busy.
+    backend
+        .acquire_project_lock(cfg)
+        .await
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+
+    let result = async {
+        // Capability probe, FIRST and DB-free in effect: an empty adoption writes
+        // nothing on a backend that implements the records-not-run write and is
+        // refused outright by one that does not. Asked here rather than after the
+        // work so a backend that cannot adopt never shows an operator a preview it
+        // could never apply -- a dry run is otherwise indistinguishable from a
+        // supported one right up to the write.
+        backend.record_adoption(cfg, &[]).await.map_err(|error| {
+            format!("this backend cannot adopt an existing project: {error}")
+        })?;
+        backend
+            .ensure_journal(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        // The identities a FRESH apply of this corpus would journal. See the doc
+        // above for why the basis is empty rather than live.
+        let artifacts = crate::lower::lower_ordered_envelopes_to_plans(
+            envelope_json,
+            owner_app,
+            project_schema,
+            dialect,
+            registry_json,
+            &charter_refs,
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
+            &[],
+            &[],
+        )?;
+        let manifests = artifacts
+            .iter()
+            .map(|artifact| {
+                PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        assert_corpus_output_is_live(backend, cfg, envelope_json, dialect, project_schema, charter_layers)
+            .await?;
+
+        // The SAME reconciliation `status` reports, against the SAME journal, inside
+        // the SAME lock. The unmatched set below is therefore `status`'s own
+        // `unexpectedJournal` rather than a second query that could disagree with the
+        // verdict the operator read before running this.
+        let status = zeroship_migrate::ops::status::status_plans_via_backend_locked(
+            backend, cfg, &manifests,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let mut state_by_step: std::collections::HashMap<&str, zeroship_migrate::ops::status::PlanStatusStepState> =
+            std::collections::HashMap::new();
+        for plan in &status.plans {
+            for step in &plan.steps {
+                state_by_step.insert(step.version.as_str(), step.state);
+            }
+        }
+
+        let mut rows: Vec<AdoptionRow> = Vec::new();
+        let mut already_recorded: Vec<String> = Vec::new();
+        for manifest in &manifests {
+            for step in &manifest.steps {
+                let version = step.version.as_str();
+                let state = state_by_step.get(version).copied().ok_or_else(|| {
+                    format!("status omitted step {version} of plan {}", manifest.name)
+                })?;
+                match state {
+                    zeroship_migrate::ops::status::PlanStatusStepState::Applied => {
+                        already_recorded.push(version.to_string());
+                    }
+                    zeroship_migrate::ops::status::PlanStatusStepState::Pending => {
+                        rows.push(AdoptionRow {
+                            version: version.to_string(),
+                            name: step.name.clone(),
+                            checksum: step.checksum.as_str().to_string(),
+                            kind: "baseline",
+                            supersedes: Vec::new(),
+                        });
+                    }
+                    // Everything else is a fact about this database that adoption
+                    // must not paper over. Drift means the journal already holds this
+                    // identity under different bytes; inflight means an apply of it
+                    // was interrupted; aborted means an online rename was explicitly
+                    // unwound. Recording "applied" over any of them would destroy the
+                    // evidence, and the journal is append-only, so there is no undo.
+                    other => {
+                        return Err(format!(
+                            "cannot adopt {}: its step {} ({}) is already journaled as {}. \
+                             Adoption records history that is absent from the journal; it never \
+                             overwrites history that is present. Resolve that step first",
+                            manifest.name,
+                            step.name,
+                            version,
+                            other.as_str()
+                        ))
+                    }
+                }
+            }
+        }
+
+        let mut unmatched: Vec<String> = Vec::new();
+        for entry in &status.unexpected_journal {
+            if entry.state != zeroship_migrate::ops::status::PlanStatusStepState::Applied {
+                return Err(format!(
+                    "cannot adopt this project: journal entry {} is {}, not a settled applied \
+                     event. An interrupted apply is a repair, not something an adoption may \
+                     supersede",
+                    entry.version,
+                    entry.state.as_str()
+                ));
+            }
+            unmatched.push(entry.version.clone());
+        }
+
+        // The edges ride the FIRST event this adoption writes, not the last. They
+        // count only while their carrier is net-applied (`superseded_versions`
+        // restricts to a net-applied `kind='squash'`), and the oldest event in a
+        // project's recorded history is the one a later rollback is least likely to
+        // reach - so the pre-adoption journal stays explained for as long as the
+        // adoption itself stands.
+        let superseded: Vec<String> = if supersede_unmatched { unmatched.clone() } else { Vec::new() };
+        if !superseded.is_empty() {
+            let Some(first) = rows.first_mut() else {
+                return Err(format!(
+                    "every step of this migration set is already journaled, so there is no new \
+                     event to carry the supersession of {} unmatched journal row(s). The journal \
+                     is append-only: edges can only be attached to an event being written",
+                    unmatched.len()
+                ));
+            };
+            first.kind = "squash";
+            first.supersedes = superseded.clone();
+        }
+
+        let wrote = !dry_run && !rows.is_empty() && (unmatched.is_empty() || supersede_unmatched);
+        if wrote {
+            let edge_refs: Vec<Vec<&str>> = rows
+                .iter()
+                .map(|row| row.supersedes.iter().map(String::as_str).collect())
+                .collect();
+            let records: Vec<zeroship_migrate::apply::journal::BaselineRecord<'_>> = rows
+                .iter()
+                .zip(&edge_refs)
+                .map(|(row, edges)| zeroship_migrate::apply::journal::BaselineRecord {
+                    version: &row.version,
+                    name: &row.name,
+                    checksum: &row.checksum,
+                    applied_by,
+                    kind: row.kind,
+                    supersedes: edges.as_slice(),
+                })
+                .collect();
+            backend
+                .record_adoption(cfg, &records)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        Ok::<BaselineReply, String>(BaselineReply {
+            recorded: rows
+                .iter()
+                .map(|row| BaselineStepDto {
+                    version: row.version.clone(),
+                    name: row.name.clone(),
+                    kind: row.kind.to_string(),
+                })
+                .collect(),
+            already_recorded,
+            unmatched,
+            superseded: if wrote { superseded } else { Vec::new() },
+            wrote,
+        })
+    }
+    .await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (result, release) {
+        (Ok(reply), Ok(())) => Ok(reply),
+        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => Err(format!(
+            "{error}; additionally failed to release project lock: {release_error}"
+        )),
+    }
+}
+
+/// Refuse an adoption whose corpus builds tables this database does not have.
+///
+/// The worst realistic misuse of a records-not-run verb is pointing it at the WRONG
+/// database - an empty one, or a peer environment - which journals a whole history
+/// as applied over a schema that was never built. Nothing later repairs that: every
+/// migration reads as done, `apply` runs none of them, and the journal is
+/// append-only.
+///
+/// The corpus's projected final schema is folded from the same ops through the
+/// engine's own `fold_ops_onto` over an empty base, so a table a later migration
+/// DROPS or RENAMES is correctly absent from the expectation rather than demanded.
+/// A fold that cannot replay is a refusal, not a skip: an unverifiable adoption is
+/// exactly the one not to wave through.
+///
+/// This is a PRESENCE check, not an equivalence check. It cannot see a column type
+/// that differs, an index that was never built, or a constraint the corpus declares
+/// and the database lacks. It catches the wrong database, not a subtly wrong one.
+async fn assert_corpus_output_is_live<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    envelope_json: &[String],
+    dialect: &str,
+    project_schema: &str,
+    charter_layers: &[String],
+) -> std::result::Result<(), String> {
+    let dialect_id = preview_dialect(dialect)?;
+    let effective = effective_policy_from_wire_layers(charter_layers)?;
+    let mut ops = Vec::new();
+    for envelope in envelope_json {
+        let ir: zeroship_migrate::model::ir::MigrationIr = serde_json::from_str(envelope)
+            .map_err(|error| format!("envelope is not a MigrationIr document: {error}"))?;
+        ops.extend(ir.ops);
+    }
+    let projected = zeroship_migrate::fold_ops_onto(
+        zeroship_migrate::shipping_vendors(),
+        &zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
+        &ops,
+        &dialect_id,
+        project_schema,
+        &effective,
+    )
+    .map_err(|error| {
+        format!(
+            "cannot verify this adoption: the migration set does not replay from an empty \
+             schema, so the shape it claims to have produced is unknown ({error})"
+        )
+    })?;
+    let live = backend
+        .snapshot_schema(cfg)
+        .await
+        .map_err(|error| format!("live schema introspection failed: {error}"))?;
+    let missing: Vec<&str> = projected
+        .tables
+        .keys()
+        .filter(|table| !live.tables.contains_key(*table))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to adopt {project_schema}: this migration set builds table(s) the database \
+         does not have: {}. Adoption records migrations as applied WITHOUT running them, so \
+         doing it here would leave a schema nothing will ever create. Apply the set instead, \
+         or point this at the database that already has it",
+        missing.join(", ")
+    ))
+}
 #[cfg(test)]
 mod status_projection_tests {
     use super::*;

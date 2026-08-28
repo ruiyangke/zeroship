@@ -938,6 +938,25 @@ impl MigrationBackend for SqliteBackend {
         )))
     }
 
+    async fn record_adoption(
+        &self,
+        _cfg: &ExecutorConfig,
+        records: &[zeroship_migrate_backend::journal::BaselineRecord<'_>],
+    ) -> Result<(), ApplyError> {
+        // Adoption records an EXISTING database's history without running it. The
+        // SQLite leg is the dev tier: its database is created from the descriptor on
+        // demand, so there is no operator-built schema to adopt and no foreign
+        // journal to reinterpret. `baseline_one` (single-migration adoption) stays
+        // wired here because the dev tier really does baseline a fresh file; the
+        // corpus-wide form does not, and reaching it is a routing bug.
+        Err(ApplyError::Backend(format!(
+            "sqlite backend: project adoption requested for {} record(s) — the SQLite dev \
+             leg builds its database from the descriptor and has no existing history to \
+             adopt (routing bug)",
+            records.len()
+        )))
+    }
+
     // -- declarative-only structured ops ------------------------------
 
     async fn rebuild_one(

@@ -627,6 +627,16 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         .map_err(ApplyError::Journal)
     }
 
+    async fn record_adoption(
+        &self,
+        cfg: &ExecutorConfig,
+        records: &[zeroship_migrate_backend::journal::BaselineRecord<'_>],
+    ) -> Result<(), ApplyError> {
+        journal_sql::record_baselines(self.conn, cfg, records)
+            .await
+            .map_err(ApplyError::Journal)
+    }
+
     async fn rebuild_one(
         &self,
         spec: &TableRebuildSpec,

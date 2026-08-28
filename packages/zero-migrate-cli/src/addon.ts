@@ -32,10 +32,13 @@ import type {
   RollbackRequest,
   RollbackTargetDto,
   HistoryRequest,
+  BaselineIrRequest,
   ApplyReply,
   RollbackReply,
   StatusReply,
   HistoryReply,
+  BaselineReply,
+  BaselineStepDto,
   LoadVerifyReply,
   PreviewSqlSource,
   AdvisoryDto,
@@ -51,10 +54,13 @@ export type {
   RollbackRequest,
   RollbackTargetDto,
   HistoryRequest,
+  BaselineIrRequest,
   ApplyReply,
   RollbackReply,
   StatusReply,
   HistoryReply,
+  BaselineReply,
+  BaselineStepDto,
   LoadVerifyReply,
   PreviewSqlSource,
   AdvisoryDto,
@@ -151,6 +157,15 @@ export interface MigrateAddon {
 
   /** `history` over the host driver. Resolves to a typed `HistoryReply`. */
   history(hostDriver: AddonHostDriver, req: HistoryRequest): Promise<HistoryReply>;
+
+  /** Adopt a database the authored set has already been applied to: journal what a
+   *  fresh apply WOULD have recorded, without running any of it. `dryRun` reports
+   *  the identical event set without writing, so a preview and a write are the same
+   *  code path. */
+  baselineIr(
+    hostDriver: AddonHostDriver,
+    req: BaselineIrRequest,
+  ): Promise<BaselineReply>;
 }
 
 let cached: MigrateAddon | null = null;
