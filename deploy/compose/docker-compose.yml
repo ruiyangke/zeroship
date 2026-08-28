@@ -154,33 +154,54 @@ services:
       timeout: 5s
       retries: 10
 
-  # Platform schema migrations (control/auth/platform schemas). One-shot: runs
-  # the `zeroship-platform-migrate` binary against the shared DB then exits 0.
-  # control/auth gate on its successful completion, so they only ever boot
-  # against a fully-migrated schema. Hand-authored JS DSL migrations live in
-  # db/migrations-ts/; the runner authors each `.ts` in-process (zeroship-runtime
-  # V8 + the published `zero-migrate` v1 recorder), lowers under the Platform
-  # guard, and applies over the native compio-postgres seam - no Node, no
-  # recorder-child subprocess.
+  # Platform schema migrations (control/auth/platform schemas). One-shot: applies
+  # db/migrations-ts against the shared DB then exits 0. control/auth gate on its
+  # successful completion, so they only ever boot against a fully-migrated schema.
   #
-  # Runs the SAME `zeroship-platform:dev` image the native services use (the
-  # Dockerfile builds + installs the `zeroship-platform-migrate` bin). The run
-  # applies all `db/migrations-ts/*.ts` under the PLATFORM trust profile (the
-  # widened guard for the zeroship/public schemas). The apply is idempotent: a
-  # re-run re-derives byte-identical journal versions and skips already-applied
-  # files. Destructive in-place evolutions (DROP CONSTRAINT/COLUMN, etc.) in the
-  # committed platform set are auto-approved by construction - this operator-side
-  # one-shot treats the committed migrations as the intended apply.
+  # IT IS A DIFFERENT IMAGE FROM EVERY OTHER SERVICE HERE, and that is the whole
+  # change. Until 2026-08-28 this ran the `zeroship-platform-migrate` Rust binary
+  # out of `zeroship-platform:dev`, which authored each `.ts` in zeroship-runtime's
+  # own V8. That binary is deleted; the corpus is applied by the general
+  # `zero-migrate` CLI, which is a NODE program with a native addon. Putting Node
+  # into the shared runtime image would hand a JavaScript runtime to control,
+  # gateway, worker and auth - none of which migrate anything - so the Dockerfile
+  # grew a `migrate` target and this service builds it.
+  #
+  # The apply is idempotent: every journal version is a hash of owner_app plus the
+  # migration name, so a re-run re-derives the same versions and skips every
+  # applied file. Measured 2026-08-28 on the host against a fresh PostgreSQL
+  # 17.11: 35 files applied, then an immediate second run applied none and exited
+  # 0. Destructive in-place evolutions in the committed set are approved by
+  # construction (`--approve`) - this operator-side one-shot treats the committed
+  # migrations as the intended apply.
+  #
+  # A DATABASE THE OLD BINARY MIGRATED NEEDS ONE MANUAL ADOPTION, and it is
+  # deliberately not automatic. Its journal holds versions this corpus does not
+  # produce, so every file reads as pending. The operator runs, once:
+  #
+  #   docker compose run --rm migrate --verb baseline --supersede-unmatched \
+  #       --database-url-file /etc/zeroship/secrets/migrate-dsn
+  #
+  # A deploy path that adopted silently could not tell that from a database which
+  # is not what the corpus produces, and refusing the second is the point of the
+  # guard.
   migrate:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
-    image: zeroship-platform:dev
+      target: migrate
+    image: zeroship-migrate:dev
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ../../db/migrations-ts:/db/migrations-ts:ro
+      # The Platform charter and the table-to-owner registry: the two files that
+      # decide what a platform migration may do. They are BAKED INTO the image as
+      # well; these mounts are the dev-loop convenience that lets a charter edit
+      # take effect without a rebuild, exactly like the corpus mount above.
+      - ../../policies/platform.policy.toml:/policies/platform.policy.toml:ro
+      - ../../policies/platform-table-owners.json:/policies/platform-table-owners.json:ro
       # The privileged DSN, as a PATH like every other credential here. It was
       # a `--database-url` VALUE until 2026-08-16, which put a postgres
       # SUPERUSER password - not a scoped role - into this container's argv,
@@ -195,24 +216,30 @@ services:
       # fail the one-shot at parse time rather than leak.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn:/etc/zeroship/secrets/migrate-dsn:ro
     command:
-      # The parser is clap now (the generated `#[zeroship_config]` carrier), so
-      # `--flag=value` would also parse. The separate-item spelling is kept
-      # because every other service block here uses it and because the compose
-      # argv check (tests/config_name_alignment_gate.sh, check 6c) reads items.
-      - zeroship-platform-migrate
+      # `--database-url-file` IS STILL THE SPELLING, and it is not vestigial. The
+      # CLI's own DSN flag is `--database-url <value>`, and a compose `command:`
+      # is published by `docker inspect`, `docker ps --no-trunc` and
+      # /proc/<pid>/cmdline to anything in the PID namespace - and this DSN is the
+      # cluster SUPERUSER. `deploy/ops/migrate-entrypoint.sh` therefore takes the
+      # PATH and builds the 0600 config the CLI reads. Keeping the flag name also
+      # keeps tests/deploy_scripts_gate.sh's `--<name>-file` scan non-empty; that
+      # row is the only one it finds in this file.
+      #
+      # `--project-schema` and `--project-id` are gone. Neither was a knob: the
+      # corpus spells `schema: "zeroship"` 562 times, and the CLI derives its
+      # advisory-lock key from the schema, so there was nothing a second name
+      # could select.
       - --migrations-dir
       - /db/migrations-ts
       - --database-url-file
       - /etc/zeroship/secrets/migrate-dsn
-      - --project-schema
-      - zeroship
-      - --project-id
-      - zeroship
-    # zeroship-platform-migrate is a compio/io_uring binary like every other
-    # service; io_uring_setup is blocked by Docker's default seccomp, so this
-    # one-shot needs the same unconfined profile the long-running services use.
-    security_opt:
-      - seccomp:unconfined
+    # NO `security_opt: seccomp:unconfined` ANY MORE, and its removal is the point
+    # rather than an oversight. The retired one-shot was a compio/io_uring binary
+    # and io_uring_setup is blocked by Docker's default seccomp profile, so it
+    # needed the unconfined profile the long-running services still use. This
+    # container runs Node over `pg` on ordinary sockets and needs no such
+    # exemption, so the one-shot that touches the database with SUPERUSER rights
+    # now runs under the DEFAULT seccomp profile.
     # BOUNDED, unlike the long-running services below, because this is a ONE-SHOT
     # and several of its failure modes are deterministic.
     #
