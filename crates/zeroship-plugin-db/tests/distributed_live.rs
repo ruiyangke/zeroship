@@ -538,6 +538,41 @@ async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, Stri
     .map_err(|error| format!("query publication: {error}"))
 }
 
+/// Stand in for `zeroship-migrated`, which owns the app publication.
+///
+/// The worker only PROVES the publication exists: `replication::
+/// ensure_worker_slot` fails closed with `replication_publication_missing`
+/// when it does not, and `replication.rs`'s
+/// `worker_setup_only_probes_for_the_migrated_publication` pins that the
+/// worker setup path carries no publication DDL at all. Membership is an
+/// authorization decision the migration service makes while holding
+/// table-owner authority (`crates/zeroship-migrated/src/publication.rs`), so
+/// this harness makes it on the migration service's behalf, exactly as
+/// `tests/integration.rs::c1_create_publication_for_tables` does for the C1
+/// suite. `events` has to be IN the set or pgoutput sends nothing and the
+/// cross-isolate delivery this target exists to prove never happens.
+async fn create_app_publication(
+    pool: &Pool,
+    app_id: &str,
+    publication: &str,
+    tables: &[&str],
+) -> Result<(), String> {
+    let members = tables
+        .iter()
+        .map(|table| format!(r#""{app_id}"."{table}""#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = if members.is_empty() {
+        format!(r#"CREATE PUBLICATION "{publication}""#)
+    } else {
+        format!(r#"CREATE PUBLICATION "{publication}" FOR TABLE {members}"#)
+    };
+    pool.execute(&sql, &[])
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("create migration-owned publication: {error}"))
+}
+
 async fn provision_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
     let role = format!("app_{app_id}_role");
     pool.execute(
@@ -644,6 +679,9 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         provision_app_role(&pool, &app_id)
             .await
             .expect("provision per-app role");
+        create_app_publication(&pool, &app_id, &publication, &["events"])
+            .await
+            .expect("create migration-owned publication");
         pool
     });
 
@@ -779,12 +817,26 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
             .deprovision_app(&app_id)
             .await
             .map_err(|error| format!("deprovision app CDC: {error}"))?;
-        let publication_gone = !publication_exists(&pool, &publication).await?;
+        // The worker's deprovision drops ITS replication slots and stops
+        // there. The publication is migration-owned and stays behind for a
+        // privileged reconciler to remove - see `drop_namespace.rs`'s
+        // "Publication ownership" section and `DbLifecycle::deprovision_app`.
+        // This target asserted the opposite until now: the worker did hold
+        // that authority, and 2a44ea8ef took it away without updating here.
+        let publication_retained = publication_exists(&pool, &publication).await?;
         pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
             .await
             .map_err(|error| format!("drop test schema: {error}"))?;
         drop_app_role(&pool, &app_id).await?;
-        Ok::<bool, String>(publication_gone)
+        // Stand in for the privileged reconciler again, so the shared test
+        // server does not accumulate one publication per run of this target.
+        pool.execute(
+            &format!(r#"DROP PUBLICATION IF EXISTS "{publication}""#),
+            &[],
+        )
+        .await
+        .map_err(|error| format!("drop test publication: {error}"))?;
+        Ok::<bool, String>(publication_retained)
     });
 
     drop(pool);
@@ -802,7 +854,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
     );
     assert!(
         app_delete_result.expect("app CDC deprovision"),
-        "app deletion must drop the shared publication"
+        "worker deprovision must leave the migration-owned publication in place"
     );
     assert_eq!(writer_result.status, 200, "writer body={}", writer_result.body);
     assert!(body.contains(PROBE), "subscriber body={body:?}");
