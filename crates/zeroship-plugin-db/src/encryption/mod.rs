@@ -15,12 +15,10 @@
 //!   decrypt side (the synthetic-nonce vs random-nonce distinction
 //!   lives only on the write path).
 //! - [`keys`] — [`KeyStore`] caches `(app_id, key_id) → AeadKey`,
-//!   derived via HKDF-SHA256 from a per-platform root key. Two
-//!   [`KeySource`] variants: env-var lookup (`ZEROSHIP_COLUMN_KEY_<KEYID>`)
-//!   for the SQLite tier and PG dev parity, and the PG source that
-//!   tries `__zeroship_admin.get_column_key` -- a getter with no
-//!   installer since the admin schema was deleted, so it always falls
-//!   back to the local source.
+//!   derived via HKDF-SHA256 from a per-platform root key. One
+//!   [`LocalKeySource`], two variants, both in-process: env-var lookup
+//!   (`ZEROSHIP_COLUMN_KEY_<KEYID>`) or roots supplied to the process
+//!   directly. Postgres and SQLite resolve through the same code.
 //! - [`aad`] — canonical, length-prefixed AAD construction.
 //!   `Randomised` mode binds `(collection, column, row_pk_bytes)`;
 //!   `Deterministic` mode binds `(collection, column)` only.
@@ -50,4 +48,4 @@ pub use aad::canonical_aad;
 #[allow(unused_imports)]
 pub use aead::{decrypt, encrypt_deterministic, encrypt_randomised, AeadKey};
 #[allow(unused_imports)]
-pub use keys::{KeySource, KeyStore, LocalKeySource, SuppliedRootKeys};
+pub use keys::{KeyStore, LocalKeySource, SuppliedRootKeys};

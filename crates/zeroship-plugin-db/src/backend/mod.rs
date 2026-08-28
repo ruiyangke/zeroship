@@ -1238,13 +1238,14 @@ pub use zeroship_schema::descriptors::GeoPoint;
 ///
 /// - PG and SQLite share the same AEAD impl (`crate::encryption::aead`),
 ///   so per-backend trait impls are thin delegations.
-/// - **Key sourcing differs**: PG asks a `get_column_key` getter that
-///   NOTHING NOW INSTALLS (see `crate::encryption::keys`) and falls
-///   through to its local source; SQLite uses the
-///   `ZEROSHIP_COLUMN_KEY_<KEYID>` env var. The trait's
-///   [`Self::KeyHandle`] associated type lets each backend pick its
-///   own key-material container without forcing a common type on the
-///   read/write surface.
+/// - **Key sourcing no longer differs**: both backends read the same
+///   in-process `LocalKeySource` (supplied roots, else the
+///   `ZEROSHIP_COLUMN_KEY_<KEYID>` env var). PG used to ask a
+///   `get_column_key` getter first; that arm went with the admin schema
+///   on 2026-08-27 (see `crate::encryption::keys`). The trait's
+///   [`Self::KeyHandle`] associated type still lets each backend pick
+///   its own key-material container without forcing a common type on
+///   the read/write surface.
 /// - The 13 carved capability traits set the pattern: focused
 ///   trait per capability, accessor-routed dispatch through
 ///   [`BackendHandle`], no boxed dyn in the hot path.

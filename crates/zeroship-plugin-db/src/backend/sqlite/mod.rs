@@ -430,7 +430,7 @@ impl SqliteBackend {
         // Cache lives for the lifetime of the backend; clears on backend
         // drop.
         let key_store =
-            crate::encryption::KeyStore::new(crate::context::sqlite_key_source());
+            crate::encryption::KeyStore::new(crate::context::isolate_key_source());
 
         Self {
             memory_db_dir,
@@ -490,7 +490,7 @@ impl SqliteBackend {
         // only on the session-minter secret; the column-key store reads
         // the isolate's local source regardless.
         let key_store =
-            crate::encryption::KeyStore::new(crate::context::sqlite_key_source());
+            crate::encryption::KeyStore::new(crate::context::isolate_key_source());
 
         Ok(Self {
             memory_db_dir: None,
@@ -2014,11 +2014,12 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 // ===========================================================================
 //
 // Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
-// is shared with PG via `crate::encryption::aead`; key sourcing
-// diverges: SQLite is local-only (`KeySource::Local`) because there's
-// no admin-schema sidecar (no SECURITY DEFINER getter equivalent on
-// SQLite), so a root comes either from the isolate's supplied keys or
-// from `ZEROSHIP_COLUMN_KEY_<KEYID>`. Mirrors the session-minter
+// is shared with PG via `crate::encryption::aead`, and key sourcing no
+// longer diverges at all: both backends take a `LocalKeySource`, so a
+// root comes either from the isolate's supplied keys or from
+// `ZEROSHIP_COLUMN_KEY_<KEYID>`. PG used to try a SECURITY DEFINER
+// `get_column_key` getter first; that arm was deleted on 2026-08-27 and
+// PG now resolves through this same path. Mirrors the session-minter
 // pattern where the secret comes from `ZEROSHIP_SESSION_SECRET`.
 //
 // The `sqlite` feature gate on this file already restricts the build to

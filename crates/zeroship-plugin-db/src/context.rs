@@ -515,15 +515,10 @@ impl ThreadDbContext {
     /// [`BackendHandle::Postgres`] arm.
     pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
-        // Admin table first, this worker thread's local source behind it.
-        let key_source = crate::encryption::KeySource::pg_admin_table_with_fallback(
-            Rc::clone(&pool),
-            self.local_key_source(),
-        );
         let backend = Rc::new(PostgresBackend::new_with_key_source(
             Rc::clone(&pool),
             url,
-            key_source,
+            self.local_key_source(),
         ));
         self.backend = Some(BackendHandle::Postgres(backend));
         self.pool = Some(pool);
@@ -1097,27 +1092,17 @@ pub fn with_mut<R>(f: impl FnOnce(&mut ThreadDbContext) -> R) -> R {
 /// The column-key source for a backend that constructs itself rather than
 /// being built by [`ThreadDbContext::set_pool`].
 ///
-/// The SQLite backend is in that position: `SqliteBackend::{new, open}`
-/// are called directly (by `init_pool_async`, and by tests) and then
-/// handed to `set_sqlite_backend`, so they read the worker thread's installed
-/// root keys here. Same re-entrancy rule as [`with`] - do not call this
-/// from inside a context closure.
-pub(crate) fn sqlite_key_source() -> crate::encryption::KeySource {
-    crate::encryption::KeySource::Local(with(ThreadDbContext::local_key_source))
-}
-
-/// The column-key source for a `PostgresBackend` that constructs itself
-/// rather than being built by [`ThreadDbContext::set_pool`]: the admin
-/// table first, this worker thread's local source behind it.
-///
-/// `set_pool` does NOT call this - it already holds `&mut` on the context
-/// and reads [`ThreadDbContext::local_key_source`] off `self` instead.
-/// Same re-entrancy rule as [`with`].
-pub(crate) fn pg_key_source(pool: Rc<Pool>) -> crate::encryption::KeySource {
-    crate::encryption::KeySource::pg_admin_table_with_fallback(
-        pool,
-        with(ThreadDbContext::local_key_source),
-    )
+/// Both backends are in that position: `SqliteBackend::{new, open}` and
+/// `PostgresBackend::new` are called directly (by `init_pool_async`, and
+/// by tests) and then handed to the context, so they read the worker
+/// thread's installed root keys here. One function serves both because
+/// key sourcing no longer differs by backend -- see
+/// `crate::encryption::keys`. Same re-entrancy rule as [`with`] - do not
+/// call this from inside a context closure. `set_pool` does NOT call it:
+/// it already holds `&mut` on the context and reads
+/// [`ThreadDbContext::local_key_source`] off `self` instead.
+pub(crate) fn isolate_key_source() -> crate::encryption::LocalKeySource {
+    with(ThreadDbContext::local_key_source)
 }
 
 #[cfg(test)]

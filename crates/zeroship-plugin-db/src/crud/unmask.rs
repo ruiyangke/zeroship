@@ -323,16 +323,30 @@ pub(crate) fn check_unmask_authorization(
     }
 }
 
-/// Best-effort lazy load of the durable policy for
-/// `app_id` into the per-isolate cache. Called by [`dispatch_unmask`]
-/// before the auth check. A storage miss is a no-op (cache stays
-/// empty, the default-deny fallback applies on the auth path); a storage hit
-/// installs the loaded policy via
-/// [`crate::context::ThreadDbContext::set_mask_policy_for_app`].
+/// Make sure the per-isolate policy cache has been consulted for
+/// `app_id` before the auth check in [`dispatch_unmask`].
 ///
-/// Errors propagate (a corrupt sidecar JSON or PG SQL failure surfaces
-/// as `DbError`); the unmask flow then rejects with the typed error
-/// instead of silently default-denying — operators see the real fault.
+/// **On PG this is a no-op beyond the cache read.** The policy is
+/// declared in the creator's source and installed at boot by
+/// `crate::crud::mask_policy::dispatch_set_mask_policy`; there is no
+/// durable store to fall back to, and an app that declared no policy
+/// correctly lands on the default-deny rule below (`auto` only). The
+/// PG arm used to `SELECT __zeroship_admin.get_mask_policy($1)` here,
+/// which meant every unmask on an app with no cached policy failed with
+/// `schema "__zeroship_admin" does not exist` rather than default-denying.
+/// The routine and its store were deleted on 2026-08-27; see
+/// `crate::crud::mask_policy`.
+///
+/// SQLite still keeps a sidecar file and is still re-read here. That
+/// asymmetry is deliberate and flagged in the module header of
+/// `crate::crud::mask_policy` - the sidecar is the arm that is out of
+/// step, not this one.
+///
+/// A storage miss is a no-op (cache stays empty, the default-deny
+/// fallback applies); a hit installs the loaded policy via
+/// [`crate::context::ThreadDbContext::set_mask_policy_for_app`]. A
+/// corrupt sidecar propagates as `DbError` so operators see the real
+/// fault instead of a silent default-deny.
 async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
     if crate::context::with(|c| c.has_mask_policy(app_id)) {
         return Ok(());
@@ -342,22 +356,12 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
         None => return Ok(()), // backend not initialised — auth path's default-deny stub handles it
     };
 
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_postgres() {
-        let loaded = crate::crud::mask_policy::load_pg(pg, app_id).await?;
-        if let Some(p) = loaded {
-            crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
-        }
-        return Ok(());
-    }
-
-    // ---- SQLite arm ----
+    // ---- SQLite arm (the only durable store left) ----
     if let Some(sq) = backend.as_sqlite() {
         let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id).await?;
         if let Some(p) = loaded {
             crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
         }
-        return Ok(());
     }
     Ok(())
 }

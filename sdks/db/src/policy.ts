@@ -22,7 +22,9 @@
  * Call this from the app's bootstrap (the default export's bootstrap
  * hook, or at module top-level — both run before the first request
  * reaches the dispatcher). The SDK flushes the pending policy through
- * `zeroship.db.setMaskPolicy` once at app init.
+ * the framework-internal `__platform.setMaskPolicy` op once at app
+ * init. The policy is fixed for the life of the deploy — change it by
+ * editing this call and redeploying, not at runtime.
  *
  * ### Default policy
  *
@@ -45,7 +47,7 @@
  * the `Classification` taxonomy. Anything else throws
  * `INVALID_MASK_CLASSIFICATION` at declare-time (and again at
  * Rust-time, belt-and-braces — see
- * `crates/plugin-db/src/crud/unmask.rs::dispatch_set_mask_policy`).
+ * `crates/zeroship-plugin-db/src/crud/mask_policy.rs::dispatch_set_mask_policy`).
  */
 import type { Classification } from "./types";
 
@@ -161,8 +163,10 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
  * **Framework-internal** — drain the pending policy slot. The
  * `@zeroship/bootstrap` runtime-entry calls this once during app
  * init; the returned policy (when non-null) is flushed through the
- * `zeroship.db.setMaskPolicy` native op so the Rust side cache + the
- * per-app storage layer pick it up.
+ * `__platform.setMaskPolicy` native op, which installs it in the Rust
+ * side's per-isolate cache. That boot-time flush is the ONLY way a
+ * policy reaches the runtime: there is no durable policy store on
+ * Postgres, and redeploying is the only way to change one.
  *
  * Returns `null` when no policy has been declared — the platform
  * then keeps PR 4's default-deny stub.

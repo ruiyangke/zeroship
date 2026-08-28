@@ -3985,10 +3985,10 @@ use zeroship_plugin_db::error::DbError;
 /// six tests and each other's roots. The isolate context is per-thread,
 /// so that race cannot happen here.
 ///
-/// The PG resolve path still calls `__zeroship_admin.get_column_key`
-/// first and falls back to this source when that fails -- which is now
-/// every time, since nothing installs the getter. This is the same arm
-/// the env var used to occupy.
+/// This IS the PG resolve path now, not a fallback behind one. The
+/// `__zeroship_admin.get_column_key` arm that used to run first was
+/// deleted on 2026-08-27; PG and SQLite both read the isolate's
+/// supplied roots. This is the same arm the env var used to occupy.
 ///
 /// The returned guard withdraws the keys on drop; keep it alive for the
 /// test body.
@@ -5978,6 +5978,127 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
     release_pg(admin_pool).await;
+}
+
+/// Regression fence for the PG mask-policy arm.
+///
+/// Until 2026-08-27 `dispatch_set_mask_policy` wrote through
+/// `__zeroship_admin.set_mask_policy` and `dispatch_unmask` re-read
+/// through `__zeroship_admin.get_mask_policy`. Neither routine had an
+/// installer, so on PG the write failed outright and every unmask on an
+/// app with no cached policy died with `schema "__zeroship_admin" does
+/// not exist` instead of default-denying. The durable PG store was
+/// deleted rather than rehomed: the policy the creator declares in
+/// source is installed straight into the per-isolate cache at boot, and
+/// that cache is the only reader.
+///
+/// This test FAILS BEFORE THAT CHANGE at the
+/// `dispatch_set_mask_policy` call, and it is the only live-PG coverage
+/// of the declared-policy authorization path -- the sibling
+/// `unmask_fetch_runs_under_per_app_role_via_rls` exercises the
+/// no-policy `auto` fallback, not a declared policy.
+#[compio::test]
+async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
+    use zeroship_plugin_db::crud::mask_policy;
+    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_pg_policy_cache";
+    let coll = "patients";
+
+    // Drops the schema and the cluster-scoped per-app role, then
+    // recreates the schema. `ensure_per_app_role` below creates the role
+    // the read path checks for -- without it the unmask SELECT refuses
+    // with `schema_not_provisioned` before authorization is ever reached.
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id TEXT PRIMARY KEY, ssn TEXT, ssn_masked TEXT)"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"{coll}\" (id, ssn, ssn_masked) \
+             VALUES ('u1', '123-45-6789', '***-**-6789')"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let schema = json!({
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        }
+    });
+    zeroship_plugin_db::set_postgres_pool_for_tests(pool.clone(), &url);
+    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+
+    // The boot-time install `installSchema` performs. Before the fix
+    // this issued `SELECT __zeroship_admin.set_mask_policy(...)` and
+    // failed here on every database.
+    mask_policy::dispatch_set_mask_policy(app, json!({ "support": ["spi"] }))
+        .await
+        .expect("setMaskPolicy must install the declared policy on PG");
+
+    // A role the declared policy grants reads through.
+    let granted = unmask::dispatch_unmask(
+        app,
+        UnmaskFieldArgs {
+            collection: coll.to_string(),
+            row_pk: "u1".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(json!({ "kind": "support" })),
+            reason: Some("declared policy grant".to_string()),
+        },
+    )
+    .await
+    .expect("the declared policy must authorize the role it lists");
+    assert_eq!(granted.plaintext, "123-45-6789");
+
+    // A role the policy does NOT list is refused. Without this arm the
+    // test would pass on an implementation that authorized everything,
+    // which is exactly the failure mode a cache-only policy could hide.
+    let err = unmask::dispatch_unmask(
+        app,
+        UnmaskFieldArgs {
+            collection: coll.to_string(),
+            row_pk: "u1".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(json!({ "kind": "intern" })),
+            reason: Some("declared policy deny".to_string()),
+        },
+    )
+    .await
+    .expect_err("a role absent from the declared policy must be refused");
+    match err {
+        zeroship_plugin_db::error::DbError::Coded { ref code, .. } => {
+            assert_eq!(code, "unmask_not_permitted", "got {err:?}");
+        }
+        other => panic!("expected unmask_not_permitted, got {other:?}"),
+    }
+
+    // Roles are CLUSTER-scoped, not database-scoped: leaving this one
+    // behind makes every later run of this test anywhere on the same
+    // server fail at `CREATE ROLE` with 42710, in a database that looks
+    // pristine. Drop the schema first so the role owns nothing.
+    let _ = pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+    release_pg(pool).await;
 }
 
 #[compio::test]

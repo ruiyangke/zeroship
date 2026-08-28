@@ -40,13 +40,12 @@ pub struct PostgresBackend {
     /// connection that survives across pool-return points).
     url: String,
     /// Per-backend column-key cache. Lazily resolves
-    /// `(app_id, key_id) → AeadKey` via the
-    /// `__zeroship_admin.get_column_key` getter; falls back to
-    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars when the getter returns
-    /// NULL or errors -- which is always, since nothing installs it
-    /// (see `crate::encryption::keys`). Single-threaded
-    /// (`RefCell` inside `KeyStore`) since every `PostgresBackend` is
-    /// owned by a single compio thread.
+    /// `(app_id, key_id) → AeadKey` from this isolate's in-process root
+    /// key source -- roots the host supplied, else
+    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars. No database round-trip is
+    /// involved and none is wanted (see `crate::encryption::keys`).
+    /// Single-threaded (`RefCell` inside `KeyStore`) since every
+    /// `PostgresBackend` is owned by a single compio thread.
     key_store: crate::encryption::KeyStore,
     /// Cached pgvector extension presence probe.
     ///
@@ -82,10 +81,10 @@ impl std::fmt::Debug for PostgresBackend {
 impl PostgresBackend {
     /// Build a backend handle around an already-initialised pool.
     ///
-    /// Column keys resolve through the admin table first, then through
-    /// whatever local source this isolate carries - the roots a host
-    /// installed, else `ZEROSHIP_COLUMN_KEY_<KEYID>`. A caller that wants
-    /// to pin the source regardless of the isolate goes through
+    /// Column keys resolve through whatever local source this isolate
+    /// carries - the roots a host installed, else
+    /// `ZEROSHIP_COLUMN_KEY_<KEYID>`. A caller that wants to pin the
+    /// source regardless of the isolate goes through
     /// [`Self::new_with_key_source`].
     ///
     /// Do not call this from inside a `context::with` / `with_mut`
@@ -93,15 +92,7 @@ impl PostgresBackend {
     /// `ThreadDbContext::set_pool` uses `new_with_key_source` for
     /// exactly that reason.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
-        // Wire the column-key store. We clone the `Rc<Pool>`
-        // into `KeySource::PgAdminTable` so the `KeyStore`'s
-        // `resolve(...)` method can attempt the `get_column_key` lookup
-        // without re-reaching into `PostgresBackend`. The pool clone is
-        // cheap (Rc inc), and the cache is invalidated naturally on
-        // backend drop. Nothing installs that getter any more, so the
-        // lookup always falls through to the local source - see
-        // `crate::encryption::keys`.
-        let key_source = crate::context::pg_key_source(pool.clone());
+        let key_source = crate::context::isolate_key_source();
         Self::new_with_key_source(pool, url, key_source)
     }
 
@@ -113,7 +104,7 @@ impl PostgresBackend {
     pub fn new_with_key_source(
         pool: Rc<compio_postgres::Pool>,
         url: String,
-        key_source: crate::encryption::KeySource,
+        key_source: crate::encryption::LocalKeySource,
     ) -> Self {
         Self {
             pool,
@@ -1138,24 +1129,25 @@ async fn create_index_with_recovery_audited(
 // ===========================================================================
 //
 // Both impls are unconditional on the PG arm:
-//   * `EncryptedColumn` -- PG key sourcing attempts
-//     `__zeroship_admin.get_column_key` and falls back to the local
-//     source. The getter has had no installer since the admin schema
-//     was deleted (2026-08-27), so the fallback always wins.
+//   * `EncryptedColumn` -- PG key sourcing is in-process only, the same
+//     `LocalKeySource` the SQLite arm uses. The database-backed variant
+//     was deleted on 2026-08-27 with the admin schema it read.
 //   * `Backup` -- the PITR placeholder writes to
-//     `__zeroship_admin.pitr_targets`, a table with no installer for
-//     the same reason, so `pitr_replay` now always errors. Snapshot /
-//     restore do not touch it. The impl is unconditional, but nothing
-//     outside this crate reaches it at all, so nothing observes the
-//     failure. Whether PITR gets a real home or is deleted is an open
-//     operator decision.
+//     `__zeroship_admin.pitr_targets`, a table with no installer since
+//     that same deletion, so `pitr_replay` always errors. Snapshot /
+//     restore do not touch it. The impl is `cfg(feature =
+//     "test-helpers")` and nothing outside this crate reaches it, so
+//     nothing observes the failure. Whether PITR gets a real home or is
+//     deleted is an open operator decision -- it was NOT covered by the
+//     2026-08-27 decisions that removed per-column keys and the durable
+//     mask-policy store, so it is the one admin-schema reference this
+//     crate still issues.
 
 // Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
 // agnostic on decrypt because the wire format carries the nonce). Key
-// resolution goes through `self.key_store`, which tries the
-// `get_column_key` lookup and falls back to local sourcing (in
-// practice: always the fallback, since nothing installs the getter).
+// resolution goes through `self.key_store`, which reads this isolate's
+// in-process root key source.
 impl crate::backend::EncryptedColumn for PostgresBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
