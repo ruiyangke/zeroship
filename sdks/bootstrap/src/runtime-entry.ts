@@ -63,7 +63,7 @@ declare const globalThis: {
   // procedure. Keeps the DDL off the module-eval critical path. (ISS-66)
   __zsSchemaReady?: Promise<unknown>;
   // **Migration-first cutover (P5 S3)** — the bundled RuntimeSchemaDescriptor
-  // v1 `{ version, collections }`, resolved from `manifest.runtime_descriptor`
+  // v2 `{ version, collections }`, resolved from `manifest.runtime_descriptor`
   // and injected by the runtime (`crates/runtime/src/core/init.rs::setup_globals`).
   // Present → the source of truth for schema install; absent → schema-less app.
   __zsRuntimeDescriptor?: Record<string, unknown>;
@@ -72,7 +72,8 @@ declare const globalThis: {
 
 // **Migration-first cutover (P5 S3)** — use only the bundled
 // RuntimeSchemaDescriptor the runtime injected as `globalThis.__zsRuntimeDescriptor`.
-// v1 carries per-collection fields/options/indexes.
+// v2 carries per-collection fields/options/indexes, each field additionally naming
+// the physical columns it occupies (`storage`) and its read-surface capabilities.
 const descriptor = globalThis.__zsRuntimeDescriptor;
 const hasDescriptor =
   descriptor != null &&
@@ -82,7 +83,7 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
   if (
     value != null &&
     typeof value === "object" &&
-    (value as { version?: unknown }).version === 1 &&
+    (value as { version?: unknown }).version === 2 &&
     (value as { collections?: unknown }).collections != null &&
     typeof (value as { collections?: unknown }).collections === "object" &&
     !Array.isArray((value as { collections?: unknown }).collections)
@@ -113,11 +114,11 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
     return out;
   }
   throw new Error(
-    "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v1 object with { version: 1, collections }",
+    "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
   );
 }
 // The object passed as installSchema's first arg is only the descriptor's field
-// map. If the descriptor is present but not v1-shaped, throw: corrupt
+// map. If the descriptor is present but not v2-shaped, throw: corrupt
 // descriptors must never degrade to schema-less boots.
 const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
 if (hasDescriptor && schema && typeof schema === "object") {

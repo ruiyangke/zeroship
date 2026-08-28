@@ -15,8 +15,11 @@
 //!
 //! Two projections are produced from ONE snapshot, in ONE pass ([`render_artifacts`]):
 //!
-//! - **`schema.runtime.json`** - the v1 `RuntimeSchemaDescriptor`:
-//!   `{ version: 1, collections: { [collection]: { fields, options, indexes }}}`.
+//! - **`schema.runtime.json`** - the v2 `RuntimeSchemaDescriptor`:
+//!   `{ version: 2, collections: { [collection]: { fields, options, indexes }}}`,
+//!   where each `FieldDef` additionally carries the physical `storage` mapping
+//!   (`valueColumn` / `rawColumn` / the raw column's capabilities / `auxiliary`) and
+//!   its own read-surface capability flags.
 //!   The `fields` map is snake_case columns, including exactly the fields injected
 //!   by the caller's effective policy, as the fold recovers them. The runtime
 //!   validates this shape.
@@ -51,7 +54,7 @@ use zeroship_migrate_backend::registry::VendorSet;
 use zeroship_migrate_ir::attribute::OpAttributes;
 
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroship_migrate_policy::EffectivePolicy;
 
@@ -61,6 +64,7 @@ use crate::model::ir::{
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
     IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
 };
+use zeroship_migrate_ir::backend::Capability;
 use zeroship_migrate_ir::dialect::DialectId;
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
@@ -119,16 +123,240 @@ pub(crate) struct RuntimeCollectionMetadata {
 }
 
 #[derive(Debug, Serialize)]
-struct RuntimeSchemaDescriptorV1 {
+struct RuntimeSchemaDescriptorV2 {
     version: u8,
-    collections: BTreeMap<String, RuntimeCollectionDescriptorV1>,
+    collections: BTreeMap<String, RuntimeCollectionDescriptorV2>,
 }
 
 #[derive(Debug, Serialize)]
-struct RuntimeCollectionDescriptorV1 {
+struct RuntimeCollectionDescriptorV2 {
     fields: Value,
     options: RuntimeOptionsDescriptor,
     indexes: Vec<RuntimeIndexDescriptor>,
+}
+
+/// **Where one declared field physically lives.**
+///
+/// A declared field is not always one column. A masked field occupies two: the value a
+/// default projection reads, and the authoritative value behind it. Every consumer that
+/// needs the second name derives it today by formatting `"{col}_masked"` - eight
+/// independent sites, enumerated in
+/// `docs/reviews/2026-08-27-descriptor-specification.md` section 1.4 - and a name
+/// derived at eight sites is eight chances to disagree with the ONE emitter that
+/// created the column. This type is that name, recorded.
+///
+/// **What these names are today.** The engine writes the MASKED value into the
+/// `<field>_masked` sibling and keeps the authoritative value in the field's own
+/// column, so [`Self::value_column`] is the sibling and [`Self::raw_column`] is the
+/// parent. Both come from [`crate::schema::query::mask_sibling_column_for_field`], the
+/// DDL emitter's own function, rather than being re-derived here - so the descriptor
+/// and the database cannot drift apart, whatever that function decides to spell. If the
+/// platform later flips which column holds the mask, this projection follows without a
+/// consumer edit, which is the whole point of recording it.
+///
+/// **The AEAD binds the column the ciphertext physically occupies** - [`Self::raw_column`]
+/// when present, otherwise the field's own column. That rule is total and one line, and
+/// it is what the consumer side must use in place of the string formatting it does now.
+/// There is deliberately **no separate `aadColumn`**: such a field earns its place only
+/// if the AAD must stay bound to a name the data no longer lives under, and pre-launch
+/// there is no ciphertext for which that is true.
+///
+/// The corollary is a constraint this type cannot solve and does not try to: **moving an
+/// encrypted value to another column is a re-encrypt, not a rename.** `canonical_aad`
+/// length-prefixes the column name into the AEAD tag, so an
+/// `ALTER TABLE ... RENAME COLUMN` leaves every stored cell authenticated under the old
+/// name and the table fails tag verification on every row. Pre-launch that costs nothing
+/// because no ciphertext exists. It cannot be made free later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldStorage {
+    /// The column a default projection reads under the field's logical name.
+    ///
+    /// Always present, on every field. A consumer that must never format a column name
+    /// needs a total function; an absent value here would put the `format!` straight
+    /// back.
+    pub value_column: String,
+    /// The column holding the authoritative value - plaintext for a mask-only field,
+    /// ciphertext for an encrypted one - when that is a DIFFERENT physical object from
+    /// [`Self::value_column`].
+    ///
+    /// Absent for an ordinary field, and absent for an encrypted field that opted out of
+    /// masking with `kind: "none"`: both occupy exactly one column, and the authoritative
+    /// value is in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_column: Option<String>,
+    /// May a creator-facing filter reach [`Self::raw_column`]?
+    ///
+    /// Emitted only alongside a `raw_column`, because a capability flag about a column
+    /// that does not exist is not state. Declared rather than inferred: nothing may read
+    /// this off the name, and in particular nothing may read it off a suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_filterable: Option<bool>,
+    /// May a creator-facing `orderBy` reach [`Self::raw_column`]? See
+    /// [`Self::raw_filterable`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_sortable: Option<bool>,
+    /// May a creator-facing projection return [`Self::raw_column`]? See
+    /// [`Self::raw_filterable`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_projectable: Option<bool>,
+    /// Physical objects this field owns beyond its columns.
+    ///
+    /// Omitted entirely when empty rather than emitted as `[]`: the artifact is
+    /// byte-diffed by the drift gate, and an empty array on every field of every
+    /// collection is noise the diff has to carry forever.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary: Vec<AuxiliaryObject>,
+}
+
+/// A physical database object a single field owns beyond its own columns.
+///
+/// Tagged by `kind` so the vocabulary can grow without any consumer having to guess
+/// from a name's shape which sort of object it is looking at - the failure mode this
+/// whole type exists to remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AuxiliaryObject {
+    /// A one-to-one SHADOW relation the field is searched through, joined to the base
+    /// table on a key and kept in step by triggers.
+    ///
+    /// A vector column needs one on any target that cannot index it natively. Which
+    /// module the shadow relation is built from is the backend's business; what the
+    /// data plane needs from the descriptor is the NAME it joins by and the trigger
+    /// names, both of which it currently derives by string formatting.
+    ///
+    /// **This records a NAME, not a creation.** The engine emits no DDL for it - the
+    /// data plane's own `ensure_vector_index` does, and that is
+    /// `#[cfg(any(test, feature = "test-helpers"))]`-gated today. The name is
+    /// nevertheless load-bearing on an ungated path, because the vector SEARCH builder
+    /// joins by it. So the descriptor is the right authority for what the object is
+    /// CALLED and the wrong authority for whether it EXISTS.
+    #[serde(rename_all = "camelCase")]
+    ShadowTable {
+        /// The shadow relation's name.
+        name: String,
+        /// The column both relations are joined on.
+        join_on: String,
+        /// The after-insert, after-delete and after-update trigger names, in that order.
+        triggers: Vec<String>,
+    },
+}
+
+/// The physical objects `field` owns beyond its own columns, on this target.
+///
+/// The target is asked a CAPABILITY question, never named. A vector column is searched
+/// through a shadow relation exactly when the target cannot express an index method
+/// other than B-tree, because that is what makes a native vector index impossible;
+/// a target that declares [`Capability::NonBtreeIndexMethod`] indexes the column in
+/// place and owns no extra object. Core resolving a backend by product name here would
+/// bake one backend's answer into the vocabulary every backend shares - the rule
+/// `tests/dialect_matrix/core_names_no_vendor_at_all.rs` exists to hold, and which the
+/// first draft of this function broke with a `dialect.as_str() != "sqlite"` compare.
+fn auxiliary_objects(
+    vendors: VendorSet,
+    collection: &str,
+    field: &str,
+    def: &Value,
+    dialect: &DialectId,
+) -> Vec<AuxiliaryObject> {
+    if def.get("type").and_then(Value::as_str) != Some("vector") {
+        return Vec::new();
+    }
+    let native_vector_index = crate::render::backends::vendor(vendors, dialect)
+        .descriptor
+        .capabilities
+        .contains(Capability::NonBtreeIndexMethod);
+    if native_vector_index {
+        return Vec::new();
+    }
+    let name = format!("{collection}__vec_{field}");
+    let triggers = ["ai", "ad", "au"]
+        .iter()
+        .map(|suffix| format!("{name}_{suffix}"))
+        .collect();
+    vec![AuxiliaryObject::ShadowTable {
+        name,
+        join_on: "rowid".to_string(),
+        triggers,
+    }]
+}
+
+/// Where `field` physically lives, read from the DDL emitter rather than re-derived.
+fn field_storage(
+    vendors: VendorSet,
+    collection: &str,
+    field: &str,
+    def: &Value,
+    dialect: &DialectId,
+) -> FieldStorage {
+    let auxiliary = auxiliary_objects(vendors, collection, field, def, dialect);
+    // The ONE call that decides whether this field has a second column, and what it is
+    // called. Everything else here is bookkeeping around its answer.
+    match crate::schema::query::mask_sibling_column_for_field(field, def) {
+        Some(sibling) => FieldStorage {
+            value_column: sibling,
+            raw_column: Some(field.to_string()),
+            // The authoritative column is not part of the creator-facing read surface.
+            // This is a DECLARATION, not a reading of what the data plane does today:
+            // `build_where` receives no schema at all, so a filter currently reaches the
+            // raw column and an `orderBy` currently orders by it (specification section
+            // 4.3). Recording the flags is what lets a consumer close that.
+            raw_filterable: Some(false),
+            raw_sortable: Some(false),
+            raw_projectable: Some(false),
+            auxiliary,
+        },
+        None => FieldStorage {
+            value_column: field.to_string(),
+            raw_column: None,
+            raw_filterable: None,
+            raw_sortable: None,
+            raw_projectable: None,
+            auxiliary,
+        },
+    }
+}
+
+/// Stamp the physical-storage block and the read-surface capabilities onto every field
+/// def of one collection.
+///
+/// Deliberately applied HERE, over the already-flattened `FieldDef` map, and not inside
+/// `descriptor_to_sdk_schema`: that function also feeds the rename-rebuild path's
+/// `live.sdk_schemas`, which the CREATE emitter renders columns from. Widening its
+/// output would put descriptor bookkeeping into a DDL input for no gain.
+fn stamp_physical_storage(
+    vendors: VendorSet,
+    collection: &str,
+    fields: &Value,
+    dialect: &DialectId,
+) -> Value {
+    let Some(obj) = fields.as_object() else {
+        return fields.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (field, def) in obj {
+        let Value::Object(def_obj) = def else {
+            out.insert(field.clone(), def.clone());
+            continue;
+        };
+        let mut def_obj = def_obj.clone();
+        // The read surface of the LOGICAL field, so a consumer stops inferring it from
+        // one membership test. Every declared field is fully capable today, which is
+        // exactly what `validate_read_identifier` already concludes - the value is not
+        // the point. Narrowing one later becomes a change here rather than in Rust
+        // spread across the query builders.
+        def_obj.insert("readable".to_string(), Value::Bool(true));
+        def_obj.insert("filterable".to_string(), Value::Bool(true));
+        def_obj.insert("sortable".to_string(), Value::Bool(true));
+        def_obj.insert("projectable".to_string(), Value::Bool(true));
+        def_obj.insert(
+            "storage".to_string(),
+            serde_json::to_value(field_storage(vendors, collection, field, def, dialect))
+                .expect("FieldStorage serializes"),
+        );
+        out.insert(field.clone(), Value::Object(def_obj));
+    }
+    Value::Object(out)
 }
 
 #[derive(Debug, Serialize)]
@@ -211,14 +439,28 @@ pub(crate) fn derived_unique_index_name(vendors: VendorSet, table: &str, field: 
     crate::plan::author::cap_ident_name(vendors, &format!("{table}_{field}_key"))
 }
 
-/// Render the v1 runtime descriptor from an ALREADY-FOLDED `FieldDef` map.
+/// Render the v2 runtime descriptor from an ALREADY-FOLDED `FieldDef` map.
 ///
 /// Takes the map rather than the op stream: the map is
 /// `FoldedSchema::project_field_defs`, read off the same fold the other two projections
 /// come from, so this function no longer folds anything and cannot fail.
-fn render_runtime_descriptor_v1(
+///
+/// **v2 over v1 because the guarantee changed, not because the shape grew.** Every field
+/// of a v2 descriptor carries a [`FieldStorage`] block, and a consumer that stops
+/// formatting physical column names depends on that being true of every field it is
+/// handed. A committed v1 artifact does not carry one; the version is what lets a reader
+/// refuse it outright instead of serving a descriptor with the facts silently missing.
+///
+/// `dialect` is threaded in because storage is not target-neutral: a vector column owns
+/// a shadow relation on a target that cannot index it natively, and nothing on one that
+/// can. The artifact was already per-target - the fold selects `Op::Dialectal` legs - so
+/// this adds no new asymmetry. `vendors` rides alongside because the target is asked a
+/// capability rather than named; see [`auxiliary_objects`].
+fn render_runtime_descriptor_v2(
+    vendors: VendorSet,
     defs: &BTreeMap<String, Value>,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
+    dialect: &DialectId,
 ) -> Value {
     let mut metadata = metadata.clone();
     let collections = defs
@@ -227,19 +469,19 @@ fn render_runtime_descriptor_v1(
             let meta = metadata.remove(name).unwrap_or_default();
             (
                 name.clone(),
-                RuntimeCollectionDescriptorV1 {
-                    fields: fields.clone(),
+                RuntimeCollectionDescriptorV2 {
+                    fields: stamp_physical_storage(vendors, name, fields, dialect),
                     options: (&meta.options).into(),
                     indexes: meta.indexes,
                 },
             )
         })
         .collect();
-    serde_json::to_value(RuntimeSchemaDescriptorV1 {
-        version: 1,
+    serde_json::to_value(RuntimeSchemaDescriptorV2 {
+        version: 2,
         collections,
     })
-    .expect("runtime descriptor v1 serializes")
+    .expect("runtime descriptor v2 serializes")
 }
 
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
@@ -364,9 +606,10 @@ pub fn render_schema_export(
     let collections = folded.project_collection_descriptors(vendors);
     let field_defs = crate::render::fold::single_fold::field_defs_from_collections(&collections);
 
-    // (a) RuntimeSchemaDescriptor v1 - fields plus runtime-visible collection
-    // options and plain indexes.
-    let runtime_value = render_runtime_descriptor_v1(&field_defs, &metadata);
+    // (a) RuntimeSchemaDescriptor v2 - fields plus their physical storage mapping and
+    // read-surface capabilities, plus runtime-visible collection options and plain
+    // indexes.
+    let runtime_value = render_runtime_descriptor_v2(vendors, &field_defs, &metadata, dialect);
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
@@ -451,7 +694,7 @@ pub fn render_schema_export_from_descriptors(
 /// under: both are reads of one traversal, and the "two artifacts under different
 /// dialects" hole this type's doc used to warn about cannot reopen.
 ///
-/// The neighbouring hole is still OPEN and is not this move's: `render_runtime_descriptor_v1`
+/// The neighbouring hole is still OPEN and is not this move's: `render_runtime_descriptor_v2`
 /// takes the runtime-metadata map as given and falls back to `unwrap_or_default()`
 /// for a collection it lacks, so a table created only inside an `Op::Dialectal` leg
 /// emits its FIELDS but loses its runtime options and plain indexes.
@@ -1951,11 +2194,13 @@ mod tests {
             &effective,
         )
         .expect("confined descriptor ops fold");
-        let value = render_runtime_descriptor_v1(
+        let value = render_runtime_descriptor_v2(
+            crate::test_fixtures::VENDORS,
             &folded.project_field_defs(crate::test_fixtures::VENDORS),
             &folded.project_runtime_metadata(crate::test_fixtures::VENDORS),
+            &POSTGRES,
         );
-        assert_eq!(value["version"], 1);
+        assert_eq!(value["version"], 2);
         let fields = &value["collections"]["hits"]["fields"];
         let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "hits")
             .expect("active injection resolves");
@@ -2141,3 +2386,8 @@ mod differential_corpus;
 
 #[cfg(test)]
 mod fold_projection_equality;
+
+// The physical-storage projection arms. In-crate rather than in tests/ because they
+// read `render_runtime_descriptor_v2` and the crate-private storage types beside it.
+#[cfg(test)]
+mod physical_storage;

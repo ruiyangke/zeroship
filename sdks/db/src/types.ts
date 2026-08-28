@@ -819,6 +819,61 @@ export type Id<T extends string> = string & {
   readonly __zeroshipTable: T;
 };
 
+/**
+ * A physical database object a single field owns beyond its own columns.
+ *
+ * Tagged by `kind` so a consumer never has to guess from a name's shape which sort of
+ * object it is looking at - the failure mode `FieldStorage` exists to remove.
+ */
+export type AuxiliaryObject = {
+  kind: "sqliteVec0Table";
+  /** The `vec0` virtual table's name. */
+  name: string;
+  /** The column the base table and the virtual table are joined on. */
+  joinOn: string;
+  /** The after-insert, after-delete and after-update trigger names, in that order. */
+  triggers: string[];
+};
+
+/**
+ * **Where one declared field physically lives** (runtime descriptor v2).
+ *
+ * A declared field is not always one column. A masked field occupies two: the value a
+ * default projection reads, and the authoritative value behind it. Recording both is
+ * what lets a consumer stop deriving the second name by formatting `\`${col}_masked\``.
+ *
+ * **The AEAD binds the column the ciphertext physically occupies** - `rawColumn` when
+ * present, otherwise the field's own column. That rule is total; there is deliberately
+ * no separate `aadColumn`. The corollary is a constraint no field here can solve:
+ * moving an encrypted value to another column is a re-encrypt, not a rename, because
+ * the column name is length-prefixed into the AEAD tag.
+ *
+ * Emitted by the migration fold, which is the only producer that knows physical
+ * layout. It is absent on a `FieldDef` built by the `t.*()` authoring builders, which
+ * describe a field's TYPE and know nothing about where it lands.
+ */
+export interface FieldStorage {
+  /** The column a default projection reads under the field's logical name. */
+  valueColumn: string;
+  /**
+   * The column holding the authoritative value - plaintext for a mask-only field,
+   * ciphertext for an encrypted one - when that is a different physical object from
+   * `valueColumn`. Absent when the field occupies exactly one column.
+   */
+  rawColumn?: string;
+  /**
+   * May a creator-facing filter reach `rawColumn`? Present only alongside one.
+   * Declared, never inferred - and in particular never inferred from a name suffix.
+   */
+  rawFilterable?: boolean;
+  /** May a creator-facing `orderBy` reach `rawColumn`? See `rawFilterable`. */
+  rawSortable?: boolean;
+  /** May a creator-facing projection return `rawColumn`? See `rawFilterable`. */
+  rawProjectable?: boolean;
+  /** Physical objects this field owns beyond its columns. Omitted when there are none. */
+  auxiliary?: AuxiliaryObject[];
+}
+
 /** Internal representation of a fully-specified field definition used by validate and collection. */
 export interface FieldDef {
   type: TypeName;
@@ -996,6 +1051,25 @@ export interface FieldDef {
    * the discriminator stays well-formed at register-model.
    */
   timestampAuto?: "now" | "now_on_update";
+  /**
+   * **Where this field physically lives** (runtime descriptor v2). See
+   * [`FieldStorage`].
+   *
+   * Optional because `FieldDef` has two producers and only one of them knows the
+   * answer: the migration fold emits it on every field of every collection, and the
+   * `t.*()` authoring builders - which describe a field's type, not its storage - do
+   * not. A consumer reading a v2 descriptor may rely on it being present; a consumer
+   * reading a builder-authored `FieldDef` may not.
+   */
+  storage?: FieldStorage;
+  /** Is this field readable through the creator-facing surface at all? */
+  readable?: boolean;
+  /** May a creator-facing filter name this field? */
+  filterable?: boolean;
+  /** May a creator-facing `orderBy` name this field? */
+  sortable?: boolean;
+  /** May a creator-facing projection return this field? */
+  projectable?: boolean;
 }
 
 const TYPE_BUILDER_BRAND = Symbol.for("@zeroship/db/TypeBuilder");
