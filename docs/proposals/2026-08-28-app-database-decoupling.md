@@ -501,6 +501,26 @@ directly, two arms differing only in the grant's inherit option:
 `SET ROLE` continues to work in every arm, so narrowing is unaffected. The
 option is therefore not a 16-only detail that a later major withdraws.
 
+**The two role failures are distinguishable by SQLSTATE alone.** Measured on
+16.14 from a real non-superuser session - the distinction is invisible to a
+superuser, because `SET ROLE` permission is checked against `session_user`, so
+a probe connected as `postgres` sees the second case succeed:
+
+| condition | SQLSTATE |
+| --- | --- |
+| role does not exist | `22023` `invalid_parameter_value` |
+| role exists, session is not a member | `42501` `insufficient_privilege` |
+
+So `SCHEMA_NOT_PROVISIONED` and `GRANT_REVOKED` split on the code, with no
+message sniffing. The existing classifier already matches on `SqlState`
+(`crates/zeroship-plugin-db/src/error.rs:230-243` pins `22023` **plus** the
+exact role name, because `22023` is the generic bad-GUC code shared with
+`SET statement_timeout = 'yes'`); `42501` needs no such qualifier, being
+specific to the membership check.
+
+*Still unverified: whether a multi-statement session-setup batch whose FIRST
+statement fails surfaces that error unreordered. The above is single-statement.*
+
 **This closes section 15's item 2 only, and nothing else.** Items 1 and 3
 through 8 remain measured on 18.4 alone - the revocation bound, the column-list
 grant, `BYPASSRLS` under `SET ROLE`, and the logical-decoding column filter have
