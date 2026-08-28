@@ -2,12 +2,16 @@
 #
 # zeroship platform image - builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship (CLI), and zeroship-platform-migrate (the platform DB migration
-#   one-shot - the compose `migrate` service runs it under the Platform trust
-#   profile). The migration path now runs on the published `zero-migrate` engine
-#   via the `zeroship-migrate-adapter` crate: it authors `db/migrations-ts/*.ts`
-#   in-process with zeroship-runtime's own V8 (no sandboxed recorder-child
-#   subprocess) and applies over the native compio-postgres `SqlSession` seam.
+#   zeroship (CLI), zeroship-migrated (the creator migration service).
+#
+# THE PLATFORM MIGRATION ONE-SHOT IS NO LONGER A RUST BINARY IN THIS IMAGE.
+# `zeroship-platform-migrate` was deleted on 2026-08-28; the platform schema is
+# applied by the general `zero-migrate` CLI, which is a NODE program. It cannot
+# ship in the `runtime` stage: that stage is ubuntu:24.04 plus six static
+# binaries and deliberately carries no Node, and adding Node there would put a
+# JavaScript runtime into the control, gateway, worker and auth containers, none
+# of which migrate anything. So the one-shot gets its OWN stage (`migrate`,
+# below) and the compose `migrate` service builds that target.
 #
 # NOTE: the sandbox/preview backend (zeroship-sandbox + agent + nomad-driver-ch)
 # now lives in the standalone `zeroship-sandbox` project and is built/shipped
@@ -25,10 +29,13 @@
 #      binaries below plus two the control crate carries and we do not ship
 #      (zeroship-mock-stripe, dev-provision) - see the `--bin` note at the
 #      cargo line for why they come along.
-#   3. final (ubuntu) ships SEVEN binaries: zeroship-control, zeroship-gate,
-#      zeroship-worker, zeroship-auth, zeroship, zeroship-platform-migrate,
-#      zeroship-migrated (the creator migration service).
+#   3. `runtime` (ubuntu) ships SIX binaries: zeroship-control, zeroship-gate,
+#      zeroship-worker, zeroship-auth, zeroship, zeroship-migrated.
 #      It ships NO console - see the apps/ note in stage 1.
+#   3b. `migrate` (node:22-bookworm-slim) carries the `zero-migrate` CLI, the
+#      napi addon the node stage already built, the migration corpus and the
+#      platform charter. It is the compose `migrate` one-shot's image and
+#      nothing else uses it.
 #
 # This header said "all seven binaries" until 2026-08-11, which was wrong in
 # both directions: the count was never seven, and the cargo line was building
@@ -111,18 +118,18 @@ COPY Cargo.toml Cargo.lock ./
 #
 # .cargo/config.toml sets `-Wl,--allow-multiple-definition` on linux, because
 # libpg_query and librdkafka each vendor a copy of xxhash and export XXH32 /
-# XXH_versionNumber with external linkage. `zeroship-platform-migrate` links
-# BOTH: pg_query arrives via zero-migrate (always), and rdkafka arrives via
-# zeroship-runtime -> zeroship-metering -> zeroship-stream, which the
-# platform-cli feature turns on for the V8 authoring front-end. Verified with
-# `cargo tree -i`, both edges.
+# XXH_versionNumber with external linkage. Any target linking BOTH needs the
+# flag: pg_query arrives via zero-migrate, rdkafka via zeroship-runtime ->
+# zeroship-metering -> zeroship-stream.
 #
-# MEASURED on the host, without this COPY:
+# THE TARGET THAT FIRST HIT THIS IS GONE AND THE FLAG IS STILL NEEDED. It was
+# `zeroship-platform-migrate`, deleted 2026-08-28. Do not read its absence as
+# "the collision belonged to that binary": both carriers are ordinary
+# dependencies of the servers this stage still builds. Dropping this COPY was
+# MEASURED on the host to fail the link:
 #   rust-lld: error: duplicate symbol: XXH_versionNumber
 #     >>> defined at rdxxhash.c  in librdkafka_sys-*.rlib
 #     >>> defined at xxhash.c    in libpg_query-*.rlib
-#   error: could not compile `zeroship-migrate-adapter`
-#         (bin "zeroship-platform-migrate")
 #
 # The collision was already diagnosed and resolved in-repo by acd5c2d72; the
 # image simply never carried the config that resolves it. So this is NOT a
@@ -178,18 +185,17 @@ COPY --from=sdks /build/sdks/ sdks/
 # dependency graph, because the platform-cli feature set differs and cargo
 # fingerprints them separately.
 #
-# `required-features` still keeps zeroship-platform-migrate honest: it is
-# declared `required-features = ["platform-cli"]`, so the --features flag
-# below is what makes it build at all, not --bin.
+# `-p zeroship-migrate-adapter --features .../platform-cli` used to trail this
+# list. Both went with the binary: the adapter is a library-only crate now, and
+# it still gets built because zeroship-migrated depends on it for
+# `CompioPgSession`.
 RUN cargo build --release \
     -p zeroship-control \
     -p zeroship-gateway \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
-    -p zeroship-migrated \
-    -p zeroship-migrate-adapter \
-    --features zeroship-migrate-adapter/platform-cli
+    -p zeroship-migrated
 
 # ---------------------------------------------------------------------------
 # Stage 3 - runtime image.
@@ -203,10 +209,6 @@ COPY --from=builder /build/target/release/zeroship-gate /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
-# The platform DB migration one-shot the compose `migrate` service invokes. It
-# authors `db/migrations-ts/*.ts` in-process via zeroship-runtime's V8 and applies
-# over the native compio-postgres seam - no recorder-child subprocess.
-COPY --from=builder /build/target/release/zeroship-platform-migrate /usr/local/bin/
 # The CREATOR migration service. Distinct from the platform one-shot above:
 # that one applies db/migrations-ts/*.ts (the platform's own schema) once at
 # boot; this is a long-running HTTP service that applies a DEPLOYED APP's
@@ -221,13 +223,68 @@ COPY --from=builder /build/target/release/zeroship-platform-migrate /usr/local/b
 # DSN this service needs on the CONTROL service - which has no code that reads
 # one; it is ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL and it belongs here.
 COPY --from=builder /build/target/release/zeroship-migrated /usr/local/bin/
-# The migration SOURCE the one-shot above reads, baked in rather than
-# bind-mounted. The compose `migrate` service used to mount
-# `../../db/migrations-ts` from a repo checkout, which meant a host running this
-# image also had to hold the source tree. Baking it makes the image the whole
-# deploy unit, and pins the migrations to the same commit as the binary that
-# applies them - a bind mount let the two drift.
+# The migration SOURCE, baked in rather than bind-mounted, so a host running this
+# image does not also have to hold the source tree and the migrations are pinned
+# to the same commit as the code.
 COPY db/migrations-ts /db/migrations-ts
+
+# ---------------------------------------------------------------------------
+# Stage 3b - the platform migration one-shot.
+#
+# WHY A SEPARATE IMAGE. The `zero-migrate` CLI is a Node program that loads a
+# native napi addon; the runtime stage is ubuntu:24.04 with six static binaries
+# and no Node. Installing Node into `runtime` would hand a JavaScript runtime to
+# control, gateway, worker and auth, none of which migrate anything, so the
+# one-shot gets its own image and the compose `migrate` service builds
+# `--target migrate`.
+#
+# WHY node:22-bookworm-slim AND NOT THE RUNTIME BASE. The addon is a native
+# `.node` compiled in the `sdks` stage, which is node:22-bookworm (glibc 2.36).
+# Staying on that base keeps the ABI the addon was built against rather than
+# relying on ubuntu 24.04's newer glibc to run it.
+#
+# WHAT IS COPIED, and why the whole store rather than a prune. pnpm links
+# workspace packages by symlink into `node_modules/.pnpm`, so the CLI, the addon,
+# `pg` and the authoring DSL are one connected store; copying the store plus the
+# package directories is the shape that actually resolves. A `pnpm deploy`-style
+# prune is smaller and is a SEPARATE change - it needs its own verification, and
+# an image that resolves is worth more than a smaller one that does not.
+#
+# NOT MEASURED: THIS STAGE HAS NOT BEEN BUILT. The workspace it copies is the one
+# proved on the host (35 of 35 migrations applied to a fresh PostgreSQL 17.11,
+# and an immediate re-run applied none), but that run used the host's
+# node_modules rather than this COPY set. The `--version` line below is what
+# turns a resolution mistake into a build failure instead of a deploy failure.
+# ---------------------------------------------------------------------------
+FROM node:22-bookworm-slim AS migrate
+WORKDIR /app
+COPY --from=sdks /build/node_modules /app/node_modules
+COPY --from=sdks /build/packages /app/packages
+COPY --from=sdks /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
+COPY --from=sdks /build/package.json /build/pnpm-workspace.yaml /app/
+# The corpus plus the two files that decide what a platform migration may do: the
+# Platform charter (the guard and executor posture) and the table-to-owner
+# registry, without which every op is refused as targeting a table owned by
+# nobody.
+COPY db/migrations-ts /db/migrations-ts
+COPY policies/platform.policy.toml /policies/platform.policy.toml
+COPY policies/platform-table-owners.json /policies/platform-table-owners.json
+# The entrypoint. It takes `--database-url-file PATH` - the same spelling the
+# retired Rust one-shot took and the same `migrate-dsn` mount `migrated` reads -
+# and turns it into the 0600 `zero-migrate.toml` the CLI reads with `--config`,
+# so the SUPERUSER DSN never reaches a compose `command:` and therefore never
+# reaches `docker inspect` or /proc/<pid>/cmdline.
+COPY deploy/ops/migrate-entrypoint.sh /usr/local/bin/zeroship-migrate-platform
+RUN chmod 0755 /usr/local/bin/zeroship-migrate-platform
+# Fail at BUILD time if the CLI is not resolvable, rather than at the first
+# deploy. `--version` loads the addon, so this also proves the native `.node`
+# came across and matches this base's glibc.
+RUN node /app/packages/zero-migrate-cli/dist/cli-bin.js --version
+# ENTRYPOINT, not CMD, so the compose `command:` supplies FLAGS to the wrapper
+# rather than replacing it. A CMD here would let a `docker compose run --rm
+# migrate <anything>` bypass the wrapper entirely and lose the DSN handling that
+# is its only reason to exist.
+ENTRYPOINT ["/usr/local/bin/zeroship-migrate-platform"]
 
 # ---------------------------------------------------------------------------
 # Stage 4 - frontend dev image: the runtime image (so it has the `zeroship`

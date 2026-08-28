@@ -138,6 +138,48 @@ function assertRegularFile(path: string, required: boolean): boolean {
 }
 
 /**
+ * Refuse a config file that carries a literal DSN and is readable by anyone but
+ * its owner.
+ *
+ * WHY THIS IS HERE AND NOT AT THE CALL SITE. A `url` in this file is credential
+ * material by grammar: a Postgres/MySQL DSN admits userinfo, so the type of the
+ * value cannot depend on whether one deployment's password happens to be empty.
+ * The file is therefore a secret file, and a secret file that group or other can
+ * read is a leaked secret however careful the program that writes it was.
+ *
+ * IT REFUSES RATHER THAN WARNS, and that is the whole point. A warning on a
+ * deploy path is read by nobody and the credential stays exposed.
+ *
+ * SCOPE, stated because a blanket rule here would break every ordinary project.
+ * Only a file whose selected environment supplies a LITERAL `url` is checked. A
+ * config that omits `url`, or writes `url = "env:DATABASE_URL"`, carries no
+ * credential and is left alone - which is also the shape this package's own docs
+ * recommend.
+ *
+ * Ported from the zeroship platform one-shot this CLI replaced: its DSN reader
+ * (`crates/core/src/config/secrets.rs`, `enforce_owner_only`) rejected any file
+ * with a bit set in 0o077, and dropping that on the way across would have been a
+ * silent security regression. The mode and the fix are both named, for the same
+ * reason that reader named them: a refusal an operator cannot act on gets worked
+ * around rather than fixed.
+ */
+function enforceOwnerOnly(path: string): void {
+  let mode: number;
+  try {
+    mode = statSync(path).mode;
+  } catch (error) {
+    throw new ZeroMigrateConfigError(`read config file ${path}: ${(error as Error).message}`);
+  }
+  if ((mode & 0o077) !== 0) {
+    throw new ZeroMigrateConfigError(
+      `config file ${path} supplies a literal database url and has mode ` +
+        `${(mode & 0o7777).toString(8).padStart(4, "0")}; group and other permissions ` +
+        `must be zero (chmod 600 '${path}')`,
+    );
+  }
+}
+
+/**
  * Discover, parse, and select a config environment. Returns `undefined` when no
  * config exists and no explicit config/environment selector was supplied.
  */
@@ -183,6 +225,12 @@ export function loadZeroMigrateConfig(
   const raw = environments.get(selected);
   if (raw === undefined) {
     throw configError(path, `environment ${JSON.stringify(selected)} is not defined`);
+  }
+
+  // A literal `url` makes this file a secret file. `env:` references and an
+  // absent url do not, so they are deliberately not checked.
+  if (typeof raw.url === "string" && !raw.url.startsWith("env:")) {
+    enforceOwnerOnly(path);
   }
 
   const base = dirname(path);

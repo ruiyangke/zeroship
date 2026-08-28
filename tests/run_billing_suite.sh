@@ -354,12 +354,12 @@ echo "==> zeroship-migrate-adapter live-PG targets"
 # target in the crate, so a target added there is covered here the moment it is
 # added.
 if run_group env PG_TEST_URL="$DSN" \
-     cargo test -p zeroship-migrate-adapter --features platform-cli --no-fail-fast \
+     cargo test -p zeroship-migrate-adapter --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
-  failed+=("zeroship-migrate-adapter::platform-cli")
+  failed+=("zeroship-migrate-adapter")
 fi
 
 echo "------------------------------------------------------------------"

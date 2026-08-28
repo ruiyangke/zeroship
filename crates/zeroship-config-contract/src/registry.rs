@@ -16,31 +16,38 @@
 //! forgetting this file fails there rather than silently shrinking every count
 //! in this tool.
 //!
-//! Cargo metadata classifies SEVEN targets `platform`: six servers plus the
-//! `zeroship-platform-migrate` one-shot. All seven declare, so `real_registry.rs`
-//! compares the two sets for exact equality with no named exception. It carried
-//! one until the one-shot was converted: its parser was hand-rolled, so it
-//! contributed no `ConfigSpec` and no `ReadSite`, and every count in this tool
-//! was one binary short while reporting green.
+//! Cargo metadata classifies SIX targets `platform`, and all six declare, so
+//! `real_registry.rs` compares the two sets for exact equality with no named
+//! exception.
 //!
-//! The one-shot's declaration lives in `zeroship-migrate-adapter`'s LIBRARY and
-//! outside its `platform-cli` feature, which is what lets this tool link the
-//! configuration without linking V8.
+//! IT WAS SEVEN UNTIL 2026-08-28. The seventh was `zeroship-platform-migrate`, the
+//! platform-schema migrate one-shot, whose declaration lived in
+//! `zeroship-migrate-adapter`'s library so this tool could link its configuration
+//! without linking V8. The binary is deleted - the platform schema is migrated by
+//! the general `zero-migrate` CLI now - so it is absent from BOTH sides of that
+//! comparison rather than exempted from one. The count shrinking is therefore not
+//! the silent-shrink failure this module warns about above: cargo metadata no
+//! longer classifies the target either, because the `[[bin]]` and its
+//! `[[package.metadata.zeroship-config.targets]]` block went with it.
+//!
+//! The CLI is a Node program and declares nothing here. What it reads is a 0600
+//! TOML config file its callers write per run (tests/lib/runtime_secrets.sh,
+//! deploy/ops/db-migrate.sh); that is outside the `#[zeroship_config]` contract by
+//! construction, and is named here so the gap is recorded rather than assumed.
 
 use zeroship_core::config::{ConfigSpec, GeneratedConfig, ReadSite, CONFIG_READ_SITES};
 
 /// Every binary whose generated registry is linked into this tool.
-pub const DECLARING_BINARIES: [&str; 7] = [
+pub const DECLARING_BINARIES: [&str; 6] = [
     "zeroship-auth",
     "zeroship-control",
     "zeroship-gate",
     "zeroship-migrated",
-    "zeroship-platform-migrate",
     "zeroship-worker",
     "zeroship-workflow-scheduler",
 ];
 
-/// Every declaration the seven platform binaries compile.
+/// Every declaration the six platform binaries compile.
 #[must_use]
 pub fn platform_specs() -> Vec<ConfigSpec> {
     let mut specs = Vec::new();
@@ -48,7 +55,6 @@ pub fn platform_specs() -> Vec<ConfigSpec> {
     specs.extend_from_slice(zeroship_control::config::ControlSettings::SPECS);
     specs.extend_from_slice(zeroship_gateway::config::GateSettings::SPECS);
     specs.extend_from_slice(zeroship_migrated::config::MigratedSettings::SPECS);
-    specs.extend_from_slice(zeroship_migrate_adapter::config::PlatformMigrateSettings::SPECS);
     specs.extend_from_slice(zeroship_worker::config::WorkerSettings::SPECS);
     specs.extend_from_slice(zeroship_workflow_scheduler::config::SchedulerSettings::SPECS);
     specs

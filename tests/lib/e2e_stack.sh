@@ -131,9 +131,10 @@ _stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{t
 # --- preflight: required binaries + tooling ---------------------------------
 stack_preflight() {
   local b
-  for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
-    [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; return 2; }
+  for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+    [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b - run cargo build --release"; return 2; }
   done
+  [ -f "$E2E_ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { _stk_bad "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; return 2; }
   [ -f "$E2E_JOSE_JS" ] || { _stk_bad "missing jose at $E2E_JOSE_JS"; return 2; }
   command -v docker  >/dev/null || { _stk_bad "docker required"; return 2; }
   command -v openssl >/dev/null || { _stk_bad "openssl required"; return 2; }
@@ -250,7 +251,7 @@ stack_pg_up() {
   fi
 
   local mig_log="$WORK/migrate.log"
-  if zs_platform_migrate "$E2E_BIN/zeroship-platform-migrate" "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+  if zs_platform_migrate "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
       --migrations-dir "$E2E_ROOT/db/migrations-ts" \
       --project-schema zeroship --project-id zeroship > "$mig_log" 2>&1; then
     _stk_ok "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"

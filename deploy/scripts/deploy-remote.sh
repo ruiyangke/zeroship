@@ -958,6 +958,31 @@ Refusing rather than treating every generated secret as operator-supplied."
   #
   # And before the --dry-run exit below, because it costs two read-only SELECTs
   # and telling an operator what would go wrong is the whole point of a dry run.
+  # THIS READS A TABLE NOTHING WRITES ANY MORE. Read before trusting it.
+  #
+  # `zeroship_migrations.platform_migration_files` was created and appended to by
+  # the `zeroship-platform-migrate` binary, deleted 2026-08-28. The `zero-migrate`
+  # CLI that replaced it keeps a DIFFERENT journal (`schema_migrations`, keyed by
+  # a migration version, checksummed over the RENDERED SQL rather than over the
+  # file bytes) and never touches this table.
+  #
+  # On a database the old binary migrated the table still EXISTS and still holds
+  # its last rows, frozen. Its checksums are over the pre-schema() corpus, and
+  # that corpus was rewritten wholesale: MEASURED 2026-08-28 by hashing
+  # db/migrations-ts against db/released_migrations.tsv, 34 of 34 files differ.
+  # Enforcing the byte comparison would fail the next roll with 34 false "edited
+  # after this host applied them" reports, so it is REPORTED, not enforced.
+  #
+  # ONE-TIME OPERATOR STEP, DELIBERATELY NOT AUTOMATED. A database the old binary
+  # migrated holds no version the new corpus produces, so every migration reads
+  # as pending. The operator adopts it once, by hand:
+  #
+  #   docker compose run --rm migrate --verb baseline --supersede-unmatched \
+  #       --database-url-file /etc/zeroship/secrets/migrate-dsn
+  #
+  # A deploy that adopted silently could not tell that from a database which is
+  # not what the corpus produces, and refusing the second is the whole value of
+  # the guard (crates/zeroship-migrate-node/src/verbs.rs).
   say "checking no migration this database already applied was edited"
   fetch_platform_journal "$JOURNAL_FILE"
   case "$JOURNAL_STATE" in
@@ -965,16 +990,25 @@ Refusing rather than treating every generated secret as operator-supplied."
       echo "ok  no migration journal on $HOST yet; nothing is frozen"
       ;;
     present)
+      # REPORTED, NOT ENFORCED - see the note above this `say`.
       LEDGER_DRIFT="$(released_ledger_drift "$JOURNAL_FILE" db/migrations-ts)"
-      [ -z "$LEDGER_DRIFT" ] || fail "these migration files were edited after $HOST applied them:
-$LEDGER_DRIFT
-  NOTHING WAS RESTARTED. The runner hashes each file's source bytes and refuses
-  every later run against this database on mismatch, permanently -- there is no
-  self-healing arm and adding one would defeat the guard. Restore the released
-  bytes (git show <the commit before the edit>) and re-land the change as a NEW
-  migration file. \`git log -p -- db/migrations-ts/<file>\` finds the edit."
-      echo "ok  all $(wc -l < "$JOURNAL_FILE") applied migrations still have their released bytes"
+      if [ -n "$LEDGER_DRIFT" ]; then
+        printf 'note  %s file(s) differ from the frozen legacy journal on %s.\n' \
+          "$(printf '%s\n' "$LEDGER_DRIFT" | wc -l | tr -d ' ')" "$HOST" >&2
+        printf '      Expected: that journal predates the schema() corpus rewrite and\n' >&2
+        printf '      nothing writes it now. NOT a refusal - see the note above.\n' >&2
+      else
+        echo "ok  every file the frozen legacy journal names still has its recorded bytes"
+      fi
 
+      # STILL ENFORCED, AND IT MATTERS MORE THAN IT DID. A file inserted
+      # mid-corpus lands, on a host that already applied everything sorting after
+      # it, AFTER those files - while on a fresh database it lands in position.
+      # The retired runner derived versions from the file ORDINAL and aborted on
+      # the collision. The CLI derives them from the migration NAME
+      # (crates/zeroship-migrate-core/src/render/lower.rs:8806-8811), so the
+      # insert now applies with NO error at all. This is the only thing left that
+      # sees it.
       LEDGER_ORDER="$(released_ledger_misordered "$JOURNAL_FILE" db/migrations-ts)"
       [ -z "$LEDGER_ORDER" ] || fail "these migrations sort before one $HOST has already applied:
 $LEDGER_ORDER
@@ -996,6 +1030,7 @@ $LEDGER_ORDER
 
   # ------------------------------------------------------------------- build
   if [ "$SKIP_BUILD" = 0 ]; then
+    MIGRATE_IMAGE="$IMAGE-migrate"
     say "building $IMAGE"
     # --target runtime: the builder stage carries the whole source tree and must
     # never be what we push.
@@ -1003,8 +1038,21 @@ $LEDGER_ORDER
       || fail "image build failed"
     echo "ok  built"
 
-    say "pushing $IMAGE"
+    # THE SECOND IMAGE, and it is not optional. The platform migration one-shot
+    # stopped being a Rust binary in the runtime image on 2026-08-28 and became
+    # the `zero-migrate` CLI, a Node program with a native addon. It cannot live
+    # in `runtime` without putting Node into control, gateway, worker and auth,
+    # none of which migrate anything, so the Dockerfile has a `migrate` target.
+    # A roll that pushes only $IMAGE leaves the host pulling a migrate image that
+    # does not exist for this SHA.
+    say "building $MIGRATE_IMAGE"
+    docker build --target migrate -t "$MIGRATE_IMAGE" -f deploy/Dockerfile . \
+      || fail "migrate image build failed"
+    echo "ok  built"
+
+    say "pushing $IMAGE and $MIGRATE_IMAGE"
     docker push "$IMAGE" || fail "push failed (is docker logged in to the registry?)"
+    docker push "$MIGRATE_IMAGE" || fail "migrate image push failed"
     echo "ok  pushed"
   else
     docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "--skip-build but $IMAGE is not present locally"
@@ -1222,6 +1270,13 @@ $MOUNT_BAD
   cd '$REMOTE_DIR/compose'
   sed -i 's|^ZEROSHIP_IMAGE=.*|ZEROSHIP_IMAGE=$IMAGE|' .env
   grep -q '^ZEROSHIP_IMAGE=$IMAGE\$' .env || { echo 'ZEROSHIP_IMAGE was not updated'; exit 1; }
+  # The migrate one-shot image, added 2026-08-28. APPENDED when absent rather
+  # than assumed present: this lands on hosts whose .env predates the split, and
+  # a sed that matches nothing would silently leave the stack on the old value.
+  grep -q '^ZEROSHIP_MIGRATE_IMAGE=' .env \
+    && sed -i 's|^ZEROSHIP_MIGRATE_IMAGE=.*|ZEROSHIP_MIGRATE_IMAGE=$MIGRATE_IMAGE|' .env \
+    || echo 'ZEROSHIP_MIGRATE_IMAGE=$MIGRATE_IMAGE' >> .env
+  grep -q 'ZEROSHIP_MIGRATE_IMAGE=$MIGRATE_IMAGE' .env || { echo 'ZEROSHIP_MIGRATE_IMAGE was not updated'; exit 1; }
   docker compose up -d --remove-orphans"; then
     # WHY THIS BLOCK EXISTS. `docker compose up` reports a failed one-shot as
     # `service "migrate" didn't complete successfully: exit 2` and NOTHING ELSE

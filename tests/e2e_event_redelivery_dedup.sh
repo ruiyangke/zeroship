@@ -52,7 +52,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "    Start docker and re-run." >&2
   exit 1
 fi
-for b in zeroship-control zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
+for b in zeroship-control; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 
 ZEROSHIP_CONTROL_PORT=9175; PG_PORT=5475; RP_PORT=19175
@@ -139,7 +140,7 @@ lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/plans" -d "{\"plan\":{\"name\"
 [ -n "$BM_ID" ] && pass "Lago seeded metric + plan" || { fail "lago seed"; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+zs_platform_migrate "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }

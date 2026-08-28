@@ -137,7 +137,7 @@ command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 
 command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
 command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
 [ -x "$BIN/zeroship-control" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 0; }
-[ -x "$BIN/zeroship-platform-migrate" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-platform-migrate — run: cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 0; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "  ⚠ SKIP: missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 0; }
 
 export PGPASSWORD="$PGPW"
 psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }
@@ -208,7 +208,7 @@ pass "created per-run DB $DB on :$PGPORT (real zeroship + zeroship_billing_test 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 MIG_LOG="$WORK/migrate.log"
 # Use the prebuilt release platform migration binary, matching the other billing e2es.
-if zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+if zs_platform_migrate "$DBURL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
   pass "zeroship-platform-migrate applied the platform set to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"

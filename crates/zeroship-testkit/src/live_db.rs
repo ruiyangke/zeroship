@@ -277,12 +277,22 @@ const UNREACHABLE_REMEDY: &str = "\
     Start the test backends and rewrite the overlay from them:\n\
     \x20     tests/provision_test_backends.sh\n";
 
+/// The remediation an unmigrated database gets.
+///
+/// IT NAMES A WRAPPER, NOT THE TOOL. `deploy/ops/db-migrate.sh` writes the DSN
+/// into a 0600 config file and calls the `zero-migrate` CLI with `--config`; the
+/// CLI's own `--database-url <value>` flag would put a superuser DSN in this
+/// process list. Printing the wrapper is therefore the safe instruction as well
+/// as the short one.
+///
+/// It replaced a `cargo run -p zeroship-migrate-adapter --features platform-cli
+/// --bin zeroship-platform-migrate` line on 2026-08-28. That binary is deleted.
 const UNMIGRATED_REMEDY: &str = "\
     Apply the platform schema to THAT database:\n\
-    \x20     printf '<dsn>' > /tmp/zs-dsn && chmod 600 /tmp/zs-dsn\n\
-    \x20     cargo run -p zeroship-migrate-adapter --features platform-cli \\\n\
-    \x20         --bin zeroship-platform-migrate -- \\\n\
-    \x20         --database-url-file /tmp/zs-dsn --migrations-dir db/migrations-ts\n\
+    \x20     ZEROSHIP_MIGRATE_DSN='<dsn>' deploy/ops/db-migrate.sh\n\
+    \n\
+    \x20   That wrapper needs the CLI built once:\n\
+    \x20     pnpm install && pnpm build && pnpm --filter zero-migrate-cli build\n\
     \n\
     \x20   or point the run at a database that is already migrated:\n\
     \x20     PG_TEST_URL=<dsn> cargo test ...\n\
