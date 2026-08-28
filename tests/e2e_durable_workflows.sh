@@ -50,7 +50,6 @@ PG_DB="${PG_DB:-zeroship_dw07_$(date +%s)_$$}"
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9130}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-9131}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-9132}"
-SIDE_PORT="${SIDE_PORT:-9133}"
 APP_NAME="dw07-$(date +%s)-$$"
 DBURL="postgres://$PG_USER:$PG_PASS@localhost:$PG_PORT/$PG_DB"
 
@@ -74,6 +73,17 @@ cleanup() {
   if [ "$CREATED_PG_DB" = "1" ] && [ -n "$PG_ADMIN_CONTAINER" ]; then
     docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d postgres -v ON_ERROR_STOP=1 \
       -c "DROP DATABASE IF EXISTS \"$PG_DB\" WITH (FORCE);" >/dev/null 2>&1 || true
+  fi
+  # The per-app runtime role `env.db` speaks as is CLUSTER-scoped, so dropping
+  # the disposable database above does not take it with it, and :5440 is
+  # routinely a container shared with other harnesses. `prepare_side_effect_table`
+  # (crates/zeroship-control/tests/durable_workflows_keystone_e2e.rs) creates one
+  # per run - the app id is fresh each time, so they accumulate rather than
+  # collide. Drop it here; after the database is gone it owns nothing, so this
+  # succeeds. Best-effort: a leaked NOLOGIN role is untidy, not a failure.
+  if [ -n "${APP_ID:-}" ] && [ -n "$PG_ADMIN_CONTAINER" ]; then
+    docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d postgres -v ON_ERROR_STOP=1 \
+      -c "DROP ROLE IF EXISTS \"app_${APP_ID}_role\";" >/dev/null 2>&1 || true
   fi
   if [ "$OWNED_PG_CONTAINER" = "1" ]; then
     docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
@@ -219,28 +229,88 @@ mkdir -p "$WORK/blobs" "$WORK/blob-cache"
 
 echo "=== DW-07 workflow .zship ==="
 cat > "$WORK/workflow.js" <<EOF
-const SIDE_EFFECT_URL = "http://127.0.0.1:$SIDE_PORT";
+import { env } from "zeroship";
+
+// WHAT THESE TWO HELPERS ARE FOR, and why they do not use \`fetch\`.
+//
+// A durable workflow's exactly-once property is not visible in the journal. A
+// step body that ran TWICE and was then memoized leaves a journal byte-for-byte
+// identical to one that ran once, so the count of BODY EXECUTIONS has to be
+// recorded somewhere the engine does not write. That out-of-band record is what
+// \`bump\` and \`commit\` produce, and every side_counts / effect_attempt_counts /
+// effect_commit_counts assertion in
+// crates/zeroship-control/tests/durable_workflows_keystone_e2e.rs reads it.
+// The mechanism is scaffolding; the property is the test.
+//
+// UNTIL 2026-08-27 THE SCAFFOLDING WAS AN HTTP CALL to a harness server on
+// http://127.0.0.1:<side port>, and it only connected because this script
+// launched \`zeroship-worker\` with \`ZEROSHIP_DEV=1\`, which the SSRF gate read
+// out of the process environment and treated as "skip all host/IP validation".
+// That read is gone (crates/zeroship-runtime/src/transport/ssrf.rs:56-68):
+// dev-ness is a stated input written only by \`set_dev_mode\`, whose one caller
+// is \`cmd_serve\` (crates/zeroship-cli/src/main.rs:96), and what it now grants
+// is loopback ONLY. \`zeroship-worker\` states nothing, so it runs the full
+// floor and refuses 127.0.0.1 - which is correct, and must not be given a way
+// around. There is no worker flag, feature or variable to re-open it here.
+//
+// env.db is the replacement, and it is not a workaround: it is a real platform
+// primitive performing a real durable write, into the same Postgres the
+// assertions already query, which is what a creator's workflow step doing a
+// side effect would actually do. It needs no egress at all.
+//
+// The three tables live in this app's OWN schema and are created by
+// \`prepare_side_effect_table\` in that Rust file.
+const SIDE_EFFECTS = "workflow_e2e_side_effects";
+const EFFECT_ATTEMPTS = "workflow_e2e_effect_attempts";
+const EFFECT_COMMITS = "workflow_e2e_effect_commits";
 
 async function bump(runId, stepName) {
-  const response = await fetch(
-    \`\${SIDE_EFFECT_URL}/bump?run=\${encodeURIComponent(runId)}&step=\${encodeURIComponent(stepName)}\`,
-    { method: "POST" },
-  );
-  if (!response.ok) {
-    throw new Error(\`side effect \${stepName} failed: \${response.status}\`);
-  }
-  return await response.json();
+  const table = env.db.collection(SIDE_EFFECTS);
+  // PRE-insert count, preserving verbatim what the old side-effect server
+  // returned: its data-modifying CTE could not see its own INSERT, so the first
+  // bump for a (run, step) answered 0. assert_side_effect_steps pins that 0, and
+  // it is the journaled value replayed into the run output.
+  const count = await table.count({ run_id: runId, step_name: stepName });
+  await table.insert({ run_id: runId, step_name: stepName });
+  return { step: stepName, count };
 }
 
 async function commit(runId, stepName, key) {
-  const response = await fetch(
-    \`\${SIDE_EFFECT_URL}/commit?run=\${encodeURIComponent(runId)}&step=\${encodeURIComponent(stepName)}&key=\${encodeURIComponent(key)}\`,
-    { method: "POST" },
-  );
-  if (!response.ok) {
-    throw new Error(\`commit \${stepName} failed: \${response.status}\`);
+  // One attempt row per entry into the effect boundary...
+  await env.db.collection(EFFECT_ATTEMPTS).insert({
+    run_id: runId,
+    step_name: stepName,
+    idempotency_key: key,
+  });
+  // ...and at most one commit row per idempotency key, however many times the
+  // boundary is entered.
+  //
+  // This catch IS the old \`ON CONFLICT (idempotency_key) DO NOTHING\`, and it is
+  // not a substitute for one: the UNIQUE index does the deciding, in the
+  // database, so two concurrent entries carrying one key still leave one row -
+  // which is the exact property effect_commit_counts measures. The loser just
+  // learns it lost. \`upsert\` would be wrong here: it is DO UPDATE, so a
+  // re-entry would rewrite the surviving row's run_id and step_name, and
+  // ordered_commit_steps reads both.
+  //
+  // Only \`unique_violation\` is swallowed (crates/zeroship-plugin-db/src/error.rs:287,
+  // :337-339); every other db error still fails the step, which is what a
+  // silently-broken side effect must do to a test that counts side effects.
+  try {
+    await env.db.collection(EFFECT_COMMITS).insert({
+      run_id: runId,
+      step_name: stepName,
+      idempotency_key: key,
+    });
+  } catch (error) {
+    if (!error || error.code !== "unique_violation") {
+      throw error;
+    }
   }
-  return await response.json();
+  const committed = await env.db
+    .collection(EFFECT_COMMITS)
+    .count({ idempotency_key: key });
+  return { step: stepName, committed };
 }
 
 export class KeystoneWorkflow {
@@ -333,10 +403,16 @@ export class BareAwaitWorkflow {
   async run(trigger, step) {
     const pending = step.run("first", () => bump(trigger.runId, "first"));
     // Body-level I/O must fail before this workflow can observe the pending step.
-    await fetch(
-      \`\${SIDE_EFFECT_URL}/bump?run=\${encodeURIComponent(trigger.runId)}&step=bare-await\`,
-      { method: "POST" },
-    );
+    //
+    // THIS ONE STAYS A \`fetch\`, and the URL is deliberately unreachable. The
+    // guard under test is \`installWorkflowIoGuards\`, which replaces
+    // \`globalThis.fetch\` and throws NondeterministicError SYNCHRONOUSLY when
+    // the dispatch is in body mode (sdks/workflows/src/journal.ts:250-254,
+    // :263-273) - before the real fetch, and therefore before the SSRF floor.
+    // It guards \`fetch\` / \`setTimeout\` / \`setInterval\` and nothing else, so
+    // moving this call to env.db like \`bump\` would stop exercising it. Nothing
+    // ever connects, so the host does not need to resolve or listen.
+    await fetch("http://127.0.0.1:1/never-connects", { method: "POST" });
     await pending;
     return { unreachable: true };
   }
@@ -599,7 +675,7 @@ build_zship "$WORK/workflow.js" "$WORK/workflow.zship"
 pass "built real workflow .zship"
 
 echo "=== DW-07 services ==="
-for port in "$ZEROSHIP_CONTROL_PORT" "$ZEROSHIP_WORKER_PORT" "$ZEROSHIP_GATEWAY_PORT" "$SIDE_PORT"; do
+for port in "$ZEROSHIP_CONTROL_PORT" "$ZEROSHIP_WORKER_PORT" "$ZEROSHIP_GATEWAY_PORT"; do
   lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
@@ -616,7 +692,19 @@ e2e_export_database_urls "$DBURL"
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control.log"
 
-ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
+# NO `ZEROSHIP_DEV=1`, AND THERE IS NO REPLACEMENT FOR IT. This line carried one
+# until 2026-08-27, purely so the workflow's step bodies could `fetch` a harness
+# HTTP server on 127.0.0.1: the SSRF gate read `ZEROSHIP_DEV` out of the process
+# environment and, when it was `1`, skipped host and IP validation entirely - for
+# every `fetch` the process made, in a worker as much as in `zeroship serve`.
+# That was a production hole, and closing it made this variable INERT here
+# (crates/zeroship-runtime/src/transport/ssrf.rs:45-72, :103-121). The step
+# bodies now record their side effects through `env.db` instead; see the comment
+# above `bump` in the fixture. Do not add a worker flag, feature or variable to
+# re-open loopback egress - `docs/reference/env-vars.md:124-128` records that
+# `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` were deliberately deleted, and a
+# flag a deployment file can set is a default, not an escape hatch.
+"$BIN/zeroship-worker" \
   --port "$ZEROSHIP_WORKER_PORT" \
   --threads 1 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
@@ -663,10 +751,16 @@ ON CONFLICT (id) DO UPDATE SET
   ingress_disabled = false,
   updated_at = now(),
   updated_by = EXCLUDED.updated_by;
-INSERT INTO zeroship.app_egress_rules (app_id, verdict, kind, destination, port, created_by, note)
-VALUES ('$APP_ID', 'accept', 'cidr', '127.0.0.1/32', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
-ON CONFLICT (app_id, kind, destination, port) DO UPDATE SET created_at = now(), note = EXCLUDED.note;
 SQL
+# NO `zeroship.app_egress_rules` ROW HERE ANY MORE, and deleting it lost no
+# coverage, because it never granted anything. That table is the `node:net` /
+# `node:tls` / outbound-WebSocket rule set; `fetch` is explicitly NOT gated by it
+# (crates/zeroship-core/src/net_policy.rs:25-28), so it never touched the step
+# bodies' calls. And no rule in it can widen the platform SSRF floor either -
+# INVARIANT GRANTS-NARROW, net_policy.rs:14-16 - so it could not have rescued the
+# loopback fetch after the floor tightened. The one thing that ever made those
+# calls connect was `ZEROSHIP_DEV=1` on the worker, which this harness no longer
+# sets and which no longer means anything to a worker.
 DEPLOY_ID="$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -v ON_ERROR_STOP=1 \
   -c "SELECT id FROM zeroship.app_deploys WHERE app_id = '$APP_ID' ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1;")"
 [ -n "$DEPLOY_ID" ] || { fail "deploy registration did not create app_deploys row"; exit 1; }
@@ -690,10 +784,6 @@ if [ "$BENCH_ONLY" = "1" ]; then
   ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
   ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
   ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
-  ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
-  ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
-  ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
-  ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
     cargo test -p zeroship-control --test main durable_workflows_keystone_e2e::dw23_workflow_engine_load_bench -- --ignored --nocapture --test-threads=1 || {
       fail "DW-23 workflow engine load bench failed"
       echo "--- control.log ---"
@@ -716,10 +806,6 @@ ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
 ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
 ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
-ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
-ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
-ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
-ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
   cargo test -p zeroship-control --test main durable_workflows_keystone_e2e::durable_workflows_m1_keystone_real_spine -- --nocapture --test-threads=1 || {
     fail "DW-07 keystone assertions failed"
     echo "--- control.log ---"
@@ -737,10 +823,6 @@ ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
 ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
 ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
-ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
-ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
-ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
-ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
   cargo test -p zeroship-control --test main durable_workflows_keystone_e2e:: -- --nocapture --test-threads=1 --skip durable_workflows_m1_keystone_real_spine || {
     fail "DW-07 keystone assertions failed"
     echo "--- control.log ---"
