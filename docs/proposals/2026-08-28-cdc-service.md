@@ -1959,11 +1959,23 @@ Stated as gaps rather than written as facts elsewhere in this document.
   transaction was not driven through the ring.
 - **Anything about MySQL or the SQLite actor beyond the CDC publisher's shape**
   at `backend/sqlite/cdc.rs:604-639`.
-- **Whether pgoutput replays a transaction's changes in a stable order across
-  repeated replays of the same transaction.** 6.3's `change_index` depends on it.
-  Argued from the reorder buffer replaying in WAL order and from
-  `heap_multi_insert` tuples being ordered within their record; **not measured**,
-  and 12.6 names the alternative that does not need it.
+- **Replay-order stability is now measured, within a stated bound.** On
+  PostgreSQL 17.11, one transaction containing a three-row multi-`VALUES`
+  `INSERT`, an `UPDATE` and a `DELETE` was re-decoded three times through
+  `pg_logical_slot_peek_binary_changes` on a `pgoutput` slot. All three replays
+  were **byte-identical** (same md5 over `lsn` plus message bytes), and the
+  message sequence was `Begin, Relation, Insert, Insert, Insert, Update, Delete,
+  Commit` - SQL order. `peek` re-decodes from `restart_lsn` rather than serving a
+  cache, so these are genuine replays.
+  **The bound:** one slot, one session, one small transaction, one major version.
+  It does not cover a relay restart decoding through a *different* session, a
+  transaction large enough to spill under `logical_decoding_work_mem`, or a
+  concurrent writer interleaving into the same reorder buffer. 12.6 still names
+  the alternative that needs no ordering assumption.
+  **Incidental confirmation:** the three-row multi-`VALUES` insert produced
+  **three separate `Insert` messages**, not a collapsed one - consistent with
+  6.3's claim that `env.db.insertMany`'s multi-`VALUES` shape does not reach the
+  `heap_multi_insert` collapse.
 - **LSN reuse across a divergence point.** The timeline change itself is now
   measured - a basebackup restored with `recovery.signal` and promoted moves the
   timeline `1 -> 2` on an unchanged `system_identifier`, and crash recovery moves
