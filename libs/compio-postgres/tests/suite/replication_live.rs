@@ -21,7 +21,9 @@
 
 use compio_postgres::Config;
 use compio_postgres::config::SslMode;
-use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
+use compio_postgres::replication::{
+    ReplicationMessage, StartReplicationOptions, format_lsn, parse_lsn,
+};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -529,6 +531,125 @@ async fn identify_system_returns_the_servers_real_identity() {
         "xlogpos {:?} is not an LSN",
         identity.xlogpos
     );
+}
+
+/// A durability acknowledgement cannot pass the highest LSN this stream has
+/// received.
+///
+/// The three positions in a `StandbyStatusUpdate` are ordered facts: WAL cannot
+/// be flushed or applied before it has been written. `PostgreSQL` deliberately
+/// trusts the frontend here. `ProcessStandbyReplyMessage` passes `flush_lsn`
+/// straight to `LogicalConfirmReceivedLocation`, and that advances the slot's
+/// `confirmed_flush_lsn`. Before the fix, `advance_lsn` accepted any `u64`, so
+/// this test made the driver send `write=0, flush=consistent_point+1,
+/// apply=consistent_point+1`; the server then made WAL below the false checkpoint
+/// eligible for recycling even though this stream had not read one `XLogData`
+/// or keepalive frame.
+#[compio::test]
+async fn an_unreceived_lsn_is_not_reported_as_flushed() {
+    Box::pin(compio::time::timeout(Duration::from_secs(20), async {
+        let url = test_url();
+        let (setup, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+            Ok(pair) => pair,
+            Err(error) => common::postgres_unreachable(&url, &error),
+        };
+        compio::runtime::spawn(async move {
+            if let Err(error) = connection.run().await {
+                eprintln!("connection error: {}", common::error_chain(&error));
+            }
+        })
+        .detach();
+
+        common::sweep_stale_test_objects(&setup).await;
+        let base = common::test_object_name("cpg replication future flush");
+        let publication = format!("{base}_p");
+        let slot = format!("{base}_s");
+        setup
+            .batch_execute(&format!("CREATE PUBLICATION {publication}"))
+            .await
+            .expect("publication setup failed");
+        setup
+            .batch_execute(&format!(
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput')"
+            ))
+            .await
+            .expect("slot setup failed");
+
+        let initial: String = setup
+            .query_one_scalar(
+                "SELECT confirmed_flush_lsn::text
+                   FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .await
+            .expect("read initial confirmed_flush_lsn");
+        let unreceived = parse_lsn(&initial)
+            .and_then(|lsn| lsn.checked_add(1))
+            .expect("the slot's initial LSN must have a successor");
+
+        let replication = compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &common::replication_config(&base),
+        )
+        .await
+        .expect("replication connect failed");
+        let mut stream = replication
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: &slot,
+                start_lsn: "0/0",
+                proto_version: 1,
+                publication_names: &[&publication],
+                ..Default::default()
+            })
+            .await
+            .expect("START_REPLICATION failed");
+        assert_eq!(
+            stream.last_received_lsn(),
+            0,
+            "the test must not acknowledge a frame it already read"
+        );
+
+        stream.advance_lsn(unreceived);
+        stream
+            .send_standby_status_update(true)
+            .await
+            .expect("send the bounded status update");
+        match stream
+            .next()
+            .await
+            .expect("read the requested server reply")
+        {
+            Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
+            other => panic!("expected the requested PrimaryKeepalive, got {other:?}"),
+        }
+
+        let confirmed_after: String = setup
+            .query_one_scalar(
+                "SELECT confirmed_flush_lsn::text
+                   FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .await
+            .expect("read resulting confirmed_flush_lsn");
+
+        // Cleanup precedes the assertion so the deliberate RED run cannot
+        // consume one of the server's finite replication slots.
+        drop(stream);
+        common::drop_replication_slot(&setup, &slot).await;
+        let _ = setup
+            .batch_execute(&format!("DROP PUBLICATION IF EXISTS {publication}"))
+            .await;
+
+        assert_eq!(
+            confirmed_after,
+            initial,
+            "the server accepted an LSN this stream never received: requested {}, \
+             confirmed_flush_lsn moved from {initial} to {confirmed_after}",
+            format_lsn(unreceived)
+        );
+    }))
+    .await
+    .expect("future-flush live test exceeded its watchdog");
 }
 
 /// `connect_replication`'s TLS refusal is keyed to the CONTRADICTION, not to
