@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "auth_email_suppressions_update";
-
 // Bounce and complaint suppression never recorded anything.
 //
 // crates/mailer/src/suppressions.rs:57 (the whole file is production -- it has
@@ -35,10 +33,13 @@ export const name = "auth_email_suppressions_update";
 // Scoped to UPDATE on this one table. Whether alias-level suppression should
 // exist at all is a separate open question (#126) and is NOT decided here; this
 // only makes the suppression the code already tries to write actually land.
-export function up() {
-  grant({
-    privileges: ["update"],
-    on: { kind: "table", schema: "zeroship", names: ["email_suppressions"] },
-    to: ["zeroship_auth"],
-  });
-}
+export default {
+  name: "auth_email_suppressions_update",
+  schema() {
+    grant({
+      privileges: ["update"],
+      on: { kind: "table", schema: "zeroship", names: ["email_suppressions"] },
+      to: ["zeroship_auth"],
+    });
+  },
+};

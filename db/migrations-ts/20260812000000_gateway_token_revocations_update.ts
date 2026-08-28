@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "gateway_token_revocations_update";
-
 // `zeroship_gateway` could never set a token-family revocation marker, so
 // signout and backchannel logout silently failed to revoke.
 //
@@ -34,10 +32,13 @@ export const name = "gateway_token_revocations_update";
 // question and is NOT settled here: no production DELETE was found in the crate,
 // but a grep cannot prove absence, so that stays open rather than being quietly
 // revoked alongside this fix.
-export function up() {
-  grant({
-    privileges: ["update"],
-    on: { kind: "table", schema: "zeroship", names: ["token_revocations"] },
-    to: ["zeroship_gateway"],
-  });
-}
+export default {
+  name: "gateway_token_revocations_update",
+  schema() {
+    grant({
+      privileges: ["update"],
+      on: { kind: "table", schema: "zeroship", names: ["token_revocations"] },
+      to: ["zeroship_gateway"],
+    });
+  },
+};

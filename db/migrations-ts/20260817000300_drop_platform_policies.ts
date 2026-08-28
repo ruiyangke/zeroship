@@ -1,7 +1,5 @@
 import { table } from "@zeroship/migrate";
 
-export const name = "drop_platform_policies";
-
 // The table backed three operator routes that wrote it and nothing that read
 // it. Enforcement takes the boot-time `load_platform_policies()` value - the
 // static `.cedar` set compiled into the binary - and never swaps it, so a row
@@ -11,10 +9,9 @@ export const name = "drop_platform_policies";
 //
 // The three routes go in the same change, so nothing is left writing rows that
 // nothing reads.
-export function up() {
-  table("platform_policies", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
-}
-
-export function down() {
-
-}
+export default {
+  name: "drop_platform_policies",
+  schema() {
+    table("platform_policies", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
+  },
+};

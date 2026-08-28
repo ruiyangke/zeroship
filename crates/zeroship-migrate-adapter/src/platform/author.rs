@@ -6,7 +6,7 @@
 
 use zeroship_runtime::{ModuleEntry, Runtime};
 
-/// The authoring glue (imports the migration + the recorder seam, runs `up()`,
+/// The authoring glue (imports the migration + the recorder seam, runs `schema()`,
 /// emits the v1 envelope on `globalThis.__zsPlatformIR`). Shared verbatim with the
 /// S2 test glue.
 const RECORDER_GLUE_JS: &str = include_str!("recorder_glue.js");
@@ -60,7 +60,7 @@ struct AuthoredEnvelope {
 ///
 /// `name` is the filename-derived fallback used when the module declares none.
 /// Returns the envelope JSON string (`{ ir_version:1, name, ops }`) on success, or
-/// a human message on any authoring failure (recorder error, missing `up()`, a V8
+/// a human message on any authoring failure (recorder error, missing `schema()`, a V8
 /// setup fault).
 pub fn author_v1_envelope(migration_source: &str, name: &str) -> Result<String, String> {
     zeroship_runtime::init_v8();

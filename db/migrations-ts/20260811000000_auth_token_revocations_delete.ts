@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "auth_token_revocations_delete";
-
 // `zeroship_auth` could never run its own retention sweep.
 //
 // crates/auth/src/cron/token_sweep.rs:125-128 DELETEs from
@@ -26,10 +24,13 @@ export const name = "auth_token_revocations_delete";
 // clients, which nothing asks for. `zeroship_gateway` already holds
 // select/insert/delete on this exact table, so auth is not gaining a privilege
 // its peer lacks.
-export function up() {
-  grant({
-    privileges: ["delete"],
-    on: { kind: "table", schema: "zeroship", names: ["token_revocations"] },
-    to: ["zeroship_auth"],
-  });
-}
+export default {
+  name: "auth_token_revocations_delete",
+  schema() {
+    grant({
+      privileges: ["delete"],
+      on: { kind: "table", schema: "zeroship", names: ["token_revocations"] },
+      to: ["zeroship_auth"],
+    });
+  },
+};

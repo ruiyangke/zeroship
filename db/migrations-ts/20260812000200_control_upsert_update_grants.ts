@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "control_upsert_update_grants";
-
 // Two more production upserts `zeroship_control` could not execute. Same class
 // as the token_revocations/gateway fix (20260812000000) and the
 // app_oauth_clients fix (20260812000100): the statement uses
@@ -28,10 +26,13 @@ export const name = "control_upsert_update_grants";
 // Scoped to UPDATE on these two tables -- the minimum each statement needs.
 // control already holds UPDATE on zeroship.apps, which the env_store CTE also
 // writes, so that half was never the blocker.
-export function up() {
-  grant({
-    privileges: ["update"],
-    on: { kind: "table", schema: "zeroship", names: ["app_vars", "token_revocations"] },
-    to: ["zeroship_control"],
-  });
-}
+export default {
+  name: "control_upsert_update_grants",
+  schema() {
+    grant({
+      privileges: ["update"],
+      on: { kind: "table", schema: "zeroship", names: ["app_vars", "token_revocations"] },
+      to: ["zeroship_control"],
+    });
+  },
+};

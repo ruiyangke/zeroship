@@ -1,7 +1,5 @@
 import { table } from "@zeroship/migrate";
 
-export const name = "drop_net_policy_catalog";
-
 // The frontable-wildcard-suffix catalog moves to the config overlay
 // (`[control] frontable_wildcard_suffixes`), read at boot by the two paths that
 // consulted this table: the creator net-grant writer and the registry
@@ -12,10 +10,9 @@ export const name = "drop_net_policy_catalog";
 // fail-closed contract is unchanged and is the reason this is not a
 // housekeeping move: absent config means the catalog is UNAVAILABLE and every
 // wildcard grant is refused, never permitted.
-export function up() {
-  table("net_policy_catalog", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
-}
-
-export function down() {
-
-}
+export default {
+  name: "drop_net_policy_catalog",
+  schema() {
+    table("net_policy_catalog", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
+  },
+};

@@ -1,7 +1,5 @@
 import { table } from "@zeroship/migrate";
 
-export const name = "drop_platform_admin_roles";
-
 // The platform staff role model is gone. `admin` was a literal universal allow
 // - permit(principal is User, action, resource) - so one missed guard call was
 // total cross-tenant compromise, and `support`/`billing`/`readonly` were narrow
@@ -16,10 +14,9 @@ export const name = "drop_platform_admin_roles";
 // The four `.cedar` files, the `platform_role` principal attribute and the
 // three role-management routes are deleted in the same change, so nothing reads
 // or writes this table afterwards.
-export function up() {
-  table("platform_admin_roles", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
-}
-
-export function down() {
-
-}
+export default {
+  name: "drop_platform_admin_roles",
+  schema() {
+    table("platform_admin_roles", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
+  },
+};

@@ -1,7 +1,5 @@
 import { table, t } from "@zeroship/migrate";
 
-export const name = "signing_key_retirement";
-
 // The signing-key trust horizon: a key leaves `retiring` for `retired` only
 // once every token it ever issued has expired, which is what
 // `max_issued_expires_at` records. Both halves were originally added by EDITING
@@ -21,16 +19,19 @@ export const name = "signing_key_retirement";
 // fail on existing data and no row is rewritten to a different status here.
 // The drop is `ifExists` because a database that never had the constraint (one
 // built from a future baseline) must not stall on the reversal.
-export function up() {
-  table("signing_keys", { schema: "zeroship" })
-    .column("max_issued_expires_at")
-    .add({ type: t.timestamp() });
+export default {
+  name: "signing_key_retirement",
+  schema() {
+    table("signing_keys", { schema: "zeroship" })
+      .column("max_issued_expires_at")
+      .add({ type: t.timestamp() });
 
-  table("signing_keys", { schema: "zeroship" })
-    .constraint("signing_keys_status_check")
-    .drop({ ifExists: true });
+    table("signing_keys", { schema: "zeroship" })
+      .constraint("signing_keys_status_check")
+      .drop({ ifExists: true });
 
-  table("signing_keys", { schema: "zeroship" })
-    .check("signing_keys_status_check")
-    .add({ expr: (col) => col("status").in(["active", "next", "retiring", "retired"]) });
-}
+    table("signing_keys", { schema: "zeroship" })
+      .check("signing_keys_status_check")
+      .add({ expr: (col) => col("status").in(["active", "next", "retiring", "retired"]) });
+  },
+};
