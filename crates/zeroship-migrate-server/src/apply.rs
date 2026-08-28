@@ -1083,13 +1083,65 @@ fn runtime_app_role_name(app_id: &str) -> String {
 /// app's journal schema without running an apply
 /// ([`crate::provisioning::provision_workflow_journal_schema`]) runs the same
 /// statement this does.
+///
+/// # `WITH INHERIT FALSE` is what makes `SET LOCAL ROLE` a fence
+///
+/// [`WORKER_ROLE`] is ONE login role shared by every app. Without the inherit
+/// option this grant makes the worker's ambient authority the union of every
+/// app runtime role it has ever been granted - measured on the provisioned dev
+/// database at 561 memberships, every one of them `inherit_option = t`. Under
+/// that posture `SET LOCAL ROLE` only ever NARROWS: a statement that forgets it
+/// does not fail, it runs with cross-tenant reach. `WITH INHERIT FALSE` inverts
+/// the default so omission fails closed with `permission denied for schema`,
+/// and the fence stops depending on every call site remembering.
+///
+/// Measured on PostgreSQL 16.14 (`server_version_num=160014`), four arms
+/// differing in one variable, bare `SELECT` from an app schema as the login
+/// role:
+///
+/// | grant | result |
+/// | --- | --- |
+/// | `GRANT app TO worker` | row returned - fence open |
+/// | same, plus `ALTER ROLE worker NOINHERIT` | row returned - the ATTRIBUTE DOES NOTHING |
+/// | `GRANT app TO worker WITH INHERIT FALSE` | `ERROR: permission denied for schema` |
+/// | any of the above, plus `SET ROLE app` | row returned - the legitimate path survives |
+///
+/// The second arm is the trap. PostgreSQL 16+ records `inherit_option` PER
+/// MEMBERSHIP at GRANT time, so flipping the role-level attribute does not
+/// reach back into a grant that already exists. It has to be on the GRANT.
+///
+/// # Why no `REVOKE` first, and why that is not an oversight
+///
+/// This block re-runs on every apply, so existing databases carry the legacy
+/// inheriting membership and must converge without a migration. Measured on the
+/// same server: issuing `GRANT ... WITH INHERIT FALSE` over an existing
+/// inheriting membership flips `pg_auth_members.inherit_option` from `t` to `f`
+/// IN PLACE, and the bare `SELECT` that succeeded a statement earlier then
+/// fails. A `REVOKE` would be strictly worse - it opens a window in which the
+/// worker holds no membership at all, so a concurrent `SET LOCAL ROLE` fails
+/// spuriously, and it buys nothing the re-grant does not already do.
+///
+/// The reverse is a no-op, which is the safe asymmetry: a plain `GRANT` over a
+/// non-inheriting membership reports `NOTICE: role ... has already been granted
+/// membership` and leaves `inherit_option = f`. A caller that regressed to the
+/// old statement could not silently re-open the fence.
+///
+/// # What this does NOT converge
+///
+/// `pg_auth_members` is keyed on `(roleid, member, GRANTOR)`. A second grantor
+/// adds a SECOND row, PostgreSQL takes the UNION, and one inheriting row
+/// re-opens the fence for the pair - measured, including that a plain `REVOKE`
+/// as superuser removes only the issuing grantor's row and leaves the other
+/// live. This statement converges the row it owns; catching a foreign inheriting
+/// row is `zeroship_worker`'s boot-time posture check, which refuses on ANY
+/// inheriting app-role membership regardless of who granted it.
 fn runtime_dependents_sql(schema: &str, runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
     let worker_q = quote_ident(WORKER_ROLE);
     format!(
         "DO $runtime_dependents$ BEGIN
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
-                GRANT {runtime_role_q} TO {worker_q};
+                GRANT {runtime_role_q} TO {worker_q} WITH INHERIT FALSE;
             END IF;
          END $runtime_dependents$;
          {journal}",
@@ -1172,9 +1224,20 @@ mod tests {
             "app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role",
         );
         assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles"));
+        // The inherit option is part of the ASSERTED string, not a suffix the
+        // match tolerates. The previous form stopped at `TO "zeroship_worker"`
+        // and so passed identically with and without the fence - the one shape
+        // a regression guard for the fence must not have.
         assert!(sql.contains(
-            "GRANT \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role\" TO \"zeroship_worker\""
+            "GRANT \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role\" \
+             TO \"zeroship_worker\" WITH INHERIT FALSE"
         ));
+        // Belt and braces against a re-grant that drops the option: a bare
+        // `... TO "zeroship_worker";` terminator is the pre-fix statement.
+        assert!(
+            !sql.contains("TO \"zeroship_worker\";"),
+            "an unqualified grant re-opens the ambient union across every app: {sql}"
+        );
         assert!(sql.contains(
             "CREATE SCHEMA IF NOT EXISTS \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc\" AUTHORIZATION \"zeroship_workflow_owner\""
         ));
@@ -1718,5 +1781,638 @@ mod live_audit_unmask_provisioning {
         teardown(&admin, &before).await;
         teardown(&admin, &after).await;
         teardown(&admin, &between).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live proof that `SET LOCAL ROLE` is a FENCE and not an optional narrowing
+// ---------------------------------------------------------------------------
+//
+// `WORKER_ROLE` is ONE login role shared by every app, and `runtime_dependents_sql`
+// grants it each app's runtime role. Whether that grant inherits decides whether
+// a query path that forgets `SET LOCAL ROLE` fails or silently runs with the
+// union of every tenant the worker has ever served. That is a property of the
+// SERVER's membership catalog, so only a live catalog can rule on it.
+//
+// WHAT THE UNIT TEST ABOVE CANNOT DO.
+// `runtime_provisioning_delegates_only_precreated_narrow_roles` greps the
+// generated string for `WITH INHERIT FALSE`. It proves the statement SAYS the
+// words - never that PostgreSQL honours them, never that the role-level
+// `NOINHERIT` attribute would not have done the same job, and never that an
+// existing database provisioned the old way converges when the statement runs
+// again. Every one of those was measured here and two of them are counter-
+// intuitive.
+//
+// THE FIXTURE IS `SET SESSION AUTHORIZATION`, not a second connection. It sets
+// both session and current user, so privilege checks run fully as the stand-in
+// worker, and it needs no password and no DSN surgery. It requires the
+// connecting user to be a superuser; if it is not, these cases fail naming it
+// rather than skipping.
+#[cfg(all(test, feature = "live-db-tests"))]
+mod live_worker_role_fence {
+    use super::*;
+    use compio_postgres::NoTls;
+
+    /// The database these cases dial. Typed config
+    /// (`zeroship_core::config::test_database_url`, backed by the overlay at
+    /// `deploy/ops/zeroship.test.toml` or the pre-existing `PG_TEST_URL`
+    /// override) - this module introduces no environment variable and sets none.
+    fn test_dsn() -> String {
+        zeroship_core::config::test_database_url()
+    }
+
+    async fn admin_client() -> compio_postgres::Client {
+        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
+            .await
+            .expect("connect to the migrate-server test database");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        client
+    }
+
+    /// Every object a case creates carries this prefix, so teardown can name
+    /// what it drops on a server shared with other work.
+    const PREFIX: &str = "zsfence";
+
+    struct Fixture {
+        /// The per-case component of every name, which is also what [`sweep`]
+        /// matches on. Distinct per case so two cases running on the same
+        /// server in parallel - the cargo default - cannot sweep each other.
+        case: String,
+        app_role: String,
+        worker: String,
+        schema: String,
+    }
+
+    impl Fixture {
+        fn new(case: &str) -> Self {
+            // Hyphen-free so every name below stays a bare identifier, and short
+            // enough that `app_<schema>` (the journal schema the production
+            // statement also creates) clears PostgreSQL's 63-byte identifier
+            // limit - a truncated name would collide across cases rather than
+            // fail.
+            let unique = Uuid::new_v4().to_string().replace('-', "");
+            Self {
+                case: case.to_string(),
+                app_role: format!("{PREFIX}_{case}_{unique}_role"),
+                worker: format!("{PREFIX}_{case}_{unique}_worker"),
+                schema: format!("{PREFIX}_{case}_{unique}_ns"),
+            }
+        }
+
+        /// The `LIKE` pattern covering every object this case can create.
+        fn like(&self) -> String {
+            format!("{PREFIX}_{}_%", self.case)
+        }
+    }
+
+    /// Drop every object THIS CASE has ever created, matched on its own
+    /// `zsfence_<case>_` prefix.
+    ///
+    /// This is a sweep, and the sibling module's "never a blanket sweep" rule
+    /// still holds: the pattern reaches only names this case mints, so it
+    /// cannot touch other work on a shared server - nor a SIBLING case, which
+    /// is why it is scoped per case rather than to [`PREFIX`]. `cargo test`
+    /// runs these in parallel by default, and a module-wide sweep would delete
+    /// a concurrently-running case's roles out from under it, producing a
+    /// failure that looks like a privilege bug.
+    ///
+    /// It exists because a case that PANICS never reaches its `teardown`, and
+    /// an assertion firing is the EXPECTED outcome of three of these five
+    /// before the fix - one such run left four schemas and thirteen roles
+    /// behind. Sweeping at the head makes that self-correcting.
+    ///
+    /// Residual, stated rather than hidden: two runs of the SAME case against
+    /// the same server (two worktrees, one Postgres) still collide. Nothing
+    /// short of a per-run database fixes that, and the sibling module carries
+    /// the same exposure.
+    async fn sweep(admin: &compio_postgres::Client, fx: &Fixture) {
+        let _ = admin.batch_execute("RESET SESSION AUTHORIZATION").await;
+        admin
+            .batch_execute(&format!(
+                "DO $sweep$
+                 DECLARE target text;
+                 BEGIN
+                   FOR target IN
+                     SELECT nspname FROM pg_namespace
+                      WHERE nspname LIKE '{like}' OR nspname LIKE 'app\\_{like}'
+                   LOOP
+                     EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', target);
+                   END LOOP;
+                   FOR target IN
+                     SELECT rolname FROM pg_roles WHERE rolname LIKE '{like}'
+                   LOOP
+                     EXECUTE format('DROP OWNED BY %I CASCADE', target);
+                     EXECUTE format('DROP ROLE IF EXISTS %I', target);
+                   END LOOP;
+                 END
+                 $sweep$;",
+                like = fx.like(),
+            ))
+            .await
+            .expect("sweep this case's leftovers");
+    }
+
+    /// Stand up a tenant schema holding one secret, an app runtime role that can
+    /// read it, and a stand-in worker login holding NO privilege of its own. The
+    /// only thing that can put the secret within the worker's ambient reach is
+    /// the membership grant under test.
+    async fn setup(admin: &compio_postgres::Client, fx: &Fixture) {
+        let (role_q, worker_q, schema_q) = (
+            quote_ident(&fx.app_role),
+            quote_ident(&fx.worker),
+            quote_ident(&fx.schema),
+        );
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE {role_q} NOLOGIN;
+                 CREATE ROLE {worker_q} LOGIN;
+                 CREATE SCHEMA {schema_q};
+                 CREATE TABLE {schema_q}.secrets(v text);
+                 INSERT INTO {schema_q}.secrets VALUES ('tenant-secret');
+                 GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
+                 GRANT SELECT ON {schema_q}.secrets TO {role_q};"
+            ))
+            .await
+            .expect("stand up the tenant schema, app role and stand-in worker");
+    }
+
+    /// Drop everything a case created, by name. Never a blanket sweep: this
+    /// server is shared with other work.
+    ///
+    /// `app_<schema>` is the workflow journal schema the SECOND half of
+    /// `runtime_dependents_sql` creates. Leaving it behind would accumulate a
+    /// schema per run on a shared server, and it is easy to miss because
+    /// nothing in these cases mentions the journal.
+    async fn teardown(admin: &compio_postgres::Client, fx: &Fixture) {
+        let _ = admin.batch_execute("RESET SESSION AUTHORIZATION").await;
+        for schema in [fx.schema.clone(), format!("app_{}", fx.schema)] {
+            let _ = admin
+                .batch_execute(&format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_ident(&schema)
+                ))
+                .await;
+        }
+        for role in [&fx.worker, &fx.app_role] {
+            let q = quote_ident(role);
+            let _ = admin.batch_execute(&format!("DROP OWNED BY {q} CASCADE")).await;
+            let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {q}")).await;
+        }
+    }
+
+    /// THE PRODUCTION STATEMENT, retargeted at the stand-in worker.
+    ///
+    /// Built by substituting the stand-in's name into
+    /// [`runtime_dependents_sql`]'s own output rather than by restating the
+    /// grant, so a revert of the fix reaches these cases. The `DO` block's
+    /// guard is `IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '<worker>')`,
+    /// so the substitution has to reach the quoted identifier AND the string
+    /// literal or the block silently no-ops and every assertion below would
+    /// then be measuring the ABSENCE of a grant while reading as a fence.
+    fn production_grant_for(fx: &Fixture) -> String {
+        let sql = runtime_dependents_sql(&fx.schema, &fx.app_role);
+        assert!(
+            sql.matches(WORKER_ROLE).count() >= 2,
+            "expected the worker role as both a quoted ident and a literal: {sql}"
+        );
+        let retargeted = sql.replace(WORKER_ROLE, &fx.worker);
+        // `zeroship_worker` is not a substring of `zeroship_workflow_owner`
+        // ("worker" vs "workflow"), so the journal half of the statement must
+        // come through untouched. Asserted rather than assumed: a rename that
+        // made one a prefix of the other would corrupt the journal DDL silently,
+        // and these cases would then be measuring a statement production never
+        // issues.
+        assert!(
+            retargeted.contains("zeroship_workflow_owner"),
+            "the substitution must not touch the journal owner: {retargeted}"
+        );
+        retargeted
+    }
+
+    /// Read `pg_auth_members.inherit_option` for one (granted role, member)
+    /// pair. Returns every row, because the catalog is unique on
+    /// `(roleid, member, GRANTOR)` and a second grantor's inheriting row would
+    /// re-open the fence for the pair - a query shaped `LIMIT 1` would report a
+    /// fence that a sibling row has already opened.
+    async fn inherit_options(
+        admin: &compio_postgres::Client,
+        fx: &Fixture,
+    ) -> Vec<bool> {
+        admin
+            .query(
+                "SELECT membership.inherit_option \
+                   FROM pg_auth_members membership \
+                   JOIN pg_roles granted ON granted.oid = membership.roleid \
+                   JOIN pg_roles member ON member.oid = membership.member \
+                  WHERE granted.rolname = $1 AND member.rolname = $2 \
+                  ORDER BY membership.grantor",
+                &[&fx.app_role, &fx.worker],
+            )
+            .await
+            .expect("read pg_auth_members")
+            .iter()
+            .map(|row| row.get::<_, bool>(0))
+            .collect()
+    }
+
+    /// Run SQL as the stand-in worker; `Ok(value)` is the first column of the
+    /// first row returned, `Err(message)` a refusal.
+    ///
+    /// The **simple** protocol, because [`fenced_select`] is a multi-statement
+    /// batch and the extended protocol refuses those with `42601 cannot insert
+    /// multiple commands into a prepared statement` - a failure that is not a
+    /// privilege refusal and would be miscounted as one by a laxer check.
+    ///
+    /// That is why the error arm asserts the SQLSTATE is exactly 42501 rather
+    /// than string-matching "denied": a fixture typo, a missing table or the
+    /// wrong protocol all produce an `Err`, and every one of them would read as
+    /// "the fence held".
+    ///
+    /// `RESET SESSION AUTHORIZATION` runs on BOTH arms before returning, so a
+    /// refusal cannot leave the shared admin connection impersonating the
+    /// stand-in for the rest of the case - which would make every later
+    /// statement, including teardown, fail for the wrong reason.
+    async fn denied_as_worker(
+        admin: &compio_postgres::Client,
+        fx: &Fixture,
+        sql: &str,
+    ) -> Result<String, String> {
+        admin
+            .batch_execute(&format!(
+                "SET SESSION AUTHORIZATION {}",
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect(
+                "SET SESSION AUTHORIZATION needs a superuser connection; \
+                 point the test overlay at one",
+            );
+        let outcome = admin.simple_query(sql).await;
+        admin
+            .batch_execute("RESET SESSION AUTHORIZATION")
+            .await
+            .expect("restore the admin identity");
+
+        match outcome {
+            Ok(messages) => Ok(messages
+                .iter()
+                .find_map(|message| match message {
+                    compio_postgres::SimpleQueryMessage::Row(row) => {
+                        Some(row.get(0).unwrap_or_default().to_string())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()),
+            Err(error) => {
+                // `Error: Display` renders the KIND ("db error"), not the
+                // server's message - so a caller that string-matched
+                // `to_string()` for "permission denied" would fail on a refusal
+                // that is exactly right. The server text lives on the nested
+                // `DbError`, and the SQLSTATE is what the case actually binds.
+                let db_error = error
+                    .as_db_error()
+                    .unwrap_or_else(|| panic!("expected a server error, got {error}"));
+                assert_eq!(
+                    db_error.code(),
+                    &compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE,
+                    "expected a privilege refusal (42501), got {} {}",
+                    db_error.code().code(),
+                    db_error.message()
+                );
+                Err(db_error.message().to_string())
+            }
+        }
+    }
+
+    fn bare_select(fx: &Fixture) -> String {
+        format!("SELECT v FROM {}.secrets", quote_ident(&fx.schema))
+    }
+
+    /// The legitimate path, in the shape the data plane uses it:
+    /// `SET LOCAL` inside an explicit transaction, so the role reverts at
+    /// COMMIT (`auth::bootstrap::autocommit_local_session_setup_sql`). Outside
+    /// a transaction `SET LOCAL` is a no-op that only WARNS, so a variant
+    /// without the `BEGIN` would be measuring the bare read under a different
+    /// name.
+    fn fenced_select(fx: &Fixture) -> String {
+        format!(
+            "BEGIN; SET LOCAL ROLE {}; SELECT v FROM {}.secrets; COMMIT",
+            quote_ident(&fx.app_role),
+            quote_ident(&fx.schema)
+        )
+    }
+
+    /// 1. THE REGRESSION. The production grant must leave the shared worker
+    /// login UNABLE to read a tenant schema without `SET LOCAL ROLE`.
+    ///
+    /// FAILS BEFORE THE FIX. With the pre-fix `GRANT <role> TO <worker>` the
+    /// bare SELECT returns `tenant-scoped-secret` and the `expect_err` below is
+    /// the assertion that goes red.
+    #[compio::test]
+    async fn the_production_grant_denies_a_bare_read_of_a_tenant_schema() {
+        let admin = admin_client().await;
+        let fx = Fixture::new("prod");
+        sweep(&admin, &fx).await;
+        setup(&admin, &fx).await;
+
+        admin
+            .batch_execute(&production_grant_for(&fx))
+            .await
+            .expect("run the production runtime-dependents statement");
+
+        // THE BEHAVIOUR FIRST, deliberately. `pg_auth_members` is the mechanism;
+        // being refused the row is the property, and it is the property that
+        // should name itself when this goes red. Asserting the catalog first
+        // would make a pre-fix run report `left: [true], right: [false]` - true
+        // but a description of a bit, not of a tenant boundary.
+        let denial = denied_as_worker(&admin, &fx, &bare_select(&fx))
+            .await
+            .expect_err(
+                "the shared worker login must NOT reach a tenant schema without \
+                 SET LOCAL ROLE - if this returns the row, the fence is open and \
+                 every query path that forgets to narrow reads across tenants",
+            );
+        assert!(
+            denial.contains("permission denied"),
+            "unexpected denial: {denial}"
+        );
+
+        // Then the catalog, which says WHY it was refused. Without this a
+        // revocation of the app role's own grants would also produce a denial
+        // and read as a working fence.
+        let options = inherit_options(&admin, &fx).await;
+        assert_eq!(
+            options.len(),
+            1,
+            "expected exactly one membership row: {options:?}"
+        );
+        assert!(
+            options.iter().all(|inherits| !inherits),
+            "the production grant must record inherit_option = false: {options:?}"
+        );
+
+        teardown(&admin, &fx).await;
+    }
+
+    /// 2. THE FENCE MUST NOT BREAK THE LEGITIMATE PATH. Same grant, same
+    /// connection, one extra statement.
+    #[compio::test]
+    async fn set_local_role_still_reaches_the_tenant_schema_under_the_fence() {
+        let admin = admin_client().await;
+        let fx = Fixture::new("setlocal");
+        sweep(&admin, &fx).await;
+        setup(&admin, &fx).await;
+
+        admin
+            .batch_execute(&production_grant_for(&fx))
+            .await
+            .expect("run the production runtime-dependents statement");
+
+        let value = denied_as_worker(&admin, &fx, &fenced_select(&fx))
+            .await
+            .expect("SET LOCAL ROLE must still reach the tenant schema");
+        assert_eq!(
+            value, "tenant-secret",
+            "the fenced path must return the row"
+        );
+
+        teardown(&admin, &fx).await;
+    }
+
+    /// 3. THE CONTROL, differing in ONE variable: the inherit option.
+    ///
+    /// Without this, case 1 would pass just as happily if the app role had
+    /// never been granted USAGE on the schema - "denied" is the default state
+    /// of a role with no privileges, and a fixture that mis-provisioned would
+    /// read as a working fence. This arm runs the SHIPPED pre-fix statement and
+    /// requires the bare read to SUCCEED, which is simultaneously the proof
+    /// that the fixture grants something real and the demonstration of the
+    /// vulnerability.
+    ///
+    /// The second arm is the trap the role attribute sets: PostgreSQL 16+
+    /// records `inherit_option` per membership at GRANT time, so
+    /// `ALTER ROLE <worker> NOINHERIT` does NOT reach back into a grant that
+    /// already exists and the bare read still succeeds. Anyone reaching for the
+    /// attribute instead of the grant option gets a green that means nothing.
+    #[compio::test]
+    async fn the_legacy_grant_leaks_and_the_role_attribute_does_not_stop_it() {
+        let admin = admin_client().await;
+        let fx = Fixture::new("legacy");
+        sweep(&admin, &fx).await;
+        setup(&admin, &fx).await;
+
+        // ARM A - the shipped pre-fix statement, verbatim.
+        admin
+            .batch_execute(&format!(
+                "GRANT {} TO {}",
+                quote_ident(&fx.app_role),
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect("legacy grant");
+        assert_eq!(
+            inherit_options(&admin, &fx).await,
+            vec![true],
+            "the legacy grant must record inherit_option = true"
+        );
+        let leaked = denied_as_worker(&admin, &fx, &bare_select(&fx))
+            .await
+            .expect(
+                "the legacy grant MUST leak - if it does not, this fixture \
+                 grants nothing and case 1's denial proves nothing",
+            );
+        assert_eq!(leaked, "tenant-secret");
+
+        // ARM B - the role attribute, which is the intuitive fix and is inert.
+        admin
+            .batch_execute(&format!(
+                "ALTER ROLE {} NOINHERIT",
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect("alter the role attribute");
+        let rolinherit: bool = admin
+            .query_one_scalar(
+                "SELECT rolinherit FROM pg_roles WHERE rolname = $1",
+                &[&fx.worker],
+            )
+            .await
+            .expect("read rolinherit");
+        assert!(!rolinherit, "the ATTRIBUTE did flip");
+        assert_eq!(
+            inherit_options(&admin, &fx).await,
+            vec![true],
+            "but the MEMBERSHIP is untouched - this is the whole trap"
+        );
+        let still_leaked = denied_as_worker(&admin, &fx, &bare_select(&fx))
+            .await
+            .expect(
+                "ALTER ROLE ... NOINHERIT must NOT close an existing grant; if \
+                 this now denies, PostgreSQL changed its semantics and the \
+                 WITH INHERIT FALSE rationale needs re-reading",
+            );
+        assert_eq!(still_leaked, "tenant-secret");
+
+        teardown(&admin, &fx).await;
+    }
+
+    /// 4. CONVERGENCE, which is what makes this safe to ship without a
+    /// migration. The `DO $runtime_dependents$` block re-runs on every apply,
+    /// and existing databases carry the legacy inheriting membership.
+    ///
+    /// Measured rather than reasoned: re-granting with the option flips
+    /// `inherit_option` IN PLACE, with no `REVOKE` and therefore no window in
+    /// which the worker holds no membership at all. The reverse is a no-op, so
+    /// a regression to the old statement cannot silently re-open a fenced
+    /// database - asserted here because that asymmetry is the opposite of what
+    /// "the last GRANT wins" would predict.
+    #[compio::test]
+    async fn re_granting_converges_a_legacy_database_and_does_not_regress() {
+        let admin = admin_client().await;
+        let fx = Fixture::new("converge");
+        sweep(&admin, &fx).await;
+        setup(&admin, &fx).await;
+
+        // A database provisioned the old way.
+        admin
+            .batch_execute(&format!(
+                "GRANT {} TO {}",
+                quote_ident(&fx.app_role),
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect("legacy grant");
+        assert_eq!(inherit_options(&admin, &fx).await, vec![true]);
+
+        // The next apply runs the production statement. No REVOKE anywhere.
+        admin
+            .batch_execute(&production_grant_for(&fx))
+            .await
+            .expect("re-run the production statement over the legacy membership");
+        assert_eq!(
+            inherit_options(&admin, &fx).await,
+            vec![false],
+            "re-granting must converge the existing membership in place"
+        );
+        denied_as_worker(&admin, &fx, &bare_select(&fx))
+            .await
+            .expect_err("a converged database must refuse the bare read");
+
+        // And the reverse does NOT regress it.
+        admin
+            .batch_execute(&format!(
+                "GRANT {} TO {}",
+                quote_ident(&fx.app_role),
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect("plain re-grant over a fenced membership");
+        assert_eq!(
+            inherit_options(&admin, &fx).await,
+            vec![false],
+            "a plain GRANT over a fenced membership is a no-op, not a re-open"
+        );
+        denied_as_worker(&admin, &fx, &bare_select(&fx))
+            .await
+            .expect_err("still refused after the plain re-grant");
+
+        teardown(&admin, &fx).await;
+    }
+
+    /// 5. WHAT THE STATEMENT DOES NOT CONVERGE, stated as a test rather than a
+    /// caveat in a comment.
+    ///
+    /// `pg_auth_members` is unique on `(roleid, member, GRANTOR)`. A second
+    /// grantor adds a SECOND row and PostgreSQL takes the UNION, so one
+    /// inheriting row re-opens the fence for the pair no matter what the other
+    /// row says - and a plain `REVOKE`, even as superuser, removes only the
+    /// issuing grantor's row.
+    ///
+    /// This is why `zeroship_worker`'s boot posture check counts EVERY
+    /// inheriting membership row rather than asking whether "the" membership is
+    /// fenced. A check shaped the latter way passes on exactly this state.
+    #[compio::test]
+    async fn a_second_grantor_re_opens_the_fence_and_a_plain_revoke_leaves_it_open() {
+        let admin = admin_client().await;
+        let fx = Fixture::new("grantor");
+        sweep(&admin, &fx).await;
+        setup(&admin, &fx).await;
+
+        let second_grantor = format!("{}_g2", fx.worker);
+        let g2_q = quote_ident(&second_grantor);
+        let _ = admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS {g2_q}"))
+            .await;
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE {g2_q} LOGIN CREATEROLE;
+                 GRANT {} TO {g2_q} WITH ADMIN OPTION;",
+                quote_ident(&fx.app_role)
+            ))
+            .await
+            .expect("create a second grantor with admin option");
+
+        admin
+            .batch_execute(&production_grant_for(&fx))
+            .await
+            .expect("the fenced grant, by the admin");
+        assert_eq!(inherit_options(&admin, &fx).await, vec![false]);
+
+        // The second grantor issues a PLAIN grant of the same pair.
+        admin
+            .batch_execute(&format!(
+                "SET SESSION AUTHORIZATION {g2_q};
+                 GRANT {} TO {};
+                 RESET SESSION AUTHORIZATION;",
+                quote_ident(&fx.app_role),
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect("second grantor's plain grant");
+
+        let options = inherit_options(&admin, &fx).await;
+        assert_eq!(
+            options.len(),
+            2,
+            "two grantors must produce two membership rows: {options:?}"
+        );
+        assert!(
+            options.iter().any(|inherits| *inherits),
+            "one of them inherits: {options:?}"
+        );
+        let leaked = denied_as_worker(&admin, &fx, &bare_select(&fx))
+            .await
+            .expect(
+                "the UNION across grantors re-opens the fence - if this denies, \
+                 the boot posture check could safely look at one row and its \
+                 count-every-row shape is over-built",
+            );
+        assert_eq!(leaked, "tenant-secret");
+
+        // A plain REVOKE as the admin removes only ITS row.
+        admin
+            .batch_execute(&format!(
+                "REVOKE {} FROM {}",
+                quote_ident(&fx.app_role),
+                quote_ident(&fx.worker)
+            ))
+            .await
+            .expect("admin revoke");
+        assert_eq!(
+            inherit_options(&admin, &fx).await,
+            vec![true],
+            "the other grantor's inheriting row survives a superuser REVOKE"
+        );
+
+        let _ = admin
+            .batch_execute(&format!("DROP OWNED BY {g2_q} CASCADE"))
+            .await;
+        let _ = admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS {g2_q}"))
+            .await;
+        teardown(&admin, &fx).await;
     }
 }

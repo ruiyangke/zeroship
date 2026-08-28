@@ -818,7 +818,24 @@ async fn write_audit_unmask_row(
         // operators can `WHERE actor_id = ''` to filter. Trading
         // perfect NULL fidelity for codepath simplicity is fine
         // here — the audit table is operator-read-only.
-        pool.query_text_params(
+        //
+        // THROUGH THE FENCE, not around it. This used to call
+        // `pool.query_text_params` on a bare checkout, which is a fresh pool
+        // connection carrying the shared `zeroship_worker` login role and NO
+        // `SET LOCAL ROLE` - the single ungated production path in this crate
+        // that reached a tenant schema unfenced, while the two sibling readers
+        // above (`fetch_and_decrypt`, `fetch_plaintext_parent`) took the same
+        // `pool_handle()` and routed it through this funnel. Since
+        // `runtime_dependents_sql` grants the runtime role `WITH INHERIT
+        // FALSE`, the bare form no longer has the privilege and this INSERT
+        // fails with `permission denied for table __zeroship_audit_unmask` -
+        // which, because an unmask whose audit row cannot be written must not
+        // return plaintext, would have failed every unmask rather than leaking
+        // one. The funnel also brings the DB-1 statement/lock timeouts, which
+        // the bare call never had.
+        crate::exec::query_postgres_pool_with_autocommit_role(
+            pool,
+            app_id,
             &sql,
             &[
                 &actor_id_s,
@@ -831,8 +848,7 @@ async fn write_audit_unmask_row(
                 outcome,
             ],
         )
-        .await
-        .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        .await?;
         return Ok(());
     }
 
