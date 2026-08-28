@@ -125,6 +125,10 @@ pub mod reducer;
 /// The driver: the only place a reducer action becomes I/O.
 pub mod driver;
 
+/// The out-of-band canceller forced cleanup uses to reach a session another
+/// future is holding.
+pub(crate) mod cancel;
+
 /// The `test-helpers` seam onto the driver, for integration targets that need a
 /// live server. Not compiled into a production build.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1567,6 +1571,94 @@ mod tests {
                 .expect("count notes after rollback");
             assert_eq!(rows[0][0].as_deref(), Some("0"));
             assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
+        });
+    }
+
+    /// **Forced cleanup reaches an unreachable SQLite session through SC-2's
+    /// canceller, and rolls it back rather than giving up on it.**
+    ///
+    /// The PostgreSQL arm of this property is
+    /// `a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection`
+    /// in `tests/native_transaction.rs`; this is its dev-tier peer, and it is
+    /// here rather than there because it needs no server.
+    ///
+    /// The two backends differ in how much a cancellation accomplishes, and this
+    /// arm exists to hold that difference to the assertion rather than to a
+    /// comment: SQLite's actor answers a `Cancel` only after it has rolled back
+    /// and retired the reservation, so there is nothing to reclaim and no
+    /// `ROLLBACK` for the driver to issue afterwards. `SqliteCancelHandle::cancel`
+    /// carried a `// no production canceller yet` allow until this change; this
+    /// is the caller that made it false.
+    ///
+    /// The session is taken out of the slot with a bare
+    /// [`crate::context::TxClientSlotGuard`], which is what ordinary CRUD does
+    /// (the module header's "known gap"), so the reducer still reports
+    /// `SessionOwnership::Registry`. That is the production shape today, not a
+    /// contrived one.
+    ///
+    /// **The row count is the load-bearing assertion.** An outcome of
+    /// `Cancelled` only means the driver believed a rollback happened; the
+    /// probe reading `0` on a SEPARATE connection is the actor having actually
+    /// done it.
+    ///
+    /// **Mutation that reddens this arm:** in `driver::cleanup`, answer the
+    /// empty-slot `Registry`/`Command` case with `CleanupAck::Indeterminate`
+    /// instead of `cancel_and_reclaim(..)`. The outcome becomes
+    /// `Indeterminate(Cancelled)` and the session is withdrawn.
+    #[test]
+    fn a_forced_cleanup_cancels_an_unreachable_sqlite_session() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend.autocommit_client();
+            backend
+                .client_exec(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            exec_begin_or_savepoint(false, None, "app_sqlite")
+                .await
+                .expect("begin sqlite tx");
+            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('doomed')")
+                .await
+                .expect("insert inside sqlite tx");
+
+            // Another future owns the session. Forced cleanup cannot take it out
+            // of the slot, so the only route left is the canceller captured when
+            // the session was installed.
+            let held =
+                crate::context::TxClientSlotGuard::take("app_sqlite").expect("hold the session");
+
+            let driven = driver::cancel("app_sqlite").await;
+            assert_eq!(
+                driven.outcome(),
+                Some(reducer::TerminalOutcome::Cancelled(
+                    reducer::CleanupCause::Cancelled
+                )),
+                "the actor rolls back and retires the reservation before it \
+                 acknowledges, so the cleanup goal is PROVED - answering \
+                 Indeterminate here is what used to abandon a live session"
+            );
+            assert!(
+                !crate::context::with(|c| c.tx_session_withdrawn("app_sqlite")),
+                "a proved cleanup withdraws nothing"
+            );
+
+            drop(held);
+
+            let rows = probe
+                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .await
+                .expect("count notes after the forced cleanup");
+            assert_eq!(
+                rows[0][0].as_deref(),
+                Some("0"),
+                "the cancellation must have really rolled the transaction back, \
+                 not merely reported that it did"
+            );
         });
     }
 

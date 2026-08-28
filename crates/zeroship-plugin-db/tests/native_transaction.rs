@@ -1816,18 +1816,37 @@ mod sc1_driver {
         });
     }
 
-    /// **`WithdrawSession` genuinely withdraws.**
+    /// **`WithdrawSession` genuinely withdraws - and this is the arm that says
+    /// what still reaches it now that forced cleanup CANCELS.**
     ///
     /// The disposition SC-1 gives unknown backend health is to destroy the
     /// physical connection rather than return it, and on PostgreSQL that is not
     /// what a drop does: `OwnedPooledClient::drop` calls
     /// `pool.return_client(entry)`, which republishes the lease as idle.
     ///
-    /// The arm reaches the withdrawal through the case that makes health
-    /// genuinely unknown - a force landing while another future holds the
-    /// session out of the slot, so the cleanup `ROLLBACK` cannot run at all -
-    /// and then asserts on the POOL, not on the reducer's own bookkeeping: the
-    /// session must not come back for reuse.
+    /// **The route changed and the name did not, so the route is asserted.**
+    /// This arm used to reach withdrawal through "the driver cannot reach the
+    /// session, so it cannot roll back" - which is precisely the answer
+    /// `cancel_and_reclaim` replaced. What it reaches now is the *best-effort*
+    /// half of PostgreSQL cancellation, and it is a case that matters more:
+    ///
+    /// 1. `HeldSession` takes the session out of the slot with **no statement
+    ///    running on it**. The backend is idle inside its transaction block.
+    /// 2. Forced cleanup delivers a real `CancelRequest` to that backend, and
+    ///    the postmaster confirms it consumed the packet.
+    /// 3. **PostgreSQL discards it.** A cancel that arrives while a backend is
+    ///    reading its next command clears `QueryCancelPending` and raises
+    ///    nothing. The session is not freed, because there was nothing to free.
+    /// 4. Nothing returns the session within `probe::cancel_reclaim_grace()`,
+    ///    the goal is unproved, and the session is withdrawn.
+    ///
+    /// That is exactly "what happens when cancellation silently does nothing",
+    /// and the answer is: the fallback, unchanged.
+    ///
+    /// The elapsed-time assertion is what binds the arm to that route. A
+    /// cancellation the server acted on frees the session in about a round trip,
+    /// so a cleanup that returned quickly took the OTHER path and this arm would
+    /// be reporting on cancellation while claiming to report on withdrawal.
     ///
     /// **Mutation that reddens this arm:** make
     /// `context::destroy_tx_connection`'s Postgres arm a plain `drop(client)`
@@ -1845,17 +1864,27 @@ mod sc1_driver {
             let (_, _, total_before) = probe::pool_counts().expect("a pool is installed");
             assert_eq!(total_before, 1, "one connection, checked out");
 
-            // An operation owns the session. A force arriving now cannot reach
-            // the connection to roll it back, so backend health is unknown -
-            // which is exactly the case SC-1 answers with a withdrawal.
+            // Another future owns the session, and NOTHING IS RUNNING ON IT.
+            // A cancel delivered to this backend is discarded by the server, so
+            // cleanup cannot free the session and backend health stays unknown -
+            // which is the case SC-1 answers with a withdrawal.
             let held = probe::HeldSession::take(APP).expect("hold the session");
             let withdrawn_pid = held.backend_pid().expect("a Postgres session");
 
+            let started = std::time::Instant::now();
             let forced = probe::cancel(APP).await;
+            let elapsed = started.elapsed();
             assert_eq!(
                 forced.outcome,
                 Some(TerminalOutcome::Indeterminate(CleanupCause::Cancelled)),
-                "cleanup that could not run proves no goal"
+                "cleanup that could not free the session proves no goal"
+            );
+            assert!(
+                elapsed >= probe::cancel_reclaim_grace(),
+                "this arm must reach withdrawal through a cancellation the server \
+                 DISCARDED, which is the path that sits out the whole reclaim \
+                 grace. Returning in {elapsed:?} means the session came back and \
+                 the arm is now measuring cancellation, not withdrawal"
             );
             assert!(
                 probe::withdrawn(APP),
@@ -1907,6 +1936,226 @@ mod sc1_driver {
 
             let settled = probe::settle(APP, false).await;
             assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            teardown(&admin, APP).await;
+        });
+    }
+
+    /// Wait until `pid` is actually executing a statement on the server.
+    ///
+    /// A `sleep` would be a guess about scheduling; this is the server's own
+    /// answer, so the arm that uses it cannot cancel a statement that never
+    /// started and then report that cancellation worked.
+    async fn wait_until_active(admin: &Client, pid: i32) {
+        for _ in 0..200u32 {
+            let state: Option<String> = admin
+                .query_one("SELECT state FROM pg_stat_activity WHERE pid = $1", &[&pid])
+                .await
+                .expect("read the backend's state")
+                .get(0);
+            if state.as_deref() == Some("active") {
+                return;
+            }
+            compio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("backend {pid} never reached state=active");
+    }
+
+    /// The state PostgreSQL reports for `pid`, or `None` once it is gone.
+    async fn backend_state(admin: &Client, pid: i32) -> Option<String> {
+        admin
+            .query_one("SELECT state FROM pg_stat_activity WHERE pid = $1", &[&pid])
+            .await
+            .expect("read the backend's state")
+            .get(0)
+    }
+
+    /// **Forced cleanup CANCELS the running statement; it does not destroy the
+    /// connection.**
+    ///
+    /// This is the common case, not an edge. The execution deadline exists to
+    /// bound a slow statement, so it fires *because* a statement is slow - and a
+    /// slow statement is one whose future is holding the session out of the
+    /// slot. Cleanup could not reach the session, could not roll back, answered
+    /// `Indeterminate`, and `Indeterminate` withdraws: the mechanism for
+    /// bounding a slow statement responded by killing the backend, every time.
+    ///
+    /// A `CancelRequest` needs no session. It travels on its own connection and
+    /// names the backend by process id, so the canceller captured at install
+    /// time reaches a session no one can take out of the slot.
+    ///
+    /// The arm asserts the whole chain on the server rather than on the
+    /// reducer's bookkeeping: the statement really was cancelled (`57014`), the
+    /// transaction really was rolled back (the goal `OpenTransaction` is proved,
+    /// which only "rolled back" proves), the connection really did come back
+    /// (the pool is idle at 1 and the next checkout is the SAME backend pid),
+    /// and it happened promptly rather than by sitting out the reclaim grace.
+    ///
+    /// **Mutation that reddens this arm:** in `driver::cleanup`, answer the
+    /// empty-slot `Registry`/`Command` case with `CleanupAck::Indeterminate`
+    /// instead of `cancel_and_reclaim(..)` - that is the pre-change behaviour
+    /// verbatim. The outcome becomes `Indeterminate(Cancelled)`, the session is
+    /// withdrawn, `total_count` drops to 0 and the next checkout is a different
+    /// backend.
+    #[test]
+    fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
+        const APP: &str = "zs_sc1drv_cancelrun";
+        block_on(async {
+            let admin = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+
+            probe::begin(APP, None).await.expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).expect("a pinned session");
+
+            // A statement that will not end on its own inside this arm. 60s is
+            // deliberately past `DB_STATEMENT_TIMEOUT_MS` (30s) so a failure to
+            // cancel shows up as this arm hanging and then failing, never as a
+            // server-side timeout that happens to look like a cancellation.
+            let running = compio::runtime::spawn(async move {
+                probe::operation(APP, "SELECT pg_sleep(60)").await
+            });
+            wait_until_active(&admin, pid).await;
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                None,
+                "the running statement holds the session OUT of the slot - that is \
+                 the condition that used to force a withdrawal"
+            );
+
+            let started = std::time::Instant::now();
+            let forced = probe::cancel(APP).await;
+            let elapsed = started.elapsed();
+
+            let statement = running.await.expect("the cancelled statement's task");
+            let failure = statement.expect_err("a cancelled statement must not report success");
+            assert!(
+                format!("{failure:?}").contains("canceling statement due to user request"),
+                "the statement must end with PostgreSQL's own 57014, not with some \
+                 other failure that would pass this arm for the wrong reason: \
+                 {failure:?}"
+            );
+
+            assert_eq!(
+                forced.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::Cancelled)),
+                "cancelling frees the session, the cleanup ROLLBACK then PROVES \
+                 CleanupGoal::OpenTransaction, and the transaction ends as \
+                 cancelled rather than indeterminate"
+            );
+            assert!(
+                !probe::withdrawn(APP),
+                "a cancelled statement's connection is healthy once rolled back; \
+                 withdrawing it is what this change exists to stop"
+            );
+            assert!(
+                elapsed < probe::cancel_reclaim_grace(),
+                "the session must be reclaimed because the cancel landed, not \
+                 because the grace expired; {elapsed:?} is the whole grace"
+            );
+
+            let (idle, active, total) = probe::pool_counts().expect("a pool is installed");
+            assert_eq!(
+                (idle, active, total),
+                (1, 0, 1),
+                "the session went back to the pool as idle"
+            );
+            probe::begin(APP, None)
+                .await
+                .expect("a second BEGIN reuses it");
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                Some(pid),
+                "the very same physical connection served the next transaction"
+            );
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+
+            teardown(&admin, APP).await;
+        });
+    }
+
+    /// **A cleanup that outlived its transaction must not roll back the session
+    /// it finds in the slot.**
+    ///
+    /// Cancellation put a second actor in a window that used to have one.
+    /// `cleanup` was a straight line with no await between reading the slot and
+    /// writing it back, so "the session in the slot" could only be the session
+    /// being cleaned up. It now waits for a cancelled statement's holder, and
+    /// that wait can outlive the transaction: the `CancellationSql` deadline
+    /// fires in its own task, settles `Indeterminate`, withdraws, and releases
+    /// the admission - after which the next transaction is admitted, clears the
+    /// withdrawal tombstone, and installs ITS session in this very slot. A
+    /// resumed cleanup that took whatever it found there would issue `ROLLBACK`
+    /// on a healthy, unrelated transaction.
+    ///
+    /// Two things stop it, and they are not the same thing.
+    /// `retire_transaction` wakes the slot waiters, so a cleanup whose
+    /// transaction was retired is released immediately rather than sitting out
+    /// its grace - that is the first line, and it depends on scheduling.
+    /// `CleanupIdentity` is the second, and does not: the cleanup re-reads the
+    /// reducer's `(cancellation token, backend generation)` after the wait and
+    /// refuses to act on a slot it can no longer prove is its own.
+    ///
+    /// **What this fixture substitutes, and why that is honest.** It restores
+    /// the SAME session rather than provisioning a successor's. A genuine
+    /// successor cannot be reached deterministically: admitting one requires the
+    /// claim, releasing the claim is what wakes this waiter, and the waiter then
+    /// resolves before the successor's `BEGIN` has run. What the arm rules on is
+    /// unchanged by the substitution - a filled slot plus a dead identity - and
+    /// the observable is the one that matters: **the transaction in that slot is
+    /// still open on the server afterwards.**
+    ///
+    /// **Mutation that reddens this arm:** delete the post-wait
+    /// `identity.is_current(..)` check in `driver::cancel_and_reclaim`. The
+    /// stale cleanup then takes the client and rolls it back, and
+    /// `pg_stat_activity` reports the backend `idle` instead of
+    /// `idle in transaction`.
+    #[test]
+    fn a_cleanup_that_outlived_its_transaction_leaves_the_slot_alone() {
+        const APP: &str = "zs_sc1drv_stalecleanup";
+        block_on(async {
+            let admin = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+
+            probe::begin(APP, None).await.expect("BEGIN");
+            let held = probe::HeldSession::take(APP).expect("hold the session");
+            let pid = held.backend_pid().expect("a Postgres session");
+            assert_eq!(
+                backend_state(&admin, pid).await.as_deref(),
+                Some("idle in transaction"),
+                "precondition: the session is inside its transaction block"
+            );
+
+            // Force it. Nothing is running, so the cancel is discarded and the
+            // cleanup parks on the slot - which is the state this arm needs.
+            let cleanup = compio::runtime::spawn(async move { probe::cancel(APP).await });
+            compio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+            // Two steps, with NO await between them, so the woken cleanup task
+            // cannot run in the middle: the session comes back, and then the
+            // transaction it belonged to is retired out from under the cleanup.
+            held.restore();
+            probe::abandon_reducer(APP);
+
+            let forced = cleanup.await.expect("the cleanup task");
+            assert_eq!(
+                forced.outcome, None,
+                "the acknowledgement lands on a retired reducer and changes nothing"
+            );
+
+            assert_eq!(
+                backend_state(&admin, pid).await.as_deref(),
+                Some("idle in transaction"),
+                "a cleanup that is no longer the current one must not send \
+                 ROLLBACK to whatever session it finds in the slot - the \
+                 transaction there is still open, and in production it would \
+                 belong to the NEXT caller"
+            );
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                Some(pid),
+                "and the session is still parked, not taken"
+            );
+
             teardown(&admin, APP).await;
         });
     }
