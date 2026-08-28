@@ -330,6 +330,14 @@ pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 /// three positions against a live catalog; its third arm is what would go red
 /// if the second call were ever removed.
 ///
+/// THAT CASE PROVES THE CONSTRAINT, NOT THE CALL ORDER. It runs the two
+/// functions itself, so swapping them inside `apply_ir_request` leaves it green.
+/// The order that ships is bound by `apply_api_test::
+/// a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg`,
+/// which applies through the HTTP surface and then writes an audit row by the
+/// worker's own identity chain. Both are needed and neither replaces the other:
+/// the first says WHY the order matters, the second says the code still has it.
+///
 /// # Idempotence
 ///
 /// `IF NOT EXISTS` throughout, so it is safe on every apply, which is how a
