@@ -176,7 +176,9 @@
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]
 #![allow(missing_debug_implementations)]
-#![allow(dead_code)]
+// No crate-wide dead_code allow: it hid an uncalled pub(crate) fn and an
+// unread field until a coverage run pointed at them. The one item that is
+// legitimately dead under some feature resolutions carries its own allow.
 
 pub use crate::buf_stream::SplitStream;
 pub use crate::cancel_token::CancelToken;

@@ -22,6 +22,9 @@ pub(crate) const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
 pub(crate) mod private {
     pub struct ForcePrivateApi;
 
+    // Read only by the TLS connectors, so the field is genuinely dead when the
+    // `tls` feature is off. Targeted rather than a crate-wide allow.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub struct ReleaseConfig<'a>(&'a mut crate::release::ConnectionRelease);
 
     impl<'a> ReleaseConfig<'a> {
