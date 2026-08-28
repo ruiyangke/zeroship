@@ -28,6 +28,32 @@ use crate::error::DbError;
 
 const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 
+/// The ONE `__zeroship_`-prefixed table in an app schema the runtime role must
+/// keep privileges on.
+///
+/// Every other reserved table in the app's schema is state a separate service
+/// WRITES and the worker only reads — above all the migration journal
+/// (`__zeroship_schema_migrations` and its siblings), which the worker must not
+/// be able to forge. Stripping the worker's grants on those is the whole point
+/// of [`revoke_reserved_system_table_privileges`].
+///
+/// The unmask audit table is the exception, and it is the exact inverse: the
+/// worker is its ONLY writer. Every `unmask()` — granted and denied — appends a
+/// row recording who read plaintext, from `crud/unmask.rs`.
+///
+/// This exemption did not matter while the worker CREATED the table itself,
+/// which it did until 2026-08-28: the creator of a Postgres table is its owner,
+/// and an owner's rights are implicit and survive `REVOKE ... FROM <owner>`, so
+/// the loop below swept the name and changed nothing. Now that the migration
+/// service creates it, the worker is an ordinary grantee and the sweep would
+/// take its INSERT with it — turning every unmask into `permission denied for
+/// table __zeroship_audit_unmask`, on the privileged read path, at runtime.
+///
+/// Losing ownership is a GAIN, not a regression: a process that owns its own
+/// audit log can `TRUNCATE` or `DROP` it, and privilege follows the process.
+/// The worker should hold exactly the reach it needs to append and no more.
+const WORKER_WRITABLE_RESERVED_TABLE: &str = "__zeroship_audit_unmask";
+
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
 /// so operators see *what* the bootstrap layer was doing when the SQL
 /// failed. The SQLSTATE classification still drives the `.code`
@@ -323,42 +349,99 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     })
 }
 
+/// The `DO` block [`revoke_reserved_system_table_privileges`] runs.
+///
+/// Split out from the execution so the predicate can be pinned by a unit test
+/// without a live cluster. The behaviour it encodes is a privilege boundary,
+/// and the only other way to check it is a live-PG suite that does not run in
+/// the default gate.
+fn revoke_reserved_system_table_privileges_sql(app_id: &str, role: &str) -> String {
+    let schema_literal = sql_string_literal(app_id);
+    let role_literal = sql_string_literal(role);
+    let prefix_literal = sql_string_literal(RESERVED_SYSTEM_TABLE_PREFIX);
+    // The audit table is excluded by NAME rather than by narrowing the prefix:
+    // the prefix must keep matching everything else, and a second reserved
+    // table that the worker may write should have to be added here deliberately.
+    let writable_literal = sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE);
+    format!(
+        "DO $$ \
+         DECLARE \
+           rel record; \
+         BEGIN \
+           FOR rel IN \
+             SELECT n.nspname, c.relname \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = {schema_literal} \
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                AND left(c.relname, {prefix_len}) = {prefix_literal} \
+                AND c.relname <> {writable_literal} \
+           LOOP \
+             EXECUTE format( \
+               'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
+               rel.nspname, rel.relname, {role_literal} \
+             ); \
+           END LOOP; \
+         END \
+         $$",
+        prefix_len = RESERVED_SYSTEM_TABLE_PREFIX.len(),
+    )
+}
+
 async fn revoke_reserved_system_table_privileges(
     pool: &Pool,
     app_id: &str,
     role: &str,
 ) -> Result<(), DbError> {
-    let schema_literal = sql_string_literal(app_id);
-    let role_literal = sql_string_literal(role);
-    let prefix_literal = sql_string_literal(RESERVED_SYSTEM_TABLE_PREFIX);
     pool.execute(
-        &format!(
-            "DO $$ \
-             DECLARE \
-               rel record; \
-             BEGIN \
-               FOR rel IN \
-                 SELECT n.nspname, c.relname \
-                   FROM pg_class c \
-                   JOIN pg_namespace n ON n.oid = c.relnamespace \
-                  WHERE n.nspname = {schema_literal} \
-                    AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
-                    AND left(c.relname, {prefix_len}) = {prefix_literal} \
-               LOOP \
-                 EXECUTE format( \
-                   'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
-                   rel.nspname, rel.relname, {role_literal} \
-                 ); \
-               END LOOP; \
-             END \
-             $$",
-            prefix_len = RESERVED_SYSTEM_TABLE_PREFIX.len(),
-        ),
+        &revoke_reserved_system_table_privileges_sql(app_id, role),
         &[],
     )
     .await
     .map_err(|e| coded_sql(&format!("REVOKE reserved table privileges {app_id}"), e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reserved_table_revoke_tests {
+    use super::*;
+
+    /// The exemption is only meaningful if the table WOULD otherwise be swept.
+    /// If the audit table were ever renamed out from under the reserved prefix
+    /// this test says so, rather than leaving a dead exclusion behind.
+    #[test]
+    fn the_exempted_table_is_one_the_prefix_would_match() {
+        assert!(
+            WORKER_WRITABLE_RESERVED_TABLE.starts_with(RESERVED_SYSTEM_TABLE_PREFIX),
+            "the exemption is dead unless the prefix matches the name"
+        );
+    }
+
+    /// THE REGRESSION. Without the `relname <> ...` predicate the sweep strips
+    /// the runtime role's INSERT on the audit table, and every `unmask()` dies
+    /// with `permission denied for table __zeroship_audit_unmask` — because the
+    /// worker stopped creating (and therefore owning) that table on 2026-08-28
+    /// and is now an ordinary grantee.
+    #[test]
+    fn the_sweep_exempts_the_unmask_audit_table() {
+        let sql = revoke_reserved_system_table_privileges_sql("app_x", "app_x_role");
+        assert!(
+            sql.contains("c.relname <> '__zeroship_audit_unmask'"),
+            "the unmask audit table must be excluded from the sweep: {sql}"
+        );
+    }
+
+    /// The sweep must still cover everything else under the prefix — above all
+    /// the migration journal, which the worker must never be able to forge.
+    #[test]
+    fn the_sweep_still_matches_the_reserved_prefix() {
+        let sql = revoke_reserved_system_table_privileges_sql("app_x", "app_x_role");
+        assert!(
+            sql.contains("left(c.relname, 11) = '__zeroship_'"),
+            "the reserved-prefix predicate must survive the exemption: {sql}"
+        );
+        assert!(sql.contains("REVOKE ALL PRIVILEGES ON TABLE"), "{sql}");
+    }
 }
 
 /// Drop the per-app role. Called by the §17.7 drop-namespace sequence

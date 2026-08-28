@@ -713,6 +713,35 @@ pub fn apply_ir_sqlite(
             project_schema.clone(),
             effective.clone(),
         );
+        // The per-app unmask audit table. This host is the dev tier's schema
+        // authority - the only thing that touches the app file before the worker
+        // serves - so it is what establishes the platform tables the worker
+        // WRITES but must not CREATE.
+        //
+        // It ran in the worker until 2026-08-28: `crud/unmask.rs` issued
+        // `CREATE TABLE IF NOT EXISTS` plus three `CREATE INDEX IF NOT EXISTS`
+        // on every single `unmask()` call, from the process that executes
+        // creator code. Moving it here is the SQLite half of removing the last
+        // live DDL from the data plane; `zeroship-migrate-server`'s
+        // `provision_audit_unmask_table` is the Postgres half.
+        //
+        // BEFORE `deploy_envelopes`, and the order is the whole defence against
+        // a creator claiming the name. `validate_collection` is FORKED, and the
+        // engine's copy (`zeroship-migrate-core`'s `schema/query.rs`) fences
+        // `__zero_migrate` but NOT `__zeroship` - and the declarative path does
+        // not call it at all. So nothing in authoring refuses a creator
+        // migration that declares `__zeroship_audit_unmask`. What refuses it is
+        // that the platform table already exists by the time the creator's
+        // `createTable` runs, which turns the collision into a loud
+        // "table already exists" apply failure instead of a silent adoption of
+        // a creator-shaped table that the worker would then write PII reads
+        // into. Postgres gets the identical guarantee the identical way
+        // (`apply.rs` provisions before `apply_sealed`), and it is the same
+        // ordering argument the engine's own journal bootstrap relies on.
+        backend
+            .ensure_audit_unmask_table_sqlite()
+            .await
+            .map_err(|error| format!("failed to establish the unmask audit table: {error}"))?;
         let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .deploy_envelopes(
                 &envelopes,

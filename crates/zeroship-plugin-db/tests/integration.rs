@@ -5037,6 +5037,25 @@ async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String 
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // The unmask audit table, APPLY-AHEAD. `crud/unmask.rs` created it lazily on
+    // every dispatch until 2026-08-28; it emits no DDL now, so the migration
+    // service creates it and this fixture stands in for that service. These are
+    // the PRODUCTION bytes - `audit_unmask_table_sql` is the same generator
+    // `provision_audit_unmask_table` executes - not a copy of them.
+    //
+    // BEFORE the caller's `ensure_per_app_role`, matching production's ordering
+    // in `zeroship-migrate-server`'s apply path: the runtime role's INSERT and
+    // its `USAGE` on the `BIGSERIAL` sequence both come from `GRANT ... ON ALL
+    // TABLES/SEQUENCES IN SCHEMA`, which grants over what exists when it runs.
+    //
+    // `batch_execute`, not `execute`: this is multi-statement DDL and the
+    // extended protocol refuses it with "cannot insert multiple commands into a
+    // prepared statement".
+    pool.batch_execute(
+        &zeroship_migrate_server::provisioning::audit_unmask_table_sql(app),
+    )
+    .await
+    .unwrap();
     role
 }
 
