@@ -414,6 +414,18 @@ cargo test -p compio-postgres -- --test-threads=1   # needs DB
 # feature-gated tests when a change touches anything behind a feature:
 cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
   -- --test-threads=1
+# THAT SET IS STILL NOT ENOUGH WHEN A CHANGE TOUCHES THE TYPE CODECS. The
+# `with-*` family gates TESTS as well as impls, and a gated-out test is not
+# reported as skipped -- it simply is not in the binary. Measured 2026-08-27 at
+# 6302fdee0: `tests/suite/temporal_edge_values.rs` declares 6 cases behind
+# `with-chrono-0_4` / `with-time-0_3`; the set above compiled 3 of them and
+# printed a clean green, and the three it dropped were exactly the ones proving
+# that PostgreSQL `time '24:00'` is refused rather than silently aliased to
+# midnight. Count the tests the file DECLARES against the ones that RAN:
+#   grep -c '#\[compio::test\]' <file>   vs   `--list | grep -c <module>`
+cargo test -p compio-postgres \
+  --features tls,live-tls-tests,live-unix-socket,with-chrono-0_4,with-time-0_3 \
+  -- --test-threads=1
 # THAT FEATURE SET, NOT `--all-features`, IS THE ONE TO USE WITH `PG_TEST_URL`.
 # `--all-features` also enables `suite-over-tls`, which `#[cfg]`-REPLACES
 # `common::test_url()` so the whole suite reads its DSN from
