@@ -161,23 +161,31 @@ whoever first writes a concurrency test on the dev tier.
         |          ROLLBACK TO SAVEPOINT -----------------+     | a statement
         |          (nested reject; the outer                    | errored
         |           transaction continues)                      v
-        |                                                    Poisoned
-        |                                                       |
-        |      settle requested while a command owns            | settle
-        |      logical execution                                | requested
-        |                       |                               |
-        |                   Quiescing                           |
-        |                       |                               |
-        |                       | that command returns          |
-        |                       |                               |
-        v                       v                               |
-     Settled <--- Settling <----+-------------------------------+
+        v                                                    Poisoned
+    Cancelling <-- a forcing publisher wins the gate in         |
+        |          Idle, InFlight, Quiescing or Poisoned        | settle
+        |                                                       | requested
+        |          settle requested while a command owns        |
+        |          logical execution                            |
+        |                      |                                |
+        |                  Quiescing                            |
+        |                      |                                |
+        |                      | that command returns           |
+        |                      |                                |
+        |                      v                                |
+        +------> Settled <--- Settling <-------------------------+
 ```
 
 Settlement may be requested from `Idle`, `InFlight` or `Poisoned`. From `Idle`
 and `Poisoned` it goes straight to `Settling`. From `InFlight` it goes to
 `Quiescing` first and waits there for the operation to return the client, rather
 than treating the empty slot as proof that terminal SQL ran.
+
+A *force* takes the other exit. From any of the six states before terminal SQL
+is issued - `Preparing`, `Starting`, `Idle`, `InFlight`, `Quiescing`,
+`Poisoned` - it enters `Cancelling`, which reaches `Settled` without passing
+through `Settling`, because forced cleanup is not terminal SQL the reducer
+issued. `Settling` is the exception and the gate section says why.
 
 - **Preparing** - admission is granted, the RAII claim guard is held and the
   execution deadline is armed, and the platform-role authority read that decides
@@ -224,24 +232,91 @@ than treating the empty slot as proof that terminal SQL ran.
   nested-inner-reject case where the outer transaction continues and commits).
   The state diagram carries that arc; without it the machine would forbid a
   behaviour the product ships.
+- **Cancelling** - the transaction is being ended by a route that is not
+  terminal SQL. The single **cleanup cause** is latched, every accepted responder
+  has been moved aside to be answered from the terminal outcome, and a **cleanup
+  goal** is fixed from the state that was interrupted. No creator request is
+  accepted here and no creator data SQL is ever issued again.
+
+  Exactly four causes reach it, and the first is the only one that races
+  anything: a **force** that won the gate, a **failed `BEGIN`**, a **`BEGIN`
+  that may or may not have opened**, and **backend health the reducer itself
+  discovered to be unknown**. The last three are found under the reducer lock
+  with no publisher to arbitrate against, so they take this state without
+  claiming the gate.
+
+  What distinguishes it from `Settling` is who owns the session. `Settling`
+  means *the reducer issued terminal SQL on a session it owns*. `Cancelling`
+  means the reducer does **not** own the session - it was never opened
+  (`Preparing`), it may or may not have been opened (`Starting`), or a command
+  still holds it (`InFlight`, `Quiescing`) - so cleanup is delegated to the
+  backend as a cancellation, and the state waits for the acknowledgement that
+  says what the backend actually did. The admission claim is held until that
+  acknowledgement arrives, or until the `CancellationSql` deadline expires and
+  the session is withdrawn.
 - **Settling** - terminal SQL has been issued and not yet answered.
 - **Settled** - terminal, with a recorded outcome.
 
-`Poisoned`, `Preparing` and `Quiescing` are why five labels were not enough.
-Each names a condition a shorter list has to fake somewhere else: as a
-bookkeeping flag beside the state, as an early `Starting` that has already
-issued `BEGIN` on an authority nobody checked, or as an empty client slot.
+`Poisoned`, `Preparing`, `Quiescing` and `Cancelling` are why five labels were
+not enough. Each names a condition a shorter list has to fake somewhere else: as
+a bookkeeping flag beside the state, as an early `Starting` that has already
+issued `BEGIN` on an authority nobody checked, as an empty client slot, or as a
+`Settling` that never issued the SQL its own definition promises.
 
-**Forced cleanup has no state of its own here.** When a force wins - a deadline,
-a cancel, a detach, or a `ReResolve`/`Deny` verdict - this contract routes the
-transaction through `Poisoned` and `Settling` to `Settled`, and the gate below
-is what makes that routing deterministic. *Open question: the r7 artifact
-instead gives forced cleanup a distinct `Cancelling` state, which waits for the
-backend's positive proof that no transaction remains before releasing the claim.
-Whether that wait needs its own label turns on one observable - what a caller is
-told while a forced rollback is still outstanding - and on where the proof
-obligation in rule 5 and invariant 3 is discharged. The invariants below hold
-under either shape.*
+### Forced cleanup owns a state, and routing it through `Poisoned` is unsound
+
+When a force wins - a deadline, a cancel, a detach, or a `ReResolve`/`Deny`
+verdict - the transaction enters `Cancelling`. It does **not** pass through
+`Poisoned`, and it does **not** pass through `Settling`. Three separate reasons,
+each sufficient on its own, and the first is why this is a correctness decision
+rather than a naming one:
+
+1. **`Poisoned` is recoverable, and a force must not be.** Invariant 13 lets a
+   successful `ROLLBACK TO` of the recovery child return the parent to `Idle`.
+   So a transaction parked in `Poisoned` by an expired deadline or by a
+   `Deny(AuthorityDomainMismatch)` verdict can be walked back to `Idle` by the
+   creator's next `rollbackTo` and resume issuing data SQL - under an authority
+   the classifier terminally denied, past a deadline that already fired. That is
+   a privilege defect, not a cosmetic one, and it follows from this document's
+   own invariant rather than from any observation about the artifact.
+2. **`Settling` promises SQL that a force has not sent.** A force winning in
+   `Preparing` issues no `BEGIN` and therefore no terminal SQL at all; a force
+   winning in `Starting` does not know whether a transaction exists to end.
+   Reporting either as `Settling` is exactly the collapse `Quiescing` exists to
+   prevent, taken from the other direction: `Settling` would stop meaning
+   "terminal SQL has been issued".
+3. **A force in `InFlight` or `Quiescing` cannot issue terminal SQL.** A command
+   owns the session, and invariant 5 permits one active backend token. Waiting
+   for that command to return is what `Quiescing` does for a cooperative settle
+   and is precisely what a force must not do - the deadline fired *because* the
+   command is not returning.
+
+`Cancelling` therefore carries a **cleanup goal**, fixed from the state the
+force interrupted, and the backend's acknowledgement is read against it:
+
+| Cleanup goal | Fixed when the force won in | The acknowledgement that proves it |
+| --- | --- | --- |
+| `NoTransaction` | `Preparing` - `BEGIN` was never sent | the session reports no open transaction |
+| `AbortIfOpened` | `Starting`, or any failure that leaves backend health unknown | either "no open transaction" or "rolled back" |
+| `OpenTransaction` | `Idle`, `InFlight`, `Quiescing`, `Poisoned` - `BEGIN` was confirmed | "rolled back" |
+
+Both backends already expose the oracle this table reads, and it is the same one
+the terminal classifier uses: PostgreSQL's `transaction_status()`, whose `None`
+means *indeterminate* and is documented as such
+(`libs/compio-postgres/src/client.rs:3170-3188`), and SQLite's `is_autocommit`
+sample (`sc2:262-266`).
+
+An acknowledgement that proves the goal settles the transaction with the latched
+cause. **Anything else - an acknowledgement that contradicts the goal, or one
+that is indeterminate - settles as indeterminate and withdraws the session**:
+the connection is destroyed rather than returned, so no later user can inherit
+it. That is the whole of the "unknown health" disposition; see invariant 4.
+
+**`AbortIfOpened` absorbs the unknown-health case, and that is a decision of
+this contract.** The artifact carries a fourth goal, `QuarantineUnknown`, which
+exists only to route into its `Quarantining` state. Its content is "we do not
+know whether a transaction is open" - which is what `AbortIfOpened` already
+says. Dropping it costs nothing this contract can observe.
 
 ## The lifecycle classifier
 
@@ -255,7 +330,7 @@ captured, and returns exactly one of three verdicts.
 | --- | --- | --- |
 | **`Current { ceiling }`** | app id, authority domain and incarnation all match, the app's lifecycle state is stable, and the observed schema epoch equals the expected one | proceed. **Not forcing**: it never claims the gate. Its ceiling is folded into the effective ceiling by `meet`, so it can only tighten |
 | **`ReResolve`** | identity matches, but the lifecycle state is *changing*, or the epoch differs | **retryable.** The attempt is rolled back and the caller receives an epoch-changed error. The entry never follows the new epoch in place; the caller re-resolves to a fresh `TxKey` |
-| **`Deny(reason)`** | app id, authority domain or incarnation differs, or the app is deprovisioned | **terminal.** No `BEGIN`, no data SQL, no following the new app. The caller receives an incarnation-mismatch error. *Open question: whether the deprovisioned reason is also creator-visible or is audit only - it distinguishes "this app is gone" from "you raced a redeploy", which is a different retry decision* |
+| **`Deny(reason)`** | app id, authority domain or incarnation differs, or the app is deprovisioned | **terminal.** No `BEGIN`, no data SQL, no following the new app. The caller receives the *specific* denial: `APP_DEPROVISIONED`, `STALE_APP_INCARNATION` or `AUTHORITY_DOMAIN_MISMATCH`, never a collapsed one |
 
 **The order inside the classifier is load-bearing:** identity is compared before
 lifecycle state, so an observation that names a *different* app is denied for
@@ -263,6 +338,47 @@ the identity mismatch rather than for whatever that other app's lifecycle
 happens to be. That is what makes invariant 1's split - epoch mismatch
 re-resolves, domain or incarnation mismatch denies terminally - a consequence of
 one function rather than a second rule that can drift away from it.
+
+### The denial reason reaches the creator, and the ordering is what makes that safe
+
+The three denial reasons the parent design keeps distinct stay distinct all the
+way to the caller. Each is a typed terminal error, not an audit row:
+`APP_DEPROVISIONED`, `STALE_APP_INCARNATION`, `AUTHORITY_DOMAIN_MISMATCH`. The
+parent design already places all three in a table headed **"Error contract"**
+(`docs/proposals/2026-08-26-runtime-db-binding-design.md:1010-1020`), which is a
+caller-facing surface; its later remark about the audit trail names a second
+consumer, not the only one.
+
+None of the three is retryable, which that same table states. **Non-retryable is
+not the same as indistinguishable**, and the three differ in what the *next*
+action should be:
+
+- `APP_DEPROVISIONED` is a permanent tombstone. There is nothing to re-resolve
+  to, now or later.
+- `STALE_APP_INCARNATION` means the app is alive under a new incarnation. This
+  handle is dead; a freshly resolved binding is not. Re-resolving is the correct
+  next action, and a caller that cannot tell this from a tombstone either
+  re-resolves against a deprovisioned app forever or gives up on a live one.
+- `AUTHORITY_DOMAIN_MISMATCH` means the cluster or timeline answering is not the
+  one the binding captured. Re-resolving locally does not help; this is an
+  operational fault, not a lifecycle event.
+
+Collapsing them would make the only distinguishable signal a log line the
+creator cannot read, which turns that choice into a guess.
+
+**What this leaks, and why it is nothing.** `Deny` is only ever returned to a
+caller whose identity *matched*, because the ordering above compares identity
+first: an observation naming a different app is denied for the identity mismatch
+and never reaches the lifecycle arm. So `APP_DEPROVISIONED` tells an app that
+its own authority record carries a tombstone. It is not an oracle over other
+tenants, and it does not distinguish "another app is deprovisioned" from "no
+such app" - that question is answered by the identity comparison, uniformly, for
+every value it could take.
+
+The reverse choice leaks more. Auditing the reason and returning a single
+collapsed error hides a *permanent* condition behind a *retryable-looking* one,
+so the observable difference migrates from an error code into retry timing -
+which every caller can measure and no caller can act on correctly.
 
 This classifier is also the comparison "Two identities, deliberately distinct"
 promises when it leaves the authority domain out of the admission key: the
@@ -315,8 +431,8 @@ which is Fork B and invariant 7.
    settles never reaches the settle path. The timer is armed on the transition
    into `Preparing` - the same transition that grants admission and creates the
    claim guard - and fires regardless of callback behaviour, moving the
-   transaction to `Poisoned` and then `Settling` with a rollback. Its slot
-   protocol is under "The deadline slot".
+   transaction to `Cancelling` with the cleanup goal its interrupted state
+   fixes. Its slot protocol is under "The deadline slot".
 
 5. **Cancellation before `BEGIN` returns must not leak the admission claim.**
    That window is exactly `Preparing` and `Starting`. An RAII guard is armed at
@@ -374,29 +490,67 @@ still be replaceable by the deadline that bounds *that* cleanup; otherwise a
 hung rollback is unbounded and strands the admission claim, which is rule 5's
 DBR-11 failure reached by a second route.
 
-**The set of `kind`s is not closed by this contract.** One is fixed:
-`Execution`, armed on entry to `Preparing`, is rule 4's timer. Guard order step
-3 authenticates on a `(kind, generation)` pair, so at least one more exists, and
-this contract's own shape says what it is for - rule 4 has the execution
-deadline drive the transaction to `Settling` with a rollback, and nothing stated
-here bounds that rollback.
+### The kinds are closed at three, and that is what closes invariant 3
 
-*Open question: the name, arming point and expiry behaviour of the deadline that
-bounds forced terminal SQL, and what a transaction whose terminal SQL never
-answers settles as. The r7 artifact names five kinds beyond `Execution`. Three
-of them - `CancellationHardStop`, `TerminalHardStop` and `RetirementFence` -
-belong to the supervisor and generation-fencing machinery this contract declines
-under "Where the full transition matrix lives", and a fourth, `CancellationSql`,
-bounds the `Cancelling` state this contract does not have. Only `TerminalSql`,
-which bounds `Settling`, lands on a state that exists here. So the artifact
-answers the question but not in this contract's shape, and its answer cannot be
-adopted wholesale. Until this is settled, the three states and four mutators
-above hold, and invariant 3's claim balance does not: an execution deadline
-firing against a rollback that never answers has nothing to release the claim.*
+Every state that can outlive a caller is bounded by exactly one kind, and each
+kind is reached by replacing the one before it:
 
-*The artifact also carries a fifth mutator, for arming a retirement fence. It
-belongs to the same declined machinery and is deliberately absent above; the
-four-mutator list is closed for the kinds this contract does arm.*
+| Kind | Armed on entry to | Bounds | Replaces |
+| --- | --- | --- | --- |
+| `Execution` | `Preparing` | everything a caller can see: admission-to-terminal | - (`arm_initial`) |
+| `CancellationSql` | `Cancelling` | forced cleanup, from the force winning the gate to the acknowledgement | `Execution` |
+| `TerminalSql` | `Settling` | terminal SQL, from issue to answer | `Execution` |
+
+There is no fourth. `Cancelling` and `Settling` are the only states that wait on
+a backend that owes an answer and has no caller left to give up, and each has
+its bound.
+
+**Every call site therefore names `Execution` as its expected kind**, so
+`replace_current`'s `expected_kind` is not decoration: a second force arriving
+in `Cancelling` finds `CancellationSql` current, fails the expectation, and is a
+pure diagnostic rather than a second cleanup with a fresh generation.
+
+**What happens when the second-stage deadline fires is the answer this contract
+owes.** `CancellationSql` or `TerminalSql` expiring means the backend did not
+answer within its grace. There is no third timer and no escalation: the session
+is **withdrawn** - the physical connection destroyed rather than returned - and
+the transaction settles as indeterminate, carrying the latched cause. Destroying
+the connection is the fence, and it is sufficient here because the admission key
+is process-local and protects the *transaction connection slot*, not the
+server-side transaction: once the connection is gone nothing can reach that
+session, so the claim can be released and the slot reused.
+
+That closes **invariant 3**, which the four-mutator table alone did not: every
+fired deadline now has a bounded path to `Settled` that requires no cooperation
+from the backend.
+
+**Accepted cost, stated rather than hidden.** Closing the socket does not
+guarantee the server-side transaction is *already* gone - a PostgreSQL backend
+mid-statement need not notice the disconnect promptly - so a following
+transaction for the same app can still block on locks that transaction holds.
+The cancellation request sent on entry to `Cancelling` is what bounds that in
+practice. The **safety** property this contract asserts - no later SQL on that
+transaction, and no reuse of a session in unknown state - holds unconditionally;
+the liveness of lock release does not, and belongs to `statement_timeout`.
+
+### Why there is no fifth mutator
+
+The artifact carries `replace_with_retirement`, and its invariant 30 lists it as
+one of five. **That fifth mutator has exactly one caller**,
+`begin_generation_retirement` (`dbbind-r7-codex.md:2046-2079`), whose only
+product is the `Quarantining` state; the single kind it arms, `RetirementFence`,
+is consumed by no other state. Adopting it means adopting `Quarantining`, which
+means adopting the supervisor, the signed `GenerationRetirementProof` and the
+durable fence jobs this contract declines. The two questions are one question,
+and they are answered together under invariant 4.
+
+**The artifact's own "five" is not a closure claim to inherit either.** Its
+invariant 30 omits `rearm_retirement`, which its `Quarantining` retry row calls
+(`:2584`), and `replace_with_cancellation_sql_infallible`, which its
+`Cancelling` constructor calls (`:2374`). The source implements at least seven
+and states five. So "four" here is not a subset promoted to a closure claim
+against a source that said five - it is a closure over the three kinds named
+above, which is a property an implementer can check by counting arming sites.
 
 ## Frames and effects
 
@@ -414,7 +568,7 @@ closed:
 | --- | --- |
 | `RELEASE` succeeds | appended to the parent, in order. Nothing is published |
 | `ROLLBACK TO` succeeds | **discarded** - the database changes they describe are known to be undone |
-| `ROLLBACK TO` fails | retained for diagnosis; the transaction poisons; nothing is published |
+| `ROLLBACK TO` fails | retained for diagnosis; the transaction poisons, ends, or withdraws by health (invariant 15); nothing is published |
 | `ROLLBACK TO` succeeds but the following `RELEASE` fails | effects **stay discarded**; an empty child frame remains; root cleanup is forced |
 | confirmed **root** commit | detached and published |
 | every other terminal outcome | every frame buffer discarded |
@@ -478,13 +632,22 @@ deadline-kind set, and the terminal outcome table. It is preserved at
 drafts). An implementer should work from that for the matrix; a reviewer should
 work from this.
 
-**Its state enum is larger than the one under "States", and the difference is
-not accidental.** It also carries `WaitingAdmission` for the pre-admission
-queue, `Cancelling` for forced cleanup, and `HardStopping` and `Quarantining`
-for the generation-fencing machinery below. The two named open questions -
-whether forced cleanup needs its own label, and which deadline bounds forced
-terminal SQL - are exactly where that difference bites; everything else the
-artifact adds is machinery this contract declines.
+**Its state enum has twelve members to this one's nine, and every difference is
+accounted for.** It also carries `WaitingAdmission` for the pre-admission queue,
+and `HardStopping` and `Quarantining` for the generation-fencing machinery.
+
+- `WaitingAdmission` is deliberately absent. Queue time is not part of the
+  execution budget and no deadline is armed before admission, so a waiting
+  caller has no state a guard can be keyed to. The queue is a property of the
+  admission key, not of a transaction that does not exist yet.
+- `Cancelling` **is adopted**, in the reduced form under "States": a cause, a
+  cleanup goal and an outstanding acknowledgement. What is dropped from it is
+  the artifact's `CancelCleanupPhase::HardStopping` arm - the permit, the
+  trigger and the fence token - along with the `QuarantineUnknown` goal that
+  only routes into `Quarantining`.
+- `HardStopping` and `Quarantining` are declined, and "The kinds are closed at
+  three" says what replaces them: withdrawing the session, which needs no
+  supervisor because it is the connection itself that is destroyed.
 
 **It is not SC-1 written out in full, and the difference is a scope trap.** That
 artifact invokes a *supervisor*, a `FenceJobRegistry` and durable fence jobs
@@ -565,9 +728,11 @@ implementation gets wrong:
   and the ordinary completion is suppressed.
 - **Completion won.** An ordinary completion was already queued. The force is
   enqueued *after* it rather than replacing it, and the reducer processes the
-  ordinary result **first**, then starts a fresh rollback from the state that
-  results. It does not discard a completion that already happened, and it does
-  not pretend the force arrived first.
+  ordinary result **first**, then enters `Cancelling` from the state that
+  results - with the cleanup goal that state fixes, which is why the goal is
+  read at entry and not at the moment the force was published. It does not
+  discard a completion that already happened, and it does not pretend the force
+  arrived first.
 - **Joined.** An earlier force already owns the cause. The second one joins it
   and emits nothing. **Exactly one cleanup cause is ever latched**, so the
   reason a transaction ended is deterministic rather than last-writer-wins -
@@ -585,8 +750,19 @@ Two rules make this airtight and both are load-bearing:
    late cancel awaiting `AlreadyCompleted`. A deadline that fires microseconds
    after a commit succeeded must not turn that commit into a cancellation.
 
-This applies in `Preparing`, `Starting`, `InFlight` and `Quiescing` alike.
-Scoping it to one state is the same mistake as scoping it to one publisher.
+This applies in `Preparing`, `Starting`, `Idle`, `InFlight`, `Quiescing` and
+`Poisoned` alike - every state from which `Cancelling` is reachable. Scoping it
+to one state is the same mistake as scoping it to one publisher. `Idle` is not
+an afterthought in that list: rule 4's central case, a callback that never
+settles, fires against a transaction sitting in exactly that state.
+
+**`Settling` is the one nonterminal state a force cannot claim**, and rule 2
+above is why. Terminal SQL has been issued exactly once and the backend owes an
+answer; a force arriving now would be starting a competing cleanup on a session
+that is already ending. It is a late cancel: it joins the terminal waiters and
+changes nothing. The `TerminalSql` deadline, not a force, is what bounds that
+wait, which is also why `replace_current` never has to accept `TerminalSql` as
+an expected kind.
 
 ## The invariants a property test asserts
 
@@ -602,10 +778,24 @@ database.
    key - which contains the runtime instance on PostgreSQL and the thread
    resource on SQLite, per Fork A.
 3. **Claim balance.** Every granted admission has exactly one release, and only
-   once no live transaction or reservation remains.
+   once no live transaction or reservation remains. This holds unconditionally
+   only because every state that waits on a backend is bounded and every bound
+   ends in withdrawing the session rather than in waiting longer; see "The kinds
+   are closed at three".
 4. **Session conservation.** Between confirmed `BEGIN` and terminal cleanup,
    session ownership is exactly one of the registry, the matching command token,
-   or quarantined - never silently absent.
+   or **withdrawn** - never silently absent.
+
+   **`Withdrawn` is a session-ownership value, not a transaction state**, and it
+   is the whole of this contract's answer to unknown backend health: the session
+   is never returned to the registry, never leased to another command, and its
+   physical connection is destroyed at terminal cleanup rather than reused. It
+   requires no supervisor, no signed retirement proof and no `Quarantining`
+   state, because closing the connection *is* the proof that nothing further can
+   run on it. SC-2 spells the same disposition as a verb over its actor's
+   connection (`sc2:269`, `sc2:275`), and the failure it prevents is the one the
+   driver already names: handing the next user of a connection an aborted
+   transaction (`libs/compio-postgres/src/client.rs:3180-3184`).
 5. **Single command.** At most one active backend token per transaction;
    duplicate or stale completions cannot alter state or effects.
 6. **Operation serialization.** A second operation while one is in flight
@@ -638,6 +828,8 @@ database.
 13. **Poison rule.** No data, frame-open or release command may start from
     `Poisoned`. A successful rollback-to or release of the recovery child
     returns the parent to `Idle`; otherwise **only root settlement** can end it.
+    `Poisoned` is therefore *recoverable by construction*, which is exactly why
+    no forced cleanup may route through it - see invariant 16.
 14. **Poisoned commit.** A `COMMIT` answered `ROLLBACK` never resolves a
     creator promise and never publishes an effect. This one is not speculative -
     it is defect **L8**, now closed
@@ -655,13 +847,30 @@ database.
     one SQL statement concurrently. A successfully closed rollback-to frame
     settles as its ordered `ROLLBACK TO` then `RELEASE` pair; if the
     `ROLLBACK TO` fails, the legal error row stops **without** `RELEASE` and
-    retains, poisons or quarantines as classified.
+    retains the frame's effects, then takes exactly one of **three**
+    dispositions, chosen by the same health oracle the cleanup goals read
+    (`transaction_status()` on PostgreSQL, `is_autocommit` on SQLite):
 
-Invariants 13-15 are the ones that decide whether the state table is executable
+    | The oracle says | Disposition |
+    | --- | --- |
+    | a transaction is still open and in error | **poisons**; invariant 13 governs it from there |
+    | no transaction remains - the backend ended it | **terminal**. Settle as aborted-by-backend, discard every frame buffer, release the claim. No `Cancelling`: there is nothing left to cancel |
+    | it cannot say | `Cancelling` with goal `AbortIfOpened`, and the session is **withdrawn** per invariant 4 |
+
+    There is no fourth. The three exhaust the oracle's range, which is what
+    makes this checkable rather than a list of remembered cases.
+16. **Forced cleanup is terminal.** Once `Cancelling` is entered, no path leads
+    back to any state that can issue creator data SQL, and exactly one cleanup
+    cause is ever latched. Every exit is `Settled`. A property test asserts this
+    on prefixes that interleave a force with a creator `rollbackTo`, which is
+    the shape that would otherwise resurrect a denied or expired transaction
+    through invariant 13's recovery arc.
+
+Invariants 13-16 are the ones that decide whether the state table is executable
 or merely descriptive. 1-12 constrain what a transition may do; these constrain
 what may happen when two things arrive at once - a settlement racing a command,
-a commit racing a poison - which is exactly where a hand-written implementation
-diverges from its own table.
+a commit racing a poison, a force racing a recovery - which is exactly where a
+hand-written implementation diverges from its own table.
 
 ## Acceptance shape
 
@@ -689,8 +898,9 @@ A state table plus one test per illegal transition, and explicitly:
 
 - **a FAILED `ROLLBACK TO` retains the frame's effects**, asserted by faulting
   the rollback statement after an effect is queued: the child effects and the
-  frame remain diagnostically present, nothing publishes, the transaction
-  poisons, and root cleanup finally discards them.
+  frame remain diagnostically present, nothing publishes, the transaction takes
+  invariant 15's disposition for the health the fault produces - poison it with
+  an ordinary statement error - and root cleanup finally discards them.
 
   This arm is required because the success-path arm below **cannot fail against
   a premature discard** - a successful-rollback regression test stays green
@@ -758,4 +968,27 @@ A state table plus one test per illegal transition, and explicitly:
 - a callback that never settles is terminated by the deadline, with the
   transaction rolled back and the claim released;
 - cancellation between admission and `BEGIN` releases the claim, proved by a
-  following transaction for the same app succeeding.
+  following transaction for the same app succeeding;
+- **a forced transaction cannot be resurrected by `rollbackTo`.** Drive a force
+  - the execution deadline is the cheapest - while an open child frame exists,
+  then have the creator callback issue `rollbackTo` on that child. It must
+  receive the latched cleanup cause, and the transaction must not become `Idle`
+  or accept any later data SQL.
+
+  This arm is the discriminating one for `Cancelling`, and it is the only arm
+  here that fails against the shape this document previously described. Routing
+  forced cleanup through `Poisoned` passes every other arm on this list and
+  fails only this one, because `Poisoned` is the single nonterminal state
+  invariant 13 lets a creator command walk back to `Idle`. Assert the cause the
+  caller receives, not merely that the transaction eventually ended: a rollback
+  that ends the transaction for the *wrong* reason is what the single-latched
+  cause exists to prevent.
+- **a second-stage deadline settles rather than hanging.** Fault the backend so
+  the forced rollback issued from `Cancelling` never answers. The
+  `CancellationSql` deadline must fire, the session must be withdrawn rather
+  than returned, the transaction must reach `Settled` with an indeterminate
+  outcome, and a following transaction for the same app must be admitted. This
+  is invariant 3's claim balance on the path that previously had nothing to
+  release the claim, so an implementation without the second-stage deadline
+  hangs this arm instead of failing it - give it a bound and treat a timeout as
+  a failure, not as an inconclusive run.
