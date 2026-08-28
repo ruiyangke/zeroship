@@ -41,8 +41,7 @@
 # Needs:  docker, curl, node, openssl, and a release build:
 #           cargo build --release -p zeroship -p zeroship-control \
 #             -p zeroship-gateway -p zeroship-worker -p zeroship-auth
-#           cargo build --release -p zeroship-migrate-adapter \
-#             --features platform-cli --bin zeroship-platform-migrate
+#           pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #         plus a built example artifact:
 #           pnpm --filter ./examples/auth-probe build
 # ============================================================================

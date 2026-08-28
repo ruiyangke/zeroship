@@ -725,16 +725,22 @@ jobs:
           set -o pipefail
           cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration 2>&1 \
             | tee -a "$RUNNER_TEMP/rust-tests.log"
-      # Same shape one level down: the platform-migrate suite is a single
-      # `#[cfg(feature = "platform-cli")]` module, so without the feature it
-      # compiled away and the target ran empty - "running 0 tests ... ok".
-      # It now declares the requirement, so `cargo test --workspace` skips it
-      # rather than reporting a pass it did not earn, and this step is what
-      # actually runs it. The tests needing a live server skip internally; the
-      # rest do not.
+      # The adapter suite. It USED to be `--features platform-cli --test
+      # platform_migrate`, a single feature-gated module that compiled away
+      # without the feature and ran empty - "running 0 tests ... ok". Both the
+      # feature and that test file are deleted with the `zeroship-platform-migrate`
+      # binary they existed for (2026-08-28). What is left is the crate's two live
+      # PG proofs plus its unit tests; they skip internally with no database.
+      #
+      # WHAT WENT WITH THEM, so nobody reads this shorter step as a tidy-up:
+      # platform_migrate.rs also held the DB-free guard comparing db/migrations-ts
+      # against db/released_migrations.tsv. Nothing in CI checks that now. It was
+      # already inert on this branch - the file has not compiled since the corpus
+      # was rewritten to the schema() form - but inert-and-present is not the same
+      # as gone, and this is the note that says which one it is.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-migrate-adapter --features platform-cli --test platform_migrate 2>&1 \
+          cargo test -p zeroship-migrate-adapter 2>&1 \
             | tee -a "$RUNNER_TEMP/rust-tests.log"
       # compio-postgres' `tls` feature has never been compiled by any workflow,
       # let alone run: `tls` appeared ZERO times in .github/ until this step.
@@ -1066,9 +1072,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # A SECOND defect, found only once the overlay fix above let this job get
       # far enough to hit it. run_auth_suite.sh:239 provisions its database with
-      # deploy/ops/db-migrate.sh, which `cargo run`s zeroship-platform-migrate
-      # out of zeroship-migrate-adapter, which pulls in zeroship-runtime - and
-      # that crate `include_str!`s three gitignored SDK dist files. Reproduced
+      # deploy/ops/db-migrate.sh. That wrapper used to `cargo run` the
+      # zeroship-platform-migrate binary, which pulled in zeroship-runtime, which
+      # `include_str!`s three gitignored SDK dist files. It now runs the
+      # `zero-migrate` CLI instead - so the Rust edge is gone, but the pnpm
+      # requirement is NOT: the CLI is a Node program and needs the very same
+      # `pnpm build` (plus `pnpm --filter zero-migrate-cli build`) to exist at all.
+      # The block below is therefore still load-bearing, for a different reason.
+      # The original failure, reproduced
       # 2026-08-20 in a worktree that had never run pnpm:
       #   error: couldn't read .../sdks/bootstrap/dist/install-schema.js
       #   error: couldn't read .../sdks/db/dist/internal.js
@@ -1471,8 +1482,11 @@ jobs:
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
             -p zeroship-gateway -p zeroship --bins
-          cargo build --release -p zeroship-migrate-adapter \
-            --features platform-cli --bin zeroship-platform-migrate
+          # The platform schema is applied by the `zero-migrate` CLI now, which is
+          # a Node program. `pnpm build` earlier in this job builds the napi addon
+          # and the DSL; this builds the CLI itself, which the root build script
+          # deliberately does not (package.json's `build` filters to ./sdks/*).
+          pnpm --filter zero-migrate-cli build
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
       # sdks/vite-plugin/dist is already on disk, so a run over a stale dist is
@@ -1730,8 +1744,11 @@ jobs:
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
             -p zeroship-gateway -p zeroship --bins
-          cargo build --release -p zeroship-migrate-adapter \
-            --features platform-cli --bin zeroship-platform-migrate
+          # The platform schema is applied by the `zero-migrate` CLI now, which is
+          # a Node program. `pnpm build` earlier in this job builds the napi addon
+          # and the DSL; this builds the CLI itself, which the root build script
+          # deliberately does not (package.json's `build` filters to ./sdks/*).
+          pnpm --filter zero-migrate-cli build
       # ZS_FRESHNESS_STRICT=1 addresses the hazard tests/lib/binary_freshness.sh
       # describes: the dev tier runs `target/release/zeroship` and the deployed
       # tier runs the three server binaries, so a partial rebuild leaves the two
@@ -2204,8 +2221,11 @@ jobs:
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
             -p zeroship-gateway -p zeroship -p zeroship-migrated --bins
-          cargo build --release -p zeroship-migrate-adapter \
-            --features platform-cli --bin zeroship-platform-migrate
+          # The platform schema is applied by the `zero-migrate` CLI now, which is
+          # a Node program. `pnpm build` earlier in this job builds the napi addon
+          # and the DSL; this builds the CLI itself, which the root build script
+          # deliberately does not (package.json's `build` filters to ./sdks/*).
+          pnpm --filter zero-migrate-cli build
       # The harness refuses to start without a built probe and says so; building
       # it here rather than letting that refusal read as a CI misconfiguration.
       - name: Build the metering probe

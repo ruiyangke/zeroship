@@ -196,9 +196,10 @@ require_cmd jq
 require_cmd lsof
 
 echo "=== build check ==="
-for b in zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate dev-provision; do
+for b in zeroship-control zeroship-gate zeroship-worker dev-provision; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b -- run: cargo build --release"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI -- run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 pass "release binaries present"
 
 echo "=== database :$PG_PORT ==="
@@ -227,7 +228,7 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
   psql_admin < "$ROOT/ops/postgres-init.sql" >/dev/null && pass "applied ops/postgres-init.sql"
 fi
 
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+zs_platform_migrate "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { fail "platform migrations failed"; tail -60 "$WORK/migrate.log"; exit 1; }

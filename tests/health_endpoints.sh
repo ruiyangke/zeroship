@@ -51,8 +51,9 @@
 #   ./tests/health_endpoints.sh
 #
 # Requires: docker, openssl, curl, lsof; a release build of zeroship-control,
-#   zeroship-gate, zeroship-worker, zeroship-auth, zeroship-migrated and
-#   zeroship-platform-migrate.
+#   zeroship-gate, zeroship-worker, zeroship-auth and zeroship-migrated; and
+#   the zero-migrate CLI, built by
+#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build.
 # ============================================================================
 set -uo pipefail
 
@@ -119,10 +120,10 @@ assert_healthy_pair() {
 }
 
 echo "=== Build check ==="
-for b in zeroship-control zeroship-gate zeroship-worker zeroship-auth zeroship-migrated \
-         zeroship-platform-migrate; do
+for b in zeroship-control zeroship-gate zeroship-worker zeroship-auth zeroship-migrated; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b - run: cargo build --release"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 pass "all five service binaries present"
 
 echo ""

@@ -74,9 +74,10 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + built example -----------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }
+for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 ST_ZSHIP="$ROOT/examples/storage-gallery/dist/app.zship"
 [ -f "$ST_ZSHIP" ] || { echo "missing $ST_ZSHIP — (cd examples/storage-gallery && pnpm install && pnpm build)"; exit 2; }
 
@@ -186,7 +187,7 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephe
   && pass "applied deploy/ops/postgres-init.sql" || true
 
 MIG_LOG="$WORK/migrate.log"
-if zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+if zs_platform_migrate "$DBURL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
   pass "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"

@@ -298,61 +298,140 @@ _e2e_secret_file() {
   chmod 600 "$path"
 }
 
-# zs_platform_migrate <migrate-bin> <dsn> [flag ...]
+# The owner_app every platform migration is stamped with.
 #
-# Run the `zeroship-platform-migrate` one-shot with the DSN off the argv.
+# It is a CONSTANT, not a knob, and it is load-bearing twice over: the engine
+# derives each migration's journal version from `owner_app + name`
+# (crates/zeroship-migrate-core/src/render/lower.rs:8806-8811), so changing it
+# re-mints every version and re-applies the whole corpus against a database that
+# already has it; and it is the value `policies/platform-table-owners.json` maps
+# every platform table to, so the two must agree or every op is refused as
+# targeting a table owned by someone else.
+ZS_PLATFORM_OWNER_APP="zeroship_platform"
+
+# zs_platform_migrate <dsn> [--migrations-dir DIR] [--project-schema S]
+#                           [--project-id P] [extra zero-migrate flags ...]
 #
-# THE ONLY WAY TO GIVE THAT BINARY A DSN IS A PATH. The `--database-url` value
-# flag was deleted: the DSN these harnesses pass is the postgres SUPERUSER one,
-# and an argument list is public to every process in the PID namespace and to
-# `ps` for every user on the box. The binary declares the DSN `Secret<String>`,
-# and the
-# config generator emits exactly one carrier for that class, `--<name>-file`.
+# Apply the platform schema (db/migrations-ts) with the DSN off the argv.
 #
-# WHERE THE FILE LIVES, AND WHO REMOVES IT. Creation and removal are both in
-# THIS function, so the lifetime is one invocation and no caller has to
-# remember a cleanup step or install a trap:
+# WHAT CHANGED, AND WHY THE FIRST ARGUMENT IS GONE. This used to take a path to
+# the `zeroship-platform-migrate` binary and hand it `--database-url-file`. That
+# binary was deleted on 2026-08-28; the platform schema is applied by the general
+# `zero-migrate` CLI (packages/zero-migrate-cli), which is a Node program built by
+# `pnpm --filter zero-migrate-cli build`. There is no binary to name any more, so
+# the parameter that named one is gone rather than kept and ignored.
 #
-#   - PER RUN, never a fixed path. `mktemp` picks the name, so two harnesses -
-#     or two agents running the SAME harness - cannot collide on it. A shared
-#     `$WORK/migrate-dsn` would be the same defect this repo has fixed for
-#     ports, scratch databases and state directories.
-#   - 0600, set EXPLICITLY. `mktemp` already creates at 0600, but the mode is
-#     not incidental here: `read_secret_file` (crates/core/src/config/
-#     secrets.rs) calls `enforce_owner_only` and REFUSES any file with a bit set
-#     in 0o077, exiting before it connects. Stating the chmod means a future
-#     edit that changes how the file is created cannot silently produce a
-#     world-readable one that fails as "the migrate binary is broken".
-#   - Removed unconditionally after the child exits, on the failure arm too,
-#     and the child's exit status is what this function returns.
+# THE DSN STILL NEVER REACHES argv, and that is the whole reason this function
+# exists rather than a bare call. The DSN these harnesses pass is the postgres
+# SUPERUSER one, and an argument list is public to every process in the PID
+# namespace and to `ps` for every user on the box. The CLI advertises
+# `--database-url <value>`; THAT SPELLING IS NEVER USED HERE. The DSN is written
+# into a per-run `zero-migrate.toml` and passed as `--config <path>`.
+#
+# THE OWNER-ONLY REFUSAL SURVIVED THE MOVE, and it is enforced by the reader, not
+# by this function. `packages/zero-migrate-cli/src/config.ts` (`enforceOwnerOnly`)
+# refuses a config file that supplies a LITERAL `url` and has any bit set in
+# 0o077, naming the mode and the chmod - the same contract the deleted binary got
+# from `crates/core/src/config/secrets.rs`. Measured 2026-08-28 with one variable
+# between the arms: the same file at 0600 runs and reports `status: 35 applied, 0
+# pending`; at 0644 the CLI exits 1 with
+#   config file ... supplies a literal database url and has mode 0644; group and
+#   other permissions must be zero (chmod 600 '...')
+# A `url = "env:NAME"` reference at 0644 is deliberately NOT refused - it carries
+# no credential - which is the control that shows the rule is scoped to secrets
+# rather than to every config file.
+#
+# WHERE THE FILE LIVES, AND WHO REMOVES IT. Both are in THIS function, so the
+# lifetime is one invocation and no caller has to remember a cleanup step:
+#
+#   - PER RUN, never a fixed path. `mktemp -d` picks the directory, so two
+#     harnesses - or two agents running the SAME harness - cannot collide.
+#   - The DIRECTORY is 0700 and the file 0600, both set EXPLICITLY. `mktemp -d`
+#     already creates at 0700, but the mode is not incidental: the CLI refuses on
+#     it, so a future edit that changes how the file is created cannot silently
+#     produce a world-readable one that fails as "the migrate tool is broken".
+#   - Removed unconditionally after the child exits, on the failure arm too, and
+#     the child's exit status is what this function returns.
 #
 # DOES NOT COVER: a harness SIGKILLed between the write and the `rm` leaves one
-# 0600 file behind in $TMPDIR. That is a leaked file readable only by the user
-# who ran the suite, which is strictly less exposure than the argv form gave
-# every user on the box for the whole life of every run.
+# 0600 file behind in $TMPDIR. That is a leaked file readable only by the user who
+# ran the suite, which is strictly less exposure than the argv form gave every
+# user on the box for the whole life of every run.
 #
 # The DSN is passed as an ARGUMENT to this function and never through the
 # environment: an exported name would be inherited by every other child the
-# harness spawns, which is the exposure the flag deletion exists to remove.
+# harness spawns, which is the exposure this exists to remove.
+#
+# --project-id IS VALIDATED, NOT IGNORED. The retired binary took a separate
+# project id for the advisory-lock key and the journal. The CLI has no such flag:
+# its lock key IS the project schema (`owner_app_project()`,
+# crates/zeroship-migrate-node/src/verbs.rs:1142-1148). Every caller in this tree
+# passes the same value for both, so the flag is accepted and checked for
+# agreement rather than silently dropped - a caller that ever passes two different
+# values is asking for something the CLI cannot express and should be told so.
 zs_platform_migrate() {
-  if [ "$#" -lt 2 ]; then
-    echo "zs_platform_migrate: usage: zs_platform_migrate <migrate-bin> <dsn> [flag ...]" >&2
+  if [ "$#" -lt 1 ]; then
+    echo "zs_platform_migrate: usage: zs_platform_migrate <dsn> [flag ...]" >&2
     return 2
   fi
-  local bin="$1" dsn="$2" dsn_file rc
-  shift 2
+  local dsn="$1"; shift
   if [ -z "$dsn" ]; then
     echo "zs_platform_migrate: refusing to write an empty DSN file" >&2
     return 2
   fi
-  dsn_file="$(mktemp "${TMPDIR:-/tmp}/zeroship-migrate-dsn.XXXXXXXX")" || return 1
-  chmod 600 "$dsn_file" || { rm -f "$dsn_file"; return 1; }
-  printf '%s' "$dsn" > "$dsn_file" || { rm -f "$dsn_file"; return 1; }
-  "$bin" --database-url-file "$dsn_file" "$@"
+
+  local root migrations_dir schema project_id
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  migrations_dir="$root/db/migrations-ts"
+  schema="zeroship"
+  project_id=""
+
+  local passthrough=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --migrations-dir) migrations_dir="$2"; shift 2 ;;
+      --project-schema) schema="$2"; shift 2 ;;
+      --project-id) project_id="$2"; shift 2 ;;
+      *) passthrough+=("$1"); shift ;;
+    esac
+  done
+  if [ -n "$project_id" ] && [ "$project_id" != "$schema" ]; then
+    echo "zs_platform_migrate: --project-id '$project_id' differs from --project-schema" \
+         "'$schema'. The zero-migrate CLI derives its advisory-lock key and journal" \
+         "project from the schema alone, so two different values cannot be honoured." >&2
+    return 2
+  fi
+
+  local cli="$root/packages/zero-migrate-cli/dist/cli-bin.js"
+  if [ ! -f "$cli" ]; then
+    echo "zs_platform_migrate: $cli is missing - run: pnpm install && pnpm build &&" \
+         "pnpm --filter zero-migrate-cli build" >&2
+    return 2
+  fi
+
+  local cfg_dir rc
+  cfg_dir="$(mktemp -d "${TMPDIR:-/tmp}/zeroship-migrate-cfg.XXXXXXXX")" || return 1
+  chmod 700 "$cfg_dir" || { rm -rf "$cfg_dir"; return 1; }
+  # `printf %s` on the DSN, never `echo`: a DSN may contain a backslash and echo
+  # would interpret it on some shells.
+  {
+    printf '[env.platform]\n'
+    printf 'url = "%s"\n' "$dsn"
+    printf 'dir = "%s"\n' "$migrations_dir"
+    printf 'schema = "%s"\n' "$schema"
+    printf 'owner_app = "%s"\n' "$ZS_PLATFORM_OWNER_APP"
+    printf 'registry = "%s"\n' "$root/policies/platform-table-owners.json"
+    printf 'policy = ["%s"]\n' "$root/policies/platform.policy.toml"
+  } > "$cfg_dir/zero-migrate.toml" || { rm -rf "$cfg_dir"; return 1; }
+  chmod 600 "$cfg_dir/zero-migrate.toml" || { rm -rf "$cfg_dir"; return 1; }
+
+  node "$cli" apply --config "$cfg_dir/zero-migrate.toml" --env platform --approve \
+    "${passthrough[@]}"
   rc=$?
-  rm -f "$dsn_file"
+  rm -rf "$cfg_dir"
   return "$rc"
 }
+
 
 # e2e_export_database_urls <dsn>
 #

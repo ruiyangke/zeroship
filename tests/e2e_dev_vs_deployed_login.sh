@@ -76,8 +76,7 @@
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway \
 #     -p zeroship-auth -p zeroship --bins
-#   cargo build --release -p zeroship-migrate-adapter --features platform-cli \
-#     --bin zeroship-platform-migrate
+#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   docker (this script starts its OWN ephemeral Postgres)
 #   pnpm install --filter ./examples/auth-probe...
 #

@@ -255,7 +255,7 @@ fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_no
         "the refusal must name what was missing; got {text}"
     );
     assert!(
-        text.contains("zeroship-platform-migrate"),
+        text.contains("db-migrate.sh"),
         "the refusal must name the remediation; got {text}"
     );
 }
@@ -319,7 +319,7 @@ fn an_unreachable_server_refuses_differently_from_an_unmigrated_database() {
         "an unreachable server must say so; got {text}"
     );
     assert!(
-        !text.contains("zeroship-platform-migrate"),
+        !text.contains("db-migrate.sh"),
         "an unreachable server must not be blamed on a missing migration; got {text}"
     );
 }

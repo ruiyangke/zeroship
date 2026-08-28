@@ -140,12 +140,21 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # Counts assertions that RAN, not that PASSED: a mutation moves an outcome
 # BETWEEN those columns, so only a LOST assertion drops the sum.
 #
-# EXACT, not a floor, and not overridable. MEASURED 2026-08-19: 15 - 14 context
-# COPY sources plus the .cargo/ builder-stage check. The minimum of 14 measured
-# on 2026-08-11 had gone slack by one, so a tree that lost a COPY source still
-# cleared it. Pure parse of a tracked Dockerfile, so deterministic; when a COPY
-# is added or removed, re-measure and change this line in the same commit.
-EXPECT_RAN=15
+# EXACT, not a floor, and not overridable. Pure parse of a tracked Dockerfile, so
+# deterministic; when a COPY is added or removed, re-measure and change this line
+# in the same commit.
+#
+# RE-MEASURED 2026-08-28: 19 - 18 context COPY sources plus the .cargo/
+# builder-stage check. It was 15 (14 sources) on 2026-08-19, and before that a
+# floor of 14 that had gone slack by one, so a tree that LOST a COPY source still
+# cleared it - which is why this is exact.
+#
+# The four new sources are the `migrate` stage the compose one-shot builds, added
+# when the platform schema moved off the deleted `zeroship-platform-migrate`
+# binary and onto the `zero-migrate` CLI: the pnpm store and package tree the CLI
+# resolves through, the charter and table-owner registry it applies under, and its
+# entrypoint wrapper.
+EXPECT_RAN=19
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

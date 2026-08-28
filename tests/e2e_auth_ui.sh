@@ -174,14 +174,14 @@ done
 cargo build --release -p zeroship -p zeroship-auth \
   >>"$BUILD_LOG" 2>&1 \
   || fail_from_log "$BUILD_LOG" "zeroship auth release build"
-cargo build --release -p zeroship-migrate-adapter \
-  --features platform-cli --bin zeroship-platform-migrate \
+pnpm --filter zero-migrate-cli build \
   >>"$BUILD_LOG" 2>&1 \
-  || fail_from_log "$BUILD_LOG" "platform migration release build"
+  || fail_from_log "$BUILD_LOG" "zero-migrate CLI build"
 
-for binary in zeroship zeroship-auth zeroship-platform-migrate; do
+for binary in zeroship zeroship-auth; do
   [ -x "$BIN/$binary" ] || die "release build did not produce $BIN/$binary"
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || die "the zero-migrate CLI build did not produce $ROOT/packages/zero-migrate-cli/dist/cli-bin.js"
 
 step "Recreate and migrate dedicated database $TEST_DB"
 DB_CREATED=1
@@ -190,7 +190,6 @@ run_psql -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE DATABASE ${TEST_DB};" >"$MIGRATE_LOG" 2>&1 \
   || fail_from_log "$MIGRATE_LOG" "dedicated database provisioning"
 ZEROSHIP_MIGRATE_DSN="$DSN" \
-ZEROSHIP_MIGRATE_BIN="$BIN/zeroship-platform-migrate" \
   "$ROOT/deploy/ops/db-migrate.sh" >>"$MIGRATE_LOG" 2>&1 \
   || fail_from_log "$MIGRATE_LOG" "platform schema migration"
 run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null \

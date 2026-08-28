@@ -1,0 +1,123 @@
+# The platform (author-owned) ceiling for the `db/migrations-ts` corpus.
+#
+# Passed to the general CLI as `zero-migrate apply --policy policies/platform.policy.toml`.
+# Every consumer names THIS path: tests/lib/runtime_secrets.sh (the harness helper),
+# deploy/ops/db-migrate.sh (the by-hand dev run), and deploy/compose/docker-compose.yml
+# (the `migrate` one-shot, which reads it from /policies inside the image).
+#
+# Author-owned: it injects NO mandatory system shape, so `resolve_create_table_policy`
+# is a pass-through over it (the platform's `db/migrations-ts` author their tables
+# verbatim). This charter is the single source for both the lowering guard and executor
+# posture, including the privileged vendor set, extension allowlist, namespace
+# authority, and raw-island role relaxation (`GuardMode::Enforced` + `access.role`).
+#
+# THE PROJECT SCHEMA IS SPELLED OUT, not a placeholder. It carried
+# `"__ZEROSHIP_PROJECT_SCHEMA__"` in three grants while a Rust caller bound it from a
+# `--project-schema` flag, and that flag was never a knob: the corpus spells the schema
+# itself, 562 times as `schema: "zeroship"` and once as `schema: "public"`
+# (`grep -ho 'schema: "[a-z_]*"' db/migrations-ts/*.ts`, measured 2026-08-28). Binding
+# the charter to any other value produces a guard that refuses every file in the corpus,
+# so the substitution could only ever reproduce the literal below.
+#
+# Two cross-schema peers, and they are peers for different reasons. `public` holds
+# the extensions. `service_authn` holds the state of the service-to-service
+# authentication MECHANISM -- today exactly `service_assertion_replay` -- and it is
+# a separate namespace because every service that VERIFIES an assertion writes
+# there, including the worker, while `zeroship` holds platform state no worker may
+# write at all. See db/migrations-ts/20260816000100_service_assertion_replay.ts.
+#
+# Widening this list widens what a platform migration may create. THE COUNTERWEIGHT
+# THAT SAT BESIDE IT IS GONE: `crates/zeroship-migrate-adapter/tests/platform_migrate.rs`
+# asserted that `service_authn` holds exactly the replay table and that no service role
+# can add to it, and it was deleted with the Rust one-shot. Nothing asserts that today.
+# A later migration CAN now put a platform table in that namespace and hand the worker
+# writes on it, and only review will catch it.
+
+policy_version = 1
+
+[[grant]]
+key = "access.role"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.grant"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.extension"
+value = ["citext", "uuid-ossp"]
+scope = "all"
+
+[[grant]]
+key = "schema.create_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.policy"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.rls"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
+
+# Triggers are a SEPARATE capability from functions in the current vocabulary, and
+# the charter did not carry it. The retired Rust one-shot never noticed: it did not
+# compile after the corpus was rewritten to the schema() form, so nothing had
+# applied 20260702000700_functions_triggers_comments.ts through this charter.
+# Measured 2026-08-28: without this grant `zero-migrate apply` refuses that file at
+# op_index=16 with "a privileged vendor primitive (op capability \"trigger\") requires
+# the allowTrigger capability, which the composed charter does not grant".
+[[grant]]
+key = "code.trigger"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw_view_body"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.materialized_view"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["zeroship", "public", "service_authn"] }
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["zeroship", "public", "service_authn"] }
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = { include = ["zeroship", "public", "service_authn"] }
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"

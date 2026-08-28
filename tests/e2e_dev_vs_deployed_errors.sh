@@ -176,7 +176,7 @@
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
-#   cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   docker (this script starts its OWN ephemeral Postgres -- nothing to pre-start)
 #   pnpm install --filter ./examples/error-probe...
 #

@@ -44,7 +44,8 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "    Start docker and re-run." >&2
   exit 1
 fi
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run cargo build --release, then cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate"; exit 2; }; done
+for b in zeroship zeroship-control zeroship-gate zeroship-worker; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }; done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null && command -v pnpm >/dev/null || { echo "need node/openssl/curl/pnpm"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 STARTER="$ROOT/examples/starter"; [ -d "$STARTER" ] || { echo "missing examples/starter"; exit 2; }
@@ -87,7 +88,7 @@ for _ in $(seq 1 40); do docker exec "$RPC" rpk cluster health --exit-when-healt
 docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || { fail "redpanda"; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+zs_platform_migrate "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }

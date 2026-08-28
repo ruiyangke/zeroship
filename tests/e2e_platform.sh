@@ -20,8 +20,7 @@
 #
 # Prerequisites:
 #   - cargo build --release
-#   - cargo build --release -p zeroship-migrate-adapter --features platform-cli \
-#         --bin zeroship-platform-migrate
+#   - pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   - pnpm install (jose, used by the harness OP to sign the admin bearer)
 #   - docker (an EPHEMERAL Postgres is started and removed by this script)
 #
