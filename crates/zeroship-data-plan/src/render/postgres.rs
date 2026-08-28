@@ -26,12 +26,15 @@
 use crate::ident::Ident;
 use crate::literal::Literal;
 use crate::path::FieldPath;
-use crate::plan::{DbPlan, Direction, NullOrder, OrderKey, Select};
+use crate::plan::{DbPlan, Direction, NullOrder, OrderKey, RowLimit, Select};
 use crate::predicate::{
     AggregateRef, CompareOp, MembershipOp, Operand, PatternOp, Predicate, TextPattern,
 };
 use crate::projection::{ProjectedField, ProjectionSource};
 use crate::render::{RenderedSql, ValueFormat};
+use crate::write::{
+    Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue,
+};
 use core::fmt;
 
 /// Why this backend refused a node.
@@ -64,6 +67,9 @@ impl std::error::Error for RenderError {}
 pub fn render(plan: &DbPlan) -> Result<RenderedSql, RenderError> {
     match plan {
         DbPlan::Select(select) => render_select(select),
+        DbPlan::Insert(insert) => render_insert(insert),
+        DbPlan::Update(update) => render_update(update),
+        DbPlan::Delete(delete) => render_delete(delete),
     }
 }
 
@@ -89,11 +95,7 @@ pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
     }
 
     out.sql.push_str(" FROM ");
-    if let Some(namespace) = plan.namespace() {
-        out.sql.push_str(&quote(namespace));
-        out.sql.push('.');
-    }
-    out.sql.push_str(&quote(plan.collection()));
+    write_qualified_table(&mut out, plan.namespace(), plan.collection());
 
     // `Const(true)` is the canonical form of "no filter", so the clause is
     // omitted rather than emitted as `WHERE TRUE`. Two plans that differ only
@@ -140,6 +142,139 @@ pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
     out.sql.push_str(" OFFSET ");
     out.write_param(Literal::Int(plan.offset().get()));
 
+    Ok(RenderedSql::new(out.sql, out.params))
+}
+
+/// Lower an insert of one or more rows.
+///
+/// ```text
+/// INSERT INTO "ns"."t" ("a", "b") VALUES ($1, NULL), ($2, $3) RETURNING ...
+/// ```
+///
+/// The column list is canonical (sorted at construction) and every row emits its
+/// values in that order, so two callers who wrote the same document with the
+/// keys in different orders produce one statement and one binding order.
+///
+/// A [`WriteValue::Null`] emits the `NULL` keyword and binds nothing, which is
+/// why the placeholder numbers are not a function of position. See
+/// [`crate::write`] for why a null is a node rather than a parameter.
+///
+/// # Errors
+///
+/// [`RenderError`] if the `RETURNING` list carries a node this backend does not
+/// serve.
+pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
+    let mut out = Writer::default();
+    out.sql.push_str("INSERT INTO ");
+    write_qualified_table(&mut out, plan.namespace(), plan.collection());
+    out.sql.push_str(" (");
+    write_column_list(&mut out, plan.columns());
+    out.sql.push_str(") VALUES ");
+
+    let mut first_row = true;
+    for row in plan.rows() {
+        if !first_row {
+            out.sql.push_str(", ");
+        }
+        first_row = false;
+        out.sql.push('(');
+        let mut first = true;
+        for value in row {
+            if !first {
+                out.sql.push_str(", ");
+            }
+            first = false;
+            write_write_value(&mut out, value);
+        }
+        out.sql.push(')');
+    }
+
+    write_returning(&mut out, plan.returning())?;
+    Ok(RenderedSql::new(out.sql, out.params))
+}
+
+/// Lower a bounded update.
+///
+/// ```text
+/// UPDATE "ns"."t" SET "a" = $1, "v" = "v" + $2
+///   WHERE "ctid" IN (SELECT "ctid" FROM "ns"."t" WHERE .. LIMIT $3 FOR UPDATE)
+///   RETURNING ...
+/// ```
+///
+/// # Why the bound is a subquery over `ctid` and not a `LIMIT` on the `UPDATE`
+///
+/// `PostgreSQL` has no `LIMIT` on `UPDATE`, so the bound has to be expressed as
+/// a set of rows chosen by a subquery. That is the shape `query.rs` already uses
+/// for the single-row case (`WHERE ctid = (SELECT ctid ... LIMIT 1)`,
+/// `query.rs:4004-4007`); this generalises it from one row to `n` and makes it
+/// unconditional, so there is no arm where the clause is absent.
+///
+/// Doing it in **one statement** rather than as a probe followed by a write is
+/// the other half. The encrypted branch of `dispatch_update_many` reads the
+/// target ids in one query and then issues per-row updates
+/// (`write_pipeline.rs:329-360`, `crud/mod.rs:1278-1321`); the unencrypted
+/// branch does neither. Here the row choice and the write are one statement
+/// against one snapshot.
+///
+/// # `FOR UPDATE` is load-bearing, not decoration
+///
+/// A `ctid` names a physical tuple, not a row: once a tuple is dead and `VACUUM`
+/// has reclaimed the line pointer, the same `ctid` can name a **different** row.
+/// Without a lock, the tuples the subquery chose could be replaced between the
+/// scan and the update. `FOR UPDATE` locks them, which is exactly why
+/// `build_write_target_probe` appends it on the `PostgreSQL` arm
+/// (`query.rs:2876-2878`).
+///
+/// The clause goes after `LIMIT`, which is where `PostgreSQL`'s `SELECT` grammar
+/// puts a locking clause, and where `query.rs:2877` puts it - it appends to a
+/// statement that already ends in `LIMIT $n OFFSET $n`.
+///
+/// One property is worth stating rather than leaving to be discovered: the
+/// subquery has no `ORDER BY`, so the lock order is the scan order. Two
+/// concurrent bounded updates over overlapping filters can therefore take their
+/// locks in different orders. Pinning an order would cost a sort on every write
+/// and is a trade to make with a measurement, not in passing.
+///
+/// # Errors
+///
+/// [`RenderError`] if the filter or the `RETURNING` list carries a node this
+/// backend does not serve.
+pub fn render_update(plan: &Update) -> Result<RenderedSql, RenderError> {
+    let mut out = Writer::default();
+    out.sql.push_str("UPDATE ");
+    write_qualified_table(&mut out, plan.namespace(), plan.collection());
+    out.sql.push_str(" SET ");
+    write_assignments(&mut out, plan.assignments());
+    write_bounded_target(
+        &mut out,
+        plan.namespace(),
+        plan.collection(),
+        plan.filter(),
+        plan.limit(),
+    )?;
+    write_returning(&mut out, plan.returning())?;
+    Ok(RenderedSql::new(out.sql, out.params))
+}
+
+/// Lower a bounded delete. Same bound, same lock, same argument as
+/// [`render_update`].
+///
+/// # Errors
+///
+/// [`RenderError`] if the filter or the `RETURNING` list carries a node this
+/// backend does not serve.
+pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
+    let mut out = Writer::default();
+    out.sql.push_str("DELETE FROM ");
+    write_qualified_table(&mut out, plan.namespace(), plan.collection());
+    write_bounded_target(
+        &mut out,
+        plan.namespace(),
+        plan.collection(),
+        plan.filter(),
+        plan.limit(),
+    )?;
+    write_returning(&mut out, plan.returning())?;
     Ok(RenderedSql::new(out.sql, out.params))
 }
 
@@ -204,6 +339,16 @@ impl ValueFormat for PostgresValueFormat {
     fn bytes_placeholder(&self, slot: usize) -> String {
         format!("${slot}")
     }
+
+    fn current_timestamp_expr(&self) -> &'static str {
+        "NOW()"
+    }
+
+    /// `ctid`. `PostgreSQL`'s physical row locator, the same one
+    /// `query.rs:4000` and `:4285` reach for on the `SqlDialect::Postgres` arm.
+    fn row_identity_column(&self) -> &'static str {
+        "ctid"
+    }
 }
 
 /// Quote an identifier.
@@ -213,9 +358,21 @@ impl ValueFormat for PostgresValueFormat {
 /// `quoting_is_unreachable_because_the_charset_forbids_it` asserts that pairing
 /// holds, so if the charset is ever widened this stops being decorative.
 fn quote(ident: &Ident) -> String {
-    let mut out = String::with_capacity(ident.as_str().len() + 2);
+    quote_raw(ident.as_str())
+}
+
+/// Quote a name this backend chose itself.
+///
+/// The **only** callers are [`ValueFormat::row_identity_column`]'s result and
+/// [`quote`]. It deliberately does not take an [`Ident`], because `ctid` is not
+/// an identifier a caller may name - it is a spelling the backend owns - and
+/// deliberately does not take a caller string either, because nothing in this
+/// crate has one to give it: no public function accepts a `&str` that reaches
+/// statement text.
+fn quote_raw(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
     out.push('"');
-    for ch in ident.as_str().chars() {
+    for ch in name.chars() {
         if ch == '"' {
             out.push('"');
         }
@@ -223,6 +380,127 @@ fn quote(ident: &Ident) -> String {
     }
     out.push('"');
     out
+}
+
+/// `"namespace"."collection"`, or `"collection"` when there is no namespace.
+fn write_qualified_table(out: &mut Writer, namespace: Option<&Ident>, collection: &Ident) {
+    if let Some(namespace) = namespace {
+        out.sql.push_str(&quote(namespace));
+        out.sql.push('.');
+    }
+    out.sql.push_str(&quote(collection));
+}
+
+/// A comma-separated list of quoted identifiers.
+///
+/// Taken as a slice rather than read off the plan so the determinism mutation
+/// arm can hand it an un-canonicalised list - the same reason
+/// `write_predicate` is reachable from the tests here.
+fn write_column_list(out: &mut Writer, columns: &[Ident]) {
+    let mut first = true;
+    for column in columns {
+        if !first {
+            out.sql.push_str(", ");
+        }
+        first = false;
+        out.sql.push_str(&quote(column));
+    }
+}
+
+/// `$n`, or the `NULL` keyword.
+fn write_write_value(out: &mut Writer, value: &WriteValue) {
+    match value {
+        WriteValue::Bind(literal) => out.write_param(literal.clone()),
+        // The keyword, not a parameter. `Literal` has no null variant and must
+        // not gain one; see `crate::write`.
+        WriteValue::Null => out.sql.push_str("NULL"),
+    }
+}
+
+/// The `SET` list.
+///
+/// Taken as a slice for the same reason as [`write_column_list`].
+fn write_assignments(out: &mut Writer, assignments: &[ColumnAssignment]) {
+    let mut first = true;
+    for assignment in assignments {
+        if !first {
+            out.sql.push_str(", ");
+        }
+        first = false;
+        let column = quote(&assignment.column);
+        out.sql.push_str(&column);
+        out.sql.push_str(" = ");
+        match &assignment.value {
+            Assignment::Set(value) => write_write_value(out, value),
+            Assignment::Arithmetic(arithmetic) => {
+                // The left operand is the column being assigned. It is written
+                // from the same `Ident`, not from a second one a caller could
+                // supply, which is what keeps `a = b + 1` unrepresentable.
+                out.sql.push_str(&column);
+                out.sql.push(' ');
+                out.sql.push_str(arithmetic.op().as_sql());
+                out.sql.push(' ');
+                // No `::numeric` cast: the shipped lowering needs one
+                // (`query.rs:3816`) because its parameter is a `String`. A typed
+                // integer or float parameter has nothing to cast.
+                out.write_param(arithmetic.operand().clone());
+            }
+            Assignment::CurrentTimestamp => {
+                out.sql.push_str(PostgresValueFormat.current_timestamp_expr());
+            }
+        }
+    }
+}
+
+/// ` WHERE "ctid" IN (SELECT "ctid" FROM <table>[ WHERE ..] LIMIT $n FOR UPDATE)`
+///
+/// Emitted **unconditionally**, which is what makes an unbounded write
+/// unrepresentable: the filter may simplify to `TRUE` and vanish, but the bound
+/// and its clause cannot.
+fn write_bounded_target(
+    out: &mut Writer,
+    namespace: Option<&Ident>,
+    collection: &Ident,
+    filter: &Predicate,
+    limit: RowLimit,
+) -> Result<(), RenderError> {
+    let identity = quote_raw(PostgresValueFormat.row_identity_column());
+    out.sql.push_str(" WHERE ");
+    out.sql.push_str(&identity);
+    out.sql.push_str(" IN (SELECT ");
+    out.sql.push_str(&identity);
+    out.sql.push_str(" FROM ");
+    write_qualified_table(out, namespace, collection);
+    if filter != &Predicate::always() {
+        out.sql.push_str(" WHERE ");
+        write_predicate(out, filter)?;
+    }
+    // Bound, then lock. `LIMIT` before a locking clause is the order
+    // PostgreSQL's SELECT grammar requires.
+    out.sql.push_str(" LIMIT ");
+    out.write_param(Literal::Int(limit.get()));
+    out.sql.push_str(" FOR UPDATE)");
+    Ok(())
+}
+
+/// The `RETURNING` list, or nothing at all.
+///
+/// There is no arm that emits `*`: the only two shapes a [`Returning`] has are
+/// an explicit [`crate::Projection`] and absence.
+fn write_returning(out: &mut Writer, returning: &Returning) -> Result<(), RenderError> {
+    let Some(projection) = returning.projection() else {
+        return Ok(());
+    };
+    out.sql.push_str(" RETURNING ");
+    let mut first = true;
+    for field in projection.fields() {
+        if !first {
+            out.sql.push_str(", ");
+        }
+        first = false;
+        write_projected_field(out, field)?;
+    }
+    Ok(())
 }
 
 fn write_projected_field(out: &mut Writer, field: &ProjectedField) -> Result<(), RenderError> {
@@ -428,6 +706,18 @@ mod tests {
         out.sql
     }
 
+    fn render_columns_raw(columns: &[Ident]) -> String {
+        let mut out = Writer::default();
+        write_column_list(&mut out, columns);
+        out.sql
+    }
+
+    fn render_assignments_raw(assignments: &[ColumnAssignment]) -> (String, Vec<Literal>) {
+        let mut out = Writer::default();
+        write_assignments(&mut out, assignments);
+        (out.sql, out.params)
+    }
+
     /// THE MUTATION ARM.
     ///
     /// SC-3 requires the determinism check to be paired with "a mutation that
@@ -459,6 +749,77 @@ mod tests {
         let forwards = Predicate::And(vec![eq("alpha", 1), eq("beta", 2)]).canonical();
         let backwards = Predicate::And(vec![eq("beta", 2), eq("alpha", 1)]).canonical();
         assert_eq!(render_raw(&forwards), render_raw(&backwards));
+    }
+
+    /// THE MUTATION ARM FOR AN INSERT'S COLUMN LIST.
+    ///
+    /// The determinism arm in `tests/determinism.rs` asserts two permutations of
+    /// one document render identically. On its own that is also true of a
+    /// renderer that was never given two different inputs, so this renders the
+    /// two permutations through the same private writer the real path uses,
+    /// WITHOUT the canonical sort `InsertBuilder::build` applies - which is
+    /// exactly the state the tree would be in if that sort were deleted.
+    #[test]
+    fn permuted_insert_columns_diverge_without_the_canonical_sort() {
+        let forwards = [column("name"), column("email")];
+        let backwards = [column("email"), column("name")];
+        assert_ne!(
+            render_columns_raw(&forwards),
+            render_columns_raw(&backwards),
+            "the two permutations rendered identically without canonicalisation, so \
+             the determinism arms that use them prove nothing"
+        );
+    }
+
+    /// The control for the arm above: with the sort applied, the same two
+    /// inputs converge.
+    #[test]
+    fn permuted_insert_columns_converge_with_the_canonical_sort() {
+        let mut forwards = vec![column("name"), column("email")];
+        let mut backwards = vec![column("email"), column("name")];
+        forwards.sort();
+        backwards.sort();
+        assert_eq!(render_columns_raw(&forwards), render_columns_raw(&backwards));
+    }
+
+    /// THE MUTATION ARM FOR AN UPDATE'S SET LIST, same shape.
+    ///
+    /// This one also proves the divergence is visible in the PARAMETER order and
+    /// not only in the statement text: a non-canonical `SET` list binds the
+    /// values in the authored order, so two callers would send different
+    /// arguments for the same logical update.
+    #[test]
+    fn permuted_assignments_diverge_without_the_canonical_sort() {
+        let name = ColumnAssignment::new(column("name"), Assignment::bind(Literal::Int(7)));
+        let score = ColumnAssignment::new(column("score"), Assignment::bind(Literal::Int(9)));
+        let forwards = [name.clone(), score.clone()];
+        let backwards = [score, name];
+        let (a_sql, a_params) = render_assignments_raw(&forwards);
+        let (b_sql, b_params) = render_assignments_raw(&backwards);
+        assert_ne!(
+            a_sql, b_sql,
+            "the two permutations rendered identically without canonicalisation, so \
+             the determinism arms that use them prove nothing"
+        );
+        assert_ne!(
+            a_params, b_params,
+            "a non-canonical SET list must also permute the parameters"
+        );
+    }
+
+    /// The control for the arm above.
+    #[test]
+    fn permuted_assignments_converge_with_the_canonical_sort() {
+        let name = ColumnAssignment::new(column("name"), Assignment::bind(Literal::Int(7)));
+        let score = ColumnAssignment::new(column("score"), Assignment::bind(Literal::Int(9)));
+        let mut forwards = vec![name.clone(), score.clone()];
+        let mut backwards = vec![score, name];
+        forwards.sort_by(|a, b| a.column.cmp(&b.column));
+        backwards.sort_by(|a, b| a.column.cmp(&b.column));
+        assert_eq!(
+            render_assignments_raw(&forwards),
+            render_assignments_raw(&backwards)
+        );
     }
 
     /// The quote-doubling in [`quote`] is unreachable, and it is worth knowing

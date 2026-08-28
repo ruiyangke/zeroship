@@ -23,6 +23,43 @@
 //!   `IN ()` - a `PostgreSQL` syntax error, which failed the entire query rather
 //!   than returning nothing - has no representation.
 //!
+//! # Depth is the bound that matters, and size is not
+//!
+//! [`Predicate`] is the **only** recursive type in this crate, and until
+//! [`MAX_PREDICATE_DEPTH`] existed it was the only one with no bound at all.
+//! [`crate::MAX_MEMBERSHIP_LIST_LEN`] bounds a list's *width*; nothing bounded
+//! its *height*.
+//!
+//! That was the wrong half. A wide input is linear work on the heap; a deep one
+//! is stack frames, and in Rust a stack overflow is an **abort**, not a catchable
+//! error. The worker runs many apps per thread under LRU isolate eviction, so an
+//! abort is not one failed request - it takes the process and every co-tenanted
+//! app on it.
+//!
+//! **The IR was dropping a guard the code it replaces already carries.**
+//! `MAX_FILTER_NESTING_DEPTH = 16` (`query.rs:604`) is enforced by
+//! `count_clause_budget` (`query.rs:5666`, entered from `validate_clause_budget`
+//! at `:5655` with an initial depth of 1). Leaving it behind is precisely the
+//! failure [`crate::ident`]'s module note calls "the dangerous half of the move":
+//! a bound that stays at the old call site, so every future caller has to
+//! re-implement it and the one that forgets aborts the worker.
+//!
+//! **Why the bound has to be at CONSTRUCTION rather than in the traversals.**
+//! Making [`Predicate::canonical`] iterative would not be enough, because it is
+//! not the only recursive surface. `Predicate` derives `PartialOrd`, `Ord`,
+//! `PartialEq` and `Hash` (the derive is at the enum below), and those recurse
+//! structurally - and `canonical_connective`'s own `flat.sort()` calls the
+//! derived `Ord`, so the sort recurses even if the walk does not.
+//! [`Predicate::render`]'s lowering and [`Predicate::mentions_aggregate`] recurse
+//! too. One bound checked before any of them run covers all four; four
+//! rewritten traversals cover three of them and leave the derive.
+//!
+//! [`Predicate::depth`] is therefore **iterative** - it is the one function that
+//! must be able to measure a hostile tree without becoming the overflow it is
+//! looking for.
+//!
+//! [`Predicate::render`]: crate::render::postgres::render_select
+//!
 //! # What is deliberately NOT a node
 //!
 //! SC-3 lists a `Range { lhs, low, high, inclusive }` variant. It is a
@@ -37,6 +74,28 @@ use crate::ident::Ident;
 use crate::literal::{Literal, LiteralError, LiteralSet};
 use crate::path::FieldPath;
 use core::fmt;
+
+/// The deepest a predicate tree may be.
+///
+/// Mirrors `MAX_FILTER_NESTING_DEPTH` (`query.rs:604`), the bound the translator
+/// this IR replaces already applies. Sixteen is kept rather than re-derived,
+/// for one reason and against one temptation:
+///
+/// * **Kept**, because a replacement that is looser than the thing it replaces
+///   is a regression however well argued the new number is. Every filter the
+///   current system accepts must still be expressible.
+/// * **Not raised**, even though the real overflow threshold is orders of
+///   magnitude higher. The bound is not calibrated to where the stack breaks -
+///   that number is a property of the build profile, the platform's thread stack
+///   size and the deepest of four recursive surfaces, so a limit tuned to it
+///   would be tuned to whichever of those was measured. It is calibrated to what
+///   a creator's filter plausibly needs, which sixteen already exceeds.
+///
+/// Depth is counted with a leaf at 1: `Compare`, `Membership`, `Pattern`,
+/// `IsNull` and `Const` are depth 1, and `And` / `Or` / `Not` are one more than
+/// their deepest child. `query.rs` counts JSON object nesting from 1, so the two
+/// agree on shape without being the same walk.
+pub const MAX_PREDICATE_DEPTH: usize = 16;
 
 /// A comparison operator. Null is not among them; see [`Predicate::IsNull`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -346,16 +405,75 @@ impl Predicate {
         }
     }
 
-    /// A conjunction, canonicalised.
+    /// How deep this tree is, with a leaf at 1.
+    ///
+    /// **Iterative, and that is the whole point.** This is the function a
+    /// hostile tree is measured by, so it is the one function that must not
+    /// recurse: a recursive depth check overflows on exactly the input it exists
+    /// to refuse, and does so before it can return an error. The explicit stack
+    /// below grows on the heap instead.
     #[must_use]
-    pub fn and(children: Vec<Self>) -> Self {
-        Self::And(children).canonical()
+    pub fn depth(&self) -> usize {
+        let mut deepest = 0_usize;
+        let mut pending: Vec<(&Self, usize)> = vec![(self, 1)];
+        while let Some((node, depth)) = pending.pop() {
+            deepest = deepest.max(depth);
+            match node {
+                Self::And(children) | Self::Or(children) => {
+                    pending.extend(children.iter().map(|child| (child, depth + 1)));
+                }
+                Self::Not(inner) => pending.push((inner.as_ref(), depth + 1)),
+                // Every remaining variant is a leaf: an `Operand` cannot hold a
+                // `Predicate`, so no other node contributes depth.
+                Self::Compare { .. }
+                | Self::Membership { .. }
+                | Self::Pattern { .. }
+                | Self::IsNull { .. }
+                | Self::Const(_) => {}
+            }
+        }
+        deepest
+    }
+
+    /// Refuse a tree deeper than [`MAX_PREDICATE_DEPTH`].
+    ///
+    /// # Errors
+    ///
+    /// [`PredicateError::TooDeep`].
+    pub(crate) fn check_depth(&self) -> Result<(), PredicateError> {
+        let depth = self.depth();
+        if depth > MAX_PREDICATE_DEPTH {
+            return Err(PredicateError::TooDeep { depth });
+        }
+        Ok(())
+    }
+
+    /// A conjunction, canonicalised.
+    ///
+    /// # Errors
+    ///
+    /// [`PredicateError::TooDeep`] past [`MAX_PREDICATE_DEPTH`]. The check runs
+    /// **before** [`Predicate::canonical`], because canonicalisation is itself
+    /// recursive - a depth check after it would be a check that never ran.
+    ///
+    /// Canonicalisation only ever flattens, so it cannot turn an accepted tree
+    /// into a deeper one; checking the authored form is conservative in the safe
+    /// direction.
+    pub fn and(children: Vec<Self>) -> Result<Self, PredicateError> {
+        let authored = Self::And(children);
+        authored.check_depth()?;
+        Ok(authored.canonical())
     }
 
     /// A disjunction, canonicalised.
-    #[must_use]
-    pub fn or(children: Vec<Self>) -> Self {
-        Self::Or(children).canonical()
+    ///
+    /// # Errors
+    ///
+    /// [`PredicateError::TooDeep`]; see [`Predicate::and`].
+    pub fn or(children: Vec<Self>) -> Result<Self, PredicateError> {
+        let authored = Self::Or(children);
+        authored.check_depth()?;
+        Ok(authored.canonical())
     }
 
     /// A negation, canonicalised.
@@ -363,22 +481,32 @@ impl Predicate {
     /// Named `negate` rather than `not` because an inherent `not` shadows
     /// `std::ops::Not::not` at every call site that has the trait in scope, and
     /// a reader cannot tell which one ran.
-    #[must_use]
-    pub fn negate(inner: Self) -> Self {
-        Self::Not(Box::new(inner)).canonical()
+    ///
+    /// # Errors
+    ///
+    /// [`PredicateError::TooDeep`]; see [`Predicate::and`].
+    pub fn negate(inner: Self) -> Result<Self, PredicateError> {
+        let authored = Self::Not(Box::new(inner));
+        authored.check_depth()?;
+        Ok(authored.canonical())
     }
 
     /// A bounded range, desugared to two comparisons.
     ///
     /// See the module note: this is a constructor rather than a node so that
     /// one logical plan has one spelling.
+    ///
+    /// Infallible, and provably so rather than by omission: the result is
+    /// `And([Compare, Compare])`, whose depth is 2 whatever the operands are,
+    /// because an [`Operand`] cannot hold a `Predicate`.
     #[must_use]
     pub fn range(lhs: Operand, low: Operand, high: Operand, bounds: RangeBounds) -> Self {
         let (low_op, high_op) = bounds.ops();
-        Self::and(vec![
+        Self::And(vec![
             Self::compare(lhs.clone(), low_op, low),
             Self::compare(lhs, high_op, high),
         ])
+        .canonical()
     }
 
     /// Membership, with the null rule applied at construction.
@@ -439,9 +567,14 @@ impl Predicate {
             operand: lhs,
             negated,
         };
+        // Built from the variants rather than through `Self::or` / `Self::and`
+        // so this stays infallible: the result is two leaves under one
+        // connective, so its depth is 2 and the bound cannot be reached. Routing
+        // it through the fallible constructors would add an error arm no input
+        // can produce.
         Ok(match op {
-            MembershipOp::In => Self::or(vec![membership, null_test]),
-            MembershipOp::NotIn => Self::and(vec![membership, null_test]),
+            MembershipOp::In => Self::Or(vec![membership, null_test]).canonical(),
+            MembershipOp::NotIn => Self::And(vec![membership, null_test]).canonical(),
         })
     }
 
@@ -554,6 +687,9 @@ pub enum PredicateError {
     NulByteInPattern,
     EscapeCharNotGraphic { character: char },
     DistinctCountOnly { func: AggregateFunc },
+    /// The tree was deeper than [`MAX_PREDICATE_DEPTH`]. See the module note:
+    /// depth, not width, is what turns a small request into an aborted worker.
+    TooDeep { depth: usize },
 }
 
 impl fmt::Display for PredicateError {
@@ -571,6 +707,11 @@ impl fmt::Display for PredicateError {
                 f,
                 "DISTINCT is supported only on COUNT, not on {}",
                 func.as_sql()
+            ),
+            Self::TooDeep { depth } => write!(
+                f,
+                "a predicate nested {depth} deep exceeds the maximum of \
+                 {MAX_PREDICATE_DEPTH}"
             ),
         }
     }
@@ -606,7 +747,8 @@ mod tests {
         let flat = Predicate::and(vec![
             Predicate::compare(col("a"), CompareOp::Eq, int(1)),
             Predicate::compare(col("b"), CompareOp::Eq, int(2)),
-        ]);
+        ])
+        .expect("within the depth bound");
         assert_ne!(nested, flat, "the two inputs must really differ");
         assert_eq!(
             nested.canonical(),
@@ -617,8 +759,14 @@ mod tests {
 
     #[test]
     fn empty_connectives_take_their_own_identity() {
-        assert_eq!(Predicate::and(vec![]), Predicate::Const(true));
-        assert_eq!(Predicate::or(vec![]), Predicate::Const(false));
+        assert_eq!(
+            Predicate::and(vec![]).expect("shallow"),
+            Predicate::Const(true)
+        );
+        assert_eq!(
+            Predicate::or(vec![]).expect("shallow"),
+            Predicate::Const(false)
+        );
     }
 
     #[test]
@@ -631,7 +779,7 @@ mod tests {
     #[test]
     fn negating_a_null_test_flips_the_node_rather_than_wrapping_it() {
         assert_eq!(
-            Predicate::negate(Predicate::is_null(col("a"))),
+            Predicate::negate(Predicate::is_null(col("a"))).expect("shallow"),
             Predicate::is_not_null(col("a"))
         );
     }
@@ -649,7 +797,61 @@ mod tests {
         let by_hand = Predicate::and(vec![
             Predicate::compare(col("age"), CompareOp::Gte, int(18)),
             Predicate::compare(col("age"), CompareOp::Lt, int(65)),
-        ]);
+        ])
+        .expect("within the depth bound");
         assert_eq!(range, by_hand);
+    }
+
+    /// A conjunction of leaves is one level deeper than a leaf, and nesting
+    /// through `Not` counts the same as nesting through a connective. The
+    /// measurement has to be right before the bound built on it means anything.
+    #[test]
+    fn depth_counts_a_leaf_as_one_and_every_connective_as_one_more() {
+        let leaf = Predicate::compare(col("a"), CompareOp::Eq, int(1));
+        assert_eq!(leaf.depth(), 1);
+        assert_eq!(Predicate::Const(true).depth(), 1);
+        assert_eq!(Predicate::And(vec![leaf.clone()]).depth(), 2);
+        assert_eq!(
+            Predicate::Not(Box::new(Predicate::And(vec![leaf.clone()]))).depth(),
+            3
+        );
+        // The DEEPEST child decides, not the first or the last one.
+        let shallow = Predicate::And(vec![leaf.clone()]);
+        let deep = Predicate::And(vec![Predicate::And(vec![leaf])]);
+        assert_eq!(
+            Predicate::Or(vec![shallow.clone(), deep.clone()]).depth(),
+            4,
+            "a deeper trailing child must win"
+        );
+        assert_eq!(
+            Predicate::Or(vec![deep, shallow]).depth(),
+            4,
+            "a deeper leading child must win too"
+        );
+    }
+
+    /// `range` and `membership` stay infallible, and this is the arm that keeps
+    /// them honest: both are asserted to produce a tree well inside the bound,
+    /// so the absence of an error arm is a fact about their output rather than
+    /// an omission.
+    #[test]
+    fn the_infallible_constructors_cannot_approach_the_depth_bound() {
+        let range = Predicate::range(col("age"), int(18), int(65), RangeBounds::InclusiveBoth);
+        assert!(range.depth() <= 2, "range produced depth {}", range.depth());
+
+        let with_null = Predicate::membership(
+            col("status"),
+            MembershipOp::In,
+            vec![Some(Literal::Int(1)), None],
+        )
+        .expect("membership builds");
+        assert!(
+            with_null.depth() <= 2,
+            "membership produced depth {}",
+            with_null.depth()
+        );
+        // The margin is what makes the two assertions above meaningful rather
+        // than a restatement of the bound.
+        const { assert!(MAX_PREDICATE_DEPTH > 2) };
     }
 }
