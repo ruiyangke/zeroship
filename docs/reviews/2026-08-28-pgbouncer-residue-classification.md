@@ -169,9 +169,24 @@ Set-differencing them, rather than comparing totals:
 - **58 tests failed in ALL THREE runs.** That intersection is the real
   category-A residue this document classifies.
 - Run 1 added `read_timeout::copy_input_time_is_not_charged_as_server_read_silence`.
-  It PASSES in isolation against both 6548 and 5455 (1 passed each), so it is
-  not a pooler incompatibility; it is timing-sensitive inside a 670-test serial
-  run under pooled load.
+  **It is category A, and calling it timing-sensitive here was wrong.**
+  Measured 2026-08-28 by repetition rather than by a single isolated run:
+  5 consecutive runs against 5455 all passed at 10.08s, while against 6548 the
+  FIRST passed at 10.02s and runs 2-5 failed in 0.05s each. A ten-second pass
+  followed by four fifty-millisecond failures is not jitter; it is state.
+
+  The cause is exact: `read_timeout.rs:939` creates a fixture named
+  `cpg_read_timeout_copy` - a FIXED name, not `common::test_object_name` - and
+  the second run dies on
+  `SQLSTATE 42P07: relation "cpg_read_timeout_copy" already exists`. The temp
+  table survives on the pooled backend, which is the same category-A mechanism
+  this document already records for 42P07.
+
+  **So the residue total depends on execution history, not only on the code.**
+  Whether this test fails depends on whether an earlier run left its table on
+  the backend the pooler hands out. That, not jitter, is what moved the total
+  between runs. One isolated run is not enough to classify a pooled failure;
+  repeat it, and read a fast failure after a slow pass as leaked state.
 - Run 2 added four `differential_tokio::*` COPY cases
   (`copy_out_bytes`, `copy_in_results`, `binary_copy_roundtrip`,
   `a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one`).
