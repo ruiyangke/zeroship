@@ -1088,9 +1088,12 @@ fn runtime_app_role_name(app_id: &str) -> String {
 ///
 /// [`WORKER_ROLE`] is ONE login role shared by every app. Without the inherit
 /// option this grant makes the worker's ambient authority the union of every
-/// app runtime role it has ever been granted - measured on the provisioned dev
-/// database at 561 memberships, every one of them `inherit_option = t`. Under
-/// that posture `SET LOCAL ROLE` only ever NARROWS: a statement that forgets it
+/// app runtime role it has ever been granted. The load-bearing fact is the
+/// PROPORTION, not the count: on the dev database on 2026-08-28 every single
+/// `app_%_role` membership the worker held was `inherit_option = t` - 540 of
+/// 540. The count drifts with every test run and is recorded as a dated
+/// observation, not a figure to carry forward. Under that posture
+/// `SET LOCAL ROLE` only ever NARROWS: a statement that forgets it
 /// does not fail, it runs with cross-tenant reach. `WITH INHERIT FALSE` inverts
 /// the default so omission fails closed with `permission denied for schema`,
 /// and the fence stops depending on every call site remembering.

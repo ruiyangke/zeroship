@@ -126,8 +126,9 @@ fn validate(posture: &DatabasePosture) -> Result<(), String> {
     // `zeroship_worker` is a single login role shared by every app, and the
     // migration service grants it each app's runtime role. If those memberships
     // inherit, the worker's ambient authority is the UNION of every tenant it
-    // has ever served - 561 inheriting memberships on the provisioned dev
-    // database when this was written - and a query path that omits
+    // has ever served - on the dev database on 2026-08-28, ALL 540 of the
+    // worker's `app_%_role` memberships inherited (the proportion is the point;
+    // the count drifts with every test run) - and a query path that omits
     // `SET LOCAL ROLE` does not fail, it succeeds with cross-tenant reach.
     // `runtime_dependents_sql` now grants `WITH INHERIT FALSE`; this refuses to
     // boot against a database still carrying the old posture, so a stale
@@ -315,8 +316,12 @@ mod tests {
     /// login whose ambient authority is the union of every tenant.
     #[test]
     fn refuses_a_login_that_ambiently_inherits_an_app_role() {
+        // An arbitrary count, deliberately NOT the dev database's measured one:
+        // this case pins that whatever number the query returns reaches the
+        // operator's error, not that any particular database has that many.
+        const OFFENDING: i64 = 7;
         let mut posture = narrow_posture();
-        posture.inheriting_memberships = 561;
+        posture.inheriting_memberships = OFFENDING;
         posture.inheriting_membership_example =
             Some("app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role".to_string());
 
@@ -326,7 +331,7 @@ mod tests {
             "the error must name the fix: {error}"
         );
         assert!(
-            error.contains("561") && error.contains("app_0191e7a2"),
+            error.contains(&OFFENDING.to_string()) && error.contains("app_0191e7a2"),
             "the error must carry the count and an offending role: {error}"
         );
     }
