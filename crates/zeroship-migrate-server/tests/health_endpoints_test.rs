@@ -26,7 +26,7 @@ const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated health probe policy seal key";
 const DEAD_DSN: &str =
     "host=127.0.0.1 port=9199 user=postgres password=zeroship dbname=zeroship connect_timeout=2";
 
-/// The up-case asserts CONNECTIVITY, not schema: `AppPolicyStore::probe` is a
+/// The up-case asserts CONNECTIVITY, not schema: `SchemaApplyStore::probe` is a
 /// connect plus a protocol sync and reads no table, so any reachable database
 /// will do.
 ///

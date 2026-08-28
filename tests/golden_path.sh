@@ -4204,14 +4204,20 @@ else
       crates/zeroship-plugin-db/src/drop_namespace.rs and the migrated apply path."
   fi
 
-  # PUT THE SECOND CASCADE BLOCKER IN PLAY, so a fix for the first one cannot
-  # produce a false all-clear here.
+  # ARM THE CASCADE BLOCKER, so this step observes the real refusal rather than
+  # an app that happened to carry no blocking rows.
   #
-  # There are TWO append-only triggers on cascade edges out of zeroship.apps, and
-  # NEITHER honours the `zeroship.audit_retention` GUC hatch that the three
-  # platform audit tables have:
-  #   migrated_migration_audit_append_only   <- what this step hits today
+  # THERE USED TO BE TWO append-only triggers on cascade edges out of
+  # zeroship.apps, and neither honoured the `zeroship.audit_retention` GUC hatch
+  # that the three platform audit tables have:
+  #   migrated_migration_audit_append_only   <- DELETED 2026-08-28 with the table
   #   plan_change_events_immutable_trg       <- only fires if the app has rows
+  #
+  # The first is gone: `zeroship.migrated_migration_audit` was removed when the
+  # migration records were consolidated onto the engine journal, so the only
+  # blocker left is the one this block arms. That makes arming it load-bearing
+  # rather than belt-and-braces - without the insert below the DELETE would now
+  # SUCCEED for this app while apps that have changed plan stayed broken.
   #
   # MEASURED 2026-08-12 on a scratch database, one variable, isolated from the
   # first blocker (no migrated_migration_audit rows in either arm):
@@ -4237,10 +4243,11 @@ else
   DEL_PCE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
     "select count(*) from zeroship.plan_change_events where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
   [ "${DEL_PCE:-0}" -ge 1 ] 2>/dev/null \
-    && pass "second cascade blocker armed: app carries $DEL_PCE plan_change_events row(s)" \
-    || fail "could not arm the second cascade blocker (plan_change_events rows=$DEL_PCE).
-      Without it a fix for migrated_migration_audit alone turns this step GREEN
-      while real apps that have changed plan stay broken. Check the insert above:
+    && pass "cascade blocker armed: app carries $DEL_PCE plan_change_events row(s)" \
+    || fail "could not arm the cascade blocker (plan_change_events rows=$DEL_PCE).
+      It is now the ONLY one left, so without it this step goes GREEN over an app
+      that carries no blocking rows while real apps that have changed plan stay
+      broken. Check the insert above:
       billing_period is a DOMAIN OVER DATE, not an enum, and to_plan_id must
       reference an existing zeroship.plans row."
 
@@ -4293,22 +4300,18 @@ else
   # and every row in them in Postgres forever, because no production code path
   # calls drop_namespace. See #330.
   #
-  # READ THIS BEFORE CONCLUDING THAT A FIX FOR #331 DID NOT WORK. What this step
-  # observes is the FIRST blocker in a chain of at least two, and it can only
-  # ever see one at a time, because the cascade aborts the whole transaction on
-  # the first trigger that raises. MEASURED against the live golden database by
-  # walking the FK graph: exactly two DELETE-firing triggers are reachable from
-  # a `DELETE FROM zeroship.apps` cascade, and NEITHER honours the
+  # READ THIS BEFORE CONCLUDING THAT A FIX FOR #331 DID NOT WORK. The cascade
+  # aborts the whole transaction on the first trigger that raises, so this step
+  # can only ever observe ONE blocker at a time. MEASURED against the live golden
+  # database by walking the FK graph: two DELETE-firing triggers were reachable
+  # from a `DELETE FROM zeroship.apps` cascade, and NEITHER honoured the
   # `zeroship.audit_retention` GUC (only 3 of the 17 append-only triggers in the
   # schema do -- app_audit, audit_events, authz_decisions):
-  #   migrated_migration_audit_append_only   <- the one this run hits
-  #   plan_change_events_immutable_trg       <- invisible here, 0 rows, because
-  #                                             this app never changed plan
-  # crates/control/src/proration.rs:188 INSERTs a plan_change_events row on
-  # every plan change, so an app that has been on a paid plan carries them and
-  # would hit the second the moment the first is cleared. Giving this step's app
-  # a plan change before the delete would put both in play; that is the next
-  # increment and it is NOT done here.
+  #   migrated_migration_audit_append_only   <- DELETED 2026-08-28 with the table
+  #   plan_change_events_immutable_trg       <- the one this run hits, armed above
+  # crates/control/src/proration.rs:188 INSERTs a plan_change_events row on every
+  # plan change, so an app that has been on a paid plan carries them; the block
+  # above seeds one for THIS app so the refusal is observed rather than assumed.
   # Same three-schema pattern as the BEFORE count. The two must stay identical:
   # a POST query narrower than the PRE query reports residue shrinking when only
   # the instrument did.
@@ -4835,10 +4838,12 @@ rc=0
 #
 # NOT ALL FOUR CATEGORIES ARE "BY DESIGN". #260 and #255 are decisions waiting on
 # an operator. Step 12's four are a KNOWN DEFECT (#331) that this harness found:
-# an app that has ever applied a migration cannot be deleted at all, because
-# `migrated_migration_audit.app_id -> zeroship.apps` is ON DELETE CASCADE and
-# that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
-# the whole transaction. They are listed here for the same reason as the others
+# an app that carries a plan-change row cannot be deleted at all, because
+# `plan_change_events.app_id -> zeroship.apps` is ON DELETE CASCADE and that
+# table carries a BEFORE DELETE append-only trigger, so the cascade aborts the
+# whole transaction. Until 2026-08-28 the trigger this step hit was
+# `migrated_migration_audit_append_only`; that table is gone, the defect is not.
+# They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
 GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"

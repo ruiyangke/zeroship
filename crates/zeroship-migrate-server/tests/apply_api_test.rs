@@ -128,83 +128,47 @@ async fn admin_conn() -> Client {
         let _ = conn.run().await;
     })
     .detach();
-    ensure_migrated_service_tables(&client).await;
+    assert_platform_schema_present(&client).await;
     client
 }
 
-async fn ensure_migrated_service_tables(conn: &Client) {
-    conn.batch_execute("SELECT pg_advisory_lock(7330067);")
+/// Refuse a database the platform migrations have not been applied to.
+///
+/// THIS USED TO CREATE THE TABLE UNDER TEST ITSELF, with a hand-written
+/// `CREATE TABLE IF NOT EXISTS` for each of the three `migrated_*` tables. That
+/// is verification-record class 7 in the fixture rather than the assertion: the
+/// suite then measured a shape the corpus does not produce, so a column the
+/// corpus declares `NOT NULL` could be nullable here, a CHECK could be absent,
+/// and every case would still be green. `zeroship.app_schema_applies` now comes
+/// from `db/migrations-ts/20260702000200_control_tables.ts` like every other
+/// platform table, and a database without it fails loudly here.
+async fn assert_platform_schema_present(conn: &Client) {
+    const REQUIRED: [&str; 4] = ["plans", "users", "apps", "app_schema_applies"];
+    let rows = conn
+        .query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'zeroship'",
+            &[],
+        )
         .await
-        .expect("lock migrated service table setup");
-    conn.batch_execute(
-        r#"
-        CREATE SCHEMA IF NOT EXISTS zeroship;
-        CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-        CREATE TABLE IF NOT EXISTS zeroship.migrated_app_policies (
-          app_id uuid NOT NULL,
-          version bigint NOT NULL CHECK (version > 0),
-          raw_toml text NOT NULL,
-          parsed_profile jsonb NOT NULL,
-          effective_profile jsonb NOT NULL,
-          ceiling_id text NOT NULL,
-          ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
-          submitted_by uuid NOT NULL,
-          submitted_at timestamptz NOT NULL DEFAULT now(),
-          PRIMARY KEY (app_id, version)
-        );
-
-        CREATE TABLE IF NOT EXISTS zeroship.migrated_migrations (
-          app_id uuid NOT NULL,
-          migration_id uuid NOT NULL,
-          status text NOT NULL CHECK (
-            status IN ('planned', 'pending_approval', 'approved', 'applied', 'rejected')
-          ),
-          request_body jsonb NOT NULL,
-          effective_profile jsonb NOT NULL,
-          ceiling_id text NOT NULL,
-          ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
-          gated_versions jsonb NOT NULL DEFAULT '[]'::jsonb,
-          submitted_by uuid NOT NULL,
-          submitted_at timestamptz NOT NULL DEFAULT now(),
-          approved_by uuid,
-          approved_at timestamptz,
-          applied_at timestamptz,
-          approved_checksum text,
-          descriptor_sha256 text,
-          last_error text,
-          PRIMARY KEY (app_id, migration_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS zeroship.migrated_migration_audit (
-          audit_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          app_id uuid NOT NULL,
-          migration_id uuid NOT NULL,
-          migration_versions jsonb NOT NULL DEFAULT '[]'::jsonb,
-          action text NOT NULL CHECK (action IN ('submit', 'reject_pending', 'approve', 'apply')),
-          outcome text NOT NULL,
-          principal_id uuid NOT NULL,
-          effective_profile jsonb NOT NULL,
-          sealed_profile jsonb,
-          ceiling_id text NOT NULL,
-          ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
-          detail jsonb NOT NULL DEFAULT '{}'::jsonb,
-          created_at timestamptz NOT NULL DEFAULT now()
-        );
-
-        CREATE INDEX IF NOT EXISTS migrated_app_policies_app_submitted_idx
-          ON zeroship.migrated_app_policies (app_id, submitted_at DESC);
-        CREATE INDEX IF NOT EXISTS migrated_migrations_app_status_idx
-          ON zeroship.migrated_migrations (app_id, status, submitted_at DESC);
-        CREATE INDEX IF NOT EXISTS migrated_migration_audit_app_idx
-          ON zeroship.migrated_migration_audit (app_id, migration_id, created_at);
-        "#,
-    )
-    .await
-    .expect("ensure migrated service tables");
-    conn.batch_execute("SELECT pg_advisory_unlock(7330067);")
-        .await
-        .expect("unlock migrated service table setup");
+        .expect("read information_schema for platform tables");
+    let present: HashSet<String> = rows
+        .iter()
+        .map(|row| row.get::<_, String>("table_name"))
+        .collect();
+    let missing: Vec<&str> = REQUIRED
+        .iter()
+        .copied()
+        .filter(|table| !present.contains(*table))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the target database has no platform schema - missing zeroship.{}.\n\
+         This target needs a database the PLATFORM migrations have been applied to; \
+         it no longer creates any table of its own.\n\
+         Run `tests/provision_test_backends.sh`, then:\n  \
+         cargo test -p zeroship-migrate-server --features live-db-tests",
+        missing.join(", zeroship."),
+    );
 }
 
 async fn cleanup_app(conn: &Client, app_id: &Uuid) {
@@ -326,12 +290,12 @@ fn state_for(authenticator: Arc<dyn Authenticator>) -> (Arc<MigrationServiceStat
 fn state_for_with_dsns(
     authenticator: Arc<dyn Authenticator>,
     provision_dsn: String,
-    policy_store_dsn: String,
+    control_dsn: String,
 ) -> (Arc<MigrationServiceState>, PathBuf) {
     state_for_with_policy_config(
         authenticator,
         provision_dsn,
-        policy_store_dsn,
+        control_dsn,
         ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
             .expect("test policy config"),
     )
@@ -431,7 +395,7 @@ fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
 fn state_for_with_policy_config(
     authenticator: Arc<dyn Authenticator>,
     provision_dsn: String,
-    policy_store_dsn: String,
+    control_dsn: String,
     policy_config: ManagedPolicyConfig,
 ) -> (Arc<MigrationServiceState>, PathBuf) {
     assert_policy_fixtures_are_current(&policy_config);
@@ -439,7 +403,7 @@ fn state_for_with_policy_config(
     (
         Arc::new(MigrationServiceState::new(
             provision_dsn,
-            policy_store_dsn,
+            control_dsn,
             tmp.clone(),
             authenticator,
             policy_config,
@@ -754,9 +718,18 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Completed rows in the app's OWN journal, `"<app_uuid>".__zeroship_schema_migrations`.
+///
+/// BOTH HALVES OF THAT NAME MOVED on 2026-08-28 and the old spelling
+/// (`"<app_uuid>_migrations".schema_migrations`) resolves to nothing, so a probe
+/// left on it would return 0 forever and every `>= 1` assertion below would fail
+/// while the code was correct. `journal_is_absent_at_the_unfenced_name` is the
+/// case that keeps this helper honest by pinning the OTHER direction.
 async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
-    let meta = format!("{}_migrations", app_id);
-    let q = format!("\"{}\".schema_migrations", meta.replace('"', "\"\""));
+    let q = format!(
+        "\"{}\".__zeroship_schema_migrations",
+        app_id.to_string().replace('"', "\"\"")
+    );
     let lit = q.replace('\'', "''");
     let present = conn
         .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
@@ -775,268 +748,19 @@ async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
     rows[0].get("n")
 }
 
-async fn stored_policy_count(conn: &Client, app_id: &Uuid) -> i64 {
+/// Does `to_regclass` resolve this exact relation?
+async fn relation_exists(conn: &Client, qualified: &str) -> bool {
+    let lit = qualified.replace('\'', "''");
     let rows = conn
-        .query(
-            "SELECT count(*)::int8 AS n \
-               FROM zeroship.migrated_app_policies \
-              WHERE app_id = $1",
-            &[app_id],
-        )
+        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
         .await
-        .expect("count stored policies");
-    rows[0].get("n")
+        .expect("regclass probe");
+    rows[0].get("p")
 }
 
-async fn audit_rows(conn: &Client, app_id: &Uuid) -> Vec<(String, String, Uuid, Value)> {
-    let rows = conn
-        .query(
-            "SELECT action, outcome, principal_id, detail \
-               FROM zeroship.migrated_migration_audit \
-              WHERE app_id = $1 \
-              ORDER BY created_at ASC, audit_id ASC",
-            &[app_id],
-        )
-        .await
-        .expect("query migration audit");
-    rows.into_iter()
-        .map(|row| {
-            (
-                row.get("action"),
-                row.get("outcome"),
-                row.get("principal_id"),
-                row.get("detail"),
-            )
-        })
-        .collect()
-}
 
-async fn migration_status(
-    conn: &Client,
-    app_id: &Uuid,
-    migration_id: &Uuid,
-) -> Option<(String, Option<String>)> {
-    let rows = conn
-        .query(
-            "SELECT status, last_error \
-               FROM zeroship.migrated_migrations \
-              WHERE app_id = $1 AND migration_id = $2",
-            &[app_id, migration_id],
-        )
-        .await
-        .expect("query migration status");
-    rows.first()
-        .map(|row| (row.get("status"), row.get("last_error")))
-}
 
-async fn first_audit_id(conn: &Client, app_id: &Uuid) -> Uuid {
-    let rows = conn
-        .query(
-            "SELECT audit_id \
-               FROM zeroship.migrated_migration_audit \
-              WHERE app_id = $1 \
-              ORDER BY created_at ASC, audit_id ASC \
-              LIMIT 1",
-            &[app_id],
-        )
-        .await
-        .expect("query first audit id");
-    rows[0].get("audit_id")
-}
 
-#[ntex::test]
-async fn policy_api_submits_gets_and_lists_versioned_policy_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer good-token")
-        .set_payload(tighter_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["version"], 1);
-    assert_eq!(body["ceiling_version"], 1);
-    assert_eq!(body["raw_toml"], tighter_policy());
-    // The stored `effective_profile` is now the managed-posture audit snapshot
-    // (`{require_rls, destructive_ops, extensions}`); `destructive_ops` renders the
-    // `DestructiveOps` Debug name.
-    assert_eq!(body["effective_profile"]["destructive_ops"], "Forbid");
-
-    let req = test::TestRequest::get()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer good-token")
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["version"], 1);
-    assert_eq!(body["raw_toml"], tighter_policy());
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer good-token")
-        .set_payload(second_tighter_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["version"], 2);
-    assert_eq!(body["raw_toml"], second_tighter_policy());
-
-    let req = test::TestRequest::get()
-        .uri(&format!("/v1/apps/{app_id}/policy?version=1"))
-        .header("authorization", "Bearer good-token")
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["version"], 1);
-    assert_eq!(body["raw_toml"], tighter_policy());
-
-    let req = test::TestRequest::get()
-        .uri(&format!("/v1/apps/{app_id}/policy/versions"))
-        .header("authorization", "Bearer good-token")
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    let versions = body["versions"].as_array().expect("versions array");
-    assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0]["version"], 1);
-    assert_eq!(versions[1]["version"], 2);
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-}
-
-#[ntex::test]
-async fn policy_api_rejects_escalating_draft_at_submit_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer good-token")
-        .set_payload(escalating_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_policy_invalid");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("sql.raw"),
-        "escalation should identify the knob, got: {body}"
-    );
-    assert_eq!(stored_policy_count(&conn, &app_id).await, 0);
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-}
-
-#[ntex::test]
-async fn policy_api_rejects_malformed_toml_at_submit_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer good-token")
-        .set_payload(malformed_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_policy_invalid");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("unknown field"),
-        "malformed policy should identify parse failure, got: {body}"
-    );
-    assert_eq!(stored_policy_count(&conn, &app_id).await, 0);
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-}
-
-#[ntex::test]
-async fn policy_api_rejects_cross_app_get_and_put() {
-    let app_id = Uuid::now_v7();
-    let other_app = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("app-a-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::get()
-        .uri(&format!("/v1/apps/{other_app}/policy"))
-        .header("authorization", "Bearer app-a-token")
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{other_app}/policy"))
-        .header("authorization", "Bearer app-a-token")
-        .set_payload(tighter_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    let _ = std::fs::remove_dir_all(tmp);
-}
 
 #[ntex::test]
 async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
@@ -1077,42 +801,106 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     );
     assert!(
         journaled_count(&conn, &app_id).await >= 1,
-        "IR apply must be journaled"
+        "IR apply must be journaled in the app's own schema under the platform prefix"
     );
-    let audit = audit_rows(&conn, &app_id).await;
+
+    // WHERE THE JOURNAL IS, asserted both ways. The positive above passes on a
+    // build that puts the journal anywhere reachable by that one name; these two
+    // pin the placement itself.
+    //
+    // The unfenced spelling matters more than the old meta schema: the engine
+    // bootstraps with `CREATE TABLE IF NOT EXISTS` and its table names are
+    // literals, so if the prefix were dropped a creator declaring a table called
+    // `schema_migrations` would have it silently adopted as the journal. This
+    // asserts nothing occupies that name.
     assert!(
-        audit
-            .iter()
-            .any(|(action, outcome, principal, _)| action == "submit"
-                && outcome == "accepted"
-                && principal == &owner_id),
-        "non-destructive apply must audit submit: {audit:?}"
+        !relation_exists(&conn, &format!("\"{app_id}_migrations\".__zeroship_schema_migrations"))
+            .await,
+        "the separate <app>_migrations meta schema must be gone"
     );
     assert!(
-        audit
-            .iter()
-            .any(|(action, outcome, principal, _)| action == "apply"
-                && outcome == "applied"
-                && principal == &owner_id),
-        "non-destructive apply must audit apply: {audit:?}"
+        !relation_exists(&conn, &format!("\"{app_id}\".schema_migrations")).await,
+        "the journal must NOT occupy the unfenced name a creator could declare"
     );
-    let audit_id = first_audit_id(&conn, &app_id).await;
-    let update = conn
-        .execute(
-            "UPDATE zeroship.migrated_migration_audit \
-                SET outcome = 'tampered' \
-              WHERE audit_id = $1",
-            &[&audit_id],
-        )
-        .await;
-    assert!(update.is_err(), "audit rows must reject UPDATE");
-    let delete = conn
-        .execute(
-            "DELETE FROM zeroship.migrated_migration_audit WHERE audit_id = $1",
-            &[&audit_id],
-        )
-        .await;
-    assert!(delete.is_err(), "audit rows must reject DELETE");
+
+    // The row the platform keeps for itself, in the platform's own schema.
+    let descriptors = applied_descriptors(&conn, &app_id).await;
+    assert_eq!(
+        descriptors.len(),
+        1,
+        "one apply request must record exactly one applied ledger row: {descriptors:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+}
+
+/// A DESTRUCTIVE migration is no longer parked for an operator who does not exist.
+///
+/// THIS IS A CAPABILITY REMOVAL, PINNED SO IT CANNOT COME BACK BY ACCIDENT. Until
+/// 2026-08-28 a `dropTable` preflighted as gated, the request answered
+/// **409 `migration_requires_operator_approval`** naming a `migration_id`, and the
+/// only way past it was `POST .../migrations/{id}/approve` - a route no dashboard,
+/// CLI or service ever called. The creator's own destructive migration was
+/// therefore a dead end.
+///
+/// WHAT THIS DOES NOT ASSERT, AND MUST NOT BE READ AS. The drop still does not
+/// apply. Measured 2026-08-28 against live PostgreSQL 16: the request answers
+/// **422** with *"apply (0002_drop_notes.ir.json): plan requires approval
+/// (destructive) but none was given"* - the ENGINE's refusal, because this host
+/// passes `Approval::None`. Removing the host's approval state machine removed a
+/// refusal nobody could clear; it did not grant creators destructive migrations,
+/// and giving them one is a separate decision about what `Approval` the host
+/// asserts on a creator's behalf.
+///
+/// So this case asserts the ABSENCE of the unclearable refusal, not any
+/// particular success. Asserting `status == OK` would make it a statement about
+/// the confined ceiling's `safety.destructive_ops` value, which is not what
+/// changed.
+#[ntex::test]
+async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let post = |body: Value| {
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .set_json(&body)
+            .to_request()
+    };
+
+    // The table has to exist before dropping it is destructive rather than absurd.
+    let resp = test::call_service(&svc, post(create_notes_request())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = test::call_service(&svc, post(drop_notes_request())).await;
+    let status = resp.status();
+    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    assert_ne!(
+        status,
+        StatusCode::CONFLICT,
+        "a destructive migration must not be parked awaiting an approval endpoint \
+         that no longer exists: {body}"
+    );
+    assert_ne!(
+        body["error"].as_str(),
+        Some("migration_requires_operator_approval"),
+        "the approval refusal must be unreachable: {body}"
+    );
 
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
@@ -1122,7 +910,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
 /// Every applied `(descriptor_sha256, applied_at)` for an app, newest last.
 async fn applied_descriptors(conn: &Client, app_id: &Uuid) -> Vec<Option<String>> {
     conn.query(
-        "SELECT descriptor_sha256 FROM zeroship.migrated_migrations \
+        "SELECT descriptor_sha256 FROM zeroship.app_schema_applies \
           WHERE app_id = $1 AND status = 'applied' \
           ORDER BY applied_at ASC, submitted_at ASC, migration_id ASC",
         &[app_id],
@@ -1131,6 +919,22 @@ async fn applied_descriptors(conn: &Client, app_id: &Uuid) -> Vec<Option<String>
     .expect("query applied descriptors")
     .iter()
     .map(|row| row.get::<_, Option<String>>("descriptor_sha256"))
+    .collect()
+}
+
+/// Every applied row's `applied_versions`, newest last - the engine's own
+/// `outcome.applied` for that request.
+async fn applied_versions(conn: &Client, app_id: &Uuid) -> Vec<Value> {
+    conn.query(
+        "SELECT applied_versions FROM zeroship.app_schema_applies \
+          WHERE app_id = $1 AND status = 'applied' \
+          ORDER BY applied_at ASC, submitted_at ASC, migration_id ASC",
+        &[app_id],
+    )
+    .await
+    .expect("query applied versions")
+    .iter()
+    .map(|row| row.get::<_, Value>("applied_versions"))
     .collect()
 }
 
@@ -1204,690 +1008,30 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
          as the newest applied row - without it the app can never deploy again",
     );
 
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-}
-
-#[ntex::test]
-async fn destructive_apply_requires_operator_approval_then_applies_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_user(&conn, operator_id, "operator").await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    auth.insert_actions(
-        "operator-token",
-        operator_id,
-        [Action::AppsApproveMigration],
-        [app_id],
-    );
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&with_policy(drop_notes_request(), require_approval_policy()))
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_requires_operator_approval");
-    let migration_id = body["migration_id"]
-        .as_str()
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .expect("pending migration id");
+    // AND THE ROW SAYS SO. `descriptor_sha256` alone cannot tell a request that
+    // advanced the schema from one that advanced nothing, which is exactly the
+    // distinction the rollback hole turns on: a creator re-submitting an OLD IR
+    // moves the ledger head backwards and the row looks identical to a real
+    // apply. `applied_versions` is the engine's own `outcome.applied` for the
+    // request, so the empty second row is visible as empty.
+    let versions = applied_versions(&conn, &app_id).await;
+    assert_eq!(versions.len(), 2, "two requests, two rows: {versions:?}");
     assert!(
-        table_exists(&conn, &app_id.to_string(), "notes").await,
-        "pending destructive apply must not drop the table"
+        versions[0].as_array().is_some_and(|a| !a.is_empty()),
+        "the first request applied migrations and must record them: {versions:?}"
     );
-
-    let creator_approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", "Bearer creator-token")
-        .to_request();
-    let resp = test::call_service(&svc, creator_approve).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert!(
-        table_exists(&conn, &app_id.to_string(), "notes").await,
-        "creator approval attempt must not apply"
-    );
-
-    let cross_app = Uuid::now_v7();
-    let cross_approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{cross_app}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", "Bearer operator-token")
-        .to_request();
-    let resp = test::call_service(&svc, cross_approve).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    let operator_approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", "Bearer operator-token")
-        .to_request();
-    let resp = test::call_service(&svc, operator_approve).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert!(
-        !body["applied"].as_array().unwrap().is_empty(),
-        "approved destructive apply should report applied versions: {body}"
-    );
-    assert!(
-        !table_exists(&conn, &app_id.to_string(), "notes").await,
-        "operator-approved destructive apply must drop the table"
-    );
-
-    let audit = audit_rows(&conn, &app_id).await;
-    assert!(
-        audit.iter().any(|(action, outcome, principal, _)| action == "reject_pending"
-            && outcome == "requires_operator_approval"
-            && principal == &owner_id),
-        "pending rejection must be audited: {audit:?}"
-    );
-    assert!(
-        audit
-            .iter()
-            .any(|(action, outcome, principal, _)| action == "approve"
-                && outcome == "approved"
-                && principal == &operator_id),
-        "operator approval must be audited with approver: {audit:?}"
-    );
-    assert!(
-        audit
-            .iter()
-            .any(|(action, outcome, principal, detail)| action == "apply"
-                && outcome == "applied"
-                && principal == &operator_id
-                && detail["approval"] == "operator"),
-        "approved apply must be audited as operator-approved: {audit:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-// A `safety.require_approval = "on_destructive"` draft gates ONLY destructive migrations:
-// an additive create applies without approval, a DROP is held `pending_approval`.
-fn on_destructive_policy() -> &'static str {
-    "policy_version = 1\n\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
-}
-
-#[ntex::test]
-async fn on_destructive_gates_destructive_migration_only_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_user(&conn, operator_id, "operator").await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    auth.insert_actions(
-        "operator-token",
-        operator_id,
-        [Action::AppsApproveMigration],
-        [app_id],
-    );
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    // Additive create under `on_destructive` → NO approval needed, applies directly.
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&with_policy(create_notes_request(), on_destructive_policy()))
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
     assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "additive migration under on_destructive must not require approval"
-    );
-    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
-
-    // A DROP under `on_destructive` → held pending_approval (409).
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&with_policy(drop_notes_request(), on_destructive_policy()))
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::CONFLICT,
-        "destructive migration under on_destructive must require approval"
-    );
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_requires_operator_approval");
-    let migration_id = body["migration_id"]
-        .as_str()
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .expect("pending migration id");
-    let (status, _) = migration_status(&conn, &app_id, &migration_id)
-        .await
-        .expect("pending row exists");
-    assert_eq!(status, "pending_approval");
-    assert!(
-        table_exists(&conn, &app_id.to_string(), "notes").await,
-        "pending destructive migration must not drop the table"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-// The migration-store state machine directly: plan (pending) → approve (stamps
-// approved_checksum = X) → drift-detected revert (approved_checksum ≠ X') → pending.
-#[ntex::test]
-async fn store_state_machine_plan_approve_and_content_drift_revert_pg() {
-    use zeroship_migrate_server::migration_store::{MigrationStore, StoreMigrationInput};
-    use zeroship_migrate_server::policy::ManagedPosture;
-    use zeroship_migrate::DestructiveOps;
-
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_user(&conn, operator_id, "operator").await;
-
-    let store = MigrationStore::new(dsn());
-    let migration_id = Uuid::now_v7();
-    let posture = ManagedPosture {
-        require_rls: false,
-        destructive_ops: DestructiveOps::Allow,
-        extensions: vec![],
-    };
-    let input = || StoreMigrationInput {
-        app_id,
-        migration_id,
-        principal_id: owner_id,
-        request_body: json!({"kind": "ir", "documents": []}),
-        effective_profile: &posture,
-        ceiling_id: "confined-default",
-        ceiling_version: 1,
-        gated_versions: &[],
-        descriptor_sha256: TEST_DESCRIPTOR_SHA256,
-    };
-
-    // PLAN (requires approval) → pending_approval, no approved_checksum yet.
-    store.insert_pending(input()).await.expect("insert pending");
-    let (status, _) = migration_status(&conn, &app_id, &migration_id)
-        .await
-        .expect("row exists");
-    assert_eq!(status, "pending_approval");
-    assert!(approved_checksum(&conn, &app_id, &migration_id).await.is_none());
-
-    // APPROVE stamps status=approved + approved_checksum = X.
-    let x = "checksum-X";
-    store
-        .mark_approved(app_id, migration_id, operator_id, x)
-        .await
-        .expect("approve");
-    let (status, _) = migration_status(&conn, &app_id, &migration_id)
-        .await
-        .expect("row exists");
-    assert_eq!(status, "approved");
-    assert_eq!(
-        approved_checksum(&conn, &app_id, &migration_id).await.as_deref(),
-        Some(x)
-    );
-
-    // A double-approve of an already-approved row is a no-op (guarded on
-    // status='pending_approval').
-    let err = store
-        .mark_approved(app_id, migration_id, operator_id, "checksum-Y")
-        .await;
-    assert!(err.is_err(), "re-approving a non-pending row must fail");
-
-    // CONTENT DRIFT: the re-resolved checksum X' ≠ approved_checksum → revert to
-    // pending_approval, clearing the stale approval.
-    store
-        .revert_to_pending(app_id, migration_id, "content drifted")
-        .await
-        .expect("revert");
-    let (status, last_error) = migration_status(&conn, &app_id, &migration_id)
-        .await
-        .expect("row exists");
-    assert_eq!(status, "pending_approval");
-    assert_eq!(last_error.as_deref(), Some("content drifted"));
-    assert!(
-        approved_checksum(&conn, &app_id, &migration_id).await.is_none(),
-        "revert must clear the stale approved_checksum"
-    );
-
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-async fn approved_checksum(conn: &Client, app_id: &Uuid, migration_id: &Uuid) -> Option<String> {
-    let rows = conn
-        .query(
-            "SELECT approved_checksum FROM zeroship.migrated_migrations \
-              WHERE app_id = $1 AND migration_id = $2",
-            &[app_id, migration_id],
-        )
-        .await
-        .expect("query approved_checksum");
-    rows.first().and_then(|row| row.get("approved_checksum"))
-}
-
-#[ntex::test]
-async fn approval_repreflight_engine_error_audits_rejected_preflight_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_user(&conn, operator_id, "operator").await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    auth.insert_actions(
-        "operator-token",
-        operator_id,
-        [Action::AppsApproveMigration],
-        [app_id],
-    );
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&with_policy(drop_notes_request(), require_approval_policy()))
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    let migration_id = body["migration_id"]
-        .as_str()
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .expect("pending migration id");
-    let reviewed_gated_versions = body["gated_versions"]
-        .as_array()
-        .expect("gated versions array")
-        .clone();
-
-    conn.batch_execute(&format!(
-        "DROP TABLE {}.{}",
-        quote_ident(&app_id.to_string()),
-        quote_ident("notes")
-    ))
-    .await
-    .expect("simulate live drift before approval");
-    assert!(
-        !table_exists(&conn, &app_id.to_string(), "notes").await,
-        "out-of-band drift should remove the table before approval re-preflight"
-    );
-
-    let approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", "Bearer operator-token")
-        .to_request();
-    let resp = test::call_service(&svc, approve).await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_failed");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("migration preflight"),
-        "engine preflight refusal should preserve the existing error shape: {body}"
-    );
-
-    let audit = audit_rows(&conn, &app_id).await;
-    assert!(
-        audit.iter().any(|(action, outcome, principal, detail)| {
-            action == "approve"
-                && outcome == "rejected_preflight"
-                && principal == &operator_id
-                && detail["reviewed_gated_versions"]
-                    .as_array()
-                    .is_some_and(|versions| {
-                        versions.as_slice() == reviewed_gated_versions.as_slice()
-                    })
-                && detail["error"]
-                    .as_str()
-                    .is_some_and(|error| error.contains("migration preflight"))
-                && detail["re_submit_required"] == true
-        }),
-        "engine preflight refusal must be audited: {audit:?}"
-    );
-    let (status, last_error) = migration_status(&conn, &app_id, &migration_id)
-        .await
-        .expect("workflow row exists");
-    assert_eq!(status, "rejected");
-    assert!(
-        last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("approval preflight failed"),
-        "workflow row should record the approval preflight failure: {last_error:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-#[ntex::test]
-async fn approval_refuses_stale_ceiling_after_operator_tightening_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_user(&conn, operator_id, "operator").await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    auth.insert_actions(
-        "operator-token",
-        operator_id,
-        [Action::AppsApproveMigration],
-        [app_id],
-    );
-    let (state_v1, tmp_v1) = state_for_with_ceiling_version(auth.clone(), 1);
-    let svc_v1 = test::init_service(
-        web::App::new()
-            .state(state_v1)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc_v1, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&with_policy(drop_notes_request(), require_approval_policy()))
-        .to_request();
-    let resp = test::call_service(&svc_v1, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    let migration_id = body["migration_id"]
-        .as_str()
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .expect("pending migration id");
-
-    let (state_v2, tmp_v2) = state_for_with_ceiling_version(auth, 2);
-    let svc_v2 = test::init_service(
-        web::App::new()
-            .state(state_v2)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-    let approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", "Bearer operator-token")
-        .to_request();
-    let resp = test::call_service(&svc_v2, approve).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_approval_stale_ceiling");
-    assert_eq!(body["migration_id"], migration_id.to_string());
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("re-submit required"),
-        "stale approval refusal should tell the caller to re-submit: {body}"
-    );
-    assert!(
-        table_exists(&conn, &app_id.to_string(), "notes").await,
-        "stale approval must not apply the reviewed destructive migration"
-    );
-
-    let audit = audit_rows(&conn, &app_id).await;
-    assert!(
-        audit.iter().any(|(action, outcome, principal, detail)| {
-            action == "approve"
-                && outcome == "rejected_stale"
-                && principal == &operator_id
-                && detail["reason"] == "ceiling_changed_since_submit"
-                && detail["submitted_ceiling_version"] == 1
-                && detail["current_ceiling_version"] == 2
-                && detail["re_submit_required"] == true
-        }),
-        "stale approval refusal must be audited: {audit:?}"
-    );
-    let (status, last_error) = migration_status(&conn, &app_id, &migration_id)
-        .await
-        .expect("workflow row exists");
-    assert_eq!(status, "rejected");
-    assert!(
-        last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("re-submit required"),
-        "stale workflow row should force a re-submit: {last_error:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp_v1);
-    let _ = std::fs::remove_dir_all(tmp_v2);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-#[ntex::test]
-async fn approval_repreflight_refuses_when_current_policy_changes_reviewed_scope_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_user(&conn, operator_id, "operator").await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    auth.insert_actions(
-        "operator-token",
-        operator_id,
-        [Action::AppsApproveMigration],
-        [app_id],
-    );
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer creator-token")
-        .set_payload(require_approval_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    let migration_id = body["migration_id"]
-        .as_str()
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .expect("pending migration id");
-    let reviewed_gated_versions = body["gated_versions"]
-        .as_array()
-        .expect("gated versions array")
-        .clone();
-    assert!(
-        !reviewed_gated_versions.is_empty(),
-        "policy-gated create should carry reviewed gated versions: {body}"
-    );
-    assert!(
-        !table_exists(&conn, &app_id.to_string(), "notes").await,
-        "policy-gated create must stay pending until approval"
-    );
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer creator-token")
-        .set_payload(tighter_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", "Bearer operator-token")
-        .to_request();
-    let resp = test::call_service(&svc, approve).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["error"], "migration_approval_preflight_changed");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("re-submit required"),
-        "changed approval preflight should force re-submit: {body}"
-    );
-    assert!(
-        !table_exists(&conn, &app_id.to_string(), "notes").await,
-        "changed approval preflight must not apply the pending migration"
-    );
-    let audit = audit_rows(&conn, &app_id).await;
-    assert!(
-        audit.iter().any(|(action, outcome, principal, detail)| {
-            action == "approve"
-                && outcome == "rejected_preflight_changed"
-                && principal == &operator_id
-                && detail["reviewed_gated_versions"]
-                    .as_array()
-                    .is_some_and(|versions| {
-                        versions.as_slice() == reviewed_gated_versions.as_slice()
-                    })
-                && detail["current_gated_versions"]
-                    .as_array()
-                    .is_some_and(Vec::is_empty)
-                && detail["re_submit_required"] == true
-        }),
-        "changed approval preflight must be audited: {audit:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-#[ntex::test]
-async fn apply_api_uses_stored_current_policy_when_no_inline_draft_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
-        .header("authorization", "Bearer good-token")
-        .set_payload(tighter_policy())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert_eq!(body["version"], 1);
-    assert_eq!(body["ceiling_version"], 1);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer good-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(
-        table_exists(&conn, &app_id.to_string(), "notes").await,
-        "stored-policy apply should still create the table in the app schema"
+        versions[1],
+        json!([]),
+        "the second request advanced nothing and the row must show it: {versions:?}"
     );
 
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
 }
+
+
 
 #[ntex::test]
 async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
@@ -2290,12 +1434,17 @@ async fn authz_receives_the_callers_request_id_pg() {
     )
     .await;
 
+    // THE APPLY ENDPOINT, because it is the only authenticated one left. This
+    // case used to drive `PUT /v1/apps/{app}/policy`, which was deleted with the
+    // policy store; a request-id test pointed at a route that 404s before authz
+    // runs would observe an empty `seen_request_ids` and read as a failure of the
+    // header plumbing rather than of the fixture.
     let caller_request_id = "req-from-the-caller-0001";
-    let req = test::TestRequest::put()
-        .uri(&format!("/v1/apps/{app_id}/policy"))
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
         .header("authorization", "Bearer good-token")
         .header("x-request-id", caller_request_id)
-        .set_payload(tighter_policy())
+        .set_json(&create_notes_request())
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -2309,87 +1458,6 @@ async fn authz_receives_the_callers_request_id_pg() {
         seen.contains(&caller_request_id.to_string()),
         "authz was given {seen:?}, none of which is the caller's {caller_request_id:?}; \
          an id minted at the authz call correlates with nothing"
-    );
-
-    drop(tmp);
-    cleanup_app(&conn, &app_id).await;
-}
-
-/// Re-submitting the SAME gated migration must reuse the pending row, not mint a
-/// second one.
-///
-/// A creator's CI retries a failed deploy; each retry used to insert another
-/// `pending_approval` row with a fresh id. The operator then sees N rows for one
-/// decision, approving one leaves N-1 stale rows pending forever, and nothing
-/// reaps them. The content is what gets approved, so identical content is one
-/// pending migration however many times it is submitted.
-#[ntex::test]
-async fn resubmitting_a_gated_migration_reuses_the_pending_row_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-
-    let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrate_server::configure),
-    )
-    .await;
-
-    // Create the table first so the DROP below is a real destructive change.
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", "Bearer creator-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    assert_eq!(test::call_service(&svc, req).await.status(), StatusCode::OK);
-
-    // Submit the gated migration twice with byte-identical bodies.
-    let gated = with_policy(drop_notes_request(), require_approval_policy());
-    let mut ids = Vec::new();
-    for attempt in 0..2 {
-        let req = test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-            .header("authorization", "Bearer creator-token")
-            .set_json(&gated)
-            .to_request();
-        let resp = test::call_service(&svc, req).await;
-        assert_eq!(
-            resp.status(),
-            StatusCode::CONFLICT,
-            "attempt {attempt} must be held for approval"
-        );
-        let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-        assert_eq!(body["error"], "migration_requires_operator_approval");
-        ids.push(
-            body["migration_id"]
-                .as_str()
-                .and_then(|raw| Uuid::parse_str(raw).ok())
-                .expect("pending migration id"),
-        );
-    }
-
-    assert_eq!(
-        ids[0], ids[1],
-        "a re-submission must name the migration already awaiting approval"
-    );
-
-    let rows = conn
-        .query(
-            "SELECT count(*)::bigint AS n FROM zeroship.migrated_migrations \
-              WHERE app_id = $1 AND status = 'pending_approval'",
-            &[&app_id],
-        )
-        .await
-        .expect("count pending");
-    let pending: i64 = rows[0].get("n");
-    assert_eq!(
-        pending, 1,
-        "two submissions of one migration must leave ONE pending row, found {pending}"
     );
 
     drop(tmp);

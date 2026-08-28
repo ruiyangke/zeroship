@@ -59,6 +59,50 @@ export default {
       },
       primaryKey: ["app_id"],
     });
+    // ONE ROW PER SCHEMA-APPLY REQUEST the migration service accepted. It is the
+    // platform's own record of what an app's schema corresponds to, and it exists
+    // BECAUSE the engine journal is not usable as one: that journal now lives in
+    // the app's own schema, which the app's migrator role OWNS, and an owner can
+    // DROP it. So the platform keeps its own row and never treats the tenant's
+    // journal as a trust anchor.
+    //
+    // The reader is the control plane's deploy precondition
+    // (`Registry::set_deploy_with_manifest`), which compares a `.zship`'s
+    // `runtime_descriptor.hash` against the NEWEST applied row's
+    // `descriptor_sha256`. `zeroship_control` holds the grant
+    // (`20260702000900_grants.ts`) and no other service reads it.
+    //
+    // A ROW IS WRITTEN PER REQUEST, EVEN WHEN NOTHING APPLIED, and that is a
+    // requirement rather than an accident of where the insert sits: an engine
+    // upgrade that changes descriptor bytes without changing any schema would
+    // otherwise halt every app's next deploy forever. `applied_versions` is what
+    // the engine reported as applied for that request, so a re-run that applied
+    // nothing is visible as `[]` rather than being indistinguishable from one
+    // that advanced the schema.
+    table("app_schema_applies", { schema: "zeroship" }).create({
+      columns: {
+        app_id: t.uuid().notNull(),
+        migration_id: t.uuid().notNull(),
+        status: t.text().notNull(),
+        request_body: t.json().notNull(),
+        effective_profile: t.json().notNull(),
+        ceiling_id: t.text().notNull(),
+        ceiling_version: t.bigInt().notNull(),
+        // The runtime descriptor this document set folds to, lowercase sha256 hex.
+        // Validated at the migration service's door, so the spelling recorded here
+        // is the one a manifest hash can be compared to with a plain `=`.
+        descriptor_sha256: t.text().notNull(),
+        // The engine's own `outcome.applied` for this request.
+        applied_versions: t.json().notNull().default([]),
+        submitted_by: t.uuid().notNull(),
+        submitted_at: t.timestamp().notNull().default(now()),
+        applied_at: t.timestamp(),
+        last_error: t.text(),
+      },
+      primaryKey: ["app_id", "migration_id"],
+    });
+    table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
+    table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_status_check").add({ expr: (col) => col("status").in(["submitted", "applied", "failed"]) });
     table("app_scope_defs", { schema: "zeroship" }).create({
       columns: {
         app_id: t.uuid().notNull(),
@@ -144,67 +188,6 @@ export default {
       },
       primaryKey: ["creator_id"],
     });
-    table("migrated_app_policies", { schema: "zeroship" }).create({
-      columns: {
-        app_id: t.uuid().notNull(),
-        version: t.bigInt().notNull(),
-        raw_toml: t.text().notNull(),
-        parsed_profile: t.json().notNull(),
-        effective_profile: t.json().notNull(),
-        ceiling_id: t.text().notNull(),
-        ceiling_version: t.bigInt().notNull(),
-        submitted_by: t.uuid().notNull(),
-        submitted_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["app_id", "version"],
-    });
-    table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
-    table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_version_check").add({ expr: (col) => col("version").gt(0) });
-    table("migrated_migration_audit", { schema: "zeroship" }).create({
-      columns: {
-        audit_id: t.uuid().notNull().default(uuidV4()),
-        app_id: t.uuid().notNull(),
-        migration_id: t.uuid().notNull(),
-        migration_versions: t.json().notNull().default([]),
-        action: t.text().notNull(),
-        outcome: t.text().notNull(),
-        principal_id: t.uuid().notNull(),
-        effective_profile: t.json().notNull(),
-        sealed_profile: t.json(),
-        ceiling_id: t.text().notNull(),
-        ceiling_version: t.bigInt().notNull(),
-        detail: t.json().notNull().default({}),
-        created_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["audit_id"],
-    });
-    table("migrated_migration_audit", { schema: "zeroship" }).check("migrated_migration_audit_action_check").add({ expr: (col) => col("action").in(["submit", "reject_pending", "approve", "apply"]) });
-    table("migrated_migration_audit", { schema: "zeroship" }).check("migrated_migration_audit_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
-    table("migrated_migrations", { schema: "zeroship" }).create({
-      columns: {
-        app_id: t.uuid().notNull(),
-        migration_id: t.uuid().notNull(),
-        status: t.text().notNull(),
-        request_body: t.json().notNull(),
-        effective_profile: t.json().notNull(),
-        ceiling_id: t.text().notNull(),
-        ceiling_version: t.bigInt().notNull(),
-        gated_versions: t.json().notNull().default([]),
-        submitted_by: t.uuid().notNull(),
-        submitted_at: t.timestamp().notNull().default(now()),
-        approved_by: t.uuid(),
-        approved_at: t.timestamp(),
-        applied_at: t.timestamp(),
-        // The content checksum the operator reviewed at approve() — the TOCTOU pin the
-        // apply gate re-verifies against the re-resolved migration set. NULL until the
-        // record is approved (auto-approved or operator-approved).
-        approved_checksum: t.text(),
-        last_error: t.text(),
-      },
-      primaryKey: ["app_id", "migration_id"],
-    });
-    table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
-    table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_status_check").add({ expr: (col) => col("status").in(["planned", "pending_approval", "approved", "applied", "rejected"]) });
     table("net_policy_catalog", { schema: "zeroship" }).create({
       columns: {
         key: t.text().notNull(),

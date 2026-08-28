@@ -1,15 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use uuid::Uuid;
-use zeroship_migrate_backend::advisory::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PlanStep, SealError, SealedPolicy,
+    SealError, SealedPolicy,
 };
 // PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
 // them off the facade, so this PostgreSQL host names PostgreSQL rather than
@@ -18,7 +17,6 @@ use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
 use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zeroship_migrate_postgres::role::migrator_role_name;
 use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
-use zeroship_migrate_ir::policy_approval::{migration_requires_approval, ApprovalLevel};
 use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use crate::session::CompioPgSession;
 
@@ -34,16 +32,14 @@ use crate::session::CompioPgSession;
 const VENDORS: zeroship_migrate_backend::registry::VendorSet =
     zeroship_migrate::shipping_vendors();
 
-use crate::migration_store::{
-    sealed_profile_audit_json, AuditAction, AuditInput, MigrationStore, MigrationStoreError,
-    StoreMigrationInput, StoredMigration, TerminalTransition,
-};
 use crate::policy::{
     confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
     ManagedPolicyError, SealVerifier,
 };
-use crate::policy_store::{AppPolicyStore, AppPolicyStoreError};
 use crate::publication::{reconcile_app_publication, PublicationError};
+use crate::schema_apply_store::{
+    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
+};
 use crate::provisioning::{exec_retry, provision_migrator, ProvisionRoleError};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -198,42 +194,9 @@ pub enum ApplyRequestError {
     #[error(transparent)]
     Policy(#[from] ManagedPolicyError),
     #[error(transparent)]
-    PolicyStore(#[from] AppPolicyStoreError),
-    #[error(transparent)]
-    MigrationStore(#[from] MigrationStoreError),
+    SchemaApplyStore(#[from] SchemaApplyStoreError),
     #[error("encode migration request: {0}")]
     EncodeRequest(String),
-    #[error("stored migration request is invalid: {0}")]
-    DecodeStoredRequest(String),
-    #[error("pending migration not found")]
-    PendingMigrationNotFound,
-    #[error("migration {migration_id} requires operator approval")]
-    ApprovalRequiredPending {
-        migration_id: Uuid,
-        gated_versions: Vec<String>,
-    },
-    #[error(
-        "ceiling changed since submit for migration {migration_id} (submitted v{submitted_ceiling_version}, current v{current_ceiling_version}): re-submit required"
-    )]
-    ApprovalStaleCeiling {
-        migration_id: Uuid,
-        submitted_ceiling_version: u64,
-        current_ceiling_version: u64,
-    },
-    #[error(
-        "approval preflight changed for migration {migration_id}: re-submit required"
-    )]
-    ApprovalPreflightChanged {
-        migration_id: Uuid,
-        reviewed_gated_versions: Vec<String>,
-        current_gated_versions: Vec<String>,
-    },
-    #[error(
-        "approved content drifted for migration {migration_id}: re-review required"
-    )]
-    ApprovalContentDrift { migration_id: Uuid },
-    #[error("stored migration policy has invalid ceiling version {0}")]
-    StoredPolicyCeilingVersion(i64),
     #[error("migration database connect: {0}")]
     Connect(compio_postgres::Error),
     #[error("migration schema provision: {0}")]
@@ -250,197 +213,33 @@ pub enum ApplyRequestError {
     Apply(#[from] SealedApplyError),
 }
 
-// 8 distinct parameters (DSN, tmp root, app/policy/store context, principal) -
-// each is independently meaningful at call sites; bundling into a params
-// struct is a real refactor, not a mechanical lint fix, so this is a
-// site-scoped allow rather than a signature change.
-#[allow(clippy::too_many_arguments)]
+
+/// Apply a frozen `.ir.json` bundle into the app's own schema.
+///
+/// THERE IS ONE PATH. Until 2026-08-28 there were two, and the second was
+/// unreachable in a way that read as a feature: a migration whose preflight gated
+/// any version was parked as `pending_approval` and could only proceed through an
+/// operator `approve()` endpoint that no dashboard, CLI or service ever called. A
+/// creator whose migration gated a version therefore got a 409 with no way past
+/// it. The approval capability is removed rather than completed; the ceiling the
+/// creator runs under is what bounds them, and the engine still refuses a
+/// destructive step it was not handed an [`Approval`] for.
+///
+/// The row in `zeroship.app_schema_applies` is opened BEFORE the engine runs and
+/// closed by exactly one of `mark_applied` / `mark_failed`.
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
     app_id: &Uuid,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
-    policy_store: &AppPolicyStore,
-    migration_store: &MigrationStore,
+    schema_apply_store: &SchemaApplyStore,
     principal_id: Uuid,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
     validate_request_shape(request)?;
-    let policy = resolve_apply_policy(app_id, request, policy_config, policy_store).await?;
+    let policy = resolve_apply_policy(app_id, request, policy_config)?;
     let migration_id = Uuid::now_v7();
-    apply_ir_documents_with_policy(
-        provision_dsn,
-        tmp_root,
-        app_id,
-        migration_id,
-        request,
-        policy,
-        policy_config,
-        migration_store,
-        principal_id,
-        ApplyAuthorization::Routine,
-    )
-    .await
-}
 
-// See the `apply_ir_documents` allow above - same rationale applies here.
-#[allow(clippy::too_many_arguments)]
-pub async fn approve_pending_migration(
-    provision_dsn: &str,
-    tmp_root: &Path,
-    app_id: &Uuid,
-    migration_id: Uuid,
-    policy_config: &ManagedPolicyConfig,
-    policy_store: &AppPolicyStore,
-    migration_store: &MigrationStore,
-    approver_id: Uuid,
-) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
-    let Some(stored) = migration_store.get_pending(*app_id, migration_id).await? else {
-        return Err(ApplyRequestError::PendingMigrationNotFound);
-    };
-
-    let request: ApplyMigrationsRequest = serde_json::from_value(stored.request_body.clone())
-        .map_err(|err| ApplyRequestError::DecodeStoredRequest(err.to_string()))?;
-    let ceiling_version = u64::try_from(stored.ceiling_version)
-        .map_err(|_| ApplyRequestError::StoredPolicyCeilingVersion(stored.ceiling_version))?;
-    // Recompose the stored migration's effective policy from its request draft against
-    // the current ceiling (the engine `EffectivePolicy` is not serde-stored — it is
-    // always re-derived from the draft + ceiling; the audit snapshot lives in the
-    // store's JSONB column).
-    let stored_policy = resolve_apply_policy(app_id, &request, policy_config, policy_store).await?;
-    let current_ceiling = policy_config.current_ceiling_for_app(app_id, None)?;
-    if ceiling_version != current_ceiling.ceiling_version {
-        let message = format!(
-            "ceiling changed since submit (submitted v{}, current v{}): re-submit required",
-            ceiling_version, current_ceiling.ceiling_version
-        );
-        migration_store
-            .record_audit(AuditInput {
-                app_id: *app_id,
-                migration_id,
-                principal_id: approver_id,
-                migration_versions: &stored.gated_versions,
-                action: AuditAction::Approve,
-                outcome: "rejected_stale",
-                effective_profile: &stored_policy.managed,
-                sealed_profile: None,
-                ceiling_id: &stored_policy.ceiling_id,
-                ceiling_version: stored_policy.ceiling_version,
-                detail: json!({
-                    "reason": "ceiling_changed_since_submit",
-                    "submitted_by": stored.submitted_by,
-                    "submitted_ceiling_version": ceiling_version,
-                    "current_ceiling_id": current_ceiling.ceiling_id,
-                    "current_ceiling_version": current_ceiling.ceiling_version,
-                    "re_submit_required": true,
-                }),
-            })
-            .await?;
-        mark_migration_failed(migration_store, *app_id, migration_id, &message).await;
-        return Err(ApplyRequestError::ApprovalStaleCeiling {
-            migration_id,
-            submitted_ceiling_version: ceiling_version,
-            current_ceiling_version: current_ceiling.ceiling_version,
-        });
-    }
-
-    let policy = resolve_apply_policy(app_id, &request, policy_config, policy_store).await?;
-
-    apply_ir_documents_with_policy(
-        provision_dsn,
-        tmp_root,
-        app_id,
-        migration_id,
-        &request,
-        policy,
-        policy_config,
-        migration_store,
-        approver_id,
-        ApplyAuthorization::OperatorApproved { stored: &stored },
-    )
-    .await
-}
-
-/// The standalone APPROVE transition — the state write the task's `approve(
-/// migration_id, operator_id)` names. Operator authorization is the CALLER's job
-/// (the control-plane HTTP endpoint / dashboard that invokes this is a FOLLOW-ON,
-/// out of scope here); this fn only performs the guarded store write:
-/// `pending_approval` → `approved`, stamping `approved_by`, `approved_at`, and
-/// `approved_checksum = X` (the content checksum the operator reviewed).
-///
-/// The apply gate later re-resolves the migration to X' and proceeds only if
-/// `X' == approved_checksum`, so passing the exact reviewed checksum here is what
-/// closes the approve/apply TOCTOU. A mismatch or a status other than
-/// `pending_approval` is a no-op ([`MigrationStoreError::NotPending`]).
-pub async fn approve(
-    migration_store: &MigrationStore,
-    app_id: Uuid,
-    migration_id: Uuid,
-    operator_id: Uuid,
-    reviewed_checksum: &str,
-) -> Result<(), ApplyRequestError> {
-    migration_store
-        .mark_approved(app_id, migration_id, operator_id, reviewed_checksum)
-        .await?;
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum ApplyAuthorization<'a> {
-    Routine,
-    OperatorApproved { stored: &'a StoredMigration },
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn record_approval_accepted(
-    migration_store: &MigrationStore,
-    app_id: Uuid,
-    migration_id: Uuid,
-    approver_id: Uuid,
-    stored: &StoredMigration,
-    policy: &EffectivePolicy,
-    approved_checksum: &str,
-) -> Result<(), ApplyRequestError> {
-    // APPROVE transition: stamp status=approved + approved_checksum = X (the content
-    // checksum the operator is approving). The apply gate below re-resolves to X' and
-    // proceeds only if X' == X (the closed approve/apply TOCTOU).
-    migration_store
-        .mark_approved(app_id, migration_id, approver_id, approved_checksum)
-        .await?;
-    migration_store
-        .record_audit(AuditInput {
-            app_id,
-            migration_id,
-            principal_id: approver_id,
-            migration_versions: &stored.gated_versions,
-            action: AuditAction::Approve,
-            outcome: "approved",
-            effective_profile: &policy.managed,
-            sealed_profile: None,
-            ceiling_id: &policy.ceiling_id,
-            ceiling_version: policy.ceiling_version,
-            detail: json!({
-                "submitted_by": stored.submitted_by,
-                "reviewed_gated_versions": stored.gated_versions.clone(),
-            }),
-        })
-        .await?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn apply_ir_documents_with_policy(
-    provision_dsn: &str,
-    tmp_root: &Path,
-    app_id: &Uuid,
-    migration_id: Uuid,
-    request: &ApplyMigrationsRequest,
-    policy: EffectivePolicy,
-    policy_config: &ManagedPolicyConfig,
-    migration_store: &MigrationStore,
-    principal_id: Uuid,
-    authorization: ApplyAuthorization<'_>,
-) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
     match request.kind {
         ApplyKind::Ir => {}
     }
@@ -474,288 +273,60 @@ async fn apply_ir_documents_with_policy(
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
     // resolution and `IrAuthor` below.
-    let exec_cfg = ExecutorConfig::new(
+    let mut exec_cfg = ExecutorConfig::new(
         schema.clone(),
         schema.clone(),
         guard_policy_for_managed(&schema),
     )
     .with_migrator_role(role.clone());
+    // THE MIGRATION JOURNAL LIVES IN THE APP'S OWN SCHEMA. `ExecutorConfig::new`
+    // derives `meta_schema` as `<project_schema>_migrations`; this host points it at
+    // the project schema itself, so the engine writes
+    // `"<app_uuid>".__zeroship_schema_migrations` and its five siblings. The record
+    // of what ran belongs to the tenant whose schema it describes.
+    //
+    // THE `__zeroship_` PREFIX IS WHAT MAKES THIS SAFE, and it is not decoration.
+    // The engine bootstraps its journal with `CREATE TABLE IF NOT EXISTS` and its
+    // table names are literals - only the schema is interpolated - so a creator
+    // declaring a table called `schema_migrations` in their own schema would have it
+    // silently ADOPTED as the journal. The prefix moves the names into a namespace
+    // creator-declared collections are refused from.
+    exec_cfg.confinement.meta_schema = schema.clone();
     provision_migrator(session.client(), &exec_cfg).await?;
     let backend = PostgresBackend::new_generic(&session);
 
-    let preflight = match authorization {
-        ApplyAuthorization::Routine => {
-            let report = preflight_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy)
-                .await?;
-            let gated_versions = gated_versions_for_policy(&policy, &schema, &report);
-            let requires_approval = !gated_versions.is_empty();
-            if requires_approval {
-                // A re-submission of content already awaiting approval names the
-                // existing migration instead of opening a second one. The operator
-                // approves content, so two rows for one content would be two
-                // decisions where there is one, and approving either would leave
-                // the other pending with nothing to reap it.
-                if let Some(existing) = migration_store
-                    .find_pending_for_request(*app_id, &request_body)
-                    .await?
-                {
-                    return Err(ApplyRequestError::ApprovalRequiredPending {
-                        migration_id: existing,
-                        gated_versions,
-                    });
-                }
-                migration_store
-                    .insert_pending(StoreMigrationInput {
-                        app_id: *app_id,
-                        migration_id,
-                        principal_id,
-                        request_body,
-                        effective_profile: &policy.managed,
-                        ceiling_id: &policy.ceiling_id,
-                        ceiling_version: policy.ceiling_version,
-                        gated_versions: &gated_versions,
-                        descriptor_sha256: &request.descriptor_sha256,
-                    })
-                    .await?;
-                migration_store
-                    .record_audit(AuditInput {
-                        app_id: *app_id,
-                        migration_id,
-                        principal_id,
-                        migration_versions: &report.all_versions,
-                        action: AuditAction::Submit,
-                        outcome: "accepted",
-                        effective_profile: &policy.managed,
-                        sealed_profile: None,
-                        ceiling_id: &policy.ceiling_id,
-                        ceiling_version: policy.ceiling_version,
-                        detail: json!({ "requires_operator_approval": true }),
-                    })
-                    .await?;
-                migration_store
-                    .record_audit(AuditInput {
-                        app_id: *app_id,
-                        migration_id,
-                        principal_id,
-                        migration_versions: &gated_versions,
-                        action: AuditAction::RejectPending,
-                        outcome: "requires_operator_approval",
-                        effective_profile: &policy.managed,
-                        sealed_profile: None,
-                        ceiling_id: &policy.ceiling_id,
-                        ceiling_version: policy.ceiling_version,
-                        detail: json!({
-                            "policy_require_approval": format!("{:?}", policy.approval_level(&schema)),
-                            "gated_versions": gated_versions,
-                        }),
-                    })
-                    .await?;
-                return Err(ApplyRequestError::ApprovalRequiredPending {
-                    migration_id,
-                    gated_versions,
-                });
-            }
+    // PREFLIGHT runs before any row is written and before any DDL: it lowers every
+    // document under the guard and refuses a denied plan, so a bundle the engine
+    // would reject leaves neither a ledger row nor a half-built schema.
+    preflight_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy).await?;
 
-            // No approval needed → AUTO-approve (`status = approved`), stamping the
-            // resolved content checksum X so the apply gate below re-verifies the same
-            // migration it planned (X' == approved_checksum).
-            migration_store
-                .insert_auto_approved(
-                    StoreMigrationInput {
-                        app_id: *app_id,
-                        migration_id,
-                        principal_id,
-                        request_body,
-                        effective_profile: &policy.managed,
-                        ceiling_id: &policy.ceiling_id,
-                        ceiling_version: policy.ceiling_version,
-                        gated_versions: &[],
-                        descriptor_sha256: &request.descriptor_sha256,
-                    },
-                    &report.content_checksum(),
-                )
-                .await?;
-            migration_store
-                .record_audit(AuditInput {
-                    app_id: *app_id,
-                    migration_id,
-                    principal_id,
-                    migration_versions: &report.all_versions,
-                    action: AuditAction::Submit,
-                    outcome: "accepted",
-                    effective_profile: &policy.managed,
-                    sealed_profile: None,
-                    ceiling_id: &policy.ceiling_id,
-                    ceiling_version: policy.ceiling_version,
-                    detail: json!({ "requires_operator_approval": false }),
-                })
-                .await?;
-            report
-        }
-        ApplyAuthorization::OperatorApproved { stored } => {
-            let report =
-                match preflight_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy)
-                    .await
-                {
-                    Ok(report) => report,
-                    Err(err) => {
-                        migration_store
-                            .record_audit(AuditInput {
-                                app_id: *app_id,
-                                migration_id,
-                                principal_id,
-                                migration_versions: &stored.gated_versions,
-                                action: AuditAction::Approve,
-                                outcome: "rejected_preflight",
-                                effective_profile: &policy.managed,
-                                sealed_profile: None,
-                                ceiling_id: &policy.ceiling_id,
-                                ceiling_version: policy.ceiling_version,
-                                detail: json!({
-                                    "submitted_by": stored.submitted_by,
-                                    "reviewed_gated_versions": stored.gated_versions.clone(),
-                                    "error": err.to_string(),
-                                    "re_submit_required": true,
-                                }),
-                            })
-                            .await?;
-                        mark_migration_failed(
-                            migration_store,
-                            *app_id,
-                            migration_id,
-                            &format!("approval preflight failed: {err}"),
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-            let current_gated_versions = gated_versions_for_policy(&policy, &schema, &report);
-            if !same_versions(&stored.gated_versions, &current_gated_versions) {
-                migration_store
-                    .record_audit(AuditInput {
-                        app_id: *app_id,
-                        migration_id,
-                        principal_id,
-                        migration_versions: &report.all_versions,
-                        action: AuditAction::Approve,
-                        outcome: "rejected_preflight_changed",
-                        effective_profile: &policy.managed,
-                        sealed_profile: None,
-                        ceiling_id: &policy.ceiling_id,
-                        ceiling_version: policy.ceiling_version,
-                        detail: json!({
-                            "submitted_by": stored.submitted_by,
-                            "reviewed_gated_versions": stored.gated_versions.clone(),
-                            "current_gated_versions": current_gated_versions.clone(),
-                            "re_submit_required": true,
-                        }),
-                    })
-                    .await?;
-                mark_migration_failed(
-                    migration_store,
-                    *app_id,
-                    migration_id,
-                    "approval preflight classification changed: re-submit required",
-                )
-                .await;
-                return Err(ApplyRequestError::ApprovalPreflightChanged {
-                    migration_id,
-                    reviewed_gated_versions: stored.gated_versions.clone(),
-                    current_gated_versions,
-                });
-            }
-            let current_checksum = report.content_checksum();
-            // TOCTOU gate: if this migration carried a prior `approved_checksum` (a
-            // standalone `approve()` stamped it) and the re-resolved content checksum X'
-            // no longer matches, the content DRIFTED after approval — revert to
-            // `pending_approval` (fail-closed) and refuse. When the row is still
-            // `pending_approval` with no stamped checksum (the fused approve-then-apply
-            // path), there is nothing to drift from; the stamp happens next.
-            if let Some(approved) = &stored.approved_checksum {
-                if approved != &current_checksum {
-                    migration_store
-                        .record_audit(AuditInput {
-                            app_id: *app_id,
-                            migration_id,
-                            principal_id,
-                            migration_versions: &report.all_versions,
-                            action: AuditAction::Approve,
-                            outcome: "rejected_content_drift",
-                            effective_profile: &policy.managed,
-                            sealed_profile: None,
-                            ceiling_id: &policy.ceiling_id,
-                            ceiling_version: policy.ceiling_version,
-                            detail: json!({
-                                "submitted_by": stored.submitted_by,
-                                "approved_checksum": approved,
-                                "current_checksum": current_checksum,
-                                "re_review_required": true,
-                            }),
-                        })
-                        .await?;
-                    // Drift → back to pending_approval (clears the stale approval).
-                    if let Err(err) = migration_store
-                        .revert_to_pending(
-                            *app_id,
-                            migration_id,
-                            "approved content drifted since approval: re-review required",
-                        )
-                        .await
-                    {
-                        tracing::error!(error = %err, "migrated: revert_to_pending failed");
-                    }
-                    return Err(ApplyRequestError::ApprovalContentDrift { migration_id });
-                }
-            }
-            record_approval_accepted(
-                migration_store,
-                *app_id,
-                migration_id,
-                principal_id,
-                stored,
-                &policy,
-                &current_checksum,
-            )
-            .await?;
-            report
-        }
-    };
+    schema_apply_store
+        .record_submitted(SchemaApplyInput {
+            app_id: *app_id,
+            migration_id,
+            principal_id,
+            request_body,
+            effective_profile: &policy.managed,
+            ceiling_id: &policy.ceiling_id,
+            ceiling_version: policy.ceiling_version,
+            descriptor_sha256: &request.descriptor_sha256,
+        })
+        .await?;
 
-    // The effective policy is the same whether or not the migration needed approval —
-    // approval is the separate sealed `safety.require_approval` obligation the host
-    // enforces via the state machine, NOT a destructive-posture value the apply
-    // projects. Both authorization paths apply under the composed policy verbatim.
     let apply_policy = policy.clone();
-    // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so the
-    // apply carries an authenticated, ceiling-stamped integrity token (the audit
-    // records its binding: dialect / matcher version / ceiling version / registry
-    // digest). Pre-launch: stored seals don't matter — this seal is minted+verified
-    // in-process for tamper-detection. This sealed policy drives managed shape/lower;
-    // the rendered-DDL guard is the fixed schema-bound no-inject confined charter.
+    // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so
+    // the apply carries an authenticated, ceiling-stamped integrity token.
+    // Pre-launch: stored seals don't matter - this seal is minted+verified in-process
+    // for tamper-detection. This sealed policy drives managed shape/lower; the
+    // rendered-DDL guard is the fixed schema-bound no-inject confined charter.
     let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
-    let sealed_audit = sealed_profile_audit_json(
-        sealed_policy.sealed.dialect(),
-        sealed_policy.sealed.matcher_version(),
-        sealed_policy.sealed.charter_version(),
-        &sealed_policy.sealed.registry_digest(),
-    );
     tracing::debug!(
         app_id = %app_id,
         ceiling_id = %sealed_policy.ceiling_id,
         ceiling_version = sealed_policy.ceiling_version,
-        approved = matches!(authorization, ApplyAuthorization::OperatorApproved { .. }),
-        "migrated: applying IR under sealed managed migration policy"
+        "migrate-server: applying IR under sealed managed migration policy"
     );
-    let approval = match authorization {
-        ApplyAuthorization::Routine => Approval::None,
-        ApplyAuthorization::OperatorApproved { .. } => Approval::Approved,
-    };
-    let applied_by = match authorization {
-        ApplyAuthorization::Routine => format!("migrated:{principal_id}"),
-        ApplyAuthorization::OperatorApproved { .. } => {
-            format!("migrated-approved:{principal_id}")
-        }
-    };
+    let applied_by = format!("migrate-server:{principal_id}");
     provision_runtime_app_role(session.client(), &schema, &role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
@@ -768,7 +339,7 @@ async fn apply_ir_documents_with_policy(
         dir.path(),
         &exec_cfg,
         &apply_policy.policy,
-        approval,
+        Approval::None,
         &applied_by,
     )
     .await;
@@ -778,75 +349,33 @@ async fn apply_ir_documents_with_policy(
                 .await
                 .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
             reconcile_app_publication(session.client(), &schema).await?;
-            if migration_store.mark_applied(*app_id, migration_id).await?
+            // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
+            // nothing is what an app whose descriptor bytes moved without a schema
+            // change (an engine upgrade, a codegen fix) uses to become deployable
+            // again, because the control plane compares against the NEWEST applied
+            // row. Skipping the write for an empty set would brick every such app.
+            if schema_apply_store
+                .mark_applied(*app_id, migration_id, &outcome.applied)
+                .await?
                 == TerminalTransition::Lost
             {
                 // The DDL is committed and cannot be taken back, but a concurrent
-                // path rejected this migration while the engine was applying it, so
-                // the row reads `rejected`. The record now contradicts the database
-                // it describes and only an operator can reconcile them. Erroring here
+                // path failed this migration while the engine was applying it, so the
+                // row reads `failed`. The record now contradicts the database it
+                // describes and only an operator can reconcile them. Erroring here
                 // would report a failure over changes that did land, so the request
                 // continues and the divergence is raised instead.
                 tracing::error!(
                     app_id = %app_id,
                     migration_id = %migration_id,
-                    "migrated: apply lost the terminal transition to a concurrent \
-                     reject - schema changes are committed but the row reads rejected"
+                    "migrate-server: apply lost the terminal transition to a concurrent \
+                     failure - schema changes are committed but the row reads failed"
                 );
             }
-            let applied = outcome.applied.clone();
-            let skipped = outcome.skipped.clone();
-            let pending_contract = outcome.pending_contract.clone();
-            migration_store
-                .record_audit(AuditInput {
-                    app_id: *app_id,
-                    migration_id,
-                    principal_id,
-                    migration_versions: &preflight.all_versions,
-                    action: AuditAction::Apply,
-                    outcome: "applied",
-                    effective_profile: &apply_policy.managed,
-                    sealed_profile: Some(sealed_audit),
-                    ceiling_id: &apply_policy.ceiling_id,
-                    ceiling_version: apply_policy.ceiling_version,
-                    detail: json!({
-                        "approval": match authorization {
-                            ApplyAuthorization::Routine => "none",
-                            ApplyAuthorization::OperatorApproved { .. } => "operator",
-                        },
-                        "applied": applied,
-                        "skipped": skipped,
-                        "pending_contract": pending_contract,
-                    }),
-                })
-                .await?;
             outcome
         }
         Err(err) => {
-            record_audit_best_effort(
-                migration_store,
-                AuditInput {
-                    app_id: *app_id,
-                    migration_id,
-                    principal_id,
-                    migration_versions: &preflight.all_versions,
-                    action: AuditAction::Apply,
-                    outcome: "failed",
-                    effective_profile: &apply_policy.managed,
-                    sealed_profile: Some(sealed_audit),
-                    ceiling_id: &apply_policy.ceiling_id,
-                    ceiling_version: apply_policy.ceiling_version,
-                    detail: json!({
-                        "approval": match authorization {
-                            ApplyAuthorization::Routine => "none",
-                            ApplyAuthorization::OperatorApproved { .. } => "operator",
-                        },
-                        "error": err.to_string(),
-                    }),
-                },
-            )
-            .await;
-            mark_migration_failed(migration_store, *app_id, migration_id, &err.to_string()).await;
+            mark_apply_failed(schema_apply_store, *app_id, migration_id, &err.to_string()).await;
             return Err(ApplyRequestError::Apply(err));
         }
     };
@@ -1199,69 +728,62 @@ async fn apply_one_ir_file_postgres(
     })
 }
 
-async fn resolve_apply_policy(
+/// The policy this apply runs under: the ceiling, narrowed by the draft the
+/// REQUEST carried.
+///
+/// POLICY ARRIVES IN THE ARTIFACT, NOT THE DATABASE. There used to be a
+/// `zeroship.migrated_app_policies` table and a PUT endpoint that wrote it, and
+/// this function preferred the request draft and fell back to the stored one. The
+/// store is gone: a migration policy is declared in the creator's repository,
+/// folded at build time and shipped with the request, exactly like the mask
+/// policy. A policy nothing can mutate at runtime is one fewer thing to
+/// authenticate.
+///
+/// See the `write_ir_documents` allow below - same `ApplyRequestError` size, same
+/// rationale. It surfaces here and not before because this function used to be
+/// `async`, and `clippy::result_large_err` does not fire through a future.
+#[allow(clippy::result_large_err)]
+fn resolve_apply_policy(
     app_id: &Uuid,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
-    policy_store: &AppPolicyStore,
 ) -> Result<EffectivePolicy, ApplyRequestError> {
-    if let Some(policy) = request.policy.as_ref() {
-        let draft = CreatorPolicyDraft {
-            filename: policy.filename.as_str(),
-            body: policy.body.as_str(),
-        };
-        let parsed = policy_config.parse_draft(&draft)?;
-        return Ok(policy_config.compose_effective_for_app(app_id, None, Some(&parsed))?);
-    }
-
-    let Some(stored) = policy_store.get_current(*app_id).await? else {
+    let Some(policy) = request.policy.as_ref() else {
         return Ok(policy_config.compose_effective_for_app(app_id, None, None)?);
     };
-    // Recompose the STORED creator draft (the source of truth, held as `raw_toml`)
-    // against the current ceiling. The engine `EffectivePolicy` is not serde-stored;
-    // it is always re-derived. If the pinned ceiling version still matches, the
-    // recomposition IS the stored effective policy (the compose is deterministic);
-    // otherwise the ceiling moved and the fresh composition is authoritative.
-    let parsed = stored.parsed_policy_draft()?;
+    let draft = CreatorPolicyDraft {
+        filename: policy.filename.as_str(),
+        body: policy.body.as_str(),
+    };
+    let parsed = policy_config.parse_draft(&draft)?;
     Ok(policy_config.compose_effective_for_app(app_id, None, Some(&parsed))?)
 }
 
-#[derive(Debug, Clone, Default)]
-struct PreflightReport {
-    all_versions: Vec<String>,
-    gated_versions: Vec<String>,
-    /// The sorted `version=checksum` fold over every lowered migration — the CONTENT
-    /// fingerprint the approval TOCTOU gate pins (`approved_checksum`). Each
-    /// per-migration checksum already covers the migration's whole apply-relevant unit
-    /// (up/down/flags/deps/preconditions), so any content edit changes this fold even
-    /// when version-ids are unchanged.
-    checksum_parts: Vec<String>,
-}
-
-impl PreflightReport {
-    /// The deterministic content checksum of the whole migration set (the sorted
-    /// `version=checksum` fold). Empty set → empty string.
-    fn content_checksum(&self) -> String {
-        let mut parts = self.checksum_parts.clone();
-        parts.sort();
-        parts.dedup();
-        parts.join("\n")
-    }
-}
-
+/// Lower every document under the guard and refuse a denied plan, WITHOUT writing
+/// anything.
+///
+/// It used to also classify which versions needed operator approval; that
+/// classification had exactly one consumer, an approval state machine no caller
+/// could drive, and both are gone. What remains is the reason to run a second
+/// lower at all: the real apply lowers per file and executes as it goes, so a
+/// bundle whose LAST document is denied would otherwise have already committed the
+/// DDL of the ones before it. Preflight walks the whole set first.
+///
+/// Because it lowers the same artifact the apply will (the same shape fold, the
+/// same guard, the same registry threading), a set that passes here and is denied
+/// there is a bug rather than a policy decision.
 async fn preflight_ir_documents(
     session: &CompioPgSession,
     exec_cfg: &ExecutorConfig,
     schema: &str,
     migrations_dir: &Path,
     policy: &EffectivePolicy,
-) -> Result<PreflightReport, ApplyRequestError> {
+) -> Result<(), ApplyRequestError> {
     let files = discover_ir_files(migrations_dir)?;
     let guard_cfg = guard_config_for_managed(schema);
     let mut state = postgres_ir_apply_state(session, exec_cfg, schema)
         .await
         .map_err(IrApplyError::Snapshot)?;
-    let mut report = PreflightReport::default();
     let engine = MigrationEngine::new(VENDORS);
 
     for path in files {
@@ -1274,18 +796,9 @@ async fn preflight_ir_documents(
             file: file.clone(),
             message: err.to_string(),
         })?;
-        // Parse the IR envelope up front so we can ask the SEALED approval obligation
-        // whether these OPS require approval (`migration_requires_approval`) — the
-        // engine only DECLARES the obligation; this host is its enforcer.
-        let ir: MigrationIr =
-            serde_json::from_str(&raw_bytes).map_err(|e| IrApplyError::Malformed {
-                file: file.clone(),
-                message: format!("deserialize IR envelope: {e}"),
-            })?;
-        let ops_require_approval = migration_requires_approval(&policy.policy, &ir.ops, schema);
         // Fold the effective table-shape profile the same way the apply path does,
         // so preflight lowers the SAME resolved artifact it will apply (identical
-        // version-ids + destructive/approval classification).
+        // version-ids + destructive classification).
         let bytes = resolve_shape_bytes(&raw_bytes, &policy.policy, schema, &file)?;
         let mut author = IrAuthor::new(VENDORS, schema, schema, &POSTGRES, &policy.policy);
         if let Some(scope) = guard_cfg.schema_scope() {
@@ -1304,59 +817,13 @@ async fn preflight_ir_documents(
                 source,
             })?;
 
-        let migrations = lowered.migrations();
-        report
-            .all_versions
-            .extend(migrations.iter().map(|migration| migration.version.as_str().to_string()));
-        // Content fingerprint: fold each lowered migration's checksum (which already
-        // covers its whole apply-relevant unit) into the set's TOCTOU checksum.
-        report.checksum_parts.extend(
-            migrations
-                .iter()
-                .map(|m| format!("{}={}", m.version.as_str(), m.checksum.as_str())),
-        );
-        // The SEALED obligation applied to THESE ops: if it requires approval, gate
-        // every version this file produced (this is the `always`, and the ops-level
-        // `on_destructive`, decision — object-scoped + OR-ed across ops by the engine
-        // query, independent of the SQL-text destructive classification below).
-        if ops_require_approval {
-            report.gated_versions.extend(
-                migrations
-                    .iter()
-                    .map(|migration| migration.version.as_str().to_string()),
-            );
-        }
-        let plan = engine.plan(&migrations, &guard_cfg);
+        let plan = engine.plan(&lowered.migrations(), &guard_cfg);
         if !plan.denied.is_empty() {
             return Err(IrApplyError::Apply {
                 file: file.clone(),
                 source: DeclarativeApplyError::Plain(EngineError::Denied(plan.denied)),
             }
             .into());
-        }
-        for item in plan.items {
-            let has_unknown_data_security = item
-                .report
-                .advisories
-                .iter()
-                .any(|advisory| advisory.rule == DATA_SECURITY_UNCLASSIFIED_OPS_WARN);
-            if item.report.destructive
-                || item.migration.flags.requires_approval
-                || has_unknown_data_security
-            {
-                report
-                    .gated_versions
-                    .push(item.migration.version.as_str().to_string());
-            }
-        }
-
-        for step in &lowered.plan.steps {
-            if let Some(version) = gated_step_version(step) {
-                report.gated_versions.push(version);
-            }
-            if let Some(version) = step_version(step) {
-                report.all_versions.push(version);
-            }
         }
         for table in lowered.created_tables {
             state
@@ -1367,9 +834,7 @@ async fn preflight_ir_documents(
         }
     }
 
-    dedupe(&mut report.all_versions);
-    dedupe(&mut report.gated_versions);
-    Ok(report)
+    Ok(())
 }
 
 /// Build the rendered-DDL guard from the authored no-inject confined charter, bound
@@ -1383,68 +848,6 @@ fn guard_policy_for_managed(schema: &str) -> PdpPolicy {
         .expect("embedded no-inject confined guard charter must bind and compose")
 }
 
-/// The versions of a migration set that require operator approval, folding the SEALED
-/// `safety.require_approval` obligation over the engine's own per-migration gating.
-///
-/// - `report.gated_versions` are the versions the ENGINE already flags (destructive
-///   ops, `flags.requires_approval`, unclassified data-security) — these always gate.
-/// - The policy obligation LEVEL then widens the set: `always` gates EVERY version
-///   (`report.all_versions`); `on_destructive` is already covered (destructive
-///   versions are in `report.gated_versions`); `never` adds nothing.
-///
-/// `schema` is the app's owned schema — the object the object-scoped obligation is
-/// resolved at.
-fn gated_versions_for_policy(
-    policy: &EffectivePolicy,
-    schema: &str,
-    report: &PreflightReport,
-) -> Vec<String> {
-    let mut gated = report.gated_versions.clone();
-    if policy.approval_level(schema) == ApprovalLevel::Always {
-        gated.extend(report.all_versions.iter().cloned());
-    }
-    dedupe(&mut gated);
-    gated
-}
-
-fn same_versions(left: &[String], right: &[String]) -> bool {
-    left.iter().collect::<BTreeSet<_>>() == right.iter().collect::<BTreeSet<_>>()
-}
-
-fn gated_step_version(step: &PlanStep) -> Option<String> {
-    if let Some(version) = step.approval_scope_version() {
-        return Some(version.to_string());
-    }
-    match step {
-        PlanStep::Ddl(migration) if migration.flags.requires_approval => {
-            Some(migration.version.as_str().to_string())
-        }
-        _ => None,
-    }
-}
-
-fn step_version(step: &PlanStep) -> Option<String> {
-    match step {
-        PlanStep::Ddl(migration) => Some(migration.version.as_str().to_string()),
-        PlanStep::Dml { version, .. } => Some(version.as_str().to_string()),
-        // The structural steps all defer to the engine's own accessor rather than
-        // reaching into `step.migration.version` here, so this host cannot drift
-        // from the engine's view of which version a step belongs to.
-        // `AlterColumnType` is in this group because `approval_scope_version`
-        // treats it identically to `AlterPrimaryKey` and `SynchronizeIdentity`
-        // (same destructive/requires_approval guard, same `step.migration.version`).
-        PlanStep::AlterPrimaryKey(_)
-        | PlanStep::AlterColumnType(_)
-        | PlanStep::SynchronizeIdentity(_)
-        | PlanStep::OnlineRename(_) => step.approval_scope_version().map(ToOwned::to_owned),
-        PlanStep::Backfill { .. } => None,
-    }
-}
-
-fn dedupe(values: &mut Vec<String>) {
-    let mut seen = BTreeSet::new();
-    values.retain(|value| seen.insert(value.clone()));
-}
 
 // `ApplyRequestError` is ~152 bytes wide because it wraps `IrApplyError` /
 // `SealedApplyError` (themselves wide - see the allows on `discover_ir_files`
@@ -1506,37 +909,41 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
     Ok(())
 }
 
-async fn record_audit_best_effort(migration_store: &MigrationStore, input: AuditInput<'_>) {
-    if let Err(err) = migration_store.record_audit(input).await {
-        tracing::error!(error = %err, "migrated: failed to write migration audit row");
-    }
-}
 
-async fn mark_migration_failed(
-    migration_store: &MigrationStore,
+/// Close the request's ledger row as `failed`, best effort.
+///
+/// Best effort because the caller is already returning an error and the apply has
+/// already failed: a store outage here must not replace the creator-facing reason
+/// with a database one. It is a LOUD best effort - every arm logs, including the
+/// lost race, which is the one that means the row and the database disagree.
+async fn mark_apply_failed(
+    schema_apply_store: &SchemaApplyStore,
     app_id: Uuid,
     migration_id: Uuid,
     message: &str,
 ) {
-    match migration_store
-        .mark_rejected(app_id, migration_id, message)
+    match schema_apply_store
+        .mark_failed(app_id, migration_id, message)
         .await
     {
         Ok(TerminalTransition::Recorded) => {}
         Ok(TerminalTransition::Lost) => {
             // The row is already `applied`, so this failure belongs to a migration
-            // that another path completed. The reject is correctly refused; what
-            // would be wrong is letting it pass for a recorded one.
+            // that another path completed. The failure marking is correctly refused;
+            // what would be wrong is letting it pass for a recorded one.
             tracing::warn!(
                 app_id = %app_id,
                 migration_id = %migration_id,
                 reason = message,
-                "migrated: reject lost the terminal transition to a completed apply - \
-                 the row stays applied and this failure is not recorded on it"
+                "migrate-server: failure lost the terminal transition to a completed \
+                 apply - the row stays applied and this failure is not recorded on it"
             );
         }
         Err(store_err) => {
-            tracing::error!(error = %store_err, "migrated: failed to mark migration rejected");
+            tracing::error!(
+                error = %store_err,
+                "migrate-server: failed to mark the schema apply row failed"
+            );
         }
     }
 }
@@ -1588,36 +995,13 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_policy_invalid",
         ),
-        ApplyRequestError::ApprovalRequiredPending { .. } => (
-            ntex::http::StatusCode::CONFLICT,
-            "migration_requires_operator_approval",
-        ),
-        ApplyRequestError::ApprovalStaleCeiling { .. } => (
-            ntex::http::StatusCode::CONFLICT,
-            "migration_approval_stale_ceiling",
-        ),
-        ApplyRequestError::ApprovalPreflightChanged { .. } => (
-            ntex::http::StatusCode::CONFLICT,
-            "migration_approval_preflight_changed",
-        ),
-        ApplyRequestError::ApprovalContentDrift { .. } => (
-            ntex::http::StatusCode::CONFLICT,
-            "migration_approval_content_drift",
-        ),
-        ApplyRequestError::PendingMigrationNotFound | ApplyRequestError::MigrationStore(MigrationStoreError::NotPending) => (
-            ntex::http::StatusCode::NOT_FOUND,
-            "pending_migration_not_found",
-        ),
         ApplyRequestError::Preflight(source) => ir_apply_error_kind(source),
         ApplyRequestError::Apply(source) => sealed_apply_error_kind(source),
         ApplyRequestError::TempDir(_)
         | ApplyRequestError::Write { .. }
         | ApplyRequestError::Policy(_)
-        | ApplyRequestError::PolicyStore(_)
-        | ApplyRequestError::MigrationStore(_)
+        | ApplyRequestError::SchemaApplyStore(_)
         | ApplyRequestError::EncodeRequest(_)
-        | ApplyRequestError::DecodeStoredRequest(_)
-        | ApplyRequestError::StoredPolicyCeilingVersion(_)
         | ApplyRequestError::Connect(_)
         | ApplyRequestError::ProvisionSchema(_)
         | ApplyRequestError::ProvisionRole(_)
@@ -1891,8 +1275,7 @@ mod tests {
                 &Uuid::new_v4(),
                 &request,
                 &policy_config,
-                &AppPolicyStore::new("postgres://unused"),
-                &MigrationStore::new("postgres://unused"),
+                &SchemaApplyStore::new("postgres://unused"),
                 Uuid::new_v4(),
             ))
             .expect_err("empty request rejected before DB connect");
@@ -1923,8 +1306,7 @@ mod tests {
                 &Uuid::new_v4(),
                 &request,
                 &policy_config,
-                &AppPolicyStore::new("postgres://unused"),
-                &MigrationStore::new("postgres://unused"),
+                &SchemaApplyStore::new("postgres://unused"),
                 Uuid::new_v4(),
             ))
             .expect_err("scalar request rejected before DB connect");
