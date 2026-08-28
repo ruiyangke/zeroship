@@ -416,9 +416,13 @@ exists for. `docker pause` reproduces it exactly, which a scripted peer cannot:
 that peer is still a live local socket choosing to withhold bytes.
 
 ```bash
-docker pause zs-cpg-review-5455     # freeze mid-query
+# Build the probe first: an example that fails to COMPILE pauses the container
+# around nothing and prints a plausible-looking log.
+#   cargo build --release -p compio-postgres --example chaos_probe
+#   ./target/release/examples/chaos_probe "$PG_TEST_URL" &
+docker pause zs-cpg-types-5475      # freeze mid-query
 # ... observe ...
-docker unpause zs-cpg-review-5455   # ALWAYS, including on failure
+docker unpause zs-cpg-types-5475    # ALWAYS, including on failure (use a trap)
 ```
 
 MEASURED 2026-08-26, with `Config::read_timeout` at 5s and a query issued
@@ -430,10 +434,33 @@ BH live_connections=0
 ```
 
 The clock fired within half a millisecond of its bound, the session was RETIRED
-rather than left in limbo, and the connection was released. Read all three: a
-timeout that fires but leaves `is_closed=false` would hand a poisoned session to
-the next caller, and a non-zero live count would mean the descriptor outlived
-the failure.
+rather than left in limbo, and the connection was released.
+
+**`is_closed` ON THE TIMEOUT ERROR IS THE WRONG SIGNAL, and this section said to
+read it until 2026-08-28.** The text above asked for `is_closed=true` and warned
+that `false` "would hand a poisoned session to the next caller". Re-measured at
+`506bab466` with the committed probe, the timeout error reports:
+
+```text
+PROBE query ended after 5.000649053s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+`is_closed()` is `kind == Kind::Closed`, and a read timeout carries
+`Kind::ReadTimeout` (`src/error/mod.rs`), so `false` is what the driver MUST
+report - the error says why it failed rather than only that the socket is gone.
+`Kind::ReadTimeout` predates both earlier measurements (`45313c6a6`,
+2026-08-21), so the older transcripts came from a different, uncommitted probe
+and cannot be reproduced; that is why the probe is now committed.
+
+Read these three instead, none of which is ambiguous:
+
+- the elapsed time is within a few milliseconds of the configured bound;
+- `live_connections=0`, so the descriptor did not outlive the failure;
+- **the next query on that client is REFUSED** (`reuse=refused ... connection
+  closed`). That is the poisoned-session property stated directly. A
+  `reuse=SUCCEEDED` line is the defect the old wording was reaching for.
 
 Set a read timeout before trying this. WITHOUT one there is no clock at all on
 this path and the query waits for as long as the freeze lasts - which is the
