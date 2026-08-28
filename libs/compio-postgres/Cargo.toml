@@ -102,7 +102,10 @@ percent-encoding = { workspace = true }
 pin-project-lite = "0.2.11"
 phf = "0.13"
 postgres-protocol = { workspace = true }
-postgres-types = { workspace = true }
+# A source-local fork of postgres-types 0.2.14. Rust's orphan rules prevent
+# repairing its SystemTime/chrono/time implementations from this crate, and
+# the fork also owns the generated built-in Kind table used by Statement.
+postgres-types = { path = "vendor/postgres-types", features = ["with-uuid-1"] }
 rand = "0.10"
 whoami = "2.0"
 compio = { workspace = true }
@@ -190,6 +193,8 @@ optional = true
 # divergence. Move this deliberately when the port moves, never by resolution.
 tokio-postgres = { version = "=0.7.18", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["rt", "macros"] }
+chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
+time = { workspace = true }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream
