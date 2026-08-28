@@ -255,7 +255,7 @@ captured, and returns exactly one of three verdicts.
 | --- | --- | --- |
 | **`Current { ceiling }`** | app id, authority domain and incarnation all match, the app's lifecycle state is stable, and the observed schema epoch equals the expected one | proceed. **Not forcing**: it never claims the gate. Its ceiling is folded into the effective ceiling by `meet`, so it can only tighten |
 | **`ReResolve`** | identity matches, but the lifecycle state is *changing*, or the epoch differs | **retryable.** The attempt is rolled back and the caller receives an epoch-changed error. The entry never follows the new epoch in place; the caller re-resolves to a fresh `TxKey` |
-| **`Deny(reason)`** | app id, authority domain or incarnation differs, or the app is deprovisioned | **terminal.** No `BEGIN`, no data SQL, no following the new app. The caller receives an incarnation-mismatch error, or the more specific deprovisioned reason |
+| **`Deny(reason)`** | app id, authority domain or incarnation differs, or the app is deprovisioned | **terminal.** No `BEGIN`, no data SQL, no following the new app. The caller receives an incarnation-mismatch error. *Open question: whether the deprovisioned reason is also creator-visible or is audit only - it distinguishes "this app is gone" from "you raced a redeploy", which is a different retry decision* |
 
 **The order inside the classifier is load-bearing:** identity is compared before
 lifecycle state, so an observation that names a *different* app is denied for
