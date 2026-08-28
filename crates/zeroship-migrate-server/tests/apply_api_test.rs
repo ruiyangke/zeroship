@@ -484,6 +484,58 @@ fn drop_notes_request() -> Value {
     })
 }
 
+/// A creator migration that CREATES a table named exactly like the platform's
+/// journal.
+///
+/// The journal now lives in the app's OWN schema, so this name is inside the
+/// creator's declared scope as far as the confined ceiling is concerned. If the
+/// op were permitted on a fresh app the engine's `CREATE TABLE IF NOT EXISTS`
+/// bootstrap would ADOPT the creator's table as the journal.
+///
+/// `createTable` takes `name`, not `table`. The first draft of this fixture used
+/// `table` and the request was refused as a MALFORMED IR ENVELOPE - a 422 that
+/// looks exactly like a name refusal in the response and proves nothing about the
+/// name. Keep the op shape valid or the case measures the typo.
+fn create_platform_journal_table_request() -> Value {
+    json!({
+        "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
+        "documents": [{
+            "filename": "0003_shadow_journal.ir.json",
+            "body": {
+                "ir_version": 1,
+                "name": "shadow_journal",
+                "ops": [{
+                    "op": "createTable",
+                    "name": "__zeroship_schema_migrations",
+                    "columns": [
+                        {"name": "creator_field", "type": "text", "nullable": false}
+                    ]
+                }]
+            }
+        }]
+    })
+}
+
+/// The same name, as a `dropTable`.
+fn drop_platform_journal_request() -> Value {
+    json!({
+        "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
+        "documents": [{
+            "filename": "0003_drop_journal.ir.json",
+            "body": {
+                "ir_version": 1,
+                "name": "drop_journal",
+                "ops": [{
+                    "op": "dropTable",
+                    "table": "__zeroship_schema_migrations"
+                }]
+            }
+        }]
+    })
+}
+
 fn with_policy(mut request: Value, body: &str) -> Value {
     request["policy"] = json!({
         "filename": MIGRATE_POLICY_FILENAME,
@@ -901,6 +953,169 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
         Some("migration_requires_operator_approval"),
         "the approval refusal must be unreachable: {body}"
     );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+}
+
+/// WHAT ACTUALLY STOPS A CREATOR MIGRATION THAT NAMES THE PLATFORM JOURNAL, and
+/// it is NOT the `__zeroship_` prefix.
+///
+/// This case exists because the obvious claim - "the prefix is reserved, so the
+/// name is refused" - is false, and a test that only asserted "the request is
+/// refused" would let it keep reading as true. `validate_collection`
+/// (`crates/zeroship-migrate-core/src/schema/query.rs`) reserves the prefix
+/// `__zero_migrate`, NOT `__zeroship`; a name starting `__zeroship_` passes it
+/// cleanly, and that validator is on the CRUD path, not the migration-authoring
+/// path. Nothing on the authoring path fences the name at all.
+///
+/// MEASURED 2026-08-28 against live PostgreSQL 16, with the refusal each op
+/// actually gets:
+///
+/// * `createTable "__zeroship_schema_migrations"` -> *"relation
+///   `__zeroship_schema_migrations` already exists"*. That is an ORDERING
+///   guarantee, not a name check: `ensure_journal` bootstraps the journal before
+///   any creator DDL runs, so the name is always taken by the time the creator's
+///   op executes. It holds for every app, including one migrating for the first
+///   time - the second arm below is what checks that.
+/// * `dropTable "__zeroship_schema_migrations"` -> *"plan requires approval
+///   (destructive) but none was given"*. That is the ENGINE's destructive gate,
+///   reached because this host passes `Approval::None`. **A change that made the
+///   host assert approval on the creator's behalf would hand them their own
+///   journal**, and this assertion is the tripwire for it.
+///
+/// So the prefix's real value is that it moves the journal off the name a creator
+/// would plausibly pick by accident (`schema_migrations`) - which was a live
+/// silent-adoption hazard - and leaves only the deliberate case. Closing the
+/// deliberate case needs a name reservation on the authoring path; there is not
+/// one today, and this test says so rather than implying otherwise.
+#[ntex::test]
+async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let post = |body: Value| {
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .set_json(&body)
+            .to_request()
+    };
+
+    // A real migration first, so the journal exists to be attacked and the app
+    // schema exists to be measured.
+    let resp = test::call_service(&svc, post(create_notes_request())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let journaled_before = journaled_count(&conn, &app_id).await;
+    assert!(journaled_before >= 1, "the journal must exist to be attacked");
+
+    // THE FIXTURE HAS ALREADY FAILED TWICE HERE, both times passing the case while
+    // measuring itself: once with `"table":` on a `createTable` (refused as a
+    // malformed IR envelope) and once with a column called `version` (refused as
+    // colliding with an injected system column). Both are 4xx with a `detail`
+    // that reads like a name refusal. The `expect` on each arm is what makes the
+    // difference visible - a fixture fault produces a different string and the
+    // case goes red instead of green.
+    for (label, request, expect) in [
+        (
+            "createTable",
+            create_platform_journal_table_request(),
+            "already exists",
+        ),
+        (
+            "dropTable",
+            drop_platform_journal_request(),
+            "requires approval (destructive)",
+        ),
+    ] {
+        let resp = test::call_service(&svc, post(request)).await;
+        let status = resp.status();
+        let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+        assert!(
+            status.is_client_error(),
+            "{label} on the platform journal answered {status}: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(expect),
+            "{label} was refused, but not by {expect:?} - the thing standing \
+             between a creator and the platform journal has CHANGED, and the doc \
+             comment above is now wrong: {body}"
+        );
+        assert!(
+            relation_exists(
+                &conn,
+                &format!("\"{app_id}\".__zeroship_schema_migrations")
+            )
+            .await,
+            "the journal must still exist after a refused {label}"
+        );
+    }
+    assert_eq!(
+        journaled_count(&conn, &app_id).await,
+        journaled_before,
+        "a refused migration must not have journalled anything"
+    );
+
+    // ARM 2: THE APP THAT HAS NEVER MIGRATED, which is where the ordering
+    // guarantee above is actually load-bearing. On an app whose journal does not
+    // exist yet, a `createTable` naming it would be the FIRST writer - and the
+    // engine's `CREATE TABLE IF NOT EXISTS` bootstrap would then adopt the
+    // creator's table as the journal, so every migration in it would read as
+    // already applied. The arm above cannot see this: it ran against an app whose
+    // journal a previous request had already created.
+    let fresh_id = Uuid::now_v7();
+    let fresh_owner = Uuid::new_v4();
+    seed_app(&conn, fresh_id, fresh_owner).await;
+    let fresh_auth = Arc::new(StaticAuthenticator::new());
+    fresh_auth.insert("good-token", fresh_owner, [Scope::AppsDeploy], [fresh_id]);
+    let (fresh_state, fresh_tmp) = state_for(fresh_auth);
+    let fresh_svc = test::init_service(
+        web::App::new()
+            .state(fresh_state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+    assert!(
+        !relation_exists(&conn, &format!("\"{fresh_id}\".__zeroship_schema_migrations")).await,
+        "this arm only means anything against an app with NO journal yet"
+    );
+    let resp = test::call_service(
+        &fresh_svc,
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{fresh_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .set_json(&create_platform_journal_table_request())
+            .to_request(),
+    )
+    .await;
+    let status = resp.status();
+    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    assert!(
+        status.is_client_error(),
+        "an app's FIRST migration shadowed the journal and was accepted ({status}): {body}"
+    );
+    assert!(
+        body["detail"].as_str().unwrap_or_default().contains("already exists"),
+        "the first-migration case was refused for a different reason than the \
+         journal bootstrap winning the race: {body}"
+    );
+    let _ = std::fs::remove_dir_all(fresh_tmp);
+    cleanup_app(&conn, &fresh_id).await;
+    cleanup_user(&conn, &fresh_owner).await;
 
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
