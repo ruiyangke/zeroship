@@ -297,6 +297,47 @@ idle-slot protection is preserved.
 follows from `wal_end` being the server's position, but I did not construct the
 race.*
 
+**7. ONE SLOT AND PER-APP PUBLICATIONS DO NOT COMPOSE. The publications must
+collapse to one - and the current reconciler would then clobber tenants.**
+Found 2026-08-28 by auditing the crate-move list for contract changes.
+
+`replication.rs` - one of the two files that MOVES to the relay - names objects
+per app and per worker (`:16-17`): publication `__zs_pub_<app-token>`, slot
+`__zs_slot_<app-token>__<worker-token>`, with `worker_slot_name(app_id,
+worker_id)` at `:114`. The relay has **one slot for the whole cluster**. So the
+slot naming is simply gone, but the publication question is real:
+`publication_names` is fixed at `START_REPLICATION`, so a relay subscribing to
+N per-app publications would have to **restart the stream for every tenant
+whenever any app is created** - a cross-tenant disruption on a routine event.
+
+**Measured on 18.4 that one publication holding many tables is the answer**
+(`verify_pub_live.sh`), with a control:
+
+| check | result |
+| --- | --- |
+| table ADDED to the publication mid-stream appears on the **live** slot | **yes - no restart** |
+| the late-added table's **column list is applied** (excluded value) | **absent** |
+| the pre-existing table keeps flowing | yes - undisturbed |
+| **control** - a table in no publication | absent |
+
+So: **one publication, many tables, each carrying its own column list.**
+Onboarding an app becomes `ALTER PUBLICATION p ADD TABLE t (cols)` with no
+restart and no effect on any other tenant.
+
+**And that turns the publication into a SHARED object, which the current
+reconciler is not written for.** `publication_membership_sql`
+(`zeroship-migrated/src/publication.rs:30-51`) emits
+`ALTER PUBLICATION <p> SET TABLE <all members>` - a **full replace** computed
+from one app's table list. On a shared publication that is a lost-update race:
+two apps migrating concurrently each SET the membership to their own view, and
+whichever commits second **removes the other tenant's tables from CDC
+entirely**, silently.
+
+The fix is `ADD TABLE` / `DROP TABLE` per table rather than `SET TABLE`, or an
+advisory lock around reconciliation. It is small, but it is invisible until two
+tenants migrate at the same moment - and it did not exist before, because a
+per-app publication has exactly one writer.
+
 **What it does NOT need to re-derive:** the decode multiplier is structural.
 Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
 filters run at commit replay, **after** decode, buffering and per-slot spill,
