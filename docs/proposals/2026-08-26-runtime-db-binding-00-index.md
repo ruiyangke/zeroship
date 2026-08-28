@@ -234,6 +234,31 @@ signature changed**: PG 16 has `pg_logical_emit_message(boolean,text,text)`;
 `proacl = NULL`. A revoke written against the 16 signature covers **nothing** on
 18. This is exactly what a single-version measurement cannot see.
 
+**The transport's "biggest unproven element" is less unproven than the review
+concluded.** Both reviewers flagged the `ntex` (server push) / `cyper` (client
+consume) composition as the design's largest implementation risk, because its
+author confirmed the dependencies but "wrote no code against them". Measured
+2026-08-28 - **both halves are already in production in this tree**:
+
+| half | where |
+| --- | --- |
+| **server push**: ntex `streaming()` over an mpsc channel | `zeroship-worker/src/handler.rs:1242+`, and `zeroship-gateway/src/proxy.rs:419`, `:876` |
+| **client consume**: cyper `bytes_stream` | `zeroship-plugin-storage/src/backend/s3.rs:35` |
+
+The worker's use is the closer analogue than the gateway's, and it is the right
+shape: an **indefinite** push driven by a waker rather than a fixed-length body -
+*"The V8 pump task runs independently ... StreamWriter.push() wakes our drain
+task via the registered waker - no busy polling"* (`handler.rs:1243-1247`).
+
+**The honest limit:** neither half is demonstrated inside the *same* long-lived
+channel, so the composition still owes a spike - but it is "wire two shipped
+primitives together", not "find out whether the libraries can do this". One
+caveat to carry into that spike: `zeroship-bundle/src/s3_blob.rs:18` records that
+"cyper's `Send`-bound streaming body never comes", which concerns streaming
+**request** bodies. The relay needs a streaming **response**, which is the
+`bytes_stream` path above - but anyone reaching for a streaming upload should
+expect to hit that wall.
+
 **What it does NOT need to re-derive:** the decode multiplier is structural.
 Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
 filters run at commit replay, **after** decode, buffering and per-slot spill,
