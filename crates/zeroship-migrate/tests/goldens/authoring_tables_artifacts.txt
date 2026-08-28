@@ -82,6 +82,18 @@
 # The remaining 8 `column`, 3 `index`, 1 `primary_key` rows come from the fixture's
 # `createTable`, which was always dialect-neutral and is what the pre-third-edit
 # golden recorded here.
+#
+# FIFTH EDIT. `RuntimeSchemaDescriptorV1` became V2: `version` is 2 and every wire
+# `FieldDef` gained `readable`/`filterable`/`sortable`/`projectable` plus a `storage`
+# block naming the physical column(s) the field occupies
+# (crates/zeroship-migrate-core/src/render/gen_types.rs:320-360).
+#
+# 96 of 763 rows rewritten, and ALL 96 are the `sha|runtime.json` CONTROL - one per
+# rendered stream/dialect, which is every such row in the file. That control is doing
+# exactly its job here: the subject of this golden is `env.db.ts`, and ZERO
+# `sha|env.db.ts` rows moved, as did ZERO `column|`, `constraint|`, `index|`,
+# `primary_key|`, `options|`, `partition_by|`, `schema|` and `unclassified|` rows. V2 is
+# a descriptor change and it stayed inside the descriptor.
 carrier:attached_partition_detached|Mysql|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition_detached|Mysql|column|p1|1|payload: t.text(),
 carrier:attached_partition_detached|Mysql|column|par|0|bucket: t.int().notNull(),
@@ -90,7 +102,7 @@ carrier:attached_partition_detached|Mysql|partition_by|par|partitionBy: { range:
 carrier:attached_partition_detached|Mysql|primary_key|p1|primaryKey: null
 carrier:attached_partition_detached|Mysql|primary_key|par|primaryKey: null
 carrier:attached_partition_detached|Mysql|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
-carrier:attached_partition_detached|Mysql|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_detached|Mysql|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
 carrier:attached_partition_detached|Postgres|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition_detached|Postgres|column|p1|1|payload: t.text(),
 carrier:attached_partition_detached|Postgres|column|par|0|bucket: t.int().notNull(),
@@ -99,7 +111,7 @@ carrier:attached_partition_detached|Postgres|partition_by|par|partitionBy: { ran
 carrier:attached_partition_detached|Postgres|primary_key|p1|primaryKey: null
 carrier:attached_partition_detached|Postgres|primary_key|par|primaryKey: null
 carrier:attached_partition_detached|Postgres|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
-carrier:attached_partition_detached|Postgres|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_detached|Postgres|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
 carrier:attached_partition_detached|Sqlite|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition_detached|Sqlite|column|p1|1|payload: t.text(),
 carrier:attached_partition_detached|Sqlite|column|par|0|bucket: t.int().notNull(),
@@ -108,25 +120,25 @@ carrier:attached_partition_detached|Sqlite|partition_by|par|partitionBy: { range
 carrier:attached_partition_detached|Sqlite|primary_key|p1|primaryKey: null
 carrier:attached_partition_detached|Sqlite|primary_key|par|primaryKey: null
 carrier:attached_partition_detached|Sqlite|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
-carrier:attached_partition_detached|Sqlite|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_detached|Sqlite|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
 carrier:attached_partition_dropped|Mysql|column|par|0|bucket: t.int().notNull(),
 carrier:attached_partition_dropped|Mysql|column|par|1|payload: t.text(),
 carrier:attached_partition_dropped|Mysql|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:attached_partition_dropped|Mysql|primary_key|par|primaryKey: null
 carrier:attached_partition_dropped|Mysql|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:attached_partition_dropped|Mysql|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:attached_partition_dropped|Mysql|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
 carrier:attached_partition_dropped|Postgres|column|par|0|bucket: t.int().notNull(),
 carrier:attached_partition_dropped|Postgres|column|par|1|payload: t.text(),
 carrier:attached_partition_dropped|Postgres|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:attached_partition_dropped|Postgres|primary_key|par|primaryKey: null
 carrier:attached_partition_dropped|Postgres|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:attached_partition_dropped|Postgres|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:attached_partition_dropped|Postgres|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
 carrier:attached_partition_dropped|Sqlite|column|par|0|bucket: t.int().notNull(),
 carrier:attached_partition_dropped|Sqlite|column|par|1|payload: t.text(),
 carrier:attached_partition_dropped|Sqlite|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:attached_partition_dropped|Sqlite|primary_key|par|primaryKey: null
 carrier:attached_partition_dropped|Sqlite|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:attached_partition_dropped|Sqlite|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:attached_partition_dropped|Sqlite|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
 carrier:attached_partition|Mysql|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition|Mysql|column|p1|1|payload: t.text(),
 carrier:attached_partition|Mysql|column|par|0|bucket: t.int().notNull(),
@@ -135,7 +147,7 @@ carrier:attached_partition|Mysql|partition_by|par|partitionBy: { range: ["bucket
 carrier:attached_partition|Mysql|primary_key|p1|primaryKey: null
 carrier:attached_partition|Mysql|primary_key|par|primaryKey: null
 carrier:attached_partition|Mysql|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
-carrier:attached_partition|Mysql|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition|Mysql|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
 carrier:attached_partition|Postgres|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition|Postgres|column|p1|1|payload: t.text(),
 carrier:attached_partition|Postgres|column|par|0|bucket: t.int().notNull(),
@@ -144,7 +156,7 @@ carrier:attached_partition|Postgres|partition_by|par|partitionBy: { range: ["buc
 carrier:attached_partition|Postgres|primary_key|p1|primaryKey: null
 carrier:attached_partition|Postgres|primary_key|par|primaryKey: null
 carrier:attached_partition|Postgres|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
-carrier:attached_partition|Postgres|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition|Postgres|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
 carrier:attached_partition|Sqlite|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition|Sqlite|column|p1|1|payload: t.text(),
 carrier:attached_partition|Sqlite|column|par|0|bucket: t.int().notNull(),
@@ -153,7 +165,7 @@ carrier:attached_partition|Sqlite|partition_by|par|partitionBy: { range: ["bucke
 carrier:attached_partition|Sqlite|primary_key|p1|primaryKey: null
 carrier:attached_partition|Sqlite|primary_key|par|primaryKey: null
 carrier:attached_partition|Sqlite|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
-carrier:attached_partition|Sqlite|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition|Sqlite|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
 carrier:composite_foreign_key_after_renames|Mysql|column|orders|0|id: t.text().primaryKey(),
 carrier:composite_foreign_key_after_renames|Mysql|column|orders|1|tenant: t.text().notNull(),
 carrier:composite_foreign_key_after_renames|Mysql|column|orders|2|account_id: t.text().notNull(),
@@ -163,7 +175,7 @@ carrier:composite_foreign_key_after_renames|Mysql|constraint|orders|0|{ name: "o
 carrier:composite_foreign_key_after_renames|Mysql|primary_key|orders|single:id
 carrier:composite_foreign_key_after_renames|Mysql|primary_key|tenants|primaryKey: ["tenant", "account_key"]
 carrier:composite_foreign_key_after_renames|Mysql|sha|env.db.ts|16573a05e0f37607816baa9e89cf42b5b9145802d117fc146fd2f15ffe0cdf81
-carrier:composite_foreign_key_after_renames|Mysql|sha|runtime.json|7d03161c404139c5b7c03806385626f2a4e91f555228b89018d304a84d7b9f23
+carrier:composite_foreign_key_after_renames|Mysql|sha|runtime.json|0735079f4a4123c5a4aae4ebc42899d01d265a47d41fd0be60905b68f55a6704
 carrier:composite_foreign_key_after_renames|Postgres|column|orders|0|id: t.text().primaryKey(),
 carrier:composite_foreign_key_after_renames|Postgres|column|orders|1|tenant: t.text().notNull(),
 carrier:composite_foreign_key_after_renames|Postgres|column|orders|2|account_id: t.text().notNull(),
@@ -173,7 +185,7 @@ carrier:composite_foreign_key_after_renames|Postgres|constraint|orders|0|{ name:
 carrier:composite_foreign_key_after_renames|Postgres|primary_key|orders|single:id
 carrier:composite_foreign_key_after_renames|Postgres|primary_key|tenants|primaryKey: ["tenant", "account_key"]
 carrier:composite_foreign_key_after_renames|Postgres|sha|env.db.ts|16573a05e0f37607816baa9e89cf42b5b9145802d117fc146fd2f15ffe0cdf81
-carrier:composite_foreign_key_after_renames|Postgres|sha|runtime.json|7d03161c404139c5b7c03806385626f2a4e91f555228b89018d304a84d7b9f23
+carrier:composite_foreign_key_after_renames|Postgres|sha|runtime.json|0735079f4a4123c5a4aae4ebc42899d01d265a47d41fd0be60905b68f55a6704
 carrier:composite_foreign_key_after_renames|Sqlite|column|orders|0|id: t.text().primaryKey(),
 carrier:composite_foreign_key_after_renames|Sqlite|column|orders|1|tenant: t.text().notNull(),
 carrier:composite_foreign_key_after_renames|Sqlite|column|orders|2|account_id: t.text().notNull(),
@@ -183,7 +195,7 @@ carrier:composite_foreign_key_after_renames|Sqlite|constraint|orders|0|{ name: "
 carrier:composite_foreign_key_after_renames|Sqlite|primary_key|orders|single:id
 carrier:composite_foreign_key_after_renames|Sqlite|primary_key|tenants|primaryKey: ["tenant", "account_key"]
 carrier:composite_foreign_key_after_renames|Sqlite|sha|env.db.ts|16573a05e0f37607816baa9e89cf42b5b9145802d117fc146fd2f15ffe0cdf81
-carrier:composite_foreign_key_after_renames|Sqlite|sha|runtime.json|7d03161c404139c5b7c03806385626f2a4e91f555228b89018d304a84d7b9f23
+carrier:composite_foreign_key_after_renames|Sqlite|sha|runtime.json|0735079f4a4123c5a4aae4ebc42899d01d265a47d41fd0be60905b68f55a6704
 carrier:composite_foreign_key|Mysql|column|accounts|0|tenant: t.text().notNull(),
 carrier:composite_foreign_key|Mysql|column|accounts|1|id: t.text().notNull(),
 carrier:composite_foreign_key|Mysql|column|orders|0|id: t.text().primaryKey(),
@@ -193,7 +205,7 @@ carrier:composite_foreign_key|Mysql|constraint|orders|0|{ name: "orders_account_
 carrier:composite_foreign_key|Mysql|primary_key|accounts|primaryKey: ["tenant", "id"]
 carrier:composite_foreign_key|Mysql|primary_key|orders|single:id
 carrier:composite_foreign_key|Mysql|sha|env.db.ts|b436120bd2b9f196038e9d78306075d1d3b6999845f7b45a24b0279ebe9640d0
-carrier:composite_foreign_key|Mysql|sha|runtime.json|50ec790e2f2506696c116c70c9c7824be498a383ebbc14a65276a60d406c76ba
+carrier:composite_foreign_key|Mysql|sha|runtime.json|f807516d0b2ccb5c0a0b10bebbcd2f8d44f38f5875428a026cd3725b7cce920c
 carrier:composite_foreign_key|Postgres|column|accounts|0|tenant: t.text().notNull(),
 carrier:composite_foreign_key|Postgres|column|accounts|1|id: t.text().notNull(),
 carrier:composite_foreign_key|Postgres|column|orders|0|id: t.text().primaryKey(),
@@ -203,7 +215,7 @@ carrier:composite_foreign_key|Postgres|constraint|orders|0|{ name: "orders_accou
 carrier:composite_foreign_key|Postgres|primary_key|accounts|primaryKey: ["tenant", "id"]
 carrier:composite_foreign_key|Postgres|primary_key|orders|single:id
 carrier:composite_foreign_key|Postgres|sha|env.db.ts|b436120bd2b9f196038e9d78306075d1d3b6999845f7b45a24b0279ebe9640d0
-carrier:composite_foreign_key|Postgres|sha|runtime.json|50ec790e2f2506696c116c70c9c7824be498a383ebbc14a65276a60d406c76ba
+carrier:composite_foreign_key|Postgres|sha|runtime.json|f807516d0b2ccb5c0a0b10bebbcd2f8d44f38f5875428a026cd3725b7cce920c
 carrier:composite_foreign_key|Sqlite|column|accounts|0|tenant: t.text().notNull(),
 carrier:composite_foreign_key|Sqlite|column|accounts|1|id: t.text().notNull(),
 carrier:composite_foreign_key|Sqlite|column|orders|0|id: t.text().primaryKey(),
@@ -213,25 +225,25 @@ carrier:composite_foreign_key|Sqlite|constraint|orders|0|{ name: "orders_account
 carrier:composite_foreign_key|Sqlite|primary_key|accounts|primaryKey: ["tenant", "id"]
 carrier:composite_foreign_key|Sqlite|primary_key|orders|single:id
 carrier:composite_foreign_key|Sqlite|sha|env.db.ts|b436120bd2b9f196038e9d78306075d1d3b6999845f7b45a24b0279ebe9640d0
-carrier:composite_foreign_key|Sqlite|sha|runtime.json|50ec790e2f2506696c116c70c9c7824be498a383ebbc14a65276a60d406c76ba
+carrier:composite_foreign_key|Sqlite|sha|runtime.json|f807516d0b2ccb5c0a0b10bebbcd2f8d44f38f5875428a026cd3725b7cce920c
 carrier:created_partition_dropped|Mysql|column|par|0|bucket: t.int().notNull(),
 carrier:created_partition_dropped|Mysql|column|par|1|payload: t.text(),
 carrier:created_partition_dropped|Mysql|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:created_partition_dropped|Mysql|primary_key|par|primaryKey: null
 carrier:created_partition_dropped|Mysql|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:created_partition_dropped|Mysql|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:created_partition_dropped|Mysql|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
 carrier:created_partition_dropped|Postgres|column|par|0|bucket: t.int().notNull(),
 carrier:created_partition_dropped|Postgres|column|par|1|payload: t.text(),
 carrier:created_partition_dropped|Postgres|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:created_partition_dropped|Postgres|primary_key|par|primaryKey: null
 carrier:created_partition_dropped|Postgres|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:created_partition_dropped|Postgres|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:created_partition_dropped|Postgres|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
 carrier:created_partition_dropped|Sqlite|column|par|0|bucket: t.int().notNull(),
 carrier:created_partition_dropped|Sqlite|column|par|1|payload: t.text(),
 carrier:created_partition_dropped|Sqlite|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:created_partition_dropped|Sqlite|primary_key|par|primaryKey: null
 carrier:created_partition_dropped|Sqlite|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:created_partition_dropped|Sqlite|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:created_partition_dropped|Sqlite|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
 carrier:every_other_field|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 carrier:every_other_field|Postgres|column|accounts|0|id: t.text().primaryKey(),
 carrier:every_other_field|Postgres|column|accounts|1|bucket: t.int().notNull(),
@@ -247,212 +259,212 @@ carrier:every_other_field|Postgres|primary_key|accounts|single:id
 carrier:every_other_field|Postgres|primary_key|orders|single:id
 carrier:every_other_field|Postgres|schema|accounts|schema: "reporting"
 carrier:every_other_field|Postgres|sha|env.db.ts|36f7bc14d179f70bc630d0902b91909e3186cdc53ab7c7498fed183fdf0921e8
-carrier:every_other_field|Postgres|sha|runtime.json|c475f66594b34de355459348ecd1ec8d906c951660a8764cf642838b65a1c1c2
+carrier:every_other_field|Postgres|sha|runtime.json|2e18904c489060989f8a7cdfdd40f388a16d77f32b0831ac0edd366be6302084
 carrier:every_other_field|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 carrier:pk_add|Mysql|column|orders|0|id: t.text().notNull(),
 carrier:pk_add|Mysql|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_add|Mysql|primary_key|orders|single:legacy_id
 carrier:pk_add|Mysql|sha|env.db.ts|342ed8e884c0611c7f0f2e3f57c8f8e52baa12746164b9b1a997925195130748
-carrier:pk_add|Mysql|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_add|Mysql|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_add|Postgres|column|orders|0|id: t.text().notNull(),
 carrier:pk_add|Postgres|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_add|Postgres|primary_key|orders|single:legacy_id
 carrier:pk_add|Postgres|sha|env.db.ts|342ed8e884c0611c7f0f2e3f57c8f8e52baa12746164b9b1a997925195130748
-carrier:pk_add|Postgres|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_add|Postgres|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_add|Sqlite|column|orders|0|id: t.text().notNull(),
 carrier:pk_add|Sqlite|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_add|Sqlite|primary_key|orders|single:legacy_id
 carrier:pk_add|Sqlite|sha|env.db.ts|342ed8e884c0611c7f0f2e3f57c8f8e52baa12746164b9b1a997925195130748
-carrier:pk_add|Sqlite|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_add|Sqlite|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_column_dropped|Mysql|column|orders|0|legacy_id: t.text().notNull(),
 carrier:pk_column_dropped|Mysql|primary_key|orders|primaryKey: null
 carrier:pk_column_dropped|Mysql|sha|env.db.ts|dc168749435b5952ba3c452d068a693f911fb4fdd78b367995d915fe8946f6c7
-carrier:pk_column_dropped|Mysql|sha|runtime.json|876a4e6fc3c1df1d7c6b1b426660bca1632e5d160fc9ad3bcd0ec2e20a75a1a5
+carrier:pk_column_dropped|Mysql|sha|runtime.json|26f24e787df9ee4899381241074b6eec10209d8c993e9518bc24d699f70311ce
 carrier:pk_column_dropped|Postgres|column|orders|0|legacy_id: t.text().notNull(),
 carrier:pk_column_dropped|Postgres|primary_key|orders|primaryKey: null
 carrier:pk_column_dropped|Postgres|sha|env.db.ts|dc168749435b5952ba3c452d068a693f911fb4fdd78b367995d915fe8946f6c7
-carrier:pk_column_dropped|Postgres|sha|runtime.json|876a4e6fc3c1df1d7c6b1b426660bca1632e5d160fc9ad3bcd0ec2e20a75a1a5
+carrier:pk_column_dropped|Postgres|sha|runtime.json|26f24e787df9ee4899381241074b6eec10209d8c993e9518bc24d699f70311ce
 carrier:pk_column_dropped|Sqlite|column|orders|0|legacy_id: t.text().notNull(),
 carrier:pk_column_dropped|Sqlite|primary_key|orders|primaryKey: null
 carrier:pk_column_dropped|Sqlite|sha|env.db.ts|dc168749435b5952ba3c452d068a693f911fb4fdd78b367995d915fe8946f6c7
-carrier:pk_column_dropped|Sqlite|sha|runtime.json|876a4e6fc3c1df1d7c6b1b426660bca1632e5d160fc9ad3bcd0ec2e20a75a1a5
+carrier:pk_column_dropped|Sqlite|sha|runtime.json|26f24e787df9ee4899381241074b6eec10209d8c993e9518bc24d699f70311ce
 carrier:pk_column_renamed|Mysql|column|orders|0|order_id: t.text().primaryKey(),
 carrier:pk_column_renamed|Mysql|column|orders|1|legacy_id: t.text().notNull(),
 carrier:pk_column_renamed|Mysql|primary_key|orders|single:order_id
 carrier:pk_column_renamed|Mysql|sha|env.db.ts|01a5a4ba0ca67b8410f3fd7a0af9e1bb9336347b8604bec5a1b3f2365331b3ef
-carrier:pk_column_renamed|Mysql|sha|runtime.json|ef49e2b66537c15824349a41ab5febe6124878e77370c28647d5920ee16da919
+carrier:pk_column_renamed|Mysql|sha|runtime.json|c1d09125ad67449a44dbb73ec63102586e7e05692b0bf6aab094e9cc89f4b00c
 carrier:pk_column_renamed|Postgres|column|orders|0|order_id: t.text().primaryKey(),
 carrier:pk_column_renamed|Postgres|column|orders|1|legacy_id: t.text().notNull(),
 carrier:pk_column_renamed|Postgres|primary_key|orders|single:order_id
 carrier:pk_column_renamed|Postgres|sha|env.db.ts|01a5a4ba0ca67b8410f3fd7a0af9e1bb9336347b8604bec5a1b3f2365331b3ef
-carrier:pk_column_renamed|Postgres|sha|runtime.json|ef49e2b66537c15824349a41ab5febe6124878e77370c28647d5920ee16da919
+carrier:pk_column_renamed|Postgres|sha|runtime.json|c1d09125ad67449a44dbb73ec63102586e7e05692b0bf6aab094e9cc89f4b00c
 carrier:pk_column_renamed|Sqlite|column|orders|0|order_id: t.text().primaryKey(),
 carrier:pk_column_renamed|Sqlite|column|orders|1|legacy_id: t.text().notNull(),
 carrier:pk_column_renamed|Sqlite|primary_key|orders|single:order_id
 carrier:pk_column_renamed|Sqlite|sha|env.db.ts|01a5a4ba0ca67b8410f3fd7a0af9e1bb9336347b8604bec5a1b3f2365331b3ef
-carrier:pk_column_renamed|Sqlite|sha|runtime.json|ef49e2b66537c15824349a41ab5febe6124878e77370c28647d5920ee16da919
+carrier:pk_column_renamed|Sqlite|sha|runtime.json|c1d09125ad67449a44dbb73ec63102586e7e05692b0bf6aab094e9cc89f4b00c
 carrier:pk_composite_from_create_table|Mysql|column|orders|0|account: t.text().notNull(),
 carrier:pk_composite_from_create_table|Mysql|column|orders|1|id: t.text().notNull(),
 carrier:pk_composite_from_create_table|Mysql|primary_key|orders|primaryKey: ["account", "id"]
 carrier:pk_composite_from_create_table|Mysql|sha|env.db.ts|7515bd6dec71d09bfafa46a88d71a2971f16353c13211a268dd4ad0959a02508
-carrier:pk_composite_from_create_table|Mysql|sha|runtime.json|6049edbc9a60c61341327c40a0d3fb17d3c77497d1195fd221944d488b79331b
+carrier:pk_composite_from_create_table|Mysql|sha|runtime.json|19110b670e3bf294797ca9b00f7a68b48656c0c19a82d3d3c1a0d351c1dc18a8
 carrier:pk_composite_from_create_table|Postgres|column|orders|0|account: t.text().notNull(),
 carrier:pk_composite_from_create_table|Postgres|column|orders|1|id: t.text().notNull(),
 carrier:pk_composite_from_create_table|Postgres|primary_key|orders|primaryKey: ["account", "id"]
 carrier:pk_composite_from_create_table|Postgres|sha|env.db.ts|7515bd6dec71d09bfafa46a88d71a2971f16353c13211a268dd4ad0959a02508
-carrier:pk_composite_from_create_table|Postgres|sha|runtime.json|6049edbc9a60c61341327c40a0d3fb17d3c77497d1195fd221944d488b79331b
+carrier:pk_composite_from_create_table|Postgres|sha|runtime.json|19110b670e3bf294797ca9b00f7a68b48656c0c19a82d3d3c1a0d351c1dc18a8
 carrier:pk_composite_from_create_table|Sqlite|column|orders|0|account: t.text().notNull(),
 carrier:pk_composite_from_create_table|Sqlite|column|orders|1|id: t.text().notNull(),
 carrier:pk_composite_from_create_table|Sqlite|primary_key|orders|primaryKey: ["account", "id"]
 carrier:pk_composite_from_create_table|Sqlite|sha|env.db.ts|7515bd6dec71d09bfafa46a88d71a2971f16353c13211a268dd4ad0959a02508
-carrier:pk_composite_from_create_table|Sqlite|sha|runtime.json|6049edbc9a60c61341327c40a0d3fb17d3c77497d1195fd221944d488b79331b
+carrier:pk_composite_from_create_table|Sqlite|sha|runtime.json|19110b670e3bf294797ca9b00f7a68b48656c0c19a82d3d3c1a0d351c1dc18a8
 carrier:pk_drop|Mysql|column|orders|0|id: t.text().notNull(),
 carrier:pk_drop|Mysql|column|orders|1|legacy_id: t.text().notNull(),
 carrier:pk_drop|Mysql|primary_key|orders|primaryKey: null
 carrier:pk_drop|Mysql|sha|env.db.ts|78cfed4d4981dbb78dc993ddc0b933992267bf3edda492f499b13ba6c693c2eb
-carrier:pk_drop|Mysql|sha|runtime.json|73dc9d76c986cbbc6f19bf0f9f131558128f5e4dfe41c5eef00bdb88e0a1b37c
+carrier:pk_drop|Mysql|sha|runtime.json|7e1265635b38aa6864267a1164b46307756288b0af4571381f9e1076ccee4e8e
 carrier:pk_drop|Postgres|column|orders|0|id: t.text().notNull(),
 carrier:pk_drop|Postgres|column|orders|1|legacy_id: t.text().notNull(),
 carrier:pk_drop|Postgres|primary_key|orders|primaryKey: null
 carrier:pk_drop|Postgres|sha|env.db.ts|78cfed4d4981dbb78dc993ddc0b933992267bf3edda492f499b13ba6c693c2eb
-carrier:pk_drop|Postgres|sha|runtime.json|73dc9d76c986cbbc6f19bf0f9f131558128f5e4dfe41c5eef00bdb88e0a1b37c
+carrier:pk_drop|Postgres|sha|runtime.json|7e1265635b38aa6864267a1164b46307756288b0af4571381f9e1076ccee4e8e
 carrier:pk_drop|Sqlite|column|orders|0|id: t.text().notNull(),
 carrier:pk_drop|Sqlite|column|orders|1|legacy_id: t.text().notNull(),
 carrier:pk_drop|Sqlite|primary_key|orders|primaryKey: null
 carrier:pk_drop|Sqlite|sha|env.db.ts|78cfed4d4981dbb78dc993ddc0b933992267bf3edda492f499b13ba6c693c2eb
-carrier:pk_drop|Sqlite|sha|runtime.json|73dc9d76c986cbbc6f19bf0f9f131558128f5e4dfe41c5eef00bdb88e0a1b37c
+carrier:pk_drop|Sqlite|sha|runtime.json|7e1265635b38aa6864267a1164b46307756288b0af4571381f9e1076ccee4e8e
 carrier:pk_replace_composite|Mysql|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_composite|Mysql|column|orders|1|tenant: t.text().notNull(),
 carrier:pk_replace_composite|Mysql|column|orders|2|legacy_id: t.text().notNull(),
 carrier:pk_replace_composite|Mysql|constraint|orders|0|{ name: "orders_pair_uq", columns: ["tenant", "legacy_id"] },
 carrier:pk_replace_composite|Mysql|primary_key|orders|primaryKey: ["tenant", "legacy_id"]
 carrier:pk_replace_composite|Mysql|sha|env.db.ts|62ee6b2e81bb23f4b1027f62dad614a06f70ed0396eb430fa3034f9e74bac286
-carrier:pk_replace_composite|Mysql|sha|runtime.json|825a27878abdd5998fa8d30c56c67a15e62ed646973f1f12447b2ce51f458831
+carrier:pk_replace_composite|Mysql|sha|runtime.json|7ddb402396883ab7007a9b755eed92935119fceac8a473e1bca37923bec94c2f
 carrier:pk_replace_composite|Postgres|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_composite|Postgres|column|orders|1|tenant: t.text().notNull(),
 carrier:pk_replace_composite|Postgres|column|orders|2|legacy_id: t.text().notNull(),
 carrier:pk_replace_composite|Postgres|constraint|orders|0|{ name: "orders_pair_uq", columns: ["tenant", "legacy_id"] },
 carrier:pk_replace_composite|Postgres|primary_key|orders|primaryKey: ["tenant", "legacy_id"]
 carrier:pk_replace_composite|Postgres|sha|env.db.ts|62ee6b2e81bb23f4b1027f62dad614a06f70ed0396eb430fa3034f9e74bac286
-carrier:pk_replace_composite|Postgres|sha|runtime.json|825a27878abdd5998fa8d30c56c67a15e62ed646973f1f12447b2ce51f458831
+carrier:pk_replace_composite|Postgres|sha|runtime.json|7ddb402396883ab7007a9b755eed92935119fceac8a473e1bca37923bec94c2f
 carrier:pk_replace_composite|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
 carrier:pk_replace_drops_identity|Mysql|column|orders|0|id: t.int().notNull(),
 carrier:pk_replace_drops_identity|Mysql|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_replace_drops_identity|Mysql|primary_key|orders|single:legacy_id
 carrier:pk_replace_drops_identity|Mysql|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
-carrier:pk_replace_drops_identity|Mysql|sha|runtime.json|85563a7d96488b631880d1e7bef0b19259b18bd362b738790757bf19c6c8bedf
+carrier:pk_replace_drops_identity|Mysql|sha|runtime.json|ee737991a2555eac3b14abf7413224238d449926017e61d50f49a9cc88737212
 carrier:pk_replace_drops_identity|Postgres|column|orders|0|id: t.int().notNull(),
 carrier:pk_replace_drops_identity|Postgres|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_replace_drops_identity|Postgres|primary_key|orders|single:legacy_id
 carrier:pk_replace_drops_identity|Postgres|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
-carrier:pk_replace_drops_identity|Postgres|sha|runtime.json|85563a7d96488b631880d1e7bef0b19259b18bd362b738790757bf19c6c8bedf
+carrier:pk_replace_drops_identity|Postgres|sha|runtime.json|ee737991a2555eac3b14abf7413224238d449926017e61d50f49a9cc88737212
 carrier:pk_replace_drops_identity|Sqlite|column|orders|0|id: t.int().notNull(),
 carrier:pk_replace_drops_identity|Sqlite|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_replace_drops_identity|Sqlite|primary_key|orders|single:legacy_id
 carrier:pk_replace_drops_identity|Sqlite|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
-carrier:pk_replace_drops_identity|Sqlite|sha|runtime.json|85563a7d96488b631880d1e7bef0b19259b18bd362b738790757bf19c6c8bedf
+carrier:pk_replace_drops_identity|Sqlite|sha|runtime.json|ee737991a2555eac3b14abf7413224238d449926017e61d50f49a9cc88737212
 carrier:pk_replace_single|Mysql|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_single|Mysql|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_replace_single|Mysql|primary_key|orders|single:legacy_id
 carrier:pk_replace_single|Mysql|sha|env.db.ts|342ed8e884c0611c7f0f2e3f57c8f8e52baa12746164b9b1a997925195130748
-carrier:pk_replace_single|Mysql|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_replace_single|Mysql|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_replace_single|Postgres|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_single|Postgres|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_replace_single|Postgres|primary_key|orders|single:legacy_id
 carrier:pk_replace_single|Postgres|sha|env.db.ts|342ed8e884c0611c7f0f2e3f57c8f8e52baa12746164b9b1a997925195130748
-carrier:pk_replace_single|Postgres|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_replace_single|Postgres|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_replace_single|Sqlite|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_single|Sqlite|column|orders|1|legacy_id: t.text().primaryKey(),
 carrier:pk_replace_single|Sqlite|primary_key|orders|single:legacy_id
 carrier:pk_replace_single|Sqlite|sha|env.db.ts|342ed8e884c0611c7f0f2e3f57c8f8e52baa12746164b9b1a997925195130748
-carrier:pk_replace_single|Sqlite|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_replace_single|Sqlite|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_replace_then_drop|Mysql|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_then_drop|Mysql|column|orders|1|legacy_id: t.text().notNull().unique(),
 carrier:pk_replace_then_drop|Mysql|primary_key|orders|primaryKey: null
 carrier:pk_replace_then_drop|Mysql|sha|env.db.ts|c7684b2709c3d75ffa9ffe2d3f8db2d00117133b9c4ef60a38b51e609bd7c752
-carrier:pk_replace_then_drop|Mysql|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_replace_then_drop|Mysql|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_replace_then_drop|Postgres|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_then_drop|Postgres|column|orders|1|legacy_id: t.text().notNull().unique(),
 carrier:pk_replace_then_drop|Postgres|primary_key|orders|primaryKey: null
 carrier:pk_replace_then_drop|Postgres|sha|env.db.ts|c7684b2709c3d75ffa9ffe2d3f8db2d00117133b9c4ef60a38b51e609bd7c752
-carrier:pk_replace_then_drop|Postgres|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_replace_then_drop|Postgres|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_replace_then_drop|Sqlite|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_then_drop|Sqlite|column|orders|1|legacy_id: t.text().notNull().unique(),
 carrier:pk_replace_then_drop|Sqlite|primary_key|orders|primaryKey: null
 carrier:pk_replace_then_drop|Sqlite|sha|env.db.ts|c7684b2709c3d75ffa9ffe2d3f8db2d00117133b9c4ef60a38b51e609bd7c752
-carrier:pk_replace_then_drop|Sqlite|sha|runtime.json|2fd83a0ba67fa6a63ef64efa5aa30eeb035615bd28b0dbb82be57ceff759239c
+carrier:pk_replace_then_drop|Sqlite|sha|runtime.json|90c9d3976d04d1cb7184057d4e755794b56005eb6e96c484dd877940e1a24ce9
 carrier:pk_replace_then_renamed|Mysql|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_then_renamed|Mysql|column|orders|1|external_id: t.text().primaryKey(),
 carrier:pk_replace_then_renamed|Mysql|primary_key|orders|single:external_id
 carrier:pk_replace_then_renamed|Mysql|sha|env.db.ts|6f5bbb16d38fcc0d94ce927d84d9f808bf2bd67df0c95c19f65144e3f871565c
-carrier:pk_replace_then_renamed|Mysql|sha|runtime.json|6537d78de4b250148215bd528d4044ca6bc113bd7911c7d8c9edc7fbd404441b
+carrier:pk_replace_then_renamed|Mysql|sha|runtime.json|b70c469c7ab997f56936886e66473c18b83a9295aecbf9d0ee3c730d16aec46f
 carrier:pk_replace_then_renamed|Postgres|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_then_renamed|Postgres|column|orders|1|external_id: t.text().primaryKey(),
 carrier:pk_replace_then_renamed|Postgres|primary_key|orders|single:external_id
 carrier:pk_replace_then_renamed|Postgres|sha|env.db.ts|6f5bbb16d38fcc0d94ce927d84d9f808bf2bd67df0c95c19f65144e3f871565c
-carrier:pk_replace_then_renamed|Postgres|sha|runtime.json|6537d78de4b250148215bd528d4044ca6bc113bd7911c7d8c9edc7fbd404441b
+carrier:pk_replace_then_renamed|Postgres|sha|runtime.json|b70c469c7ab997f56936886e66473c18b83a9295aecbf9d0ee3c730d16aec46f
 carrier:pk_replace_then_renamed|Sqlite|column|orders|0|id: t.text().notNull(),
 carrier:pk_replace_then_renamed|Sqlite|column|orders|1|external_id: t.text().primaryKey(),
 carrier:pk_replace_then_renamed|Sqlite|primary_key|orders|single:external_id
 carrier:pk_replace_then_renamed|Sqlite|sha|env.db.ts|6f5bbb16d38fcc0d94ce927d84d9f808bf2bd67df0c95c19f65144e3f871565c
-carrier:pk_replace_then_renamed|Sqlite|sha|runtime.json|6537d78de4b250148215bd528d4044ca6bc113bd7911c7d8c9edc7fbd404441b
+carrier:pk_replace_then_renamed|Sqlite|sha|runtime.json|b70c469c7ab997f56936886e66473c18b83a9295aecbf9d0ee3c730d16aec46f
 carrier:table_dropped_and_recreated|Mysql|column|users|0|id: t.text().primaryKey(),
 carrier:table_dropped_and_recreated|Mysql|column|users|1|handle: t.text().notNull().unique(),
 carrier:table_dropped_and_recreated|Mysql|primary_key|users|single:id
 carrier:table_dropped_and_recreated|Mysql|sha|env.db.ts|7391597d4f8e3ffe0fbfa9627b60a162f55f96c48656f388aab33f18b1145c38
-carrier:table_dropped_and_recreated|Mysql|sha|runtime.json|39c98c2e5b523b32582a1311daa115327a16d2fbb2b0b1a7ee03821c623455b6
+carrier:table_dropped_and_recreated|Mysql|sha|runtime.json|fbbb6f569c23d79fd5007e341b7ba06b676728dfab658a375e68984a029f9151
 carrier:table_dropped_and_recreated|Postgres|column|users|0|id: t.text().primaryKey(),
 carrier:table_dropped_and_recreated|Postgres|column|users|1|handle: t.text().notNull().unique(),
 carrier:table_dropped_and_recreated|Postgres|primary_key|users|single:id
 carrier:table_dropped_and_recreated|Postgres|sha|env.db.ts|7391597d4f8e3ffe0fbfa9627b60a162f55f96c48656f388aab33f18b1145c38
-carrier:table_dropped_and_recreated|Postgres|sha|runtime.json|39c98c2e5b523b32582a1311daa115327a16d2fbb2b0b1a7ee03821c623455b6
+carrier:table_dropped_and_recreated|Postgres|sha|runtime.json|fbbb6f569c23d79fd5007e341b7ba06b676728dfab658a375e68984a029f9151
 carrier:table_dropped_and_recreated|Sqlite|column|users|0|id: t.text().primaryKey(),
 carrier:table_dropped_and_recreated|Sqlite|column|users|1|handle: t.text().notNull().unique(),
 carrier:table_dropped_and_recreated|Sqlite|primary_key|users|single:id
 carrier:table_dropped_and_recreated|Sqlite|sha|env.db.ts|7391597d4f8e3ffe0fbfa9627b60a162f55f96c48656f388aab33f18b1145c38
-carrier:table_dropped_and_recreated|Sqlite|sha|runtime.json|39c98c2e5b523b32582a1311daa115327a16d2fbb2b0b1a7ee03821c623455b6
+carrier:table_dropped_and_recreated|Sqlite|sha|runtime.json|fbbb6f569c23d79fd5007e341b7ba06b676728dfab658a375e68984a029f9151
 carrier:table_renamed_with_fk_and_expressions|Mysql|column|orders|0|id: t.text().primaryKey(),
 carrier:table_renamed_with_fk_and_expressions|Mysql|column|orders|1|owner_id: t.text().references("tenants", "id", { name: "orders_owner_fk", onDelete: "cascade" }),
 carrier:table_renamed_with_fk_and_expressions|Mysql|column|tenants|0|id: t.text().primaryKey(),
 carrier:table_renamed_with_fk_and_expressions|Mysql|primary_key|orders|single:id
 carrier:table_renamed_with_fk_and_expressions|Mysql|primary_key|tenants|single:id
 carrier:table_renamed_with_fk_and_expressions|Mysql|sha|env.db.ts|e60fe32ea585d5fe25657d44feffbe5c695846fc97ea5a6c021ec45f7f3509a0
-carrier:table_renamed_with_fk_and_expressions|Mysql|sha|runtime.json|faeba898dcd3fc52d3405d7e92d2c43f878ee3948a6b4352c0340b351aa62f01
+carrier:table_renamed_with_fk_and_expressions|Mysql|sha|runtime.json|061ed131d85a3c2098ce3597b6999e1ff4c3c8b22abf49211a3a113a70f4a8d9
 carrier:table_renamed_with_fk_and_expressions|Postgres|column|orders|0|id: t.text().primaryKey(),
 carrier:table_renamed_with_fk_and_expressions|Postgres|column|orders|1|owner_id: t.text().references("tenants", "id", { name: "orders_owner_fk", onDelete: "cascade" }),
 carrier:table_renamed_with_fk_and_expressions|Postgres|column|tenants|0|id: t.text().primaryKey(),
 carrier:table_renamed_with_fk_and_expressions|Postgres|primary_key|orders|single:id
 carrier:table_renamed_with_fk_and_expressions|Postgres|primary_key|tenants|single:id
 carrier:table_renamed_with_fk_and_expressions|Postgres|sha|env.db.ts|e60fe32ea585d5fe25657d44feffbe5c695846fc97ea5a6c021ec45f7f3509a0
-carrier:table_renamed_with_fk_and_expressions|Postgres|sha|runtime.json|faeba898dcd3fc52d3405d7e92d2c43f878ee3948a6b4352c0340b351aa62f01
+carrier:table_renamed_with_fk_and_expressions|Postgres|sha|runtime.json|061ed131d85a3c2098ce3597b6999e1ff4c3c8b22abf49211a3a113a70f4a8d9
 carrier:table_renamed_with_fk_and_expressions|Sqlite|column|orders|0|id: t.text().primaryKey(),
 carrier:table_renamed_with_fk_and_expressions|Sqlite|column|orders|1|owner_id: t.text().references("tenants", "id", { name: "orders_owner_fk", onDelete: "cascade" }),
 carrier:table_renamed_with_fk_and_expressions|Sqlite|column|tenants|0|id: t.text().primaryKey(),
 carrier:table_renamed_with_fk_and_expressions|Sqlite|primary_key|orders|single:id
 carrier:table_renamed_with_fk_and_expressions|Sqlite|primary_key|tenants|single:id
 carrier:table_renamed_with_fk_and_expressions|Sqlite|sha|env.db.ts|e60fe32ea585d5fe25657d44feffbe5c695846fc97ea5a6c021ec45f7f3509a0
-carrier:table_renamed_with_fk_and_expressions|Sqlite|sha|runtime.json|faeba898dcd3fc52d3405d7e92d2c43f878ee3948a6b4352c0340b351aa62f01
+carrier:table_renamed_with_fk_and_expressions|Sqlite|sha|runtime.json|061ed131d85a3c2098ce3597b6999e1ff4c3c8b22abf49211a3a113a70f4a8d9
 carrier:unique_constraint_lifecycle|Mysql|column|users|0|id: t.text().primaryKey(),
 carrier:unique_constraint_lifecycle|Mysql|column|users|1|email: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Mysql|column|users|2|handle: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Mysql|constraint|users|0|{ name: "users_email_uq", columns: ["email"] },
 carrier:unique_constraint_lifecycle|Mysql|primary_key|users|single:id
 carrier:unique_constraint_lifecycle|Mysql|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_lifecycle|Mysql|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
+carrier:unique_constraint_lifecycle|Mysql|sha|runtime.json|8ca451db9d0ea66d4a51875516c1f577835879076002dd0b455981fa84d43f75
 carrier:unique_constraint_lifecycle|Postgres|column|users|0|id: t.text().primaryKey(),
 carrier:unique_constraint_lifecycle|Postgres|column|users|1|email: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Postgres|column|users|2|handle: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Postgres|constraint|users|0|{ name: "users_email_uq", columns: ["email"] },
 carrier:unique_constraint_lifecycle|Postgres|primary_key|users|single:id
 carrier:unique_constraint_lifecycle|Postgres|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_lifecycle|Postgres|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
+carrier:unique_constraint_lifecycle|Postgres|sha|runtime.json|8ca451db9d0ea66d4a51875516c1f577835879076002dd0b455981fa84d43f75
 carrier:unique_constraint_lifecycle|Sqlite|column|users|0|id: t.text().primaryKey(),
 carrier:unique_constraint_lifecycle|Sqlite|column|users|1|email: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Sqlite|column|users|2|handle: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Sqlite|constraint|users|0|{ name: "users_email_uq", columns: ["email"] },
 carrier:unique_constraint_lifecycle|Sqlite|primary_key|users|single:id
 carrier:unique_constraint_lifecycle|Sqlite|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_lifecycle|Sqlite|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
+carrier:unique_constraint_lifecycle|Sqlite|sha|runtime.json|8ca451db9d0ea66d4a51875516c1f577835879076002dd0b455981fa84d43f75
 fixture:alter_primary_key|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -474,7 +486,7 @@ fixture:comments_indexes|Postgres|index|users|2|{ name: "users_created_by_idx", 
 fixture:comments_indexes|Postgres|index|users|3|{ name: "users_email_lower_idx", on: ["email", { expr: () => ({"node":"fnCall","fn":"lower","args":[{"node":"colRef","name":"email"}]} as Expr) }], where: () => ({"node":"unaryOp","op":"isTrue","operand":{"node":"colRef","name":"active"}} as Expr) },
 fixture:comments_indexes|Postgres|primary_key|users|single:id
 fixture:comments_indexes|Postgres|sha|env.db.ts|db42bb14431b5afa26bab972df8bc194b507ead38d934eeed46207fbdcdb29c9
-fixture:comments_indexes|Postgres|sha|runtime.json|2a85398851fe4451d7198ce0a770690e2fc0ff2ca7556f52a3a036247fb09885
+fixture:comments_indexes|Postgres|sha|runtime.json|e8e628130c92c065782880e3f8183ed4decd4e1063e85b17a627cd33f0f44384
 fixture:comments_indexes|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
 fixture:constraint_not_valid|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
 fixture:constraint_not_valid|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
@@ -501,7 +513,7 @@ fixture:ddl_create|Mysql|index|orders|2|{ name: "orders_created_by_idx", on: ["c
 fixture:ddl_create|Mysql|index|orders|3|{ name: "orders_total_idx", on: ["total"] },
 fixture:ddl_create|Mysql|primary_key|orders|single:id
 fixture:ddl_create|Mysql|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
-fixture:ddl_create|Mysql|sha|runtime.json|973aa7e5dea383494b2403d3246f48d0e3b5d51360b2700597c783e3a99d29b3
+fixture:ddl_create|Mysql|sha|runtime.json|5723da5ed75fe91cd13db8c27c79b58ea1ca53848eda0f664ba36c9d4b4a2152
 fixture:ddl_create|Postgres|column|orders|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:ddl_create|Postgres|column|orders|1|created_at: t.timestamp().notNull(),
 fixture:ddl_create|Postgres|column|orders|2|updated_at: t.timestamp().notNull(),
@@ -518,7 +530,7 @@ fixture:ddl_create|Postgres|index|orders|2|{ name: "orders_created_by_idx", on: 
 fixture:ddl_create|Postgres|index|orders|3|{ name: "orders_total_idx", on: ["total"] },
 fixture:ddl_create|Postgres|primary_key|orders|single:id
 fixture:ddl_create|Postgres|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
-fixture:ddl_create|Postgres|sha|runtime.json|973aa7e5dea383494b2403d3246f48d0e3b5d51360b2700597c783e3a99d29b3
+fixture:ddl_create|Postgres|sha|runtime.json|5723da5ed75fe91cd13db8c27c79b58ea1ca53848eda0f664ba36c9d4b4a2152
 fixture:ddl_create|Sqlite|column|orders|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:ddl_create|Sqlite|column|orders|1|created_at: t.timestamp().notNull(),
 fixture:ddl_create|Sqlite|column|orders|2|updated_at: t.timestamp().notNull(),
@@ -535,7 +547,7 @@ fixture:ddl_create|Sqlite|index|orders|2|{ name: "orders_created_by_idx", on: ["
 fixture:ddl_create|Sqlite|index|orders|3|{ name: "orders_total_idx", on: ["total"] },
 fixture:ddl_create|Sqlite|primary_key|orders|single:id
 fixture:ddl_create|Sqlite|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
-fixture:ddl_create|Sqlite|sha|runtime.json|973aa7e5dea383494b2403d3246f48d0e3b5d51360b2700597c783e3a99d29b3
+fixture:ddl_create|Sqlite|sha|runtime.json|5723da5ed75fe91cd13db8c27c79b58ea1ca53848eda0f664ba36c9d4b4a2152
 fixture:ddl_drop|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_drop|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_drop|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -555,7 +567,7 @@ fixture:dialectal_ops|Mysql|index|docs|1|{ name: "docs_updated_at_idx", on: ["up
 fixture:dialectal_ops|Mysql|index|docs|2|{ name: "docs_created_by_idx", on: ["created_by"] },
 fixture:dialectal_ops|Mysql|primary_key|docs|single:id
 fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Mysql|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Mysql|sha|runtime.json|f0cb16a255550ddccf1b3303116d9eb3c14f884fc3f0a7e0844c53d00e520ed3
 fixture:dialectal_ops|Postgres|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:dialectal_ops|Postgres|column|docs|1|created_at: t.timestamp().notNull(),
 fixture:dialectal_ops|Postgres|column|docs|2|updated_at: t.timestamp().notNull(),
@@ -570,7 +582,7 @@ fixture:dialectal_ops|Postgres|index|docs|2|{ name: "docs_created_by_idx", on: [
 fixture:dialectal_ops|Postgres|index|docs|3|{ name: "docs_embedding_hnsw_idx", on: ["embedding"], using: "hnsw" },
 fixture:dialectal_ops|Postgres|primary_key|docs|single:id
 fixture:dialectal_ops|Postgres|sha|env.db.ts|0e86a8cb73947cd55e4c22a4d52cf7f19d0c757e3ecae3f7dde690fa210df141
-fixture:dialectal_ops|Postgres|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Postgres|sha|runtime.json|46bd761f1ab6088f3dbe0bb478fa4f61648e00a3afdef05812f5c4b5e837ee7c
 fixture:dialectal_ops|Sqlite|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:dialectal_ops|Sqlite|column|docs|1|created_at: t.timestamp().notNull(),
 fixture:dialectal_ops|Sqlite|column|docs|2|updated_at: t.timestamp().notNull(),
@@ -584,25 +596,25 @@ fixture:dialectal_ops|Sqlite|index|docs|1|{ name: "docs_updated_at_idx", on: ["u
 fixture:dialectal_ops|Sqlite|index|docs|2|{ name: "docs_created_by_idx", on: ["created_by"] },
 fixture:dialectal_ops|Sqlite|primary_key|docs|single:id
 fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Sqlite|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Sqlite|sha|runtime.json|f0cb16a255550ddccf1b3303116d9eb3c14f884fc3f0a7e0844c53d00e520ed3
 fixture:dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml_upsert|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:dml_upsert|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml_upsert|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml_upsert|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:dml_upsert|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml_upsert|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml_upsert|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:dml_upsert|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml_upsert|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:edge_scalars|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:edge_scalars|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:edge_scalars|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:edge_scalars|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:edge_scalars|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:edge_scalars|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:edge_scalars|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:edge_scalars|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:edge_scalars|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:enums_domains|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:enums_domains|Postgres|column|pg_expr_checks|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:enums_domains|Postgres|column|pg_expr_checks|1|created_at: t.timestamp().notNull(),
@@ -635,23 +647,23 @@ fixture:enums_domains|Postgres|index|subscriptions|2|{ name: "subscriptions_crea
 fixture:enums_domains|Postgres|primary_key|pg_expr_checks|single:id
 fixture:enums_domains|Postgres|primary_key|subscriptions|single:id
 fixture:enums_domains|Postgres|sha|env.db.ts|aa0cd5220074c5a9b8a98cb0e882770c031515300b957c8306cdd408b45499d3
-fixture:enums_domains|Postgres|sha|runtime.json|99de44572f7a1ffa1af569c92c766c54775d806dbfcd8926326d8faee48a7ad8
+fixture:enums_domains|Postgres|sha|runtime.json|94f642513b030d558c659387ff6d6aedbc3ac2b183e4d8fdc6cc4a4e82ec0427
 fixture:enums_domains|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_ddl|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_ddl|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `accounts_legacy_chk` does not exist on `accounts`
 fixture:fluent_ddl|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
 fixture:fluent_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:fluent_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:fluent_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:fluent_scalars_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_scalars_dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_scalars_dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:fluent_scalars_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_scalars_dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_scalars_dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:fluent_scalars_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_scalars_dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_scalars_dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:fluent_scalars|Mysql|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Mysql|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Mysql|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -666,7 +678,7 @@ fixture:fluent_scalars|Mysql|index|ledger|1|{ name: "ledger_updated_at_idx", on:
 fixture:fluent_scalars|Mysql|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Mysql|primary_key|ledger|single:id
 fixture:fluent_scalars|Mysql|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Mysql|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
+fixture:fluent_scalars|Mysql|sha|runtime.json|e5667f2763508b88d355ace4cb190da0b55cf53cad461cce6b3e08d15bcdab85
 fixture:fluent_scalars|Postgres|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Postgres|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Postgres|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -681,7 +693,7 @@ fixture:fluent_scalars|Postgres|index|ledger|1|{ name: "ledger_updated_at_idx", 
 fixture:fluent_scalars|Postgres|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Postgres|primary_key|ledger|single:id
 fixture:fluent_scalars|Postgres|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Postgres|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
+fixture:fluent_scalars|Postgres|sha|runtime.json|e5667f2763508b88d355ace4cb190da0b55cf53cad461cce6b3e08d15bcdab85
 fixture:fluent_scalars|Sqlite|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Sqlite|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Sqlite|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -696,13 +708,13 @@ fixture:fluent_scalars|Sqlite|index|ledger|1|{ name: "ledger_updated_at_idx", on
 fixture:fluent_scalars|Sqlite|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Sqlite|primary_key|ledger|single:id
 fixture:fluent_scalars|Sqlite|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Sqlite|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
+fixture:fluent_scalars|Sqlite|sha|runtime.json|e5667f2763508b88d355ace4cb190da0b55cf53cad461cce6b3e08d15bcdab85
 fixture:grouped_views|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:grouped_views|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:grouped_views|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:grouped_views|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:grouped_views|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:grouped_views|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:grouped_views|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:grouped_views|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:grouped_views|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:in_list_scalars|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:in_list_scalars|Postgres|column|scalar_membership|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:in_list_scalars|Postgres|column|scalar_membership|1|created_at: t.timestamp().notNull(),
@@ -720,7 +732,7 @@ fixture:in_list_scalars|Postgres|index|scalar_membership|1|{ name: "scalar_membe
 fixture:in_list_scalars|Postgres|index|scalar_membership|2|{ name: "scalar_membership_created_by_idx", on: ["created_by"] },
 fixture:in_list_scalars|Postgres|primary_key|scalar_membership|single:id
 fixture:in_list_scalars|Postgres|sha|env.db.ts|e969f871c55023e71668517269f75c24b63a6ff26255893e985663cd122f344a
-fixture:in_list_scalars|Postgres|sha|runtime.json|a5e370efbe529b2cb0c0be2d1879212e3e625b7549d28ffc2c872a168033bf1b
+fixture:in_list_scalars|Postgres|sha|runtime.json|18b22d10ed55e0324691b6bd56e55b172e1d9451f8e709e7847cab9861227a4b
 fixture:in_list_scalars|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:p2a_facets|Mysql|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:p2a_facets|Mysql|column|posts|1|created_at: t.timestamp().notNull(),
@@ -737,7 +749,7 @@ fixture:p2a_facets|Mysql|index|posts|1|{ name: "posts_updated_at_idx", on: ["upd
 fixture:p2a_facets|Mysql|index|posts|2|{ name: "posts_created_by_idx", on: ["created_by"] },
 fixture:p2a_facets|Mysql|primary_key|posts|single:id
 fixture:p2a_facets|Mysql|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
-fixture:p2a_facets|Mysql|sha|runtime.json|50d14d129186b3558cbc0616dda689334b9f53c6be4fc267bbc2c2fdf3c5ac4a
+fixture:p2a_facets|Mysql|sha|runtime.json|6bbe95514a5e60fd779beda29057d35b2fc279fe061bc3f8c270e0fbcdb0a215
 fixture:p2a_facets|Postgres|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:p2a_facets|Postgres|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:p2a_facets|Postgres|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -753,7 +765,7 @@ fixture:p2a_facets|Postgres|index|posts|1|{ name: "posts_updated_at_idx", on: ["
 fixture:p2a_facets|Postgres|index|posts|2|{ name: "posts_created_by_idx", on: ["created_by"] },
 fixture:p2a_facets|Postgres|primary_key|posts|single:id
 fixture:p2a_facets|Postgres|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
-fixture:p2a_facets|Postgres|sha|runtime.json|50d14d129186b3558cbc0616dda689334b9f53c6be4fc267bbc2c2fdf3c5ac4a
+fixture:p2a_facets|Postgres|sha|runtime.json|00ddc916e29275c788cb0bd39226138f35ec82f16d2a3d22a90d9a346a26cf66
 fixture:p2a_facets|Sqlite|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:p2a_facets|Sqlite|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:p2a_facets|Sqlite|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -769,16 +781,16 @@ fixture:p2a_facets|Sqlite|index|posts|1|{ name: "posts_updated_at_idx", on: ["up
 fixture:p2a_facets|Sqlite|index|posts|2|{ name: "posts_created_by_idx", on: ["created_by"] },
 fixture:p2a_facets|Sqlite|primary_key|posts|single:id
 fixture:p2a_facets|Sqlite|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
-fixture:p2a_facets|Sqlite|sha|runtime.json|50d14d129186b3558cbc0616dda689334b9f53c6be4fc267bbc2c2fdf3c5ac4a
+fixture:p2a_facets|Sqlite|sha|runtime.json|6bbe95514a5e60fd779beda29057d35b2fc279fe061bc3f8c270e0fbcdb0a215
 fixture:partition|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:pg_aggregates|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:pg_aggregates|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:pg_aggregates|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:pg_aggregates|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:pg_aggregates|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:pg_aggregates|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:pg_aggregates|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:pg_aggregates|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:pg_aggregates|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:pg_vendor|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
 fixture:pg_vendor|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
 fixture:pg_vendor|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
@@ -799,7 +811,7 @@ fixture:runtime_options|Mysql|index|posts|3|{ name: "posts_author_status_idx", o
 fixture:runtime_options|Mysql|options|posts|options: { softDelete: true, strictness: "off" }
 fixture:runtime_options|Mysql|primary_key|posts|single:id
 fixture:runtime_options|Mysql|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
-fixture:runtime_options|Mysql|sha|runtime.json|e0d2b2d35c77786057d2599de5bccc9f8043a74ef34c29f217aa77e4b304d7c4
+fixture:runtime_options|Mysql|sha|runtime.json|2671cd4d141615f162e8a36d31b7ba47c21b28f5e928d58f84db7cfe83c50f63
 fixture:runtime_options|Postgres|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:runtime_options|Postgres|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:runtime_options|Postgres|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -817,7 +829,7 @@ fixture:runtime_options|Postgres|index|posts|3|{ name: "posts_author_status_idx"
 fixture:runtime_options|Postgres|options|posts|options: { softDelete: true, strictness: "off" }
 fixture:runtime_options|Postgres|primary_key|posts|single:id
 fixture:runtime_options|Postgres|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
-fixture:runtime_options|Postgres|sha|runtime.json|e0d2b2d35c77786057d2599de5bccc9f8043a74ef34c29f217aa77e4b304d7c4
+fixture:runtime_options|Postgres|sha|runtime.json|2671cd4d141615f162e8a36d31b7ba47c21b28f5e928d58f84db7cfe83c50f63
 fixture:runtime_options|Sqlite|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:runtime_options|Sqlite|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:runtime_options|Sqlite|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -835,7 +847,7 @@ fixture:runtime_options|Sqlite|index|posts|3|{ name: "posts_author_status_idx", 
 fixture:runtime_options|Sqlite|options|posts|options: { softDelete: true, strictness: "off" }
 fixture:runtime_options|Sqlite|primary_key|posts|single:id
 fixture:runtime_options|Sqlite|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
-fixture:runtime_options|Sqlite|sha|runtime.json|e0d2b2d35c77786057d2599de5bccc9f8043a74ef34c29f217aa77e4b304d7c4
+fixture:runtime_options|Sqlite|sha|runtime.json|2671cd4d141615f162e8a36d31b7ba47c21b28f5e928d58f84db7cfe83c50f63
 fixture:sequences_exclusion|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
 fixture:sequences_exclusion|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
 fixture:sequences_exclusion|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist

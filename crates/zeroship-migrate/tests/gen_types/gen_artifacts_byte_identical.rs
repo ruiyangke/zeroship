@@ -1,4 +1,4 @@
-//! **`genArtifacts` byte-identical-by-construction + v1-shape pins.**
+//! **`genArtifacts` byte-identical-by-construction + v2-shape pins.**
 //!
 //! The schema-artifact emitter (`gen-types`) has two front-doors:
 //!   - `render_artifacts(ops, dialect, schema, effective)` - the GENERATED source
@@ -31,9 +31,9 @@
 //! and compared, but did not START from the recorder's raw author-only shape.
 //!   1. the two produce BYTE-IDENTICAL `schema.runtime.json` (the byte-identical
 //!      guarantee: one renderer, not two);
-//!   2. the emitted `schema.runtime.json` parses + satisfies the v1 contract the
-//!      runtime validates (version==1, snake_case fields incl. the 7 system fields,
-//!      options, indexes);
+//!   2. the emitted `schema.runtime.json` parses + satisfies the v2 contract the
+//!      runtime validates (version==2, snake_case fields incl. the 7 system fields,
+//!      each field's read-surface flags and physical-storage block, options, indexes);
 //!   3. the emitted `env.db.ts` is a passive schema map whose current
 //!      `zero-migrate` builder calls satisfy `CreateTableArgs`.
 
@@ -183,8 +183,26 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     );
 }
 
+/// **The v2 descriptor contract, structurally.**
+///
+/// This was `..._the_v1_shape` until `RuntimeSchemaDescriptorV1` became V2
+/// (`crates/zeroship-migrate-core/src/render/gen_types.rs:126-135`, `:481`). The version
+/// number is the smallest part of the change and checking only it would leave the arm
+/// weaker than the one it replaced: V2 also gives EVERY field four read-surface flags
+/// and a `storage` block naming the physical column(s) it occupies
+/// (`gen_types.rs:320-360`). So every field of this collection is walked, not just the
+/// seven the policy injects, and the storage block's key set is pinned exactly.
+///
+/// The TWO-COLUMN arm - a masked or encrypted field, where `valueColumn` is the sibling
+/// and `rawColumn` the authoritative column with its three capability flags - cannot be
+/// reached from here, because `people_descriptor` declares no mask and no encryption.
+/// It is pinned in
+/// `crates/zeroship-migrate-core/src/render/gen_types/physical_storage.rs`. What this
+/// arm pins is the other half of that rule, which that file also states and which is
+/// easy to lose by accident: an ORDINARY field emits `valueColumn` and NOTHING ELSE, so
+/// no consumer ever sees a capability flag about a column that does not exist.
 #[test]
-fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
+fn emitted_runtime_json_parses_and_satisfies_the_v2_shape() {
     let artifacts = render_artifacts_from_descriptors(
         zeroship_migrate::shipping_vendors(),
         &[people_descriptor()],
@@ -195,8 +213,8 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     .expect("render");
     let v: Value = serde_json::from_str(&artifacts.runtime_json).expect("runtime json parses");
 
-    // version == 1
-    assert_eq!(v["version"], 1, "runtime descriptor is v1: {v}");
+    // version == 2
+    assert_eq!(v["version"], 2, "runtime descriptor is v2: {v}");
 
     let people = &v["collections"]["people"];
     assert!(people.is_object(), "collection present: {v}");
@@ -218,6 +236,46 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     assert_eq!(fields["name"]["type"], "string");
     assert_eq!(fields["email"]["type"], "string");
     assert_eq!(fields["email"]["required"], true);
+
+    // EVERY field - the two authored and the seven the policy injects - carries the v2
+    // read surface and physical storage. Walking the whole map rather than a named few
+    // is what makes this a shape check: a field the emitter forgot to stamp fails here
+    // instead of passing because nobody named it.
+    let all_fields = fields.as_object().expect("fields is an object");
+    let mut walked = 0usize;
+    for (name, def) in all_fields {
+        walked += 1;
+        for flag in ["readable", "filterable", "sortable", "projectable"] {
+            assert_eq!(
+                def[flag],
+                Value::Bool(true),
+                "field {name} must declare `{flag}` as a boolean: {def}"
+            );
+        }
+        let storage = def
+            .get("storage")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("field {name} must carry a `storage` object: {def}"));
+        assert_eq!(
+            storage.get("valueColumn").and_then(Value::as_str),
+            Some(name.as_str()),
+            "an unmasked field's value lives in its own column, named not formatted: {def}"
+        );
+        // Exhaustive, not a spot check: `rawColumn`, the three `raw*` capability flags
+        // and `auxiliary` are all `skip_serializing_if`-absent for a one-column field,
+        // and a flag about a column that does not exist is not state
+        // (`gen_types.rs:172-209`).
+        assert_eq!(
+            storage.keys().collect::<Vec<_>>(),
+            vec!["valueColumn"],
+            "an ordinary field's storage block is `valueColumn` and nothing else: {def}"
+        );
+    }
+    assert_eq!(
+        walked,
+        confined_injected_column_names().len() + 2,
+        "the walk covered the 2 authored fields and every injected one: {fields}"
+    );
 
     // Options block: booleans + strictness enum.
     let options = &people["options"];

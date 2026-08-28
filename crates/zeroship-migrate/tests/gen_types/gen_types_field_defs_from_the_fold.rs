@@ -204,6 +204,53 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
         );
     }
 
+    // THE V2 KEYS, held to the same floor and for the same reason. The wire `FieldDef`
+    // gained four read-surface flags and a physical-`storage` block
+    // (`crates/zeroship-migrate-core/src/render/gen_types.rs:320-360`), and this file was
+    // REGENERATED to record them. A golden regenerated once can be regenerated again;
+    // without a floor, a later capture that emitted none of these would look exactly like
+    // a clean run. Every rendered field carries all five, so the floor is the field-row
+    // count rather than a token number - a partial stamp fails here too.
+    let field_rows = count("|field|");
+    assert!(
+        field_rows >= 300,
+        "the golden must carry field rows for the floors below to mean anything: \
+         {field_rows}"
+    );
+    for key in [
+        "\"readable\":true",
+        "\"filterable\":true",
+        "\"sortable\":true",
+        "\"projectable\":true",
+        "\"storage\":{\"valueColumn\"",
+    ] {
+        assert_eq!(
+            count(key),
+            field_rows,
+            "EVERY field row carries {key}; a capture that stamped only some of them \
+             would still satisfy a `> 0` floor"
+        );
+    }
+    // The auxiliary leg is a different shape and a much thinner one: only a `vector`
+    // column on a target with no non-B-tree index method owns a shadow relation, which
+    // is Sqlite and Mysql here and never Postgres. Pinned separately so a change that
+    // stopped emitting it cannot hide inside the totals above.
+    assert!(
+        count("\"kind\":\"shadowTable\"") > 0,
+        "the golden must carry at least one `auxiliary` shadow relation, or a change \
+         that stopped naming them would regenerate green"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("\"kind\":\"shadowTable\"")
+                && line.contains("|Postgres|"))
+            .count(),
+        0,
+        "and NONE of them on Postgres, which indexes a vector in place - the control \
+         that says the shadow relation is a capability answer, not a default"
+    );
+
     // Both outcomes of `render_artifacts`, so the golden pins refusals as well as
     // renders. An all-rendered corpus would say nothing about over-refusal.
     assert!(
