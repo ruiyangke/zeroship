@@ -48,9 +48,10 @@ fn command_timeout_is_opt_in_pool_policy() {
 #[compio::test]
 async fn overrun_is_cancelled_and_the_same_client_remains_usable() {
     compio::time::timeout(OUTER_WATCHDOG, async {
+        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(100)).await;
         let mut client = pool.get().await.expect("check out the only connection");
-        let backend_pid = client.process_id();
+        let announced_pid = client.process_id();
 
         let started = Instant::now();
         let error = client
@@ -76,7 +77,7 @@ async fn overrun_is_cancelled_and_the_same_client_remains_usable() {
             .query_one("SELECT pg_backend_pid(), 42::int4", &[])
             .await
             .expect("the timed-out client's response stream was not drained");
-        assert_eq!(row.get::<_, i32>(0), backend_pid);
+        transport.assert_backend_pid(announced_pid, row.get(0), "timeout recovery");
         assert_eq!(row.get::<_, i32>(1), 42);
     })
     .await
@@ -86,9 +87,10 @@ async fn overrun_is_cancelled_and_the_same_client_remains_usable() {
 #[compio::test]
 async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
     compio::time::timeout(OUTER_WATCHDOG, async {
+        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(100)).await;
         let mut client = pool.get().await.expect("check out the only connection");
-        let backend_pid = client.process_id();
+        let announced_pid = client.process_id();
 
         let error = client
             .command(async |client| client.batch_execute("BEGIN; SELECT pg_sleep(3)").await)
@@ -100,7 +102,7 @@ async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
             .query_one("SELECT pg_backend_pid(), 42::int4", &[])
             .await
             .expect("timeout recovery left the held client in failed transaction state");
-        assert_eq!(row.get::<_, i32>(0), backend_pid);
+        transport.assert_backend_pid(announced_pid, row.get(0), "transaction-timeout recovery");
         assert_eq!(row.get::<_, i32>(1), 42);
     })
     .await
@@ -110,9 +112,10 @@ async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
 #[compio::test]
 async fn command_inside_the_deadline_is_untouched() {
     compio::time::timeout(OUTER_WATCHDOG, async {
+        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(750)).await;
         let mut client = pool.get().await.expect("check out the only connection");
-        let backend_pid = client.process_id();
+        let announced_pid = client.process_id();
 
         let row = client
             .command(async |client| {
@@ -123,7 +126,7 @@ async fn command_inside_the_deadline_is_untouched() {
             .await
             .expect("an in-budget command was cancelled");
 
-        assert_eq!(row.get::<_, i32>(0), backend_pid);
+        transport.assert_backend_pid(announced_pid, row.get(0), "in-budget command");
         assert_eq!(row.get::<_, i32>(1), 7);
         assert!(!client.is_closed());
     })
@@ -134,9 +137,10 @@ async fn command_inside_the_deadline_is_untouched() {
 #[compio::test]
 async fn direct_pooled_client_query_does_not_enter_command_scope() {
     compio::time::timeout(OUTER_WATCHDOG, async {
+        let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(50)).await;
         let client = pool.get().await.expect("check out the only connection");
-        let backend_pid = client.process_id();
+        let announced_pid = client.process_id();
 
         let started = Instant::now();
         let row = client
@@ -148,7 +152,7 @@ async fn direct_pooled_client_query_does_not_enter_command_scope() {
             started.elapsed() >= Duration::from_millis(150),
             "the query did not expose three configured command budgets"
         );
-        assert_eq!(row.get::<_, i32>(0), backend_pid);
+        transport.assert_backend_pid(announced_pid, row.get(0), "direct pooled-client query");
         assert_eq!(row.get::<_, i32>(1), 42);
         assert!(!client.is_closed());
     })

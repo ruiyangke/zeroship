@@ -134,6 +134,83 @@ pub fn server_answered(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// The endpoint behavior relevant to tests that observe session provenance.
+///
+/// PgBouncer exposes `SHOW CONFIG` only through its `pgbouncer` administration
+/// database, and the `pool_mode=transaction` row is positive evidence that the
+/// endpoint provides transaction pooling. PostgreSQL either rejects that
+/// database or rejects the PgBouncer-only command. Any refusal, query error,
+/// or ambiguous response therefore retains the stricter direct assertions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestTransport {
+    Direct,
+    TransactionPooler,
+}
+
+pub async fn test_transport<T>(endpoint: &str, tls: T) -> TestTransport
+where
+    T: compio_postgres::tls::MakeTlsConnect<compio_postgres::Socket>,
+    T::Stream: compio::io::AsyncRead
+        + compio::io::AsyncWrite
+        + Unpin
+        + compio_postgres::SplitStream
+        + 'static,
+    <T::Stream as compio_postgres::SplitStream>::ReadHalf: 'static,
+{
+    use compio_postgres::SimpleQueryMessage;
+
+    let mut config: compio_postgres::Config = endpoint
+        .parse()
+        .expect("the transport-probe endpoint parses");
+    config.dbname("pgbouncer");
+
+    let Ok((client, connection)) = config.connect(tls).await else {
+        return TestTransport::Direct;
+    };
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let is_transaction_pooler =
+        client
+            .simple_query("SHOW CONFIG")
+            .await
+            .ok()
+            .is_some_and(|messages| {
+                messages.into_iter().any(|message| match message {
+                    SimpleQueryMessage::Row(row) => {
+                        row.get(0) == Some("pool_mode") && row.get(1) == Some("transaction")
+                    }
+                    _ => false,
+                })
+            });
+
+    if is_transaction_pooler {
+        TestTransport::TransactionPooler
+    } else {
+        TestTransport::Direct
+    }
+}
+
+impl TestTransport {
+    /// Assert the backend identity returned by a query separate from the mode
+    /// probe, so the pooled inequality is an independently falsifiable claim.
+    pub fn assert_backend_pid(self, announced_pid: i32, backend_pid: i32, context: &str) {
+        match self {
+            Self::Direct => assert_eq!(
+                backend_pid, announced_pid,
+                "{context}: a direct connection changed physical backend"
+            ),
+            Self::TransactionPooler => assert_ne!(
+                backend_pid, announced_pid,
+                "{context}: a transaction pooler exposed its synthetic frontend PID as a \
+                 PostgreSQL backend PID"
+            ),
+        }
+    }
+}
+
 /// Fail the calling test because the connection this test needs was not made.
 ///
 /// This is what a missing database does now. It used to announce a skip, which
