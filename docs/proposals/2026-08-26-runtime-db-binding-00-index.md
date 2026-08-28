@@ -192,6 +192,29 @@ through `backend/sqlite/cdc.rs` - never reaches them. The design says they "stay
 only for the SQLite dev tier", which is backwards: deleting the Postgres arm
 means deleting these three **entirely**, and SQLite is untouched.
 
+**5. The service the design assigns the projection to DOES NOT HAVE THE
+DESCRIPTOR.** The design computes the wire projection from
+`storage.valueColumn` and applies it via `zeroship-migrated`, "which already
+owns publication membership". It owns membership at **table** granularity only.
+Verified:
+
+- `ApplyMigrationsRequest` (`zeroship-migrated/src/apply.rs:49-55`) carries
+  `kind`, `documents: Vec<IrDocument>` and `policy` - **no descriptor field**.
+- `publication_membership_sql` (`publication.rs:30-51`) takes
+  `tables: &[String]` and emits `schema.table`. There is no column parameter
+  anywhere on the path.
+
+So the placement as written cannot be implemented: the service has no
+`storage.valueColumn` to read.
+
+**But the fix is smaller than "plumb the descriptor through", because the
+service already receives `documents: Vec<IrDocument>` - and the IR is what the
+descriptor is FOLDED FROM.** The projection should be derived from that IR
+inside the service, in the same policy-resolved fold that produces the DDL, so
+the DDL and the projection come from one source rather than two that can
+disagree. That also supplies the diff finding 1's shrink-before/widen-after
+bracket needs, so both fixes land in the same place.
+
 **One reviewer-flagged risk RESOLVED, and it resolves structurally.** The wire
 projection reads `storage.valueColumn` and nothing else, while the read side
 (`read_column_for`, `query.rs:3402`) has a suffix *fallback* when the storage
