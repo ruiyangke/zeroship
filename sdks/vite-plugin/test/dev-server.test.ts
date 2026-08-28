@@ -322,17 +322,20 @@ describe("devServerPlugin", () => {
   });
 
   test("prefers DATABASE_URL from the parent environment over .env", async () => {
+    // sqlite: values, not postgres:// — `resolveDatabaseUrl` now REJECTS a
+    // non-SQLite dev URL outright (SC-4 decision 1,
+    // docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md), so a Postgres
+    // URL here would never reach the runtime at all. Precedence is what this
+    // case tests; the scheme rejection itself is covered directly and far
+    // more cheaply by test/dev-database-url.test.ts.
     const harness = await startHarness({
-      dotenv: "DATABASE_URL=postgres://dotenv-user:secret@dotenv-host/dotenv-db\n",
-      parentDatabaseUrl: "postgres://shell-user:secret@shell-host/shell-db",
+      dotenv: "DATABASE_URL=sqlite:.dotenv-dev.sqlite\n",
+      parentDatabaseUrl: "sqlite:.shell-dev.sqlite",
       devServerPort: 3902,
     });
     try {
       const runtime = await harness.runtimeLog();
-      assert.equal(
-        runtime.env.DATABASE_URL,
-        "postgres://shell-user:secret@shell-host/shell-db",
-      );
+      assert.equal(runtime.env.DATABASE_URL, "sqlite:.shell-dev.sqlite");
     } finally {
       await harness.close();
     }
