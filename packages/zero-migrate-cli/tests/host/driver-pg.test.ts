@@ -361,7 +361,7 @@ test("apply survives a fully poisoned global pg.types map", async (t) => {
     // exercised: the property arm at the top of this file, and e2e-pg's `history()`
     // arm, which asserts `typeof eventSeq === "bigint"`.
     const journal = await adm.query(
-      `SELECT checksum FROM "${meta}".schema_migrations
+      `SELECT checksum FROM "${meta}".__zeroship_schema_migrations
        WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     assert.ok(journal.rows.length > 0, "the apply journaled at least one step");

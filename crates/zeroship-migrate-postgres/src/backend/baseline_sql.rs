@@ -165,7 +165,7 @@ async fn first_baseline_version<D: SqlSession>(
     let rows = conn
         .query(
             &format!(
-                "SELECT version FROM {meta}.schema_migrations
+                "SELECT version FROM {meta}.__zeroship_schema_migrations
                   WHERE kind = 'baseline'
                   ORDER BY event_seq ASC
                   LIMIT 1"

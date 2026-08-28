@@ -1416,7 +1416,7 @@ const PROGRESS_RELATION_SQL: &str = "SELECT c.relkind::text AS relation_kind, \
             c.relpersistence::text AS persistence, c.relnatts::bigint AS attribute_count \
        FROM pg_catalog.pg_class c \
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-      WHERE n.nspname = $1 AND c.relname = 'schema_backfills'";
+      WHERE n.nspname = $1 AND c.relname = '__zeroship_schema_backfills'";
 
 const PROGRESS_COLUMNS_SQL: &str = "SELECT a.attnum::bigint AS ordinal_position, \
             a.attname::text AS column_name, \
@@ -1430,7 +1430,7 @@ const PROGRESS_COLUMNS_SQL: &str = "SELECT a.attnum::bigint AS ordinal_position,
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
        LEFT JOIN pg_catalog.pg_attrdef d \
          ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-      WHERE n.nspname = $1 AND c.relname = 'schema_backfills' \
+      WHERE n.nspname = $1 AND c.relname = '__zeroship_schema_backfills' \
         AND a.attnum > 0 \
       ORDER BY a.attnum";
 
@@ -1443,13 +1443,13 @@ const PROGRESS_CONSTRAINTS_SQL: &str = "SELECT con.contype::text AS constraint_t
        FROM pg_catalog.pg_constraint con \
        JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-      WHERE n.nspname = $1 AND c.relname = 'schema_backfills' \
+      WHERE n.nspname = $1 AND c.relname = '__zeroship_schema_backfills' \
         AND con.contype <> 'n' \
       ORDER BY con.oid";
 
 fn progress_schema_error(detail: impl Into<String>) -> ApplyError {
     backend_error(format!(
-        "schema_backfills does not have the exact current pre-release schema: {}",
+        "__zeroship_schema_backfills does not have the exact current pre-release schema: {}",
         detail.into()
     ))
 }
@@ -1524,7 +1524,7 @@ async fn ensure_progress<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Resul
     conn.batch(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
     conn.batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_backfills (\
+        "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_backfills (\
             backfill_id TEXT PRIMARY KEY, \
             checksum TEXT NOT NULL, \
             name TEXT NOT NULL, \
@@ -1580,7 +1580,7 @@ async fn read_progress_row<D: SqlSession>(
                         rows_done, batches_done, complete, \
                         guard_trigger, guard_function, guard_marker, \
                         guard_installed, guard_cleaned \
-                   FROM {meta}.schema_backfills \
+                   FROM {meta}.__zeroship_schema_backfills \
                   WHERE backfill_id = $1{lock}"
             ),
             &[Bind::Text(backfill_id.to_string())],
@@ -1735,7 +1735,7 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
             "SELECT EXISTS ( \
                  SELECT 1 FROM pg_catalog.pg_class c \
                  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = $1 AND c.relname = 'schema_backfills' \
+                 WHERE n.nspname = $1 AND c.relname = '__zeroship_schema_backfills' \
                    AND c.relkind IN ('r', 'p') \
              ) AS table_exists",
             &[Bind::Text(cfg.confinement.meta_schema.clone())],
@@ -1753,7 +1753,7 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
         .query(
             &format!(
                 "SELECT backfill_id, checksum, complete \
-                   FROM {meta}.schema_backfills"
+                   FROM {meta}.__zeroship_schema_backfills"
             ),
             &[],
         )
@@ -1901,7 +1901,7 @@ async fn initialize_progress<D: SqlSession>(
         let inserted = conn
             .exec(
                 &format!(
-                    "INSERT INTO {meta}.schema_backfills (\
+                    "INSERT INTO {meta}.__zeroship_schema_backfills (\
                         backfill_id, checksum, name, target_schema, target_table, \
                         cursor_columns, cursor_contract, cursor_stability, \
                         end_cursor, cohort_bound_checksum, cohort_initialized, \
@@ -2129,7 +2129,7 @@ async fn run_batch<D: SqlSession>(
             let advanced = conn
                 .exec(
                     &format!(
-                        "UPDATE {meta}.schema_backfills \
+                        "UPDATE {meta}.__zeroship_schema_backfills \
                             SET last_cursor = $3::text::jsonb, rows_done = rows_done + $4, \
                                 batches_done = batches_done + 1, updated_at = now() \
                           WHERE backfill_id = $1 AND checksum = $2 AND complete = false"
@@ -2208,7 +2208,7 @@ async fn finish_backfill<D: SqlSession>(
             let completed = conn
                 .exec(
                     &format!(
-                        "UPDATE {meta}.schema_backfills \
+                        "UPDATE {meta}.__zeroship_schema_backfills \
                             SET complete = true, guard_installed = false, \
                                 guard_cleaned = true, updated_at = now() \
                           WHERE backfill_id = $1 AND checksum = $2 \
@@ -2236,7 +2236,7 @@ async fn finish_backfill<D: SqlSession>(
         let latest = conn
             .query(
                 &format!(
-                    "SELECT event_kind, checksum FROM {meta}.schema_migrations \
+                    "SELECT event_kind, checksum FROM {meta}.__zeroship_schema_migrations \
                       WHERE version = $1 ORDER BY event_seq DESC LIMIT 1"
                 ),
                 &[Bind::Text(version.as_str().to_string())],
@@ -2263,7 +2263,7 @@ async fn finish_backfill<D: SqlSession>(
         if !already_journaled {
             conn.exec(
                 &format!(
-                    "INSERT INTO {meta}.schema_migrations \
+                    "INSERT INTO {meta}.__zeroship_schema_migrations \
                         (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
                      VALUES ('{applied}', $1, $2, $3, $4, 0, \
                              'completed', 'success', 'apply')",

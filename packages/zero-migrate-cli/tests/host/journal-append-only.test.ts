@@ -19,7 +19,7 @@
 // first two would leave the fastest way to erase history open.
 //
 // WHAT THIS DOES NOT CLAIM. The fourth arm records that a forged INSERT was
-// rejected, but by the `schema_migrations_event_shape` CHECK - a well-formedness
+// rejected, but by the `__zeroship_schema_migrations_event_shape` CHECK - a well-formedness
 // constraint, not an authenticity one. It is evidence that a careless forgery
 // fails, NOT that forging a properly shaped event is impossible. The manifest
 // that `security-model.md` describes for Rust hosts is what addresses that, and
@@ -94,7 +94,7 @@ test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ct
 
     const journalRows = async (): Promise<number> => {
       const { rows } = await client.query(
-        `SELECT count(*)::int AS n FROM "${meta}".schema_migrations`,
+        `SELECT count(*)::int AS n FROM "${meta}".__zeroship_schema_migrations`,
       );
       return rows[0].n as number;
     };
@@ -104,18 +104,18 @@ test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ct
     // Three separate privileges, three separate arms.
     await assert.rejects(
       client.query(
-        `UPDATE "${meta}".schema_migrations SET checksum = 'deadbeef' WHERE event_kind = 'applied'`,
+        `UPDATE "${meta}".__zeroship_schema_migrations SET checksum = 'deadbeef' WHERE event_kind = 'applied'`,
       ),
       /append-only \(no UPDATE\/DELETE\)/,
       "rewriting a journaled checksum must be refused by the database",
     );
     await assert.rejects(
-      client.query(`DELETE FROM "${meta}".schema_migrations WHERE event_kind = 'applied'`),
+      client.query(`DELETE FROM "${meta}".__zeroship_schema_migrations WHERE event_kind = 'applied'`),
       /append-only \(no UPDATE\/DELETE\)/,
       "erasing a journaled event must be refused by the database",
     );
     await assert.rejects(
-      client.query(`TRUNCATE "${meta}".schema_migrations`),
+      client.query(`TRUNCATE "${meta}".__zeroship_schema_migrations`),
       /append-only \(no UPDATE\/DELETE\)/,
       "truncating the journal must be refused too - it is a distinct privilege",
     );
@@ -124,10 +124,10 @@ test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ct
     // authenticity guarantee, only evidence that the event shape is constrained.
     await assert.rejects(
       client.query(
-        `INSERT INTO "${meta}".schema_migrations (event_kind, version, name, checksum, "by")
+        `INSERT INTO "${meta}".__zeroship_schema_migrations (event_kind, version, name, checksum, "by")
          VALUES ('applied', 'mig_forged', 'forged', 'cafebabe', 'attacker')`,
       ),
-      /schema_migrations_event_shape/,
+      /__zeroship_schema_migrations_event_shape/,
       "a malformed forged event must fail the event-shape check",
     );
 

@@ -149,7 +149,7 @@ test("a mid-batch failure leaves the earlier migration applied and resumes clean
   const appliedNames = async (): Promise<string[]> =>
     (
       await client.query(
-        `SELECT name FROM "${namespace}_migrations".schema_migrations
+        `SELECT name FROM "${namespace}_migrations".__zeroship_schema_migrations
           WHERE event_kind = 'applied' ORDER BY event_seq`,
       )
     ).rows.map((row: { name: string }) => row.name);

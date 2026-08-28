@@ -138,7 +138,7 @@ async function pgJournalPhases(
 ): Promise<Array<{ name: string; event_kind: string; phase: string | null }>> {
   const result = await client.query(
     `SELECT name, event_kind, phase
-       FROM ${pgIdent(`${schema}_migrations`)}.schema_migrations
+       FROM ${pgIdent(`${schema}_migrations`)}.__zeroship_schema_migrations
       ORDER BY event_seq`,
   );
   return result.rows as Array<{ name: string; event_kind: string; phase: string | null }>;

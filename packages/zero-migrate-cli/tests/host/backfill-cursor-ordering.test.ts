@@ -191,7 +191,7 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
 
         // And the engine's own count must agree with the table.
         const { rows: progress } = await admin.query(
-          `SELECT rows_done FROM "${meta}".schema_backfills`,
+          `SELECT rows_done FROM "${meta}".__zeroship_schema_backfills`,
         );
         assert.equal(
           Number(progress[0]?.rows_done),
@@ -339,7 +339,7 @@ test("a composite cursor visits every row exactly once under the same inversions
         assert.equal(rows.length, pairs.length, `${label}: the cohort must be intact`);
 
         const { rows: progress } = await admin.query(
-          `SELECT rows_done FROM "${meta}".schema_backfills`,
+          `SELECT rows_done FROM "${meta}".__zeroship_schema_backfills`,
         );
         assert.equal(
           Number(progress[0]?.rows_done),

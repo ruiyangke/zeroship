@@ -14,7 +14,7 @@
 // THE OVERLAP IS ASSERTED, NOT HOPED FOR. A test that wrote before the backfill
 // started, or after it finished, would report zero lost updates and mean nothing
 // - which is the failure mode of most concurrency tests. So the write loop also
-// samples `schema_backfills`, counts how many of its writes landed while the
+// samples `__zeroship_schema_backfills`, counts how many of its writes landed while the
 // backfill was genuinely mid-flight (`0 < rows_done < N` and not complete), and
 // requires that count to be substantial. If the machine is too fast for the
 // windows to overlap, this fails loudly rather than passing empty.
@@ -173,7 +173,7 @@ test("a write committed during the expand backfill is not overwritten by it", as
       }
       try {
         const { rows } = await sampler.query(
-          `SELECT rows_done::bigint AS d, complete FROM "${meta}".schema_backfills`,
+          `SELECT rows_done::bigint AS d, complete FROM "${meta}".__zeroship_schema_backfills`,
         );
         if (rows.length === 1) {
           const done = Number(rows[0].d);

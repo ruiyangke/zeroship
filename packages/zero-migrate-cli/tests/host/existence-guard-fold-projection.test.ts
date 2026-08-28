@@ -227,7 +227,7 @@ async function pgCompletedVersions(
   metaSchema: string,
 ): Promise<string[]> {
   const result = await client.query(
-    `SELECT version FROM ${pgIdent(metaSchema)}.schema_migrations ORDER BY version`,
+    `SELECT version FROM ${pgIdent(metaSchema)}.__zeroship_schema_migrations ORDER BY version`,
   );
   return (result.rows as Array<{ version: string }>).map((row) => row.version);
 }

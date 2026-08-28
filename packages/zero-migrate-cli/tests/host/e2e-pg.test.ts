@@ -60,7 +60,7 @@ async function readJournal(
   const meta = `${projectSchema}_migrations`;
   const r = await client.query(
     `SELECT event_seq, name, checksum
-       FROM "${meta}".schema_migrations
+       FROM "${meta}".__zeroship_schema_migrations
       WHERE event_kind = 'applied'
       ORDER BY event_seq`,
   );
@@ -88,7 +88,7 @@ async function applyAndAnchors(
       nameFallback: "create_gadgets",
     });
     const r = await client.query(
-      `SELECT DISTINCT checksum FROM "${meta}".schema_migrations WHERE event_kind = 'applied'`,
+      `SELECT DISTINCT checksum FROM "${meta}".__zeroship_schema_migrations WHERE event_kind = 'applied'`,
     );
     return (r.rows as Array<{ checksum: string }>).map((row) => row.checksum);
   } finally {

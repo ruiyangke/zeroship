@@ -168,7 +168,7 @@ test("racing applies never double-apply: one wins, the journal holds each versio
     // Whatever the exit codes, the DATA must be untouched by the race.
     const { rows: duplicated } = await client.query(
       `SELECT count(*)::int AS n FROM (
-         SELECT version FROM "${meta}".schema_migrations
+         SELECT version FROM "${meta}".__zeroship_schema_migrations
           WHERE event_kind = 'applied'
           GROUP BY version HAVING count(*) > 1) AS d`,
     );
@@ -212,7 +212,7 @@ test("a racing first deploy no longer fails with a raw PostgreSQL catalog error"
     // The safety property still holds even here - that part is not the complaint.
     const { rows: duplicated } = await client.query(
       `SELECT count(*)::int AS n FROM (
-         SELECT version FROM "${meta}".schema_migrations
+         SELECT version FROM "${meta}".__zeroship_schema_migrations
           WHERE event_kind = 'applied'
           GROUP BY version HAVING count(*) > 1) AS d`,
     );

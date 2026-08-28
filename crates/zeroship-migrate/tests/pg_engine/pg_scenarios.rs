@@ -33,7 +33,7 @@
 //! `apply/journal.rs:608-622` says this crate ships the durable recovery primitives
 //! AND NO DRIVER: `DeployRecoveryScope` is never constructed, no `deploy_id` is
 //! generated, and the only entry point passes `None`, so no
-//! `schema_deploy_recovery` marker is written or recovered. Keeping both arms means
+//! `__zeroship_schema_deploy_recovery` marker is written or recovered. Keeping both arms means
 //! the shipped behaviour is pinned AND the gap it leaves is legible, rather than the
 //! refusals reading as the finished answer.
 //!
@@ -860,7 +860,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
     let progress_rows: i64 = session
         .query_one(
             &format!(
-                "SELECT count(*) AS progress_rows FROM \"{}\".schema_backfills \
+                "SELECT count(*) AS progress_rows FROM \"{}\".__zeroship_schema_backfills \
                  WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
@@ -974,7 +974,7 @@ async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohor
     let progress_rows: i64 = session
         .query_one(
             &format!(
-                "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
+                "SELECT count(*)::bigint AS n FROM \"{}\".__zeroship_schema_backfills \
                  WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
@@ -1083,7 +1083,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     let progress = session
         .query_one(
             &format!(
-                "SELECT last_cursor::text AS last_cursor, complete FROM \"{}\".schema_backfills \
+                "SELECT last_cursor::text AS last_cursor, complete FROM \"{}\".__zeroship_schema_backfills \
                  WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
@@ -1174,7 +1174,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
                 "SELECT last_cursor::text AS last_cursor, end_cursor::text AS end_cursor, \
                         cursor_columns::text AS cursor_columns, guard_trigger, \
                         guard_installed, guard_cleaned, complete \
-                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                   FROM \"{}\".__zeroship_schema_backfills WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
@@ -1269,7 +1269,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
         .query_one(
             &format!(
                 "SELECT guard_installed, guard_cleaned, complete \
-                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                   FROM \"{}\".__zeroship_schema_backfills WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
@@ -1412,7 +1412,7 @@ async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
             .query_one(
                 &format!(
                     "SELECT end_cursor::text AS end_cursor, complete \
-                       FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                       FROM \"{}\".__zeroship_schema_backfills WHERE backfill_id = $1",
                     cfg.confinement.meta_schema
                 ),
                 &[version.as_str().into()],
@@ -1697,7 +1697,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
         .query_one(
             &format!(
                 "SELECT guard_trigger, guard_function, guard_marker \
-                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                   FROM \"{}\".__zeroship_schema_backfills WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
@@ -1810,7 +1810,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
     session
         .exec(
             &format!(
-                "UPDATE \"{}\".schema_backfills \
+                "UPDATE \"{}\".__zeroship_schema_backfills \
                     SET end_cursor = '[{{\"int64\":\"999\"}}]'::jsonb \
                   WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
@@ -1871,7 +1871,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
     session
         .exec(
             &format!(
-                "UPDATE \"{}\".schema_backfills \
+                "UPDATE \"{}\".__zeroship_schema_backfills \
                     SET cursor_columns = '[\"other_id\"]'::jsonb \
                   WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
@@ -1977,7 +1977,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
 
     session
         .batch(&format!(
-            "ALTER TABLE \"{}\".schema_backfills ADD COLUMN stale_extra text; \
+            "ALTER TABLE \"{}\".__zeroship_schema_backfills ADD COLUMN stale_extra text; \
              UPDATE \"{}\".progress_shape_items SET value = 'pending'",
             cfg.confinement.meta_schema, cfg.project_schema
         ))
@@ -2023,7 +2023,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
     let progress_rows: i64 = session
         .query_one(
             &format!(
-                "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
+                "SELECT count(*)::bigint AS n FROM \"{}\".__zeroship_schema_backfills \
                   WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
@@ -2104,7 +2104,7 @@ async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() 
         .query_one(
             &format!(
                 "SELECT cursor_stability::text AS stability \
-                   FROM \"{}\".schema_backfills WHERE backfill_id = $1",
+                   FROM \"{}\".__zeroship_schema_backfills WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
@@ -2257,7 +2257,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
     let progress_rows: i64 = session
         .query_one(
             &format!(
-                "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
+                "SELECT count(*)::bigint AS n FROM \"{}\".__zeroship_schema_backfills \
                   WHERE backfill_id = $1",
                 cfg.confinement.meta_schema
             ),
@@ -3136,7 +3136,7 @@ async fn inflight_marker_armed(
     let row = session
         .query_one(
             &format!(
-                "SELECT EXISTS (SELECT 1 FROM \"{}\".schema_migrations_inflight \
+                "SELECT EXISTS (SELECT 1 FROM \"{}\".__zeroship_schema_migrations_inflight \
                  WHERE version = $1) AS armed",
                 cfg.confinement.meta_schema
             ),
@@ -3229,7 +3229,7 @@ async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_k
         other => panic!("expected NonTxnRecoveryUnsafe, got {other:?}"),
     }
     assert!(
-        text.contains("schema_migrations_inflight"),
+        text.contains("__zeroship_schema_migrations_inflight"),
         "the refusal must name the repair the operator can perform: {text}"
     );
     assert!(
@@ -3494,7 +3494,8 @@ async fn an_armed_marker_outranks_a_skip_precondition() {
         "the marker's refusal is what the operator sees, not a skip: {err:?}"
     );
     assert!(
-        err.to_string().contains("schema_migrations_inflight"),
+        err.to_string()
+            .contains("__zeroship_schema_migrations_inflight"),
         "the refusal names the repair: {err}"
     );
     assert!(
@@ -3831,7 +3832,7 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
                 "SELECT \
                    count(*) FILTER (WHERE event_kind = 'applied')::int8     AS applied_n, \
                    count(*) FILTER (WHERE event_kind = 'rolled_back')::int8 AS rolled_n \
-                 FROM \"{}\".schema_migrations WHERE version = $1",
+                 FROM \"{}\".__zeroship_schema_migrations WHERE version = $1",
                 cfg.confinement.meta_schema
             ),
             &[v.as_str().into()],
@@ -7821,7 +7822,7 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
     let edges: i64 = session
         .query_one(
             &format!(
-                "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations_supersedes",
+                "SELECT count(*)::bigint AS n FROM \"{}\".__zeroship_schema_migrations_supersedes",
                 cfg.confinement.meta_schema
             ),
             &[],
@@ -7907,7 +7908,7 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
     let fresh_edges: i64 = session
         .query_one(
             &format!(
-                "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations_supersedes",
+                "SELECT count(*)::bigint AS n FROM \"{}\".__zeroship_schema_migrations_supersedes",
                 fresh_cfg.confinement.meta_schema
             ),
             &[],

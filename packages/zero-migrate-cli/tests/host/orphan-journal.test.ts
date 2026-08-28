@@ -110,7 +110,7 @@ test("CLI apply names a deleted migration's journal step once, and only it", asy
     assert.deepEqual(diagnosedStepIds(first), [], "a complete set has no missing step");
 
     const journal = await client.query(
-      `SELECT name, version FROM "${schema}_migrations".schema_migrations
+      `SELECT name, version FROM "${schema}_migrations".__zeroship_schema_migrations
         WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     const stepIdByName = new Map<string, string>(
@@ -195,7 +195,7 @@ test("CLI apply refuses a pending migration when a completed step has no file", 
     const applied = spawnCli(applyArgs(schema), cwd);
     assert.equal(applied.status, 0, applied.stderr);
     const journal = await client.query(
-      `SELECT version FROM "${schema}_migrations".schema_migrations
+      `SELECT version FROM "${schema}_migrations".__zeroship_schema_migrations
         WHERE event_kind = 'applied' AND name = 'create_table_beta'`,
     );
     const strandedStepId = (journal.rows as Array<{ version: string }>)[0]?.version;

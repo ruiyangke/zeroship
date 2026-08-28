@@ -170,7 +170,7 @@ test("a file that fails partway leaves its earlier work applied, and the retry r
   };
   const journal = async (): Promise<string[]> => {
     const { rows } = await client.query(
-      `SELECT name FROM "${meta}".schema_migrations
+      `SELECT name FROM "${meta}".__zeroship_schema_migrations
         WHERE event_kind = 'applied' AND (phase IS NULL OR phase = 'completed')
         ORDER BY event_seq`,
       [],

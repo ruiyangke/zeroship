@@ -142,7 +142,7 @@ async function storedDown(
 ): Promise<string | null> {
   const result = await client.query(
     `SELECT down
-       FROM ${ident(`${schema}_migrations`)}.schema_migrations
+       FROM ${ident(`${schema}_migrations`)}.__zeroship_schema_migrations
       WHERE event_kind = 'applied'
       ORDER BY event_seq DESC
       LIMIT 1`,
@@ -238,7 +238,7 @@ test("F654 b: a stored reverse is replayed, and says nothing about reconstructin
 test("F654 c: a legacy NULL reverse is reconstructed with a visible advisory", async (t) => {
   await withProject(t, "f654_legacy", async (client, schema) => {
     const work = scaffold(schema, "create_f654_notes", createTableBody());
-    const journal = `${ident(`${schema}_migrations`)}.schema_migrations`;
+    const journal = `${ident(`${schema}_migrations`)}.__zeroship_schema_migrations`;
     try {
       const applied = cli(work, schema, ["apply", "--approve"]);
       assertCliOk(applied, "apply before legacy-row simulation");
@@ -284,7 +284,7 @@ test("F654 d CONTROL: ordinary DDL rollback appends an event and remains re-appl
 
       const events = await client.query(
         `SELECT count(*)::int AS n
-           FROM ${ident(`${schema}_migrations`)}.schema_migrations
+           FROM ${ident(`${schema}_migrations`)}.__zeroship_schema_migrations
           WHERE event_kind = 'rolled_back'`,
       );
       assert.equal(

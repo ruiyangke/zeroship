@@ -125,7 +125,7 @@ test("history --json carries an event_seq beyond 2^53 exactly", async (ctx) => {
 
     // Push the identity past what a double can hold, then journal one more event.
     await client.query(
-      `ALTER TABLE "${meta}".schema_migrations
+      `ALTER TABLE "${meta}".__zeroship_schema_migrations
          ALTER COLUMN event_seq RESTART WITH ${BEYOND_DOUBLE}`,
     );
     writeMigration(work, 2, "t2");
@@ -134,7 +134,7 @@ test("history --json carries an event_seq beyond 2^53 exactly", async (ctx) => {
 
     // The premise, read as text so this assertion cannot itself lose precision.
     const { rows: stored } = await client.query(
-      `SELECT event_seq::text AS seq FROM "${meta}".schema_migrations
+      `SELECT event_seq::text AS seq FROM "${meta}".__zeroship_schema_migrations
         ORDER BY event_seq DESC LIMIT 1`,
     );
     assert.equal(

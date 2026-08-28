@@ -47,7 +47,7 @@ function hostDriver([request, done]) {
 
   if (request.sql.includes('pg_try_advisory_lock')) {
     rows = [row(['got'], [bool(true)])];
-  } else if (request.sql.includes("c.relname = 'schema_backfills'")) {
+  } else if (request.sql.includes("c.relname = '__zeroship_schema_backfills'")) {
     rows = [row(['table_exists', 'checksum_exists'], [bool(false), bool(false)])];
   } else if (request.sql.includes('union_all')) {
     rows = [
@@ -61,7 +61,7 @@ function hostDriver([request, done]) {
       ),
     ];
   } else if (
-    request.sql.includes('schema_migrations') &&
+    request.sql.includes('__zeroship_schema_migrations') &&
     request.sql.includes("event_kind = 'rolled_back'")
   ) {
     rows = [
@@ -78,11 +78,11 @@ function hostDriver([request, done]) {
       ),
     ];
   } else if (
-    request.sql.includes('schema_pending_contracts') &&
+    request.sql.includes('__zeroship_schema_pending_contracts') &&
     request.sql.includes("WHERE state = 'resolved'")
   ) {
     rows = [];
-  } else if (request.sql.includes('schema_pending_contracts')) {
+  } else if (request.sql.includes('__zeroship_schema_pending_contracts')) {
     rows = [
       row(
         [

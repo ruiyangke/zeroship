@@ -214,7 +214,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
 
     // The journal recorded the applied migration steps.
     const journal = await probe.query(
-      `SELECT name FROM "${meta}".schema_migrations WHERE event_kind = 'applied' ORDER BY event_seq`,
+      `SELECT name FROM "${meta}".__zeroship_schema_migrations WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     const journalNames = journal.rows.map((r: { name: string }) => r.name);
     assert.ok(journalNames.length > 0, "journal has applied rows");

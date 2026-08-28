@@ -59,7 +59,8 @@ impl MockDispatch {
 
     /// Route a read to canned rows by SQL shape. ONLY the journal net-state read
     /// (recognisable by the `union_all` CTE + the `schema_migrations_inflight` UNION
-    /// leg) gets rows - and we return NONE (nothing applied yet), so the supplied
+    /// leg - `__zeroship_`-prefixed on PostgreSQL, unprefixed on MySQL) gets rows -
+    /// and we return NONE (nothing applied yet), so the supplied
     /// migration is pending and gets applied. Every other read (introspection,
     /// squash, drift) gets an empty rowset - a valid empty decode.
     fn rows_for(&self, sql: &str) -> Vec<JsRow> {
@@ -90,6 +91,9 @@ impl MockDispatch {
                 cells: vec![int_cell(1)],
             }];
         }
+        // MySQL arm: MySQL keeps the UNPREFIXED journal table names (only the
+        // PostgreSQL backend fences them behind `__zeroship_`), so this needle
+        // must stay unprefixed or the probe goes unanswered.
         if sql.contains("COLLATION_NAME AS collation_name")
             && sql.contains("schema_migrations_inflight")
         {
@@ -396,10 +400,11 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
         "the migration DDL runs before the lock is released: ddl@{ddl} unlock@{unlock}"
     );
 
-    // The journal write-back happened (a schema_migrations INSERT/execute).
+    // The journal write-back happened (a __zeroship_schema_migrations INSERT/execute).
     assert!(
-        log.iter().any(|s| s.contains("schema_migrations")),
-        "a journal write to schema_migrations was recorded: {log:#?}"
+        log.iter()
+            .any(|s| s.contains("__zeroship_schema_migrations")),
+        "a journal write to __zeroship_schema_migrations was recorded: {log:#?}"
     );
 }
 
@@ -440,7 +445,8 @@ fn data_only_plan_executes_and_journals_through_the_host_bridge() {
     );
     assert!(
         log.iter()
-            .any(|entry| entry.contains("INSERT INTO") && entry.contains("schema_migrations")),
+            .any(|entry| entry.contains("INSERT INTO")
+                && entry.contains("__zeroship_schema_migrations")),
         "the data step must be journaled: {log:#?}"
     );
 }

@@ -93,7 +93,7 @@ impl MockPgDispatch {
                 ],
             )];
         }
-        if sql.contains("c.relname = 'schema_backfills'") {
+        if sql.contains("c.relname = '__zeroship_schema_backfills'") {
             return vec![row(
                 &["table_exists", "checksum_exists"],
                 vec![bool_cell(false), bool_cell(false)],
@@ -102,7 +102,9 @@ impl MockPgDispatch {
         if sql.contains("union_all") {
             return self.journal_net_state_rows();
         }
-        if sql.contains("schema_migrations") && sql.contains("event_kind = 'rolled_back'") {
+        if sql.contains("__zeroship_schema_migrations")
+            && sql.contains("event_kind = 'rolled_back'")
+        {
             return vec![row(
                 &["version", "name", "checksum", "actor", "exec_ms", "at"],
                 vec![
@@ -115,10 +117,12 @@ impl MockPgDispatch {
                 ],
             )];
         }
-        if sql.contains("schema_pending_contracts") && sql.contains("WHERE state = 'resolved'") {
+        if sql.contains("__zeroship_schema_pending_contracts")
+            && sql.contains("WHERE state = 'resolved'")
+        {
             return Vec::new();
         }
-        if sql.contains("schema_pending_contracts") {
+        if sql.contains("__zeroship_schema_pending_contracts") {
             return vec![row(
                 &[
                     "pending_version",
@@ -443,8 +447,8 @@ fn status_ir_reads_nothing_when_a_peer_holds_the_project_lock() {
     for forbidden in [
         "FROM pg_class child",
         "union_all",
-        "schema_pending_contracts",
-        "schema_backfills",
+        "__zeroship_schema_pending_contracts",
+        "__zeroship_schema_backfills",
         "pg_advisory_unlock",
     ] {
         assert!(

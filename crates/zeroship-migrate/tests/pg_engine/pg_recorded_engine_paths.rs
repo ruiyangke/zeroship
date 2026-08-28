@@ -106,7 +106,8 @@ async fn mixed_plan_treats_partial_backfill_as_pending_before_earlier_update() {
     ));
     let log = rec.log.borrow();
     assert!(
-        log.iter().any(|entry| entry.contains("schema_backfills")),
+        log.iter()
+            .any(|entry| entry.contains("__zeroship_schema_backfills")),
         "preflight must reconcile partial progress: {log:?}"
     );
     assert!(
@@ -323,8 +324,9 @@ async fn full_surface_runs_generically_with_in_flight_guard_never_tripping() {
         "ensure_journal recorded the CREATE SCHEMA DDL: {log:?}"
     );
     assert!(
-        log.iter().any(|s| s.contains("schema_migrations")),
-        "the journal DDL/INSERT sequence touched schema_migrations: {log:?}"
+        log.iter()
+            .any(|s| s.contains("__zeroship_schema_migrations")),
+        "the journal DDL/INSERT sequence touched __zeroship_schema_migrations: {log:?}"
     );
     assert!(
         log.iter()
