@@ -81,6 +81,41 @@ pub(crate) enum TxConnection {
     Sqlite(SqliteSessionHandle),
 }
 
+/// Destroy a transaction session's physical connection instead of returning it.
+///
+/// **This is what SC-1's `WithdrawSession` means, and a plain `drop` is not it.**
+/// `OwnedPooledClient::drop` calls `pool.return_client(entry)`, which
+/// republishes the lease as idle - so dropping a withdrawn session hands the
+/// next borrower exactly the connection the protocol withdrew. Closing the
+/// client's request channel first makes `PoolEntry::is_pool_eligible` false (it
+/// tests `!client.is_closed()`), and `return_client` then evicts the entry and
+/// releases its capacity slot rather than publishing it. The same
+/// close-before-drop idiom is what `backend::lock_guard::LockGuard::drop` uses
+/// to terminate a session whose advisory lock it could not release.
+///
+/// SQLite has no pool to return to - the handle is an `Rc` clone of the single
+/// writer actor - so the withdrawal is the best-effort detached `ROLLBACK` that
+/// stops the actor holding the transaction open. Dropping the handle alone does
+/// not touch the live transaction on the worker thread.
+pub(crate) fn destroy_tx_connection(client: TxConnection) {
+    match client {
+        TxConnection::Postgres(mut client) => {
+            client.__private_api_close();
+            drop(client);
+        }
+        TxConnection::Sqlite(handle) => {
+            if let Err(error) = handle.try_exec_detached("ROLLBACK", &[]) {
+                tracing::warn!(
+                    error = %error,
+                    "sc1: withdrawing a SQLite transaction session could not enqueue its \
+                     fallback ROLLBACK; the actor may hold the transaction until it is reaped"
+                );
+            }
+            drop(handle);
+        }
+    }
+}
+
 /// RAII guard for a transaction client temporarily removed from the
 /// per-thread map.
 ///
@@ -217,23 +252,46 @@ pub struct ThreadDbContext {
     /// if it lost.
     tx_waiters: HashMap<String, Vec<std::task::Waker>>,
 
-    /// Number of nested `SAVEPOINT`s open within each
-    /// app's active explicit transaction, **keyed by owning `app_id`**
-    /// (SEC-1: a shared counter would let one app's savepoint
-    /// bookkeeping corrupt another's `zs_sp_<N>` naming). A missing
-    /// entry (or `0`) means either no transaction is active for that
-    /// app, or the only open transaction is the outermost one (the
-    /// `BEGIN`). Each nested `env.db.transaction(...)` call — nested by
-    /// ASYNC SCOPE, see [`crate::tx_scope`] — emits `SAVEPOINT zs_sp_<depth+1>` and
-    /// increments this; the matching `RELEASE SAVEPOINT` /
-    /// `ROLLBACK TO SAVEPOINT` decrements it.
+    /// The SC-1 transaction state machine for each app with an admitted
+    /// transaction, **keyed by owning `app_id`**.
     ///
-    /// The native transaction module (`transaction`) is the only
-    /// writer: the savepoint name `zs_sp_<N>` is derived from this counter
-    /// so RELEASE/ROLLBACK TO always target the savepoint the matching
-    /// nested call opened. Capped at [`crate::transaction::MAX_SAVEPOINT_DEPTH`]
-    /// (a 9th level throws `savepoint_depth_exceeded`).
-    savepoint_depths: HashMap<String, u32>,
+    /// This replaced a `savepoint_depths: HashMap<String, u32>` counter whose
+    /// value was the `N` in a depth-derived savepoint name `zs_sp_<N>`. That
+    /// scheme reuses a name after the depth decrements, and PostgreSQL resolves
+    /// a savepoint name to the **most recently established** one while
+    /// `ROLLBACK TO SAVEPOINT` deliberately leaves the savepoint defined - so a
+    /// leftover savepoint shadowed an enclosing frame of the same name and sent
+    /// the enclosing rollback to the wrong scope. The reducer's
+    /// [`crate::transaction::reducer::frames::FrameStack`] mints names from a
+    /// monotonic sequence that is never reset and never reused, and it is the
+    /// same object that enforces
+    /// [`crate::transaction::MAX_SAVEPOINT_DEPTH`] on simultaneous opens.
+    ///
+    /// SEC-1: keyed by app for the same reason every other map here is - one
+    /// app's frame bookkeeping must be invisible and untouchable to another's.
+    transactions: HashMap<String, crate::transaction::reducer::TxReducer>,
+
+    /// The backend generation stamped on the next installed transaction
+    /// session, for SC-1's guard order step 4.
+    ///
+    /// Monotonic for the life of the thread and never reset: a completion
+    /// naming a generation the current session does not carry is stale, and a
+    /// counter that restarted would let a stale completion authenticate against
+    /// a later session by arithmetic coincidence.
+    backend_generation: u64,
+
+    /// Apps whose transaction session has been WITHDRAWN, **keyed by owning
+    /// `app_id`**.
+    ///
+    /// SC-1 [`Action::WithdrawSession`](crate::transaction::reducer::Action::WithdrawSession):
+    /// the physical connection is destroyed rather than returned, so no later
+    /// user can inherit it. A tombstone is needed as well as the destruction
+    /// itself because a withdrawal can land while another future holds the
+    /// session out of the slot behind a [`TxClientSlotGuard`], whose `Drop`
+    /// puts it back: [`Self::put_tx_client_for`] consults this set and destroys
+    /// anything returning under it. Without that, "withdrawn" would hold only
+    /// for the sessions that happened to be in the slot at the time.
+    withdrawn_tx_sessions: HashSet<String>,
 
     /// Per-app stack of `pending_emits` watermarks, one entry per open
     /// savepoint frame: the length of that app's queued-event buffer at
@@ -393,7 +451,9 @@ impl ThreadDbContext {
             tx_conns: HashMap::new(),
             tx_claims: HashSet::new(),
             tx_waiters: HashMap::new(),
-            savepoint_depths: HashMap::new(),
+            transactions: HashMap::new(),
+            backend_generation: 0,
+            withdrawn_tx_sessions: HashSet::new(),
             savepoint_emit_marks: HashMap::new(),
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
@@ -798,27 +858,134 @@ impl ThreadDbContext {
 
     /// Return a client previously taken via [`Self::take_tx_client_for`]
     /// to `app_id`'s slot.
+    ///
+    /// **A withdrawn session is destroyed here rather than parked.** SC-1's
+    /// [`Action::WithdrawSession`](crate::transaction::reducer::Action::WithdrawSession)
+    /// can land while another future holds the session out of the slot; that
+    /// future's [`TxClientSlotGuard`] restores it on drop, and without this
+    /// check the restoration would hand a withdrawn session straight back to
+    /// the pool.
     pub(crate) fn put_tx_client_for(&mut self, app_id: &str, client: TxConnection) {
+        if self.withdrawn_tx_sessions.contains(app_id) {
+            destroy_tx_connection(client);
+            return;
+        }
+        // **An occupied slot means this client is not the current session.**
+        // The normal take/put cycle leaves the slot empty between the two calls,
+        // so an occupant here can only be a LATER transaction's session - which
+        // happens when a withdrawal races the guard that was holding the old
+        // one: the next transaction is admitted (clearing the tombstone) before
+        // the guard's `Drop` runs. Without this arm the dead session would
+        // overwrite the live one, and the tombstone alone cannot cover it
+        // because it is cleared by exactly the admission that creates the race.
+        if self.tx_conns.contains_key(app_id) {
+            tracing::warn!(
+                app_id,
+                "a transaction session returned to an occupied slot; destroying it \
+                 rather than clobbering the session that is there"
+            );
+            destroy_tx_connection(client);
+            return;
+        }
         self.tx_conns.insert(app_id.to_string(), client);
     }
 
-    /// Read `app_id`'s current nested-savepoint depth
-    /// (zero when no savepoint is open above the outermost `BEGIN`, or
-    /// when the app has no active tx).
-    pub(crate) fn savepoint_depth_for(&self, app_id: &str) -> u32 {
-        self.savepoint_depths.get(app_id).copied().unwrap_or(0)
+    // ----- SC-1 TRANSACTION REDUCER -----------------------------------
+
+    /// Admit a transaction for `app_id` and return the actions admission
+    /// emits.
+    ///
+    /// The execution deadline is armed on this transition - the same one that
+    /// grants admission - so queue time does not consume the transaction's
+    /// execution budget.
+    pub(crate) fn admit_transaction(
+        &mut self,
+        app_id: &str,
+        expected: crate::transaction::reducer::identity::ExpectedAuthority,
+        budgets: crate::transaction::reducer::TxBudgets,
+        now: std::time::Instant,
+        max_depth: u32,
+    ) -> Vec<crate::transaction::reducer::Action> {
+        let (reducer, actions) =
+            crate::transaction::reducer::TxReducer::admit(expected, budgets, now, max_depth);
+        let previous = self.transactions.insert(app_id.to_string(), reducer);
+        debug_assert!(
+            previous.is_none(),
+            "admit_transaction: a transaction is already admitted for this app",
+        );
+        // A fresh transaction starts from a clean withdrawal state; the
+        // tombstone belongs to the session that was withdrawn, not to the app.
+        self.withdrawn_tx_sessions.remove(app_id);
+        actions
     }
 
-    /// Bump `app_id`'s nested-savepoint depth on
-    /// `SAVEPOINT zs_sp_N`. Returns the new depth, which is also the `N`
-    /// in the savepoint name the caller just opened. Requires an active
-    /// transaction connection for that app (a savepoint without an
-    /// enclosing `BEGIN` is a state-machine bug).
-    pub(crate) fn push_savepoint_for(&mut self, app_id: &str) -> u32 {
-        debug_assert!(
-            self.tx_conns.contains_key(app_id),
-            "push_savepoint_for called without an active tx for the app",
-        );
+    /// Apply one event to `app_id`'s reducer. `None` means no transaction is
+    /// admitted for that app.
+    pub(crate) fn apply_transaction_event(
+        &mut self,
+        app_id: &str,
+        event: crate::transaction::reducer::TxEvent,
+        now: std::time::Instant,
+    ) -> Option<Vec<crate::transaction::reducer::Action>> {
+        self.transactions
+            .get_mut(app_id)
+            .map(|reducer| reducer.apply(event, now))
+    }
+
+    /// Borrow `app_id`'s reducer, for the frame stack and the latched cleanup
+    /// cause the driver reads back.
+    pub(crate) fn transaction_reducer(
+        &self,
+        app_id: &str,
+    ) -> Option<&crate::transaction::reducer::TxReducer> {
+        self.transactions.get(app_id)
+    }
+
+    /// The authority `app_id`'s transaction was admitted under, for the events
+    /// that must carry it (guard order step 1).
+    pub(crate) fn transaction_expected_authority(
+        &self,
+        app_id: &str,
+    ) -> Option<&crate::transaction::reducer::identity::ExpectedAuthority> {
+        self.transactions.get(app_id).map(|r| r.expected())
+    }
+
+    /// Drop `app_id`'s settled reducer and the frame watermarks that died with
+    /// its frames.
+    ///
+    /// Leaving the watermarks would let the next transaction's first savepoint
+    /// pop a stale mark and truncate that transaction's buffer to an unrelated
+    /// length.
+    pub(crate) fn retire_transaction(&mut self, app_id: &str) {
+        self.transactions.remove(app_id);
+        self.savepoint_emit_marks.remove(app_id);
+    }
+
+    /// Mint the backend generation for the next installed session.
+    pub(crate) const fn next_backend_generation(&mut self) -> u64 {
+        self.backend_generation += 1;
+        self.backend_generation
+    }
+
+    /// SC-1 `Action::WithdrawSession`: mark `app_id`'s session withdrawn and
+    /// hand the caller whatever is in the slot to destroy.
+    ///
+    /// The tombstone outlives this call deliberately - see
+    /// [`Self::put_tx_client_for`].
+    pub(crate) fn withdraw_tx_session(&mut self, app_id: &str) -> Option<TxConnection> {
+        self.withdrawn_tx_sessions.insert(app_id.to_string());
+        self.tx_conns.remove(app_id)
+    }
+
+    /// Has `app_id`'s transaction session been withdrawn?
+    pub(crate) fn tx_session_withdrawn(&self, app_id: &str) -> bool {
+        self.withdrawn_tx_sessions.contains(app_id)
+    }
+
+    // ----- FRAME EFFECT WATERMARKS ------------------------------------
+
+    /// Record the queued-event watermark for a frame that just opened.
+    pub(crate) fn push_frame_emit_mark(&mut self, app_id: &str) {
         let mark = self
             .pending_emits
             .get(app_id)
@@ -827,68 +994,42 @@ impl ThreadDbContext {
             .entry(app_id.to_string())
             .or_default()
             .push(mark);
-        let depth = self.savepoint_depths.entry(app_id.to_string()).or_insert(0);
-        *depth = depth.saturating_add(1);
-        *depth
     }
 
-    /// Decrement `app_id`'s nested-savepoint depth on
-    /// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Saturates at zero
-    /// so a double-settle (handler + finalizer race) cannot underflow.
-    ///
-    /// `rolled_back` selects the frame's effect fate, and the two are not
-    /// interchangeable: on `ROLLBACK TO SAVEPOINT` the frame's queued
-    /// change events are discarded with the rows they describe; on
-    /// `RELEASE` they are inherited by the enclosing frame. Passing the
-    /// wrong one either publishes events for rows that do not exist or
-    /// silently drops events for rows that do.
-    /// Returns the frame's effect watermark so the caller can discard the
-    /// frame's queued events **after** confirming the rollback actually
-    /// happened - see [`Self::discard_effects_to_mark`].
-    pub(crate) fn pop_savepoint_for(&mut self, app_id: &str) -> Option<usize> {
-        if let Some(depth) = self.savepoint_depths.get_mut(app_id) {
-            *depth = depth.saturating_sub(1);
-        }
+    /// Pop a released frame's watermark without truncating: those events belong
+    /// to the enclosing frame now, exactly as its rows do.
+    pub(crate) fn pop_frame_emit_mark(&mut self, app_id: &str) -> Option<usize> {
         self.savepoint_emit_marks
             .get_mut(app_id)
             .and_then(std::vec::Vec::pop)
     }
 
-    /// Discard the events a rolled-back frame queued, truncating back to the
-    /// watermark [`Self::pop_savepoint_for`] returned.
+    /// Discard the events the current frame queued, truncating back to its
+    /// watermark.
     ///
-    /// Called **only after `ROLLBACK TO SAVEPOINT` has succeeded**, because
-    /// only then are the matching database changes known to be undone. An
-    /// earlier version discarded before issuing the statement, which is the
-    /// "mutate state on the assumption the operation will succeed" shape: a
-    /// failed `ROLLBACK TO` left the contract's documented fate (retain the
-    /// effects for diagnosis, poison the transaction) unachievable, since the
-    /// evidence was already gone.
-    pub(crate) fn discard_effects_to_mark(&mut self, app_id: &str, mark: Option<usize>) {
-        // A missing mark means the frame was opened before this bookkeeping
-        // existed for the app, or the stacks desynced. Truncating to 0 would
+    /// Called **only after `ROLLBACK TO SAVEPOINT` has succeeded**, because only
+    /// then are the matching database changes known to be undone. Discarding
+    /// before the statement ran is the "mutate on the assumption it will
+    /// succeed" shape: it leaves the failure row's documented fate - retain the
+    /// effects for diagnosis, poison the transaction - unachievable, since the
+    /// evidence is already gone.
+    ///
+    /// The watermark is NOT popped here. A rolled-back frame is not closed
+    /// until its `RELEASE` lands, and that is the call that pops it.
+    pub(crate) fn discard_frame_effects(&mut self, app_id: &str) {
+        // A missing mark means the stacks desynced. Truncating to 0 would
         // discard the ENCLOSING frame's events too, so leave the buffer alone:
         // over-publishing is a bug, but silently dropping a committed row's
         // event is a worse one.
+        let mark = self
+            .savepoint_emit_marks
+            .get(app_id)
+            .and_then(|marks| marks.last().copied());
         if let (Some(mark), Some(buf)) = (mark, self.pending_emits.get_mut(app_id)) {
             if mark <= buf.len() {
                 buf.truncate(mark);
             }
         }
-    }
-
-    /// Reset `app_id`'s nested-savepoint depth to zero.
-    /// Called by the top-level settle path (COMMIT / ROLLBACK) so a
-    /// fresh transaction for that app starts from a clean slate even if
-    /// an inner savepoint settle was skipped (e.g. the whole tx is being
-    /// torn down by a top-level rollback). A different app's depth is
-    /// untouched (SEC-1).
-    pub(crate) fn reset_savepoint_depth_for(&mut self, app_id: &str) {
-        self.savepoint_depths.remove(app_id);
-        // The frame watermarks die with the frames. Leaving them would
-        // let the next transaction's first savepoint pop a stale mark and
-        // truncate that transaction's buffer to an unrelated length.
-        self.savepoint_emit_marks.remove(app_id);
     }
 
     // ----- PENDING_EMITS ---------------------------------------------
@@ -1028,7 +1169,8 @@ mod tests {
         assert!(ctx.backend().is_none());
         assert!(ctx.db_url().is_none());
         assert!(!ctx.has_tx_for("a"));
-        assert_eq!(ctx.savepoint_depth_for("a"), 0);
+        assert!(ctx.transaction_reducer("a").is_none());
+        assert!(!ctx.tx_session_withdrawn("a"));
         // pending_emits starts empty (each app's queue is allocated
         // lazily on first push).
         assert!(ctx.pending_emits.is_empty());
@@ -1042,7 +1184,10 @@ mod tests {
         let b = ThreadDbContext::new();
         // Compare observable state (no PartialEq on the struct).
         assert_eq!(a.pool_initialised(), b.pool_initialised());
-        assert_eq!(a.savepoint_depth_for("a"), b.savepoint_depth_for("a"));
+        assert_eq!(
+            a.transaction_reducer("a").is_none(),
+            b.transaction_reducer("a").is_none()
+        );
         assert_eq!(a.has_tx_for("a"), b.has_tx_for("a"));
         assert_eq!(a.db_url(), b.db_url());
     }
@@ -1197,52 +1342,77 @@ mod tests {
     // ----- TX token monotonic counter ------------------------------------
 
     #[test]
-    fn savepoint_depth_pop_and_reset_saturate_at_zero() {
-        // `push_savepoint_for` carries a `debug_assert!(tx parked)` and
-        // so needs a real Client (see module-level note) — covered by
-        // the integration/V8 end-to-end paths. The decrement / reset
-        // arms have no such precondition: a double-settle (handler +
-        // finalizer race) must NOT underflow the unsigned counter.
+    fn frame_emit_marks_never_discard_an_enclosing_frames_events() {
         let mut ctx = ThreadDbContext::new();
-        assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
-        // pop on an already-zero depth saturates rather than wrapping to
-        // u32::MAX, and yields no watermark - there is no frame to restore.
+        // No frame is open, so there is no watermark to pop.
         assert_eq!(
-            ctx.pop_savepoint_for("app_t"),
+            ctx.pop_frame_emit_mark("app_t"),
             None,
             "no open frame yields no watermark"
         );
-        assert_eq!(ctx.savepoint_depth_for("app_t"), 0, "pop must saturate at zero");
 
-        // Discarding against a missing watermark must leave the buffer ALONE
+        // Discarding with no watermark on the stack must leave the buffer ALONE
         // rather than truncating to zero, which would drop the enclosing
         // frame's events. Over-publishing is a bug; silently dropping a
         // committed row's event is a worse one.
         ctx.push_pending_emit(dummy_event("c1"));
-        ctx.discard_effects_to_mark("app_t", None);
+        ctx.discard_frame_effects("app_t");
         assert_eq!(
             ctx.pending_emits.get("app_t").map(std::vec::Vec::len),
             Some(1),
             "a missing watermark must not discard the enclosing frame's events"
         );
 
-        // And a watermark past the buffer end is equally refused.
-        ctx.discard_effects_to_mark("app_t", Some(99));
-        assert_eq!(
-            ctx.pending_emits.get("app_t").map(std::vec::Vec::len),
-            Some(1),
-            "an out-of-range watermark must not be applied"
-        );
-
-        // A real watermark discards exactly the frame's own events.
+        // A real watermark discards exactly the frame's own events: the mark is
+        // taken when the frame opens, so everything queued after it is the
+        // frame's and everything before it is the parent's.
+        ctx.push_frame_emit_mark("app_t");
         ctx.push_pending_emit(dummy_event("c2"));
-        ctx.discard_effects_to_mark("app_t", Some(1));
+        ctx.discard_frame_effects("app_t");
         let kept = ctx.pending_emits.get("app_t").expect("queue");
         assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
         assert_eq!(kept[0].collection, "c1", "the enclosing frame's event survives");
-        // reset on zero is a no-op.
-        ctx.reset_savepoint_depth_for("app_t");
-        assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
+
+        // `discard_frame_effects` does NOT pop: a rolled-back frame is not
+        // closed until its RELEASE lands, and that is the call that pops.
+        assert_eq!(ctx.pop_frame_emit_mark("app_t"), Some(1));
+        assert_eq!(ctx.pop_frame_emit_mark("app_t"), None);
+    }
+
+    /// `retire_transaction` drops the watermarks that died with the frames.
+    ///
+    /// Leaving them would let the next transaction's first savepoint pop a
+    /// stale mark and truncate that transaction's buffer to an unrelated
+    /// length.
+    #[test]
+    fn retiring_a_transaction_drops_its_frame_watermarks() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_frame_emit_mark("app_t");
+        ctx.retire_transaction("app_t");
+        assert_eq!(
+            ctx.pop_frame_emit_mark("app_t"),
+            None,
+            "a retired transaction leaves no watermark behind"
+        );
+    }
+
+    /// The backend generation is monotonic and never restarts.
+    ///
+    /// A counter that restarted would let a stale completion authenticate
+    /// against a later session by arithmetic coincidence, which is exactly what
+    /// SC-1's guard order step 4 exists to refuse.
+    #[test]
+    fn backend_generations_are_monotonic() {
+        let mut ctx = ThreadDbContext::new();
+        let first = ctx.next_backend_generation();
+        let second = ctx.next_backend_generation();
+        assert!(second > first, "generations must strictly increase");
+        ctx.retire_transaction("app_t");
+        assert!(
+            ctx.next_backend_generation() > second,
+            "retiring a transaction must not restart the sequence"
+        );
     }
 
     // ----- PENDING_EMITS state machine -----------------------------------
@@ -1393,30 +1563,31 @@ mod tests {
     }
 
     #[test]
-    fn sec1_savepoint_depth_is_scoped_per_app() {
+    fn sec1_frame_watermarks_are_scoped_per_app() {
         run_async(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let mut ctx = ThreadDbContext::new();
             ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
 
-            ctx.push_savepoint_for("app_a");
-            ctx.push_savepoint_for("app_a");
-            assert_eq!(ctx.savepoint_depth_for("app_a"), 2);
+            ctx.push_frame_emit_mark("app_a");
+            ctx.push_frame_emit_mark("app_a");
             assert_eq!(
-                ctx.savepoint_depth_for("app_b"),
-                0,
-                "SEC-1: app_b must not inherit app_a's savepoint depth \
-                 (shared depth corrupts both apps' savepoint names)",
+                ctx.pop_frame_emit_mark("app_b"),
+                None,
+                "SEC-1: app_b must not inherit app_a's frame watermarks \
+                 (a shared stack lets one app truncate the other's queue)",
             );
 
-            // app_b settling its own (nonexistent) tx state must not
-            // clobber app_a's live savepoint bookkeeping.
-            ctx.reset_savepoint_depth_for("app_b");
+            // app_b settling its own (nonexistent) transaction must not clobber
+            // app_a's live frame bookkeeping.
+            ctx.retire_transaction("app_b");
             assert_eq!(
-                ctx.savepoint_depth_for("app_a"),
-                2,
-                "SEC-1: app_b's settle must not zero app_a's savepoint depth",
+                ctx.pop_frame_emit_mark("app_a"),
+                Some(0),
+                "SEC-1: app_b's settle must not drop app_a's frame watermarks",
             );
+            assert_eq!(ctx.pop_frame_emit_mark("app_a"), Some(0));
+            assert_eq!(ctx.pop_frame_emit_mark("app_a"), None);
         });
     }
 

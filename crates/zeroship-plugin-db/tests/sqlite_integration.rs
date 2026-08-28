@@ -9442,8 +9442,11 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
             .await
             .expect("outer insert");
 
-        // Nested transaction → SAVEPOINT zs_sp_1 (the orchestrator's
-        // savepoint_name(1)).
+        // Nested transaction → SAVEPOINT. The literal name here is this arm's
+        // own, NOT the orchestrator's: dispatch emits `zs_sp_<frame sequence>`
+        // minted by `reducer::frames::FrameStack`, which never derives a name
+        // from the depth and never reuses one. What this arm rules on is the
+        // SQLite engine's savepoint semantics, which are name-agnostic.
         backend.client_exec(&client, "SAVEPOINT zs_sp_1", &[]).await.expect("SAVEPOINT");
         backend
             .client_exec(&client, "INSERT INTO notes (title) VALUES ('inner-doomed')", &[])

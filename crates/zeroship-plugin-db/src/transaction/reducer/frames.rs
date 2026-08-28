@@ -428,12 +428,18 @@ mod tests {
 
     /// The savepoint-shadowing arm, driven at the naming layer.
     ///
-    /// Where this fails today: `FrameStack` did not exist. It fails on a
-    /// depth-derived name (`zs_sp_<depth>`), which the orchestrator emits
-    /// today (`transaction/mod.rs:988-1002`): open a child at depth 1, roll it
-    /// back, open another at depth 1, and both are named `zs_sp_1` - so the
-    /// second rollback resolves to whichever leftover PostgreSQL established
-    /// most recently.
+    /// It fails on a depth-derived name (`zs_sp_<depth>`), which is what the
+    /// orchestrator emitted before dispatch moved onto this stack: open a child
+    /// at depth 1, roll it back, open another at depth 1, and both are named
+    /// `zs_sp_1` - so the second rollback resolves to whichever leftover
+    /// PostgreSQL established most recently.
+    ///
+    /// Its peers one layer out are
+    /// `transaction::tests::dispatch_emits_monotonic_savepoint_names_at_the_same_depth`
+    /// (the dispatch entry points, on SQLite) and
+    /// `sc1_driver::dispatch_emits_the_reducers_monotonic_savepoint_names`
+    /// (live PostgreSQL, asserting the released name really is gone from the
+    /// server).
     #[test]
     fn a_savepoint_name_is_never_reused_at_the_same_depth() {
         let mut stack = opened();

@@ -8,26 +8,31 @@
 //! `db.beginTransaction()` and the `Transaction` v8_class methods
 //! (`commit`/`rollback`/`collection`) no longer exist on the JS surface.
 //!
-//! ## The 8-step orchestrator (§4.4 of the transaction-redesign proposal)
+//! ## The orchestrator runs on the SC-1 reducer
+//!
+//! This module owns the V8 shape - promises, continuations, `.then` handlers -
+//! and **nothing else**. Every state transition is an event applied to
+//! [`reducer::TxReducer`], and every statement that reaches the wire is an
+//! [`reducer::Action`] [`driver`] was told to issue. There is no second copy of
+//! the rules here: the depth cap, the savepoint names, the effect fate, the
+//! session disposition and the admission release all live in the state machine.
 //!
 //! 1. [`transaction_dispatch`] (a sync v8_method body) mints the outer
 //!    [`v8::PromiseResolver`] and returns its promise to JS immediately.
 //! 2. It reads the calling frame's **async context**
 //!    ([`crate::tx_scope`]) to decide whether this is a **top-level**
-//!    transaction (not inside any transaction callback → emit `BEGIN`)
-//!    or a **nested** one (inside this app's enclosing callback → emit
-//!    `SAVEPOINT zs_sp_<N>`). Nesting beyond [`MAX_SAVEPOINT_DEPTH`]
-//!    rejects with `savepoint_depth_exceeded`. It is deliberately NOT
-//!    "does this app have a transaction open right now" — that test
-//!    cannot tell a nested call from an unrelated concurrent one, and
-//!    reading it that way silently folded one request's transaction into
-//!    another's (see [`crate::tx_scope`] for the measurement).
-//! 3. A spawned op runs the `BEGIN` / `SAVEPOINT` SQL against the pinned
-//!    connection. On success it hands back a
-//!    [`zeroship_runtime::state::ResolveValue::Continuation`] (see step
-//!    4); on failure it rejects the outer promise (`begin_failed` for a
-//!    top-level BEGIN, except that a missing per-app role keeps its
-//!    provisioning diagnosis; the underlying coded error for a savepoint).
+//!    transaction (not inside any transaction callback → admit a reducer and
+//!    emit `BEGIN`) or a **nested** one (inside this app's enclosing callback →
+//!    open a frame and emit `SAVEPOINT`). It is deliberately NOT "does this app
+//!    have a transaction open right now" — that test cannot tell a nested call
+//!    from an unrelated concurrent one, and reading it that way silently folded
+//!    one request's transaction into another's (see [`crate::tx_scope`] for the
+//!    measurement).
+//! 3. A spawned op takes the admission claim as an RAII [`TxAdmission`] guard
+//!    and runs the `BEGIN` / `SAVEPOINT` through the reducer. On success it
+//!    hands back a [`zeroship_runtime::state::ResolveValue::Continuation`]; on
+//!    failure the guard's drop releases the claim, retires the reducer and
+//!    withdraws any session that was installed.
 //! 4. The continuation runs inside the pump's V8 scope:
 //!    [`mint_tx_view`](crate::v8_classes::transaction::mint_tx_view)
 //!    builds the tx-view object (collections-as-props, no
@@ -39,14 +44,30 @@
 //!    the rollback path.
 //! 6. `.then(resolve_handler, reject_handler)` is attached to that
 //!    Promise. The handlers are native [`v8::Function`]s whose `.data()`
-//!    carries a heap [`TxFinalizer`] (the outer resolver + savepoint
-//!    name + request id).
-//! 7. On the creator promise **resolving**, [`tx_resolve_handler`] runs
-//!    `COMMIT` (top-level) or `RELEASE SAVEPOINT zs_sp_<N>` (nested),
-//!    then resolves the outer promise with the body result.
-//! 8. On the creator promise **rejecting**, [`tx_reject_handler`] runs
-//!    `ROLLBACK` (top-level) or `ROLLBACK TO SAVEPOINT zs_sp_<N>`
-//!    (nested), then rejects the outer promise with the body error.
+//!    carries a heap [`TxFinalizer`] (the outer resolver + the FRAME ID + the
+//!    request id — never a savepoint name).
+//! 7. On the creator promise **resolving**, [`tx_resolve_handler`] settles:
+//!    `COMMIT` at the root, `RELEASE` for a frame.
+//! 8. On the creator promise **rejecting**, [`tx_reject_handler`] settles:
+//!    `ROLLBACK` at the root, `ROLLBACK TO` + `RELEASE` for a frame.
+//!
+//! ## Two defects this shape removes, by name
+//!
+//! - **DBR-03**, "an absent client is proof terminal SQL ran". The settle path
+//!   used to read an empty transaction slot as "already settled", release the
+//!   claim and return success **without sending anything**. Only `Settled` ends
+//!   a settle early now; a settle that arrives while an operation owns the
+//!   session waits in `Quiescing`, and a session that is genuinely unreachable
+//!   when terminal SQL is due settles as indeterminate and withdraws.
+//! - **DBR-11**, the leaked admission claim. Cancellation between taking the
+//!   claim and `BEGIN` returning left it held forever. [`TxAdmission`] covers
+//!   exactly that window, and from `Idle` onward the reducer emits
+//!   `ReleaseAdmission` on every path to `Settled`.
+//!
+//! Savepoint names are the frame stack's monotonic sequence, never
+//! `zs_sp_<depth>`: `ROLLBACK TO SAVEPOINT` leaves the savepoint defined and
+//! PostgreSQL resolves a name to the most recently established one, so a reused
+//! name shadows an enclosing frame and sends its rollback to the wrong scope.
 //!
 //! ## Single-connection model & backend scope
 //!
@@ -93,26 +114,29 @@
 /// The SC-1 transaction protocol reducer.
 ///
 /// A pure state machine - nine states, one gate for every forcing publisher,
-/// one deadline slot, one lifecycle classifier - which the V8 orchestrator
-/// above will be rebuilt onto. It performs no I/O and owns no session, which
-/// is what makes SC-1's invariants checkable without a database.
+/// one deadline slot, one lifecycle classifier. It performs no I/O and owns no
+/// session, which is what makes SC-1's invariants checkable without a database.
 ///
-/// It is deliberately not wired into [`transaction_dispatch`] yet: the
-/// orchestrator's begin / settle paths carry the defects SC-1 names (DBR-03's
-/// "an absent client is proof terminal SQL ran", DBR-11's leaked claim,
-/// depth-derived savepoint names), and moving them onto the reducer is the
-/// next step rather than part of building it.
+/// [`transaction_dispatch`] runs on it: every begin, frame open, frame close
+/// and settlement below is an event applied to this machine, and the SQL that
+/// results is whatever [`driver`] was told to issue.
 pub mod reducer;
+
+/// The driver: the only place a reducer action becomes I/O.
+pub mod driver;
+
+/// The `test-helpers` seam onto the driver, for integration targets that need a
+/// live server. Not compiled into a production build.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod probe;
 
 use std::cell::Cell;
 
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
-use crate::backend::SqlExecutor;
 use crate::binding::DbBinding;
-use crate::context::TxConnection;
 use crate::error::DbError;
-use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
+use crate::exec::clear_pending_emits;
 use crate::tx_route::TxRoute;
 use crate::v8_bridge::runtime_state;
 
@@ -134,75 +158,15 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
     "SERIALIZABLE",
 ];
 
-/// Execute a control statement (`BEGIN`, `SAVEPOINT`, `COMMIT`,
-/// `ROLLBACK`, etc.) against the backend-specific pinned tx client.
-/// Run a transaction's TERMINAL statement (`COMMIT` / `ROLLBACK`) and judge its
-/// command tag.
+/// Execute a control statement (`BEGIN`, `SAVEPOINT`, `RELEASE`,
+/// `ROLLBACK TO`) against the backend-specific pinned tx client.
 ///
-/// Separate from [`client_exec_on_tx`] because for a terminal statement the tag
-/// is not cosmetic: PostgreSQL answers `COMMIT` with the tag `ROLLBACK` when the
-/// transaction is in a failed state. `client_exec_on_tx` goes through
-/// `client_exec`, which returns `Ok(rows.len())` and throws the tag away - so a
-/// transaction the server discarded was reported to the creator as committed,
-/// and the settle path went on to publish change events for writes that never
-/// landed.
-///
-/// The borrowing `compio_postgres::Transaction::commit` already makes this
-/// check; a raw driver has to make it explicitly.
-///
-/// Only the PostgreSQL `COMMIT` arm can produce it: SQLite has no such tag, and
-/// a `ROLLBACK` we asked for being answered `ROLLBACK` is the correct outcome.
-///
-/// **The SQLite arm makes the same judgement on different evidence.** There is
-/// no command tag, so the authority is `is_autocommit` sampled after the
-/// statement - never the result code. `Command::Settle` runs it inside the
-/// actor and returns a classified
-/// [`crate::backend::sqlite::reservation::TerminalOutcome`]; see SC-2's
-/// terminal table. A `COMMIT` that returned `Err` does not prove a rollback,
-/// which is why `CommitIndeterminate` exists as an outcome rather than being
-/// folded into failure - the same mistake as L8, made in the other direction.
-async fn exec_terminal_on_tx(
-    backend: &crate::backend::BackendHandle,
-    client: &crate::context::TxConnection,
-    cmd: &str,
-) -> Result<u64, crate::error::DbError> {
-    use crate::context::TxConnection;
-
-    if let (crate::backend::BackendHandle::Sqlite(_), TxConnection::Sqlite(handle)) =
-        (backend, client)
-    {
-        use crate::backend::sqlite::session::TerminalIntent;
-        let intent = match cmd {
-            "COMMIT" => TerminalIntent::Commit,
-            "ROLLBACK" => TerminalIntent::Rollback,
-            other => {
-                return Err(crate::error::DbError::internal(format!(
-                    "db: exec_terminal_on_tx called with a non-terminal statement: {other}"
-                )));
-            }
-        };
-        return handle.settle(intent).await?.into_result().map(|()| 0);
-    }
-
-    if let (crate::backend::BackendHandle::Postgres(_), TxConnection::Postgres(pg_client)) =
-        (backend, client)
-    {
-        let tag = pg_client
-            .batch_execute_reporting_tag(cmd)
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-        if cmd == "COMMIT" && tag.as_deref() == Some("ROLLBACK") {
-            return Err(crate::error::DbError::internal(
-                "db: COMMIT was answered with ROLLBACK - the transaction was \
-                 not committed and its writes were discarded",
-            ));
-        }
-        return Ok(0);
-    }
-
-    client_exec_on_tx(backend, client, cmd, &[]).await
-}
-
+/// **Terminal statements do NOT come through here.** A terminal statement's
+/// command tag is not cosmetic - PostgreSQL answers `COMMIT` with the tag
+/// `ROLLBACK` when the transaction is in a failed state, and this path goes
+/// through `client_exec`, which returns `Ok(rows.len())` and throws the tag
+/// away. `driver::terminal` reads the tag and classifies the three-way
+/// [`reducer::TerminalResult`] the state machine needs.
 pub(crate) async fn client_exec_on_tx(
     backend: &crate::backend::BackendHandle,
     client: &crate::context::TxConnection,
@@ -281,12 +245,17 @@ struct TxFinalizer {
     /// logs + cancellation to the request that opened the tx.
     request_id: Option<u64>,
     /// `None` ⇒ this `transaction()` opened the outermost `BEGIN`
-    /// (settle = `COMMIT` / `ROLLBACK`, then drop the connection).
-    /// `Some("zs_sp_N")` ⇒ this `transaction()` opened a nested
-    /// `SAVEPOINT` (settle = `RELEASE SAVEPOINT zs_sp_N` /
-    /// `ROLLBACK TO SAVEPOINT zs_sp_N`, connection stays open for the
-    /// enclosing tx).
-    savepoint: Option<String>,
+    /// (settle = `COMMIT` / `ROLLBACK`, then dispose of the session).
+    /// `Some(frame)` ⇒ this `transaction()` opened a nested `SAVEPOINT`
+    /// (settle = `RELEASE` / `ROLLBACK TO` + `RELEASE`, connection stays open
+    /// for the enclosing tx).
+    ///
+    /// A [`reducer::frames::FrameId`], not a savepoint NAME. The name lives on
+    /// the reducer's frame stack, is minted from a monotonic sequence, and is
+    /// never reused - so a settle can never name a savepoint some other frame
+    /// established. Carrying the name here is how a depth-derived scheme sends
+    /// a rollback to the wrong scope.
+    frame: Option<reducer::frames::FrameId>,
     /// Owning app. SEC-1: the settle path (COMMIT / ROLLBACK / RELEASE /
     /// ROLLBACK TO + pending-emit drain) operates strictly on this app's
     /// slot, so one app's transaction can never settle another's.
@@ -364,27 +333,11 @@ pub fn transaction_dispatch<'s>(
         return outer_promise;
     }
 
-    // Savepoint-depth cap: refuse the (MAX+1)-th level up front, before
-    // any SQL runs. The depth that *would* be opened is the current
-    // depth + 1.
-    if nested {
-        let would_be = crate::context::with(|c| c.savepoint_depth_for(&app_id)) + 1;
-        if would_be > MAX_SAVEPOINT_DEPTH {
-            let err = DbError::validation_hinted(
-                "savepoint_depth_exceeded",
-                format!(
-                    "db.transaction: nested transaction depth limit ({MAX_SAVEPOINT_DEPTH}) \
-                     exceeded — flatten the nesting or split the work into separate transactions"
-                ),
-                "Each nested env.db.transaction(...) opens a SAVEPOINT; the cap guards against \
-                 runaway recursion.",
-            );
-            // Resolve nothing yet exists to clean up (no SAVEPOINT was
-            // emitted) — reject the outer promise directly.
-            reject_outer_now(scope, &outer_global, err);
-            return outer_promise;
-        }
-    }
+    // The savepoint-depth cap is NOT re-checked here. `FrameStack::open_child`
+    // refuses the (MAX+1)-th simultaneous frame before any `SAVEPOINT` reaches
+    // the wire and answers `savepoint_depth_exceeded`, which is the same code
+    // this used to produce. A second copy of the rule beside the state machine
+    // is a copy that can disagree with it.
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Drain note: the JS-side DataLoader queues are flushed by the
@@ -405,28 +358,35 @@ pub fn transaction_dispatch<'s>(
         // Cannot deadlock: a genuinely NESTED call skips this (it does not
         // need a claim), and the claim holder never waits on a waiter.
         //
-        // WHAT THIS DOES NOT COVER, stated rather than implied: if this op
-        // is CANCELLED between taking the claim and the `BEGIN` returning
-        // (a window of one round-trip), the claim leaks and later
-        // transactions for this app park until the isolate is evicted.
-        // Every non-cancelled path releases — the `Err` arm below, the
-        // settle in `exec_settle_top_level`, and `TxTeardownGuard::drop`.
-        // Closing the cancellation window needs an RAII guard armed for
-        // exactly this window and disarmed once the client is installed;
-        // it is not here because it is unverified, not because the window
-        // does not exist.
-        if !nested {
-            AwaitTxClaim::new(app_id.clone()).await;
-        }
+        // **The cancellation window is closed by [`TxAdmission`], not left
+        // open.** This comment used to end "if this op is CANCELLED between
+        // taking the claim and the `BEGIN` returning, the claim leaks ...
+        // closing the window needs an RAII guard armed for exactly this window
+        // and disarmed once the client is installed; it is not here because it
+        // is unverified". That guard is now here, and it is SC-1 rule 5 - the
+        // defect labelled DBR-11.
+        let admission = if nested {
+            None
+        } else {
+            Some(TxAdmission::acquire(app_id.clone()).await)
+        };
         match exec_begin_or_savepoint(nested, isolation_level.as_deref(), &app_id).await {
-            Ok(savepoint) => {
+            Ok(frame) => {
+                // The session is installed and the reducer is in `Idle`. Every
+                // path out of there emits `ReleaseAdmission`, so the claim's
+                // release is now the protocol's rather than this future's - and
+                // an unsettling callback is bounded by the execution deadline
+                // rather than by nothing.
+                if let Some(admission) = admission {
+                    admission.handed_to_reducer();
+                }
                 // Hand back a continuation that mints the tx-view, calls
                 // the creator callback, and attaches commit/rollback
                 // handlers — all inside the pump's V8 scope.
                 let finalizer = TxFinalizer {
                     outer: outer_global,
                     request_id,
-                    savepoint,
+                    frame,
                     app_id: app_id.clone(),
                     settled: Cell::new(false),
                 };
@@ -453,12 +413,10 @@ pub fn transaction_dispatch<'s>(
                     DbError::Configuration { code, .. }
                         if *code == crate::error::SCHEMA_NOT_PROVISIONED
                 );
-                if !nested {
-                    // Nothing was opened, so nothing will settle — release
-                    // the claim here or every later transaction for this
-                    // app parks forever.
-                    crate::context::with_mut(|c| c.release_tx_claim(&app_id));
-                }
+                // `admission` is still armed and drops here, which releases the
+                // claim, retires the reducer and destroys any session that was
+                // installed. There is no per-arm release to forget.
+                drop(admission);
                 let coded = if nested || preserve_provisioning_error {
                     e
                 } else {
@@ -514,21 +472,88 @@ impl std::future::Future for AwaitTxClaim {
     }
 }
 
+/// The admission claim, as an RAII guard covering `Preparing` and `Starting`.
+///
+/// **SC-1 rule 5, the defect labelled DBR-11.** Cancellation before `BEGIN`
+/// returns must not leak the claim, and that window is exactly these two states:
+/// from the moment admission is granted to the moment the session is installed
+/// and the reducer reaches `Idle`. Before this guard, a spawned op cancelled
+/// inside that window left the claim held and every later transaction for the
+/// app parked until the isolate was evicted.
+///
+/// It is disarmed by [`Self::handed_to_reducer`] and by nothing else. From
+/// `Idle` onward the reducer emits `Action::ReleaseAdmission` on *every* path to
+/// `Settled` - including the forced ones - so the release stops being something
+/// a `return` can skip. A creator callback that never settles is bounded by the
+/// execution deadline, which is armed on the same transition that granted
+/// admission.
+struct TxAdmission {
+    app_id: String,
+    armed: bool,
+}
+
+impl TxAdmission {
+    /// Wait for the claim, then arm.
+    async fn acquire(app_id: String) -> Self {
+        AwaitTxClaim::new(app_id.clone()).await;
+        Self {
+            app_id,
+            armed: true,
+        }
+    }
+
+    /// The reducer owns the release from here on.
+    fn handed_to_reducer(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TxAdmission {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // This transaction is not going to settle. Retire its state, WITHDRAW
+        // any session that was installed - a session abandoned mid-`BEGIN` has
+        // unknown health and must not go back to the pool - and release the
+        // claim so later transactions for this app are not parked forever.
+        //
+        // `withdraw_tx_session`, not `take_tx_client_for`: the session may be
+        // out on loan behind a `TxClientSlotGuard` whose future was cancelled by
+        // the same drop that got us here, and the tombstone is what destroys it
+        // when that guard restores it.
+        let client = crate::context::with_mut(|c| {
+            c.retire_transaction(&self.app_id);
+            let client = c.withdraw_tx_session(&self.app_id);
+            c.release_tx_claim(&self.app_id);
+            client
+        });
+        if let Some(client) = client {
+            crate::context::destroy_tx_connection(client);
+        }
+        clear_pending_emits(&self.app_id);
+    }
+}
+
 /// Transaction frame used by a native write that expands one creator call
 /// into multiple SQL mutations.
 ///
 /// A normally settled call outside `db.transaction()` owns a top-level
 /// `BEGIN`/`COMMIT`; a call inside one owns a savepoint. A row failure is
 /// returned only after that frame reports a successful rollback. Settlement
-/// goes through [`exec_settle`], including its PostgreSQL
-/// `COMMIT`-answered-with-`ROLLBACK` check. Dropping an unsettled top-level
-/// frame tears down its pinned client; SQLite additionally queues an explicit
-/// rollback because dropping its actor handle does not end the transaction.
+/// goes through [`exec_settle`], and therefore through the reducer - including
+/// the PostgreSQL `COMMIT`-answered-with-`ROLLBACK` check the driver's terminal
+/// classifier makes. Dropping an unsettled top-level frame withdraws its
+/// session through [`TxAdmission`]: the connection is destroyed rather than
+/// pooled, because a transaction abandoned mid-flight has unknown health.
 #[must_use = "an atomic write frame must be settled with finish"]
 pub(crate) struct AtomicWriteFrame {
     route: TxRoute,
-    savepoint: Option<String>,
+    frame: Option<reducer::frames::FrameId>,
     state: AtomicWriteFrameState,
+    /// Held for a top-level frame until the settle path takes over, so a
+    /// cancelled `begin` releases the claim it took. See [`TxAdmission`].
+    admission: Option<TxAdmission>,
 }
 
 #[derive(Clone, Copy)]
@@ -550,37 +575,23 @@ impl AtomicWriteFrame {
                 "Run updateMany while its enclosing db.transaction callback is still open.",
             ));
         }
-        if nested {
-            let would_be = crate::context::with(|context| {
-                context.savepoint_depth_for(&app_id)
-            }) + 1;
-            if would_be > MAX_SAVEPOINT_DEPTH {
-                return Err(DbError::validation_hinted(
-                    "savepoint_depth_exceeded",
-                    format!(
-                        "updateMany: nested transaction depth limit ({MAX_SAVEPOINT_DEPTH}) \
-                         exceeded"
-                    ),
-                    "Flatten the nesting or split the work into separate transactions.",
-                ));
-            }
-        }
-        if !nested {
-            AwaitTxClaim::new(app_id.clone()).await;
-        }
+        // The depth cap is the frame stack's, not a second copy here.
+        let admission = if nested {
+            None
+        } else {
+            Some(TxAdmission::acquire(app_id.clone()).await)
+        };
 
         match exec_begin_or_savepoint(nested, None, &app_id).await {
-            Ok(savepoint) => Ok(Self {
+            Ok(frame) => Ok(Self {
                 route: route.into_internal_transaction(),
-                savepoint,
+                frame,
                 state: AtomicWriteFrameState::Open,
+                admission,
             }),
-            Err(error) => {
-                if !nested {
-                    crate::context::with_mut(|context| context.release_tx_claim(&app_id));
-                }
-                Err(error)
-            }
+            // `admission` drops here, releasing the claim and destroying any
+            // session that was installed.
+            Err(error) => Err(error),
         }
     }
 
@@ -597,16 +608,13 @@ impl AtomicWriteFrame {
     /// is then no longer trustworthy.
     pub(crate) async fn finish<T>(mut self, body: Result<T, DbError>) -> Result<T, DbError> {
         let success = body.is_ok();
-        // Transfer cancellation cleanup to `exec_settle`: its top-level arm
-        // installs a `TxTeardownGuard`, and its nested arm installs a
-        // `TxClientSlotGuard`, before either one can yield.
+        // The reducer owns the admission release from here: every path it takes
+        // to `Settled` emits `ReleaseAdmission`.
+        if let Some(admission) = self.admission.take() {
+            admission.handed_to_reducer();
+        }
         self.state = AtomicWriteFrameState::Settling;
-        let outcome = exec_settle(
-            self.route.app_id(),
-            success,
-            self.savepoint.as_deref(),
-        )
-        .await;
+        let outcome = exec_settle(self.route.app_id(), success, self.frame).await;
         self.state = AtomicWriteFrameState::Settled;
         match (body, outcome) {
             (Ok(value), SettleOutcome::Ok) => Ok(value),
@@ -626,10 +634,10 @@ impl Drop for AtomicWriteFrame {
         }
 
         let app_id = self.route.app_id();
-        if self.savepoint.is_some() {
+        if self.frame.is_some() {
             // A nested frame cannot synchronously issue ROLLBACK TO from Drop.
-            // The enclosing transaction still owns the connection and must
-            // settle it; do not release its claim or destroy its client here.
+            // The enclosing transaction still owns the session and must settle
+            // it; do not release its claim or destroy its session here.
             tracing::warn!(
                 app_id,
                 "nested atomic write frame dropped before savepoint settlement"
@@ -637,29 +645,17 @@ impl Drop for AtomicWriteFrame {
             return;
         }
 
-        let (client, backend) = crate::context::with_mut(|context| {
-            let client = context.take_tx_client_for(app_id);
-            context.reset_savepoint_depth_for(app_id);
-            (client, context.backend())
-        });
-        if let Some(client) = client {
-            drop(TxTeardownGuard::new(app_id.to_string(), client));
-        } else if matches!(backend, Some(crate::backend::BackendHandle::Postgres(_))) {
-            // PostgreSQL's exec path owns its taken client directly. If that
-            // future was cancelled, dropping it already closed the session
-            // and aborted the transaction; only the logical claim remains.
-            crate::context::with_mut(|context| context.release_tx_claim(app_id));
-            clear_pending_emits(app_id);
-        } else {
-            // SQLite routes through TxClientSlotGuard, which must restore the
-            // actor handle before this frame drops. Releasing the claim with
-            // no handle would let another transaction enter a possibly live
-            // SQLite transaction, so fail closed.
-            tracing::warn!(
-                app_id,
-                "atomic write frame dropped with no SQLite transaction client; retaining claim"
-            );
-        }
+        // A top-level frame dropped unsettled is the cancellation case, and
+        // `admission`'s own Drop is what handles it: retire the reducer,
+        // destroy the session rather than pool it, release the claim, clear the
+        // queued events. Nothing is open-coded here any more, so the two paths
+        // cannot disagree about what a cancelled admission owes.
+        //
+        // The SQLite fail-closed arm this replaced ("no client; retaining
+        // claim") kept a claim forever whenever the exec path happened to hold
+        // the handle at drop time. The withdrawal tombstone answers that
+        // properly: the handle IS destroyed, when its holder returns it.
+        drop(self.admission.take());
     }
 }
 
@@ -680,105 +676,67 @@ fn reject_outer_now(
 // exec_begin_or_savepoint — the async begin/savepoint SQL
 // ---------------------------------------------------------------------------
 
-/// Run `BEGIN [ISOLATION LEVEL ...]` (top-level) or `SAVEPOINT zs_sp_<N>`
-/// (nested). Returns `Ok(None)` for a top-level begin, `Ok(Some(name))`
-/// for the savepoint name opened on a nested begin.
+/// Run `BEGIN [ISOLATION LEVEL ...]` (top-level) or `SAVEPOINT <frame>`
+/// (nested), through the reducer.
+///
+/// Returns `Ok(None)` for a top-level begin, `Ok(Some(frame))` for the frame a
+/// nested begin opened. The savepoint NAME never leaves the frame stack: the
+/// caller settles by frame id, and the name the settle emits is the one that
+/// frame minted.
 async fn exec_begin_or_savepoint(
     nested: bool,
     isolation_level: Option<&str>,
     app_id: &str,
-) -> Result<Option<String>, DbError> {
+) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
-        // A savepoint reuses the open connection. The depth counter is
-        // the source of the savepoint name; bump it, then emit the SQL.
-        // (We bump first so a concurrent finalizer can never observe a
-        // name that wasn't yet allocated — V8 is single-threaded so
-        // there is no real race, but the ordering keeps the invariant
-        // legible.)
-        let depth = crate::context::with_mut(|c| c.push_savepoint_for(app_id));
-        let name = savepoint_name(depth);
-        let sql = format!("SAVEPOINT {name}");
-        if let Err(e) = run_on_tx_conn(app_id, &sql).await {
-            // SAVEPOINT failed — undo the depth bump so the slot stays
-            // consistent (the enclosing tx is untouched; nothing was
-            // opened).
-            //
-            // `rolled_back: false` because no frame ever opened: nothing
-            // ran inside it, so its watermark is simply popped. Passing
-            // `true` would truncate to the same length and is equivalent
-            // here, but says something untrue about what happened.
-            // No frame ever opened, so there is nothing to discard: the
-            // watermark is simply dropped.
-            let _ = crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
-            return Err(e);
+        let driven = driver::open_frame(app_id).await;
+        if let Some(refusal) = driven.refusal() {
+            return Err(frame_refusal(refusal, driven.error));
         }
-        return Ok(Some(name));
+        let frame = driven.frame().ok_or_else(|| {
+            driven.error.unwrap_or_else(|| {
+                DbError::internal("db.transaction: SAVEPOINT did not open a frame")
+            })
+        })?;
+        return Ok(Some(frame));
     }
 
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-
-    match &backend {
-        crate::backend::BackendHandle::Postgres(pg) => {
-            let begin_sql = build_begin_sql(isolation_level)?;
-            let client = pg.acquire_dedicated_client(app_id).await?;
-            let tx_client = TxConnection::Postgres(client);
-            client_exec_on_tx(&backend, &tx_client, &begin_sql, &[]).await?;
-            let TxConnection::Postgres(client) = tx_client else {
-                unreachable!("just constructed Postgres tx client")
-            };
-
-            // §17.5 — constrain client SQL to the per-app role for the
-            // lifetime of this transaction. `SET LOCAL ROLE` auto-reverts
-            // at COMMIT / ROLLBACK, so the dedicated tx connection never
-            // leaks the role. The nested SAVEPOINT arm above deliberately
-            // does NOT call this: a savepoint reuses the open connection,
-            // which already had the role applied at its enclosing
-            // top-level BEGIN.
-            apply_per_app_role(&client, app_id).await?;
-
-            crate::context::with_mut(|c| {
-                let _previous = c.install_tx_client(app_id, TxConnection::Postgres(client));
-                debug_assert!(
-                    _previous.is_none(),
-                    "exec_begin_or_savepoint: tx_conn slot already occupied for this app"
-                );
-                c.reset_savepoint_depth_for(app_id);
-            });
-        }
-        crate::backend::BackendHandle::Sqlite(sq) => {
-            // SQLite has no `ISOLATION LEVEL` clause. We still validate
-            // the caller-provided string defensively for parity with the
-            // PG arm, then issue a plain `BEGIN`.
-            let _ = build_begin_sql(isolation_level)?;
-            // Bind the app's file into the session BEFORE its transaction
-            // connection is opened. The connection ATTACHes only this app's
-            // file, and it reads the path from the session's attachment list,
-            // so an app that has never been attached would get a transaction
-            // lane that cannot see its own tables. Idempotent: `attach_app_file`
-            // returns on a cache hit without issuing SQL.
-            sq.attach_app_file(app_id).await?;
-            let client = sq.acquire_dedicated_client(app_id).await?;
-            let tx_client = TxConnection::Sqlite(client);
-            client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
-            let TxConnection::Sqlite(client) = tx_client else {
-                unreachable!("just constructed SQLite tx client")
-            };
-
-            crate::context::with_mut(|c| {
-                let _previous = c.install_tx_client(app_id, TxConnection::Sqlite(client));
-                debug_assert!(
-                    _previous.is_none(),
-                    "exec_begin_or_savepoint: tx_conn slot already occupied for this app"
-                );
-                c.reset_savepoint_depth_for(app_id);
-            });
-        }
+    let driven = driver::begin_top_level(app_id, isolation_level).await?;
+    match driven.outcome() {
+        // A `BEGIN` that never opened reaches `Settled` through forced cleanup,
+        // carrying the latched cause. Report the backend's own error - the
+        // caller re-codes it as `begin_failed` unless it is the provisioning
+        // diagnosis.
+        Some(_) => Err(driven.error.unwrap_or_else(|| {
+            DbError::internal("db.transaction: BEGIN did not open a transaction")
+        })),
+        None => match driven.refusal() {
+            Some(refusal) => Err(driver::protocol_error(refusal, driven.error)),
+            None => Ok(None),
+        },
     }
-    // Defensive: drop any broker residue from an interrupted prior run so
-    // it cannot leak into this app's tx drain.
-    clear_pending_emits(app_id);
-    Ok(None)
+}
+
+/// Lower a frame guard's refusal to the creator-visible error.
+///
+/// `savepoint_depth_exceeded` keeps the hinted validation shape it has always
+/// had; the frame stack is where the cap now lives, so this is the only place
+/// that spells it.
+fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> DbError {
+    if refusal
+        == reducer::TxProtocolError::Frame(reducer::frames::FrameError::SavepointDepthExceeded)
+    {
+        return DbError::validation_hinted(
+            "savepoint_depth_exceeded",
+            format!(
+                "db.transaction: nested transaction depth limit ({MAX_SAVEPOINT_DEPTH}) \
+                 exceeded — flatten the nesting or split the work into separate transactions"
+            ),
+            "Each nested env.db.transaction(...) opens a SAVEPOINT; the cap guards against \
+             runaway recursion.",
+        );
+    }
+    driver::protocol_error(refusal, detail)
 }
 
 /// Build the `BEGIN [ISOLATION LEVEL ...]` statement, validating the
@@ -802,92 +760,25 @@ fn build_begin_sql(isolation_level: Option<&str>) -> Result<String, DbError> {
     }
 }
 
-/// Savepoint identifier for nesting `depth` (1-based). `zs_sp_1`,
-/// `zs_sp_2`, … — the `zs_` prefix keeps the name out of any plausible
-/// user-chosen savepoint namespace.
-fn savepoint_name(depth: u32) -> String {
-    format!("zs_sp_{depth}")
-}
-
-/// Guard for a top-level tx settle that has drained the client out of the
-/// slot and now owes a terminal COMMIT/ROLLBACK.
+/// Run one creator data statement inside `app_id`'s open transaction.
 ///
-/// On cancellation, Postgres is safe to clean up by dropping the owned
-/// client (session ends, tx aborts). SQLite needs an explicit best-
-/// effort `ROLLBACK` enqueued back onto the session actor because the
-/// handle itself is just an `Rc` clone of the actor and dropping it does
-/// not touch the live transaction on the worker thread.
-pub(super) struct TxTeardownGuard {
-    app_id: String,
-    client: Option<TxConnection>,
-}
-
-impl TxTeardownGuard {
-    pub(super) fn new(app_id: String, client: TxConnection) -> Self {
-        Self {
-            app_id,
-            client: Some(client),
-        }
-    }
-
-    pub(super) fn client(&self) -> &TxConnection {
-        self.client
-            .as_ref()
-            .expect("TxTeardownGuard::client called after into_inner")
-    }
-
-    pub(super) fn into_inner(mut self) -> TxConnection {
-        self.client
-            .take()
-            .expect("TxTeardownGuard::into_inner called twice")
-    }
-}
-
-impl Drop for TxTeardownGuard {
-    fn drop(&mut self) {
-        let Some(client) = self.client.take() else {
-            // Normal path: `into_inner` already took the client and
-            // `exec_settle_top_level` released the claim. Nothing owed.
-            return;
-        };
-        // Cancellation path. The transaction is not going to settle, so
-        // release the claim; leaving it held would park every later
-        // transaction for this app on a settle that will never come.
-        crate::context::with_mut(|c| c.release_tx_claim(&self.app_id));
-
-        match &client {
-            TxConnection::Sqlite(handle) => {
-                if let Err(err) = handle.try_exec_detached("ROLLBACK", &[]) {
-                    tracing::warn!(
-                        error = %err,
-                        "sqlite tx teardown cancelled before completion; failed to enqueue \
-                         fallback ROLLBACK, restoring tx slot for reuse"
-                    );
-                    // SEC-1: restore to THIS app's slot only.
-                    crate::context::with_mut(|c| {
-                        c.put_tx_client_for(&self.app_id, TxConnection::Sqlite(handle.clone()))
-                    });
-                    return;
-                }
-            }
-            TxConnection::Postgres(_) => {}
-        }
-
-        clear_pending_emits(&self.app_id);
-        drop(client);
-    }
-}
-
-/// Run a single non-returning statement (`SAVEPOINT` / `RELEASE` /
-/// `ROLLBACK TO` / `COMMIT` / `ROLLBACK`) against `app_id`'s pinned tx
-/// connection, holding the client across the await and putting it back.
-/// Used for savepoint statements that must NOT drain the connection.
-async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let client = crate::context::TxClientSlotGuard::take(app_id)?;
-    let result = client_exec_on_tx(&backend, client.client(), sql, &[]).await;
-    result.map(|_| ())
+/// Goes through the reducer's operation guard: the statement takes the session,
+/// and its outcome is reported back. A statement that errors leaves the
+/// transaction in `Poisoned`, which is where PostgreSQL has already put it -
+/// every further data statement answers `25P02` until the block ends.
+///
+/// **The savepoint statements no longer come through here.** They are frame
+/// events now, and the name they carry is the frame's.
+///
+/// See [`driver::run_operation`] for why the creator CRUD path has not moved
+/// onto this yet.
+#[allow(
+    dead_code,
+    reason = "the tests below are its only callers until exec.rs's in-transaction \
+              arms move onto the reducer's operation guard"
+)]
+pub(crate) async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
+    driver::run_operation(app_id, sql, &[]).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,7 +998,7 @@ fn settle_after_body(
     let TxFinalizer {
         outer,
         request_id,
-        savepoint,
+        frame,
         app_id,
         ..
     } = *finalizer;
@@ -1116,7 +1007,7 @@ fn settle_after_body(
     let body = if success { body_ok } else { body_err };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(&app_id, success, savepoint.as_deref()).await;
+        let settle_result = exec_settle(&app_id, success, frame).await;
         let value = build_settle_resolve_value(settle_result, success, body);
         OpResult::JsValue {
             resolver: outer,
@@ -1141,7 +1032,7 @@ fn settle_failed_before_body(
     let TxFinalizer {
         outer,
         request_id,
-        savepoint,
+        frame,
         app_id,
         ..
     } = finalizer;
@@ -1152,7 +1043,7 @@ fn settle_failed_before_body(
         v8::Global::new(scope, exc)
     };
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(&app_id, false, savepoint.as_deref()).await;
+        let settle_result = exec_settle(&app_id, false, frame).await;
         OpResult::JsValue {
             resolver: outer,
             value: build_settle_resolve_value(settle_result, false, Some(err_global)),
@@ -1179,144 +1070,91 @@ enum SettleOutcome {
     SettleErr(DbError),
 }
 
-/// Run the settle statement for this transaction level.
+/// Run the settle for this transaction level, through the reducer.
 ///
-/// Top-level (`savepoint == None`):
-///   - success → `COMMIT`, drop the connection, drain pending emits.
-///   - failure → `ROLLBACK`, drop the connection, clear pending emits.
+/// Top-level (`frame == None`):
+///   - success → `COMMIT`, dispose of the session, publish the queued effects.
+///   - failure → `ROLLBACK`, dispose of the session, discard them.
 ///
-/// Nested (`savepoint == Some(name)`):
-///   - success → `RELEASE SAVEPOINT name` (keeps the connection open).
-///   - failure → `ROLLBACK TO SAVEPOINT name` (keeps the connection
-///     open; the enclosing tx continues).
-async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> SettleOutcome {
-    match savepoint {
-        Some(name) => {
-            // Nested — pop the depth first so a sibling/enclosing level
-            // sees the correct count, then run RELEASE / ROLLBACK TO.
-            //
-            // `!success` is the frame's effect fate: a ROLLBACK TO drops
-            // the frame's queued change events along with its rows, a
-            // RELEASE hands them to the enclosing frame. Before this, the
-            // buffer was never touched here and the top-level COMMIT
-            // drained everything - publishing events for rolled-back rows.
-            let mark = crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
-            let sql = if success {
-                format!("RELEASE SAVEPOINT {name}")
+/// Nested (`frame == Some(id)`):
+///   - success → `RELEASE` (keeps the session open).
+///   - failure → `ROLLBACK TO` **then** `RELEASE` (keeps it open; the enclosing
+///     transaction continues). The second statement is not optional: `ROLLBACK
+///     TO SAVEPOINT` leaves the savepoint defined, and leaving it there is what
+///     a later frame of the same name would shadow.
+///
+/// **DBR-03 is gone from this function.** It used to read "slot already drained
+/// (e.g. a concurrent teardown). Treat as settled" and return
+/// `SettleOutcome::Ok` **without sending anything** - so an absent client was
+/// proof that terminal SQL had run. Under the reducer the only state that ends a
+/// settle early is `Settled`; a settle that arrives while an operation owns the
+/// session waits in `Quiescing` for it to come back, and a session that is
+/// genuinely unreachable when terminal SQL is due is `Indeterminate`, which
+/// withdraws and tells the creator.
+async fn exec_settle(
+    app_id: &str,
+    success: bool,
+    frame: Option<reducer::frames::FrameId>,
+) -> SettleOutcome {
+    match frame {
+        Some(frame) => {
+            let close = if success {
+                reducer::frames::FrameClose::Released
             } else {
-                format!("ROLLBACK TO SAVEPOINT {name}")
+                reducer::frames::FrameClose::RolledBackTo
             };
-            match run_on_tx_conn(app_id, &sql).await {
-                Ok(()) => {
-                    // The frame's effect fate, applied only now that the
-                    // statement has actually succeeded:
-                    //   RELEASE      -> events are inherited by the enclosing
-                    //                   frame, exactly as its rows are;
-                    //   ROLLBACK TO  -> events are discarded, because the rows
-                    //                   they describe are NOW known to be gone.
-                    if !success {
-                        crate::context::with_mut(|c| c.discard_effects_to_mark(app_id, mark));
-                    }
-                    SettleOutcome::Ok
-                }
-                // A FAILED settle keeps the frame's events. The transaction is
-                // poisoned and will not commit (a COMMIT on a failed tx is
-                // answered `ROLLBACK`, which `exec_terminal_on_tx` now
-                // detects), so nothing publishes either way - but the events
-                // are the diagnostic evidence for why the rollback failed, and
-                // discarding them before the statement ran destroyed exactly
-                // that.
-                Err(error) => {
-                    let error = if success {
-                        savepoint_release_failed_indeterminate(error)
-                    } else {
-                        rollback_failed_indeterminate(error)
-                    };
-                    SettleOutcome::SettleErr(error)
-                }
+            let driven = driver::close_frame(app_id, frame, close).await;
+            if driven.frame().is_some() {
+                return SettleOutcome::Ok;
             }
+            // A FAILED frame settle keeps the frame's events. The transaction
+            // is poisoned and will not commit (a COMMIT on a failed tx is
+            // answered `ROLLBACK`, which the driver's terminal classifier
+            // detects), so nothing publishes either way - but the events are
+            // the diagnostic evidence for why the close failed, and discarding
+            // them before the statement ran destroyed exactly that.
+            let refusal = driven.refusal();
+            let error = driven
+                .error
+                .or_else(|| refusal.map(|r| driver::protocol_error(r, None)))
+                .unwrap_or_else(|| DbError::internal("db.transaction: savepoint settle failed"));
+            SettleOutcome::SettleErr(if success {
+                savepoint_release_failed_indeterminate(error)
+            } else {
+                rollback_failed_indeterminate(error)
+            })
         }
-        None => exec_settle_top_level(app_id, success).await,
-    }
-}
-
-/// Top-level COMMIT / ROLLBACK. Drains `app_id`'s connection out of the
-/// slot, runs the statement, drops the client, and settles that app's
-/// broker queue.
-/// Every exit path below releases `app_id`'s top-level-transaction claim
-/// (see [`crate::context::ThreadDbContext::try_claim_tx`]). A path that
-/// forgot to would park every later transaction for that app forever, so
-/// the release is deliberately duplicated per-arm rather than hidden in a
-/// guard that a future `return` could skip.
-async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
-    let backend = match crate::context::with(|c| c.backend()) {
-        Some(backend) => backend,
         None => {
-            crate::context::with_mut(|c| {
-                c.reset_savepoint_depth_for(app_id);
-                c.release_tx_claim(app_id);
-            });
-            clear_pending_emits(app_id);
-            return SettleOutcome::Ok;
-        }
-    };
-    let client_opt = crate::context::with_mut(|c| {
-        let client = c.take_tx_client_for(app_id);
-        c.reset_savepoint_depth_for(app_id);
-        client
-    });
-    let Some(client) = client_opt else {
-        // Slot already drained (e.g. a concurrent teardown). Treat as
-        // settled — clear residual state.
-        crate::context::with_mut(|c| c.release_tx_claim(app_id));
-        clear_pending_emits(app_id);
-        return SettleOutcome::Ok;
-    };
-
-    let teardown = TxTeardownGuard::new(app_id.to_string(), client);
-    let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    // No SQLite fallback `ROLLBACK` here any more. The terminal classifier
-    // inside the actor already issues exactly one when a `COMMIT` failed with
-    // the connection still in a transaction, and it decides the outcome from
-    // `is_autocommit` rather than from the result code. Re-sending `ROLLBACK`
-    // from here would arrive after the reservation was retired and be refused
-    // as a non-owner - turning a correctly classified `RolledBack` into a
-    // spurious error.
-    let result = exec_terminal_on_tx(&backend, teardown.client(), cmd).await;
-    let client = teardown.into_inner();
-    drop(client);
-    // The terminal statement has run and the connection is gone: the next
-    // top-level transaction for this app may proceed.
-    crate::context::with_mut(|c| c.release_tx_claim(app_id));
-
-    match (success, result) {
-        (true, Ok(_)) => {
-            // Commit succeeded — fire the deferred broker events.
-            drain_pending_emits_on_commit(app_id);
-            SettleOutcome::Ok
-        }
-        (true, Err(e)) => {
-            // COMMIT failed after the body resolved → indeterminate.
-            // PG aborts on connection drop; SQLite's actor terminalizes inside
-            // `run_settle`, which is exactly why the block above no longer
-            // sends a fallback `ROLLBACK` from here. Drop the queued events so
-            // subscribers never see writes that may not have landed.
-            clear_pending_emits(app_id);
-            SettleOutcome::CommitIndeterminate(e)
-        }
-        (false, Ok(_)) => {
-            // Rollback succeeded — drop the queued events.
-            clear_pending_emits(app_id);
-            SettleOutcome::Ok
-        }
-        (false, Err(e)) => {
-            // Do not claim that the body was cleanly rolled back when the
-            // terminal statement failed. PG aborts on connection drop and the
-            // SQLite actor classified the terminal from `is_autocommit`, but
-            // the creator must still see that the outcome could not be
-            // confirmed.
-            clear_pending_emits(app_id);
-            SettleOutcome::SettleErr(rollback_failed_indeterminate(e))
+            let intent = if success {
+                reducer::SettleIntent::Commit
+            } else {
+                reducer::SettleIntent::Rollback
+            };
+            let driven = driver::settle_root(app_id, intent).await;
+            let Some(outcome) = driven.outcome() else {
+                let error = driven
+                    .refusal()
+                    .map_or_else(
+                        || DbError::internal("db.transaction: the settle produced no outcome"),
+                        |refusal| driver::protocol_error(refusal, None),
+                    );
+                return SettleOutcome::SettleErr(error);
+            };
+            // The driver's mapping already carries the RIGHT code for each
+            // outcome, so nothing here re-wraps it. Re-wrapping is how a
+            // definitively rolled-back commit came out labelled
+            // `commit_failed_indeterminate`: the outcome was known, not unknown,
+            // and the label said the opposite of what the state machine
+            // established.
+            match driver::outcome_error(outcome, intent, driven.error) {
+                None => SettleOutcome::Ok,
+                Some(error)
+                    if matches!(outcome, reducer::TerminalOutcome::Indeterminate(_)) =>
+                {
+                    SettleOutcome::CommitIndeterminate(error)
+                }
+                Some(error) => SettleOutcome::SettleErr(error),
+            }
         }
     }
 }
@@ -1347,13 +1185,13 @@ fn build_settle_resolve_value(
                 }
             }
         }
-        SettleOutcome::CommitIndeterminate(e) => {
-            ResolveValue::RejectError(commit_failed_indeterminate(e).to_op_error())
-        }
-        SettleOutcome::SettleErr(e) => {
-            // A nested RELEASE / ROLLBACK TO failed. Surface it as a coded
-            // error regardless of the body outcome — the savepoint state
-            // is no longer trustworthy.
+        // Both arms surface the error the settle produced, VERBATIM. Neither
+        // re-wraps: `driver::outcome_error` already chose the code that names
+        // what happened, and wrapping it again in
+        // `commit_failed_indeterminate` labelled a definitively rolled-back
+        // commit as an unknown one - the opposite of what the state machine
+        // established.
+        SettleOutcome::CommitIndeterminate(e) | SettleOutcome::SettleErr(e) => {
             ResolveValue::RejectError(e.to_op_error())
         }
     }
@@ -1413,7 +1251,8 @@ mod tests {
         fn drop(&mut self) {
             crate::context::with_mut(|c| {
                 let _ = c.take_tx_client_for("app_sqlite");
-                c.reset_savepoint_depth_for("app_sqlite");
+                c.retire_transaction("app_sqlite");
+                c.release_tx_claim("app_sqlite");
                 c.clear_pending_emits_for("app_sqlite");
                 c.clear_pool();
             });
@@ -1428,18 +1267,88 @@ mod tests {
         let reset = ContextReset;
         crate::context::with_mut(|c| {
             let _ = c.take_tx_client_for("app_sqlite");
-            c.reset_savepoint_depth_for("app_sqlite");
+            c.retire_transaction("app_sqlite");
+            c.release_tx_claim("app_sqlite");
             c.clear_pending_emits_for("app_sqlite");
             c.set_sqlite_backend(Rc::clone(&backend));
         });
         (backend, dir, reset)
     }
 
+    /// **Dispatch emits the reducer's monotonic names, not depth-derived ones.**
+    ///
+    /// This replaced `savepoint_name_is_prefixed_and_1_based`, which asserted
+    /// `savepoint_name(1) == "zs_sp_1"` - a function whose whole contract was
+    /// the defect. Two frames opened at the SAME depth used to get the same
+    /// name, and because `ROLLBACK TO SAVEPOINT` leaves the savepoint defined
+    /// and PostgreSQL resolves a name to the most recently established one, the
+    /// leftover shadowed the enclosing frame and sent its rollback to the wrong
+    /// scope.
+    ///
+    /// The arm drives the real dispatch entry point, not the frame stack: it
+    /// opens a frame, settles it, opens another at the same depth, and requires
+    /// the two minted names to differ. Mutating `FrameStack::open_child` back to
+    /// a depth-derived `format!("zs_sp_{}", self.frames.len())` reddens this.
     #[test]
-    fn savepoint_name_is_prefixed_and_1_based() {
-        assert_eq!(savepoint_name(1), "zs_sp_1");
-        assert_eq!(savepoint_name(2), "zs_sp_2");
-        assert_eq!(savepoint_name(8), "zs_sp_8");
+    fn dispatch_emits_monotonic_savepoint_names_at_the_same_depth() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend.autocommit_client();
+            backend
+                .client_exec(&probe, "CREATE TABLE notes (id INTEGER PRIMARY KEY)", &[])
+                .await
+                .expect("create table");
+
+            exec_begin_or_savepoint(false, None, "app_sqlite")
+                .await
+                .expect("begin");
+
+            let first = exec_begin_or_savepoint(true, None, "app_sqlite")
+                .await
+                .expect("first nested frame")
+                .expect("a nested begin opens a frame");
+            // Roll it back, which on PostgreSQL leaves the savepoint defined -
+            // the precondition that makes a reused name dangerous.
+            match exec_settle("app_sqlite", false, Some(first)).await {
+                SettleOutcome::Ok => {}
+                other => panic!("expected Ok for the first frame settle, got {other:?}"),
+            }
+
+            let second = exec_begin_or_savepoint(true, None, "app_sqlite")
+                .await
+                .expect("second nested frame")
+                .expect("a nested begin opens a frame");
+            assert_ne!(
+                first, second,
+                "a frame id is minted from a monotonic sequence and never reused"
+            );
+
+            let names = crate::context::with(|c| {
+                c.transaction_reducer("app_sqlite")
+                    .expect("the transaction is still open")
+                    .frames()
+                    .minted_names()
+                    .clone()
+            });
+            assert_eq!(
+                names.len(),
+                2,
+                "two frames at the same depth must mint two DISTINCT names; a \
+                 depth-derived scheme mints one name twice and the set collapses \
+                 to a single entry. got {names:?}"
+            );
+            assert!(
+                names.iter().all(|name| name.starts_with("zs_sp_")),
+                "the zs_ prefix keeps the name out of any plausible user-chosen \
+                 savepoint namespace; got {names:?}"
+            );
+
+            match exec_settle("app_sqlite", false, Some(second)).await {
+                SettleOutcome::Ok => {}
+                other => panic!("expected Ok for the second frame settle, got {other:?}"),
+            }
+            let _ = exec_settle("app_sqlite", false, None).await;
+        });
     }
 
     #[test]
@@ -1473,21 +1382,102 @@ mod tests {
         assert_eq!(MAX_SAVEPOINT_DEPTH, 8);
     }
 
+    /// The settle's own code reaches the creator, UNWRAPPED.
+    ///
+    /// It used to be re-wrapped in `commit_failed_indeterminate` here, which
+    /// labelled every failing settle "indeterminate" - including a COMMIT the
+    /// server answered `ROLLBACK`, whose outcome is not unknown at all. The
+    /// codes now come from `driver::outcome_error`, one per outcome.
     #[test]
-    fn build_settle_resolve_value_commit_indeterminate_has_code() {
-        let rv = build_settle_resolve_value(
-            SettleOutcome::CommitIndeterminate(DbError::internal("network drop")),
-            true,
-            None,
+    fn a_settles_own_code_reaches_the_creator_unwrapped() {
+        for outcome in [
+            SettleOutcome::CommitIndeterminate(DbError::Coded {
+                code: "commit_failed_indeterminate".to_string(),
+                message: "network drop".to_string(),
+                hint: None,
+            }),
+            SettleOutcome::SettleErr(DbError::Coded {
+                code: "commit_rolled_back".to_string(),
+                message: "the server discarded it".to_string(),
+                hint: None,
+            }),
+        ] {
+            let expected = match &outcome {
+                SettleOutcome::CommitIndeterminate(_) => "commit_failed_indeterminate",
+                SettleOutcome::SettleErr(_) => "commit_rolled_back",
+                SettleOutcome::Ok => unreachable!(),
+            };
+            match build_settle_resolve_value(outcome, true, None) {
+                ResolveValue::RejectError(op_err) => match op_err.kind {
+                    zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                        assert_eq!(
+                            code, expected,
+                            "the settle's code must survive; re-wrapping it makes \
+                             every failure read as indeterminate"
+                        );
+                    }
+                    other => panic!("expected CodedError, got {other:?}"),
+                },
+                _ => panic!("expected RejectError for {expected}"),
+            }
+        }
+    }
+
+    /// `driver::outcome_error` names each outcome distinctly.
+    ///
+    /// A commit the server rolled back is NOT indeterminate: its outcome is
+    /// known and its writes are gone. Collapsing the two hides a definite
+    /// failure behind a retryable-looking one.
+    #[test]
+    fn outcome_errors_do_not_collapse_rolled_back_into_indeterminate() {
+        use reducer::{CleanupCause, SettleIntent, TerminalOutcome};
+
+        fn code_of(error: &DbError) -> &str {
+            match error {
+                DbError::Coded { code, .. } => code,
+                other => panic!("expected a coded error, got {other:?}"),
+            }
+        }
+
+        assert!(
+            driver::outcome_error(TerminalOutcome::Committed, SettleIntent::Commit, None)
+                .is_none(),
+            "a confirmed commit is not an error"
         );
-        match rv {
-            ResolveValue::RejectError(op_err) => match op_err.kind {
-                zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
-                    assert_eq!(code, "commit_failed_indeterminate");
-                }
-                other => panic!("expected CodedError, got {other:?}"),
-            },
-            _ => panic!("expected RejectError"),
+        let rolled_back =
+            driver::outcome_error(TerminalOutcome::RolledBack, SettleIntent::Commit, None)
+                .expect("a COMMIT answered ROLLBACK is a failure");
+        let indeterminate = driver::outcome_error(
+            TerminalOutcome::Indeterminate(CleanupCause::BackendHealthUnknown),
+            SettleIntent::Commit,
+            None,
+        )
+        .expect("an unproved terminal is a failure");
+        assert_eq!(code_of(&rolled_back), "commit_rolled_back");
+        assert_eq!(code_of(&indeterminate), "commit_failed_indeterminate");
+        assert_ne!(
+            code_of(&rolled_back),
+            code_of(&indeterminate),
+            "a definite failure must not be reported under the code for an \
+             unknown one - the observable difference would migrate into retry \
+             timing, which every caller can measure and none can act on"
+        );
+
+        // Every cleanup cause reaches the creator under its OWN code, so a
+        // caller can tell a deadline from a denial from a cancel.
+        for cause in [
+            CleanupCause::Cancelled,
+            CleanupCause::Detached,
+            CleanupCause::EpochChanged,
+            CleanupCause::BeginFailed,
+        ] {
+            let error = driver::outcome_error(
+                TerminalOutcome::Cancelled(cause),
+                SettleIntent::Commit,
+                None,
+            )
+            .expect("a cancelled transaction is an error to the caller");
+            assert_eq!(code_of(&error), cause.code());
         }
     }
 
