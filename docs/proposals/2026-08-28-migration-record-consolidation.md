@@ -1,321 +1,127 @@
-# Five records of one fact: consolidate onto the engine journal
+# Where migration records live
 
 **Date:** 2026-08-28
-**Status:** finding + recommendation. Not started.
+**Status:** decided, not implemented. Blocked on the
+`zeroship-migrated` -> `zeroship-migrate-server` rename landing, which touches
+the same crates.
 
-Raised by the operator asking a one-line question - *"where do we have two places
-to manage the migrations?"* - which turned out to have a five-part answer, three
-of which are shadow copies and two of which are already broken.
+## The decision
 
-## The count
+**Creator migrations belong to the creator.** Their journal lives in their own
+schema, under the platform prefix:
 
-### Creator app migrations: two, and the overlap is documented as hazardous
+```
+<app_id>.__zeroship_schema_migrations
+<app_id>.__zeroship_schema_migrations_supersedes
+<app_id>.__zeroship_schema_migrations_inflight
+<app_id>.__zeroship_schema_pending_contracts
+<app_id>.__zeroship_schema_deploy_recovery
+<app_id>.__zeroship_schema_backfills
+```
 
-| record | holds |
-| --- | --- |
-| `<app_uuid>_migrations.schema_migrations` | **what ran.** Engine journal: `event_kind` in `applied`/`rolled_back`, `version`, `name`, `checksum`, `at`, `by`, `exec_ms`, `phase`, `kind`. Append-only |
-| `zeroship.migrated_migrations` | **what was requested.** `status`, `submitted_by`, `approved_by`, `ceiling_id`/`ceiling_version`, `request_body`, `approved_checksum` |
+**Platform migrations get a schema of their own:**
 
-These are genuinely different concerns and the split is right: the engine is a
-standalone publishable library and knows nothing about operator ceilings or
-approval, correctly.
+```
+zeroship_migrate.<table>          (was zeroship_migrations.<table>)
+```
 
-**But they overlap on the single fact everything depends on - "applied" - and
-the code already documents that they can contradict** (`migrate-server/src/apply.rs:784-788`):
+No new schema for creator apps. No separate meta schema. The creator is
+responsible for their own migrations.
 
-> *"The DDL is committed and cannot be taken back, but a concurrent path
-> rejected this migration while the engine was applying it, so the row reads
-> `rejected`. The record now contradicts the database it describes and only an
-> operator can reconcile them."*
+## Why `__zeroship_`
 
-That is an accepted divergence on the write path. **The rollback hole
-(`2026-08-28-deploy-schema-precondition.md`) is the same seam from the read
-side:** the ledger can move backwards because it records *requests*; the journal
-cannot, because it records *events*.
+It is already fenced. `validate_collection` refuses the `__zeroship` prefix for
+table names (`zeroship-schema/src/query.rs`, beside `pg_`), so co-habitation is
+protected with no new reservation. The prefix means one thing everywhere: **the
+platform owns this name.**
 
-### Platform migrations: three, and two are dead
+**That protection is load-bearing, not decoration.** Without a fenced prefix,
+co-habitation is a live collision:
+
+- the engine creates its journal with `CREATE TABLE IF NOT EXISTS`;
+- its table names are **literals** - only `{meta}` is interpolated
+  (`zeroship-migrate-postgres/src/backend/journal_sql.rs:128`, `:178`, `:224`,
+  `:327`, `:342`);
+- `validate_collection` does **not** fence `schema_migrations`.
+
+So a creator declaring a table named `schema_migrations` in their own schema
+would have it silently **adopted as the journal**.
+
+**The pattern is already in use.** `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}`
+live in the `app_<uuid>` workflow schema (`plugin-workflow/src/store/pg.rs`).
+That schema is a different service's journal and is **not** folded in here.
+
+## What this costs, accepted deliberately
+
+The migrator role **owns** the app's schema
+(`migrate-server/src/provisioning.rs:140-160`: `ALTER SCHEMA {proj} OWNER TO
+{role}`, `GRANT CREATE, USAGE`, `ALTER DEFAULT PRIVILEGES ... GRANT ALL ON
+TABLES`). A schema owner can `DROP` and `TRUNCATE` anything in it, and owner
+privileges are **implicit - they cannot be REVOKE'd away.**
+
+So a creator can destroy their own journal. That is the point: it is their
+database and their app, and corrupting it breaks only them.
+
+**Two consequences that follow, and must not be forgotten:**
+
+1. **The platform cannot treat the creator journal as a trust anchor.**
+   `zeroship.migrated_migrations` remains the platform's answer to "did this
+   app's migrations apply". The deploy precondition keeps reading the ledger.
+2. **The rollback hole closes platform-side, not by reading the journal.**
+   Record what the engine **reported as applied** (`outcome.applied`) on the
+   ledger row beside the declared descriptor. A re-submitted old IR yields
+   `applied: []`, so the row shows nothing advanced, while the per-request write
+   that the engine-upgrade case needs is preserved. Detail:
+   `2026-08-28-deploy-schema-precondition.md`.
+
+## The work
+
+1. **Engine:** prefix the six journal tables `__zeroship_`. Our copy is
+   in-sourced at `crates/zeroship-migrate-*`, so this is an ordinary change.
+2. **Config:** `meta_schema` becomes the app's own schema. `conn.rs` already
+   exposes `meta_schema` and nothing else, so this is the one knob that exists.
+3. **Platform:** `zeroship_migrations` -> `zeroship_migrate`.
+4. **Delete** `provisioning.rs` step 5's `REVOKE ALL ON ... SCHEMA {meta}`. With
+   no separate meta schema it names nothing, and a revoke that names nothing
+   reads as protection.
+5. **A migration** moving existing objects, dated after the last applied file.
+
+**No rename is needed on either side.** `__zeroship_migrations` - the runtime
+DDL audit table that would have collided - disappears under operator decision
+10 (no DDL in the data plane), because its only writers are the two lazy index
+paths that decision removes. See the index, "Decision 10".
+
+## The platform half: two shadows can go
+
+`zeroship_migrate.schema_migrations` is append-only, enforced by a
+`schema_migrations_immutable` trigger. Two other records duplicate slices of it
+and are both already broken:
 
 | record | state |
 | --- | --- |
-| `zeroship_migrations.schema_migrations` | the engine journal for the platform's own schema, protected by a `schema_migrations_immutable` trigger. **Alive and authoritative** |
-| `zeroship_migrations.platform_migration_files` | filename + checksum. **No writer** - its only producer, `zeroship-migrate-adapter/src/platform.rs`, was deleted 2026-08-28 (register L32) |
-| `db/released_migrations.tsv` | a git-tracked snapshot of the above. **All 34 checksums stale**; the pre-flight check reading it was demoted from `fail` to a printed report |
+| `zeroship_migrations.platform_migration_files` | **no writer** since `platform.rs` was deleted (register L32) |
+| `db/released_migrations.tsv` | all 34 checksums stale; its pre-flight check was demoted from `fail` to a printed report |
 
-The platform grew two bookkeeping layers *beside* the engine's own journal, and
-today's removal killed both. Neither death was noticed until someone went
-looking.
+Both hold *filename + checksum*, which the journal already stores under an
+immutability trigger. They exist only because the code that needed "what
+actually ran" could not reach the journal: its public reader
+`journal_sql::applied`
+(`zeroship-migrate-postgres/src/backend/journal_sql.rs:506`) is called by
+**nothing**.
 
-## The root cause: the journal has no platform reader
+**Fix:** point the freeze check at the platform journal and delete both shadows.
+This is a platform schema with no tenant, so no grant question arises.
 
-Every shadow exists because the code that needed "what actually ran" could not
-reach the record of it.
+## The one thing a reviewer must check
 
-- The journal's public reader is `journal_sql::applied`
-  (`zeroship-migrate-postgres/src/backend/journal_sql.rs:506`). **No platform
-  service calls it.**
-- The meta schema is created on the superuser provisioning DSN, and
-  `provisioning.rs:169` runs `REVOKE ALL ON ALL TABLES IN SCHEMA {meta} FROM
-  {role}`.
+If any future change grants access to a **creator** journal, check the
+**grantee**, not just the privilege. The tenant owning its own journal is
+accepted here; a *third party* gaining write access to someone else's is not.
 
-**That REVOKE is deliberate and must not be undone.** `{role}` is the **app's own
-migrator role**, and the comment beside it (`:163`) gives the reason:
-*"unforgeable by deny-by-absence"*. A tenant that could write its own journal
-could claim a migration ran that never did. The fence is a security property,
-not an oversight.
+## A constraint on any future consolidation
 
-**But it fences the TENANT, not the platform.** `zeroship_control` is a
-different role and granting it SELECT on the meta schema does not weaken the
-unforgeability property at all - the tenant still cannot write, and now cannot
-write *or* be the only source the platform trusts.
-
-## The recommendation
-
-**Grant a platform role read on the journal, and delete the shadows.**
-
-One change collapses three open problems:
-
-1. **The rollback hole closes.** The deploy precondition currently compares
-   against `migrated_migrations`, which records requests and is therefore
-   mutable in both directions. Comparing against the journal - or against a
-   descriptor `migrate-server` derives *from* the journal - removes the
-   backwards move entirely, because re-submitting an old IR journals nothing.
-2. **L32 stops needing a fix.** `platform_migration_files` and
-   `db/released_migrations.tsv` exist to answer "was an applied file edited?",
-   which is `version` + `checksum` - exactly two columns `schema_migrations`
-   already stores, under an immutability trigger. Neither shadow needs a
-   producer if the check reads the journal.
-3. **The freeze guard gets a source that cannot drift.** Today it reads a table
-   nothing writes, compared against a TSV maintained by a deploy script. The
-   journal is append-only by trigger.
-
-**What `migrated_migrations` legitimately keeps:** approval state, submitter and
-approver identity, the operator ceiling a migration was approved under, the
-request body, and `approved_checksum`'s TOCTOU pin. None of that is in the
-journal and none of it should be. The recommendation is not to delete the
-ledger - it is to stop using the ledger as the answer to *"what ran?"*, which is
-the one question it cannot answer correctly.
-
-## FINAL DECISION 2026-08-28: everything in the creator-accessible schema
-
-**Operator, on being shown the ownership objection below and reaffirming:**
-*"place everything inside the creator accessible schema, no new schema, the
-creator is responsible for the migration."*
-
-**This supersedes the sibling-schema compromise recorded further down.** The
-reasoning is a position, not an oversight: if the creator owns their database
-and their migrations, the journal is **their** bookkeeping. A creator who
-corrupts it breaks their own app, which is their problem, not a platform
-integrity failure.
-
-**What that costs, stated so it is not rediscovered.** The platform can no
-longer treat the creator journal as a trust anchor - a tenant owning the schema
-can `DROP` or rewrite it, and owner privileges cannot be revoked. So:
-
-- `zeroship.migrated_migrations` **remains** the platform's answer to "did this
-  app's migrations apply", and the consolidation recommended above applies to
-  **platform** migrations only.
-- **The rollback hole must be closed platform-side**, not by reading the
-  journal. The workable fix without the journal: record what the engine
-  **reported as applied** (`outcome.applied`) on the ledger row alongside the
-  declared descriptor. A re-submitted old IR produces `applied: []`, so the row
-  records that nothing advanced and the precondition can compare against the
-  newest row that actually applied something. That keeps the per-request write
-  the engine-upgrade case needs while removing the backwards move.
-- `provisioning.rs` step 5's `REVOKE ALL ON ... SCHEMA {meta}` becomes moot -
-  there is no separate meta schema to revoke. Delete it rather than leave a
-  revoke that names nothing.
-
-### The final naming, decided 2026-08-28
-
-**Operator: everything prefixed `__zeroship_`.** That inherits the existing
-fence for free - `validate_collection` already refuses the `__zeroship` prefix
-for table names (`zeroship-schema/src/query.rs`, beside `pg_`), so no new
-reservation is needed and the prefix means one consistent thing everywhere:
-**the platform owns this name.**
-
-**The pattern already exists and works.** `__zeroship_migrations` has lived in
-the creator's data schema since before this discussion, created by
-`plugin-db/src/audit.rs:236`. The engine journal is joining an established
-arrangement, not inventing one.
-
-**But that existing table forces a rename, because the names collide in
-MEANING:**
-
-| name | what it actually is |
-| --- | --- |
-| `__zeroship_migrations` (existing) | the runtime **DDL audit log** - `collection`, `phase`, `change_class`, `change_kind`, `details` jsonb, `ddl_sql`, `applied_by_kind`, `deploy_id`, self-referencing `parent_id` |
-| `__zeroship_schema_migrations` (incoming) | the engine's **migration journal** - `event_kind`, `version`, `checksum`, `at`, `by` |
-
-Two nearly identical identifiers, different meanings, in one schema. That is how
-a future reader joins the wrong table.
-
-**Operator, 2026-08-28: "we need to remove `__zeroship_migrations` from the
-audit."** Tracing what actually writes it turns that from a rename into a
-sharper cleanup.
-
-**The table does not record migrations.** Its three production writers are all
-inside one function, `create_index_with_recovery_audited`
-(`plugin-db/src/backend/postgres.rs:888`), reached from exactly three places:
-
-| call site | enclosing function |
-| --- | --- |
-| `postgres.rs:371` | `create_index_with_recovery` |
-| `postgres.rs:543` | **`ensure_vector_index`** |
-| `postgres.rs:683` | **`ensure_spatial_index`** |
-
-The last two are **lazy runtime DDL** - the runtime creating an index on demand
-when a vector or spatial query needs one. So `__zeroship_migrations` is the
-provenance log for **DDL the runtime issues outside the migration path**, under
-a name that says the opposite.
-
-**Which makes the table a symptom, not the problem.** Operator decision 8 made
-the descriptor the sole schema authority and deleted live introspection on the
-principle that the data plane does not discover or change schema. A runtime that
-still creates indexes lazily contradicts that, and the audit table exists
-precisely to record the contradiction.
-
-**So the removal has two shapes and they are not equivalent:**
-
-1. **Delete the table, keep lazy DDL.** Cheapest, and wrong - it removes the
-   only record of unattributed DDL while leaving the DDL. The audit module's own
-   doc (`audit.rs:20-42`) is the passage `AGENTS.md` quotes when refusing a
-   `SECURITY DEFINER` writer, on the grounds that *"the worker pool is the only
-   writer, so provenance is enforced at the Rust call boundary"*. Deleting the
-   log keeps the writer and drops the provenance.
-2. **Move vector and spatial index creation into migrations, then delete the
-   table because nothing writes it.** This is the coherent end state: it
-   finishes decision 8 rather than working around it, and the audit table
-   disappears as a consequence rather than as an edit.
-
-**Recommended: 2.** It also removes the lazy-DDL sites that the design's own
-invariant 7 was written about and never fully enumerated - measured earlier at
-**six** ungated `CREATE TABLE IF NOT EXISTS` across three tables, where the
-invariant asserted three.
-
-Verified free of the freeze either way: `grep '__zeroship_migrations'
-db/migrations-ts/*.ts` returns **nothing**. The table is created by runtime code
-in the app's own schema, sits in no platform migration, and holds no creator
-data pre-launch.
-
-**Consequence for the naming above:** with the audit table gone, the collision
-disappears and the engine journal can simply take `__zeroship_schema_migrations`
-and siblings, with no rename needed on either side.
-
-**The resulting set in `<app_id>`:**
-
-```
-__zeroship_ddl_audit                      (renamed from __zeroship_migrations)
-__zeroship_schema_migrations              (the six, moved in from the meta schema)
-__zeroship_schema_migrations_supersedes
-__zeroship_schema_migrations_inflight
-__zeroship_schema_pending_contracts
-__zeroship_schema_deploy_recovery
-__zeroship_schema_backfills
-```
-
-and `zeroship_migrate.<table>` for the platform's own, per the same instruction.
-
-**Note the workflow journal is a different schema and is already conformant:**
-`app_<uuid>` holds `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}`
-(`plugin-workflow/src/store/pg.rs`, schema from `app_schema_for()`). It needs no
-change and should not be folded in - it is a separate service's journal.
-
-### Why the engine change is still needed
-
-Verified 2026-08-28, and this is the part that decides the work:
-
-1. **The engine's journal table names are LITERALS.** Only `{meta}` is
-   interpolated (`zeroship-migrate-postgres/src/backend/journal_sql.rs:128`,
-   `:178`, `:224`, `:327`, `:342`, plus `schema_backfills`):
-   `schema_migrations`, `schema_migrations_supersedes`,
-   `schema_migrations_inflight`, `schema_pending_contracts`,
-   `schema_deploy_recovery`, `schema_backfills`. `conn.rs` exposes `meta_schema`
-   and no table-name knob.
-2. **`validate_collection` fences only `pg_` and `__zeroship`** for table names.
-   **So a creator CAN declare a table named `schema_migrations`.**
-3. The engine creates its journal with `CREATE TABLE IF NOT EXISTS`. A
-   creator-declared `schema_migrations` in the same schema would therefore be
-   silently **adopted as the journal**, or collide on shape.
-
-So co-habitation without a prefix is a live collision, and the operator's
-`zeroship_migrate_` prefix is exactly what prevents it.
-
-**The work this implies, in dependency order:**
-
-1. **Engine:** prefix the six journal tables to `zeroship_migrate_*`, or add a
-   table-prefix config. Our copy is in-sourced at `crates/zeroship-migrate-*`,
-   so this is an ordinary change - not a vendored-submodule edit.
-2. **Reserve the prefix in `validate_collection`**, beside `pg_` and
-   `__zeroship`. **Without this the prefix is decoration** - a creator can still
-   declare `zeroship_migrate_schema_migrations` and collide deliberately. This
-   step is what converts a naming convention into a guarantee.
-3. **Config:** `meta_schema` becomes the app's own schema.
-4. **Platform:** `zeroship_migrations` schema becomes `zeroship_migrate`.
-5. **Delete** `provisioning.rs` step 5's now-meaningless revoke.
-6. **A migration** moving existing journal objects, remembering that
-   `db/migrations-ts` files already applied are frozen.
-
-## SUPERSEDED: the naming, with one correction
-
-Operator instruction: place creator migration records under
-`<app_schema>.zeroship_migrate_<table>`, and platform records under
-`zeroship_migrate.<table>`.
-
-**The platform half lands as instructed.** `zeroship_migrations` becomes
-`zeroship_migrate`, matching the renamed crate family.
-
-**The creator half cannot be inside `<app_schema>`, and the reason is
-ownership rather than grants.** `provisioning.rs:140-160` does three things to
-the app's project schema:
-
-```
-ALTER SCHEMA {proj} OWNER TO {role}                       -- step 3
-GRANT CREATE, USAGE ON SCHEMA {proj} TO {role}            -- step 4
-ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO {role} -- step 4b
-```
-
-The migrator role **owns** that schema. A PostgreSQL schema owner can `DROP` and
-`TRUNCATE` any table in it, and owner privileges are **implicit - they cannot be
-REVOKE'd away.** So a journal inside `<app_schema>` is a journal the tenant can
-delete or rewrite, which destroys exactly the property step 5 exists to hold:
-
-```
-REVOKE ALL ON ALL TABLES IN SCHEMA {meta} FROM {role}
-REVOKE ALL ON SCHEMA {meta} FROM {role}
--- "journal is unforgeable by deny-by-absence"
-```
-
-**The separateness of the meta schema IS the mechanism.** It is not incidental
-placement.
-
-**Adopted instead - a sibling schema, same naming family:**
-
-| | before | after |
-| --- | --- | --- |
-| creator | `<app_uuid>_migrations.<table>` | **`<app_schema>_zeroship_migrate.<table>`** |
-| platform | `zeroship_migrations.<table>` | **`zeroship_migrate.<table>`** |
-
-One word different from the instruction, the same consistency gained, and the
-revoke keeps working untouched.
-
-### The shape that would have been better, and why it is blocked
-
-One shared `zeroship_migrate` schema holding **every** app's journal, rows
-partitioned by app, would be maximally consistent and would enable the
-consolidation above directly. It does not work today: **`schema_migrations` has
-no tenant column.** Its columns are `event_seq`, `event_kind`, `version`,
-`name`, `checksum`, `at`, `by`, `exec_ms`, `down`, `phase`, `outcome`, `kind`.
-A shared table would mix tenants with no way to separate them, and `version`
-would collide across apps.
-
-**So the engine's per-app isolation is carried by the schema name itself.** That
-is worth stating plainly because it constrains every future consolidation: any
-move to a shared journal must first add an owner column upstream, in the
-standalone engine, and that changes a published contract.
-
-## The one thing to get right
-
-The grant must go to a **platform** role and must be **SELECT only**. Any grant
-that lets a tenant role reach its own meta schema re-opens forgeability, which
-is the property `provisioning.rs:163-169` exists to hold. A reviewer should
-check the grantee, not just the privilege.
+The engine's journal has **no tenant column** - `event_seq`, `event_kind`,
+`version`, `name`, `checksum`, `at`, `by`, `exec_ms`, `down`, `phase`,
+`outcome`, `kind`. Its per-app isolation is carried entirely by the schema name.
+Any move to a single shared journal table must first add an owner column
+upstream in the standalone engine, which changes a published contract.
