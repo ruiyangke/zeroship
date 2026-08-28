@@ -34,7 +34,7 @@ sources.
 
 | question | answer | section |
 | --- | --- | --- |
-| Where is the wire projection applied? | In the **publication column list**, as DDL, by `zeroship-migrate-server`. PostgreSQL never puts the excluded bytes or the excluded names on the wire | 3 |
+| Where is the wire projection applied? | In the **publication column list**, as DDL, by `zeroship-migrate-server`. PostgreSQL never puts the excluded bytes or the excluded names on the wire - **from the swap forward.** Measured: changes already in the WAL when a column is newly excluded still carry it, so the projection is prospective, not retroactive (13) | 3 |
 | What covers `changed_columns`? | The same mechanism. A column absent from the publication list is absent from the pgoutput `Relation` message, which is the only thing `changed_columns` is built from | 3.2 |
 | How many publications? | **One, cluster-wide.** `publication_names` is fixed at `START_REPLICATION`, so a per-app publication would restart every tenant's stream on every app creation. Membership is edited with `DROP TABLE` + `ADD TABLE (cols)`, never `SET TABLE` | 3.6 |
 | When is membership reconciled? | **Bracketing** the migration DDL - shrink before, widen after - because a published column is a catalog dependency and `DROP COLUMN` of one fails `2BP01` | 3.6 |
@@ -1986,30 +1986,21 @@ Stated as gaps rather than written as facts elsewhere in this document.
 - **Behaviour of non-transactional `pg_logical_emit_message`.** 8.4. Not used and
   not tested.
 
-- **`messages 'true'` is REQUIRED on `START_REPLICATION`, and omitting it drops
-  the schema-change signal silently.** Measured on PostgreSQL 17.11. One
-  transaction containing `insert`, a transactional
-  `pg_logical_emit_message(true, 'zsschema', 'epoch=7')`, and a second `insert`,
-  decoded twice from the same slot:
-
-  | decode options | message types | payload present |
-  | --- | --- | --- |
-  | `proto_version`, `publication_names` | `Begin Relation Insert Insert Commit` | **no** |
-  | the same plus `messages 'true'` | `Begin Relation Insert **Message** Insert Commit` | yes |
-
-  Two consequences, and the first is the dangerous one:
-
-  1. **Without the option the stream is well-formed and complete-looking.** No
-     error, no gap, no diagnostic - the `Message` frame simply is not there. A
-     relay that forgets it would decode data changes correctly forever while
-     every schema-change signal vanished, and section 8's whole mechanism would
-     be silently inert. The option belongs in the `START_REPLICATION` construction
-     with a test that fails when it is absent, not in a comment.
-  2. **With the option, section 8's ordering claim holds as measured.** The
-     `Message` frame appears *between* the two inserts, at the point in the
-     transaction where it was emitted - so the marker really is ordered by the
-     WAL rather than by a side channel, which is what lets it dissolve the
-     carrier problem instead of moving it.
+- **Section 8's `messages 'true'` requirement reproduces on 17.11.** Not a new
+  finding - 8 already measures it on 16.15 and quotes the driver's own note
+  ("Off, the server omits them and the decoder's `M` arm never runs"). Repeated
+  on `server_version_num=170011` with a transaction containing an insert, a
+  transactional `pg_logical_emit_message`, and a second insert: without the
+  option the stream decodes `Begin Relation Insert Insert Commit` and the payload
+  is absent; with it, `Begin Relation Insert Message Insert Commit` and the
+  payload is present. So the behaviour is stable across two majors, and the
+  ordering claim holds on both - the `M` frame lands between the two inserts,
+  where it was emitted.
+  Worth stating once in implementation terms, because the failure is silent:
+  **without the option the stream is well-formed and complete-looking**, so a
+  relay that omits it decodes data changes correctly forever while every
+  schema-change signal vanishes. That belongs in a test that fails when the
+  option is absent, not only in a doc comment.
 - **Whether `ntex` v3's response streaming and `cyper`'s `stream` feature compose
   into a long-lived push channel in practice.** Both are present in the workspace
   (`Cargo.toml:45`, `:48`) and `cyper`'s `stream` feature is enabled; no code was
