@@ -347,9 +347,31 @@ directions:
   `query.rs`, at `:11348`, **in a doc comment**. There is no code anywhere that
   knows the name.
 
-  **The fix is one line** - `ReservedName::Suffix("_raw")` beside the `_masked`
-  entry - and it must land **before** the flip, not with it. It is breaking for
-  any creator holding a `*_raw` column, which pre-launch costs nothing.
+  **SUPERSEDED 2026-08-28 by a better answer: do not reserve `_raw`, name the
+  raw column something every validator ALREADY refuses.** An earlier revision of
+  this page said the fix was one line - `ReservedName::Suffix("_raw")` beside the
+  `_masked` entry - which would have had to land in **two** independent
+  reservation tables (`zeroship-schema/src/query.rs:754` and
+  `migrate-core/src/schema/query.rs:379`) with no dependency edge to keep them
+  agreeing.
+
+  `RESERVED_NAMES` already contains `ReservedName::Prefix("_")`
+  (`query.rs:742`), and `validate_field_name` already gates **every inbound
+  surface** - verified:
+
+  | surface | site |
+  | --- | --- |
+  | write-document keys, including nested | `crud/write_pipeline.rs:44`, `:63`, `:67` |
+  | filter keys | `query.rs:5329` |
+  | conflict-probe keys | `query.rs:2909` |
+  | read identifiers | `query.rs:937` |
+
+  **So a raw column named with a leading underscore is already unrepresentable on
+  every path a creator can reach, and the entire inbound half of the flip
+  disappears** - no new reservation, no filter-builder change, no schema hint
+  threaded through. This is the difference between adding a fence and choosing a
+  name no existing gate admits, and it is strictly better because a fence
+  protects only the surfaces someone remembered to fence.
 
 **The flip's blast radius is larger than any document here states, and the
 missing part is the MIGRATION side.** The descriptor generator's own doc
