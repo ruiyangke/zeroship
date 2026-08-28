@@ -137,9 +137,20 @@ platform side.
 `ApprovalLevel::Never` is the **default** (`migrate-ir/src/policy_approval.rs:32-38`),
 and measured 2026-08-28: **no policy artifact anywhere in the tree sets
 `require_approval`** - not in `policies/`, not in any `.toml`, `.json` or `.ts`
-outside tests. So `gated_versions` is always empty, `insert_pending` is never
-called, and the whole `pending_approval -> approved -> applied` state machine,
-with `approved_by`, `approved_at`, `approved_checksum` and `ceiling_version`, is
+outside tests.
+
+**Confirmed at the code level, not only the config level**, which is the
+stronger form: `resolve_approval_level` starts at `ApprovalLevel::Never`
+(`policy_approval.rs:123`) and only ever **loosens** it via
+`level.loosest(...)` when a `require_approval` rule matches (`:127`). With no
+such rule anywhere, the level cannot leave `Never`, and
+`migration_requires_approval` returns `false` for every op (`:174`). The
+property is pinned by a test that asserts the default outright
+(`migrate-server/src/policy.rs:744`).
+
+So `gated_versions` is always empty, `insert_pending` is never called, and the
+whole `pending_approval -> approved -> applied` state machine, with
+`approved_by`, `approved_at`, `approved_checksum` and `ceiling_version`, is
 configured-but-unused.
 
 **This is a capability removal and should be explicit rather than incidental:**
