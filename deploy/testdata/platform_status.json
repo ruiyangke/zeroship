@@ -1,0 +1,941 @@
+{
+  "interruptedUnwinds": [],
+  "currentVersion": "mig_7n42DGM5SvI71xRdlpF4Wz",
+  "applied": [
+    "mig_7n42DGM5P7CheUcsjXj96L",
+    "mig_7n42DGM5OMb6N9LxExRVdn",
+    "mig_7n42DGM5SqlnYkvco8z0mc",
+    "mig_7n42DGM5P09ISUAAzYgOWo",
+    "mig_7n42DGM5Q7t50B3wjJwDqU",
+    "mig_7n42DGM5S91CRQB2QcrnhQ",
+    "mig_7n42DGM5QV67QALYt3p0hd",
+    "mig_7n42DGM5SWfiVxjqhCvRNb",
+    "mig_7n42DGM5RcWfs9P5iQfk1J",
+    "mig_7n42DGM5Oz0MwhUynD73Y8",
+    "mig_7n42DGM5QYOgTjkNDdlU6W",
+    "mig_7n42DGM5P76UeLGpfv9vpI",
+    "mig_7n42DGM5QzTeQNqp89BJRh",
+    "mig_7n42DGM5SibaqDwUb1LnFq",
+    "mig_7n42DGM5Ngdl0xwvn5WYMq",
+    "mig_7n42DGM5NvYxxi4h0DiFfN",
+    "mig_7n42DGM5RTO0u7R1WPfO41",
+    "mig_7n42DGM5SMGYQM0nN5fgNA",
+    "mig_7n42DGM5OMird1A2DyOQMy",
+    "mig_7n42DGM5Sq1duKgsixFSkD",
+    "mig_7n42DGM5S1DGcbaiWxvOd8",
+    "mig_7n42DGM5Qrpx22B4FXfG8l",
+    "mig_7n42DGM5PiDLdiDbzKOZh7",
+    "mig_7n42DGM5PiXj5BB3qxwYds",
+    "mig_7n42DGM5OXqBscSXAlv3VU",
+    "mig_7n42DGM5O0Gq9DrVf9jcVF",
+    "mig_7n42DGM5SLV9Ph4OUqMeDo",
+    "mig_7n42DGM5QDG3k3wBXyqeIA",
+    "mig_7n42DGM5Tap3lpFYx6fbdA",
+    "mig_7n42DGM5Slg7VzEuKKV3NE",
+    "mig_7n42DGM5PA5fLNIVmhY7oH",
+    "mig_7n42DGM5Qw6Laum1reIWDy",
+    "mig_7n42DGM5O6PnWNZsEZsDWS",
+    "mig_7n42DGM5RDTPZN599nL2rl",
+    "mig_7n42DGM5SvI71xRdlpF4Wz"
+  ],
+  "pending": [],
+  "aborted": [],
+  "rolledBack": [],
+  "pendingContracts": [],
+  "blocked": [],
+  "unexpectedJournal": [],
+  "plans": [
+    {
+      "version": "mig_7n42DGM5P7CheUcsjXj96L",
+      "name": "schema_roles_extensions",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5SsGPG3Xjuayy9s",
+          "name": "create_schema_zeroship",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5RBZt0nRddkAI6J",
+          "name": "create_extension_citext",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5OMb6N9LxExRVdn",
+      "name": "control_tables",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5NqV0ml93U8Aa9u",
+          "name": "create_table_app_audit",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5QbillxphuJlt4J",
+          "name": "create_table_app_env_expose",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_audit",
+        "app_env_expose",
+        "app_members",
+        "app_net_grants",
+        "app_oauth_clients",
+        "app_schema_applies",
+        "app_scope_defs",
+        "app_secrets",
+        "app_usage",
+        "app_usage_history",
+        "app_vars",
+        "apps",
+        "creator_account_history",
+        "creator_accounts",
+        "net_policy_catalog",
+        "payouts",
+        "permission_tokens",
+        "platform_admin_roles",
+        "platform_policies"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5SqlnYkvco8z0mc",
+      "name": "auth_oauth_tables",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Rb9hjvP0MdaBK2",
+          "name": "create_table_app_session_anchors",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5SUauhvE4LqpYB2",
+          "name": "create_table_app_user_identities",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_session_anchors",
+        "app_user_identities",
+        "audit_events",
+        "authz_decisions",
+        "cron_state",
+        "device_grants",
+        "dpop_jti",
+        "email_suppressions",
+        "email_verifications",
+        "federated_identities",
+        "gateway_sessions",
+        "identity_links",
+        "idp_sessions",
+        "jwk_key_state",
+        "magic_completions",
+        "magic_links",
+        "oauth_authorization_codes",
+        "oauth_clients",
+        "oauth_grants",
+        "oauth_refresh_tokens",
+        "oidc_session_clients",
+        "principal_grants",
+        "rate_limits",
+        "signing_keys",
+        "token_revocations",
+        "totp_backup_codes",
+        "totp_credentials",
+        "users"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5P09ISUAAzYgOWo",
+      "name": "billing_metering_invoice_tables",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5PddxxTw5zTVlbb",
+          "name": "create_table_app_spend_limit",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5R6bjgfiwLTtNq6",
+          "name": "add_constraint_app_spend_limit_app_spend_limit_spend_limit_cents_check",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_spend_limit",
+        "app_spend_state",
+        "billing_customer_refs",
+        "billing_disputes",
+        "billing_line_provider_refs",
+        "billing_metrics",
+        "billing_notifications",
+        "billing_provider_refs",
+        "billing_reconciliation_findings",
+        "connect_checkout_failures",
+        "creator_billing",
+        "creator_billing_status",
+        "creator_billing_status_history",
+        "creator_fee_policy",
+        "credit_ledger",
+        "invoice_lines",
+        "invoice_payments",
+        "invoices",
+        "metering_exports",
+        "metric_weights",
+        "payout_failures",
+        "pending_disputes",
+        "plan_change_events",
+        "plans",
+        "pricing_config",
+        "provider_dead_letter",
+        "refund_provider_refs",
+        "refunds",
+        "spend_state_history",
+        "stripe_events_seen",
+        "usage_aggregates"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5Q7t50B3wjJwDqU",
+      "name": "sandbox_tables",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5PgXfZTvs5wvLu0",
+          "name": "create_table_deleted_sandboxes",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5PQXOW2cGR3AFDh",
+          "name": "add_constraint_deleted_sandboxes_deleted_sandboxes_sandbox_id_check",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "deleted_sandboxes",
+        "hosts",
+        "sandbox_events",
+        "sandbox_events_2026_05",
+        "sandbox_events_2026_06",
+        "sandbox_events_2026_07",
+        "sandbox_events_2026_08",
+        "sandbox_events_2026_09",
+        "sandbox_events_2026_10",
+        "sandbox_events_default",
+        "sandboxes",
+        "shares",
+        "wake_jobs"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5S91CRQB2QcrnhQ",
+      "name": "constraints_indexes_fks",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5RKk9vu2JtGGGUc",
+          "name": "add_constraint_app_oauth_clients_app_oauth_clients_client_id_key",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5PLtGho36mYSpV4",
+          "name": "add_constraint_app_usage_history_app_usage_history_app_id_period_key",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_audit",
+        "app_env_expose",
+        "app_members",
+        "app_net_grants",
+        "app_oauth_clients",
+        "app_schema_applies",
+        "app_scope_defs",
+        "app_secrets",
+        "app_session_anchors",
+        "app_spend_limit",
+        "app_spend_state",
+        "app_usage",
+        "app_usage_history",
+        "app_user_identities",
+        "app_vars",
+        "apps",
+        "audit_events",
+        "authz_decisions",
+        "billing_customer_refs",
+        "billing_disputes",
+        "billing_line_provider_refs",
+        "billing_metrics",
+        "billing_notifications",
+        "billing_provider_refs",
+        "billing_reconciliation_findings",
+        "connect_checkout_failures",
+        "creator_account_history",
+        "creator_accounts",
+        "creator_billing",
+        "creator_billing_status",
+        "creator_billing_status_history",
+        "creator_fee_policy",
+        "credit_ledger",
+        "deleted_sandboxes",
+        "device_grants",
+        "dpop_jti",
+        "email_verifications",
+        "federated_identities",
+        "gateway_sessions",
+        "hosts",
+        "identity_links",
+        "idp_sessions",
+        "invoice_lines",
+        "invoice_payments",
+        "invoices",
+        "magic_completions",
+        "magic_links",
+        "metering_exports",
+        "metric_weights",
+        "oauth_authorization_codes",
+        "oauth_clients",
+        "oauth_grants",
+        "oauth_refresh_tokens",
+        "oidc_session_clients",
+        "payout_failures",
+        "payouts",
+        "pending_disputes",
+        "permission_tokens",
+        "plan_change_events",
+        "platform_admin_roles",
+        "platform_policies",
+        "principal_grants",
+        "provider_dead_letter",
+        "rate_limits",
+        "refund_provider_refs",
+        "refunds",
+        "sandbox_events",
+        "sandboxes",
+        "shares",
+        "signing_keys",
+        "spend_state_history",
+        "token_revocations",
+        "totp_backup_codes",
+        "totp_credentials",
+        "usage_aggregates",
+        "users",
+        "wake_jobs"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5QV67QALYt3p0hd",
+      "name": "functions_triggers_comments",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5PxLT67UtVEi1Uo",
+          "name": "create_function_app_audit_block_tamper",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5OSMqN76QzL3fU2",
+          "name": "create_function_app_oauth_clients_reject_sector_change",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_audit",
+        "app_oauth_clients",
+        "app_schema_applies",
+        "audit_events",
+        "authz_decisions",
+        "billing_disputes",
+        "billing_reconciliation_findings",
+        "connect_checkout_failures",
+        "credit_ledger",
+        "invoice_lines",
+        "invoice_payments",
+        "invoices",
+        "oauth_refresh_tokens",
+        "payout_failures",
+        "plan_change_events",
+        "refunds"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5SWfiVxjqhCvRNb",
+      "name": "policies_rls",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5RqprzJARBN5ZEZ",
+          "name": "rls_enable_app_secrets",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5NkpiQRSlmCF24l",
+          "name": "rls_force_app_secrets",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_secrets",
+        "app_session_anchors",
+        "app_spend_limit",
+        "app_spend_state",
+        "app_user_identities",
+        "gateway_sessions",
+        "plan_change_events",
+        "spend_state_history",
+        "usage_aggregates"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5RcWfs9P5iQfk1J",
+      "name": "grants",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5S7GtHSK7rX6Ar4",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5Neu5BJdQ9BEcrV",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5Oz0MwhUynD73Y8",
+      "name": "durable_workflows_journal",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Nt7FaZO0Yby9SR",
+          "name": "create_table_app_deploys",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5OLBsOKNJXvDnW1",
+          "name": "add_constraint_app_deploys_app_deploys_app_id_deploy_hash_key",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_deploys",
+        "workflow_blobs",
+        "workflow_broadcasts",
+        "workflow_rollout_config",
+        "workflow_runs",
+        "workflow_schedules",
+        "workflow_signal_keys",
+        "workflow_signals",
+        "workflow_steps",
+        "workflow_subscriptions"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5QYOgTjkNDdlU6W",
+      "name": "billing_provider_corrections",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5PwbJZ3dbi81HdK",
+          "name": "raw",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5R8rD6w0IPzvmkG",
+          "name": "raw",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5P76UeLGpfv9vpI",
+      "name": "drop_metering_exports",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5STVZyayb1Mna9z",
+          "name": "drop_table_metering_exports",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "metering_exports"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5QzTeQNqp89BJRh",
+      "name": "auth_token_revocations_delete",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5NiLpnX2ZSd0Wff",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5SibaqDwUb1LnFq",
+      "name": "workflow_scheduler_store",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5PrwyRGjnCLx2mE",
+          "name": "create_table_workflow_scheduler_timers",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5PalwzvcePWZpZi",
+          "name": "create_index_workflow_scheduler_timers_due_idx",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "workflow_scheduler_inflight",
+        "workflow_scheduler_timers"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5Ngdl0xwvn5WYMq",
+      "name": "control_audit_grants",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5PeWh8nqfrYO2cr",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5OG97dPKQ6GqUed",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5NvYxxi4h0DiFfN",
+      "name": "control_connect_failures_grant",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5RDS6aZeLhHQh6M",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5RTO0u7R1WPfO41",
+      "name": "rate_limits_write_grants",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Qtmd03odE8H0li",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5SUYHsCYjjOwjlb",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5SMGYQM0nN5fgNA",
+      "name": "gateway_token_revocations_update",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5QFK73a9DIiEbK9",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5OMird1A2DyOQMy",
+      "name": "control_app_oauth_clients_update",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5OCDayTdeFhSjua",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5Sq1duKgsixFSkD",
+      "name": "control_upsert_update_grants",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Oe4dLOsvqLAhcV",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5S1DGcbaiWxvOd8",
+      "name": "auth_email_suppressions_update",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Oug1ZSY9d45pHa",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5Qrpx22B4FXfG8l",
+      "name": "auth_app_oauth_clients_select",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Rcmf2ShTfJvcsm",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5PiDLdiDbzKOZh7",
+      "name": "service_assertion_replay",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5StG5A9hI2sYxKt",
+          "name": "create_schema_service_authn",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5R0eRAifY8Im3Dc",
+          "name": "create_table_service_assertion_replay",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "service_assertion_replay"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5PiXj5BB3qxwYds",
+      "name": "drop_permission_tokens",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5QpjsCL4MLvYpm3",
+          "name": "drop_table_permission_tokens",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "permission_tokens"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5OXqBscSXAlv3VU",
+      "name": "drop_audit_token_columns",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5QB9R6t5ohMp06r",
+          "name": "drop_column_authz_decisions_token_id",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5SeXVlSjBiXwX6Z",
+          "name": "drop_column_app_audit_actor_token_id",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_audit",
+        "authz_decisions"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5O0Gq9DrVf9jcVF",
+      "name": "drop_app_freeze_flags",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5RSUDhGz6ATLeUf",
+          "name": "drop_column_apps_suspended",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5Q67OuGQ5cZAkaQ",
+          "name": "drop_column_apps_audit_locked",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "apps"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5SLV9Ph4OUqMeDo",
+      "name": "drop_platform_policies",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5REk7v3RZRmuYlN",
+          "name": "drop_table_platform_policies",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "platform_policies"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5QDG3k3wBXyqeIA",
+      "name": "drop_platform_admin_roles",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5P6qWOO46m4tHH9",
+          "name": "drop_table_platform_admin_roles",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "platform_admin_roles"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5Tap3lpFYx6fbdA",
+      "name": "drop_net_policy_catalog",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5OYM0GESOzzycDj",
+          "name": "drop_table_net_policy_catalog",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "net_policy_catalog"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5Slg7VzEuKKV3NE",
+      "name": "auth_principal_grants_select",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5TDmoVZmQoJ9Guz",
+          "name": "grant",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5PA5fLNIVmhY7oH",
+      "name": "signing_key_retirement",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5NubQZLjIQ1kV2X",
+          "name": "add_column_signing_keys_max_issued_expires_at",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5T8faHkpy09oZhf",
+          "name": "drop_constraint_signing_keys_signing_keys_status_check",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "signing_keys"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5Qw6Laum1reIWDy",
+      "name": "worker_database_authority",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5NkYHEqGlM6sxA7",
+          "name": "create_role_zeroship_workflow_owner",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5Sh5KcG9t4Oys1I",
+          "name": "raw",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5O6PnWNZsEZsDWS",
+      "name": "credential_lifecycle",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5OzrOm60OhrMXzs",
+          "name": "create_index_app_user_identities_global_user_id_idx",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5O6ZVxTH2PGGAHw",
+          "name": "create_index_auth_users_non_authenticating_idx",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_user_identities",
+        "users"
+      ]
+    },
+    {
+      "version": "mig_7n42DGM5RDTPZN599nL2rl",
+      "name": "control_workflow_journal_access",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5P4vVBXkvyQWsLz",
+          "name": "raw",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": []
+    },
+    {
+      "version": "mig_7n42DGM5SvI71xRdlpF4Wz",
+      "name": "app_egress_rules",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_7n42DGM5Te7SPaTipp2SXx",
+          "name": "create_table_app_egress_rules",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_7n42DGM5S9axjshiJK8FXD",
+          "name": "add_constraint_app_egress_rules_app_egress_rules_verdict_check",
+          "kind": "ddl",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": [],
+      "touchedTables": [
+        "app_egress_rules",
+        "app_net_grants"
+      ]
+    }
+  ],
+  "busy": false,
+  "lockHolders": []
+}

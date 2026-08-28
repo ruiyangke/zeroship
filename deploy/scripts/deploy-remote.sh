@@ -167,120 +167,142 @@ scrape_floor() {
 
   printf '%s\n' "$out"
 }
-
 # ====================================================================
-# THE FROZEN-MIGRATION LEDGER
+# THE FROZEN-MIGRATION CHECK
 # ====================================================================
 #
-# The migrate runner hashes each `db/migrations-ts/*.ts` file's source bytes and
-# refuses every later run against a database whose journal recorded a different
-# hash -- permanently, with no self-healing arm. Editing an applied file
-# therefore bricks that database; it blocked a roll here for a full day on
-# 2026-08-19.
+# The migrate runner refuses every later run against a database whose journal
+# recorded a different checksum for a migration it already applied -- permanently,
+# with no self-healing arm. Editing an applied migration therefore bricks that
+# database; it blocked a roll here for a full day on 2026-08-19.
 #
-# THERE IS NO LONGER A CI HALF OF THAT GUARD, and this comment named it as
-# though there were until 2026-08-28. It was a test in the `migrate-adapter`
-# crate; that crate was folded into `zeroship-migrate-server` and the test was
-# deleted with the Rust one-shot. Nothing in the tree asserts anything about
-# `db/released_migrations.tsv` today -- the same removal is recorded, for its
-# other victim, in the header of `policies/platform.policy.toml`. Do not read
-# the paragraphs below as "the belt, with a brace in CI": this script is now
-# the ONLY thing standing between an edited applied migration and a bricked
-# database.
+# THIS CHECK USED TO READ A TABLE NOTHING WRITES. It compared
+# `db/migrations-ts/*.ts` file bytes against `zeroship_migrations.platform_migration_files`,
+# a table the retired `zeroship-platform-migrate` binary appended to. That binary
+# was deleted on 2026-08-28 and the `zero-migrate` CLI that replaced it keeps a
+# DIFFERENT journal, so the comparison had already been demoted to "reported, not
+# enforced" against frozen rows describing a corpus that no longer exists. The
+# checked-in `released_migrations.tsv` snapshot of it (under `db/`) is deleted with
+# this
+# change: a guard whose input nobody writes does not fail, it stops guarding.
 #
-# The list can only ever cover the files someone recorded in it. Nothing in the
-# repo can learn which files are actually applied -- only a deployed database
-# knows -- so it went stale the moment a deploy applied files nobody added to
-# it: it was written covering 21 files while the deployed journal held 34, and
-# it reported the identical green either way.
+# WHAT REPLACED IT IS THE RUNNER'S OWN VERDICT. `zero-migrate status --json`
+# knows both sides -- this tree's corpus and that database's journal -- and it is
+# the same code path the roll is about to run. Two facts come out of it:
 #
-# This script is the only place that both KNOWS the journal and RUNS every time
-# the journal changes, so it owns keeping the list honest. Two uses below:
+#   drift     `blocked` / `unexpectedJournal` non-empty, or a plan in any state
+#             other than `applied`/`pending`. This is the ChecksumDrift the
+#             `migrate` one-shot would hit, caught while nothing has been
+#             restarted and reported with the migration's name instead of a bare
+#             `exit 2`.
+#   ordering  a plan that is NOT applied sorting BEFORE one that is. The CLI
+#             emits `plans[]` in sorted-filename order, one plan per file, so
+#             "sorts before" is just position in that array.
 #
-#   before the roll   refuse when a file the journal already recorded has
-#                     different bytes in this tree. That is the ChecksumMismatch
-#                     the `migrate` one-shot would hit, caught while nothing has
-#                     been restarted and reported with the filename instead of a
-#                     bare `exit 2`.
-#   after the roll    rewrite db/released_migrations.tsv from the journal the
-#                     roll just wrote, and exit non-zero when that produced a
-#                     diff, naming the file to commit.
-#
-# WHAT THIS DOES NOT COVER. A file edited BEFORE it was ever deployed is
-# invisible to both: it is in no journal, so no checksum exists to compare it
-# against. That is deliberate -- an undeployed migration is not frozen -- but it
-# means a green run never meant "no migration was edited". Nor does it cover a
-# SECOND deployment further behind: the file is one cluster's journal.
-
-# Where the checked-in snapshot lives, relative to the repo root.
-RELEASED_LEDGER_FILE="db/released_migrations.tsv"
-
-# released_ledger_drift <journal_tsv> <migrations_dir>
-#
-# Print one line per journalled file whose bytes in THIS tree no longer hash to
-# what the journal recorded. Empty output means every applied file is intact.
-#
-# `sha256sum` and not a recomputed ledger entry: the comparison is only worth
-# anything because one side comes from a database this tree cannot write.
-released_ledger_drift() {
-  local journal="$1" dir="$2" filename checksum current
-  while IFS=$'\t' read -r filename checksum; do
-    case "$filename" in ''|'#'*) continue ;; esac
-    if [ ! -f "$dir/$filename" ]; then
-      printf '%s DELETED from the tree (journal has %s)\n' "$filename" "$checksum"
-      continue
-    fi
-    current="$(sha256sum "$dir/$filename" | cut -d' ' -f1)"
-    [ "$current" = "$checksum" ] \
-      || printf '%s journal=%s tree=%s\n' "$filename" "$checksum" "$current"
-  done < "$journal"
-}
-
-# released_ledger_misordered <journal_tsv> <migrations_dir>
-#
-# Print one line per migration that is NOT in the journal but sorts BEFORE the
-# newest migration that is. Empty output means the undeployed files are all a
-# suffix, which is the only arrangement the version stamping survives.
-#
-# WHY A SECOND CHECK, when released_ledger_drift already compares bytes. They
+# WHY ORDERING IS A SEPARATE CHECK, when drift already compares content. They
 # catch disjoint failures and this one is invisible to the other: the file at
-# fault is NEW, so no journal row covers its bytes and its own content is fine.
-# `platform.rs` (restamp_stable_versions) derives every lowered step's journal
-# version from the file's ORDINAL in sorted-filename order, so inserting a file
-# mid-corpus takes a version the journal already recorded for a LATER file and
-# shifts everything after it. The runner then compares a recorded checksum
-# against a different file's body and aborts with `ChecksumDrift` -- naming the
-# new file, which is not the one that changed, and never mentioning order.
+# fault is NEW, so no journal row covers it and its own content is fine. A file
+# inserted mid-corpus lands, on a host that already applied everything sorting
+# after it, AFTER those files -- while on a fresh database it lands in position.
+# The two schemas then agree only if the inserted migration commutes with
+# everything it jumped, which is a property of the corpus, not of the numbering.
+# The retired runner derived versions from the file ORDINAL and aborted on the
+# collision; the CLI derives them from the migration NAME, so the insert now
+# applies with NO error at all. This is the only thing that sees it.
 #
 # Measured 2026-08-20: `20260819000000_app_egress_rules.ts` landed while this
-# host's journal ended at `20260820000000_control_workflow_journal_access.ts`,
-# whose only step it records as mig_0000E9Uuwao9JYwWBWok52. The next roll would
-# have aborted. The fix is always to rename the undeployed file so it sorts
-# last; it is in no journal, so that costs nothing.
-released_ledger_misordered() {
-  local journal="$1" dir="$2" newest="" name
-  newest="$(cut -f1 "$journal" | sort | tail -1)"
-  [ -n "$newest" ] || return 0
-  for path in "$dir"/*.ts; do
-    [ -e "$path" ] || continue
-    name="${path##*/}"
-    [ "$name" \< "$newest" ] || continue
-    cut -f1 "$journal" | grep -qxF "$name" && continue
-    printf '%s sorts before %s but this host has never applied it\n' "$name" "$newest"
-  done
+# host's journal ended at `20260820000000_control_workflow_journal_access.ts`.
+# The fix is always to rename the undeployed file so it sorts last; it is in no
+# journal, so that costs nothing and needs no new migration.
+#
+# WHAT THIS DOES NOT COVER. A file edited BEFORE it was ever deployed is
+# invisible: it is in no journal, so there is nothing to compare it against.
+# That is deliberate -- an undeployed migration is not frozen -- but it means a
+# green run never meant "no migration was edited". Nor does it cover a SECOND
+# deployment further behind: the status is one cluster's.
+
+# platform_status_plans <status_json>
+#
+# Print `<name>\t<state>` for every plan, IN THE CLI'S OWN ORDER, which is sorted
+# filename order with one plan per `db/migrations-ts/*.ts` file.
+#
+# ONE `awk`, NOT A `grep -o` PIPELINE, and that is not a style choice: this
+# script runs under `set -euo pipefail`, and `grep` exits 1 when it matches
+# nothing - which here is the SUCCESS case. A pipeline built on `grep -o` aborts
+# the deploy on a clean status and reports it as a guard failure. `awk` returns 0
+# whether or not its loop ever matched.
+#
+# No `jq`: the deploy host is not guaranteed to have it, and this runs before
+# anything is built.
+platform_status_plans() {
+  tr -d ' \n' < "$1" | awk '
+    {
+      body = $0
+      sub(/.*"plans":\[/, "", body)
+      # MATCH THE PLAN HEADER, do not try to slice the array. Each plan carries
+      # `"steps":[...],"missingDependencies":[],"touchedTables":[...]`, so any
+      # attempt to cut the array at the first `],"<key>":` truncates after the
+      # FIRST plan and the check then rules on one migration while printing what
+      # a clean corpus prints. Measured 2026-08-28: 36 plans in, 1 out.
+      #
+      # A plan header is `version,name,state` adjacent in that order. A STEP is
+      # `version,name,kind,state` - `kind` sits between - so steps cannot match
+      # this pattern and nothing has to know how deep the nesting goes.
+      while (match(body, /"version":"[^"]*","name":"[^"]*","state":"[^"]*"/)) {
+        head = substr(body, RSTART, RLENGTH)
+        body = substr(body, RSTART + RLENGTH)
+        name = head; sub(/^"version":"[^"]*","name":"/, "", name); sub(/","state":".*$/, "", name)
+        state = head; sub(/^.*","state":"/, "", state); sub(/"$/, "", state)
+        printf "%s\t%s\n", name, state
+      }
+    }'
 }
 
-# released_ledger_render <journal_tsv> <ledger_file>
+# platform_status_misordered <status_json>
 #
-# Print the ledger file's leading comment header verbatim, then the journal rows.
-# The header is the prose explaining why the values may not be recomputed from
-# the tree, so it has to survive every refresh.
-released_ledger_render() {
-  local journal="$1" ledger="$2"
-  if [ -r "$ledger" ]; then
-    awk '/^#/ || /^[[:space:]]*$/ { print; next } { exit }' "$ledger"
-  fi
-  cat "$journal"
+# Print one line per plan that is NOT applied but precedes an applied one. Empty
+# output means the unapplied plans are all a suffix, which is the only
+# arrangement the version stamping survives.
+platform_status_misordered() {
+  platform_status_plans "$1" | awk -F'\t' '
+    { name[NR] = $1; state[NR] = $2; if ($2 == "applied") last = NR }
+    END {
+      for (i = 1; i <= NR; i++)
+        if (i < last && state[i] != "applied")
+          printf "%s is %s but sorts before %s, which this host has applied\n",
+                 name[i], state[i], name[last]
+    }'
+}
+
+# platform_status_drift <status_json>
+#
+# Print one line per plan the runner will not simply apply, plus any journal row
+# it cannot explain. Empty output means every plan is either applied or cleanly
+# pending and the journal holds nothing the corpus cannot account for.
+platform_status_drift() {
+  platform_status_plans "$1" | awk -F'\t' '$2 != "applied" && $2 != "pending" {
+    printf "%s is %s, which the roll cannot resolve on its own\n", $1, $2
+  }'
+  # `blocked` and `unexpectedJournal` are the runner's own words for "this
+  # database holds something the corpus does not explain". Reported by NAME
+  # rather than counted, because a count tells an operator nothing they can act
+  # on.
+  tr -d ' \n' < "$1" | awk '
+    {
+      split("blocked unexpectedJournal", keys, " ")
+      for (k in keys) {
+        key = keys[k]
+        if (!match($0, "\"" key "\":\\[[^]]*\\]")) continue
+        arr = substr($0, RSTART, RLENGTH)
+        sub("^\"" key "\":\\[", "", arr)
+        sub(/\]$/, "", arr)
+        while (match(arr, /"[^"]*"/)) {
+          item = substr(arr, RSTART + 1, RLENGTH - 2)
+          arr = substr(arr, RSTART + RLENGTH)
+          printf "%s: %s\n", key, item
+        }
+      }
+    }'
 }
 
 # Two things are NOT compose variables and must not be counted, both of which
@@ -624,38 +646,45 @@ main() {
   SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
   rsh() { ssh "${SSH_OPTS[@]}" "$HOST" "$@"; }
 
-  # Dump `zeroship_migrations.platform_migration_files` into $1 and set
-  # JOURNAL_STATE to `present` or `absent`.
+  # Write `zero-migrate status --json` for the PLATFORM corpus, as this host's
+  # own runner sees it, into $1. Sets STATUS_STATE to `present` or `absent`.
   #
-  # The existence probe is a SEPARATE query and uses `to_regclass`, which returns
-  # NULL rather than erroring on a missing relation. Selecting from the table and
-  # treating any psql failure as "no journal" would fold a down database, a wrong
+  # THE EXISTENCE PROBE IS A SEPARATE QUERY and uses `to_regclass`, which returns
+  # NULL rather than erroring on a missing relation. Running the status verb and
+  # treating any failure as "no journal" would fold a down database, a wrong
   # password and an empty deployment into one answer, and the first two would then
   # read as "nothing is frozen" -- a failure and a legitimate empty result
   # printing identically is the exact shape this whole guard exists to remove.
-  JOURNAL_FILE="$(mktemp)"
-  trap 'rm -f "$JOURNAL_FILE"' EXIT
-  JOURNAL_STATE=""
-  fetch_platform_journal() {
+  #
+  # The status itself runs through the compose `migrate` service, so it uses the
+  # image, the corpus, the charter and the DSN this roll is about to use. Reading
+  # the journal table directly with `psql` would answer a different question: the
+  # journal keys on migration VERSIONS derived from names, and only the runner can
+  # map this tree's files onto them.
+  STATUS_FILE="$(mktemp)"
+  trap 'rm -f "$STATUS_FILE"' EXIT
+  STATUS_STATE=""
+  fetch_platform_status() {
     local out="$1" exists
     exists="$(rsh "cd '$REMOTE_DIR/compose' && docker compose exec -T postgres \
       psql -U postgres -d zeroship -At -c \
-      \"SELECT to_regclass('zeroship_migrations.platform_migration_files') IS NOT NULL\"" \
+      \"SELECT to_regclass('zeroship_migrations.__zeroship_schema_migrations') IS NOT NULL\"" \
       | tr -d '[:space:]')" \
       || fail "cannot read the migration journal on $HOST. That is not the same as
   there being none: a down database, a wrong role and an empty deployment all
   fail here, and treating them alike would report 'nothing is frozen' for the
   first two. Fix the connection or check \`docker compose ps postgres\`."
     case "$exists" in
-      t) JOURNAL_STATE="present" ;;
-      f) JOURNAL_STATE="absent"; : > "$out"; return 0 ;;
+      t) STATUS_STATE="present" ;;
+      f) STATUS_STATE="absent"; : > "$out"; return 0 ;;
       *) fail "the journal existence probe on $HOST answered $exists, not t or f" ;;
     esac
-    rsh "cd '$REMOTE_DIR/compose' && docker compose exec -T postgres \
-      psql -U postgres -d zeroship -At -F'\t' -c \
-      \"SELECT filename, checksum FROM zeroship_migrations.platform_migration_files \
-        ORDER BY filename\"" > "$out" \
-      || fail "the migration journal on $HOST exists but could not be read"
+    rsh "cd '$REMOTE_DIR/compose' && docker compose run --rm -T migrate \
+      --verb status --json \
+      --database-url-file /etc/zeroship/secrets/migrate-dsn" > "$out" \
+      || fail "the migration journal on $HOST exists but \`zero-migrate status\` could
+  not read it. That is the runner's own verdict on this corpus against that
+  database, so a failure here is what the roll would hit at \`migrate\`."
   }
 
   # ---------------------------------------------------------------- preflight
@@ -1076,26 +1105,20 @@ main() {
   # thing `up -d` runs and a ChecksumMismatch there reports a bare
   # `service "migrate" didn't complete successfully: exit 2`.
   #
-  # And before the --dry-run exit below, because it costs two read-only SELECTs
-  # and telling an operator what would go wrong is the whole point of a dry run.
-  # THIS READS A TABLE NOTHING WRITES ANY MORE. Read before trusting it.
+  # And before the --dry-run exit below, because it is read-only and telling an
+  # operator what would go wrong is the whole point of a dry run.
   #
-  # `zeroship_migrations.platform_migration_files` was created and appended to by
-  # the `zeroship-platform-migrate` binary, deleted 2026-08-28. The `zero-migrate`
-  # CLI that replaced it keeps a DIFFERENT journal (`schema_migrations`, keyed by
-  # a migration version, checksummed over the RENDERED SQL rather than over the
-  # file bytes) and never touches this table.
+  # THE VERDICT IS THE RUNNER'S OWN. `zero-migrate status --json` sees this tree's
+  # corpus and that database's journal through the same code path the roll is
+  # about to run, which is what the deleted `released_migrations.tsv` snapshot
+  # comparison could not: that snapshot named FILES, the journal keys on migration
+  # versions derived from names, and nothing in the repo could map one onto the
+  # other. It also went stale silently -- written covering 21 files while the
+  # deployment held 34, reporting the identical green either way.
   #
-  # On a database the old binary migrated the table still EXISTS and still holds
-  # its last rows, frozen. Its checksums are over the pre-schema() corpus, and
-  # that corpus was rewritten wholesale: MEASURED 2026-08-28 by hashing
-  # db/migrations-ts against db/released_migrations.tsv, 34 of 34 files differ.
-  # Enforcing the byte comparison would fail the next roll with 34 false "edited
-  # after this host applied them" reports, so it is REPORTED, not enforced.
-  #
-  # ONE-TIME OPERATOR STEP, DELIBERATELY NOT AUTOMATED. A database the old binary
-  # migrated holds no version the new corpus produces, so every migration reads
-  # as pending. The operator adopts it once, by hand:
+  # ONE-TIME OPERATOR STEP, DELIBERATELY NOT AUTOMATED. A database an older runner
+  # migrated holds no version the current corpus produces, so every migration
+  # reads as pending. The operator adopts it once, by hand:
   #
   #   docker compose run --rm migrate --verb baseline --supersede-unmatched \
   #       --database-url-file /etc/zeroship/secrets/migrate-dsn
@@ -1103,40 +1126,40 @@ main() {
   # A deploy that adopted silently could not tell that from a database which is
   # not what the corpus produces, and refusing the second is the whole value of
   # the guard (crates/zeroship-migrate-node/src/verbs.rs).
-  say "checking no migration this database already applied was edited"
-  fetch_platform_journal "$JOURNAL_FILE"
-  case "$JOURNAL_STATE" in
+  say "checking this database's journal against the corpus this roll ships"
+  fetch_platform_status "$STATUS_FILE"
+  case "$STATUS_STATE" in
     absent)
       echo "ok  no migration journal on $HOST yet; nothing is frozen"
       ;;
     present)
-      # REPORTED, NOT ENFORCED - see the note above this `say`.
-      LEDGER_DRIFT="$(released_ledger_drift "$JOURNAL_FILE" db/migrations-ts)"
-      if [ -n "$LEDGER_DRIFT" ]; then
-        printf 'note  %s file(s) differ from the frozen legacy journal on %s.\n' \
-          "$(printf '%s\n' "$LEDGER_DRIFT" | wc -l | tr -d ' ')" "$HOST" >&2
-        printf '      Expected: that journal predates the schema() corpus rewrite and\n' >&2
-        printf '      nothing writes it now. NOT a refusal - see the note above.\n' >&2
-      else
-        echo "ok  every file the frozen legacy journal names still has its recorded bytes"
-      fi
+      STATUS_DRIFT="$(platform_status_drift "$STATUS_FILE")"
+      [ -z "$STATUS_DRIFT" ] || fail "this host's journal does not match the corpus being shipped:
+$STATUS_DRIFT
+  NOTHING WAS RESTARTED. \`migrate\` is the first thing \`up -d\` runs and it
+  would abort there with an opaque exit 2. A migration in a state other than
+  applied/pending, or a journal row the corpus cannot explain, means an APPLIED
+  file was edited or the corpus was rewritten under this database. Restore the
+  released bytes and re-land the change as a NEW migration, or adopt the
+  database once with the baseline command above."
+      echo "ok  every migration this host applied still matches the corpus"
 
-      # STILL ENFORCED, AND IT MATTERS MORE THAN IT DID. A file inserted
-      # mid-corpus lands, on a host that already applied everything sorting after
-      # it, AFTER those files - while on a fresh database it lands in position.
-      # The retired runner derived versions from the file ORDINAL and aborted on
-      # the collision. The CLI derives them from the migration NAME
-      # (crates/zeroship-migrate-core/src/render/lower.rs:8806-8811), so the
-      # insert now applies with NO error at all. This is the only thing left that
+      # A SEPARATE CHECK, AND INVISIBLE TO THE ONE ABOVE. The file at fault is
+      # NEW, so no journal row covers it and its own content is fine. A file
+      # inserted mid-corpus lands, on a host that already applied everything
+      # sorting after it, AFTER those files - while on a fresh database it lands
+      # in position. The retired runner derived versions from the file ORDINAL and
+      # aborted on the collision; the CLI derives them from the migration NAME
+      # (crates/zeroship-migrate-core/src/render/lower.rs, `ir_plan_version`), so
+      # the insert now applies with NO error at all. This is the only thing that
       # sees it.
-      LEDGER_ORDER="$(released_ledger_misordered "$JOURNAL_FILE" db/migrations-ts)"
-      [ -z "$LEDGER_ORDER" ] || fail "these migrations sort before one $HOST has already applied:
-$LEDGER_ORDER
-  NOTHING WAS RESTARTED. A file's journal version comes from its ordinal in
-  sorted-filename order, so one inserted mid-corpus claims the version this
-  host already recorded for a later file. The roll would abort at \`migrate\`
-  with ChecksumDrift naming the file above -- which is not the one that
-  changed. RENAME the file(s) above so they sort last. They are in no journal
+      STATUS_ORDER="$(platform_status_misordered "$STATUS_FILE")"
+      [ -z "$STATUS_ORDER" ] || fail "these migrations sort before one $HOST has already applied:
+$STATUS_ORDER
+  NOTHING WAS RESTARTED. On this host the file above would apply AFTER every
+  migration that sorts later than it, while on a fresh database it applies in
+  position - so the two schemas agree only if it commutes with everything it
+  jumped. RENAME the file(s) above so they sort last. They are in no journal
   yet, so the rename costs nothing and needs no new migration."
       echo "ok  every migration this host has not applied sorts after the ones it has"
       ;;
@@ -1465,48 +1488,17 @@ $MOUNT_BAD
       || fail "the app probe failed against the new deploy. Re-run with --rollback to restore the $STAMP snapshot."
   fi
 
-  # ------------------------------------------- record what this deploy froze
-  #
-  # This roll just journalled every migration it applied, and those files are
-  # frozen from now on. Writing the snapshot HERE -- from the journal, into the
-  # operator's own checkout -- is what stops the repo's coverage drifting behind
-  # the deployment's, which is exactly how the guard came to cover 21 of 34
-  # files while reporting green.
-  #
-  # It writes rather than instructs, because the transcription step is where the
-  # procedure was going to be skipped. Nothing is written to $HOST.
-  say "recording the migrations this deploy froze"
-  fetch_platform_journal "$JOURNAL_FILE"
-  if [ "$JOURNAL_STATE" = "present" ]; then
-    released_ledger_render "$JOURNAL_FILE" "$RELEASED_LEDGER_FILE" > "$RELEASED_LEDGER_FILE.new"
-    mv "$RELEASED_LEDGER_FILE.new" "$RELEASED_LEDGER_FILE"
-    if git diff --quiet -- "$RELEASED_LEDGER_FILE"; then
-      echo "ok  $RELEASED_LEDGER_FILE already matches the journal on $HOST"
-    else
-      LEDGER_REFRESHED=1
-    fi
-  else
-    echo "ok  no journal on $HOST; nothing to record"
-  fi
+  # THERE IS NOTHING TO RECORD AFTER THE ROLL ANY MORE, and that is the point of
+  # the change rather than a step that was dropped. This block used to rewrite
+  # the `released_migrations.tsv` snapshot from the journal and exit 1 asking the
+  # operator to commit it, because the repo held a SNAPSHOT of what the deployment had
+  # applied and the snapshot went stale the moment a roll applied a file nobody
+  # transcribed. The pre-roll check above now asks the deployment directly,
+  # through its own runner, so the repo keeps no copy that can drift.
 
   say "deployed $IMAGE to $HOST"
   echo "snapshot $STAMP covers $SNAPSHOT_MEMBERS"
   echo "roll back with: $0 --host $HOST --rollback"
-
-  # The one non-zero exit that does NOT mean the deploy failed, and it says so
-  # in the first line because an exit code alone cannot. It is non-zero anyway:
-  # a warning is what the old maintained-by-hand list effectively was, and it
-  # went thirteen files stale.
-  if [ "${LEDGER_REFRESHED:-0}" = "1" ]; then
-    printf '\nTHE DEPLOY SUCCEEDED AND THE STACK IS HEALTHY. This exit code is a to-do.\n' >&2
-    printf '%s was rewritten from the journal this roll wrote:\n\n' "$RELEASED_LEDGER_FILE" >&2
-    git --no-pager diff --stat -- "$RELEASED_LEDGER_FILE" >&2
-    printf '\nCommit it. Those files are frozen now, and until the commit lands CI\n' >&2
-    printf 'cannot tell an edit to one of them from an ordinary change.\n' >&2
-    printf '\n    git add %s && git commit -m "chore(db): record the migrations this deploy froze"\n\n' \
-      "$RELEASED_LEDGER_FILE" >&2
-    exit 1
-  fi
 }
 
 # Only run when EXECUTED. Sourcing this file must have no side effects: the

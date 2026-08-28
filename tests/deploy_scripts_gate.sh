@@ -985,18 +985,19 @@ fi
 # control is actually running. A stub that says nothing makes the happy path
 # fail for reasons unrelated to anything under test, and a control that cannot
 # succeed is not a control.
-# The frozen-migration ledger asks two more, and they are ANSWERS too. The
+# The frozen-migration check asks two more, and they are ANSWERS too. The
 # existence probe must say `t` or `f` and nothing else, because the script
 # refuses any third reply on purpose -- a down database and an empty deployment
 # both produce no output, and folding them together would report "nothing is
 # frozen" for a database it simply could not reach. ZS_GATE_JOURNAL_EXISTS
-# drives that arm; ZS_GATE_JOURNAL names a file holding the journal rows.
+# drives that arm; ZS_GATE_STATUS names a file holding a `zero-migrate status
+# --json` document.
 case "$*" in
   *"config --images"*) printf '%s\n' "${ZS_GATE_RENDERED_IMAGE-${ZS_GATE_RUNNING_IMAGE:-}}" ;;
   inspect*)            printf '%s\n' "${ZS_GATE_RUNNING_IMAGE:-}" ;;
   *to_regclass*)       printf '%s\n' "${ZS_GATE_JOURNAL_EXISTS-t}" ;;
-  *platform_migration_files*)
-    [ -n "${ZS_GATE_JOURNAL:-}" ] && [ -r "${ZS_GATE_JOURNAL:-}" ] && cat "$ZS_GATE_JOURNAL"
+  *"--verb status"*)
+    [ -n "${ZS_GATE_STATUS:-}" ] && [ -r "${ZS_GATE_STATUS:-}" ] && cat "$ZS_GATE_STATUS"
     ;;
 esac
 exit 0
@@ -1505,14 +1506,30 @@ seed_deploy() { # $1 sandbox. A host that would pass every contract.
   seed_secrets "$d"
 }
 
-# The journal the stub postgres reports, seeded from the tree's own snapshot so
-# the happy path finds no drift and rewrites nothing. Using the REAL file rather
-# than a fixture is deliberate: the post-roll step writes into this repo's
-# working tree, and a fixture that disagreed with it would leave every gate run
-# dirtying a tracked file.
-LEDGER_FILE="$ROOT/db/released_migrations.tsv"
-GATE_JOURNAL="$FIX/journal.tsv"
-grep -v '^#' "$LEDGER_FILE" | grep . >"$GATE_JOURNAL"
+# The status the stub `migrate` service reports.
+#
+# A REAL CAPTURE, not a hand-written document: `deploy/testdata/platform_status.json`
+# is `zero-migrate status --json --env platform` run against a PostgreSQL the
+# corpus had just been applied to, with each plan's `steps` array truncated to
+# two entries so the file is 25 KB instead of 144 KB. Nothing else is edited.
+#
+# THE FIDELITY THAT MATTERS IS THE NESTING, so the steps are truncated rather than
+# removed: a plan header is `version,name,state` and a STEP is
+# `version,name,kind,state`, and each plan also carries `"steps":[...],
+# "missingDependencies":[],"touchedTables":[...]`. A fixture without those would
+# pass an extractor that cannot tell a plan from a step, or one that slices the
+# plans array at the first `],"<key>":` -- which is exactly the bug the first
+# draft of `platform_status_plans` had (36 plans in, 1 out).
+#
+# RE-CAPTURE IT if the CLI's status shape changes. There is no live database in
+# this gate, so nothing here can notice on its own.
+GATE_STATUS_FIXTURE="$ROOT/deploy/testdata/platform_status.json"
+[ -r "$GATE_STATUS_FIXTURE" ] || {
+  echo "missing $GATE_STATUS_FIXTURE; the migration-freeze arms cannot run" >&2
+  exit 1
+}
+GATE_STATUS="$FIX/status.json"
+cp "$GATE_STATUS_FIXTURE" "$GATE_STATUS"
 
 run_deploy() { # $1 sandbox, rest: extra argv. Sets DEP_RC, DEP_OUT and CAP.
   CAP_N=$((CAP_N+1))
@@ -1520,7 +1537,7 @@ run_deploy() { # $1 sandbox, rest: extra argv. Sets DEP_RC, DEP_OUT and CAP.
   : >"$CAP"
   local sb="$1"; shift
   DEP_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" ZS_GATE_RUNNING_IMAGE="$FAKE_IMAGE" \
-    ZS_GATE_JOURNAL="$GATE_JOURNAL" "$@" \
+    ZS_GATE_STATUS="$GATE_STATUS" "$@" \
     "$REMOTE" --host fakehost --remote-dir "$sb" \
       --registry ghcr.io/example/zeroship-platform --image "$FAKE_IMAGE" 2>&1)"
   DEP_RC=$?
@@ -1590,71 +1607,130 @@ fi
 
 # --- D4: an APPLIED migration that was edited refuses BEFORE the roll -------
 #
-# The defect: the migrate runner hashes each db/migrations-ts file's bytes and
-# refuses every later run against a database whose journal recorded a different
-# hash, permanently. Editing an applied file bricks that database, and the only
-# signal `docker compose up` gives is `service "migrate" didn't complete
-# successfully: exit 2` with the container's own stderr never surfaced. It cost
-# a full day on 2026-08-19.
+# The defect: the migrate runner refuses every later run against a database whose
+# journal recorded a different checksum for a migration it already applied,
+# permanently. Editing an applied file bricks that database, and the only signal
+# `docker compose up` gives is `service "migrate" didn't complete successfully:
+# exit 2` with the container's own stderr never surfaced. It cost a full day on
+# 2026-08-19.
+#
+# THE MUTATION IS IN THE STATUS, NOT IN THE TREE, and that is the change from the
+# version of this arm that appended a line to a real `db/migrations-ts` file. The
+# check no longer compares file bytes against a checked-in snapshot -- it asks the
+# deployment's own runner, and the runner's word for "an applied migration's
+# content moved" is `"state": "drifted"`. Editing a file in this repo would
+# therefore produce no signal at all through a stub that cannot run the CLI, and
+# the arm would go green over nothing.
+#
+# MEASURED, NOT ASSUMED: the fixture below is what `zero-migrate status --json`
+# actually printed on 2026-08-28 after one applied migration's source was edited
+# (`control_workflow_journal_access`) -- `"state":"drifted"`, with `blocked` and
+# `unexpectedJournal` both empty. So the state string is the whole signal, and a
+# check that only read `blocked` would have seen nothing.
 #
 # The CONTROL for this pair is the happy path above, which ran with the same
-# stub journal and DID reach the roll -- so a refusal here is about the edited
-# file and not about the check existing at all.
-# Every arm from D2 down reads the HAPPY PATH's capture. These three arms each
-# run their own deploy, which repoints $CAP, so put it back before leaving.
+# fixture unmutated and DID reach the roll -- so a refusal here is about the
+# drifted plan and not about the check existing at all.
+# Every arm from D2 down reads the HAPPY PATH's capture. These arms each run
+# their own deploy, which repoints $CAP, so put it back before leaving.
 CAP_HAPPY="$CAP"
-LEDGER_VICTIM="$(head -1 "$GATE_JOURNAL" | cut -f1)"
-LEDGER_BACKUP="$FIX/victim.ts"
-cp "$ROOT/db/migrations-ts/$LEDGER_VICTIM" "$LEDGER_BACKUP"
-printf '\n// gate mutation\n' >>"$ROOT/db/migrations-ts/$LEDGER_VICTIM"
+# THE *LAST* PLAN, and picking the first instead is how this arm proved nothing.
+# A drifted plan is also not-applied, so if it sits anywhere but last the
+# ORDERING check fires on it too and refuses the deploy on its own. Measured
+# 2026-08-28: with the first plan mutated, deleting the drift refusal from
+# deploy-remote.sh left this gate at 158 passed / 0 failed - the ordering arm was
+# answering for both. Mutating the last plan leaves nothing applied after it, so
+# ordering stays silent and only the drift check can refuse.
+#
+# Plan headers are at six spaces of indent and STEP names at ten, which is what
+# separates them here; a bare `"name":` grep would return a step.
+DRIFT_VICTIM="$(sed -n 's/^      "name": "\([a-z0-9_]*\)",$/\1/p' "$GATE_STATUS_FIXTURE" | tail -1)"
+[ -n "$DRIFT_VICTIM" ] || fail "could not read a plan name out of $GATE_STATUS_FIXTURE; the drift arm would rule on nothing"
+GATE_STATUS_DRIFT="$FIX/status.drifted.json"
+awk -v victim="$DRIFT_VICTIM" '
+  $0 ~ "\"name\": \""victim"\"," { seen = 1 }
+  seen && /"state": "applied"/ { sub(/"applied"/, "\"drifted\""); seen = 0 }
+  { print }' "$GATE_STATUS_FIXTURE" >"$GATE_STATUS_DRIFT"
+grep -q '"drifted"' "$GATE_STATUS_DRIFT" \
+  || fail "the drift mutation changed nothing in $GATE_STATUS_FIXTURE; this arm would rule on a clean status"
 SB_LEDGER="$FIX/sb_ledger"; seed_deploy "$SB_LEDGER"
+GATE_STATUS_SAVE="$GATE_STATUS"; GATE_STATUS="$GATE_STATUS_DRIFT"
 run_deploy "$SB_LEDGER"
-cp "$LEDGER_BACKUP" "$ROOT/db/migrations-ts/$LEDGER_VICTIM"
+GATE_STATUS="$GATE_STATUS_SAVE"
 
 [ "$DEP_RC" != 0 ] \
-  && pass "editing a migration the host already applied makes the deploy exit non-zero" \
-  || fail "a migration edited after the host applied it deployed cleanly (rc=$DEP_RC); the roll will stop at 'migrate' with a bare exit 2"
+  && pass "a migration the host applied whose content drifted makes the deploy exit non-zero" \
+  || fail "a drifted applied migration deployed cleanly (rc=$DEP_RC); the roll will stop at 'migrate' with a bare exit 2"
 case "$DEP_OUT" in
-  *"$LEDGER_VICTIM"*) pass "the refusal names the edited migration ($LEDGER_VICTIM)" ;;
-  *) fail "the refusal never names the file, which is the whole diagnosis compose does not give: $DEP_OUT" ;;
+  *"$DRIFT_VICTIM"*) pass "the refusal names the drifted migration ($DRIFT_VICTIM)" ;;
+  *) fail "the refusal never names the migration, which is the whole diagnosis compose does not give: $DEP_OUT" ;;
 esac
 seen "$CAP" '### docker compose up -d --remove-orphans' \
   && fail "the stack was ROLLED anyway; the check has to precede the roll or 'migrate' has already refused" \
-  || pass "NOTHING IS RESTARTED when an applied migration was edited"
+  || pass "NOTHING IS RESTARTED when an applied migration drifted"
 
 # --- D4: a migration that sorts before an applied one refuses the roll ------
 #
 # Disjoint from the arm above and invisible to it: the file at fault is NEW, so
-# no journal row covers its bytes and its own content is fine. The version comes
-# from the file's ordinal in sorted-filename order, so inserting one mid-corpus
-# claims a version the journal already holds for a later file, and the roll
-# aborts at `migrate` with a ChecksumDrift naming the wrong file. Measured on
-# 2026-08-20 with 20260819000000_app_egress_rules.ts against a journal ending at
+# no journal row covers it and its own content is fine. On a host that already
+# applied everything sorting after it the file lands LAST, while on a fresh
+# database it lands in position, so the two schemas agree only if it commutes
+# with everything it jumped. The retired runner derived versions from the file
+# ordinal and aborted on the collision; the CLI derives them from the migration
+# name, so the insert now applies with NO error at all. Measured on 2026-08-20
+# with 20260819000000_app_egress_rules.ts against a journal ending at
 # 20260820000000_control_workflow_journal_access.ts.
 #
-# The stub journal is the real ledger, so "sorts before the newest journalled
-# file" is produced by planting a file with an early date -- the same shape the
-# egress merge had.
-LEDGER_EARLY="$ROOT/db/migrations-ts/20260101000000_gate_misordered.ts"
-printf 'export const name = "gate_misordered";\nexport function up() {}\nexport function down() {}\n' >"$LEDGER_EARLY"
+# The planted plan is PREPENDED to the plans array in the CLI's own field order,
+# which is what a file with an early date produces: measured 2026-08-28, a
+# `20260101000000_*.ts` planted into an otherwise fully applied corpus came back
+# as `plans[0]` with `"state": "pending"`.
+GATE_STATUS_ORDER="$FIX/status.misordered.json"
+awk '
+  /^  "plans": \[$/ && !done {
+    print
+    print "    {"
+    print "      \"version\": \"mig_gateMisorderedProbe0001\","
+    print "      \"name\": \"gate_misordered\","
+    print "      \"state\": \"pending\","
+    print "      \"steps\": ["
+    print "        {"
+    print "          \"version\": \"mig_gateMisorderedProbeStep\","
+    print "          \"name\": \"create_table_gate_misordered\","
+    print "          \"kind\": \"ddl\","
+    print "          \"state\": \"pending\""
+    print "        }"
+    print "      ],"
+    print "      \"missingDependencies\": [],"
+    print "      \"touchedTables\": ["
+    print "        \"gate_misordered\""
+    print "      ]"
+    print "    },"
+    done = 1
+    next
+  }
+  { print }' "$GATE_STATUS_FIXTURE" >"$GATE_STATUS_ORDER"
+grep -q 'gate_misordered' "$GATE_STATUS_ORDER" \
+  || fail "the misorder mutation planted nothing in $GATE_STATUS_FIXTURE; this arm would rule on a clean status"
 SB_ORDER="$FIX/sb_order"; seed_deploy "$SB_ORDER"
+GATE_STATUS_SAVE="$GATE_STATUS"; GATE_STATUS="$GATE_STATUS_ORDER"
 run_deploy "$SB_ORDER"
-rm -f "$LEDGER_EARLY"
+GATE_STATUS="$GATE_STATUS_SAVE"
 
 [ "$DEP_RC" != 0 ] \
   && pass "a migration sorting before one the host has applied makes the deploy exit non-zero" \
-  || fail "a mid-corpus migration deployed cleanly (rc=$DEP_RC); the roll aborts at 'migrate' with ChecksumDrift naming the wrong file"
+  || fail "a mid-corpus migration deployed cleanly (rc=$DEP_RC); on this host it would apply after every file that sorts later than it"
 case "$DEP_OUT" in
-  *20260101000000_gate_misordered.ts*) pass "the refusal names the misordered file, which the engine's own ChecksumDrift never does" ;;
-  *) fail "the refusal does not name the misordered file: $DEP_OUT" ;;
+  *gate_misordered*) pass "the refusal names the misordered migration, which the engine itself never does" ;;
+  *) fail "the refusal does not name the misordered migration: $DEP_OUT" ;;
 esac
 seen "$CAP" '### docker compose up -d --remove-orphans' \
-  && fail "the stack was ROLLED anyway; this has to precede the roll or 'migrate' has already aborted" \
+  && fail "the stack was ROLLED anyway; this has to precede the roll or 'migrate' has already applied it out of order" \
   || pass "NOTHING IS RESTARTED when a migration sorts before an applied one"
 
-# CONTROL: the happy path above ran the same check against the same journal with
-# no planted file and DID reach the roll, so the three arms are about the file
-# and not about the check refusing everything.
+# CONTROL: the happy path above ran the same check against the same fixture with
+# no mutation and DID reach the roll, so these arms are about the mutation and
+# not about the check refusing everything.
 
 # --- the edge claim refusal, end to end ------------------------------------
 #
@@ -1762,54 +1838,30 @@ run_deploy "$SB_FRESH" ZS_GATE_JOURNAL_EXISTS='f'
   && pass "CONTROL: a host with NO migration journal yet still deploys (nothing is frozen there)" \
   || fail "CONTROL: a fresh host with no journal was refused (rc=$DEP_RC), so the two refusals above prove nothing: $DEP_OUT"
 
-# --- D4: a deploy from a tree with a STALE ledger rewrites it and says so ---
+# --- D4: the repo keeps NO snapshot of what the deployment has applied ------
 #
-# This is the arm that decides whether the fix rebuilt the defect with more
-# steps. The old guard was a hand-maintained list that covered 21 files while
-# the deployed journal held 34; if a deploy from a tree that never updated the
-# list could still finish quietly, the list would go stale exactly as before,
-# just with a different file extension.
+# THERE IS NOTHING LEFT TO GO STALE, and this arm is what says so rather than a
+# comment claiming it. `db/released_migrations.tsv` was a checked-in copy of one
+# deployment's journal; it covered 21 files while that journal held 34 and
+# reported the identical green either way, and the deploy carried a post-roll
+# step that rewrote it and exited 1 asking for a commit. Both are gone: the
+# pre-roll check asks the deployment's own runner instead, so no copy exists to
+# drift.
 #
-# THE FIRST VERSION OF THIS ARM TRUNCATED THE SNAPSHOT IN THE WORKING TREE AND
-# PROVED NOTHING, which is worth recording because it looked right. The script
-# asks `git diff --quiet`, so it compares the rewritten file against what is
-# COMMITTED -- and rewriting a truncated worktree file restores it to exactly
-# the committed content, no diff, exit 0. That is the correct answer to the
-# question the script asks (nothing needs committing) and the wrong scenario:
-# real staleness lives in the COMMIT, not in the worktree.
-#
-# So the disagreement is introduced on the JOURNAL side instead: the stub host
-# reports one row fewer than the committed snapshot holds. The direction is the
-# opposite of real drift, but the property under test is the mechanism -- when
-# the journal and the committed snapshot disagree, the deploy must rewrite the
-# file and refuse to finish quietly -- and that is direction-agnostic.
-#
-# The pre-roll check still passes, because every file the journal DOES name is
-# intact in the tree, so the run reaches the roll and the post-roll refresh is
-# what has to fire.
-LEDGER_SAVE="$FIX/ledger.tsv"
-cp "$LEDGER_FILE" "$LEDGER_SAVE"
-LEDGER_ROWS_BEFORE="$(grep -c '\.ts	' "$LEDGER_FILE")"
-STALE_JOURNAL="$FIX/journal.short.tsv"
-head -n -1 "$GATE_JOURNAL" >"$STALE_JOURNAL"
-SB_STALE="$FIX/sb_stale"; seed_deploy "$SB_STALE"
-run_deploy "$SB_STALE" ZS_GATE_JOURNAL="$STALE_JOURNAL"
-LEDGER_ROWS_AFTER="$(grep -c '\.ts	' "$LEDGER_FILE")"
-cp "$LEDGER_SAVE" "$LEDGER_FILE"
-
-[ "$LEDGER_ROWS_AFTER" = "$((LEDGER_ROWS_BEFORE - 1))" ] \
-  && pass "a deploy REWRITES db/released_migrations.tsv from the journal ($LEDGER_ROWS_BEFORE rows became $LEDGER_ROWS_AFTER), so coverage tracks deploys instead of whoever remembered" \
-  || fail "the ledger still holds $LEDGER_ROWS_AFTER rows after a deploy whose journal held $((LEDGER_ROWS_BEFORE - 1)); it drifts away from the deployment exactly as the hand-maintained list did"
-[ "$DEP_RC" != 0 ] \
-  && pass "the same run exits non-zero, so a stale ledger cannot be deployed past in silence" \
-  || fail "the deploy exited 0 with a ledger it had just rewritten; nothing makes anyone commit it"
-case "$DEP_OUT" in
-  *"THE DEPLOY SUCCEEDED"*) pass "the non-zero exit says the deploy succeeded, so it is not read as a failed roll" ;;
-  *) fail "the non-zero exit does not distinguish itself from a failed deploy; an operator will --rollback a healthy stack: $DEP_OUT" ;;
-esac
-seen "$CAP" '### docker compose up -d --remove-orphans' \
-  && pass "CONTROL: the stale-ledger run DID roll the stack, so the non-zero exit above is the to-do and not an early refusal" \
-  || fail "CONTROL: the stale-ledger run never reached the roll, so it proves nothing about the post-roll refresh: $DEP_OUT"
+# The property under test is therefore an ABSENCE, and an absence is exactly the
+# kind of claim that rots into prose. Two spellings are checked because a rename
+# would defeat either one alone, and the deploy script is checked for the
+# post-roll writer as well as the tree for the file: a script that still writes
+# it would recreate the drift the moment someone committed the output.
+[ -e "$ROOT/db/released_migrations.tsv" ] \
+  && fail "db/released_migrations.tsv is back. It is a snapshot of ONE deployment's journal, it went 13 files stale while reporting green, and nothing writes it now - so it can only mislead." \
+  || pass "the repo keeps no checked-in snapshot of any deployment's migration journal"
+# NON-COMMENT LINES ONLY. The prose above the pre-roll check names the deleted
+# snapshot on purpose - that is the record of why it is gone - and a grep over
+# the whole file would refuse the very explanation it is protecting.
+grep -v '^[[:space:]]*#' "$REMOTE" | grep -q 'released_migrations\|released_ledger' \
+  && fail "deploy-remote.sh still reads or writes the released-migrations snapshot; the pre-roll check is supposed to be the only thing that consults a deployment's journal" \
+  || pass "the deploy script keeps no copy of the journal and writes none back"
 
 CAP="$CAP_HAPPY"
 
