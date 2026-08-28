@@ -59,6 +59,70 @@ The consequence is already a recorded divergence
 > write still executes inside whatever transaction that connection is holding.
 > ... Measured and recorded in `docs/reference/sqlite-divergences.md`.
 
+## RETRACTED 2026-08-28: Decision 1's premise is FALSE for app data
+
+**Decision 1 rests on "WAL permits this concurrency". App files are not in WAL,
+and the acceptance arm that proves Decision 1 cannot see it.**
+
+`PRAGMA journal_mode` is per database and does **not** propagate across `ATTACH`.
+The migration engine pins every app file to DELETE and refuses to proceed
+otherwise (`crates/zeroship-migrate-sqlite/src/backend/actor.rs:719-729`):
+
+```
+PRAGMA "<schema>".journal_mode = DELETE
+  ... "journal_mode remained {actual}; DELETE rollback journaling is
+       required for atomic app+journal commits"
+```
+
+So `zs-<app>.sqlite` is in **rollback-journal** mode. Only the session's own
+control database is WAL.
+
+**Why the existing arm could not catch it.**
+`an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction`
+(`tests/sqlite_integration.rs:9946+`) creates its table with an **unqualified**
+`CREATE TABLE t`, so the table lands in `main` - the WAL control database - and
+the test never attaches an app at all. Its fixture cannot distinguish WAL from
+DELETE and never touches app data. **The mechanism was proved on the wrong
+database.**
+
+That is this project's recurring failure in a new location, and it is worth
+naming precisely: not a vacuous test and not a wrong assertion, but a fixture
+whose *subject* is not the thing the surrounding decision is about. Two other
+instances were found the same day - an `updateMany` cap whose fixture routed
+onto the guarded branch, and a CDC mask test whose fixture was ciphertext where
+the leaking shape is plaintext.
+
+Pinned by `an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal`,
+and recorded in `docs/reference/sqlite-divergences.md` in its creator-facing
+form.
+
+**Consequence for the `SQLITE_BUSY_SNAPSHOT` arm, which DID land:** it proves the
+error mapping and the lane mechanics on `main`. It proves **nothing about app
+data**, where the same schedule yields a plain `SQLITE_BUSY`.
+
+## RESOLVED 2026-08-28: L22b is not reachable in any shipped vector
+
+The cross-tenant `transaction_connection_busy` refusal needs two apps in one
+SQLite process. No shipped vector produces that:
+
+- the worker **exits** on a SQLite DSN (`zeroship-worker/src/main.rs:328-334`)
+- `resolve_num_workers` clamps `zeroship serve` to **one thread** on a SQLite URL
+  (`zeroship-runtime/src/core/serve.rs:171-179`)
+- `app_id` there comes from one process-wide `env_vars` map defaulting to
+  `"default"` (`zeroship-runtime/src/core/plugin.rs:229-232`)
+
+Reachable in tests, and the shape the first second-app vector would hit. The
+per-app transaction lane (`ab8de00d3`) closes it by construction.
+
+**What that fix did NOT close, stated because the implementer raised it against
+their own work:** cross-tenant **head-of-line blocking** is still structural. One
+FIFO actor loop means a long-running statement from one app stalls every other
+tenant's reads on the same session. A per-app thread would remove it; the shipped
+shape does not. The judgement that this is acceptable rests entirely on the
+reachability above - the day a vector puts two apps in one SQLite process, it
+becomes live, and the connection map is already keyed by app so promoting each
+entry to its own thread is local.
+
 ## Decision 1 - connection model: two per attached app
 
 The actor owns, per attached app file:
