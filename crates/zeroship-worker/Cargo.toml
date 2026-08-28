@@ -40,6 +40,15 @@ cyper = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# DEV-only, and zeroship-migrate-server does not depend on zeroship-worker, so
+# no cycle (same pattern as zeroship-plugin-db's and zeroship-control's
+# dev-dependency on it). The workflow-advance handler tests seed an app by
+# INSERTing into zeroship.apps directly, which - like every such seed in this
+# workspace - skips the migration apply that creates the app's app_<uuid>
+# workflow journal schema in production; PgStore::provision holds no CREATE
+# and cannot make that schema itself (2a44ea8ef), so the tests call the
+# migration service's own provisioning statement first.
+zeroship-migrate-server = { workspace = true }
 # The generated-controls test parses an overlay fixture to prove a persisted
 # entry cannot enable the unsigned workflow-advance ingress.
 toml = { workspace = true }

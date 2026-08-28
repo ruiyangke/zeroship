@@ -7932,6 +7932,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-metering",
+ "zeroship-migrate-server",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",

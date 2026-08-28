@@ -1574,6 +1574,7 @@ mod tests {
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_core::types::AppRuntimeLimits;
+    use zeroship_migrate_server::provisioning::provision_workflow_journal_schema;
     use zeroship_plugin_storage::StorageBackendConfig;
     use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
     use zeroship_runtime::init::init_v8;
@@ -1813,6 +1814,18 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         deploy_hash: &str,
     ) {
         let conn = pg_client(db_url).await;
+        // A test seeds its app by INSERTing into `zeroship.apps` below, which
+        // skips the migration apply that - in production - creates the app's
+        // `app_<uuid>` workflow journal schema. `PgStore::provision` holds no
+        // CREATE and cannot make that schema itself (2a44ea8ef), so it must
+        // exist first; call the migration service's own provisioning
+        // statement rather than a hand-rolled `CREATE SCHEMA`, so the journal
+        // below ends up owned exactly the way a deployed app's is. Same
+        // sequencing as `zeroship-plugin-db`'s and `zeroship-control`'s
+        // workflow-journal test fixtures.
+        provision_workflow_journal_schema(&conn, app_id)
+            .await
+            .expect("provision app workflow journal schema");
         PgStore::provision(&conn, app_id)
             .await
             .expect("provision worker workflow test journal");
