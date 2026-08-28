@@ -532,17 +532,18 @@ async fn parameterized_query() {
 async fn create_table_insert_select_drop() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("test_crud");
 
     // Clean up from any prior failed run
     client
-        .execute("DROP TABLE IF EXISTS test_crud", &[])
+        .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
         .await
         .unwrap();
 
     // Create
     client
         .execute(
-            "CREATE TABLE test_crud (id serial PRIMARY KEY, name text NOT NULL)",
+            &format!("CREATE TABLE {table} (id serial PRIMARY KEY, name text NOT NULL)"),
             &[],
         )
         .await
@@ -550,20 +551,26 @@ async fn create_table_insert_select_drop() {
 
     // Insert
     let affected = client
-        .execute("INSERT INTO test_crud (name) VALUES ($1)", &[&"alice"])
+        .execute(
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
+            &[&"alice"],
+        )
         .await
         .unwrap();
     assert_eq!(affected, 1);
 
     let affected = client
-        .execute("INSERT INTO test_crud (name) VALUES ($1)", &[&"bob"])
+        .execute(
+            &format!("INSERT INTO {table} (name) VALUES ($1)"),
+            &[&"bob"],
+        )
         .await
         .unwrap();
     assert_eq!(affected, 1);
 
     // Select
     let rows = client
-        .query("SELECT id, name FROM test_crud ORDER BY id", &[])
+        .query(&format!("SELECT id, name FROM {table} ORDER BY id"), &[])
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -571,7 +578,10 @@ async fn create_table_insert_select_drop() {
     assert_eq!(rows[1].get::<_, &str>("name"), "bob");
 
     // Drop
-    client.execute("DROP TABLE test_crud", &[]).await.unwrap();
+    client
+        .execute(&format!("DROP TABLE {table}"), &[])
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -582,14 +592,15 @@ async fn create_table_insert_select_drop() {
 async fn transaction_commit() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("test_tx_commit");
 
     client
-        .execute("DROP TABLE IF EXISTS test_tx_commit", &[])
+        .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
         .await
         .unwrap();
     client
         .execute(
-            "CREATE TABLE test_tx_commit (id serial PRIMARY KEY, val text)",
+            &format!("CREATE TABLE {table} (id serial PRIMARY KEY, val text)"),
             &[],
         )
         .await
@@ -597,10 +608,10 @@ async fn transaction_commit() {
 
     {
         let tx = client.transaction().await.unwrap();
-        tx.execute("INSERT INTO test_tx_commit (val) VALUES ($1)", &[&"one"])
+        tx.execute(&format!("INSERT INTO {table} (val) VALUES ($1)"), &[&"one"])
             .await
             .unwrap();
-        tx.execute("INSERT INTO test_tx_commit (val) VALUES ($1)", &[&"two"])
+        tx.execute(&format!("INSERT INTO {table} (val) VALUES ($1)"), &[&"two"])
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -608,7 +619,7 @@ async fn transaction_commit() {
 
     // Data should persist after commit
     let rows = client
-        .query("SELECT val FROM test_tx_commit ORDER BY id", &[])
+        .query(&format!("SELECT val FROM {table} ORDER BY id"), &[])
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -616,7 +627,7 @@ async fn transaction_commit() {
     assert_eq!(rows[1].get::<_, &str>("val"), "two");
 
     client
-        .execute("DROP TABLE test_tx_commit", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -629,14 +640,15 @@ async fn transaction_commit() {
 async fn transaction_rollback_on_drop() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("test_tx_rollback");
 
     client
-        .execute("DROP TABLE IF EXISTS test_tx_rollback", &[])
+        .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
         .await
         .unwrap();
     client
         .execute(
-            "CREATE TABLE test_tx_rollback (id serial PRIMARY KEY, val text)",
+            &format!("CREATE TABLE {table} (id serial PRIMARY KEY, val text)"),
             &[],
         )
         .await
@@ -647,7 +659,7 @@ async fn transaction_rollback_on_drop() {
     {
         let tx = client.transaction().await.unwrap();
         tx.execute(
-            "INSERT INTO test_tx_rollback (val) VALUES ($1)",
+            &format!("INSERT INTO {table} (val) VALUES ($1)"),
             &[&"ghost"],
         )
         .await
@@ -658,13 +670,13 @@ async fn transaction_rollback_on_drop() {
     // Client should still be usable for subsequent queries - this is the
     // key observable that replaces the legacy `needs_rollback` flag.
     let rows = client
-        .query("SELECT val FROM test_tx_rollback", &[])
+        .query(&format!("SELECT val FROM {table}"), &[])
         .await
         .unwrap();
     assert_eq!(rows.len(), 0, "expected ghost row to have been rolled back");
 
     client
-        .execute("DROP TABLE test_tx_rollback", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -1377,9 +1389,10 @@ async fn inner_savepoint_rollback_keeps_outer_work() {
 async fn a_rolled_back_savepoint_does_not_shadow_an_enclosing_one() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("savepoint_scope");
 
     client
-        .batch_execute("CREATE TABLE savepoint_scope (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
@@ -1388,13 +1401,13 @@ async fn a_rolled_back_savepoint_does_not_shadow_an_enclosing_one() {
         {
             let mut outer = tx.savepoint("s").await.unwrap();
             outer
-                .execute("INSERT INTO savepoint_scope VALUES (1)", &[])
+                .execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
                 .await
                 .unwrap();
             {
                 let inner = outer.savepoint("s").await.unwrap();
                 inner
-                    .execute("INSERT INTO savepoint_scope VALUES (2)", &[])
+                    .execute(&format!("INSERT INTO {table} VALUES (2)"), &[])
                     .await
                     .unwrap();
                 inner.rollback().await.unwrap();
@@ -1405,7 +1418,7 @@ async fn a_rolled_back_savepoint_does_not_shadow_an_enclosing_one() {
     }
 
     let rows = client
-        .query("SELECT n FROM savepoint_scope ORDER BY n", &[])
+        .query(&format!("SELECT n FROM {table} ORDER BY n"), &[])
         .await
         .unwrap();
     let kept: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
@@ -1415,7 +1428,7 @@ async fn a_rolled_back_savepoint_does_not_shadow_an_enclosing_one() {
     );
 
     client
-        .batch_execute("DROP TABLE savepoint_scope")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 }
@@ -1462,34 +1475,35 @@ async fn a_rolled_back_savepoint_is_no_longer_defined() {
 async fn a_savepoint_rollback_recovers_a_failed_statement() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("savepoint_recovery");
 
     client
-        .batch_execute("CREATE TABLE savepoint_recovery (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
     {
         let mut tx = client.transaction().await.unwrap();
-        tx.execute("INSERT INTO savepoint_recovery VALUES (1)", &[])
+        tx.execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
             .await
             .unwrap();
         {
             let sp = tx.savepoint("attempt").await.unwrap();
-            sp.execute("INSERT INTO savepoint_recovery VALUES ('not an int')", &[])
+            sp.execute(&format!("INSERT INTO {table} VALUES ('not an int')"), &[])
                 .await
                 .expect_err("the statement must fail and abort the subtransaction");
             sp.rollback()
                 .await
                 .expect("rolling back an aborted subtransaction must recover it");
         }
-        tx.execute("INSERT INTO savepoint_recovery VALUES (3)", &[])
+        tx.execute(&format!("INSERT INTO {table} VALUES (3)"), &[])
             .await
             .expect("the enclosing transaction must be usable again");
         tx.commit().await.unwrap();
     }
 
     let rows = client
-        .query("SELECT n FROM savepoint_recovery ORDER BY n", &[])
+        .query(&format!("SELECT n FROM {table} ORDER BY n"), &[])
         .await
         .unwrap();
     let kept: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
@@ -1498,7 +1512,7 @@ async fn a_savepoint_rollback_recovers_a_failed_statement() {
     // A transaction that owns no savepoint still rolls back as one unit.
     {
         let tx = client.transaction().await.unwrap();
-        tx.execute("INSERT INTO savepoint_recovery VALUES (4)", &[])
+        tx.execute(&format!("INSERT INTO {table} VALUES (4)"), &[])
             .await
             .unwrap();
         tx.rollback()
@@ -1507,14 +1521,14 @@ async fn a_savepoint_rollback_recovers_a_failed_statement() {
     }
 
     let rows = client
-        .query("SELECT n FROM savepoint_recovery ORDER BY n", &[])
+        .query(&format!("SELECT n FROM {table} ORDER BY n"), &[])
         .await
         .unwrap();
     let kept: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
     assert_eq!(kept, vec![1, 3]);
 
     client
-        .batch_execute("DROP TABLE savepoint_recovery")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 }
@@ -1525,9 +1539,10 @@ async fn a_savepoint_rollback_recovers_a_failed_statement() {
 async fn a_committed_savepoint_keeps_its_work() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("savepoint_commit");
 
     client
-        .batch_execute("CREATE TABLE savepoint_commit (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
@@ -1535,7 +1550,7 @@ async fn a_committed_savepoint_keeps_its_work() {
         let mut tx = client.transaction().await.unwrap();
         {
             let sp = tx.savepoint("keep").await.unwrap();
-            sp.execute("INSERT INTO savepoint_commit VALUES (1)", &[])
+            sp.execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
                 .await
                 .unwrap();
             sp.commit().await.unwrap();
@@ -1544,13 +1559,13 @@ async fn a_committed_savepoint_keeps_its_work() {
     }
 
     let rows = client
-        .query("SELECT n FROM savepoint_commit", &[])
+        .query(&format!("SELECT n FROM {table}"), &[])
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
 
     client
-        .batch_execute("DROP TABLE savepoint_commit")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 }
@@ -2677,11 +2692,13 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
     let table = common::test_object_name("cpg_copy_out_late_failure");
+    let function = common::test_object_name("cpg_copy_out_late_failure_function");
+    let trigger = common::test_object_name("cpg_copy_out_late_failure_trigger");
 
     client
         .batch_execute(&format!(
             "CREATE TEMPORARY TABLE {table} (n int);
-             CREATE FUNCTION pg_temp.cpg_copy_out_late_failure() RETURNS trigger
+             CREATE FUNCTION pg_temp.{function}() RETURNS trigger
              LANGUAGE plpgsql AS $$
              BEGIN
                  RAISE EXCEPTION USING
@@ -2689,9 +2706,9 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
                      MESSAGE = 'late COPY OUT failure';
              END
              $$;
-             CREATE TRIGGER cpg_copy_out_late_failure
+             CREATE TRIGGER {trigger}
              AFTER INSERT ON {table}
-             FOR EACH ROW EXECUTE FUNCTION pg_temp.cpg_copy_out_late_failure();"
+             FOR EACH ROW EXECUTE FUNCTION pg_temp.{function}();"
         ))
         .await
         .unwrap();
@@ -3917,11 +3934,12 @@ async fn single_connection_pool(url: &str) -> Pool {
 async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     let url = require_pg().await;
     let pool = single_connection_pool(&url).await;
+    let table = common::test_object_name("tx_leak");
 
     {
         let client = pool.get().await.unwrap();
         client
-            .batch_execute("CREATE TABLE tx_leak (id int)")
+            .batch_execute(&format!("CREATE TABLE {table} (id int)"))
             .await
             .unwrap();
     }
@@ -3931,7 +3949,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     {
         let client = pool.get().await.unwrap();
         client
-            .batch_execute("BEGIN; INSERT INTO tx_leak VALUES (1); SELECT 1")
+            .batch_execute(&format!("BEGIN; INSERT INTO {table} VALUES (1); SELECT 1"))
             .await
             .unwrap();
         assert_eq!(
@@ -3951,7 +3969,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     // wrote it, so seeing it proves this borrower is still in that
     // transaction.
     let rows: i64 = client
-        .query_one_scalar("SELECT count(*) FROM tx_leak", &[])
+        .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
         .await
         .unwrap();
     assert_eq!(
@@ -4090,6 +4108,7 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
     let url = require_pg().await;
     let pool = single_connection_pool(&url).await;
     let channel = test_schema();
+    let table = common::test_object_name("batch_error_temp");
     let backend_pid;
 
     {
@@ -4104,9 +4123,9 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
             .batch_execute(&format!(
                 "SET application_name = 'cpg_during_error'; \
                  LISTEN {channel}; \
-                 CREATE TEMP TABLE batch_error_temp (id int); \
-                 INSERT INTO batch_error_temp VALUES (0); \
-                 SELECT 1 / id FROM batch_error_temp"
+                 CREATE TEMP TABLE {table} (id int); \
+                 INSERT INTO {table} VALUES (0); \
+                 SELECT 1 / id FROM {table}"
             ))
             .await
             .unwrap_err();
@@ -4146,7 +4165,7 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
     assert_eq!(listeners, 0, "LISTEN survived the implicit rollback");
 
     let temp_table: Option<String> = client
-        .query_one_scalar("SELECT to_regclass('batch_error_temp')::text", &[])
+        .query_one_scalar("SELECT to_regclass($1)::text", &[&table])
         .await
         .unwrap();
     assert!(
@@ -4160,6 +4179,7 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
     let url = require_pg().await;
     let pool = single_connection_pool(&url).await;
     let channel = test_schema();
+    let table = common::test_object_name("aborted_batch_temp");
 
     {
         let client = pool.get().await.unwrap();
@@ -4172,9 +4192,9 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
                 "BEGIN; \
                  SET application_name = 'cpg_in_aborted_batch'; \
                  LISTEN {channel}; \
-                 CREATE TEMP TABLE aborted_batch_temp (id int); \
-                 INSERT INTO aborted_batch_temp VALUES (0); \
-                 SELECT 1 / id FROM aborted_batch_temp"
+                 CREATE TEMP TABLE {table} (id int); \
+                 INSERT INTO {table} VALUES (0); \
+                 SELECT 1 / id FROM {table}"
             ))
             .await
             .unwrap_err();
@@ -4211,7 +4231,7 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
     assert_eq!(listeners, 0, "LISTEN survived the release rollback");
 
     let temp_table: Option<String> = client
-        .query_one_scalar("SELECT to_regclass('aborted_batch_temp')::text", &[])
+        .query_one_scalar("SELECT to_regclass($1)::text", &[&table])
         .await
         .unwrap();
     assert!(
@@ -5477,17 +5497,19 @@ async fn concurrent_typeinfo_cache_loser_is_closed() {
     compio::time::timeout(Duration::from_secs(10), async {
         let url = require_pg().await;
         let client = connect(&url).await.unwrap();
+        let type_name = common::test_object_name("cpg_typeinfo_race");
         client
-            .batch_execute(
-                "DROP TYPE IF EXISTS pg_temp.cpg_typeinfo_race CASCADE; \
-                 CREATE TYPE pg_temp.cpg_typeinfo_race AS ENUM ('value')",
-            )
+            .batch_execute(&format!(
+                "DROP TYPE IF EXISTS pg_temp.{type_name} CASCADE; \
+                 CREATE TYPE pg_temp.{type_name} AS ENUM ('value')"
+            ))
             .await
             .unwrap();
 
+        let query = format!("SELECT 'value'::pg_temp.{type_name}");
         let (first, second) = futures_util::future::join(
-            client.prepare("SELECT 'value'::pg_temp.cpg_typeinfo_race"),
-            client.prepare("SELECT 'value'::pg_temp.cpg_typeinfo_race"),
+            client.prepare(query.as_str()),
+            client.prepare(query.as_str()),
         )
         .await;
         let first = first.unwrap();
@@ -5510,7 +5532,7 @@ WHERE t.oid = $1
             "concurrent type-info cache loser leaked its server statement"
         );
         client
-            .batch_execute("DROP TYPE pg_temp.cpg_typeinfo_race CASCADE")
+            .batch_execute(&format!("DROP TYPE pg_temp.{type_name} CASCADE"))
             .await
             .unwrap();
     })
@@ -5864,26 +5886,27 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
 
     let url = require_pg().await;
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let type_name = common::test_object_name("cpg_cache_enum");
 
     client
-        .batch_execute("CREATE TYPE cpg_cache_enum AS ENUM ('before')")
+        .batch_execute(&format!("CREATE TYPE {type_name} AS ENUM ('before')"))
         .await
         .unwrap();
 
-    const SQL: &str = "SELECT 'before'::cpg_cache_enum AS value";
-    let before_rows = client.query(SQL, &[]).await.unwrap();
+    let sql = format!("SELECT 'before'::{type_name} AS value");
+    let before_rows = client.query(sql.as_str(), &[]).await.unwrap();
     let before = before_rows[0].columns()[0].type_().clone();
 
     client
-        .batch_execute("ALTER TYPE cpg_cache_enum ADD VALUE 'after'")
+        .batch_execute(&format!("ALTER TYPE {type_name} ADD VALUE 'after'"))
         .await
         .unwrap();
     let catalog_variants: String = client
-        .query_one_scalar("SELECT enum_range(NULL::cpg_cache_enum)::text", &[])
+        .query_one_scalar(&format!("SELECT enum_range(NULL::{type_name})::text"), &[])
         .await
         .unwrap();
 
-    let stale_rows = client.query(SQL, &[]).await.unwrap();
+    let stale_rows = client.query(sql.as_str(), &[]).await.unwrap();
     let stale = stale_rows[0].columns()[0].type_().clone();
 
     const BUILTIN_SQL: &str = "SELECT 71::int4 AS cache_survivor";
@@ -5893,18 +5916,21 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
     drop((before_rows, stale_rows));
     client.clear_type_cache();
     client.simple_query("").await.unwrap();
-    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+    assert!(prepared_statement_names(&client, &sql).await.is_empty());
     assert_eq!(
         prepared_statement_names(&client, BUILTIN_SQL).await.len(),
         1
     );
 
-    let cleared_rows = client.query(SQL, &[]).await.unwrap();
+    let cleared_rows = client.query(sql.as_str(), &[]).await.unwrap();
     let cleared = cleared_rows[0].columns()[0].type_().clone();
 
     // The one-shot path must agree with the cache repopulated after the clear,
     // or the two raw-SQL preparation paths have diverged.
-    let fresh_rows = client.query(&Uncached::new(SQL), &[]).await.unwrap();
+    let fresh_rows = client
+        .query(&Uncached::new(sql.as_str()), &[])
+        .await
+        .unwrap();
     let fresh = fresh_rows[0].columns()[0].type_().clone();
 
     eprintln!(
@@ -5930,7 +5956,7 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
 
     drop((builtin_rows, cleared_rows, fresh_rows));
     client
-        .batch_execute("DROP TYPE cpg_cache_enum")
+        .batch_execute(&format!("DROP TYPE {type_name}"))
         .await
         .unwrap();
 }
@@ -6175,18 +6201,21 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 3).await.unwrap();
     let table = common::test_object_name("cpg_cache_domain_shape");
+    let sequence = common::test_object_name("cpg_cache_domain_0a000_seq");
+    let function = common::test_object_name("cpg_cache_domain_0a000_check");
+    let domain = common::test_object_name("cpg_cache_domain_0a000");
     client
         .batch_execute(&format!(
-            "CREATE TEMP SEQUENCE cpg_cache_domain_0a000_seq; \
-             CREATE FUNCTION pg_temp.cpg_cache_domain_0a000_check(value text) \
+            "CREATE TEMP SEQUENCE {sequence}; \
+             CREATE FUNCTION pg_temp.{function}(value text) \
              RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
              BEGIN \
-               PERFORM nextval('pg_temp.cpg_cache_domain_0a000_seq'); \
+               PERFORM nextval('pg_temp.{sequence}'); \
                RETURN true; \
              END \
              $function$; \
-             CREATE DOMAIN pg_temp.cpg_cache_domain_0a000 AS text \
-             CHECK (pg_temp.cpg_cache_domain_0a000_check(VALUE)); \
+             CREATE DOMAIN pg_temp.{domain} AS text \
+             CHECK (pg_temp.{function}(VALUE)); \
              CREATE TEMP TABLE {table} (id int4); \
              INSERT INTO {table} VALUES (73)"
         ))
@@ -6195,7 +6224,7 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
 
     let sql = format!(
         "SELECT {table}.*, \
-        $1::pg_temp.cpg_cache_domain_0a000::text AS bound \
+        $1::pg_temp.{domain}::text AS bound \
         FROM {table}"
     );
     let warm = client
@@ -6223,10 +6252,7 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
         Some("RevalidateCachedQuery")
     );
     let after_error: i64 = client
-        .query_one_scalar(
-            "SELECT last_value FROM pg_temp.cpg_cache_domain_0a000_seq",
-            &[],
-        )
+        .query_one_scalar(&format!("SELECT last_value FROM pg_temp.{sequence}"), &[])
         .await
         .unwrap();
     assert_eq!(
@@ -6249,10 +6275,7 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
     assert_ne!(prepared_statement_name(&client, &sql).await, stale_name);
 
     let after_fresh: i64 = client
-        .query_one_scalar(
-            "SELECT last_value FROM pg_temp.cpg_cache_domain_0a000_seq",
-            &[],
-        )
+        .query_one_scalar(&format!("SELECT last_value FROM pg_temp.{sequence}"), &[])
         .await
         .unwrap();
     assert_eq!(after_fresh, 3);
@@ -6631,32 +6654,40 @@ async fn statement_cache_does_not_retry_a_cold_26000() {
 async fn statement_cache_requires_server_provenance_before_retrying_26000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let sequence = common::test_object_name("cpg_cache_domain_26000_seq");
+    let function = common::test_object_name("cpg_cache_domain_26000_check");
+    let domain = common::test_object_name("cpg_cache_domain_26000");
     client
-        .batch_execute(
-            "CREATE TEMP SEQUENCE cpg_cache_domain_26000_seq; \
-             CREATE FUNCTION pg_temp.cpg_cache_domain_26000_check(value text) \
+        .batch_execute(&format!(
+            "CREATE TEMP SEQUENCE {sequence}; \
+             CREATE FUNCTION pg_temp.{function}(value text) \
              RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
              BEGIN \
                IF value = 'raise' THEN \
-                 PERFORM nextval('pg_temp.cpg_cache_domain_26000_seq'); \
+                 PERFORM nextval('pg_temp.{sequence}'); \
                  RAISE EXCEPTION USING \
                    ERRCODE = '26000', MESSAGE = 'domain input raised 26000'; \
                END IF; \
                RETURN true; \
              END \
              $function$; \
-             CREATE DOMAIN pg_temp.cpg_cache_domain_26000 AS text \
-             CHECK (pg_temp.cpg_cache_domain_26000_check(VALUE))",
-        )
+             CREATE DOMAIN pg_temp.{domain} AS text \
+             CHECK (pg_temp.{function}(VALUE))"
+        ))
         .await
         .unwrap();
 
-    const SQL: &str = "SELECT $1::pg_temp.cpg_cache_domain_26000";
-    drop(client.query(SQL, &[&DomainText("ok")]).await.unwrap());
-    let cached_name = prepared_statement_name(&client, SQL).await;
+    let sql = format!("SELECT $1::pg_temp.{domain}");
+    drop(
+        client
+            .query(sql.as_str(), &[&DomainText("ok")])
+            .await
+            .unwrap(),
+    );
+    let cached_name = prepared_statement_name(&client, &sql).await;
 
     let error = client
-        .query(SQL, &[&DomainText("raise")])
+        .query(sql.as_str(), &[&DomainText("raise")])
         .await
         .unwrap_err();
     assert_eq!(error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
@@ -6667,15 +6698,12 @@ async fn statement_cache_requires_server_provenance_before_retrying_26000() {
     );
 
     let side_effects: i64 = client
-        .query_one_scalar(
-            "SELECT last_value FROM pg_temp.cpg_cache_domain_26000_seq",
-            &[],
-        )
+        .query_one_scalar(&format!("SELECT last_value FROM pg_temp.{sequence}"), &[])
         .await
         .unwrap();
     assert_eq!(side_effects, 1, "Bind parameter input ran more than once");
     assert_eq!(
-        prepared_statement_name(&client, SQL).await,
+        prepared_statement_name(&client, &sql).await,
         cached_name,
         "an application-raised 26000 evicted a healthy cached statement"
     );
@@ -7255,21 +7283,23 @@ async fn custom_multirange_resolves_its_element_type() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let range = common::test_object_name("cpg_prep_range");
+    let multirange = common::test_object_name("cpg_prep_multirange");
 
     client
-        .batch_execute(
-            "DROP TYPE IF EXISTS cpg_prep_range CASCADE; \
-             DROP TYPE IF EXISTS cpg_prep_multirange CASCADE; \
-             CREATE TYPE cpg_prep_range AS RANGE ( \
+        .batch_execute(&format!(
+            "DROP TYPE IF EXISTS {range} CASCADE; \
+             DROP TYPE IF EXISTS {multirange} CASCADE; \
+             CREATE TYPE {range} AS RANGE ( \
                  subtype = int4, \
-                 multirange_type_name = cpg_prep_multirange \
-             )",
-        )
+                 multirange_type_name = {multirange} \
+             )"
+        ))
         .await
         .unwrap();
 
     let statement = client
-        .prepare("SELECT '{}'::cpg_prep_multirange")
+        .prepare(&format!("SELECT '{{}}'::{multirange}"))
         .await
         .unwrap();
     let actual = statement.columns()[0].type_().kind().clone();
@@ -7281,10 +7311,10 @@ async fn custom_multirange_resolves_its_element_type() {
 
     drop(statement);
     client
-        .batch_execute(
-            "DROP TYPE IF EXISTS cpg_prep_range CASCADE; \
-             DROP TYPE IF EXISTS cpg_prep_multirange CASCADE",
-        )
+        .batch_execute(&format!(
+            "DROP TYPE IF EXISTS {range} CASCADE; \
+             DROP TYPE IF EXISTS {multirange} CASCADE"
+        ))
         .await
         .unwrap();
 

@@ -21,18 +21,21 @@ async fn connect(url: &str) -> Result<Client, Error> {
     Ok(client)
 }
 
-const FAILING_CUSTOM_TYPE_QUERY: &str = "SELECT NULL::pg_temp.cpg_query_diag_enum \
-     FROM generate_series(0, 0) AS g(n) \
-     WHERE $1::int4 / n::int4 = 0";
-
-async fn create_failing_custom_type_fixture(client: &Client) {
+async fn create_failing_custom_type_fixture(client: &Client, type_name: &str) {
     client
-        .batch_execute(
-            "CREATE TYPE pg_temp.cpg_query_diag_enum AS ENUM ('value'); \
-             BEGIN",
-        )
+        .batch_execute(&format!(
+            "CREATE TYPE pg_temp.{type_name} AS ENUM ('value'); BEGIN"
+        ))
         .await
         .expect("create the custom type and begin its failing transaction");
+}
+
+fn failing_custom_type_query(type_name: &str) -> String {
+    format!(
+        "SELECT NULL::pg_temp.{type_name} \
+         FROM generate_series(0, 0) AS g(n) \
+         WHERE $1::int4 / n::int4 = 0"
+    )
 }
 
 #[compio::test]
@@ -41,10 +44,12 @@ async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails(
     let client = connect(&url)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-    create_failing_custom_type_fixture(&client).await;
+    let type_name = common::test_object_name("cpg_query_diag_text_enum");
+    create_failing_custom_type_fixture(&client, &type_name).await;
+    let query = failing_custom_type_query(&type_name);
 
     let failure = client
-        .query_text_params(FAILING_CUSTOM_TYPE_QUERY, &["1"])
+        .query_text_params(&query, &["1"])
         .await
         .expect_err("query_text_params execution must fail with division by zero");
     assert_eq!(
@@ -71,13 +76,12 @@ async fn query_typed_preserves_the_outer_error_when_type_resolution_fails() {
     let client = connect(&url)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-    create_failing_custom_type_fixture(&client).await;
+    let type_name = common::test_object_name("cpg_query_diag_typed_enum");
+    create_failing_custom_type_fixture(&client, &type_name).await;
+    let query = failing_custom_type_query(&type_name);
 
     let failure = client
-        .query_typed(
-            FAILING_CUSTOM_TYPE_QUERY,
-            &[(&1_i32, compio_postgres::types::Type::INT4)],
-        )
+        .query_typed(&query, &[(&1_i32, compio_postgres::types::Type::INT4)])
         .await
         .expect_err("query_typed execution must fail with division by zero");
     assert_eq!(
@@ -149,24 +153,18 @@ async fn stale_typeinfo_statement_failure_cleans_the_cache_for_the_next_lookup()
         let range = connect(&url)
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        assert_stale_helpers_are_retired(
-            &range,
-            "CREATE TYPE pg_temp.cpg_stale_range AS RANGE (subtype = int4)",
-            "SELECT NULL::pg_temp.cpg_stale_range",
-            1,
-        )
-        .await;
+        let range_name = common::test_object_name("cpg_stale_range");
+        let range_ddl = format!("CREATE TYPE pg_temp.{range_name} AS RANGE (subtype = int4)");
+        let range_query = format!("SELECT NULL::pg_temp.{range_name}");
+        assert_stale_helpers_are_retired(&range, &range_ddl, &range_query, 1).await;
 
         let enumeration = connect(&url)
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        assert_stale_helpers_are_retired(
-            &enumeration,
-            "CREATE TYPE pg_temp.cpg_stale_enum AS ENUM ('value')",
-            "SELECT NULL::pg_temp.cpg_stale_enum",
-            2,
-        )
-        .await;
+        let enum_name = common::test_object_name("cpg_stale_enum");
+        let enum_ddl = format!("CREATE TYPE pg_temp.{enum_name} AS ENUM ('value')");
+        let enum_query = format!("SELECT NULL::pg_temp.{enum_name}");
+        assert_stale_helpers_are_retired(&enumeration, &enum_ddl, &enum_query, 2).await;
 
         let composite = connect(&url)
             .await
