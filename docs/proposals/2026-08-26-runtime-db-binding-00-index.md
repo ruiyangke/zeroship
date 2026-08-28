@@ -324,6 +324,53 @@ For a NEW table, `build_create_table_with_fks_for_dialect` must emit the declare
 type and constraints under the **raw** name and a bare `TEXT` sibling under the
 **logical** name. Nothing does that today.
 
+### The flip's value is REAL, and an earlier revision of this page understated it
+
+Measured 2026-08-28, because the case for cancelling the flip was made here
+without testing its strongest counter-argument.
+
+`read_pipeline::apply` runs the mask pass only `if schema_has_masked_columns(&schema)`,
+and that predicate reads **the descriptor** (`crud/mod.rs:2590-2602`). So when
+the descriptor does not declare a field masked, no mask pass runs and the parent
+column's contents pass through untouched. Therefore:
+
+| | descriptor declares the mask | descriptor does NOT (stale) |
+| --- | --- | --- |
+| **today** (parent = plaintext) | masked | **PLAINTEXT RETURNED** |
+| **post-flip** (parent = mask) | masked | **mask returned - safe** |
+
+**That is exactly the hazard decisions 7 and 8 created**, and this page already
+names it: *"If a deploy goes live before its migration applies, the descriptor
+says `ssn` is the masked column while the database still holds the real value
+there, and the runtime serves plaintext believing it is masked. Nothing detects
+it."* The flip closes it by making the safe value the one physically present.
+
+So the decision is a genuine trade, not the lopsided one an earlier revision
+implied: **real protection against the one failure mode with no runtime check,
+against 22 production sites over two forks with no dependency edge, a
+type-and-constraint swap that breaks numeric and enum masked columns, and a DDL
+migration the differ is structurally blind to.**
+
+### A third option neither document considers: enforce the ordering instead
+
+The flip defends against a **violation of the deploy ordering**. The cheaper
+move is to stop the violation. The descriptor is built at deploy time and the
+deploy pipeline already owns both halves, so the pipeline can **refuse to make a
+deploy live until its migrations have applied**, turning "PostgreSQL migrations
+are applied before a deploy becomes live" from a description into an enforced
+precondition.
+
+That costs one check at one place, versus a storage change at 22 sites that the
+migration engine cannot verify. It does not cover a *restore* (which the design
+already answers with "roll the workers"), and it is weaker than the flip in
+exactly the case where the pipeline itself is buggy - so it trades defence in
+depth for cost.
+
+**Recommendation, revised: enforce the ordering first, and treat the flip as a
+separate decision made on its own merits afterwards** - because the ordering
+guard is cheap, is needed whether or not the flip lands, and removes the single
+argument that currently makes the flip look mandatory.
+
 **Blocks:** SC-6. Full detail there under "BLOCKING", and in
 `docs/reviews/2026-08-28-flip-write-path.md` (966 lines, in the tree, and
 referenced from neither SC-6 nor this page until now).
