@@ -140,9 +140,10 @@ export type NormalizedSchema = Record<string, FieldDef>;
  * **v2 over v1 because the guarantee changed, not because the shape grew.** Every
  * `FieldDef` in a v2 descriptor carries a `storage` block naming the physical column
  * a default projection reads and, when they differ, the column holding the
- * authoritative value. A consumer that stops formatting `\`${col}_masked\`` depends on
- * that being true of every field it is handed, and a committed v1 artifact does not
- * carry it. Refusing a v1 descriptor outright is the whole reason the number moved.
+ * authoritative value. A consumer that stops deriving that second name by string
+ * formatting depends on it being true of every field it is handed, and a committed v1
+ * artifact does not carry it. Refusing a v1 descriptor outright is the whole reason the
+ * number moved.
  */
 type RuntimeStrictness = "strict" | "lenient" | "off";
 type RuntimeCollectionDescriptorV2 = {

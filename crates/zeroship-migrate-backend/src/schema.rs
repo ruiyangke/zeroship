@@ -544,17 +544,59 @@ pub fn build_encryption_sentinel_comments(
     out
 }
 
-/// Return the sibling column name `<field>_masked` IFF
-/// the field's schema entry carries a `.mask({...})` declaration with
-/// `kind != "none"`. Returns `None` for non-masked columns and for
-/// columns that explicitly opt out via `.mask({ kind: "none" })`.
+/// The prefix every RAW-value column carries.
 ///
-/// The platform reserves the `_masked` suffix at the field-name level
-/// (`validate_field_name`'s `ReservedName::Suffix`) so a creator cannot
-/// shadow a sibling. Every caller is a DDL emitter - create-table, add-column and
-/// index creation all ask this, so the sibling is declared and indexed alongside the
-/// column it shadows.
-pub fn mask_sibling_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
+/// Chosen so the runtime's `validate_field_name` already refuses it: its
+/// reservation table reserves both `_` and `__zs_` as prefixes, and that
+/// validator gates every inbound identifier surface (filter keys, conflict-probe
+/// keys, write-document keys, read identifiers). Naming the raw column something
+/// no validator accepts is what makes it unreachable from creator code on
+/// surfaces nobody has written yet.
+pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
+
+/// The longest field name that can carry a mask.
+///
+/// `63 - RAW_COLUMN_PREFIX.len()`. Postgres truncates identifiers at 63 bytes
+/// (NAMEDATALEN) and `validate_field_name` admits a 63-byte field, so a longer
+/// masked field would produce a raw column the server silently truncates - and
+/// two such fields could truncate to the same column. The declaration is
+/// REFUSED instead, at DDL-emission time, which is both loud and the reason
+/// this function needs no hashing cap and can therefore stay trivially
+/// byte-identical to its runtime twin.
+///
+/// (The pre-flip `<field>_masked` sibling had exactly this bug and did not cap:
+/// a 60-character masked field produced a 67-character sibling.)
+pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
+
+/// The physical column that holds `field`'s REAL value.
+///
+/// Total, and deliberately a plain concatenation: it must stay byte-identical
+/// to `zeroship_schema::query::raw_column_name` - this one names the column the
+/// migration engine CREATES, that one names the column the data plane READS and
+/// WRITES - and two hashing implementations in two crates could not be checked
+/// to agree by any compiler.
+#[must_use]
+pub fn raw_column_name(field: &str) -> String {
+    format!("{RAW_COLUMN_PREFIX}{field}")
+}
+
+/// Return the RAW-value column name for `field` IFF the field's schema entry
+/// carries a `.mask({...})` declaration with `kind != "none"`. Returns `None`
+/// for non-masked columns and for columns that explicitly opt out via
+/// `.mask({ kind: "none" })`.
+///
+/// # The storage flip (2026-08-28)
+///
+/// The field's OWN column holds the **mask**; this sibling holds the **real
+/// value** and is unqueryable. It used to be the other way round, and because
+/// the WHERE builder takes no schema hint and so could not substitute,
+/// `find({ ssn: { $gt: v } })` compared against plaintext - an unaudited,
+/// unauthorized binary search over a value the caller could not read.
+///
+/// Every caller is a DDL emitter - create-table, add-column and index creation
+/// all ask this, so the raw column is declared and indexed alongside the masked
+/// column that shadows it.
+pub fn raw_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind = mask_meta
         .get("kind")
@@ -563,7 +605,7 @@ pub fn mask_sibling_column_for_field(field: &str, def: &serde_json::Value) -> Op
     if kind == "none" {
         return None;
     }
-    Some(format!("{field}_masked"))
+    Some(raw_column_name(field))
 }
 
 /// Render the canonical mask-sentinel comment payload
@@ -622,9 +664,9 @@ pub fn build_mask_sentinel_comments(
         if is_schema_metadata_key(field) {
             continue;
         }
-        let Some(sibling) = mask_sibling_column_for_field(field, def) else {
+        if raw_column_for_field(field, def).is_none() {
             continue;
-        };
+        }
         let Some(sentinel) = mask_sentinel_for_field(def) else {
             continue;
         };
@@ -632,11 +674,13 @@ pub fn build_mask_sentinel_comments(
         // literal. The kind+classification alphabet contains none, but
         // be defensive against a future kind that does.
         let escaped = sentinel.replace('\'', "''");
+        // The sentinel rides the MASKED column - the field's own - because that
+        // is the column whose contents it describes.
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
             backend.quote_ident(app_id),
             backend.quote_ident(collection),
-            backend.quote_ident(&sibling),
+            backend.quote_ident(field),
             escaped,
         ));
     }

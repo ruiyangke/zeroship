@@ -703,12 +703,13 @@ fn encryption_meta_for_field(
     })
 }
 
-/// The hidden `<col>_masked` sibling column a field's `.mask({...})` declaration
-/// requires, or `None` for an unmasked field / `kind: "none"` opt-out. Delegates
-/// to the shared kernel ([`crate::schema::query::mask_sibling_column_for_field`])
-/// so the engine and plugin-db agree on exactly which fields get a sibling.
-fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
-    crate::schema::query::mask_sibling_column_for_field(&f.name, &field_to_sdk_def(f))
+/// The hidden `__zs_raw__<col>` column a field's `.mask({...})` declaration
+/// requires - the one holding the REAL value - or `None` for an unmasked field
+/// / `kind: "none"` opt-out. Delegates to the shared kernel
+/// ([`crate::schema::query::raw_column_for_field`]) so the engine and plugin-db
+/// agree on exactly which fields get a second column and what it is called.
+fn mask_raw_column_for_field(f: &FieldDescriptor) -> Option<String> {
+    crate::schema::query::raw_column_for_field(&f.name, &field_to_sdk_def(f))
 }
 
 /// Resolve a field's column data type in the `information_schema.data_type`
@@ -1592,7 +1593,11 @@ pub(crate) fn column_snapshot_for_field(
             && f.enum_values.is_none()
             && f.id_prefix.is_none());
     let mut column = ColumnSnapshot {
-        name: f.name.clone(),
+        // A masked field's declared type, nullability, default and constraints
+        // belong to the column that holds the REAL value, which after the
+        // storage flip is `__zs_raw__<field>`. The field's own name is taken by
+        // the mask, emitted as a plain nullable TEXT column by the caller.
+        name: mask_raw_column_for_field(f).unwrap_or_else(|| f.name.clone()),
         data_type,
         nullable: !f.required,
         default: default.clone(),
@@ -2198,29 +2203,32 @@ fn build_table_snapshot_impl(
             dialect,
             synth_json_defaults,
         )?);
-        // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
-        // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
-        // the SHARED kernel's `mask_sibling_column_for_field`). The sibling is a
-        // real physical column, so the desired snapshot models it or it
-        // phantom-drifts against the live table the engine creates. It round-
-        // trips as a plain nullable TEXT column.
+        // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) owns
+        // TWO physical columns. The push above emitted `__zs_raw__<col>` with
+        // the declared type and constraints; this one emits the MASK under the
+        // field's own name, as a plain nullable TEXT column. Both are real
+        // physical columns, so the desired snapshot models both or it
+        // phantom-drifts against the live table the engine creates.
         //
-        // the `zero-migrate:mask:kind=...,classification=...` sentinel that
-        // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
-        // read-pass is now EMITTED into the generated DDL: it rides on the
-        // sibling column's `comment_sentinel`, which `render_create_table` /
-        // `render_add_column` turn into a `COMMENT ON COLUMN` statement. Built
-        // by the SHARED codec (`crate::schema::query::mask_sentinel_for_field`
-        // -> `build_mask_sentinel`) so it is byte-identical to the one
+        // The mask column is TEXT and carries none of the declared constraints,
+        // and that is not an omission: `'***'` is not a `DOUBLE PRECISION` and
+        // is not a member of an enum CHECK list, so leaving the constraints
+        // here would refuse every write to the collection.
+        //
+        // The `zero-migrate:mask:kind=...,classification=...` sentinel that
+        // plugin-db reads at RUNTIME (via `pg_description`) rides this column's
+        // `comment_sentinel`, which `render_create_table` / `render_add_column`
+        // turn into a `COMMENT ON COLUMN` statement. Built by the SHARED codec
+        // (`crate::schema::query::mask_sentinel_for_field` ->
+        // `build_mask_sentinel`) so it is byte-identical to the one
         // `registerModel` writes. `snapshot_schema` never introspects COMMENTs,
         // so the sentinel is not a snapshot drift attribute (excluded from
-        // `ColumnSnapshot` equality) - the sibling COLUMN itself round-trips as
-        // a plain nullable TEXT column.
-        if mask_sibling_for_field(f).is_some() {
+        // `ColumnSnapshot` equality).
+        if mask_raw_column_for_field(f).is_some() {
             let comment_sentinel =
                 crate::schema::query::mask_sentinel_for_field(&field_to_sdk_def(f));
             columns.push(ColumnSnapshot {
-                name: format!("{}_masked", f.name),
+                name: f.name.clone(),
                 data_type: "text".into(),
                 nullable: true,
                 default: None,

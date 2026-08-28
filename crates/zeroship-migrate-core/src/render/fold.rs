@@ -3675,18 +3675,28 @@ fn add_column_snapshot(
         .map_err(|error| FoldError::Render(error.to_string()))?;
     let snap =
         build_resolved_table_snapshot(vendors, project_schema, &desc, dialect, &resolved_inject)?;
-    let sibling_name = format!("{column}_masked");
+    // Read the pair off the RESOLVED SNAPSHOT, not off the `mask` argument: an
+    // encrypted column carries an auto-default mask the shared builder applies
+    // and the IR `mask` field does not record, so `mask.is_some()` is not the
+    // same question as "did the builder emit two columns". `main` is the one
+    // carrying the declared type - the raw column when masked - because the
+    // author-type and structured-default fixups below apply to it.
+    let raw_name = zeroship_migrate_backend::schema::raw_column_name(column);
+    let is_masked = snap.columns.iter().any(|c| c.name == raw_name);
+    let main_name = if is_masked { raw_name.as_str() } else { column };
+    let sibling_name = is_masked.then(|| column.to_string());
     let mut main = snap
         .columns
         .iter()
-        .find(|c| c.name == column)
+        .find(|c| c.name == main_name)
         .cloned()
         .ok_or(FoldError::Unsupported("addColumn (column folded away)"))?;
     apply_fold_author_type_override_to_column(vendors, table, column, ty, &mut main, dialect)?;
     apply_fold_structured_default_to_column(
         vendors, table, column, ty, default, &mut main, dialect,
     )?;
-    let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
+    let sibling =
+        sibling_name.and_then(|name| snap.columns.into_iter().find(|c| c.name == name));
     Ok((main, sibling))
 }
 

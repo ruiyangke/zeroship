@@ -17,7 +17,8 @@
 //!   2. the lower `ir_column_to_field` maps `IrColumn.mask` → `FieldDescriptor.mask`
 //!      (explicit mask WINS over the encrypted auto-mask);
 //!   3. so the `FieldDef` projection recovers it AND the op lower emits the `zero-migrate:mask`
-//!      sentinel + `_masked` sibling (closing the runtime masking-fidelity gap too).
+//!      sentinel + the `__zs_raw__<field>` raw sibling (closing the runtime masking-fidelity
+//!      gap too).
 //!
 //! This test PINS the round-trip: a standalone mask authored on a plaintext column
 //! SURVIVES descriptors -> ops -> fold and reappears on the recovered `FieldDef`.

@@ -354,13 +354,12 @@ pub enum WrappedType {
 /// or, for `t.encrypted()` columns, when the schema-normaliser
 /// auto-populates the default mask (`{ kind: "full", classification: "pii" }`).
 ///
-/// Sibling-column-based: when present, the platform emits a sibling `<col>_masked`
-/// physical column alongside the parent at CREATE TABLE time,
-/// default reads pull the masked sibling and alias it back to the
-/// schema-declared name, and writes dual-bind both columns
-/// atomically. The sibling column is HIDDEN from the SDK
-/// surface -- `Row<S>` only contains the parent column wrapped in
-/// `MaskedValue<T>`.
+/// Two-column: when present, the field's OWN column holds the MASK and a
+/// hidden `__zs_raw__<col>` sibling holds the REAL value, carrying the
+/// declared type and constraints. A default read needs no aliasing - the
+/// column with the declared name is the mask - and the sibling is HIDDEN
+/// from the SDK surface: `Row<S>` contains only the declared field, wrapped
+/// in `MaskedValue<T>`.
 ///
 /// Population path:
 /// - **PG**: from `__zeroship_meta.mask_columns` rows the DDL
@@ -376,10 +375,10 @@ pub struct MaskMeta {
     /// Classification of the source field -- drives unmask
     /// authorization and audit-row tagging.
     pub classification: Classification,
-    /// Name of the physical sibling column emitted alongside the
-    /// parent. Always `format!("{parent}_masked")`. Stored explicitly
-    /// so the read/write passes can quote the right identifier
-    /// without re-deriving from the parent name each call.
+    /// Name of the physical sibling column holding the REAL value.
+    /// Always `raw_column_name(field)`. Stored explicitly so the
+    /// read/write passes can quote the right identifier without
+    /// re-deriving it from the field name at each call site.
     pub sibling_column: String,
 }
 
@@ -579,7 +578,7 @@ fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String>
         }
         columns.insert(field.clone());
         if mask_meta_from_schema_def(def).is_some() {
-            columns.insert(format!("{field}_masked"));
+            columns.insert(crate::query::raw_column_name(field));
         }
     }
 
@@ -668,7 +667,16 @@ SELECT c.relname AS table_name,
         //     data plane (and the diff) recover it.
         let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
-            if comment.starts_with("__zsmask:") && column.ends_with("_masked") {
+            // The mask sentinel rides the MASKED column, which after the
+            // storage flip is the field's OWN column - so there is no suffix
+            // to test and no parent to resolve.
+            //
+            // The `&& column.ends_with("_masked")` conjunct that used to be
+            // here had no `else`: a `__zsmask:` comment on a column that did
+            // not match fell through both arms and was discarded in silence,
+            // while the malformed-sentinel arm below warns loudly. After the
+            // flip that arm would have matched EVERY sentinel.
+            if comment.starts_with("__zsmask:") {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
             } else if comment.starts_with("zsenc:") {
                 match crate::mask_codec::parse_encryption_sentinel(comment) {
@@ -707,22 +715,25 @@ SELECT c.relname AS table_name,
             },
         );
     }
-    // Second pass: for every sibling carrying a
-    // `__zsmask:…` sentinel, parse the kind+classification and stamp
-    // `MaskMeta` onto the PARENT column. The diff classifier reads
-    // `parent.mask` to decide whether to emit a backfill,
-    // rewrite, or removal op.
-    for ((table, sibling), sentinel) in sibling_sentinels {
-        let Some(parent_name) = sibling.strip_suffix("_masked") else {
-            continue;
-        };
-        let parent_name = parent_name.to_string();
+    // Second pass: for every column carrying a `__zsmask:…` sentinel, parse
+    // the kind+classification and stamp `MaskMeta` on it. The column carrying
+    // the sentinel IS the declared field - the mask lives under the field's own
+    // name - so there is nothing to resolve. The diff classifier reads
+    // `col.mask` to decide whether to emit a backfill, rewrite, or removal op.
+    for ((table, masked_column), sentinel) in sibling_sentinels {
         let Some(table_cols) = out.tables.get_mut(&table) else {
             continue;
         };
-        let Some(parent_col) = table_cols.get_mut(&parent_name) else {
+        let Some(parent_col) = table_cols.get_mut(&masked_column) else {
+            tracing::warn!(
+                table = %table,
+                column = %masked_column,
+                "diff: mask sentinel on a column the introspection did not \
+                 return; ignoring",
+            );
             continue;
         };
+        let sibling = masked_column;
         let (kind, classification) =
             match crate::mask_codec::parse_mask_sentinel(&sentinel) {
                 Ok(p) => p,
@@ -736,11 +747,11 @@ SELECT c.relname AS table_name,
                     // operators get a loud warn instead.
                     tracing::warn!(
                         table = %table,
-                        sibling = %sibling,
+                        column = %sibling,
                         sentinel = %sentinel,
                         error = %e,
-                        "diff: malformed mask sentinel on PG sibling column; \
-                         treating parent column as unmasked"
+                        "diff: malformed mask sentinel on a PG column; \
+                         treating it as unmasked"
                     );
                     continue;
                 }
@@ -748,7 +759,8 @@ SELECT c.relname AS table_name,
         parent_col.mask = Some(MaskMeta {
             kind,
             classification,
-            sibling_column: sibling,
+            // The OTHER column of the pair: the one holding the real value.
+            sibling_column: crate::query::raw_column_name(&sibling),
         });
     }
 
@@ -1191,51 +1203,23 @@ pub fn compute_diff(
                 // No mask on either side — nothing to do.
                 (None, None) => {}
 
-                // New mask declaration on existing column.
+                // A mask declaration added to an EXISTING column. REFUSED,
+                // for the reason spelled out at the same arm of the migration
+                // engine's classifier (`zeroship-migrate-core/src/schema/diff.rs`)
+                // - and spelled out in BOTH because two classifiers that
+                // disagree about whether a transition is safe are worse than
+                // either answer.
+                //
+                // Before the storage flip this was two additive steps: add the
+                // sibling, backfill it. The column holding the data never moved
+                // and its type and constraints never changed. After the flip
+                // the same declaration means four data-touching steps - add
+                // `__zs_raw__<col>`, copy every row's value into it, overwrite
+                // `<col>` with the mask, and rewrite `<col>` to `TEXT` dropping
+                // the constraints it carries - and this differ can see only the
+                // first. Emitting steps 1-3 would leave a schema whose every
+                // write fails, having already rewritten the data.
                 (None, Some(new_meta)) => {
-                    // (1) ALTER ADD COLUMN <col>_masked TEXT NULL +
-                    //     `COMMENT ON COLUMN` sentinel attachment —
-                    //     emitted as a regular `AddColumn` op so the
-                    //     existing apply pipeline runs it. Both
-                    //     statements ride in the same multi-statement
-                    //     payload so an interrupted deploy never leaves
-                    //     a sibling without its sentinel comment.
-                    let sibling = format!("{field}_masked");
-                    let mut add_stmts = vec![format!(
-                        "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
-                        crate::query::quote_ident(app_id),
-                        crate::query::quote_ident(collection),
-                        crate::query::quote_ident(&sibling),
-                    )];
-                    let sentinel = crate::mask_codec::build_mask_sentinel(
-                        new_meta.kind,
-                        new_meta.classification,
-                    );
-                    let escaped = sentinel.replace('\'', "''");
-                    add_stmts.push(format!(
-                        "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-                        crate::query::quote_ident(app_id),
-                        crate::query::quote_ident(collection),
-                        crate::query::quote_ident(&sibling),
-                        escaped,
-                    ));
-                    let add_sql = Some(add_stmts.join(";\n"));
-                    ops.push(DiffOp {
-                        collection: collection.to_string(),
-                        change_kind: ChangeKind::AddColumn,
-                        class: ChangeClass::Additive,
-                        sql: add_sql,
-                        details: serde_json::json!({
-                            "kind": "add_column",
-                            "field": sibling,
-                            "declared_type": "string",
-                            "required": false,
-                            "has_default": false,
-                            "mask_sibling_for": field,
-                        }),
-                        field: Some(sibling.clone()),
-                    });
-                    // (2) Backfill op proper.
                     ops.push(DiffOp {
                         collection: collection.to_string(),
                         change_kind: ChangeKind::MaskBackfill {
@@ -1244,18 +1228,20 @@ pub fn compute_diff(
                             kind: new_meta.kind,
                             classification: new_meta.classification,
                         },
-                        class: ChangeClass::Additive,
-                        // Backfill SQL is multi-statement and
-                        // resumable — there is no single "the SQL" to
-                        // store on the op. The apply layer dispatches
-                        // to `mask_backfill::run_mask_backfill`.
+                        class: ChangeClass::Destructive,
                         sql: None,
                         details: serde_json::json!({
                             "kind": "mask_backfill",
                             "field": field,
                             "mask_kind": new_meta.kind.as_sql(),
                             "classification": new_meta.classification.as_sql(),
-                            "sibling_column": sibling,
+                            "raw_column": crate::query::raw_column_name(field),
+                            "refused": "adding .mask() to a column that already holds data \
+                                        relocates every row's value into a new column, \
+                                        replaces the original with a mask, and rewrites the \
+                                        column's type and constraint set; three of those four \
+                                        steps are invisible to the differ, so the transition is \
+                                        refused rather than half-applied",
                         }),
                         field: Some(field.clone()),
                     });
@@ -1283,7 +1269,7 @@ pub fn compute_diff(
                             "old_mask_kind": old_meta.kind.as_sql(),
                             "new_mask_kind": new_meta.kind.as_sql(),
                             "classification": new_meta.classification.as_sql(),
-                            "sibling_column": format!("{field}_masked"),
+                            "raw_column": crate::query::raw_column_name(field),
                         }),
                         field: Some(field.clone()),
                     });
@@ -1305,7 +1291,7 @@ pub fn compute_diff(
                         details: serde_json::json!({
                             "kind": "mask_remove",
                             "field": field,
-                            "sibling_column": format!("{field}_masked"),
+                            "raw_column": crate::query::raw_column_name(field),
                         }),
                         field: Some(field.clone()),
                     });
@@ -2129,10 +2115,17 @@ mod tests {
         live
     }
 
-    /// Live has no mask, schema declares one -> emit the
-    /// sibling `AddColumn` + `MaskBackfill` ops.
+    /// Live has no mask and the schema declares one: the transition is
+    /// REFUSED, with no DDL emitted.
+    ///
+    /// It used to emit an `AddColumn` for the `<col>_masked` sibling plus an
+    /// additive `MaskBackfill`, and that was correct while the column holding
+    /// the data never moved. After the storage flip the declaration means four
+    /// data-touching steps and this differ can see only the first, so emitting
+    /// what it can see would rewrite the data and leave a schema whose every
+    /// write fails.
     #[test]
-    fn mask_backfill_emits_alter_then_backfill_ops() {
+    fn a_mask_added_to_an_existing_column_is_refused() {
         let live = live_with_column("users", "ssn", None);
         let declared = json!({
             "ssn": {
@@ -2142,45 +2135,52 @@ mod tests {
         });
         let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
 
-        let add_sibling: Vec<&DiffOp> = ops
-            .iter()
-            .filter(|o| matches!(o.change_kind, ChangeKind::AddColumn))
-            .filter(|o| o.field.as_deref() == Some("ssn_masked"))
-            .collect();
-        assert_eq!(add_sibling.len(), 1, "expected sibling ADD: {ops:?}");
-        assert_eq!(add_sibling[0].class, ChangeClass::Additive);
-        // The sibling ADD must include the `COMMENT ON COLUMN` sentinel
-        // attachment so PG introspection round-trips on the next deploy.
-        let sql = add_sibling[0].sql.as_deref().unwrap_or("");
         assert!(
-            sql.contains("ADD COLUMN") && sql.contains("ssn_masked") && sql.contains("__zsmask:"),
-            "sibling ADD must include COMMENT ON COLUMN sentinel: {sql}"
+            !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::AddColumn)),
+            "no column may be added for a refused transition: {ops:?}",
         );
-
         let backfill_ops: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::MaskBackfill { .. }))
             .collect();
         assert_eq!(backfill_ops.len(), 1, "expected one MaskBackfill: {ops:?}");
-        assert_eq!(backfill_ops[0].class, ChangeClass::Additive);
+        assert_eq!(
+            backfill_ops[0].class,
+            ChangeClass::Destructive,
+            "a Destructive op routes to the approval workflow instead of applying",
+        );
         assert_eq!(backfill_ops[0].field.as_deref(), Some("ssn"));
-
-        // The diff must emit the AddColumn BEFORE the MaskBackfill so the
-        // sibling exists when the backfill writes to it.
-        let alter_idx = ops
-            .iter()
-            .position(|o| {
-                matches!(o.change_kind, ChangeKind::AddColumn)
-                    && o.field.as_deref() == Some("ssn_masked")
-            })
-            .unwrap();
-        let backfill_idx = ops
-            .iter()
-            .position(|o| matches!(o.change_kind, ChangeKind::MaskBackfill { .. }))
-            .unwrap();
         assert!(
-            alter_idx < backfill_idx,
-            "ALTER ADD must precede MaskBackfill"
+            backfill_ops[0].sql.is_none(),
+            "a refused transition carries no SQL: {:?}",
+            backfill_ops[0].sql,
+        );
+        assert!(
+            backfill_ops[0].details.get("refused").is_some(),
+            "the op must say why: {:?}",
+            backfill_ops[0].details,
+        );
+
+        // The CONTROL: declaring `.mask()` on a column that does NOT exist
+        // live is unaffected - it still emits working DDL through the
+        // column-additions branch. Without this arm the assertions above would
+        // pass on an implementation that refused masking outright.
+        let ops = compute_diff(&live, "app1", "users", &json!({
+            "ssn": { "type": "string" },
+            "dob": {
+                "type": "string",
+                "mask": { "kind": "dateYear", "classification": "phi" }
+            }
+        }), "", &[]);
+        let adds: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::AddColumn))
+            .collect();
+        assert_eq!(adds.len(), 1, "the new masked column is added: {ops:?}");
+        let sql = adds[0].sql.as_deref().unwrap_or("");
+        assert!(
+            sql.contains(&crate::query::raw_column_name("dob")) && sql.contains("__zsmask:"),
+            "a NEW masked column still gets its raw column and its sentinel: {sql}",
         );
     }
 
@@ -2288,12 +2288,13 @@ mod tests {
         assert_eq!(removes[0].class, ChangeClass::Destructive);
     }
 
-    /// Sibling kept out of DropColumn loop: a `_masked`
-    /// sibling that exists in the live schema MUST NOT generate a
-    /// spurious DropColumn just because the user-declared schema
-    /// doesn't list `ssn_masked`. The sibling is platform-managed.
+    /// The raw column is kept out of the DropColumn loop: a
+    /// `__zs_raw__<col>` column that exists in the live schema MUST NOT
+    /// generate a spurious DropColumn just because the creator-declared schema
+    /// does not list it. It is platform-managed, and dropping it would destroy
+    /// the real value while leaving the mask behind.
     #[test]
-    fn mask_sibling_not_dropped_when_parent_still_masked() {
+    fn the_raw_column_is_not_dropped_when_the_field_is_still_masked() {
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
         cols.insert(
@@ -2313,15 +2314,15 @@ mod tests {
                 mask: Some(MaskMeta {
                     kind: MaskKind::Last4,
                     classification: Classification::Spi,
-                    sibling_column: "ssn_masked".into(),
+                    sibling_column: crate::query::raw_column_name("ssn"),
                 }),
                 ..Default::default()
             },
         );
-        // The sibling sits alongside (live-only — the SDK never
+        // The raw column sits alongside (live-only - the SDK never
         // declares it).
         cols.insert(
-            "ssn_masked".to_string(),
+            crate::query::raw_column_name("ssn"),
             ColumnInfo {
                 pg_type: "text".into(),
                 not_null: true,
@@ -2339,8 +2340,8 @@ mod tests {
         let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
         assert!(
             !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::DropColumn)
-                && o.field.as_deref() == Some("ssn_masked")),
-            "platform-owned sibling must not be dropped: {ops:?}"
+                && o.field.as_deref() == Some(crate::query::raw_column_name("ssn").as_str())),
+            "the platform-owned raw column must not be dropped: {ops:?}"
         );
     }
 

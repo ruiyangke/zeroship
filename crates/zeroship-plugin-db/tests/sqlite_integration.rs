@@ -39,7 +39,7 @@ use zeroship_plugin_db::backend::{
 };
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
 use zeroship_plugin_db::error::DbError;
-use zeroship_plugin_db::query::{IndexKind, IndexSpec};
+use zeroship_plugin_db::query::{raw_column_name, IndexKind, IndexSpec};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -3210,13 +3210,19 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 }
 
 /// Raw DDL matching [`users_encrypted_ssn_schema`].
+///
+/// Post-storage-flip layout: the field's own column (`ssn`) holds the
+/// masked representation as bare `TEXT`; the sibling raw column (named via
+/// [`raw_column_name`], NOT spelled out here) carries the declared type,
+/// the encryption sentinel, and any constraints.
 fn users_encrypted_ssn_ddl(key_id: &str) -> String {
+    let raw_ssn = raw_column_name("ssn");
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "ssn" BLOB /* zsenc:randomised:{key_id}:string */,
-  "ssn_masked" TEXT /* __zsmask:kind=last4,classification=spi */
+  "{raw_ssn}" BLOB /* zsenc:randomised:{key_id}:string */,
+  "ssn" TEXT /* __zsmask:kind=last4,classification=spi */
 );
 {}
 CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
@@ -3246,12 +3252,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email
 /// lookup index and the unique constraint over ciphertext - that pair is what the
 /// deterministic-conflict upsert needs, and the reason this schema exists.
 fn users_deterministic_email_ddl(key_id: &str) -> String {
+    let raw_ssn = raw_column_name("ssn");
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" BLOB /* zsenc:deterministic:{key_id}:string */ NOT NULL,
   "name" TEXT NOT NULL,
-  "ssn" BLOB /* zsenc:randomised:{key_id}:string */,
-  "ssn_masked" TEXT /* __zsmask:kind=last4,classification=spi */
+  "{raw_ssn}" BLOB /* zsenc:randomised:{key_id}:string */,
+  "ssn" TEXT /* __zsmask:kind=last4,classification=spi */
 );
 {}
 CREATE INDEX IF NOT EXISTS "default"."users_email_idx" ON "users" ("email");
@@ -3386,13 +3393,13 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                         .expect("minted id")
                         .to_string(),
                     (
+                        obj.get(raw_column_name("ssn").as_str())
+                            .and_then(|v| v.as_str())
+                            .expect("base64 ciphertext marker doc, relocated to the raw column")
+                            .to_string(),
                         obj.get("ssn")
                             .and_then(|v| v.as_str())
-                            .expect("base64 ciphertext marker doc")
-                            .to_string(),
-                        obj.get("ssn_masked")
-                            .and_then(|v| v.as_str())
-                            .expect("masked sibling")
+                            .expect("masked sibling stays on the field's own column")
                             .to_string(),
                     ),
                 )
@@ -3412,10 +3419,11 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             .await
             .expect("INSERT ... RETURNING");
 
+        let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
                 &format!(
-                    r#"SELECT id, ssn, ssn_masked FROM "{app_id}"."{collection}" ORDER BY id"#
+                    r#"SELECT id, "{raw_ssn}", ssn FROM "{app_id}"."{collection}" ORDER BY id"#
                 ),
                 &[],
             )
@@ -3434,11 +3442,11 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             };
             let stored_blob = match &row[1] {
                 TypedCell::Blob(bytes) => bytes.clone(),
-                other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+                other => panic!("{raw_ssn} must be stored as BLOB ciphertext, got {other:?}"),
             };
             let masked = match &row[2] {
                 TypedCell::Text(s) => s.clone(),
-                other => panic!("ssn_masked must be TEXT, got {other:?}"),
+                other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
             };
             let (prepared_ciphertext_b64, prepared_masked) = expected_by_id
                 .get(&id)
@@ -3453,6 +3461,16 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 stored_blob,
                 b"987-65-4321".to_vec(),
                 "stored bytes must not equal raw plaintext",
+            );
+            // The field's own column (`ssn`) must never hold the real value:
+            // it is the masked sibling's new home after the storage flip.
+            assert_ne!(
+                masked, "123-45-6789",
+                "ssn (field's own column) must not hold plaintext",
+            );
+            assert_ne!(
+                masked, "987-65-4321",
+                "ssn (field's own column) must not hold plaintext",
             );
             let expected_ciphertext = base64::engine::general_purpose::STANDARD
                 .decode(prepared_ciphertext_b64)
@@ -3634,11 +3652,14 @@ const _procedures = { setup, upsertConflict };
             .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
+        let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
-                r#"SELECT id, created_by, updated_by, version, ssn, ssn_masked
+                &format!(
+                    r#"SELECT id, created_by, updated_by, version, "{raw_ssn}", ssn
                    FROM "default"."users"
-                   WHERE email = 'alice@example.com'"#,
+                   WHERE email = 'alice@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -3664,17 +3685,27 @@ const _procedures = { setup, upsertConflict };
         }
         let stored_blob = match &row[4] {
             TypedCell::Blob(bytes) => bytes.clone(),
-            other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+            other => panic!("{raw_ssn} must be stored as BLOB ciphertext, got {other:?}"),
         };
         match &row[5] {
             TypedCell::Text(masked) => assert_eq!(masked, "***-**-4321"),
-            other => panic!("ssn_masked must be TEXT, got {other:?}"),
+            other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
         }
         assert_ne!(
             stored_blob,
             b"987-65-4321".to_vec(),
             "conflict-updated raw storage must not equal plaintext"
         );
+        // The field's own column (`ssn`) already asserted equal to the mask
+        // above; pin the negative directly too - it must never be the
+        // plaintext the conflict-update wrote.
+        match &row[5] {
+            TypedCell::Text(masked) => assert_ne!(
+                masked, "987-65-4321",
+                "ssn (field's own column) must not hold plaintext"
+            ),
+            other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
+        }
 
         let key = backend
             .resolve_key("default", key_id)
@@ -3760,10 +3791,13 @@ const _procedures = { setup, upsertConflict };
             .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
+        let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
-                r#"SELECT id, email, ssn, ssn_masked
-                   FROM "default"."users""#,
+                &format!(
+                    r#"SELECT id, email, "{raw_ssn}", ssn
+                   FROM "default"."users""#
+                ),
                 &[],
             )
             .await
@@ -3781,11 +3815,19 @@ const _procedures = { setup, upsertConflict };
         };
         let ssn_blob = match &row[2] {
             TypedCell::Blob(bytes) => bytes.clone(),
-            other => panic!("ssn must be stored as randomised ciphertext BLOB, got {other:?}"),
+            other => panic!("{raw_ssn} must be stored as randomised ciphertext BLOB, got {other:?}"),
         };
         match &row[3] {
-            TypedCell::Text(masked) => assert_eq!(masked, "***-**-4321"),
-            other => panic!("ssn_masked must be TEXT, got {other:?}"),
+            TypedCell::Text(masked) => {
+                assert_eq!(masked, "***-**-4321");
+                // The field's own column (`ssn`) must hold the mask, never
+                // the plaintext the conflict-update wrote.
+                assert_ne!(
+                    masked, "987-65-4321",
+                    "ssn (field's own column) must not hold plaintext"
+                );
+            }
+            other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
         }
 
         let key = backend
@@ -3879,11 +3921,14 @@ const _procedures = { setup, seed, updateByEmail };
             .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
+        let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
-                r#"SELECT id, ssn, ssn_masked
+                &format!(
+                    r#"SELECT id, "{raw_ssn}", ssn
                    FROM "default"."users"
-                   WHERE email = 'alice@example.com'"#,
+                   WHERE email = 'alice@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -3897,11 +3942,17 @@ const _procedures = { setup, seed, updateByEmail };
         };
         let stored_blob = match &row[1] {
             TypedCell::Blob(bytes) => bytes.clone(),
-            other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+            other => panic!("{raw_ssn} must be stored as BLOB ciphertext, got {other:?}"),
         };
         match &row[2] {
-            TypedCell::Text(masked) => assert_eq!(masked, "***-**-4321"),
-            other => panic!("ssn_masked must be TEXT, got {other:?}"),
+            TypedCell::Text(masked) => {
+                assert_eq!(masked, "***-**-4321");
+                assert_ne!(
+                    masked, "987-65-4321",
+                    "ssn (field's own column) must not hold plaintext"
+                );
+            }
+            other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
         }
 
         let key = backend
@@ -4024,12 +4075,15 @@ const _procedures = { setup, seed, updateManyByName };
             .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
+        let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
-                r#"SELECT id, name, ssn, ssn_masked
+                &format!(
+                    r#"SELECT id, name, "{raw_ssn}", ssn
                    FROM "default"."users"
                    WHERE name = 'Red Team'
-                   ORDER BY id"#,
+                   ORDER BY id"#
+                ),
                 &[],
             )
             .await
@@ -4051,11 +4105,17 @@ const _procedures = { setup, seed, updateManyByName };
             }
             let stored_blob = match &row[2] {
                 TypedCell::Blob(bytes) => bytes.clone(),
-                other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+                other => panic!("{raw_ssn} must be stored as BLOB ciphertext, got {other:?}"),
             };
             match &row[3] {
-                TypedCell::Text(masked) => assert_eq!(masked, "***-**-7777"),
-                other => panic!("ssn_masked must be TEXT, got {other:?}"),
+                TypedCell::Text(masked) => {
+                    assert_eq!(masked, "***-**-7777");
+                    assert_ne!(
+                        masked, "999-88-7777",
+                        "ssn (field's own column) must not hold plaintext"
+                    );
+                }
+                other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
             }
             let plaintext = backend
                 .decrypt(
@@ -5340,7 +5400,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "ssn": hex,
         });
 
-        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value, &[])
+        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value)
             .await
             .expect("decrypt_row_on_read");
 
@@ -5353,23 +5413,27 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 }
 
 // ===========================================================================
-// Path B sibling-column dual-write integration
+// Storage-flip raw-column dual-write integration
 // ===========================================================================
 //
-// Tests the end-to-end Path B contract on the SQLite arm:
-// (a) CREATE TABLE emits both the parent + `<col>_masked` sibling.
+// Tests the end-to-end contract on the SQLite arm:
+// (a) CREATE TABLE emits the field's own column (bare `TEXT`, holding the
+//     mask) plus a RAW sibling - named via [`raw_column_name`] - that
+//     carries the declared type and constraints.
 // (b) INSERT writes both atomically (mask pass runs before SQL build).
-// (c) The masked sibling contains the pre-computed mask string while the
-//     parent stores the ciphertext / plaintext as before.
+// (c) The field's own column contains the pre-computed mask string while
+//     the raw sibling stores the ciphertext / plaintext.
 
 /// **DDL shape on SQLite**: `build_create_table_with_fks`
-/// emits both the parent and a sibling `<col>_masked TEXT` column for
-/// every masked field. The SQLite arm receives the SQL
-/// byte-identical to PG; the sibling clause itself is standard SQL
-/// (`TEXT`) so the SQLite engine accepts it once executed
-/// through the SQLite-flavoured `CREATE TABLE` path.
+/// emits the field's own column as a bare `TEXT` mask holder (carrying the
+/// `__zsmask:...` sentinel) plus a RAW sibling - named via
+/// [`raw_column_name`], never spelled out here - that carries the declared
+/// type and constraints. The SQLite arm receives the SQL byte-identical to
+/// PG for this schema (no encryption, so no dialect-specific BYTEA/BLOB
+/// split); the SQLite engine accepts it once executed through the
+/// SQLite-flavoured `CREATE TABLE` path.
 #[test]
-fn sibling_column_emitted_for_masked_field_sqlite() {
+fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
     use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
     let schema = serde_json::json!({
         "ssn": {
@@ -5380,17 +5444,30 @@ fn sibling_column_emitted_for_masked_field_sqlite() {
     });
     let sql =
         build_create_table_with_fks("app_demo", "users", &schema, &FkEmission::Inline).unwrap();
+    let raw_ssn = raw_column_name("ssn");
     assert!(
-        sql.contains("\"ssn_masked\" TEXT"),
-        "sibling column must be emitted: {sql}"
+        sql.contains(&format!("\"{raw_ssn}\" TEXT")),
+        "raw column must be emitted to carry the real value: {sql}"
     );
     assert!(
-        sql.contains("__zsmask:kind=last4,classification=spi"),
-        "sibling column must carry the mask sentinel: {sql}"
+        sql.contains("\"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */"),
+        "the field's own column must be the masked sibling and carry the mask sentinel: {sql}"
+    );
+    // The sentinel rides the masked column only - the raw column is not
+    // itself masked (it holds the real value), so it must carry no mask
+    // metadata.
+    assert!(
+        !sql.contains(&format!("\"{raw_ssn}\" TEXT /* __zsmask")),
+        "the raw column must not carry the mask sentinel: {sql}"
     );
     assert!(
         !sql.contains("\"name_masked\""),
         "non-masked column must not emit a sibling: {sql}"
+    );
+    let raw_name = raw_column_name("name");
+    assert!(
+        !sql.contains(&format!("\"{raw_name}\"")),
+        "non-masked column must not emit a raw sibling: {sql}"
     );
 }
 
@@ -5467,16 +5544,20 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
     });
 }
 
-/// **Aliased SELECT serves the masked sibling**: a default
-/// read against a masked-column DDL must emit
-/// `"<col>_masked" AS "<col>"` in the SELECT clause and never include
-/// the parent (ciphertext / plaintext) column. End-to-end gate: drive a
-/// dual-write through the dialect-aware INSERT builder, then
-/// build a `find` SQL via `build_find_with_schema` with the cached
-/// schema, run it through the SQLite session, and assert the engine
-/// returns the masked string under the parent key.
+/// **A default SELECT serves the masked column**: a default
+/// read against a masked-column DDL must name the field's own column
+/// directly - no AS-rewrite; the sibling-alias scheme is gone since the
+/// storage flip - and must NEVER reference the raw column. Since the
+/// field's own column is now where a dual-write leaves the mask, a
+/// schema-blind SELECT already reads the mask with no special casing.
+/// End-to-end gate: drive a dual-write through the dialect-aware INSERT
+/// builder (mirroring what `mask_pass::relocate_masked_columns`
+/// produces), then build a `find` SQL via `build_find_with_schema` with
+/// the cached schema, run it through the SQLite session, and assert the
+/// engine returns the masked string under the field's own column - and
+/// that the real value is nowhere in the row.
 #[test]
-fn aliased_select_serves_masked_sibling_sqlite() {
+fn a_select_serves_the_masked_column_sqlite() {
     use zeroship_plugin_db::query::{
         build_find_with_schema, build_insert_with_dialect, SqlDialect,
     };
@@ -5487,23 +5568,27 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
+        let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_demo\".\"users\" (\
-                     id    TEXT PRIMARY KEY, \
-                     ssn   TEXT, \
-                     ssn_masked TEXT NOT NULL, \
-                     name  TEXT\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_demo\".\"users\" (\
+                         id    TEXT PRIMARY KEY, \
+                         \"{raw_ssn}\" TEXT, \
+                         ssn   TEXT NOT NULL, \
+                         name  TEXT\
+                     )"
+                ),
                 &[],
                 )
             .await
             .expect("CREATE TABLE ok");
 
-        // Dual-write a row: parent stores plaintext (no encryption pass
-        // in this fixture - masking + encryption are orthogonal in
-        // `apply_mask_on_write` design), sibling stores the masked
-        // string. This is the row a dual-write produces.
+        // Dual-write a row the way `mask_pass::relocate_masked_columns`
+        // produces one: the raw column stores the real value (plaintext
+        // here - masking + encryption are orthogonal in
+        // `apply_mask_on_write` design), the field's own column stores
+        // the masked string.
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
@@ -5511,12 +5596,14 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             },
             "name": { "type": "string" }
         });
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "id": "usr_01",
-            "ssn": "123-45-6789",
-            "ssn_masked": "***-**-6789",
+            "ssn": "***-**-6789",
             "name": "alice"
         });
+        doc.as_object_mut()
+            .expect("doc object")
+            .insert(raw_ssn.clone(), serde_json::json!("123-45-6789"));
         let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -5530,10 +5617,9 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             .expect("INSERT");
 
         // Build a default read with schema awareness: the SELECT must
-        // alias the sibling under the parent name AND must NOT include
-        // the parent column (`ssn`) directly. Verify the SQL shape
-        // BEFORE running the query - this is the load-bearing
-        // assertion this test pins.
+        // name the field's own column directly AND must NOT reference the
+        // raw column at all. Verify the SQL shape BEFORE running the
+        // query - this is the load-bearing assertion this test pins.
         let bq = build_find_with_schema(
             "app_demo",
             "users",
@@ -5545,55 +5631,48 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             &schema,
         )
         .expect("build_find_with_schema");
-        assert!(
-            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
-            "SELECT must alias the sibling under the parent name: {}",
-            bq.sql,
-        );
-        // The parent column slot (ciphertext / plaintext) must NOT
-        // appear in the SELECT clause — `<col>_masked AS <col>` is the
-        // ONLY way `ssn` enters the result set.
         let select_clause = bq
             .sql
             .split(" FROM ")
             .next()
             .expect("SELECT prefix")
             .to_string();
-        // Crude but adequate: there's no occurrence of bare `"ssn"`
-        // (without the `_masked` suffix or AS-rewrite) in the SELECT.
-        let bare_ssn_count = select_clause.matches("\"ssn\"").count();
-        let aliased_count = select_clause.matches("\"ssn_masked\" AS \"ssn\"").count();
-        assert_eq!(
-            bare_ssn_count, aliased_count,
-            "every occurrence of `\"ssn\"` in the SELECT must be the AS-rewrite tail: {select_clause}"
+        assert!(
+            select_clause.contains("\"ssn\""),
+            "SELECT must project the field's own column directly: {select_clause}"
+        );
+        assert!(
+            !select_clause.contains("AS \"ssn\""),
+            "there is no more AS-rewrite onto ssn - the aliasing scheme is gone: {select_clause}"
+        );
+        // The raw column (real value) must NEVER appear in a default
+        // read's SELECT clause - it is unqueryable outside the audited
+        // unmask path (`crud::unmask`).
+        assert!(
+            !select_clause.contains(raw_ssn.as_str()),
+            "SELECT must never reference the raw column: {select_clause}"
         );
 
         // Execute the SELECT and verify the row returns the masked
-        // string under the parent name.
+        // string under the field's own column, and the real value is
+        // nowhere in the row.
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let rows = client
             .query(&bq.sql, &param_refs)
             .await
             .expect("SELECT");
         assert_eq!(rows.len(), 1);
-        // The aliased SELECT puts `ssn_masked` under the `ssn` column
-        // slot. Column ordering: id, ssn, name (the schema iteration
-        // order in `build_masked_aware_select_expr`'s "case 2").
-        // Find the `ssn` value (the masked string).
         let row = &rows[0];
-        // Row shape: `Vec<Option<String>>` from the SQLite client.
-        // Order is the order we emitted in SELECT: id, ssn (= sibling
-        // value), name.
         assert_eq!(
             row.iter().filter_map(|c| c.as_deref()).find(|s| *s == "***-**-6789"),
             Some("***-**-6789"),
             "row must include the masked string: {row:?}"
         );
-        // Ciphertext / plaintext parent value must NOT appear (we
-        // dropped it from the SELECT).
+        // The real value must NOT appear anywhere in the row (we never
+        // selected the raw column).
         assert!(
             !row.iter().any(|c| c.as_deref() == Some("123-45-6789")),
-            "parent slot ciphertext / plaintext must not surface on default read: {row:?}"
+            "the real value must not surface on a default read: {row:?}"
         );
     });
 }
@@ -6340,14 +6419,21 @@ fn unmask_with_auto_actor_returns_plaintext() {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         // Manually create the table — the encryption pass + dual-write
         // pipeline lives in CRUD, but the unmask SELECT only needs
-        // `id TEXT PRIMARY KEY, ssn BLOB`. Mirrors the e2e CRUD test.
+        // `id TEXT PRIMARY KEY, "<raw ssn>" BLOB, ssn TEXT`. Mirrors the
+        // e2e CRUD test. Post-storage-flip layout: the raw column (named
+        // via `raw_column_name`, never spelled out here) holds the
+        // ciphertext `crud::unmask` reads; the field's own column (`ssn`)
+        // holds the mask, exactly as a default read pipeline would leave it.
+        let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_unmask_auto\".\"users\" (\
-                     id  TEXT PRIMARY KEY, \
-                     ssn BLOB, \
-                     ssn_masked TEXT NOT NULL DEFAULT '***-**-XXXX'\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_unmask_auto\".\"users\" (\
+                         id  TEXT PRIMARY KEY, \
+                         \"{raw_ssn}\" BLOB, \
+                         ssn TEXT NOT NULL DEFAULT '***-**-XXXX'\
+                     )"
+                ),
                 &[],
             )
             .await
@@ -6361,11 +6447,31 @@ fn unmask_with_auto_actor_returns_plaintext() {
         let mut doc = serde_json::json!({
             "id": row_pk,
             "ssn": plaintext,
-            "ssn_masked": "***-**-6789",
         });
         encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
             .await
             .expect("encrypt_row_on_write");
+        // `encrypt_row_on_write` alone (no `mask_pass` call - that pass is
+        // crate-private) leaves the ciphertext under the LOGICAL key, plus
+        // an `__zsbin__ssn` binary-bind marker so the SQL builder base64
+        // decodes it into the BLOB column. Relocate both by hand exactly as
+        // `mask_pass::relocate_masked_columns` does: the real value (here,
+        // ciphertext) AND its binary-bind marker move to the raw column;
+        // the field's own column gets the precomputed mask.
+        let ciphertext = doc
+            .as_object_mut()
+            .expect("doc object")
+            .remove("ssn")
+            .expect("ciphertext produced by encrypt_row_on_write");
+        let bin_marker = doc.as_object_mut().expect("doc object").remove("__zsbin__ssn");
+        {
+            let obj = doc.as_object_mut().expect("doc object");
+            obj.insert(raw_ssn.clone(), ciphertext);
+            if let Some(marker) = bin_marker {
+                obj.insert(format!("__zsbin__{raw_ssn}"), marker);
+            }
+            obj.insert("ssn".to_string(), serde_json::json!("***-**-6789"));
+        }
         let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let client = backend
@@ -6402,6 +6508,28 @@ fn unmask_with_auto_actor_returns_plaintext() {
         assert_eq!(
             audit[0].2, "spi",
             "classification must be 'spi' (from the schema mask block)"
+        );
+
+        // A direct read of the field's own column (what a default read
+        // pipeline would see, no audit, no authorization check) must
+        // still be the mask, never the plaintext - the audited path above
+        // is the only way to recover it.
+        let direct = client
+            .query(
+                "SELECT ssn FROM \"app_unmask_auto\".\"users\" WHERE id = 'usr_auto_01'",
+                &[],
+            )
+            .await
+            .expect("direct SELECT of the field's own column");
+        assert_eq!(
+            direct[0][0].as_deref(),
+            Some("***-**-6789"),
+            "field's own column must hold the mask"
+        );
+        assert_ne!(
+            direct[0][0].as_deref(),
+            Some(plaintext),
+            "field's own column must never hold the plaintext"
         );
     });
 }
@@ -6619,13 +6747,20 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .await
             .expect("set_mask_policy must succeed");
 
+        // Post-storage-flip layout: the raw column (named via
+        // `raw_column_name`, never spelled out here) holds the ciphertext
+        // `crud::unmask` reads; the field's own column (`email`) holds the
+        // mask, exactly as a default read pipeline would leave it.
+        let raw_email = raw_column_name("email");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_unmask_policy_grant\".\"users\" (\
-                     id    TEXT PRIMARY KEY, \
-                     email BLOB, \
-                     email_masked TEXT NOT NULL DEFAULT 'x***@***'\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_unmask_policy_grant\".\"users\" (\
+                         id    TEXT PRIMARY KEY, \
+                         \"{raw_email}\" BLOB, \
+                         email TEXT NOT NULL DEFAULT 'x***@***'\
+                     )"
+                ),
                 &[],
             )
             .await
@@ -6639,11 +6774,31 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         let mut doc = serde_json::json!({
             "id": row_pk,
             "email": plaintext,
-            "email_masked": "a****@example.com",
         });
         encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
             .await
             .expect("encrypt_row_on_write");
+        // `encrypt_row_on_write` alone (no `mask_pass` call - that pass is
+        // crate-private) leaves the ciphertext under the LOGICAL key, plus
+        // an `__zsbin__email` binary-bind marker so the SQL builder base64
+        // decodes it into the BLOB column. Relocate both by hand exactly as
+        // `mask_pass::relocate_masked_columns` does: the real value (here,
+        // ciphertext) AND its binary-bind marker move to the raw column;
+        // the field's own column gets the precomputed mask.
+        let ciphertext = doc
+            .as_object_mut()
+            .expect("doc object")
+            .remove("email")
+            .expect("ciphertext produced by encrypt_row_on_write");
+        let bin_marker = doc.as_object_mut().expect("doc object").remove("__zsbin__email");
+        {
+            let obj = doc.as_object_mut().expect("doc object");
+            obj.insert(raw_email.clone(), ciphertext);
+            if let Some(marker) = bin_marker {
+                obj.insert(format!("__zsbin__{raw_email}"), marker);
+            }
+            obj.insert("email".to_string(), serde_json::json!("a****@example.com"));
+        }
         let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let client = backend
@@ -6674,6 +6829,27 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         assert_eq!(audit[0].0, "granted", "outcome must be granted");
         assert_eq!(audit[0].1, "user");
         assert_eq!(audit[0].2, "pii");
+
+        // A direct read of the field's own column (what a default read
+        // pipeline would see, no audit, no authorization check) must
+        // still be the mask, never the plaintext.
+        let direct = client
+            .query(
+                "SELECT email FROM \"app_unmask_policy_grant\".\"users\" WHERE id = 'usr_grant_01'",
+                &[],
+            )
+            .await
+            .expect("direct SELECT of the field's own column");
+        assert_eq!(
+            direct[0][0].as_deref(),
+            Some("a****@example.com"),
+            "field's own column must hold the mask"
+        );
+        assert_ne!(
+            direct[0][0].as_deref(),
+            Some(plaintext),
+            "field's own column must never hold the plaintext"
+        );
     });
 }
 
@@ -6905,11 +7081,31 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 // 3. The diff classifier sees the recovered metadata and emits no
 //    spurious ops on a stable-shape redeploy.
 
-/// **Sentinel round-trip on SQLite**: emit a CREATE TABLE with
-/// a masked column -> execute it -> re-read via `introspect_schema` ->
-/// the parent column carries `mask = Some({last4, spi})`.
+/// **Mask added to an EXISTING column is refused end-to-end on
+/// SQLite**: adding a `.mask({...})` declaration to a column that
+/// already holds data does NOT backfill any more - it is refused. After
+/// the storage flip the transition means four data-touching steps (add
+/// the raw column, copy every row's value into it, overwrite the
+/// field's own column with the mask, rewrite the field's own column to
+/// `TEXT` dropping its declared constraints) and the differ can see
+/// only the first, so it emits exactly one `MaskBackfill` op classified
+/// `Destructive`, with `sql: None` and a `"refused"` key in `details`,
+/// and no `AddColumn`. Nothing is applied and the live row is
+/// untouched.
+///
+/// Paired with a control: the SAME mask declaration on a column that
+/// does NOT exist yet (a genuinely new field) is unaffected and still
+/// emits working multi-statement `AddColumn` DDL - so this test cannot
+/// pass against an implementation that refuses every masked-column
+/// addition, only the unsafe one.
+///
+/// Finally, simulates the state a human-run manual migration would
+/// leave (the four steps the differ refused to guess at, applied by
+/// hand) and confirms the SQLite introspector still recovers the mask
+/// sentinel from the field's own column, and that a stable re-deploy
+/// against that end state emits zero mask ops.
 #[test]
-fn mask_addition_backfills_existing_rows_end_to_end() {
+fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
     use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
 
     run(async {
@@ -6921,7 +7117,7 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
 
         // Step 1 — initial deploy: schema declares no mask, just a
         // plain ssn column. The DDL emitter produces a CREATE TABLE
-        // without a sibling.
+        // without a raw/masked split.
         let schema_v1 = serde_json::json!({
             "ssn": { "type": "string" }
         });
@@ -6936,7 +7132,8 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
             "CREATE TABLE \"app_demo\".\"users\" (id INTEGER PRIMARY KEY, ssn TEXT)";
         backend.pool_exec(sqlite_v1, &[]).await.expect("CREATE v1");
 
-        // INSERT a row.
+        // INSERT a row - the column already holds data, which is
+        // exactly the condition the refusal exists to protect.
         backend
             .pool_exec(
                 "INSERT INTO \"app_demo\".\"users\"(id, ssn) VALUES (1, '123-45-6789')",
@@ -6945,18 +7142,16 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
             .await
             .expect("INSERT pre-mask row");
 
-        // Step 2 — re-deploy with mask declared. The diff classifier
-        // detects None→Some(last4, spi) and emits AddColumn + MaskBackfill.
+        // Step 2 - re-deploy with mask declared on the EXISTING
+        // column. The diff classifier must refuse this transition:
+        // exactly one Destructive MaskBackfill op, no SQL, no
+        // AddColumn, and a "refused" explanation in details.
         let schema_v2 = serde_json::json!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        // This only exercises the diff layer here - production
-        // backfill on SQLite ships separately. We assert the diff
-        // classifier emits the right shape AGAINST the live snapshot
-        // we just produced.
         let live = backend.introspect_schema("app_demo").await.expect("introspect");
         let ops = zeroship_plugin_db::diff::compute_diff(
             &live,
@@ -6966,75 +7161,169 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
             &create_v1, // unused — table already exists in live
             &[],
         );
-        // Expect: one AddColumn for the sibling + one MaskBackfill.
-        let add_sib: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
+        assert_eq!(
+            ops.len(),
+            1,
+            "adding .mask() to an existing column must emit exactly one op, not a \
+             half-applied backfill: {ops:?}"
+        );
+        assert!(
+            matches!(
+                ops[0].change_kind,
+                zeroship_plugin_db::diff::ChangeKind::MaskBackfill { .. }
+            ),
+            "the one op must be a MaskBackfill: {ops:?}"
+        );
+        assert_eq!(
+            ops[0].class,
+            zeroship_plugin_db::diff::ChangeClass::Destructive,
+            "the refused transition must be classified Destructive so it is never \
+             auto-applied: {ops:?}"
+        );
+        assert!(
+            ops[0].sql.is_none(),
+            "a refused transition must carry no SQL to apply: {ops:?}"
+        );
+        assert!(
+            ops[0].details.get("refused").is_some(),
+            "the refusal reason must be recorded in details: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|o| matches!(o.change_kind, zeroship_plugin_db::diff::ChangeKind::AddColumn)),
+            "the refused transition must not ALSO emit an AddColumn for the raw column: {ops:?}"
+        );
+
+        // Nothing was applied - the live table must still be exactly
+        // what step 1 left it: no mask on `ssn`, no raw column, and the
+        // pre-existing row's plaintext untouched.
+        let after_refusal = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("re-introspect after refused diff");
+        let users_after_refusal = after_refusal.tables.get("users").expect("users table");
+        assert!(
+            users_after_refusal
+                .get("ssn")
+                .expect("ssn column")
+                .mask
+                .is_none(),
+            "a refused transition must not be reflected in the live schema"
+        );
+        let raw_ssn = raw_column_name("ssn");
+        assert!(
+            !users_after_refusal.contains_key(&raw_ssn),
+            "a refused transition must not create the raw column: {users_after_refusal:?}"
+        );
+        let client = backend
+            .acquire_dedicated_client("app_demo")
+            .await
+            .expect("acquire client");
+        let untouched = client
+            .query("SELECT ssn FROM \"app_demo\".\"users\"", &[])
+            .await
+            .expect("SELECT unchanged row");
+        assert_eq!(
+            untouched[0][0].as_deref(),
+            Some("123-45-6789"),
+            "the pre-existing row's plaintext must be untouched by the refused transition"
+        );
+
+        // Control - the SAME mask declaration on a column that does NOT
+        // exist yet (a genuinely new field) is unaffected: the
+        // classifier still emits working multi-statement DDL (the raw
+        // column with the declared type, the masked column as
+        // `TEXT NULL`, and the sentinel comment). This is what proves
+        // the refusal above targets the unsafe transition specifically,
+        // not every masked-column declaration.
+        let schema_v3 = serde_json::json!({
+            "ssn": { "type": "string" },
+            "new_ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let ops_new_field = zeroship_plugin_db::diff::compute_diff(
+            &live,
+            "app_demo",
+            "users",
+            &schema_v3,
+            &create_v1,
+            &[],
+        );
+        let add_ops: Vec<&zeroship_plugin_db::diff::DiffOp> = ops_new_field
             .iter()
             .filter(|o| {
                 matches!(o.change_kind, zeroship_plugin_db::diff::ChangeKind::AddColumn)
-                    && o.field.as_deref() == Some("ssn_masked")
+                    && o.field.as_deref() == Some("new_ssn")
             })
             .collect();
         assert_eq!(
-            add_sib.len(),
+            add_ops.len(),
             1,
-            "expected one sibling ADD op: {ops:?}"
+            "a mask on a brand-new column must still emit one working AddColumn: {ops_new_field:?}"
         );
-        let backfills: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
-            .iter()
-            .filter(|o| {
-                matches!(
-                    o.change_kind,
-                    zeroship_plugin_db::diff::ChangeKind::MaskBackfill { .. }
-                )
-            })
-            .collect();
-        assert_eq!(
-            backfills.len(),
-            1,
-            "expected one MaskBackfill op: {ops:?}"
+        let add_sql = add_ops[0].sql.as_deref().expect("AddColumn must carry SQL");
+        let raw_new_ssn = raw_column_name("new_ssn");
+        assert!(
+            add_sql.contains(&raw_new_ssn),
+            "the new column's AddColumn SQL must create the raw column: {add_sql}"
+        );
+        assert!(
+            add_sql.contains("\"new_ssn\" TEXT NULL"),
+            "the new column's AddColumn SQL must create the masked column: {add_sql}"
+        );
+        assert!(
+            !ops_new_field.iter().any(|o| matches!(
+                o.change_kind,
+                zeroship_plugin_db::diff::ChangeKind::MaskBackfill { .. }
+            )),
+            "a brand-new masked column must not ALSO be refused: {ops_new_field:?}"
         );
 
-        // Step 3 — simulate the post-backfill state by hand:
-        // ALTER TABLE add the sibling + populate it for the existing
-        // row. The sentinel comment goes into the column's
-        // `sqlite_master.sql` text so the next introspect picks up
-        // `mask = Some(_)` on the parent.
+        // Step 3 - simulate the state a human-run manual migration
+        // would leave (the four steps the differ refused to guess at,
+        // applied by hand): the raw column carries the real value, the
+        // field's own column carries the mask + the sentinel comment.
         //
-        // NOTE: SQLite's ALTER TABLE ADD COLUMN allows inline
-        // comments via standard SQL syntax, but the comment is
-        // preserved in `sqlite_master.sql` only when the column is
-        // emitted at CREATE TABLE time. To exercise the sentinel
-        // round-trip we DROP the v1 table and CREATE v2 directly
-        // with the sibling + sentinel inline. Production code
-        // (orchestrator) would use the diff-emitted multi-statement
-        // payload.
+        // NOTE: SQLite's ALTER TABLE ADD COLUMN allows inline comments
+        // via standard SQL syntax, but the comment is preserved in
+        // `sqlite_master.sql` only when the column is emitted at CREATE
+        // TABLE time. To exercise the sentinel round-trip we DROP the
+        // v1 table and CREATE v2 directly with the raw + masked columns
+        // + sentinel inline.
         backend
             .pool_exec("DROP TABLE \"app_demo\".\"users\"", &[])
             .await
             .expect("DROP v1");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_demo\".\"users\" (\
-                     \"id\" INTEGER PRIMARY KEY, \
-                     \"ssn\" TEXT, \
-                     \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_demo\".\"users\" (\
+                         \"id\" INTEGER PRIMARY KEY, \
+                         \"{raw_ssn}\" TEXT, \
+                         \"ssn\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE v2");
-        // Re-insert the row + masked sibling.
+        // Re-insert the row under the post-migration column shape.
         backend
             .pool_exec(
-                "INSERT INTO \"app_demo\".\"users\"(\"id\", \"ssn\", \"ssn_masked\") \
-                 VALUES (1, '123-45-6789', '***-**-6789')",
+                &format!(
+                    "INSERT INTO \"app_demo\".\"users\"(\"id\", \"{raw_ssn}\", \"ssn\") \
+                     VALUES (1, '123-45-6789', '***-**-6789')"
+                ),
                 &[],
             )
             .await
             .expect("INSERT post-mask row");
 
-        // Step 4 — re-introspect: the parent now carries
-        // `mask: Some({last4, spi})`.
+        // Step 4 - re-introspect: the field's own column now carries
+        // `mask: Some({last4, spi})`, and its sibling_column names the
+        // raw column.
         let live = backend.introspect_schema("app_demo").await.expect("introspect v2");
         let users = live.tables.get("users").expect("users table");
         let parent = users.get("ssn").expect("ssn parent col");
@@ -7043,6 +7332,10 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
         assert_eq!(
             meta.classification,
             zeroship_plugin_db::diff::Classification::Spi
+        );
+        assert_eq!(
+            meta.sibling_column, raw_ssn,
+            "recovered mask metadata must point at the raw column, not a `_masked` sibling"
         );
 
         // Step 5 — a stable-shape re-deploy emits zero mask ops.
@@ -7069,9 +7362,12 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
 /// **Kind change detected end-to-end on SQLite**: an existing
 /// masked column with `kind = full` rolls forward to `kind = last4`;
 /// the diff classifier emits a `MaskRewrite` op (no AddColumn - the
-/// sibling already exists).
+/// raw column already exists). The rewrite overwrites the FIELD'S OWN
+/// column with the new mask; it is classified `Compatible`, not
+/// `Destructive` - unlike adding a mask to a previously-unmasked
+/// column, no schema shape and no constraint set changes here.
 #[test]
-fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
+fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -7079,34 +7375,47 @@ fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
             .await
             .expect("ensure_app_schema");
 
-        // Set up a live table with `kind=full` sentinel.
+        // Set up a live table already in the post-storage-flip shape:
+        // the raw column (named via `raw_column_name`, never spelled
+        // out here) holds the real value; the field's own column holds
+        // the mask + the `__zsmask:...` sentinel the introspector reads.
+        let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_demo\".\"users\" (\
-                     \"id\" INTEGER PRIMARY KEY, \
-                     \"ssn\" TEXT, \
-                     \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=full,classification=pii */\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_demo\".\"users\" (\
+                         \"id\" INTEGER PRIMARY KEY, \
+                         \"{raw_ssn}\" TEXT, \
+                         \"ssn\" TEXT NOT NULL /* __zsmask:kind=full,classification=pii */\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE v_full");
-        // INSERT a row with the full-masked sibling.
+        // INSERT a row with the full-masked field column.
         backend
             .pool_exec(
-                "INSERT INTO \"app_demo\".\"users\"(\"id\", \"ssn\", \"ssn_masked\") \
-                 VALUES (1, '123-45-6789', '***')",
+                &format!(
+                    "INSERT INTO \"app_demo\".\"users\"(\"id\", \"{raw_ssn}\", \"ssn\") \
+                     VALUES (1, '123-45-6789', '***')"
+                ),
                 &[],
             )
             .await
             .expect("INSERT pre-rewrite row");
 
-        // Introspect: parent.mask = full/pii.
+        // Introspect: the field's own column carries mask = full/pii,
+        // and its sibling_column names the raw column.
         let live = backend.introspect_schema("app_demo").await.expect("intro v_full");
         let users = live.tables.get("users").expect("users");
-        let parent = users.get("ssn").expect("ssn parent");
+        let parent = users.get("ssn").expect("ssn column");
         let m = parent.mask.as_ref().expect("mask sentinel");
         assert_eq!(m.kind, zeroship_plugin_db::diff::MaskKind::Full);
+        assert_eq!(
+            m.sibling_column, raw_ssn,
+            "recovered mask metadata must point at the raw column, not a `_masked` sibling"
+        );
 
         // Re-deploy with kind=last4 + classification=spi → MaskRewrite.
         let schema_v2 = serde_json::json!({
@@ -7136,17 +7445,23 @@ fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
             rewrites[0].class,
             zeroship_plugin_db::diff::ChangeClass::Compatible
         );
-        // No sibling ADD — the sibling already exists.
-        let add_sib: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
+        assert_eq!(
+            rewrites[0].details.get("raw_column").and_then(|v| v.as_str()),
+            Some(raw_ssn.as_str()),
+            "the rewrite's details must name the raw column, not a `_masked` sibling: {ops:?}"
+        );
+        // No AddColumn - the column already exists in the live schema
+        // (only its mask representation is changing).
+        let add_ssn: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
             .iter()
             .filter(|o| {
                 matches!(o.change_kind, zeroship_plugin_db::diff::ChangeKind::AddColumn)
-                    && o.field.as_deref() == Some("ssn_masked")
+                    && o.field.as_deref() == Some("ssn")
             })
             .collect();
         assert!(
-            add_sib.is_empty(),
-            "must NOT emit sibling ADD when sibling exists: {ops:?}"
+            add_ssn.is_empty(),
+            "must NOT emit AddColumn when the column already exists: {ops:?}"
         );
     });
 }
@@ -7154,7 +7469,9 @@ fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
 /// **Mask removal classified Destructive on SQLite**: live
 /// has mask, schema drops it -> MaskRemove with `class = Destructive`,
 /// which the validate stage refuses under `strictness=strict` /
-/// `lenient` and applies under `strictness=off`.
+/// `lenient` and applies under `strictness=off`. The op still names the
+/// LOGICAL field (`ssn`); its `details` name the raw column via
+/// `raw_column_name`, never a `_masked` sibling.
 #[test]
 fn mask_removal_classified_destructive_on_sqlite_diff() {
     run(async {
@@ -7164,13 +7481,20 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
             .await
             .expect("ensure_app_schema");
 
+        // Post-storage-flip layout: the raw column (named via
+        // `raw_column_name`, never spelled out here) holds the real
+        // value; the field's own column holds the mask + the
+        // `__zsmask:...` sentinel the introspector reads.
+        let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_demo\".\"users\" (\
-                     \"id\" INTEGER PRIMARY KEY, \
-                     \"ssn\" TEXT, \
-                     \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_demo\".\"users\" (\
+                         \"id\" INTEGER PRIMARY KEY, \
+                         \"{raw_ssn}\" TEXT, \
+                         \"ssn\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\
+                     )"
+                ),
                 &[],
             )
             .await
@@ -7180,6 +7504,14 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
             .introspect_schema("app_demo")
             .await
             .expect("introspect");
+        // Sanity: the introspector must have recovered the mask on the
+        // field's own column before we exercise its removal.
+        let users = live.tables.get("users").expect("users table");
+        assert!(
+            users.get("ssn").expect("ssn column").mask.is_some(),
+            "fixture setup must produce a live mask on ssn before testing its removal"
+        );
+
         let schema_post = serde_json::json!({
             "ssn": { "type": "string" }
         });
@@ -7201,6 +7533,16 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
             zeroship_plugin_db::diff::ChangeClass::Destructive,
             "MaskRemove MUST be Destructive — validate strict gate \
              depends on it",
+        );
+        assert_eq!(
+            removes[0].field.as_deref(),
+            Some("ssn"),
+            "MaskRemove must name the LOGICAL field: {ops:?}"
+        );
+        assert_eq!(
+            removes[0].details.get("raw_column").and_then(|v| v.as_str()),
+            Some(raw_ssn.as_str()),
+            "MaskRemove's details must name the raw column, not a `_masked` sibling: {ops:?}"
         );
     });
 }
@@ -7618,15 +7960,23 @@ fn bulk_unmask_end_to_end() {
     run(async {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        // Post-storage-flip layout: each field's own column holds the
+        // mask; the raw sibling (named via `raw_column_name`, never
+        // spelled out here) holds the real value `dispatch_bulk_unmask`
+        // reads.
+        let raw_email = raw_column_name("email");
+        let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_bulk_unmask_e2e\".\"users\" (\
-                     id           TEXT PRIMARY KEY, \
-                     email        TEXT, \
-                     email_masked TEXT NOT NULL, \
-                     ssn          TEXT, \
-                     ssn_masked   TEXT NOT NULL\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_bulk_unmask_e2e\".\"users\" (\
+                         id             TEXT PRIMARY KEY, \
+                         \"{raw_email}\" TEXT, \
+                         email          TEXT NOT NULL, \
+                         \"{raw_ssn}\"   TEXT, \
+                         ssn            TEXT NOT NULL\
+                     )"
+                ),
                 &[],
             )
             .await
@@ -7637,7 +7987,7 @@ fn bulk_unmask_end_to_end() {
         ] {
             let sql = format!(
                 "INSERT INTO \"app_bulk_unmask_e2e\".\"users\" \
-                 (id, email, email_masked, ssn, ssn_masked) VALUES \
+                 (id, \"{raw_email}\", email, \"{raw_ssn}\", ssn) VALUES \
                  ('{id}', '{email}', 'masked', '{ssn}', 'masked')"
             );
             backend.pool_exec(&sql, &[]).await.expect("INSERT");
@@ -7673,6 +8023,25 @@ fn bulk_unmask_end_to_end() {
         assert_eq!(audit.len(), 1, "bulk → single audit row: {audit:?}");
         assert_eq!(audit[0].0, "granted");
         assert_eq!(audit[0].1, "user", "actor_role recorded");
+
+        // A direct read of the fields' own columns (what a default read
+        // pipeline would see) must still be the mask placeholder, never
+        // the plaintext bulk_unmask returned above.
+        let client = backend
+            .acquire_dedicated_client(app_id)
+            .await
+            .expect("acquire client");
+        let direct = client
+            .query(
+                "SELECT email, ssn FROM \"app_bulk_unmask_e2e\".\"users\" WHERE id = 'u1'",
+                &[],
+            )
+            .await
+            .expect("direct SELECT of the fields' own columns");
+        assert_eq!(direct[0][0].as_deref(), Some("masked"));
+        assert_eq!(direct[0][1].as_deref(), Some("masked"));
+        assert_ne!(direct[0][0].as_deref(), Some("alice@example.com"));
+        assert_ne!(direct[0][1].as_deref(), Some("123-45-6789"));
     });
 }
 
@@ -7814,24 +8183,34 @@ fn per_query_unmask_hint_end_to_end() {
     run(async {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        // Post-storage-flip layout: each field's own column holds the
+        // mask; the raw sibling (named via `raw_column_name`, never
+        // spelled out here) holds the real value `dispatch_unmask_for_query`
+        // reads.
+        let raw_email = raw_column_name("email");
+        let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_qhint_e2e\".\"users\" (\
-                     id           TEXT PRIMARY KEY, \
-                     email        TEXT, \
-                     email_masked TEXT NOT NULL, \
-                     ssn          TEXT, \
-                     ssn_masked   TEXT NOT NULL\
-                 )",
+                &format!(
+                    "CREATE TABLE \"app_qhint_e2e\".\"users\" (\
+                         id             TEXT PRIMARY KEY, \
+                         \"{raw_email}\" TEXT, \
+                         email          TEXT NOT NULL, \
+                         \"{raw_ssn}\"   TEXT, \
+                         ssn            TEXT NOT NULL\
+                     )"
+                ),
                 &[],
             )
             .await
             .expect("CREATE TABLE");
         backend
             .pool_exec(
-                "INSERT INTO \"app_qhint_e2e\".\"users\" \
-                 (id, email, email_masked, ssn, ssn_masked) VALUES \
-                 ('u1', 'alice@example.com', 'a***@example.com', '123-45-6789', '***-**-6789')",
+                &format!(
+                    "INSERT INTO \"app_qhint_e2e\".\"users\" \
+                     (id, \"{raw_email}\", email, \"{raw_ssn}\", ssn) VALUES \
+                     ('u1', 'alice@example.com', 'a***@example.com', '123-45-6789', '***-**-6789')"
+                ),
                 &[],
             )
             .await
@@ -7899,6 +8278,25 @@ fn per_query_unmask_hint_end_to_end() {
         assert_eq!(audit.len(), 1, "one audit row for the query: {audit:?}");
         assert_eq!(audit[0].0, "granted");
         assert_eq!(audit[0].1, "user");
+
+        // `dispatch_unmask_for_query` mutates only the in-memory `rows`
+        // passed above - a direct read of the fields' own columns must
+        // still show the mask, never the plaintext it just returned.
+        let client = backend
+            .acquire_dedicated_client(app_id)
+            .await
+            .expect("acquire client");
+        let direct = client
+            .query(
+                "SELECT email, ssn FROM \"app_qhint_e2e\".\"users\" WHERE id = 'u1'",
+                &[],
+            )
+            .await
+            .expect("direct SELECT of the fields' own columns");
+        assert_eq!(direct[0][0].as_deref(), Some("a***@example.com"));
+        assert_eq!(direct[0][1].as_deref(), Some("***-**-6789"));
+        assert_ne!(direct[0][0].as_deref(), Some("alice@example.com"));
+        assert_ne!(direct[0][1].as_deref(), Some("123-45-6789"));
     });
 }
 

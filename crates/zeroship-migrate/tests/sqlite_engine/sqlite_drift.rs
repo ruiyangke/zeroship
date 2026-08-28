@@ -1149,16 +1149,21 @@ async fn orphan_journal_detected_when_a_migration_is_deleted_from_the_set() {
 async fn mask_sentinel_recovered_from_sqlite_master() {
     let p = paths("snap_sentinel");
     let be = backend(&p);
-    // The emitter writes the masked sibling column with an inline mask sentinel;
+    // After the storage flip the emitter writes the inline mask sentinel onto the
+    // FIELD'S OWN column (it used to ride the `<col>_masked` sibling; the real
+    // value moved the other way, into a `__zs_raw__<col>` sibling instead).
     // sqlite_master.sql preserves the comment verbatim. We hand-author the exact
-    // shape the emitter produces (a nullable `<col>_masked TEXT /* zero-migrate:mask:... */`).
+    // shape the emitter produces today.
+    let raw = zeroship_migrate::schema::query::raw_column_name("ssn");
     be.apply_one_additive(
         &mig(
             "with_mask",
-            "CREATE TABLE accounts (\
-                id INTEGER PRIMARY KEY, \
-                ssn BLOB, \
-                ssn_masked TEXT /* zero-migrate:mask:kind=last4,classification=pii */);",
+            &format!(
+                "CREATE TABLE accounts (\
+                    id INTEGER PRIMARY KEY, \
+                    {raw} BLOB, \
+                    ssn TEXT /* zero-migrate:mask:kind=last4,classification=pii */);"
+            ),
         ),
         "d",
     )
@@ -1170,8 +1175,8 @@ async fn mask_sentinel_recovered_from_sqlite_master() {
     let masked = accounts
         .columns
         .iter()
-        .find(|c| c.name == "ssn_masked")
-        .expect("masked sibling column present");
+        .find(|c| c.name == "ssn")
+        .expect("mask column present");
     assert_eq!(
         masked.comment_sentinel.as_deref(),
         Some("zero-migrate:mask:kind=last4,classification=pii"),

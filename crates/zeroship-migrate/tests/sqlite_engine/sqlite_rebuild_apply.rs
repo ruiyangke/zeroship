@@ -1145,27 +1145,42 @@ async fn goodie_sentinels_survive_rebuild() {
         .expect("goodie rebuild applies");
 
     // The drift snapshot recovers the sentinels from the rebuilt table's
-    // sqlite_master.sql.
+    // sqlite_master.sql. The ciphertext (and its `zero-migrate:enc:` sentinel) now
+    // lives in the RAW column; the field's own `secret` column carries the
+    // schema-normaliser's auto-mask sentinel instead.
     let snap = be.snapshot_schema_sqlite().await.expect("snapshot");
     let t = snap.tables.get("accounts").expect("accounts in snapshot");
-    let secret = t
+    let raw_secret_name = zeroship_migrate::schema::query::raw_column_name("secret");
+    let secret_raw = t
+        .columns
+        .iter()
+        .find(|c| c.name == raw_secret_name)
+        .expect("raw secret column");
+    assert!(
+        secret_raw
+            .comment_sentinel
+            .as_deref()
+            .or(secret_raw.encryption_sentinel.as_deref())
+            .is_some_and(|s| s.contains("zero-migrate:enc:")),
+        "encryption sentinel must survive the rebuild + recover via drift: {secret_raw:?}"
+    );
+    let secret_mask = t
         .columns
         .iter()
         .find(|c| c.name == "secret")
         .expect("secret");
     assert!(
-        secret
+        secret_mask
             .comment_sentinel
             .as_deref()
-            .or(secret.encryption_sentinel.as_deref())
-            .is_some_and(|s| s.contains("zero-migrate:enc:")),
-        "encryption sentinel must survive the rebuild + recover via drift: {secret:?}"
+            .is_some_and(|s| s.contains("zero-migrate:mask:")),
+        "the encrypted column's auto-mask sentinel must survive the rebuild too: {secret_mask:?}"
     );
     let masked = t
         .columns
         .iter()
-        .find(|c| c.name == "ssn_masked")
-        .expect("ssn_masked sibling");
+        .find(|c| c.name == "ssn")
+        .expect("ssn column");
     assert!(
         masked
             .comment_sentinel

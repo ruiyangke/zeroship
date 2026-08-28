@@ -1,19 +1,41 @@
-//! Sibling-column mask transforms + atomic dual-write CRUD pass.
+//! Mask transforms + the write-side physical placement of a masked column.
 //!
-//! The sibling-column strategy is "Path B" in
-//! `docs/archive/sensitive-field-masking.md` (resolved 2026-05-24): the masked
-//! representation is computed at write time and stored beside the ciphertext,
-//! so a default read touches no key material. Path A - computing the mask on
-//! read - was rejected there for key-scope reasons. The name is worth keeping
-//! because the trade-off analysis is only recorded under it.
+//! The masked representation is computed at write time and stored beside the
+//! real value, so a default read touches no key material ("Path B" in
+//! `docs/archive/sensitive-field-masking.md`, resolved 2026-05-24; Path A -
+//! computing the mask on read - was rejected there for key-scope reasons, and
+//! the name is worth keeping because the trade-off analysis is recorded under
+//! it).
 //!
-//! For every column with `def.mask = Some(_)` and `kind != "none"`,
-//! the [`apply_mask_on_write`] companion pass computes the masked
-//! representation from the plaintext value and writes it onto the row
-//! at `row["<col>_masked"]`. The SQL builder then naturally picks up
-//! the sibling key alongside the parent (the row is iterated as a
-//! map; `<col>_masked` is a reserved-suffix name that creators cannot
-//! shadow, so there is no collision risk).
+//! # Which column holds what
+//!
+//! The field's OWN column (`ssn`) holds the **mask**; the sibling
+//! `__zs_raw__ssn` holds the **real value**. That is the 2026-08-28 storage
+//! flip and it is the reason this module has a relocation stage rather than a
+//! second-column-insert stage.
+//!
+//! It used to be the other way round, and the consequence was a filter oracle:
+//! the projection substituted `"ssn_masked" AS "ssn"` but the WHERE builder
+//! takes no schema hint and could not, so `find({ ssn: { $gt: v } })` compared
+//! against plaintext. The caller never saw a value and did not need to - the
+//! set of matching rows is the answer, and repeated probes binary-search it
+//! with no authorization check on the path and no audit row written.
+//!
+//! # The stage order this depends on
+//!
+//! [`apply_mask_on_write`] COMPUTES the masks and returns them; it does not
+//! touch the row. [`relocate_masked_columns`] performs the physical placement
+//! and runs LAST, after the encryption, SQLite-binary and plain-bytes passes.
+//!
+//! The split is load-bearing. The flip makes two passes want to write the same
+//! key: the encryption pass replaces `row["ssn"]` with ciphertext and the mask
+//! wants `row["ssn"]` to be the mask, so the authoritative value has to move.
+//! For an encrypted field the value the relocation moves is ciphertext; for a
+//! mask-only field it is plaintext; for `t.bytes().mask()` the bytes pass has
+//! to see the real value under the logical key before anything moves. One
+//! stage that runs after all of them, MOVES whatever it finds rather than
+//! recomputing it, and never conditions the move on the sidechannel, is the
+//! only shape where none of those combinations loses data.
 //!
 //! ## Wiring into the CRUD dispatch
 //!
@@ -70,12 +92,19 @@ use crate::error::DbError;
 /// column's masked output without a redundant decrypt round-trip.
 pub(crate) type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 
-/// Apply mask transforms to a row before INSERT/UPDATE.
+/// The masks [`apply_mask_on_write`] derived, keyed by LOGICAL field name.
+///
+/// Held rather than written straight into the row so that exactly one stage -
+/// [`relocate_masked_columns`] - owns physical placement. See the module doc.
+pub(crate) type DerivedMasks = Vec<(String, String)>;
+
+/// Derive the masked representation of every masked column on `row`.
 ///
 /// Walks every column on the schema; when the column carries a
 /// `mask = { kind: <kind>, classification: <class> }` entry AND
-/// `kind != "none"`, derives the sibling column's value from the
-/// plaintext and inserts `row["<col>_masked"] = <masked_string>`.
+/// `kind != "none"`, computes the mask from the plaintext and returns it under
+/// the LOGICAL field name. **Does not mutate `row`** - see
+/// [`relocate_masked_columns`].
 ///
 /// Plaintext source order:
 /// 1. If `plaintexts[col]` is populated (encrypted-column case, the
@@ -83,30 +112,25 @@ pub(crate) type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 ///    the ciphertext), use it.
 /// 2. Otherwise, read `row[col]` directly (non-encrypted-but-masked
 ///    case — `t.string().mask({...})`).
-/// 3. If the column is absent from `row` (partial UPDATE), skip — the
-///    sibling stays in sync because the parent didn't change.
+/// 3. If the column is absent from `row` (partial UPDATE), skip — nothing
+///    changed, so nothing is relocated and the stored mask stays in sync.
 /// 4. If the column value is `null`, skip — `null` passes through as
 ///    `null` (no mask written, per Q-MASK-L).
-///
-/// Mutates `row` in place. No-op when the schema declares no masked
-/// columns.
 pub(crate) fn apply_mask_on_write(
     schema: &Value,
     plaintexts: &MaskPlaintextSidechannel,
-    row: &mut Value,
-) -> Result<(), DbError> {
+    row: &Value,
+) -> Result<DerivedMasks, DbError> {
     let Some(schema_obj) = schema.as_object() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    let Some(obj) = row.as_object_mut() else {
+    let Some(obj) = row.as_object() else {
         return Err(DbError::internal(
             "apply_mask_on_write: row must be a JSON object",
         ));
     };
 
-    // Collect (sibling, masked_value) up front so we don't hold a
-    // mutable borrow across iteration of the schema.
-    let mut to_insert: Vec<(String, String)> = Vec::new();
+    let mut derived: DerivedMasks = Vec::new();
 
     for (col, def) in schema_obj.iter() {
         let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
@@ -146,14 +170,54 @@ pub(crate) fn apply_mask_on_write(
         };
 
         if let Some(pt) = plaintext {
-            let masked = apply_mask_kind(kind, pt.as_str());
-            let sibling = format!("{col}_masked");
-            to_insert.push((sibling, masked));
+            derived.push((col.clone(), apply_mask_kind(kind, pt.as_str())));
         }
     }
 
-    for (sibling, masked) in to_insert {
-        obj.insert(sibling, Value::String(masked));
+    Ok(derived)
+}
+
+/// Move each masked field's real value to its raw column and put the mask in
+/// the field's own column.
+///
+/// The ONE stage that owns physical placement, and the last one to run. For
+/// every `(field, mask)` in `masks`:
+///
+/// 1. `row[__zs_raw__<field>] = row[<field>]` (the real value, whatever stage
+///    produced it - plaintext, ciphertext, or a base64 bytes envelope);
+/// 2. `row[<field>] = mask`;
+/// 3. the binary-bind marker moves with the value: `__zsbin__<field>` becomes
+///    `__zsbin__<__zs_raw__<field>>`, because it is the RAW column that wants
+///    `decode($N, 'base64')::bytea` and the masked column is plain `TEXT`.
+///
+/// Step 1 MOVES rather than recomputes. That is what makes the
+/// documented contract violation in `apply_mask_on_write` - the encryption pass
+/// ran and the sidechannel was not populated, so the value in hand is
+/// ciphertext - survivable: the ciphertext lands in the raw column intact and
+/// only the mask is wrong. Recomputing the raw value here, or making the move
+/// conditional on the sidechannel being populated, would overwrite the
+/// ciphertext with a mask of itself on a write that returns success.
+///
+/// A field absent from `masks` is untouched: a partial UPDATE that does not
+/// mention `ssn` neither relocates nor re-masks it.
+pub(crate) fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<(), DbError> {
+    if masks.is_empty() {
+        return Ok(());
+    }
+    let Some(obj) = row.as_object_mut() else {
+        return Err(DbError::internal(
+            "relocate_masked_columns: row must be a JSON object",
+        ));
+    };
+    for (field, masked) in masks {
+        let raw_col = crate::query::raw_column_name(field);
+        if let Some(value) = obj.remove(field.as_str()) {
+            obj.insert(raw_col.clone(), value);
+        }
+        if let Some(marker) = obj.remove(&format!("__zsbin__{field}")) {
+            obj.insert(format!("__zsbin__{raw_col}"), marker);
+        }
+        obj.insert(field.clone(), Value::String(masked.clone()));
     }
     Ok(())
 }
@@ -376,20 +440,22 @@ fn mask_date_decade(plaintext: &str) -> String {
 /// Called AFTER the SELECT (or RETURNING) materialises rows, BEFORE
 /// the row crosses back to V8.
 ///
-/// Two row shapes are handled uniformly:
+/// One row shape, two sources of it:
 ///
-/// 1. **Aliased-SELECT shape** (`find`, read-side flip): the
-///    SELECT clause already aliased `<col>_masked AS <col>`, so
-///    `row[col]` holds the masked string and no `<col>_masked` key
-///    is present. We wrap `row[col]` in place.
+/// - a **SELECT** projects only logical names, so `row[col]` already holds the
+///   masked string and no raw key is present;
+/// - a **`RETURNING *`** write returns every physical column, so the row also
+///   carries `__zs_raw__<col>` with the real value.
 ///
-/// 2. **Dual-write RETURNING-`*` shape** (`insert` / `update` /
-///    `upsert` / `delete` write paths): the row carries
-///    BOTH the parent (ciphertext / plaintext) AND the sibling
-///    (`<col>_masked`). We prefer the sibling's value (the safe
-///    default), drop the sibling key from the row, and wrap the parent
-///    slot. This way the SDK never sees raw ciphertext on a write
-///    RETURNING path.
+/// Both are handled by the same two steps: re-apply the mask transform to
+/// `row[col]`, and remove the raw key if it is there.
+///
+/// The re-application is not redundant. `row[col]` is the mask on every
+/// correct path, and re-masking a mask is a no-op for every built-in kind
+/// (pinned by `remasking_a_mask_is_a_no_op_for_every_kind`). What it buys is
+/// that a builder that somehow lowered a masked field to its raw column - the
+/// class of bug the flip exists to make impossible, not a class that is
+/// impossible to reintroduce - is masked here rather than returned.
 ///
 /// The wire shape mirrors the SDK's `MaskedValueRepr` (sdks/db/src/
 /// types.ts): a `sentinel: "__zsmask__"` discriminator plus `masked`
@@ -450,40 +516,24 @@ pub(crate) fn wrap_row_on_read(
             .to_string();
         let kind = parse_mask_kind(kind).unwrap_or(MaskKind::Full);
 
-        // Pick the masked value:
-        //
-        //  1. Sibling present (RETURNING-`*` dual-write shape) → it
-        //     already holds the masked string; use it verbatim.
-        //  2. No sibling, but the parent slot holds a string → the SELECT
-        //     aliased the sibling back to the parent name (`"<col>_masked"
-        //     AS "<col>"`, the read-side flip / aggregate
-        //     substitution), OR - the SEC-4 hazard - a builder lowered a
-        //     masked column to plaintext. We CANNOT distinguish "already
-        //     masked" from "raw plaintext" by value, so we MUST NOT trust
-        //     the parent slot as already-masked: re-apply the mask
-        //     transform. Re-masking an already-masked string is
-        //     idempotent for the built-in kinds (the masked form has no
-        //     more plaintext to reveal), so this is safe for the
-        //     legitimate aliased-SELECT path and closes the leak for the
-        //     dangerous one.
-        let sibling_key = format!("{col}_masked");
-        let masked_value: Option<String> = if let Some(sib) = obj.get(&sibling_key) {
-            sib.as_str().map(|s| s.to_string())
-        } else if let Some(parent) = obj.get(col) {
-            parent.as_str().map(|s| apply_mask_kind(kind, s))
-        } else {
-            None
-        };
+        // The field's own slot holds the mask. Re-apply the transform rather
+        // than trusting it: we cannot distinguish "already masked" from "a
+        // builder lowered this to the raw column" by looking at the value, and
+        // re-masking a mask is a no-op for every built-in kind.
+        let masked_value: Option<String> =
+            obj.get(col).and_then(|v| v.as_str()).map(|s| apply_mask_kind(kind, s));
 
-        // If the row carried a sibling, strip it regardless (the SDK
-        // surface only exposes the parent column).
-        if obj.contains_key(&sibling_key) {
-            to_strip.push(sibling_key);
+        // The raw column rides out of every `RETURNING *`. Strip it here -
+        // `read_pipeline`'s surface stage would too, but this pass runs first
+        // and the sentinel it writes must not sit beside the value it hides.
+        let raw_key = crate::query::raw_column_name(col);
+        if obj.contains_key(&raw_key) {
+            to_strip.push(raw_key);
         }
 
         let Some(masked) = masked_value else {
-            // Parent absent (e.g. SELECT projection excluded it) and no
-            // sibling present — nothing to wrap.
+            // The field's column is absent (e.g. a narrowed projection) or is
+            // not a string (NULL) — nothing to wrap.
             continue;
         };
 
@@ -673,8 +723,19 @@ mod tests {
     // apply_mask_on_write: integration with row + sidechannel
     // -----------------------------------------------------------------
 
+    /// Run the two write stages in the order `WriteStages::apply_to_doc` does:
+    /// derive the masks, then place them.
+    fn derive_and_relocate(
+        schema: &Value,
+        plaintexts: &MaskPlaintextSidechannel,
+        row: &mut Value,
+    ) {
+        let masks = apply_mask_on_write(schema, plaintexts, row).expect("derive masks");
+        relocate_masked_columns(&masks, row).expect("relocate");
+    }
+
     #[test]
-    fn apply_mask_on_write_populates_sibling_from_sidechannel() {
+    fn a_masked_encrypted_write_puts_the_mask_in_the_logical_column_and_moves_the_ciphertext() {
         // Encrypted column: plaintext arrives via the sidechannel.
         let schema = json!({
             "ssn": {
@@ -684,29 +745,63 @@ mod tests {
             }
         });
         // Row's `ssn` is the base64 ciphertext (encryption pass ran first).
-        let mut row = json!({ "id": "usr_01", "ssn": "BASE64CIPHERTEXT" });
+        let mut row = json!({
+            "id": "usr_01",
+            "ssn": "BASE64CIPHERTEXT",
+            "__zsbin__ssn": true,
+        });
         let mut plaintexts = MaskPlaintextSidechannel::new();
         plaintexts.insert(
             "ssn".to_string(),
             Zeroizing::new("123-45-6789".to_string()),
         );
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
+        let raw = crate::query::raw_column_name("ssn");
         let obj = row.as_object().unwrap();
+        assert_eq!(obj.get("ssn").and_then(|v| v.as_str()), Some("***-**-6789"));
         assert_eq!(
-            obj.get("ssn_masked").and_then(|v| v.as_str()),
-            Some("***-**-6789")
+            obj.get(&raw).and_then(|v| v.as_str()),
+            Some("BASE64CIPHERTEXT"),
+            "the authoritative value moves to the raw column",
         );
-        // Parent column untouched.
+        // The binary-bind marker travels with the value: it is the RAW column
+        // that wants `decode($N,'base64')::bytea`; the masked column is TEXT.
+        assert!(obj.get("__zsbin__ssn").is_none(), "marker must not stay behind: {row}");
+        assert_eq!(obj.get(&format!("__zsbin__{raw}")), Some(&json!(true)));
+    }
+
+    /// The documented contract violation: the encryption pass ran but the
+    /// sidechannel was not populated, so the only value in hand is ciphertext.
+    ///
+    /// The mask is then garbage (a mask of the ciphertext), which is ugly. What
+    /// must NOT happen is losing the ciphertext, and that is why the relocation
+    /// MOVES the slot rather than recomputing it or conditioning the move on
+    /// the sidechannel.
+    #[test]
+    fn a_missing_sidechannel_still_preserves_the_ciphertext() {
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let mut row = json!({ "id": "usr_01", "ssn": "BASE64CIPHERTEXT" });
+        let plaintexts = MaskPlaintextSidechannel::new();
+
+        derive_and_relocate(&schema, &plaintexts, &mut row);
+
         assert_eq!(
-            obj.get("ssn").and_then(|v| v.as_str()),
-            Some("BASE64CIPHERTEXT")
+            row[crate::query::raw_column_name("ssn")].as_str(),
+            Some("BASE64CIPHERTEXT"),
+            "the ciphertext must survive a write that returns success: {row}",
         );
     }
 
     #[test]
-    fn apply_mask_on_write_reads_row_when_no_sidechannel() {
+    fn a_mask_only_write_moves_the_plaintext_to_the_raw_column() {
         // Non-encrypted but masked column: plaintext stays in `row[col]`,
         // sidechannel has no entry.
         let schema = json!({
@@ -718,17 +813,48 @@ mod tests {
         let mut row = json!({ "id": "usr_01", "email": "alice@example.com" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
         assert_eq!(
-            obj.get("email_masked").and_then(|v| v.as_str()),
-            Some("a***@example.com")
+            obj.get("email").and_then(|v| v.as_str()),
+            Some("a***@example.com"),
+            "the field's own column holds the mask",
         );
         assert_eq!(
-            obj.get("email").and_then(|v| v.as_str()),
-            Some("alice@example.com")
+            obj.get(&crate::query::raw_column_name("email"))
+                .and_then(|v| v.as_str()),
+            Some("alice@example.com"),
         );
+    }
+
+    /// Re-masking a mask must be a no-op, for EVERY built-in kind.
+    ///
+    /// `wrap_row_on_read` re-applies the transform to the field's own column on
+    /// every read, so idempotence went from "true on one path" to load-bearing
+    /// everywhere. A kind that mangled its own output would corrupt every read
+    /// of that column, silently and without touching the stored value.
+    #[test]
+    fn remasking_a_mask_is_a_no_op_for_every_kind() {
+        let samples: &[(MaskKind, &[&str])] = &[
+            (MaskKind::Full, &["123-45-6789", "", "a"]),
+            (MaskKind::Last4, &["123-45-6789", "ab", ""]),
+            (MaskKind::First4, &["4111-1111-1111-1234", "ab", ""]),
+            (MaskKind::Email, &["alice@example.com", "no-at-sign", ""]),
+            (MaskKind::Name, &["Alice Anderson", "Cher", ""]),
+            (MaskKind::DateYear, &["1985-04-12", "not-a-date", ""]),
+            (MaskKind::DateDecade, &["1985-04-12", "not-a-date", ""]),
+        ];
+        for (kind, inputs) in samples {
+            for input in *inputs {
+                let once = apply_mask_kind(*kind, input);
+                let twice = apply_mask_kind(*kind, &once);
+                assert_eq!(
+                    once, twice,
+                    "{kind:?} is not idempotent on {input:?}: {once:?} -> {twice:?}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -748,7 +874,7 @@ mod tests {
             Zeroizing::new("123-45-6789".to_string()),
         );
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
         assert!(
@@ -769,7 +895,7 @@ mod tests {
         let mut row = json!({ "id": "usr_01", "email": null });
         let plaintexts = MaskPlaintextSidechannel::new();
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
         assert!(
@@ -793,7 +919,7 @@ mod tests {
         let mut row = json!({ "name": "alice" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
         assert!(obj.get("ssn_masked").is_none());
@@ -823,21 +949,21 @@ mod tests {
         });
         let plaintexts = MaskPlaintextSidechannel::new();
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
-        assert_eq!(
-            obj.get("ssn_masked").and_then(|v| v.as_str()),
-            Some("***-**-6789")
-        );
-        assert_eq!(
-            obj.get("email_masked").and_then(|v| v.as_str()),
-            Some("b***@example.com")
-        );
-        assert_eq!(
-            obj.get("dob_masked").and_then(|v| v.as_str()),
-            Some("1985-**-**")
-        );
+        for (field, mask, plaintext) in [
+            ("ssn", "***-**-6789", "123-45-6789"),
+            ("email", "b***@example.com", "bob@example.com"),
+            ("dob", "1985-**-**", "1985-04-12"),
+        ] {
+            assert_eq!(obj.get(field).and_then(|v| v.as_str()), Some(mask));
+            assert_eq!(
+                obj.get(&crate::query::raw_column_name(field))
+                    .and_then(|v| v.as_str()),
+                Some(plaintext),
+            );
+        }
     }
 
     #[test]
@@ -851,7 +977,7 @@ mod tests {
         let mut row = json!({ "ssn": "abc" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
-        let err = apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap_err();
+        let err = apply_mask_on_write(&schema, &plaintexts, &row).unwrap_err();
         match err {
             DbError::Internal { .. } => {}
             other => panic!("expected DbError::Internal, got {other:?}"),
@@ -869,7 +995,7 @@ mod tests {
         let plaintexts = MaskPlaintextSidechannel::new();
         let original = row.clone();
 
-        apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
+        derive_and_relocate(&schema, &plaintexts, &mut row);
 
         assert_eq!(row, original);
     }
@@ -911,27 +1037,34 @@ mod tests {
     }
 
     #[test]
-    fn wrap_row_on_read_returning_star_shape_prefers_sibling() {
-        // RETURNING *: row carries BOTH parent (ciphertext / plaintext)
-        // AND sibling. The sibling carries the masked string; we wrap
-        // the parent slot with it and drop the sibling key.
+    fn wrap_row_on_read_strips_the_raw_column_from_a_returning_star_row() {
+        // `RETURNING *` yields every physical column, so the row carries the
+        // mask under `ssn` AND the real value under the raw column. The wrap
+        // must return the mask and remove the raw key.
         let schema = json!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
+        let raw = crate::query::raw_column_name("ssn");
         let mut row = json!({
             "id": "usr_01",
-            "ssn": "BASE64CIPHERTEXT",   // parent — what RETURNING * yields
-            "ssn_masked": "***-**-6789"   // sibling — the safe display value
+            "ssn": "***-**-6789",
         });
+        row[raw.clone()] = json!("123-45-6789");
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
         let obj = row.as_object().unwrap();
-        // Sibling stripped — SDK surface only exposes the parent.
-        assert!(obj.get("ssn_masked").is_none(), "sibling must be stripped: {row}");
+        assert!(
+            obj.get(&raw).is_none(),
+            "the raw column must not survive to the JS boundary: {row}",
+        );
+        assert!(
+            !serde_json::to_string(&row).unwrap().contains("123-45-6789"),
+            "and neither must its value: {row}",
+        );
         let ssn = obj.get("ssn").and_then(|v| v.as_object()).unwrap();
         assert_eq!(ssn.get("masked").and_then(|v| v.as_str()), Some("***-**-6789"));
     }

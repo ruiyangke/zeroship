@@ -1383,11 +1383,36 @@ in `docs/archive/sensitive-field-masking.md` (shipped; archived).
 | Masking     | Returns a `MaskedValue<T>` wrapper on reads   | Find / get / live  |
 | Unmask      | Trades the wrapper for plaintext (audited)    | Explicit call only |
 
-A default read of a masked column **never** decrypts. The platform
-stores a pre-computed mask in a sibling `<col>_masked` column (Path
-B) and the SELECT clause aliases it: `"<col>_masked" AS "<col>"`.
-The ciphertext column never leaves the database on a default read,
-and the column-derivation key is never consulted.
+A default read of a masked column **never** decrypts. The platform stores a
+pre-computed mask in the field's **own** column and the real value in a hidden
+sibling, so a plain `SELECT "ssn"` returns the mask. The column holding the real
+value never leaves the database on a default read, and the column-derivation key
+is never consulted.
+
+#### Querying a masked column
+
+Every query surface - `find`, `orderBy`, `select`, `distinct`, `aggregate` -
+sees the **mask**, because that is what the column with the field's name
+contains. Three consequences, all deliberate:
+
+- **`find({ ssn: "123-45-6789" })` matches nothing.** Equality by real value is
+  not a query any more; it is an `unmask()` call, which is where the
+  authorization check and the audit row live.
+- **`find({ ssn: { $gt: v } })` compares masks**, so it cannot narrow the real
+  value. This is the point: a range filter plus `orderBy` plus `limit` used to
+  binary-search a value the caller could not read, with no authorization check
+  on the path and nothing written to `__zeroship_audit_unmask`.
+- **`orderBy: { ssn: 1 }` sorts by the mask**, and `aggregate`'s `$group.by`
+  buckets by the mask - one bucket per distinct MASK, not per distinct value.
+
+`.unique()` and `.index()` still mean what they say: they are declared about the
+real value and the platform builds them on the column that holds it, so two rows
+whose SSNs differ but whose masks collide (`***-**-1234`) both insert, and two
+rows with the SAME SSN still conflict.
+
+If you need to look a row up by its real value, that is
+`unmask`-shaped work, not filter-shaped work - the mask is not a lossy index
+into the plaintext and no query can treat it as one.
 
 ### Schema declaration
 
@@ -1592,9 +1617,11 @@ apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
 
 This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`, `crates/plugin-db/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`, and `crates/plugin-db/src/crud/mask_backfill.rs`.
 
-Every masked field uses the sibling-column model: the platform emits `<field>_masked` next to the parent column, writes both columns atomically, and routes default reads through the masked representation instead of plaintext (`crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`). `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`).
+Every masked field owns TWO physical columns. The field's OWN column holds the MASK, as bare `TEXT` carrying none of the declared constraints; a hidden sibling holds the REAL value, and carries the declared type and every constraint. Both are written atomically, and a default read serves the field's own column, so it serves the mask (`crates/zeroship-schema/src/query.rs`, `crates/zeroship-plugin-db/src/crud/mask_pass.rs`).
 
-On writes, `apply_mask_on_write` computes the sibling value from plaintext, not from a later read-path decrypt. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values do not emit a sibling write, and `kind: "none"` skips the sibling entirely (`crates/plugin-db/src/crud/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`).
+The layout used to be the other way round - plaintext under the field's name, the mask in a `<field>_masked` sibling that the SELECT aliased back. That made the SELECT the only mask-aware surface: the WHERE builder takes no schema and could not substitute, so `find({ ssn: { $gt: v } })` compared against plaintext and repeated probes binary-searched a value the caller could not read, unauthorized and unaudited. The flip makes the ignorant path the safe path - a builder that has never heard of masking names the column with the natural name, and that column is the mask. The sibling's name is `__zs_raw__<field>`, which `validate_field_name` refuses, so no filter, projection, sort, conflict probe or write-document key can name it either. `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`).
+
+On writes, `apply_mask_on_write` computes the mask from plaintext, not from a later read-path decrypt, and a separate relocation stage - the ONE stage that owns physical placement, running after the encryption and bytes passes - moves the finished value to the raw column and writes the mask into the field's own. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values relocate nothing and write no mask, and `kind: "none"` skips the field entirely (`crates/plugin-db/src/crud/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`).
 
 Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps a masked cell in the `__zsmask__` sentinel shape, then the runtime rehydrates that sentinel into a native `MaskedValue` v8 class before user code sees the row (`crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). The shipped surface is intentionally coercion-safe: `masked` and `classification` are readable, `_meta` carries `{ collection, row_pk, column }`, and `toString()` / `toJSON()` return the masked string (`crates/plugin-db/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`).
 
@@ -1602,4 +1629,4 @@ Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })`
 
 `defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the six shipped classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`), stores a single pending role-to-classification map for bootstrap to flush, and replaces rather than merges when called again in the same isolate (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
-Two sentinel formats are shipped. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`). `__zsmask:kind=<kind>,classification=<class>` is the schema/introspection sentinel attached to `<field>_masked`, so the diff and backfill paths can recover mask metadata from the live database definition (`crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_backfill.rs`).
+Two sentinel formats are shipped. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`). `__zsmask:kind=<kind>,classification=<class>` is the schema/introspection sentinel attached to the field's own (masked) column, so the diff and backfill paths can recover mask metadata from the live database definition (`crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/mask_backfill.rs`).

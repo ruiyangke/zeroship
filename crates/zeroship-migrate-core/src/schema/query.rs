@@ -100,8 +100,9 @@ pub struct BuiltQuery {
 /// therefore the whole engine) into the leaf.
 pub use zeroship_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
-    is_schema_metadata_key, mask_sentinel_for_field, mask_sibling_column_for_field, max_length,
-    string_enum_values, SchemaRenderer,
+    is_schema_metadata_key, mask_sentinel_for_field, max_length, raw_column_for_field,
+    raw_column_name, string_enum_values, SchemaRenderer, MAX_MASKED_FIELD_NAME_BYTES,
+    RAW_COLUMN_PREFIX,
 };
 
 /// The schema renderer for a dialect.
@@ -800,36 +801,29 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             let col_def = field_to_column_for_dialect(vendors, field, def, backend, &inject)?;
             columns.push(col_def);
 
-            // Path B sibling-column emission. When the
-            // field carries a `.mask({...})` declaration (or the
-            // auto-default mask attached to `t.encrypted(...)` columns)
-            // AND the mask kind is NOT `"none"`, emit a sibling
-            // `<col>_masked TEXT` column alongside the parent. The sibling is
-            // engine-managed: raw inserts may omit it and the runtime mask-write
-            // pass fills it when the parent value is written.
-            // The sibling stores the pre-computed masked representation
-            // (e.g. `"***-**-6789"`) computed at INSERT/UPDATE time by
-            // `crud::mask_pass::apply_mask_on_write`. Reads default to
-            // the sibling; writes dual-bind both columns atomically.
+            // Masked-column emission. When the field carries a `.mask({...})`
+            // declaration (or the auto-default mask attached to
+            // `t.encrypted(...)` columns) AND the mask kind is NOT `"none"`,
+            // the column with the field's OWN name holds the pre-computed
+            // masked representation (e.g. `"***-**-6789"`) that
+            // `crud::mask_pass` derives at INSERT/UPDATE time, and the real
+            // value has already been emitted above under `__zs_raw__<col>`.
             //
-            // The sibling type is `TEXT` for every mask kind
-            // (full / last4 / first4 / email / name / dateYear /
-            // dateDecade) - the union of mask outputs is string-shaped.
-            // Future BYTEA-shaped masks would extend this with a per-
-            // kind type lookup.
+            // The masked column is `TEXT` for every mask kind (full / last4 /
+            // first4 / email / name / dateYear / dateDecade) - the union of
+            // mask outputs is string-shaped - and carries NONE of the declared
+            // constraints, because a `t.number().mask(...)` column would refuse
+            // `'***'` under `DOUBLE PRECISION` and an enum CHECK would refuse
+            // it outright. The constraints belong to the value, and the value
+            // moved.
             //
-            // Explicit `.mask({ kind: "none" })` opt-out -> no sibling
-            // emission. The decrypt-on-read path continues to serve
-            // such columns; the parent column is the only storage site.
-            if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
-                // `_masked` suffix is platform-reserved
-                // (`validate_field_name`'s `ReservedName::Suffix`
-                // forbids creator-declared columns ending in
-                // `_masked`); no collision possible.
-                //
+            // Explicit `.mask({ kind: "none" })` opt-out -> no second column.
+            // The field's own column is the only storage site and holds the
+            // real value, exactly as an unmasked column does.
+            if raw_column_for_field(field, def).is_some() {
                 // Attach a `/* zero-migrate:mask:kind=...,
-                // classification=... */` inline comment to the sibling
-                // DDL so the SQLite introspector can recover the mask
+                // classification=... */` inline comment to the MASKED
+                // column's DDL so the SQLite introspector can recover the mask
                 // metadata from `sqlite_master.sql`. PG ignores SQL
                 // comments at parse time, so the introspector on the
                 // PG arm reads `pg_description` populated by the
@@ -842,7 +836,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 };
                 columns.push(format!(
                     "{} TEXT{inline_comment}",
-                    backend.quote_ident(&sibling_col)
+                    backend.quote_ident(field)
                 ));
             }
 
@@ -1364,13 +1358,17 @@ pub fn build_add_column(
     validate_schema(app_id)?;
     let backend = renderer(vendors, dialect);
     let data_type = backend.column_type(&column_snapshot_for_type_def(def), false);
-    let constraints = def_to_constraints_for_dialect(field, def, backend);
+    // The declared type and constraints go on the column that holds the REAL
+    // value - `__zs_raw__<field>` when masked, the field's own name otherwise.
+    let raw = raw_column_for_field(field, def);
+    let physical = raw.clone().unwrap_or_else(|| field.to_string());
+    let constraints = def_to_constraints_for_dialect(&physical, def, backend);
 
     let mut statements = backend
         .add_column_if_not_exists_statements(AddColumnIfNotExistsRequest {
             schema: app_id,
             table: collection,
-            column: field,
+            column: &physical,
             definition: AddColumnDefinition::Rendered {
                 data_type: &data_type,
                 constraints: &constraints,
@@ -1379,35 +1377,30 @@ pub fn build_add_column(
         })
         .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))?;
 
-    // When the field carries a `.mask({...})`
-    // declaration, also emit a nullable unbounded-text ADD COLUMN op for
-    // the sibling `<col>_masked` and its sentinel attachment in the
-    // same multi-statement payload. Only the sibling is NULL here
-    // (versus NOT NULL on CREATE TABLE) - existing rows would refuse
-    // the ALTER if the sibling were NOT NULL; the mask backfill flips it
-    // to NOT NULL after every row has its sibling populated.
+    // When the field carries a `.mask({...})` declaration, also emit a nullable
+    // unbounded-text ADD COLUMN op for the MASKED column - the one with the
+    // field's own name - and its sentinel attachment, in the same
+    // multi-statement payload. It is NULL here (versus the CREATE TABLE shape)
+    // because existing rows would refuse the ALTER if it were NOT NULL; the
+    // mask backfill populates it after every row has its mask computed.
     //
     // Note: this branch is taken ONLY when the diff classifier emits
     // an `AddColumn` for a fresh top-level field declared with
-    // `.mask({...})` - for that case the sibling tags along in the
-    // same payload. The separate `MaskBackfill`-paired
-    // `AddColumn(<col>_masked)` op the diff classifier emits for the
-    // backfill sets `mask_sibling_for` in `details` and the field IS the
-    // sibling itself; `mask_sibling_column_for_field(sibling, def)`
-    // returns `None` there because the synthetic def carries no
-    // mask block. So we don't double-emit.
-    if let Some(sibling) = mask_sibling_column_for_field(field, def) {
+    // `.mask({...})`. The separate `MaskBackfill`-paired op the classifier
+    // emits for the backfill passes a synthetic def carrying no mask block, so
+    // `raw_column_for_field` returns `None` there and we do not double-emit.
+    if raw.is_some() {
         let sentinel = mask_sentinel_for_field(def);
-        let sibling_statements = backend
+        let masked_statements = backend
             .add_column_if_not_exists_statements(AddColumnIfNotExistsRequest {
                 schema: app_id,
                 table: collection,
-                column: &sibling,
+                column: field,
                 definition: AddColumnDefinition::NullableUnboundedText,
                 comment_sentinel: sentinel.as_deref(),
             })
             .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))?;
-        statements.extend(sibling_statements);
+        statements.extend(masked_statements);
     }
 
     Ok(statements.join(";\n"))
@@ -1677,6 +1670,14 @@ pub fn build_create_indexes(
             continue;
         }
 
+        // `.index()` and `.unique()` are declarations about the REAL value, so
+        // they land on the column that holds it. Putting a `.unique()` on the
+        // masked column would enforce uniqueness over MASKS, where many rows
+        // legitimately share `***-**-1234` - and for `kind: "full"` every mask
+        // is `***`, so the table would cap at one row.
+        let raw = raw_column_for_field(field, def);
+        let value_col = raw.clone().unwrap_or_else(|| field.to_string());
+
         // Unique implies an index - if both flags are set, prefer the unique
         // form (a unique index also serves as a lookup index, so emitting
         // both would be redundant and waste storage).
@@ -1687,12 +1688,12 @@ pub fn build_create_indexes(
                 app_id,
                 collection,
                 &name,
-                &[field.as_str()],
+                &[value_col.as_str()],
                 true,
             )?;
             out.push(IndexSpec {
                 name,
-                columns: vec![field.clone()],
+                columns: vec![value_col.clone()],
                 unique: true,
                 sql,
                 kind: IndexKind::BTree,
@@ -1704,42 +1705,40 @@ pub fn build_create_indexes(
                 app_id,
                 collection,
                 &name,
-                &[field.as_str()],
+                &[value_col.as_str()],
                 false,
             )?;
             out.push(IndexSpec {
                 name,
-                columns: vec![field.clone()],
+                columns: vec![value_col.clone()],
                 unique: false,
                 sql,
                 kind: IndexKind::BTree,
             });
         }
 
-        // Auto-emit a B-tree index on the sibling
-        // `<col>_masked` column when the parent column has `.index()`
-        // or `.uniqueIndex()` declared AND the field carries a mask
-        // declaration with `kind != "none"`. The sibling index lets reads
-        // route equality / sort queries through the masked sibling
-        // without a sequential scan. Naming: `<coll>__<col>_masked_idx`
-        // (double-underscore separator, matching `named_index_name`'s
-        // collision-avoidance convention). Never UNIQUE - uniqueness
-        // applies to the parent column only (the sibling is a derived
-        // value, multiple rows can share the same masked output).
+        // Auto-emit a B-tree index on the MASKED column when the field has
+        // `.index()` or `.uniqueIndex()` declared AND carries a mask
+        // declaration with `kind != "none"`. Every creator-visible read and
+        // filter touches the masked column, so this is the index those queries
+        // use; the one above serves the raw column, which only the unmask path
+        // reads. Naming: `<coll>__<col>_mask_idx` (double-underscore separator,
+        // matching `named_index_name`'s collision-avoidance convention). Never
+        // UNIQUE - see above.
         if wants_index || wants_unique {
-            if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
-                let idx_name = format!("{collection}__{sibling_col}_idx");
+            if raw.is_some() {
+                let idx_name = format!("{collection}__{field}_mask_idx");
                 let sql = create_index_if_not_exists(
                     backend,
                     app_id,
                     collection,
                     &idx_name,
-                    &[sibling_col.as_str()],
+                    &[field.as_str()],
                     false,
                 )?;
                 out.push(IndexSpec {
                     name: idx_name,
-                    columns: vec![sibling_col],
+                    columns: vec![field.clone()],
                     unique: false,
                     sql,
                     kind: IndexKind::BTree,
@@ -2028,6 +2027,24 @@ fn field_to_column_for_dialect(
 ) -> Result<String, QueryError> {
     validate_field_name_for_declaration(vendors, field, inject)?;
     validate_encryption_sentinel_for_field(def)?;
+    // The declared type and every constraint go on the column that holds the
+    // REAL value: `__zs_raw__<field>` when masked, the field's own name
+    // otherwise. The LOGICAL name is what got validated above - the physical
+    // one is the platform's, and the validator would refuse it (it starts
+    // `__zs_`, which is exactly why that name was chosen).
+    let physical = match raw_column_for_field(field, def) {
+        Some(raw) => {
+            if field.len() > MAX_MASKED_FIELD_NAME_BYTES {
+                return Err(QueryError::InvalidIdent(format!(
+                    "masked field name exceeds {MAX_MASKED_FIELD_NAME_BYTES} bytes: {field} \
+                     (a mask needs a second column named '{RAW_COLUMN_PREFIX}<field>', and \
+                     the identifier limit is 63 bytes)"
+                )));
+            }
+            raw
+        }
+        None => field.to_string(),
+    };
     // `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
     // regardless of `wraps`. The encryption pass swaps the plaintext
@@ -2053,14 +2070,14 @@ fn field_to_column_for_dialect(
         ""
     };
     let sql_type = backend.column_type(&column_snapshot_for_type_def(def), false);
-    let constraints = def_to_constraints_for_dialect(field, def, backend);
+    let constraints = def_to_constraints_for_dialect(&physical, def, backend);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
     // `sqlite_master.sql` for the introspector regex.
     Ok(format!(
         "{} {}{} {}",
-        backend.quote_ident(field),
+        backend.quote_ident(&physical),
         sql_type,
         enc_comment,
         constraints
@@ -2657,12 +2674,15 @@ columns = [
     // -----------------------------------------------------------------------
     // SEC-4 - aggregation pipeline must NOT leak masked-column plaintext.
     //
-    // For a mask-only column (`.mask({...})` without `.encrypted()`),
-    // plaintext lives in `<col>` and the masked string in `<col>_masked`.
-    // a bare `quote_ident(field)` against the base plaintext column, so
-    // `$group.by:"ssn"` / `$max:"ssn"` returned PLAINTEXT. These pin the
-    // sibling substitution at the SQL-builder level (BASE column, not the
-    // already-rejected `ssn_masked` sibling name).
+    // For a mask-only column (`.mask({...})` without `.encrypted()`), after the
+    // storage flip the real value lives in `__zs_raw__<col>` and the masked
+    // string lives in the field's own `<col>`. A bare `quote_ident(field)`
+    // against the base column now reaches the MASK directly - `$group.by:"ssn"`
+    // / `$max:"ssn"` can no longer return plaintext through the base identifier,
+    // since the base identifier no longer names the plaintext column. These pin
+    // that the SQL-builder never substitutes in the raw column name (BASE
+    // column, not the pre-flip `ssn_masked` sibling / the current
+    // `__zs_raw__ssn`).
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
@@ -4893,42 +4913,45 @@ columns = [
     }
 
     // -----------------------------------------------------------------
-    // Path B sibling-column DDL emission
+    // Path B raw-column DDL emission
     // -----------------------------------------------------------------
 
-    /// `mask_sibling_column_for_field` returns `Some("<col>_masked")`
+    /// `raw_column_for_field` returns `Some(raw_column_name(field))` - after the
+    /// storage flip the field's own column holds the mask, and the RAW column
+    /// (the one this function names) is where the real value lives.
     #[test]
-    fn mask_sibling_column_for_field_returns_sibling_for_masked() {
+    fn raw_column_for_field_returns_raw_column_for_masked() {
         let def = serde_json::json!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
         assert_eq!(
-            mask_sibling_column_for_field("ssn", &def),
-            Some("ssn_masked".to_string())
+            raw_column_for_field("ssn", &def),
+            Some(raw_column_name("ssn"))
         );
     }
 
     #[test]
-    fn mask_sibling_column_for_field_returns_none_for_unmasked() {
+    fn raw_column_for_field_returns_none_for_unmasked() {
         let def = serde_json::json!({ "type": "string" });
-        assert_eq!(mask_sibling_column_for_field("name", &def), None);
+        assert_eq!(raw_column_for_field("name", &def), None);
     }
 
     #[test]
-    fn mask_sibling_column_for_field_returns_none_for_kind_none() {
+    fn raw_column_for_field_returns_none_for_kind_none() {
         let def = serde_json::json!({
             "type": "string",
             "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         });
-        assert_eq!(mask_sibling_column_for_field("ssn", &def), None);
+        assert_eq!(raw_column_for_field("ssn", &def), None);
     }
 
-    /// **DDL shape** - masked column emits parent + nullable sibling
-    /// `<col>_masked TEXT`.
+    /// **DDL shape** - a masked column emits the RAW column (declared type, its
+    /// constraints, named by `raw_column_name`) plus the field's own column as
+    /// bare nullable TEXT holding the mask.
     #[test]
-    fn build_create_table_emits_sibling_for_masked_column() {
+    fn build_create_table_emits_raw_column_for_masked_field() {
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
@@ -4938,27 +4961,28 @@ columns = [
         });
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
+        let raw = raw_column_name("ssn");
         assert!(
-            sql.contains("\"ssn_masked\" TEXT"),
-            "expected sibling column with TEXT: {sql}"
+            sql.contains(&format!("\"{raw}\" TEXT")),
+            "expected raw column with the declared type: {sql}"
         );
         assert!(
-            !sql.contains("\"ssn_masked\" TEXT NOT NULL"),
-            "masked sibling must be nullable / omittable: {sql}"
+            !sql.contains(&format!("\"{raw}\" TEXT NOT NULL")),
+            "an unrequired field's raw column carries no NOT NULL: {sql}"
         );
         assert!(
-            sql.contains("\"ssn\""),
-            "parent column still present: {sql}"
+            sql.contains("\"ssn\" TEXT"),
+            "the field's own column now holds the mask, bare TEXT: {sql}"
         );
         assert!(
-            !sql.contains("\"name_masked\""),
-            "non-masked column must NOT emit sibling: {sql}"
+            !sql.contains(&raw_column_name("name")),
+            "non-masked column must NOT emit a raw column: {sql}"
         );
     }
 
     /// Masked column CREATE TABLE emits `COMMENT ON
-    /// COLUMN` for the sibling so PG introspection round-trips the
-    /// mask metadata via `pg_description`.
+    /// COLUMN` for the field's OWN column (the one now holding the mask) so PG
+    /// introspection round-trips the mask metadata via `pg_description`.
     #[test]
     fn build_create_table_emits_comment_on_column_sentinel_for_masked_column() {
         let schema = serde_json::json!({
@@ -4970,8 +4994,8 @@ columns = [
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn_masked\""),
-            "expected COMMENT ON COLUMN for sibling: {sql}"
+            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn\""),
+            "expected COMMENT ON COLUMN on the field's own (mask) column: {sql}"
         );
         assert!(
             sql.contains("'zero-migrate:mask:kind=last4,classification=spi'"),
@@ -4979,8 +5003,8 @@ columns = [
         );
     }
 
-    /// Sibling DDL inline `/* zero-migrate:mask:... */` comment
-    /// for SQLite-arm introspection (PG ignores SQL comments; SQLite
+    /// Inline `/* zero-migrate:mask:... */` comment on the field's own (mask)
+    /// column, for SQLite-arm introspection (PG ignores SQL comments; SQLite
     /// preserves them in `sqlite_master.sql`).
     #[test]
     fn build_create_table_emits_inline_mask_sentinel_comment() {
@@ -4993,10 +5017,8 @@ columns = [
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains(
-                "\"email_masked\" TEXT /* zero-migrate:mask:kind=email,classification=pii */"
-            ),
-            "expected inline /* zero-migrate:mask:... */ comment on sibling: {sql}"
+            sql.contains("\"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */"),
+            "expected inline /* zero-migrate:mask:... */ comment on the mask column: {sql}"
         );
     }
 
@@ -5023,28 +5045,30 @@ columns = [
     }
 
     /// `build_add_column` for a fresh field with a
-    /// `.mask({...})` declaration emits BOTH the parent ADD + the
-    /// sibling ADD + the `COMMENT ON COLUMN` sentinel in one
-    /// multi-statement payload.
+    /// `.mask({...})` declaration emits BOTH the RAW column ADD (declared type)
+    /// + the mask column ADD (the field's own name, nullable TEXT) + the
+    /// `COMMENT ON COLUMN` sentinel on the mask column, in one multi-statement
+    /// payload.
     #[test]
-    fn build_add_column_emits_sibling_and_sentinel_when_masked() {
+    fn build_add_column_emits_raw_column_and_sentinel_when_masked() {
         let def = serde_json::json!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
         let sql = build_add_column(crate::test_fixtures::VENDORS, "app1", "users", "ssn", &def)
             .expect("build_add_column ok");
+        let raw = raw_column_name("ssn");
         assert!(
-            sql.contains("ADD COLUMN IF NOT EXISTS \"ssn\""),
-            "parent: {sql}"
+            sql.contains(&format!("ADD COLUMN IF NOT EXISTS \"{raw}\" TEXT")),
+            "raw column: {sql}"
         );
         assert!(
-            sql.contains("ADD COLUMN IF NOT EXISTS \"ssn_masked\""),
-            "sibling: {sql}"
+            sql.contains("ADD COLUMN IF NOT EXISTS \"ssn\" TEXT NULL"),
+            "mask column keeps the field's own name, bare nullable TEXT: {sql}"
         );
         assert!(
-            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn_masked\""),
-            "comment: {sql}"
+            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn\""),
+            "comment on the mask column: {sql}"
         );
         assert!(
             sql.contains("'zero-migrate:mask:kind=last4,classification=spi'"),
@@ -5053,20 +5077,24 @@ columns = [
     }
 
     /// `build_add_column` for a non-masked field emits
-    /// only the single parent ADD; no sibling DDL, no comment.
+    /// only the single column ADD; no raw column, no comment.
     #[test]
-    fn build_add_column_no_sibling_when_unmasked() {
+    fn build_add_column_no_raw_column_when_unmasked() {
         let def = serde_json::json!({ "type": "string" });
         let sql = build_add_column(crate::test_fixtures::VENDORS, "app1", "users", "name", &def)
             .expect("build_add_column ok");
-        assert!(!sql.contains("_masked"), "no sibling for unmasked: {sql}");
+        assert!(
+            !sql.contains(RAW_COLUMN_PREFIX),
+            "no raw column for unmasked: {sql}"
+        );
         assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
 
-    /// **DDL shape** - `t.encrypted(...)` (default-mask path) gets the
-    /// sibling because the SDK auto-populates `mask: {kind: "full", ...}`
+    /// **DDL shape** - `t.encrypted(...)` (default-mask path) gets a RAW column
+    /// because the SDK auto-populates `mask: {kind: "full", ...}`: the ciphertext
+    /// moves to the raw column and the field's own column holds the mask.
     #[test]
-    fn build_create_table_emits_sibling_for_encrypted_with_default_mask() {
+    fn build_create_table_emits_raw_column_for_encrypted_with_default_mask() {
         // Mirror the SDK's auto-fill: `t.encrypted(...)` -> mask = full.
         let schema = serde_json::json!({
             "ssn": {
@@ -5077,24 +5105,29 @@ columns = [
         });
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
+        let raw = raw_column_name("ssn");
         assert!(
-            sql.contains("\"ssn\" BYTEA"),
-            "parent encrypted column stays BYTEA: {sql}"
+            sql.contains(&format!("\"{raw}\" BYTEA")),
+            "the ciphertext moved to the raw column, still BYTEA: {sql}"
         );
         assert!(
-            sql.contains("\"ssn_masked\" TEXT"),
-            "encrypted column with default mask emits sibling: {sql}"
+            !sql.contains(&format!("\"{raw}\" BYTEA NOT NULL")),
+            "an unrequired field's raw column carries no NOT NULL: {sql}"
         );
         assert!(
-            !sql.contains("\"ssn_masked\" TEXT NOT NULL"),
-            "encrypted masked sibling must be nullable / omittable: {sql}"
+            sql.contains("\"ssn\" TEXT"),
+            "the field's own column now holds the mask, bare TEXT: {sql}"
+        );
+        assert!(
+            !sql.contains("\"ssn\" TEXT NOT NULL"),
+            "the mask column must be nullable / omittable: {sql}"
         );
     }
 
-    /// **DDL shape** - `kind: "none"` explicit opt-out -> no sibling.
-    /// The parent encrypted column behaves like a plain encrypted column.
+    /// **DDL shape** - `kind: "none"` explicit opt-out -> no raw column at all.
+    /// The field's own column behaves like a plain encrypted column.
     #[test]
-    fn build_create_table_no_sibling_when_mask_kind_none() {
+    fn build_create_table_no_raw_column_when_mask_kind_none() {
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
@@ -5105,10 +5138,13 @@ columns = [
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            !sql.contains("\"ssn_masked\""),
-            "kind=none must NOT emit a sibling: {sql}"
+            !sql.contains(RAW_COLUMN_PREFIX),
+            "kind=none must NOT emit a raw column: {sql}"
         );
-        assert!(sql.contains("\"ssn\" BYTEA"), "parent still present: {sql}");
+        assert!(
+            sql.contains("\"ssn\" BYTEA"),
+            "field's own column still holds the ciphertext directly: {sql}"
+        );
     }
 
     #[test]
@@ -5145,18 +5181,20 @@ columns = [
     // -----------------------------------------------------------------
     // SELECT-shape gates
     //
-    // The masked-column READ shape - a default read emitting
-    // `"<col>_masked" AS "<col>"` so the ciphertext column never appears as a
-    // top-level select expression, and an SDK row shape that therefore never
-    // sees the sibling at all - belonged to the data-plane SELECT builder. That
-    // builder and the tests that pinned it left this crate with the query
-    // language, so nothing here proves the read shape; do not read this heading
-    // as though something did.
+    // The masked-column READ shape belongs to the data-plane SELECT builder, not
+    // this crate - that builder and the tests that pin it live elsewhere, so
+    // nothing here proves the read shape; do not read this heading as though
+    // something did. Before the storage flip a default read aliased
+    // `"<col>_masked" AS "<col>"`; after it, the field's own column already IS
+    // `"<col>"` and already holds the mask, so an ordinary read needs no
+    // aliasing at all - only a read that wants the raw value would need to name
+    // `__zs_raw__<col>`, and nothing on the creator-facing read surface can.
     //
-    // What this layer still owns: `_masked` is a reserved SUFFIX, so
-    // `validate_field_name` refuses a creator field ending in it wherever a
-    // field name is validated. A `<col>_masked` column can therefore only ever
-    // be one the builders in this module emitted.
+    // What this layer still owns: `__zs_raw__` falls under the generic `_`
+    // prefix reservation, so `validate_field_name` refuses a creator field
+    // starting with it wherever a field name is validated. A `__zs_raw__<col>`
+    // column can therefore only ever be one the builders in this module
+    // emitted.
     // -----------------------------------------------------------------
 
     // ----------------------------------------------------------------
@@ -5296,10 +5334,11 @@ columns = [
         assert!(via_stable.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."accounts" ("#));
     }
 
-    /// `MainUnqualified` SQLite carries the goodies: the inline `zero-migrate:mask:` mask
-    /// sentinel on the `_masked` sibling, the inline `zero-migrate:enc:` encryption
-    /// sentinel on the BLOB column, and an unqualified FK clause - so all three
-    /// survive into `sqlite_master.sql` for the drift snapshot to recover.
+    /// `MainUnqualified` SQLite carries the goodies: the paired raw column, the
+    /// inline `zero-migrate:mask:` mask sentinel on the field's own (now
+    /// mask-holding) column, the inline `zero-migrate:enc:` encryption sentinel
+    /// on the BLOB column, and an unqualified FK clause - so all four survive
+    /// into `sqlite_master.sql` for the drift snapshot to recover.
     #[test]
     fn sqlite_main_unqualified_carries_mask_enc_and_fk() {
         let sql = build_create_table_with_fks_for_dialect_scoped(
@@ -5312,10 +5351,16 @@ columns = [
         )
         .expect("build goodies sqlite ddl");
 
-        // Mask sentinel rides inline on the `<col>_masked` sibling column.
+        // The raw column for `ssn` carries the declared type.
         assert!(
-            sql.contains(r#""ssn_masked" TEXT /* zero-migrate:mask:"#),
-            "mask sentinel must ride inline on the sibling: {sql}"
+            sql.contains(&format!("\"{}\" TEXT", raw_column_name("ssn"))),
+            "raw column for ssn must be present: {sql}"
+        );
+        // Mask sentinel rides inline on the field's own column now, not a
+        // `_masked`-suffixed sibling.
+        assert!(
+            sql.contains(r#""ssn" TEXT /* zero-migrate:mask:"#),
+            "mask sentinel must ride inline on the field's own column: {sql}"
         );
         // Encryption: BLOB physical column + inline `zero-migrate:enc:` sentinel.
         assert!(

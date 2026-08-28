@@ -249,7 +249,6 @@ pub async fn decrypt_row_on_read<B>(
     collection: &str,
     schema: &Value,
     row: &mut Value,
-    unmask_columns: &[String],
 ) -> Result<(), DbError>
 where
     B: EncryptedColumn,
@@ -287,16 +286,28 @@ where
             .to_string();
         let wraps = parse_wraps(enc_meta);
 
-        let masked_kind = def
+        // Which physical column carries this field's ciphertext, and whether
+        // this read is allowed to decrypt it at all.
+        //
+        // For a MASKED encrypted field the ciphertext lives in the raw column,
+        // which only a `RETURNING *` write ever carries - a SELECT projects
+        // the field's own column, which holds the mask. Decrypting is then
+        // pointless AND unsafe: pointless because the mask pass overwrites the
+        // slot with a sentinel, unsafe because the plaintext would sit in the
+        // row while it happened. The query-hint unmask path does not need it
+        // either; `dispatch_unmask_for_query` re-fetches the cell under its own
+        // authorization check and audit row.
+        //
+        // So: an unmasked encrypted field decrypts from its own column, and a
+        // masked one is left alone. The old gate also decrypted whenever the
+        // row happened to carry the sibling key, which is how a write's
+        // `RETURNING *` used to hand plaintext to the mask pass.
+        let masked = def
             .get("mask")
             .and_then(|v| v.as_object())
             .and_then(|mask| mask.get("kind").and_then(|v| v.as_str()))
-            .unwrap_or("none");
-        let sibling_key = format!("{col}_masked");
-        let should_decrypt = masked_kind == "none"
-            || unmask_columns.iter().any(|field| field == col)
-            || obj.contains_key(&sibling_key);
-        if !should_decrypt {
+            .is_some_and(|kind| kind != "none");
+        if masked {
             continue;
         }
 
@@ -683,7 +694,7 @@ mod tests {
         let mut read_row = serde_json::json!({ "id": "usr_01HX", "ssn": hex_str, "name": "alice" });
 
         rt.block_on(async {
-            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut read_row, &[])
+            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut read_row)
                 .await
                 .unwrap();
         });
@@ -696,7 +707,7 @@ mod tests {
         // `encryption_aead_failed`).
         let mut wrong_pk_row = serde_json::json!({ "id": "usr_02HX", "ssn": hex_str, "name": "alice" });
         let err = rt.block_on(async {
-            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut wrong_pk_row, &[])
+            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut wrong_pk_row)
                 .await
         });
         match err {
@@ -772,7 +783,6 @@ mod tests {
                 "users",
                 &schema,
                 &mut read_row,
-                &[],
             )
             .await
             .unwrap();

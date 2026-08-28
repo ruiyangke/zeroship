@@ -4206,6 +4206,12 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     // The column and its dimensionality are faithful; the index is absent. If a
     // future assertion here depends on the ANN index existing, it will fail, and
     // that failure is correct.
+    // Post-flip: `phone` (masked, not encrypted) carries the bare-TEXT mask in
+    // its own column; the real value sits in its raw sibling
+    // (`raw_column_name`), typed the way the declared field would be. `ssn` is
+    // encrypted-only (no `.mask()`), so it is NOT flipped -- its own column
+    // keeps holding ciphertext, unchanged.
+    let phone_raw = raw_column_name("phone");
     pool.batch_execute(&format!(
         r#"CREATE SCHEMA IF NOT EXISTS "{app}";
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -4213,7 +4219,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
   "name" TEXT NOT NULL,
   "ssn" BYTEA,
   "phone" TEXT,
-  "phone_masked" TEXT,
+  "{phone_raw}" TEXT,
   "embedding" vector(3)
 );
 {idx}"#,
@@ -4247,7 +4253,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .expect("write pipeline");
 
     // The write pipeline encrypted `ssn` (base64 blob + `__zsbin__ssn` marker)
-    // and derived the masked sibling `phone_masked` from the plaintext.
+    // and RELOCATED `phone`: the mask moves into the field's OWN column and
+    // the real value moves out to the raw sibling
+    // (`mask_pass::relocate_masked_columns`).
     let doc = &docs[0];
     assert!(
         doc["ssn"].as_str().is_some() && doc["ssn"] != json!("123-45-6789"),
@@ -4256,42 +4264,54 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     );
     assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
-        doc["phone_masked"], json!("***-***-0142"),
-        "mask pass must derive the last4 sibling on write, got {:?}",
-        doc["phone_masked"]
+        doc["phone"], json!("***-***-0142"),
+        "mask pass must move the last4 mask into phone's own column on write, got {:?}",
+        doc["phone"]
+    );
+    assert_ne!(
+        doc["phone"], json!("415-555-0142"),
+        "phone's own column must not carry the real value after relocation, got {:?}",
+        doc["phone"]
+    );
+    assert_eq!(
+        doc[phone_raw.as_str()], json!("415-555-0142"),
+        "the real phone value must be relocated to the raw sibling column, got {:?}",
+        doc[phone_raw.as_str()]
     );
 
-    // Persist it the way the SQL builder would (decode the encrypted blob, store
-    // the masked sibling). We INSERT the encrypted ssn + the masked sibling.
+    // Persist it the way the SQL builder would (decode the encrypted blob,
+    // store the mask under `phone` and the real value under its raw sibling).
     let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
-    let phone_masked = doc["phone_masked"].as_str().unwrap().to_string();
+    let phone_mask = doc["phone"].as_str().unwrap().to_string();
+    let phone_real = doc[phone_raw.as_str()].as_str().unwrap().to_string();
     // The vector literal is a test-controlled constant — format it inline with a
     // `::vector` cast (compio-postgres infers a `vector`-typed param from the
     // bind otherwise, which it cannot encode an `&str` into).
     pool.execute(
         &format!(
-            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, phone_masked, embedding) \
+            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\", embedding) \
              VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
         ),
         &[
             &"psn_round_trip_1",
             &"Ada",
             &ssn_b64.as_str(),
-            &"415-555-0142",
-            &phone_masked.as_str(),
+            &phone_mask.as_str(),
+            &phone_real.as_str(),
         ],
     )
     .await
     .unwrap();
 
     // ----- READ (real pipeline, introspected metadata) -----
-    // Fetch the raw row the way the SELECT builder would (encrypted blob as
-    // base64, the masked sibling aliased back to the parent name).
+    // Fetch the raw row the way the SELECT builder would: the encrypted blob
+    // as base64, and `phone` read directly. Reads no longer alias anything
+    // after the storage flip -- the field's own column already holds the mask.
     let raw = pool
         .query_text_params(
             &format!(
-                "SELECT id, name, encode(ssn, 'base64') AS ssn, \
-                 phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
+                "SELECT id, name, encode(ssn, 'base64') AS ssn, phone \
+                 FROM \"{app}\".\"people\" WHERE id = $1"
             ),
             &["psn_round_trip_1"],
         )
@@ -4326,6 +4346,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         out["phone"]
     );
     assert_eq!(out["phone"]["classification"], json!("pci"));
+    assert!(
+        !out.to_string().contains("415-555-0142"),
+        "the real phone number must not appear anywhere in the finalized row, got {out:?}"
+    );
     release_pg(pool).await;
 }
 
@@ -4486,15 +4510,18 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     });
 
     // === Simulate the engine/deploy-apply: create the table. ===
-    // The SAME DDL shape the relocated engine emits, including the masked
-    // sibling column, standing in for the deploy-time apply.
+    // The SAME DDL shape the relocated engine emits, post-flip: `phone`
+    // (masked, not encrypted) carries the bare-TEXT mask in its own column,
+    // and its raw sibling (`raw_column_name`) carries the real value. `ssn` is
+    // encrypted-only, so it is NOT flipped -- unchanged BYTEA in its own slot.
+    let phone_raw = raw_column_name("phone");
     pool.batch_execute(&format!(
         r#"CREATE SCHEMA IF NOT EXISTS "{app}";
 CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
   "name" TEXT NOT NULL,
   "ssn" BYTEA,
   "phone" TEXT,
-  "phone_masked" TEXT
+  "{phone_raw}" TEXT
 );
 {idx}"#,
         idx = pg_system_indexes(app, "people"),
@@ -4562,35 +4589,48 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     );
     assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
-        doc["phone_masked"], json!("***-***-0199"),
-        "mask pass derives the last4 sibling on write, got {:?}",
-        doc["phone_masked"]
+        doc["phone"], json!("***-***-0199"),
+        "mask pass must move the last4 mask into phone's own column on write, got {:?}",
+        doc["phone"]
+    );
+    assert_ne!(
+        doc["phone"], json!("650-555-0199"),
+        "phone's own column must not carry the real value after relocation, got {:?}",
+        doc["phone"]
+    );
+    assert_eq!(
+        doc[phone_raw.as_str()], json!("650-555-0199"),
+        "the real phone value must be relocated to the raw sibling column, got {:?}",
+        doc[phone_raw.as_str()]
     );
 
     let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
-    let phone_masked = doc["phone_masked"].as_str().unwrap().to_string();
+    let phone_mask = doc["phone"].as_str().unwrap().to_string();
+    let phone_real = doc[phone_raw.as_str()].as_str().unwrap().to_string();
     pool.execute(
         &format!(
-            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, phone_masked) \
+            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\") \
              VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5)"
         ),
         &[
             &"psn_p5_1",
             &"Grace",
             &ssn_b64.as_str(),
-            &"650-555-0199",
-            &phone_masked.as_str(),
+            &phone_mask.as_str(),
+            &phone_real.as_str(),
         ],
     )
     .await
     .unwrap();
 
     // ----- READ via the real pipeline (introspected metadata) -----
+    // `phone` is read directly -- it already holds the mask after the storage
+    // flip, so no alias is needed the way `phone_masked AS phone` used to be.
     let raw = pool
         .query_text_params(
             &format!(
-                "SELECT id, name, encode(ssn, 'base64') AS ssn, \
-                 phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
+                "SELECT id, name, encode(ssn, 'base64') AS ssn, phone \
+                 FROM \"{app}\".\"people\" WHERE id = $1"
             ),
             &["psn_p5_1"],
         )
@@ -4616,6 +4656,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     assert_eq!(out["phone"]["sentinel"], json!("__zsmask__"), "phone wrapped");
     assert_eq!(out["phone"]["masked"], json!("***-***-0199"));
     assert_eq!(out["phone"]["classification"], json!("pci"));
+    assert!(
+        !out.to_string().contains("650-555-0199"),
+        "the real phone number must not appear anywhere in the finalized row, got {out:?}"
+    );
 
     // FINAL proof: still zero runtime DDL after the full CRUD round-trip.
     assert_eq!(
@@ -5827,21 +5871,17 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
             "mask": { "kind": "last4", "classification": "spi" }
         }
     });
+    let ssn_raw = raw_column_name("ssn");
+    // Built with the platform's own emitter, not hand-spelled, so the fixture
+    // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
+    // column and `__zs_raw__ssn` gets the declared type for the real value.
+    let create_table =
+        build_create_table_with_fks(app, coll, &schema, &FkEmission::Inline)
+            .expect("emitter must build the users DDL");
+    admin_pool.batch_execute(&create_table).await.unwrap();
     admin_pool.execute(
         &format!(
-            "CREATE TABLE \"{app}\".\"{coll}\" (\
-               id TEXT PRIMARY KEY, \
-               ssn TEXT, \
-               ssn_masked TEXT\
-             )"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-    admin_pool.execute(
-        &format!(
-            "INSERT INTO \"{app}\".\"{coll}\" (id, ssn, ssn_masked) \
+            "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
              VALUES ('u1', '123-45-6789', '***-**-6789')"
         ),
         &[],
@@ -5863,16 +5903,20 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     )
     .await;
 
+    // The SENSITIVE value now lives in the raw sibling column (the storage
+    // flip), so that is the column this proof must show is unreachable by
+    // direct SQL before `dispatch_unmask` narrows to the per-app role.
     let blocked = login_pool
         .query_text_params(
-            &format!("SELECT ssn FROM \"{app}\".\"{coll}\" WHERE id = 'u1'"),
+            &format!("SELECT \"{ssn_raw}\" FROM \"{app}\".\"{coll}\" WHERE id = 'u1'"),
             &[],
         )
         .await
         .unwrap();
     assert!(
         blocked.is_empty(),
-        "login role must be blocked by FORCE RLS before unmask proves the role fence"
+        "login role must be blocked by FORCE RLS from the raw column before unmask proves \
+         the role fence"
     );
 
     zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
@@ -5947,20 +5991,18 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             "mask": { "kind": "last4", "classification": "phi" }
         }
     });
+    let ssn_raw = raw_column_name("ssn");
+    // Built with the platform's own emitter, not hand-spelled, so the fixture
+    // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
+    // column and `__zs_raw__ssn` gets the declared type for the real value.
+    let create_table =
+        build_create_table_with_fks(app, coll, &schema, &FkEmission::Inline)
+            .expect("emitter must build the patients DDL");
+    admin_pool.batch_execute(&create_table).await.unwrap();
     admin_pool
         .execute(
             &format!(
-                "CREATE TABLE \"{app}\".\"{coll}\" (\
-                   id TEXT PRIMARY KEY, ssn TEXT, ssn_masked TEXT)"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-    admin_pool
-        .execute(
-            &format!(
-                "INSERT INTO \"{app}\".\"{coll}\" (id, ssn, ssn_masked) \
+                "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
                  VALUES ('p1', '555-44-3333', '***-**-3333')"
             ),
             &[],
@@ -6104,24 +6146,6 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
-    pool.execute(
-        &format!(
-            "CREATE TABLE \"{app}\".\"{coll}\" (\
-               id TEXT PRIMARY KEY, ssn TEXT, ssn_masked TEXT)"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-    pool.execute(
-        &format!(
-            "INSERT INTO \"{app}\".\"{coll}\" (id, ssn, ssn_masked) \
-             VALUES ('u1', '123-45-6789', '***-**-6789')"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
 
     let schema = json!({
         "ssn": {
@@ -6129,6 +6153,24 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             "mask": { "kind": "last4", "classification": "spi" }
         }
     });
+    let ssn_raw = raw_column_name("ssn");
+    // Built with the platform's own emitter, not hand-spelled, so the fixture
+    // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
+    // column and `__zs_raw__ssn` gets the declared type for the real value.
+    let create_table =
+        build_create_table_with_fks(app, coll, &schema, &FkEmission::Inline)
+            .expect("emitter must build the patients DDL");
+    pool.batch_execute(&create_table).await.unwrap();
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
+             VALUES ('u1', '123-45-6789', '***-**-6789')"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
     zeroship_plugin_db::set_postgres_pool_for_tests(pool.clone(), &url);
     zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);

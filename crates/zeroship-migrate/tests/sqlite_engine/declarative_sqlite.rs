@@ -140,11 +140,10 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         "no schema/app qualifier may appear: {}",
         create.up
     );
-    // Mask + encryption sentinels ride inline (the SQLite wire).
+    // Mask + encryption sentinels ride inline (the SQLite wire): the field's own
+    // `ssn` column carries the mask sentinel now; the raw column carries the value.
     assert!(
-        create
-            .up
-            .contains(r#""ssn_masked" TEXT /* zero-migrate:mask:"#),
+        create.up.contains(r#""ssn" TEXT /* zero-migrate:mask:"#),
         "mask sentinel must ride inline: {}",
         create.up
     );
@@ -190,31 +189,52 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         .get("accounts")
         .expect("accounts in drift snapshot");
 
-    // The encrypted column's `zero-migrate:enc:` sentinel round-trips. The SQLite drift path
-    // recovers BOTH inline `zero-migrate:mask:` and `zero-migrate:enc:` sentinels from
-    // `sqlite_master.sql` into the single `comment_sentinel` slot (PG splits them
-    // across `encryption_sentinel`/`comment_sentinel`; SQLite uses one recovery
-    // slot). What matters is that the sentinel body survives emit→apply→snapshot.
-    let secret = t
+    // The encrypted column's `zero-migrate:enc:` sentinel round-trips on the RAW
+    // column now (the ciphertext moved there in the storage flip). The SQLite drift
+    // path recovers BOTH inline `zero-migrate:mask:` and `zero-migrate:enc:`
+    // sentinels from `sqlite_master.sql` into the single `comment_sentinel` slot
+    // (PG splits them across `encryption_sentinel`/`comment_sentinel`; SQLite uses
+    // one recovery slot). What matters is that the sentinel body survives
+    // emit→apply→snapshot.
+    let raw_secret_name = zeroship_migrate::schema::query::raw_column_name("secret");
+    let secret_raw = t
+        .columns
+        .iter()
+        .find(|c| c.name == raw_secret_name)
+        .expect("raw secret column in snapshot");
+    let secret_sentinel = secret_raw
+        .comment_sentinel
+        .as_deref()
+        .or(secret_raw.encryption_sentinel.as_deref());
+    assert!(
+        secret_sentinel.is_some_and(|s| s.contains("zero-migrate:enc:")),
+        "encryption `zero-migrate:enc:` sentinel must round-trip through the drift snapshot: {secret_raw:?}"
+    );
+
+    // The field's own `secret` column now holds the mask - an encrypted column
+    // with no explicit `.mask()` still gets the schema-normaliser's fail-safe
+    // default (`{ kind: full, classification: pii }`) - recovered WITH its
+    // `zero-migrate:mask:` sentinel.
+    let secret_mask = t
         .columns
         .iter()
         .find(|c| c.name == "secret")
         .expect("secret column in snapshot");
-    let secret_sentinel = secret
-        .comment_sentinel
-        .as_deref()
-        .or(secret.encryption_sentinel.as_deref());
     assert!(
-        secret_sentinel.is_some_and(|s| s.contains("zero-migrate:enc:")),
-        "encryption `zero-migrate:enc:` sentinel must round-trip through the drift snapshot: {secret:?}"
+        secret_mask
+            .comment_sentinel
+            .as_deref()
+            .is_some_and(|s| s.contains("zero-migrate:mask:")),
+        "the encrypted column's auto-mask sentinel must round-trip: {secret_mask:?}"
     );
 
-    // The masked sibling column is recovered WITH its `zero-migrate:mask:` mask sentinel.
+    // The field's own `ssn` column holds the mask, recovered WITH its
+    // `zero-migrate:mask:` mask sentinel.
     let masked = t
         .columns
         .iter()
-        .find(|c| c.name == "ssn_masked")
-        .expect("ssn_masked sibling in snapshot");
+        .find(|c| c.name == "ssn")
+        .expect("ssn column in snapshot");
     assert!(
         masked
             .comment_sentinel
@@ -811,9 +831,14 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
             .map_or("<missing>", |c| c.data_type.as_str())
     };
     assert_eq!(
-        live_type("secret"),
+        live_type(&zeroship_migrate::schema::query::raw_column_name("secret")),
         "blob",
-        "encrypted column introspects as SQLite blob"
+        "the raw (ciphertext) column introspects as SQLite blob"
+    );
+    assert_eq!(
+        live_type("secret"),
+        "text",
+        "the field's own column now holds the auto-mask, introspecting as SQLite text"
     );
     assert_eq!(
         live_type("amount"),
@@ -1114,11 +1139,15 @@ async fn golden_sqlite_create_table_and_index() {
     );
     assert_eq!(users_mig.down.as_deref(), Some(r#"DROP TABLE "users""#));
 
-    // create_table accounts — mask sibling + encrypted BLOB inline + inline FK.
+    // create_table accounts — raw column (declared type, sentinel where the value
+    // carries one) + the field's own mask column (bare TEXT + inline sentinel), for
+    // both the encrypted-with-auto-mask `secret` field and the explicitly-masked
+    // `ssn` field. Physical columns sort alphabetically, so both `__zs_raw__*`
+    // columns land first.
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE \"accounts\" (\"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" BLOB /* zero-migrate:enc:randomised:k1:string */, \"secret_masked\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT, \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
+        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:randomised:k1:string */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
     );
     assert_eq!(
         accounts_mig.down.as_deref(),
@@ -1184,26 +1213,78 @@ async fn golden_sqlite_add_column() {
         Some(r#"ALTER TABLE "accounts" DROP COLUMN "note""#)
     );
 
-    // Encrypted — SQLite `BLOB` plus the inline encryption sentinel, no COMMENT tail.
-    let secret = golden_find(&migs, "add_column_accounts_secret");
+    // Encrypted, no explicit `.mask()` — the schema-normaliser's fail-safe still
+    // auto-populates the default `{ kind: full, classification: pii }` mask (mirrors
+    // the SDK's `t.encrypted()` auto-fill), so `secret` splits into a RAW column
+    // (declared type BLOB + the inline encryption sentinel, no COMMENT tail on
+    // SQLite) named by `raw_column_name`, and the field's own `secret` column
+    // holding the mask.
+    let raw_secret_name = format!(
+        "add_column_accounts_{}",
+        zeroship_migrate::schema::query::raw_column_name("secret")
+    );
+    let secret_raw = golden_find(&migs, &raw_secret_name);
     assert_eq!(
-        secret.up,
-        r#"ALTER TABLE "accounts" ADD COLUMN "secret" BLOB /* zero-migrate:enc:randomised:k1:string */"#,
+        secret_raw.up,
+        format!(
+            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:randomised:k1:string */"#,
+            zeroship_migrate::schema::query::raw_column_name("secret")
+        ),
     );
     assert_eq!(
-        secret.down.as_deref(),
+        secret_raw.down.as_deref(),
+        Some(
+            format!(
+                r#"ALTER TABLE "accounts" DROP COLUMN "{}""#,
+                zeroship_migrate::schema::query::raw_column_name("secret")
+            )
+            .as_str()
+        ),
+    );
+    let secret_mask = golden_find(&migs, "add_column_accounts_secret");
+    assert_eq!(
+        secret_mask.up,
+        r#"ALTER TABLE "accounts" ADD COLUMN "secret" TEXT /* zero-migrate:mask:kind=full,classification=pii */"#,
+    );
+    assert_eq!(
+        secret_mask.down.as_deref(),
         Some(r#"ALTER TABLE "accounts" DROP COLUMN "secret""#),
     );
 
-    // mask sibling — inline `/* zero-migrate:mask:… */` (no COMMENT ON COLUMN on SQLite).
-    let masked = golden_find(&migs, "add_column_accounts_ssn_masked");
+    // Explicitly masked, not encrypted — `ssn` splits into a RAW column (the
+    // declared type, no sentinel of its own) and the field's own `ssn` column
+    // carrying the inline `/* zero-migrate:mask:… */` sentinel (no COMMENT ON
+    // COLUMN on SQLite).
+    let raw_ssn_name = format!(
+        "add_column_accounts_{}",
+        zeroship_migrate::schema::query::raw_column_name("ssn")
+    );
+    let ssn_raw = golden_find(&migs, &raw_ssn_name);
     assert_eq!(
-        masked.up,
-        r#"ALTER TABLE "accounts" ADD COLUMN "ssn_masked" TEXT /* zero-migrate:mask:kind=last4,classification=pii */"#,
+        ssn_raw.up,
+        format!(
+            r#"ALTER TABLE "accounts" ADD COLUMN "{}" TEXT"#,
+            zeroship_migrate::schema::query::raw_column_name("ssn")
+        ),
     );
     assert_eq!(
-        masked.down.as_deref(),
-        Some(r#"ALTER TABLE "accounts" DROP COLUMN "ssn_masked""#),
+        ssn_raw.down.as_deref(),
+        Some(
+            format!(
+                r#"ALTER TABLE "accounts" DROP COLUMN "{}""#,
+                zeroship_migrate::schema::query::raw_column_name("ssn")
+            )
+            .as_str()
+        ),
+    );
+    let ssn_mask = golden_find(&migs, "add_column_accounts_ssn");
+    assert_eq!(
+        ssn_mask.up,
+        r#"ALTER TABLE "accounts" ADD COLUMN "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=pii */"#,
+    );
+    assert_eq!(
+        ssn_mask.down.as_deref(),
+        Some(r#"ALTER TABLE "accounts" DROP COLUMN "ssn""#),
     );
 }
 

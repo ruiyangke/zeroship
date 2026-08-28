@@ -490,9 +490,15 @@ async fn fetch_and_decrypt(
     if let Some(pg) = backend.as_encrypted_column_pg() {
         use crate::backend::{EncryptedColumn as _, PgSqlExecutor as _};
         let pool = pg.pool_handle();
+        // The real value lives in the RAW column - the field's own column
+        // holds the mask. This function and its SQLite twin are the only
+        // readers of that column in the tree, and they sit behind
+        // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
         let sql = format!(
             "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
-            args.column, app_id, args.collection
+            crate::query::raw_column_name(&args.column),
+            app_id,
+            args.collection
         );
         let rows =
             crate::exec::query_postgres_pool_with_autocommit_role(pool, app_id, &sql, &[&args.row_pk])
@@ -533,7 +539,7 @@ async fn fetch_and_decrypt(
         use crate::backend::{DialectBuilder as _, EncryptedColumn as _};
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
-        let q_col = sq.quote_ident(&args.column);
+        let q_col = sq.quote_ident(&crate::query::raw_column_name(&args.column));
         let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
         let handle = sq.autocommit_client();
         let typed = handle
@@ -591,9 +597,15 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
     if let Some(pg) = backend.as_postgres() {
         use crate::backend::PgSqlExecutor as _;
         let pool = pg.pool_handle();
+        // The real value lives in the RAW column - the field's own column
+        // holds the mask. This function and its SQLite twin are the only
+        // readers of that column in the tree, and they sit behind
+        // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
         let sql = format!(
             "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
-            args.column, app_id, args.collection
+            crate::query::raw_column_name(&args.column),
+            app_id,
+            args.collection
         );
         let rows =
             crate::exec::query_postgres_pool_with_autocommit_role(pool, app_id, &sql, &[&args.row_pk])
@@ -628,7 +640,7 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
         use crate::backend::DialectBuilder as _;
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
-        let q_col = sq.quote_ident(&args.column);
+        let q_col = sq.quote_ident(&crate::query::raw_column_name(&args.column));
         let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
         let handle = sq.autocommit_client();
         let rows = handle

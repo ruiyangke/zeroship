@@ -244,5 +244,18 @@ name = "search_ir_live"
 path = "tests/search_ir_live.rs"
 required-features = ["test-helpers"]
 
+# The masking storage flip. Its own target rather than another section of
+# `integration.rs` because every fixture in it builds its table from the
+# PLATFORM'S OWN DDL emitter and writes through the real write pipeline - the
+# flip's risk is the emitter and the data plane disagreeing about which physical
+# column holds what, and a hand-written fixture agrees with whichever one its
+# author had in mind. Guarded like its siblings, and it FAILS rather than skips
+# without a database: a skipping run of a security suite is indistinguishable
+# from a passing one.
+[[test]]
+name = "mask_flip"
+path = "tests/mask_flip.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true

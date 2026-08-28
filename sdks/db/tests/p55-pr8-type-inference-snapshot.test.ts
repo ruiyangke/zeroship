@@ -72,7 +72,7 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     assert.equal(row.ssn as unknown as string, "***-**-6789");
   });
 
-  test("ssn_masked sibling column is NOT part of Row<S>", () => {
+  test("the raw column is NOT part of Row<S>", () => {
     const usersSchema = {
       ssn: t
         .encrypted({ wraps: t.string() })
@@ -81,21 +81,32 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     };
     type UsersRow = Row<typeof usersSchema>;
 
-    // The sibling column must NOT be inferred. The line below uses
-    // `keyof` to check the inferred key set; `ssn_masked` is not
-    // present, so removing it from the union leaves the union
-    // unchanged.
+    // A masked field owns a second physical column, `__zs_raw__ssn`,
+    // holding the real value. It must NOT be inferred into the row type:
+    // the generated type is what a review of a handler is written
+    // against, so a column present at runtime but absent from the type
+    // is invisible to that review.
+    //
+    // This test used to exclude `"ssn_masked"`, which was the second
+    // column's name BEFORE the storage flip. After the flip no
+    // implementation can produce that key, so the assertion held for
+    // every possible outcome and proved nothing.
     type Keys = keyof UsersRow;
-    type WithoutSibling = Exclude<Keys, "ssn_masked">;
+    type WithoutRaw = Exclude<Keys, "__zs_raw__ssn">;
 
-    // If `ssn_masked` HAD been inferred, the assignment below would
-    // type-error because `WithoutSibling` would be a strict subset
-    // of `Keys`. With `ssn_masked` correctly absent, the two types
-    // are identical and the cast succeeds.
+    // If `__zs_raw__ssn` HAD been inferred, the assignment below would
+    // type-error because `WithoutRaw` would be a strict subset of
+    // `Keys`. With it correctly absent, the two types are identical and
+    // the cast succeeds.
     const sentinel = null as unknown as Keys;
-    const checked = sentinel as WithoutSibling;
+    const checked = sentinel as WithoutRaw;
     assertType<Keys>(checked);
     assert.equal(checked, null);
+
+    // The positive control, differing in one variable: the LOGICAL name
+    // IS inferred. Without it, a `Row<S>` that inferred nothing at all
+    // would satisfy the exclusion above.
+    assertType<"ssn">(null as unknown as Extract<Keys, "ssn">);
   });
 
   test("encrypted column WITHOUT explicit .mask() still infers as MaskedValue (default full mask)", () => {
