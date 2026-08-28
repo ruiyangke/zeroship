@@ -7306,7 +7306,6 @@ dependencies = [
  "zeroship-control",
  "zeroship-core",
  "zeroship-gateway",
- "zeroship-migrate-adapter",
  "zeroship-migrated",
  "zeroship-worker",
  "zeroship-workflow-scheduler",
@@ -7535,7 +7534,6 @@ dependencies = [
 name = "zeroship-migrate-adapter"
 version = "0.1.0"
 dependencies = [
- "clap",
  "compio",
  "compio-postgres",
  "serde",
@@ -7545,8 +7543,6 @@ dependencies = [
  "v8",
  "zeroship-core",
  "zeroship-migrate",
- "zeroship-migrate-ir",
- "zeroship-migrate-policy",
  "zeroship-runtime",
  "zeroship-test-support",
 ]

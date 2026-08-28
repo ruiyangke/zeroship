@@ -152,11 +152,11 @@ require_cmd lsof
 echo "=== DW-07 build ==="
 pnpm build
 cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker
-cargo build --release -p zeroship-migrate-adapter --bin zeroship-platform-migrate \
-  --features zeroship-migrate-adapter/platform-cli
-for b in zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate dev-provision; do
+pnpm --filter zero-migrate-cli build
+for b in zeroship-control zeroship-gate zeroship-worker dev-provision; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b"; exit 2; }
 done
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 pass "release binaries built"
 
 echo "=== DW-07 test warmup ==="
@@ -215,7 +215,7 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
   pass "applied ops/postgres-init.sql"
 fi
 
-zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+zs_platform_migrate "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship \
   --project-id zeroship > "$WORK/migrate.log" 2>&1 || {
