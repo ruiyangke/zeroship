@@ -319,7 +319,10 @@ impl ReadObligation {
         let Some(inner) = &self.inner else {
             return;
         };
-        if !inner.copy_producer {
+        if !inner.copy_producer || !inner.copy_terminal_has_sync.get() {
+            // A simple Query can contain `COPY TO; COPY FROM`. Its producer's
+            // CopyFail has no Sync and must survive the autonomous COPY OUT so
+            // it can answer a later CopyInResponse in the same query string.
             return;
         }
         match inner.state.get() {
@@ -4231,6 +4234,24 @@ mod tests {
 
         assert_eq!(tx_status.load(Ordering::Relaxed), b'T');
         assert_eq!(in_flight_requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_simple_copy_producer_survives_output_for_later_input() {
+        let obligation = ReadObligation::new(None, true);
+        obligation.set_copy_terminal_has_sync(false);
+        obligation.activate_initial();
+
+        obligation.enter_copy_output();
+        assert!(
+            !obligation.copy_producer_finished(),
+            "CopyOutResponse discarded the simple-query producer before a later CopyInResponse"
+        );
+        assert!(
+            !obligation.pause_for_copy_input(),
+            "the retained simple-query producer could not answer the later CopyInResponse"
+        );
+        assert!(obligation.accepts_copy_input());
     }
 
     #[test]
