@@ -1030,8 +1030,16 @@ impl LsnTracker {
     }
 
     /// Record that the caller has durably processed up to `lsn`.
-    /// Advances ONLY the flush position. Monotonic: never regresses.
+    /// Advances ONLY the flush position. Monotonic, but never past the
+    /// received position: `PostgreSQL` trusts `flush_lsn` enough to recycle WAL,
+    /// and a flush beyond `write_lsn` is a protocol state this stream cannot
+    /// truthfully report.
     const fn advance_processed(&mut self, lsn: u64) {
+        let lsn = if lsn > self.received {
+            self.received
+        } else {
+            lsn
+        };
         if lsn > self.processed {
             self.processed = lsn;
         }
@@ -1444,6 +1452,10 @@ where
     /// *after* a durable hand-off (persisted / acknowledged), never on
     /// mere receipt - a concern that lives in the consumer
     /// (`wal_consumer.rs`), intentionally out of scope of this driver.
+    /// A value above [`last_received_lsn`](Self::last_received_lsn) is capped
+    /// there: `flush_lsn` and `apply_lsn` cannot truthfully exceed the
+    /// `write_lsn` this stream reports, and `PostgreSQL` uses an overreported
+    /// flush position to advance `confirmed_flush_lsn` and recycle WAL.
     pub fn advance_lsn(&mut self, lsn: u64) {
         self.lsn.advance_processed(lsn);
     }
@@ -3645,6 +3657,12 @@ mod tests {
         assert_eq!(t.received, 100, "observe_received must not regress");
         assert_eq!(t.processed, 80, "observe_received must not touch processed");
         assert_eq!(t.standby_lsns(), (100, 80, 80));
+
+        // A caller-supplied checkpoint cannot make flush/apply overtake
+        // write. PostgreSQL trusts flush enough to recycle WAL, so emitting
+        // (100, 120, 120) would turn a local bookkeeping error into data loss.
+        t.advance_processed(120);
+        assert_eq!(t.standby_lsns(), (100, 100, 100));
 
         // A fresh tracker seeded at a non-zero resume LSN reports it in
         // all three slots until something advances.
