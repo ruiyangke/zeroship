@@ -548,6 +548,45 @@ design beside the claim it replaces, and its **reversal history is in
 | 6 | ~~One resident is left~~ **superseded by 7 within hours** |
 | 7 | **`__zeroship_admin` is deleted ENTIRELY, and there is no schema epoch.** The runtime descriptor is the authority |
 | 8 | **The data plane performs NO live introspection at all.** Startup DDL validation is deferred, not designed |
+| 9 | **The descriptor MUST NOT get wrong, and the masking flip lands anyway as a second line of defence** |
+
+### Decision 9, 2026-08-28: enforce the descriptor, and flip anyway
+
+Two operator statements settled SC-6.
+
+**"Silent break is nothing, we have no users and no apps yet."** That discounts
+two of the flip's three costs outright - the 22-site churn and the
+type-and-constraint swap are exactly what pre-launch is for. **Only the third
+survives:** the migration engine cannot see this change (it compares names, and
+the names do not move), so the flip's migration is hand-authored with nothing
+verifying it. That is a one-time correctness problem rather than an ongoing one,
+and it is the piece that touches real column data - so it owes a mutation-proved
+test before it runs anywhere.
+
+**"The descriptor must not get wrong."** This is the primary work, and it is
+larger than the deploy-ordering guard an earlier revision of this page proposed,
+because there are **three** ways the descriptor goes wrong and decisions 7 and 8
+removed the runtime check that caught all of them:
+
+| # | drift path | enforced today |
+| --- | --- | --- |
+| 1 | a deploy goes live **before** its migration applies - the descriptor says `ssn` is masked while the database still holds plaintext there | **No.** The design calls this "a description, not a mechanism" |
+| 2 | **mid-life drift** - a migration applies while a worker runs, with no deploy, so that worker serves against a database its descriptor no longer describes until it restarts | **No** |
+| 3 | **restore / PITR** - the same effect arriving from a different direction | **No.** "Roll the workers" is a procedure, not a mechanism |
+
+Path 1 is a deploy-pipeline precondition: refuse to make a deploy live until its
+migrations have applied. Paths 2 and 3 are harder, because there is no deploy
+event to hook - the worker must learn the schema moved underneath it, which is
+exactly the schema-change signal decisions 7 and 8 deleted.
+
+**That is the same signal the new CDC service reinstates as an in-WAL marker**,
+and the connection should not be lost: the epoch marker is not only a
+subscriber-resync device, it is the descriptor-drift detector for paths 2 and 3.
+One mechanism, two problems.
+
+**The flip is therefore the SECOND line, not the primary.** Its unique property
+is that it stays safe when the enforcement above has a bug - and enforcement is
+code.
 
 **Five of these reverse text that read as settled.** Decisions 7 and 8 are the
 largest: together they turn a stated **non-goal** ("the runtime descriptor does
