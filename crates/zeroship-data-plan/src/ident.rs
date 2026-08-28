@@ -51,11 +51,22 @@
 //! # Why the role is a parameter and not decoration
 //!
 //! The fences genuinely differ, and SC-3 is emphatic that they are **a pair,
-//! not a single guardian**: a *table* name is fenced by the `__zeroship`
-//! prefix list (`query.rs:645-653`), a *column* name by a second list ninety
-//! lines away (`query.rs:738-766`: `_`, `__zs_`, `__zeroship_`, `sqlite_`, the
-//! `_masked` sibling suffix, and the six classification names). Moving one
-//! without the other is the dangerous half of the move, because the survivor
+//! not a single guardian**: a *table* name is fenced by `validate_collection`'s
+//! prefix list, a *column* name by a second list in `RESERVED_NAMES` (`_`,
+//! `__zs_`, `__zeroship_`, `sqlite_`, the `_masked` sibling suffix, and the six
+//! classification names).
+//!
+//! **`validate_collection` is FORKED, and the two forks reserve different
+//! prefixes.** The data plane's
+//! (`zeroship-schema/src/query.rs`) fences `__zeroship`; the migration
+//! authoring path's (`zeroship-migrate-core/src/schema/query.rs`) fences
+//! `__zero_migrate` and does NOT fence `__zeroship`. A creator's `createTable`
+//! passes through the authoring fork, so a `__zeroship`-prefixed table name is
+//! not refused there. Do not restate either fork's list as "the" reserved set:
+//! an earlier version of this comment did, citing line numbers that no longer
+//! exist, and that is a claim that reads as protection.
+//!
+//! Moving one without the other is the dangerous half of the move, because the survivor
 //! makes the namespace look defended. Both are re-stated below, together, each
 //! with its own arm in `tests/ident_refusals.rs`.
 //!
@@ -153,10 +164,10 @@ impl Reservation {
     fn matches(self, name: &str) -> bool {
         match self {
             Self::Exact(n) => name == n,
-            // Case-insensitive, as `validate_collection` is for `pg_` and
-            // `__zeroship` (`query.rs:645-653`): PostgreSQL folds unquoted
-            // identifiers to lower case, so `PG_Foo` and `pg_foo` are the same
-            // catalog name and a case-sensitive fence would miss one of them.
+            // Case-insensitive, as both forks of `validate_collection` are:
+            // PostgreSQL folds unquoted identifiers to lower case, so `PG_Foo`
+            // and `pg_foo` are the same catalog name and a case-sensitive fence
+            // would miss one of them.
             Self::Prefix(p) => {
                 name.len() >= p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
             }
