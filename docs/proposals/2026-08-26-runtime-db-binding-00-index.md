@@ -118,11 +118,67 @@ list also prunes; and **new columns default OUT**, which is whitelist semantics
 by construction - a property the `format!("{col}_masked")` blacklist can never
 have.
 
-**The known cost, disclosed by the design's own author and not yet judged:** a
-column list that does not cover the replica identity is accepted SILENTLY at
-DDL time, and then every `UPDATE` and `DELETE` on that table fails. A projection
-bug becomes a creator write outage. Two reviewers are weighing whether that is
-disqualifying.
+**The known cost, disclosed by the design's own author:** a column list that does
+not cover the replica identity is accepted SILENTLY at DDL time, and then every
+`UPDATE` and `DELETE` on that table fails with **SQLSTATE 42P10**. Reviewed
+verdict: real, **not disqualifying, and narrower than "write outage"** - `INSERT`
+still succeeds, so it is an UPDATE/DELETE outage and reads are unaffected. The
+replica-identity UNION in the projection is the structural defence.
+
+### Three review findings that change the design (2026-08-28)
+
+**1. `DROP COLUMN` of a listed column FAILS, so reconcile-after-apply is the
+wrong placement.** A column named in a publication column list becomes a catalog
+dependency. Measured by me on 18.4, with a control:
+
+| | result |
+| --- | --- |
+| drop a **listed** column | **REFUSED** - *"cannot drop column ... because other objects depend on it / DETAIL: publication of table t in publication p depends on column mask_col"* |
+| **control** - drop an **unlisted** column, same table | drops cleanly |
+| `DROP ... CASCADE` | succeeds, and **removes the whole TABLE from the publication** (0 rows) - CDC silently stops |
+
+`reconcile_app_publication` runs **after** the migration DDL
+(`zeroship-migrated/src/apply.rs:755`), and `dropColumn` is a supported creator
+op the Postgres adapter lowers to a pure `ALTER TABLE DROP COLUMN`. So any
+migration that drops a masked column - including the ordinary "remove `.mask()`
+from a field" - aborts the creator's migration. **Today this cannot happen
+because publications are whole-table.** Column lists introduce an ordering
+constraint a single post-apply reconciliation cannot satisfy.
+
+**The fix is bounded, not fatal:** split reconciliation into a
+**shrink-before / widen-after** bracket around the DDL. The migration service
+already holds the diff. It also fixes finding 2 for free.
+
+**2. The epoch marker is emitted one transaction LATE.** The design's transcript
+puts `pg_logical_emit_message` and the `ALTER TABLE` in one transaction, but the
+actual emission site is inside `reconcile_in_transaction`, whose transaction
+carries the `ALTER PUBLICATION` - **not** the creator's DDL, which committed
+earlier. So "the marker strictly precedes new-schema data" holds only for data
+committed after the *reconcile*, not for writes in the window between. Staleness,
+not a leak - the projection is unaffected because new columns default out either
+way.
+
+**3. The marker is FORGEABLE, and marker integrity rests entirely on
+no-raw-SQL.** `pg_logical_emit_message` has `proacl = NULL`, i.e. **default
+PUBLIC EXECUTE** - verified by me on 18.4, by the reviewer on 16.14. The WAL `M`
+frame carries prefix, content, xid and lsn but **not the emitting role**
+(`compio-postgres/src/replication.rs:2043-2050`), and the marker names its own
+app *in its content string*. With one shared cluster slot, the relay cannot
+distinguish a marker minted by `zeroship-migrated` from one minted by any other
+session, nor verify the claimed app.
+
+The only thing preventing a tenant from bumping another tenant's incarnation is
+that creator code has no raw-SQL surface. That is probably sufficient today, but
+it is a **new trust edge** and the design should say so rather than describing
+the marker as dissolving the problem.
+
+**A version trap in the recommended mitigation, found by measuring two servers.**
+`REVOKE EXECUTE ... FROM PUBLIC` must name the right overloads, and **the
+signature changed**: PG 16 has `pg_logical_emit_message(boolean,text,text)`;
+**PG 18.4 has four parameters** and two overloads -
+`(boolean,text,text,boolean)` and `(boolean,text,bytea,boolean)`, both with
+`proacl = NULL`. A revoke written against the 16 signature covers **nothing** on
+18. This is exactly what a single-version measurement cannot see.
 
 **What it does NOT need to re-derive:** the decode multiplier is structural.
 Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
