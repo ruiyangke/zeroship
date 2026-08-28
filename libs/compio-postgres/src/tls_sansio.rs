@@ -378,6 +378,34 @@ impl TlsSession {
     }
 }
 
+const CLOSE_NOTIFY_SENT_MESSAGE: &str = "the TLS session already sent close_notify";
+
+struct CloseNotifySent;
+
+impl std::fmt::Debug for CloseNotifySent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(CLOSE_NOTIFY_SENT_MESSAGE, formatter)
+    }
+}
+
+impl std::fmt::Display for CloseNotifySent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(CLOSE_NOTIFY_SENT_MESSAGE)
+    }
+}
+
+impl std::error::Error for CloseNotifySent {}
+
+fn close_notify_sent_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, CloseNotifySent)
+}
+
+fn is_close_notify_sent_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync + 'static>::is::<CloseNotifySent>)
+}
+
 struct SharedSessionState {
     session: Option<TlsSession>,
     owner: Option<ThreadId>,
@@ -441,10 +469,7 @@ impl SharedSession {
                 ));
             }
             if self.inner.close_notify_out.load(Ordering::Acquire) {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "the TLS session already sent close_notify",
-                ));
+                return Err(close_notify_sent_error());
             }
             if state.poisoned {
                 return Err(io::Error::new(
@@ -482,10 +507,7 @@ impl SharedSession {
             ));
         }
         if self.inner.close_notify_out.load(Ordering::Acquire) {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "the TLS session already sent close_notify",
-            ));
+            return Err(close_notify_sent_error());
         }
 
         let Some(mut state) = self.inner.state.try_lock() else {
@@ -498,10 +520,7 @@ impl SharedSession {
             ));
         }
         if self.inner.close_notify_out.load(Ordering::Acquire) {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "the TLS session already sent close_notify",
-            ));
+            return Err(close_notify_sent_error());
         }
         if state.poisoned {
             return Err(io::Error::new(
@@ -824,6 +843,12 @@ where
                 commit(&mut buf, &self.plain[..n]);
                 BufResult(Ok(n), buf)
             }
+            // Synchronous release serialized close_notify and committed to
+            // shutting down the socket. Its typed lease refusal is EOF to the
+            // racing read half, just as local teardown is over plaintext. A
+            // different I/O or TLS failure stays intact, and awaited-response
+            // classification still rejects this EOF when protocol work remains.
+            Err(error) if is_close_notify_sent_error(&error) => BufResult(Ok(0), buf),
             Err(error) => BufResult(Err(error), buf),
         }
     }
