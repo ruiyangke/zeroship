@@ -1295,6 +1295,42 @@ it. Dropping `REPLICATION` leaves that question exactly where it was.
 justification even after the relay lands, since it is unrelated to replication
 and nothing in this set explains why the worker needs it.
 
+### L31 (NEW 2026-08-28) - `updateMany`'s row cap guards one of two branches, and its only test is written on the guarded one
+
+**`db.updateMany({}, {...})` on an ordinary collection renders an unbounded
+whole-table rewrite that also materialises every row.** Verified:
+
+- `dispatch_update_many` probes target ids and refuses above `MAX_QUERY_LIMIT`,
+  but that check sits **inside `if per_row_encrypted_update`**
+  (`crud/mod.rs:1233`). An update touching no randomised-encrypted column falls
+  through to `crud/mod.rs:1353+`, which builds the statement straight from the
+  caller's filter - no probe, no cap.
+- `build_update_many_with_system_fields` emits the `WHERE` clause only when the
+  filter is non-empty (`zeroship-schema/src/query.rs:4220-4228`), then appends
+  `RETURNING *`.
+
+So the rendered statement is `UPDATE "app"."t" SET ... RETURNING *`.
+
+**What makes it invisible is the part worth keeping.** The cap has a test, and
+the test is green:
+`update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime`
+(`tests/sqlite_integration.rs:4191`). Its fixture updates `{ ssn: ... }` against
+`users_encrypted_ssn_schema` - and `ssn` is the randomised-encrypted column,
+which is exactly what selects the **guarded** branch. **The guard exists, has a
+passing test, and the test's fixture is what routes around the hole.**
+
+This is the verification record's central class, in its most exact form yet: not
+a vacuous test and not a wrong assertion, but a **fixture that cannot reach the
+unguarded path**. A reviewer reading the test sees a cap being enforced.
+
+`dispatch_purge_many` has the same shape with no cap at all
+(`crud/mod.rs:1599` -> `query.rs:4249-4254`).
+
+**NOT FIXED, per the standing deferral.** Recorded with the note that the IR's
+write family already makes this unrepresentable - `RowLimit` is mandatory on
+`Update` and `Delete` with no "all rows" value - so the port closes it by
+construction rather than by adding a second guard to the second branch.
+
 ---
 
 ## Reclassified from v3: not live defects
