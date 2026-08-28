@@ -167,25 +167,24 @@ jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{co
 
 psql_exec() { docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 
-# Record the probe's committed migrations as IR for zeroship-migrated. Same
-# helper as tests/e2e_db_app_end_to_end.sh; the recorder lives in the built
-# vite-plugin, so this reads the SAME migration files the .zship was built from.
+# The probe's apply body is THE BUILD'S OWN `migrations.ir.json`, taken verbatim
+# - the same file `zeroship migrate` posts.
+#
+# It used to be re-recorded here from the migration sources. That produced the
+# same documents but no `descriptor_sha256`, and that field is what binds the
+# apply to the descriptor the .zship carries: `genTypesFromMigrations` calls
+# `genArtifacts` ONCE and writes `schema.runtime.json` and `migrations.ir.json`
+# from that single reply. Control refuses a deploy whose
+# `manifest.runtime_descriptor.hash` is not the hash recorded on the app's
+# newest applied migration, so a re-recorded body would apply and then leave
+# every deploy of this app refused.
 write_apply_request() {
-  node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" \
-    "$ROOT/examples/metering-probe/migrations" > "$WORK/apply-migrations.json" <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const migration of migrations) {
-  documents.push({
-    filename: migration.stem + ".ir.json",
-    body: await recordMigration(migration.path),
-  });
-}
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
+  local ir="$ROOT/examples/metering-probe/generated/zeroship/migrations.ir.json"
+  [ -s "$ir" ] || {
+    echo "missing $ir — (cd examples/metering-probe && pnpm build)" >&2
+    return 1
+  }
+  cp "$ir" "$WORK/apply-migrations.json"
 }
 
 cleanup() {
@@ -488,12 +487,11 @@ INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP', '$CREAT
 ON CONFLICT (app_id, user_id) DO UPDATE SET role='owner';
 SQL
 
-DEP="$("$BIN/zeroship" deploy "$PROBE_ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
-echo "$DEP" | grep -q "deploy_hash" && pass "deployed metering-probe .zship → $APP" || { fail "deploy failed: $DEP"; tail -20 "$WORK/control.log"; exit 1; }
-
-# Apply the probe's migrations to its per-app schema. Deploy uploads the bundle;
-# it does NOT create tables. Without this the probe's env.db insert has nothing
-# to write to, which is the state this harness ran in until 2026-08-11.
+# MIGRATIONS FIRST, THEN DEPLOY. Control refuses a deploy whose runtime schema
+# descriptor is not the one the app's newest applied migration recorded, so the
+# order here is the product's rather than this harness's preference. The app row
+# still has to exist first - the migration service will not create one, and the
+# POST /api/apps above is what does.
 write_apply_request || { fail "could not record migration IR"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' \
   -X POST "$MIGRATED_URL/v1/apps/$APP/migrations/apply" \
@@ -506,6 +504,9 @@ else
   fail "migration apply failed (http=$APPLY_CODE): $(cat "$WORK/apply-response.json")"
   tail -30 "$WORK/migrated.log"; exit 1
 fi
+
+DEP="$("$BIN/zeroship" deploy "$PROBE_ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
+echo "$DEP" | grep -q "deploy_hash" && pass "deployed metering-probe .zship → $APP" || { fail "deploy failed: $DEP"; tail -20 "$WORK/control.log"; exit 1; }
 
 sleep 5  # let route + version sync to gateway + worker
 

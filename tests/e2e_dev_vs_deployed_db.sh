@@ -857,11 +857,15 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy" || { fail "gateway did not come up"; tail -30 "$WORK/gate.log"; exit 1; }
 
+# --defer-deploy: this app's .zship carries a runtime schema descriptor, and
+# control refuses to make such a deploy live until the migrations that produced
+# that descriptor are applied. The migration service needs the app row first and
+# will not create one, so the app is created here and activated after the apply.
 OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
-  --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+  --name "$APP_NAME" --zship "$ZSHIP" --defer-deploy 2>&1)
 APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
 API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
-[ -n "$API_KEY" ] && pass "deployed $APP_NAME ($APP_ID)" || { fail "provision: $OUT"; exit 1; }
+[ -n "$API_KEY" ] || { fail "provision: $OUT"; exit 1; }
 
 # --- apply the creator's recorded migration IR through zeroship-migrated ---
 # Same mechanism as tests/e2e_db_app_end_to_end.sh: the .zship carries the
@@ -879,22 +883,18 @@ SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint"; exit 1; }
 
-node --input-type=module - "$RECORDER" "$APP/migrations" > "$WORK/apply-migrations.json" <<'NODE'
-import { pathToFileURL } from "node:url";
-const [recorderPath, dir] = process.argv.slice(2);
-const { discoverMigrations, recordMigration } = await import(pathToFileURL(recorderPath).href);
-const migrations = await discoverMigrations(dir);
-const documents = [];
-for (const migration of migrations) {
-  documents.push({ filename: migration.stem + ".ir.json", body: await recordMigration(migration.path) });
-}
-console.log(JSON.stringify({ kind: "ir", documents }));
-NODE
-[ -s "$WORK/apply-migrations.json" ] || { fail "recorded no migration IR"; exit 1; }
+# THE BUILD'S OWN APPLY BODY, not a second recording of the same sources. It
+# carries `descriptor_sha256` - the hash of the `schema.runtime.json` the same
+# `genArtifacts` call emitted, which is what the .zship's manifest is
+# content-addressed by and what the activation below is checked against. A
+# re-recording produces a body with no descriptor, and the activation would then
+# be refused for a reason that has nothing to do with the app.
+IR_BODY="$APP/generated/zeroship/migrations.ir.json"
+[ -s "$IR_BODY" ] || { fail "the build left no $IR_BODY - run pnpm build in $APP"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' -X POST \
   "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$APP_ID/migrations/apply" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
-  --data-binary @"$WORK/apply-migrations.json")"
+  --data-binary @"$IR_BODY")"
 APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
 SKIPPED="$(jget '.skipped.length' < "$WORK/apply-response.json")"
 if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
@@ -903,6 +903,17 @@ else
   fail "migrated apply failed (http=$APPLY_CODE)"
   cat "$WORK/apply-response.json"; tail -30 "$WORK/migrated.log"; exit 1
 fi
+
+# NOW the deploy can go live. Same command, minus --defer-deploy: dev-provision
+# reuses the app by name and re-ingests the same content-addressed blobs.
+ACT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
+  --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
+LIVE=$(psql_exec -tAc "select coalesce(deploy_hash,'') from zeroship.apps where id = '$APP_ID'" 2>/dev/null | tr -d '[:space:]')
+# ONE pass for the pair, not two. The create-then-activate split replaced a
+# single `dev-provision` call, and the floor at the bottom of this file is an
+# exact measurement - so the assertion moved here rather than multiplying.
+[ -n "$LIVE" ] && pass "deployed $APP_NAME ($APP_ID) once its migrations applied" \
+  || { fail "activation refused after the apply: $ACT"; exit 1; }
 sleep 6   # gateway route-sync poll
 
 RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"

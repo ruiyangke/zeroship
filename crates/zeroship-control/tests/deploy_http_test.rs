@@ -1131,3 +1131,370 @@ async fn deploy_is_rate_limited() {
     drop(fx);
     common::drain_pg().await;
 }
+
+// ---------------------------------------------------------------------------
+// The deploy schema precondition
+//
+// The runtime descriptor carried by the `.zship` is the SOLE schema authority
+// for `env.db` - there is no live introspection left. So if a deploy goes live
+// before its migrations apply, the descriptor says a column is masked while the
+// database still holds plaintext there, and the runtime serves the plain value
+// believing it is masked. Nothing downstream detects it.
+//
+// The guard is a predicate on the UPDATE in `Registry::set_deploy_with_manifest`,
+// which is what "this deploy is live" means. These cases drive the full HTTP
+// handler, so they measure the shipped path rather than the registry call.
+//
+// ON THE FIXTURE, AND WHY IT IS NOT `manifest_for`. Every other deploy case in
+// this file uses `manifest_for`, which hardcodes `runtime_descriptor: None`
+// (correctly - those are schema-less apps). A case that reused it unchanged
+// would take the "no descriptor, no applied schema" arm, which the guard
+// PERMITS, and would print exactly what a working guard prints while ruling on
+// nothing. `manifest_with_descriptor` below is the whole difference, and the
+// fixture mutation named on the first case is what pins it.
+// ---------------------------------------------------------------------------
+
+/// Bytes that stand in for `schema.runtime.json`.
+///
+/// Deliberately NOT a real descriptor. Control's ingest validates the blob's
+/// HASH FORMAT and its PRESENCE in the tar and never parses the body
+/// (`zeroship-bundle/src/unpack.rs`, the `runtime_descriptor` arm of the blob
+/// gather), so the guard is reachable with any bytes. Lifting a committed
+/// `examples/*/generated/schema.runtime.json` would be worse than useless: all
+/// of them are `"version": 1` while the packer accepts only v2, so they would
+/// fail for a reason that has nothing to do with this guard.
+fn descriptor_blob(marker: &str) -> Vec<u8> {
+    format!(r#"{{"version":2,"marker":"{marker}","collections":{{}},"storage":{{}}}}"#).into_bytes()
+}
+
+/// A manifest that CARRIES a runtime schema descriptor - the state
+/// [`manifest_for`] cannot construct.
+fn manifest_with_descriptor(worker_hash: &str, descriptor_hash: &str) -> Manifest {
+    let mut m = manifest_for(Some(worker_hash), &[]);
+    m.runtime_descriptor = Some(zeroship_bundle::RuntimeDescriptorEntry {
+        hash: descriptor_hash.to_string(),
+    });
+    m
+}
+
+/// A `.zship` whose manifest names the descriptor and whose tar carries the
+/// matching blob. `None` builds the schema-less artifact instead.
+fn zship_with_descriptor(descriptor: Option<&[u8]>) -> Vec<u8> {
+    let server = b"export default { fetch() { return new Response('ok'); } }";
+    let server_hash = sha256_hex(server);
+    let mut blobs = vec![(server_hash.clone(), server.to_vec())];
+    let manifest = match descriptor {
+        Some(bytes) => {
+            let hash = sha256_hex(bytes);
+            blobs.push((hash.clone(), bytes.to_vec()));
+            manifest_with_descriptor(&server_hash, &hash)
+        }
+        None => manifest_for(Some(&server_hash), &[]),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    build_zship(&manifest_bytes, &blobs, true)
+}
+
+/// Write the ledger row `migrated` writes when an apply request succeeds.
+///
+/// `applied_at` is a parameter so a case can order two rows deterministically:
+/// the predicate compares against the NEWEST applied row, and a case that
+/// cannot control which row is newest cannot tell "newest" from "any".
+async fn insert_applied_migration(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    submitted_by: &Uuid,
+    descriptor_sha256: &str,
+    applied_at: &str,
+) {
+    conn.execute(
+        "INSERT INTO zeroship.migrated_migrations \
+            (app_id, migration_id, status, request_body, effective_profile, \
+             ceiling_id, ceiling_version, gated_versions, submitted_by, \
+             applied_at, descriptor_sha256) \
+         VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
+                 '[]'::jsonb, $3, $4::text::timestamptz, $5)",
+        &[
+            app_id,
+            &Uuid::now_v7(),
+            submitted_by,
+            &applied_at,
+            &descriptor_sha256,
+        ],
+    )
+    .await
+    .expect("insert applied migration row");
+}
+
+/// The app's live deploy hash AS THE GATEWAY WOULD READ IT.
+///
+/// Read through `get_routes()` rather than off `zeroship.apps`, because that is
+/// the projection the gateway polls. Asserting the 409 alone would pass on a
+/// build that answers 409 AND commits the UPDATE.
+async fn live_deploy_hash(state: &AppState, app_id: &Uuid) -> Option<String> {
+    state
+        .registry
+        .get_routes()
+        .await
+        .expect("get_routes")
+        .get(app_id)
+        .and_then(|entry| entry.deploy_hash.clone())
+}
+
+async fn post_zship(
+    app: &ntex::Pipeline<
+        impl ntex::Service<
+            ntex::http::Request,
+            Response = ntex::web::WebResponse,
+            Error = ntex::web::Error,
+        >,
+    >,
+    app_id: &Uuid,
+    bearer: &str,
+    body: Vec<u8>,
+) -> (StatusCode, serde_json::Value) {
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .header("authorization", bearer)
+        .header("content-type", "application/x-zship")
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status();
+    let bytes = test::read_body(resp).await;
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// Create an app named for `label`, owned by `owner_id`.
+async fn create_labelled_app(state: &AppState, label: &str, owner_id: &Uuid) -> Uuid {
+    state
+        .registry
+        .create_app(
+            &format!("{label}-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            &zeroship_control::plan_catalog::free_plan_id(),
+            owner_id,
+        )
+        .await
+        .expect("create app")
+        .id
+}
+
+/// ARM 1. A descriptor-carrying deploy over an app with NO applied schema is
+/// refused, and nothing goes live.
+///
+/// MUTATIONS THIS MUST SURVIVE, both run:
+///  - CODE: delete the `AND CASE ... END` clause from the UPDATE in
+///    `Registry::set_deploy_with_manifest`. This case must go RED.
+///  - FIXTURE: build the bundle with `zship_with_descriptor(None)`. This case
+///    must ALSO go red - with no descriptor and no applied schema the guard
+///    correctly answers 200, so a case that cannot tell those two apart is not
+///    measuring the guard.
+#[compio::test]
+async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
+    let db_url = db_url();
+    let fx = build_test_state(&db_url, "schema-unapplied").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "schema-unapplied").await;
+    let app_id = create_labelled_app(&fx.state, "schemaunapplied", &pat.user_id).await;
+
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await,
+        None,
+        "CONTROL: a freshly created app has no live deploy, so the same read \
+         after the refusal is attributable to the refusal",
+    );
+
+    let (status, body) = post_zship(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        zship_with_descriptor(Some(&descriptor_blob("v1"))),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "expected 409, body: {body}");
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("schema_not_applied"),
+    );
+    assert!(
+        body.get("remedy")
+            .and_then(|v| v.as_str())
+            .is_some_and(|remedy| remedy.contains("zeroship migrate")
+                && remedy.contains(&app_id.to_string())),
+        "the body must carry the remedy command naming this app, got {body}",
+    );
+    // THE ASSERTION THAT MAKES THE 409 MEAN SOMETHING. A build that answers 409
+    // and commits the UPDATE anyway satisfies every check above and leaks
+    // exactly what this guard exists to stop.
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await,
+        None,
+        "the refused deploy must not be live in the projection the gateway reads",
+    );
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// ARM 2. THE CONTROL, differing from arm 1 in ONE variable: the same bytes,
+/// over an app whose newest applied migration recorded THIS descriptor.
+#[compio::test]
+async fn deploy_matching_the_applied_descriptor_goes_live() {
+    let db_url = db_url();
+    let fx = build_test_state(&db_url, "schema-applied").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "schema-applied").await;
+    let app_id = create_labelled_app(&fx.state, "schemaapplied", &pat.user_id).await;
+
+    let blob = descriptor_blob("v1");
+    insert_applied_migration(
+        &fx.state.control_pg,
+        &app_id,
+        &pat.user_id,
+        &sha256_hex(&blob),
+        "2026-08-28T00:00:00Z",
+    )
+    .await;
+
+    let (status, body) = post_zship(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        zship_with_descriptor(Some(&blob)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "expected 200, body: {body}");
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await.as_deref(),
+        body.get("deploy_hash").and_then(|v| v.as_str()),
+        "the accepted deploy is live in the projection the gateway reads",
+    );
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// ARM 3. The bypass that costs one JSON key.
+///
+/// `runtime_descriptor` is `skip_serializing_if = "Option::is_none"` on a
+/// creator-produced artifact, so a one-armed guard is defeated by deleting the
+/// field. The app would then boot with `env.db` uninstalled over a live
+/// database.
+#[compio::test]
+async fn deploy_without_a_descriptor_is_refused_when_the_app_has_applied_schema() {
+    let db_url = db_url();
+    let fx = build_test_state(&db_url, "schema-missing").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "schema-missing").await;
+    let app_id = create_labelled_app(&fx.state, "schemamissing", &pat.user_id).await;
+
+    insert_applied_migration(
+        &fx.state.control_pg,
+        &app_id,
+        &pat.user_id,
+        &sha256_hex(&descriptor_blob("v1")),
+        "2026-08-28T00:00:00Z",
+    )
+    .await;
+
+    let (status, body) =
+        post_zship(&app, &app_id, &pat.bearer(), zship_with_descriptor(None)).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "expected 409, body: {body}");
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("schema_descriptor_missing"),
+    );
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await,
+        None,
+        "a descriptor-less deploy over a schema'd app must not go live",
+    );
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// ARM 4. NEWEST APPLIED, NOT MEMBERSHIP.
+///
+/// This is the case an `IN (...)` implementation passes: N-1's descriptor WAS
+/// applied once, so it is a member of the set forever, and a rollback across a
+/// migration boundary would go live while the database sits at N. The two rows
+/// differ only in `applied_at`, which is what "newest" is decided on.
+#[compio::test]
+async fn deploy_rolling_back_to_a_previously_applied_descriptor_is_refused() {
+    let db_url = db_url();
+    let fx = build_test_state(&db_url, "schema-rollback").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "schema-rollback").await;
+    let app_id = create_labelled_app(&fx.state, "schemarollback", &pat.user_id).await;
+
+    let old = descriptor_blob("v1");
+    let new = descriptor_blob("v2");
+    insert_applied_migration(
+        &fx.state.control_pg,
+        &app_id,
+        &pat.user_id,
+        &sha256_hex(&old),
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
+    insert_applied_migration(
+        &fx.state.control_pg,
+        &app_id,
+        &pat.user_id,
+        &sha256_hex(&new),
+        "2026-08-28T00:00:00Z",
+    )
+    .await;
+
+    let (status, body) = post_zship(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        zship_with_descriptor(Some(&old)),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a descriptor that was applied ONCE but is not the newest must be refused, body: {body}",
+    );
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await,
+        None,
+        "the rolled-back deploy must not be live",
+    );
+
+    // The control: the NEWEST descriptor over the SAME two rows is accepted, so
+    // the refusal above is about which row is newest and not about the app
+    // holding two rows at all.
+    let (status, body) = post_zship(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        zship_with_descriptor(Some(&new)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "expected 200, body: {body}");
+    assert!(live_deploy_hash(&fx.state, &app_id).await.is_some());
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}

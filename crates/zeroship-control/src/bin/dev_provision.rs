@@ -50,6 +50,25 @@ struct Cli {
     /// Owner user id for the app. Defaults to a deterministic dev-only owner.
     #[arg(long)]
     owner: Option<Uuid>,
+
+    /// Create the app and ingest the artifact, but do NOT make the deploy live.
+    ///
+    /// An app whose `.zship` carries a runtime schema descriptor cannot be made
+    /// live until its migrations are applied - `Registry::set_deploy_with_manifest`
+    /// refuses it, the same way the deploy API refuses a creator. But the
+    /// migration service needs the app row to exist before it will apply
+    /// anything, and this tool is what creates it. So a schema-carrying app is
+    /// provisioned in two calls:
+    ///
+    ///   dev-provision --defer-deploy ...   # app_id + api_key, nothing live
+    ///   <apply migrations through zeroship-migrated>
+    ///   dev-provision ...                  # same command, now activates
+    ///
+    /// The second call reuses the existing app by name and re-ingests the same
+    /// content-addressed blobs, so running it is idempotent. An app with no
+    /// descriptor needs neither the flag nor the second call.
+    #[arg(long = "defer-deploy")]
+    defer_deploy: bool,
 }
 
 #[derive(Debug)]
@@ -131,10 +150,42 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
     let success = zeroship_bundle::ingest(&blob_store, &app.id, &bytes)
         .await
         .map_err(|e| err(format!("zship ingest: {e:?}")))?;
+    if cli.defer_deploy {
+        eprintln!(
+            "dev-provision: --defer-deploy: app {} created and blobs ingested; the deploy is \
+             NOT live. Apply its migrations, then re-run without the flag.",
+            app.id
+        );
+        return Ok(app);
+    }
+    // Read from the SAME manifest bytes the registry is about to store, so the
+    // descriptor this call presents is the descriptor that would go live.
+    let descriptor_sha256 =
+        serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json)
+            .map_err(|e| err(format!("re-parse ingested manifest: {e}")))?
+            .runtime_descriptor
+            .map(|entry| entry.hash);
     let updated = registry
-        .set_deploy_with_manifest(&app.id, &success.deploy_hash, &success.manifest_json)
+        .set_deploy_with_manifest(
+            &app.id,
+            &success.deploy_hash,
+            &success.manifest_json,
+            descriptor_sha256.as_deref(),
+        )
         .await
-        .map_err(|e| err(format!("deploy commit: {e}")))?;
+        .map_err(|e| match e {
+            // The schema precondition, restated for a tool whose caller is a
+            // shell script rather than the deploy CLI. Without the second
+            // sentence this reads as a bug in the artifact.
+            RegistryError::SchemaNotApplied { .. } => err(format!(
+                "deploy commit refused: {e}\n\
+                 app {} exists and its blobs are ingested. Apply its migrations through \
+                 zeroship-migrated, then re-run this command. To create the app WITHOUT \
+                 this failure, pass --defer-deploy on the first call.",
+                app.id
+            )),
+            other => err(format!("deploy commit: {other}")),
+        })?;
     if !updated {
         return Err(err(format!(
             "app {} vanished between create/reuse and deploy commit",

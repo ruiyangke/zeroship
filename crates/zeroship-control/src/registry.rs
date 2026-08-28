@@ -42,6 +42,22 @@ pub enum RegistryError {
     /// surfaced as a distinct variant so the sweep can fail closed instead of
     /// logging-and-continuing past a revenue leak.
     FxUnresolved,
+    /// The deploy was refused because its runtime schema descriptor does not
+    /// name the schema the app's database actually holds.
+    ///
+    /// Typed separately from [`Self::Conflict`] because the remedy is a command
+    /// the creator runs, and the response body carries it. Both fields are
+    /// `Option` because the two refusals are different mistakes:
+    ///
+    /// - `descriptor = Some`, `applied = Some(other)` / `None` — the code was
+    ///   built against a schema this app has not migrated to. Run the migration.
+    /// - `descriptor = None`, `applied = Some(_)` — the artifact declares NO
+    ///   schema at all while the app has one. Deploying it would boot the app
+    ///   with `env.db` uninstalled over a live database.
+    SchemaNotApplied {
+        descriptor_sha256: Option<String>,
+        applied_sha256: Option<String>,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -58,6 +74,23 @@ impl std::fmt::Display for RegistryError {
                 "global default FX missing — platform cannot price; aborting billing sweep \
                  rather than billing $0"
             ),
+            Self::SchemaNotApplied {
+                descriptor_sha256,
+                applied_sha256,
+            } => match descriptor_sha256 {
+                Some(descriptor) => write!(
+                    f,
+                    "schema not applied: this build's runtime descriptor is {descriptor}, but \
+                     the app's newest applied migration recorded {}",
+                    applied_sha256.as_deref().unwrap_or("no descriptor at all")
+                ),
+                None => write!(
+                    f,
+                    "schema descriptor missing: this artifact declares no runtime schema, but \
+                     the app has applied migrations (newest descriptor {})",
+                    applied_sha256.as_deref().unwrap_or("unrecorded")
+                ),
+            },
         }
     }
 }
@@ -383,40 +416,96 @@ impl Registry {
         Ok(n > 0)
     }
 
-    /// Set the deploy hash (content-addressable bundle hash) for an app.
-    pub async fn set_deploy_hash(&self, id: &Uuid, hash: &str) -> Result<bool, RegistryError> {
-        let conn = self.conn().await?;
-        let n = conn
-            .execute(
-                "UPDATE zeroship.apps SET deploy_hash = $1, \
-                 updated_at = NOW() WHERE id = $2",
-                &[&hash, id],
-            )
-            .await?;
-        Ok(n > 0)
-    }
-
     /// Atomic deploy commit. Sets `deploy_hash` and `manifest_json` in
     /// the same UPDATE so the gateway never observes a half-applied
     /// deploy. Used by the .zship ingest path.
+    ///
+    /// THIS STATEMENT IS WHAT "LIVE" MEANS. The gateway reads exactly these two
+    /// columns ([`Self::get_gateway_snapshot`]) and polls them; the
+    /// `zeroship.app_deploys` insert below is history. So the schema
+    /// precondition is a PREDICATE ON THIS UPDATE, not a check in the handler.
+    /// The precedent is [`Self::set_plan`] directly below: a separate
+    /// validate-then-UPDATE there had a TOCTOU window and was replaced by an
+    /// `EXISTS` subquery in the same statement. The same window here is worse,
+    /// because what races is a concurrent migration.
+    ///
+    /// `descriptor_sha256` is `manifest.runtime_descriptor.hash` — the sha256 of
+    /// the `schema.runtime.json` this artifact carries, or `None` for an app
+    /// that declares no schema. The predicate has two arms and both are load-
+    /// bearing:
+    ///
+    /// - Present: it must equal the descriptor recorded on the app's NEWEST
+    ///   APPLIED migration row. Newest, not "any" — membership would let a
+    ///   rollback through, since N-1's hash was applied once and an `IN (...)`
+    ///   test passes while the database sits at N.
+    /// - Absent: allowed only when the app has NO applied schema.
+    ///   `runtime_descriptor` is `skip_serializing_if = "Option::is_none"` on a
+    ///   creator-produced artifact, so a one-armed guard is bypassed by deleting
+    ///   one JSON key — and the app then boots with `env.db` uninstalled over a
+    ///   live database. A guard whose bypass is "omit the field" is not a guard.
+    ///
+    /// Both arms fail CLOSED on a NULL `descriptor_sha256` in the ledger (a row
+    /// written before that column existed): `=` against NULL is NULL, never
+    /// true, so the app must migrate once more before it can deploy.
+    ///
+    /// There is no operator override, and that is not a policy about overrides.
+    /// The remedy is a creator-reachable endpoint that is already mandatory in
+    /// the golden path, and the case that feels like it needs one — a code
+    /// rollback across a migration boundary — is not made safe by an override.
     pub async fn set_deploy_with_manifest(
         &self,
         id: &Uuid,
         deploy_hash: &str,
         manifest_json: &str,
+        descriptor_sha256: Option<&str>,
     ) -> Result<bool, RegistryError> {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
         let n = tx
             .execute(
                 "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
-                 updated_at = NOW() WHERE id = $3",
-                &[&deploy_hash, &manifest_json, id],
+                 updated_at = NOW() WHERE id = $3 \
+                   AND CASE WHEN $4::text IS NULL \
+                            THEN NOT EXISTS (SELECT 1 FROM zeroship.migrated_migrations \
+                                              WHERE app_id = $3 AND status = 'applied') \
+                            ELSE $4::text = (SELECT m.descriptor_sha256 \
+                                               FROM zeroship.migrated_migrations m \
+                                              WHERE m.app_id = $3 AND m.status = 'applied' \
+                                              ORDER BY m.applied_at DESC NULLS LAST, \
+                                                       m.submitted_at DESC, \
+                                                       m.migration_id DESC \
+                                              LIMIT 1) \
+                       END",
+                &[&deploy_hash, &manifest_json, id, &descriptor_sha256],
             )
             .await?;
         if n == 0 {
-            tx.commit().await?;
-            return Ok(false);
+            // Zero rows is ambiguous: no such app, or the schema predicate
+            // refused. Disambiguate for the MESSAGE only — the decision was
+            // already taken atomically above, so this read cannot re-open it.
+            let app_exists = tx
+                .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
+                .await?;
+            if app_exists.is_empty() {
+                tx.commit().await?;
+                return Ok(false);
+            }
+            let applied_sha256 = tx
+                .query(
+                    "SELECT m.descriptor_sha256 FROM zeroship.migrated_migrations m \
+                      WHERE m.app_id = $1 AND m.status = 'applied' \
+                      ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
+                               m.migration_id DESC \
+                      LIMIT 1",
+                    &[id],
+                )
+                .await?
+                .first()
+                .and_then(|row| row.get::<_, Option<String>>("descriptor_sha256"));
+            return Err(RegistryError::SchemaNotApplied {
+                descriptor_sha256: descriptor_sha256.map(str::to_owned),
+                applied_sha256,
+            });
         }
 
         let deploy_id = format!("dep_{}", uuid::Uuid::new_v4().simple());

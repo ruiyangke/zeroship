@@ -140,7 +140,57 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
             "pricing misconfigured",
             "global default FX missing".to_string(),
         ),
+        // Reachable only through a caller that does not build the remedy body.
+        // `deploy` intercepts this variant before `error_response` and answers
+        // with `schema_precondition_response`, which carries the command.
+        RegistryError::SchemaNotApplied { .. } => {
+            web::HttpResponse::Conflict().json(&serde_json::json!({
+                "error": "schema_not_applied",
+                "detail": e.to_string(),
+            }))
+        }
     }
+}
+
+/// The 409 a deploy gets when its runtime schema descriptor does not name the
+/// schema the app's database holds.
+///
+/// 409, not 400: the artifact is well-formed and the request is well-formed;
+/// what is wrong is the ORDER two correct operations happened in. And 409 is
+/// load-bearing beyond readability - `should_resolve_or_create_after_deploy_failure`
+/// in the CLI returns true only on 404, so a 409 does not trigger the
+/// auto-create-and-retry path and the creator sees this body rather than a
+/// second failure against a freshly created app.
+///
+/// `remedy` is a command, not a sentence. The CLI prints this body raw, so a
+/// creator can copy the line out of the terminal.
+fn schema_precondition_response(
+    app_id: &uuid::Uuid,
+    descriptor_sha256: &Option<String>,
+    applied_sha256: &Option<String>,
+) -> web::HttpResponse {
+    let (error, detail) = match descriptor_sha256 {
+        Some(_) => (
+            "schema_not_applied",
+            "this build's migrations have not been applied to the app's database. \
+             Deploying it would run code against a schema it was not built for - and \
+             where the two disagree about masking, the runtime would serve the plain \
+             value believing it was masked.",
+        ),
+        None => (
+            "schema_descriptor_missing",
+            "this artifact carries no runtime schema descriptor, but the app has \
+             applied migrations. Deploying it would boot the app with `env.db` \
+             uninstalled over a live database. Build with the migrations present.",
+        ),
+    };
+    web::HttpResponse::Conflict().json(&serde_json::json!({
+        "error": error,
+        "detail": detail,
+        "deploy_descriptor_sha256": descriptor_sha256,
+        "applied_descriptor_sha256": applied_sha256,
+        "remedy": format!("zeroship migrate --app={app_id}"),
+    }))
 }
 
 /// Log the real cause, return a generic body -- plus the correlation id
@@ -691,9 +741,12 @@ pub async fn deploy(
             // same bytes), but we still abort the deploy rather than silently drop
             // declared scopes (which would wipe the app_scope_defs registry on the
             // next provision).
-            let declared_scopes =
+            // The SAME re-parse also yields the runtime schema descriptor the
+            // artifact carries. It is read here rather than re-parsed later so
+            // there is exactly one interpretation of these bytes on this path.
+            let (declared_scopes, descriptor_sha256) =
                 match serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json) {
-                    Ok(m) => m.auth.scopes,
+                    Ok(m) => (m.auth.scopes, m.runtime_descriptor.map(|entry| entry.hash)),
                     Err(e) => {
                         tracing::error!(
                             app_id = %uid,
@@ -756,7 +809,12 @@ pub async fn deploy(
             // the migration service as a separate operation.
             match state
                 .registry
-                .set_deploy_with_manifest(&uid, &success.deploy_hash, &success.manifest_json)
+                .set_deploy_with_manifest(
+                    &uid,
+                    &success.deploy_hash,
+                    &success.manifest_json,
+                    descriptor_sha256.as_deref(),
+                )
                 .await
             {
                 Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({
@@ -766,6 +824,10 @@ pub async fn deploy(
                 })),
                 Ok(false) => web::HttpResponse::NotFound()
                     .json(&serde_json::json!({"error": "app not found"})),
+                Err(RegistryError::SchemaNotApplied {
+                    descriptor_sha256,
+                    applied_sha256,
+                }) => schema_precondition_response(&uid, &descriptor_sha256, &applied_sha256),
                 Err(e) => error_response(e),
             }
         }

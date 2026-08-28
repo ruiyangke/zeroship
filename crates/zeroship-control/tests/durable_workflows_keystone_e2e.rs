@@ -2023,7 +2023,7 @@ async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, Strin
     let updated = fx
         .state
         .registry
-        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest)
+        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest, None)
         .await
         .expect("activate redeploy manifest");
     assert!(updated, "redeploy should update app");
@@ -4760,6 +4760,7 @@ async fn keystone_real_spine() {
         &fx.app_id,
         &cascade_redeploy_hash,
         &cascade_manifest_raw,
+        None,
     );
     let cancel = post_control(
         &control_url,
@@ -4833,7 +4834,7 @@ async fn keystone_real_spine() {
     let updated = fx
         .state
         .registry
-        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest)
+        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest, None)
         .await
         .expect("redeploy without schedule");
     assert!(updated, "redeploy should update app");

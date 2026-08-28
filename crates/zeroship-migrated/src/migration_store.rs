@@ -81,8 +81,8 @@ impl MigrationStore {
                 "INSERT INTO zeroship.migrated_migrations \
                     (app_id, migration_id, status, request_body, effective_profile, \
                      ceiling_id, ceiling_version, gated_versions, submitted_by, \
-                     approved_checksum) \
-                 VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::jsonb, $9, $10)",
+                     approved_checksum, descriptor_sha256) \
+                 VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::jsonb, $9, $10, $11)",
                 &[
                     &input.app_id,
                     &input.migration_id,
@@ -94,6 +94,7 @@ impl MigrationStore {
                     &gated_versions,
                     &input.principal_id,
                     &approved_checksum,
+                    &input.descriptor_sha256,
                 ],
             )
             .await
@@ -373,6 +374,17 @@ pub struct StoreMigrationInput<'a> {
     pub ceiling_id: &'a str,
     pub ceiling_version: u64,
     pub gated_versions: &'a [String],
+    /// The runtime descriptor this document set folds to, lowercase sha256 hex.
+    ///
+    /// ONE ROW PER APPLY REQUEST, NOT PER APPLIED MIGRATION, and that is a
+    /// requirement rather than an accident of where the insert sits. A re-run
+    /// that applies nothing still writes a row carrying the CURRENT descriptor
+    /// hash, which is the only way an app whose descriptor bytes moved without
+    /// a schema change - an engine upgrade, a codegen fix - can ever deploy
+    /// again. "Skip the ledger write when nothing applied" is a natural
+    /// optimisation and it would brick every such app's next deploy forever,
+    /// because the control plane compares against the NEWEST applied row.
+    pub descriptor_sha256: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -595,6 +607,7 @@ mod tests {
                   approved_at timestamptz,
                   applied_at timestamptz,
                   approved_checksum text,
+                  descriptor_sha256 text,
                   last_error text,
                   PRIMARY KEY (app_id, migration_id)
                 );

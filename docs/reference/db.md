@@ -52,6 +52,53 @@ export const listAdmins = query(async () => {
 });
 ```
 
+## Migrate before you deploy
+
+`zeroship deploy` ships code; it does not touch the database. `zeroship migrate`
+applies the migration set. **For an app with migrations, the migrate has to come
+first**, and the control plane enforces it: a deploy whose generated
+`schema.runtime.json` is not the one the app's newest applied migration produced
+is refused with `409 schema_not_applied`, and nothing goes live.
+
+```
+$ zeroship deploy ./dist/app.zship --app=<id>
+
+This app has committed migrations. Deploy does NOT apply them:
+  zeroship migrate --app=<id> --control=<url>
+Until you do, this deploy is REFUSED with 409 schema_not_applied.
+```
+
+The response body names the fix:
+
+```json
+{
+  "error": "schema_not_applied",
+  "deploy_descriptor_sha256": "a588c564…",
+  "applied_descriptor_sha256": null,
+  "remedy": "zeroship migrate --app=<id>"
+}
+```
+
+There is no override. The check exists because the generated descriptor is the
+only thing the runtime consults about your schema - including which columns are
+masked. If it could go live ahead of the DDL it describes, a column the
+descriptor calls masked would be served as the plain value it still holds, and
+nothing downstream would notice.
+
+Three consequences worth knowing before you meet them:
+
+- **A brand-new database app takes two commands.** `zeroship migrate` will not
+  create an app that does not exist and `zeroship deploy` is what creates it, so
+  the first run is deploy (409) -> migrate -> deploy. Every run after that is
+  migrate -> deploy.
+- **An artifact built WITHOUT its migrations is refused too**, with
+  `409 schema_descriptor_missing`, once the app has any applied schema. Shipping
+  it would boot the app with `env.db` uninstalled over a live database.
+- **You cannot deploy an older build across a migration boundary.** The
+  comparison is against the NEWEST applied migration, not "any migration ever
+  applied", so rolling code back over a schema change means rolling the schema
+  forward - there is no reverse.
+
 ### TypeScript: typed `env.db`
 
 To make `env.db.<name>` strongly typed against the folded migration set,
@@ -1055,7 +1102,7 @@ Errors carry a `.code` property where applicable:
 | `VALIDATION`                | Input fails schema validation.                      |
 | `UNIQUE_VIOLATION`          | Duplicate unique-key violation.                     |
 | `OPTIMISTIC_CONCURRENCY`    | `update` with a CAS version that didn't match.     |
-| `SCHEMA_NOT_PROVISIONED`    | The app's database was never provisioned: its per-app Postgres role does not exist. Run `zeroship migrate` for the app. Deploying alone does not create it, so the first `env.db` call is what discovers it. |
+| `SCHEMA_NOT_PROVISIONED`    | The app's database was never provisioned: its per-app Postgres role does not exist. Run `zeroship migrate` for the app. Reachable only for an app deployed WITHOUT a generated descriptor - one that carries a descriptor is refused at deploy with `409 schema_not_applied` instead (see [Migrate before you deploy](#migrate-before-you-deploy)). |
 | `MIGRATION_*` (see above)   | Migration lifecycle errors.                         |
 | `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `POLYGON_OPS_PG_ONLY` | Vector / geo paths - see [Vector / Geo: Error codes](#error-codes). |
 

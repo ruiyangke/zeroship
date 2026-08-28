@@ -244,7 +244,9 @@ async fn deploy_round_trip() {
         .await
         .expect("ingest2");
     let updated = registry
-        .set_deploy_with_manifest(&app_id2, &success2.deploy_hash, &success2.manifest_json)
+        // No descriptor: this bundle declares no schema and the app has no
+        // applied migrations, which is the arm the precondition permits.
+        .set_deploy_with_manifest(&app_id2, &success2.deploy_hash, &success2.manifest_json, None)
         .await
         .expect("set deploy");
     assert!(updated);
