@@ -129,6 +129,23 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 futures = { workspace = true }
 schemars = { workspace = true }
+# TEST-ONLY typed environment-read boundary. `clippy.toml`'s `disallowed-methods` ban
+# on `std::env::var` names this crate's macro as the fix: `support::require_live_db_dsn`
+# used to read `ZERO_MIGRATE_TEST_PG_URL` / `ZERO_MIGRATE_MYSQL_URL` with a raw
+# `std::env::var`, which is exactly the un-enumerable read Section 4.5 of
+# docs/proposals/2026-08-11-config-name-alignment.md exists to remove. `test_env!` is
+# the one sanctioned way for first-party test code to read a literal env name (13+
+# other crates' test suites already use it, e.g. `zeroship-plugin-kv`'s
+# `DRAGONFLY_CLUSTER_SEEDS`); both names are registered in
+# `tests/test_only_env_gate.sh`'s closed INVENTORY in the same commit that adds them.
+#
+# Dev-only, so it never ships (`cargo tree -p zeroship-migrate -e normal` stays free of
+# it). It reaches tokio via `cyper`/`hyper` as a NORMAL dependency of zeroship-core
+# itself, which is not a new category of exposure for this crate's TEST build: the
+# `postgres` dev-dependency above already pulls tokio in transitively, accepted for the
+# same never-ships reason. `tests/zero_tokio_gate.sh` arms 2 and 3 both resolve with
+# `-e normal`, which never walks a dev edge, so this addition moves neither pinned set.
+zeroship-core = { workspace = true }
 
 [lints]
 workspace = true

@@ -4,11 +4,17 @@
 //! targets. This test emits it (`schemars::schema_for!`) and gates the on-disk
 //! file against the freshly generated one:
 //!
-//! - `UPDATE_SCHEMA=1 cargo test … --test ir_envelope_schema` REWRITES the file
-//!   (regenerate after an intentional IR shape change), then commit it.
+//! - `cargo test -p zeroship-migrate --test ir_contract -- --ignored update_ir_envelope_schema`
+//!   REWRITES the file (regenerate after an intentional IR shape change), then commit it.
 //! - the default run ASSERTS the on-disk file equals the generated schema, so a
 //!   silent IR-shape drift (a new/removed `Op` variant, a renamed field) fails
 //!   CI until the schema is regenerated + committed.
+//!
+//! The regen switch is an `#[ignore]`d test rather than an env var: this crate's tests
+//! read nothing from their own process environment (`clippy.toml`'s `disallowed-methods`
+//! on `std::env::var`), and `#[ignore]` + `cargo test -- --ignored <name>` is the
+//! existing idiom this crate already uses for an explicitly-invoked, not-run-by-default
+//! test (see `tests/authoring_surface/f664_scaling.rs`).
 
 use std::path::PathBuf;
 
@@ -29,22 +35,33 @@ fn generated_schema() -> String {
 fn emit_ir_envelope_schema() {
     let path = schema_path();
     let generated = generated_schema();
-    if std::env::var("UPDATE_SCHEMA").is_ok() {
-        std::fs::write(&path, generated.as_bytes()).expect("write ir-envelope.schema.json");
-        return;
-    }
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "ir-envelope.schema.json missing or unreadable at {}: {e}. \
-             Run `UPDATE_SCHEMA=1 cargo test -p zeroship-migrate --test ir_contract ir_envelope_schema` to generate it.",
+             Run `cargo test -p zeroship-migrate --test ir_contract -- --ignored \
+             update_ir_envelope_schema` to generate it.",
             path.display()
         )
     });
     assert_eq!(
         on_disk, generated,
         "ir-envelope.schema.json is stale. Regenerate with \
-         `UPDATE_SCHEMA=1 cargo test -p zeroship-migrate --test ir_contract ir_envelope_schema` and commit it."
+         `cargo test -p zeroship-migrate --test ir_contract -- --ignored \
+         update_ir_envelope_schema` and commit it."
     );
+}
+
+/// Rewrites `ir-envelope.schema.json` from the current [`MigrationIr`] shape.
+/// Not run by default — [`emit_ir_envelope_schema`] above is the gate; this is the
+/// developer affordance that keeps it green after an intentional IR shape change.
+#[test]
+#[ignore = "regenerates ir-envelope.schema.json; run explicitly with \
+            `cargo test -p zeroship-migrate --test ir_contract -- --ignored \
+            update_ir_envelope_schema`, then commit the file"]
+fn update_ir_envelope_schema() {
+    let path = schema_path();
+    std::fs::write(&path, generated_schema().as_bytes())
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 /// The exhaustiveness seed: the schema must enumerate EXACTLY the closed

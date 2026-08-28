@@ -107,7 +107,13 @@ fn workspace_root() -> PathBuf {
 /// agree with the manifests and still disagree with the build.
 fn members() -> BTreeMap<String, PathBuf> {
     let root = workspace_root();
-    let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+    // `env!("CARGO")`, not `std::env::var("CARGO")`: this reads the cargo binary path
+    // cargo set for the process that COMPILED this test, at compile time, so it is not
+    // the runtime accessor `clippy.toml`'s `disallowed-methods` bans (that ban targets
+    // application configuration; this is cargo-provided build metadata, always present
+    // when cargo built this binary at all, so there is no "unset" case to fall back
+    // from).
+    let out = Command::new(env!("CARGO"))
         .args([
             "metadata",
             "--no-deps",

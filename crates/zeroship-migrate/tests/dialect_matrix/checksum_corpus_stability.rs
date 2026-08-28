@@ -20,8 +20,15 @@
 //! 2. The AGGREGATE digest over `kind|variant|checksum` for every row, in corpus
 //!    order, equals a frozen constant.
 //!
-//! Set `ZM_CHECKSUM_CORPUS_DUMP=<path>` to write the full per-row listing, which
-//! is what a before/after comparison across a refactor diffs.
+//! `corpus_checksums_are_byte_stable` below prints the full per-row listing to
+//! stdout, which is what a before/after comparison across a refactor diffs: capture
+//! it with `--nocapture` and shell redirection —
+//! `cargo test -p zeroship-migrate --test dialect_matrix \
+//! corpus_checksums_are_byte_stable -- --nocapture > before.txt` — rather than an
+//! operator-chosen path read from the process environment (this crate's tests take
+//! no input from their own environment; `clippy.toml`'s `disallowed-methods` on
+//! `std::env::var`). libtest also surfaces the same printed listing automatically
+//! on a FAILING run, with no flag needed.
 
 use crate::dialect_corpus;
 
@@ -93,9 +100,9 @@ fn corpus_checksums_are_byte_stable() {
         listing.push('\n');
     }
 
-    if let Ok(path) = std::env::var("ZM_CHECKSUM_CORPUS_DUMP") {
-        std::fs::write(&path, &listing).expect("dump path is writable");
-    }
+    // Printed, not written to an operator-chosen path: see this file's header for why
+    // and how to capture it (`--nocapture` plus shell redirection).
+    println!("{listing}");
 
     let mut hasher = Sha256::new();
     hasher.update(listing.as_bytes());

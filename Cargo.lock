@@ -7525,6 +7525,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "toml 0.8.23",
+ "zeroship-core",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",
  "zeroship-migrate-ir",

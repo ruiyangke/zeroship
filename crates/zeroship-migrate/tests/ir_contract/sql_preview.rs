@@ -18,8 +18,15 @@
 //! 4. NO DB CONNECTION: the render path opens no socket (proven by running it with NO
 //!    DSN env set and no DB reachable — a connection attempt would error/hang).
 //!
-//! Regenerate the goldens with `UPDATE_PREVIEW_GOLDENS=1 cargo test -p zeroship-migrate
-//! --test sql_preview`.
+//! Regenerate the goldens with
+//! `cargo test -p zeroship-migrate --test ir_contract -- --ignored update_golden`
+//! (the substring matches all three dialects; append `_pg`/`_sqlite`/`_mysql` for one).
+//!
+//! The regen switch is an `#[ignore]`d test rather than an env var: this crate's tests
+//! read nothing from their own process environment (`clippy.toml`'s `disallowed-methods`
+//! on `std::env::var`), and `#[ignore]` + `cargo test -- --ignored <name>` is the
+//! existing idiom this crate already uses for an explicitly-invoked, not-run-by-default
+//! test (see `tests/authoring_surface/f664_scaling.rs`).
 
 use crate::support;
 
@@ -138,22 +145,41 @@ fn resolve_envelope_json(ir: &str) -> String {
     serde_json::to_string(&resolved).expect("resolved preview fixture serializes")
 }
 
-/// Golden-compare helper: write-or-assert against a committed golden file.
+/// Golden-compare helper: assert against a committed golden file.
 fn assert_golden(name: &str, actual: &str) {
     let path = format!("{}/tests/golden/{name}", env!("CARGO_MANIFEST_DIR"));
-    if std::env::var("UPDATE_PREVIEW_GOLDENS").is_ok() {
-        std::fs::create_dir_all(format!("{}/tests/golden", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        std::fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read golden {path}: {e} (run UPDATE_PREVIEW_GOLDENS=1)"));
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "read golden {path}: {e} (run `cargo test -p zeroship-migrate --test \
+             ir_contract -- --ignored update_golden` to generate it)"
+        )
+    });
     assert_eq!(actual, expected, "preview golden drift for {name}");
+}
+
+/// Rewrites `name`'s golden file from `actual`. Called only from the `update_golden_*`
+/// tests below, which are `#[ignore]`d so this never runs by default.
+fn write_golden(name: &str, actual: &str) {
+    let dir = format!("{}/tests/golden", env!("CARGO_MANIFEST_DIR"));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {dir}: {e}"));
+    let path = format!("{dir}/{name}");
+    std::fs::write(&path, actual).unwrap_or_else(|e| panic!("write {path}: {e}"));
 }
 
 #[test]
 fn golden_pg() {
     assert_golden(
+        "sql_preview_pg.txt",
+        &render_representative(&zeroship_migrate_postgres::DIALECT),
+    );
+}
+
+#[test]
+#[ignore = "regenerates sql_preview_pg.txt; run explicitly with `cargo test -p \
+            zeroship-migrate --test ir_contract -- --ignored update_golden_pg`, \
+            then commit the file"]
+fn update_golden_pg() {
+    write_golden(
         "sql_preview_pg.txt",
         &render_representative(&zeroship_migrate_postgres::DIALECT),
     );
@@ -168,8 +194,30 @@ fn golden_sqlite() {
 }
 
 #[test]
+#[ignore = "regenerates sql_preview_sqlite.txt; run explicitly with `cargo test -p \
+            zeroship-migrate --test ir_contract -- --ignored update_golden_sqlite`, \
+            then commit the file"]
+fn update_golden_sqlite() {
+    write_golden(
+        "sql_preview_sqlite.txt",
+        &render_representative(&zeroship_migrate_sqlite::DIALECT),
+    );
+}
+
+#[test]
 fn golden_mysql() {
     assert_golden(
+        "sql_preview_mysql.txt",
+        &render_representative(&zeroship_migrate_mysql::DIALECT),
+    );
+}
+
+#[test]
+#[ignore = "regenerates sql_preview_mysql.txt; run explicitly with `cargo test -p \
+            zeroship-migrate --test ir_contract -- --ignored update_golden_mysql`, \
+            then commit the file"]
+fn update_golden_mysql() {
+    write_golden(
         "sql_preview_mysql.txt",
         &render_representative(&zeroship_migrate_mysql::DIALECT),
     );
@@ -528,18 +576,23 @@ fn guard_label_is_truthful_per_dialect() {
     );
 }
 
-/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). Scrubbing
-/// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
-/// REQUIRE a DSN env var - it does NOT prove the absence of a hard-coded connect
-/// (a path dialing a fixed host would still pass here). Named honestly for what it
-/// proves, and nothing in this tree proves the stronger claim. Only running the real
-/// binary with no DSN anywhere in its environment or arguments would: a stray connect
-/// to a fixed host fails or hangs a subprocess, and cannot hide inside an in-process
-/// `is_ok()`.
+/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). The render entrypoints take
+/// no DSN parameter — `vendors`, an IR string, a `DialectId`, `PreviewOpts` — and
+/// nothing on the engine's lowering path reads `DATABASE_URL` or any other name from
+/// the process environment (verified by inspection: no source file under
+/// `zeroship-migrate-core`, `-postgres`, `-sqlite`, `-mysql`, or `-backend` mentions
+/// `DATABASE_URL` or calls `std::env::`). A prior version of this test scrubbed
+/// `DATABASE_URL` with `std::env::remove_var` before asserting, which — given that
+/// finding — proved nothing beyond what asserting against the untouched environment
+/// already proves: the scrub never changed the render's inputs, because nothing on
+/// this path ever read the variable it cleared. Asserting `is_ok()` here does NOT prove
+/// the absence of a hard-coded connect (a path dialing a fixed host would still pass).
+/// Named honestly for what it proves, and nothing in this tree proves the stronger
+/// claim. Only running the real binary with no DSN anywhere in its environment or
+/// arguments would: a stray connect to a fixed host fails or hangs a subprocess, and
+/// cannot hide inside an in-process `is_ok()`.
 #[test]
 fn render_succeeds_without_a_dsn() {
-    // Scrub any inherited DSN so the render cannot lean on an env-provided DSN.
-    std::env::remove_var("DATABASE_URL");
     let representative = resolve_envelope_json(REPRESENTATIVE_IR);
     let representative_mysql = resolve_envelope_json(REPRESENTATIVE_IR_MYSQL);
     let pg = render_ir_envelope_sql(

@@ -71,10 +71,17 @@ pub const MYSQL_URL_ENV: &str = "ZERO_MIGRATE_MYSQL_URL";
 /// [`require_live_db_dsn`](crate::support::require_live_db_dsn) the PostgreSQL side
 /// uses, so a missing MySQL DSN is a FAILURE rather than a green run with no
 /// coverage. A skip must never read as a pass, so there is no skip.
+///
+/// The literal below MUST stay byte-identical to [`MYSQL_URL_ENV`]: `test_env!`
+/// requires a compile-time literal, so it cannot read the constant.
 #[macro_export]
 macro_rules! require_live_mysql {
     () => {{
-        $crate::support::require_live_db_dsn($crate::support::mysql::MYSQL_URL_ENV, "MySQL")
+        $crate::support::require_live_db_dsn(
+            ::zeroship_core::test_env!("ZERO_MIGRATE_MYSQL_URL"),
+            $crate::support::mysql::MYSQL_URL_ENV,
+            "MySQL",
+        )
     }};
 }
 
