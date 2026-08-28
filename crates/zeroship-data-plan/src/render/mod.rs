@@ -75,7 +75,14 @@ pub mod postgres;
 
 use crate::literal::Literal;
 
-/// How a dialect spells the placeholder for each parameter type.
+/// Every spelling that is a dialect's rather than the grammar's.
+///
+/// Most of them are placeholders, and the two that are not
+/// ([`ValueFormat::current_timestamp_expr`], [`ValueFormat::row_identity_column`])
+/// arrived with the write family. They are here rather than as constants in
+/// [`postgres`] for the reason the trait exists: one place to read what a
+/// dialect does, and a compiler error rather than a silent inheritance when a
+/// second dialect is added.
 ///
 /// **No default methods, deliberately.** A method with a default is a spelling
 /// a new dialect inherits without anyone deciding it should, which is how one
@@ -95,6 +102,8 @@ use crate::literal::Literal;
 ///     fn float_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn text_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn bytes_placeholder(&self, slot: usize) -> String { format!("${slot}") }
+///     fn current_timestamp_expr(&self) -> &'static str { "NOW()" }
+///     fn row_identity_column(&self) -> &'static str { "ctid" }
 /// }
 /// ```
 ///
@@ -106,6 +115,23 @@ use crate::literal::Literal;
 /// impl ValueFormat for Half {
 ///     fn dialect_name(&self) -> &'static str { "half" }
 ///     fn bool_placeholder(&self, slot: usize) -> String { format!("${slot}") }
+/// }
+/// ```
+///
+/// And so does one that spells every placeholder but neither of the two the
+/// write family added - which is the case a `bytes_placeholder`-shaped trait
+/// would have let through:
+///
+/// ```compile_fail
+/// use zeroship_data_plan::render::ValueFormat;
+/// struct PlaceholdersOnly;
+/// impl ValueFormat for PlaceholdersOnly {
+///     fn dialect_name(&self) -> &'static str { "placeholders-only" }
+///     fn bool_placeholder(&self, slot: usize) -> String { format!("${slot}") }
+///     fn int_placeholder(&self, slot: usize) -> String { format!("${slot}") }
+///     fn float_placeholder(&self, slot: usize) -> String { format!("${slot}") }
+///     fn text_placeholder(&self, slot: usize) -> String { format!("${slot}") }
+///     fn bytes_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 /// }
 /// ```
 pub trait ValueFormat {
@@ -122,6 +148,22 @@ pub trait ValueFormat {
     /// binary needs no wrapper at all - so the `PostgreSQL` implementation
     /// **deletes** `decode($N, 'base64')::bytea` rather than relocating it.
     fn bytes_placeholder(&self, slot: usize) -> String;
+    /// The expression that reads **the server's** clock.
+    ///
+    /// `NOW()` on `PostgreSQL`, `CURRENT_TIMESTAMP` on `SQLite` - a divergence
+    /// `query.rs` already carries per dialect (`current_timestamp_expr`, reached
+    /// through `renderer(dialect)` at `query.rs:3915`). It is a spelling, not a
+    /// value: nothing about it is caller-supplied, and the reason it is not a
+    /// bound parameter at all is that a worker's clock is not the database's.
+    fn current_timestamp_expr(&self) -> &'static str;
+    /// The column that names one physical row, for a bounded write's subquery.
+    ///
+    /// `ctid` on `PostgreSQL`, `rowid` on `SQLite` - the same per-dialect choice
+    /// `query.rs:3999-4003` and `:4284-4288` make, twice each, inline.
+    ///
+    /// It is emitted quoted like any other identifier, and it never comes from a
+    /// caller: no [`crate::Ident`] a caller holds reaches this position.
+    fn row_identity_column(&self) -> &'static str;
 }
 
 /// The single exhaustive dispatch from a value's type to its spelling.

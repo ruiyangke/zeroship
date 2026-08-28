@@ -15,10 +15,16 @@ use std::path::{Path, PathBuf};
 
 /// Fewer source files than this means the walk collapsed and every negative
 /// check below would pass over an empty set.
-const SOURCE_FILE_FLOOR: usize = 7;
+const SOURCE_FILE_FLOOR: usize = 8;
 
 /// The plan and grammar types the negative checks must actually find. If a
 /// rename empties this, the gates stop ruling on anything and say so.
+///
+/// The write family's types are listed for the reason SC-3 gives for the gate
+/// existing at all: a negative check over types that do not exist matches
+/// nothing and reports success. Adding a family without adding its types here
+/// would leave the two gates below scanning the read family and calling it the
+/// crate.
 const PLAN_TYPES: &[&str] = &[
     "pub enum DbPlan",
     "pub struct Select",
@@ -27,6 +33,14 @@ const PLAN_TYPES: &[&str] = &[
     "pub struct Ident",
     "pub enum Literal",
     "pub struct FieldPath",
+    // The write family.
+    "pub struct Insert",
+    "pub struct Update",
+    "pub struct Delete",
+    "pub enum Assignment",
+    "pub enum WriteValue",
+    "pub struct Returning",
+    "pub struct BindBudget",
 ];
 
 fn crate_root() -> PathBuf {
