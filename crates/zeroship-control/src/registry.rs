@@ -444,9 +444,14 @@ impl Registry {
     ///   one JSON key — and the app then boots with `env.db` uninstalled over a
     ///   live database. A guard whose bypass is "omit the field" is not a guard.
     ///
-    /// Both arms fail CLOSED on a NULL `descriptor_sha256` in the ledger (a row
-    /// written before that column existed): `=` against NULL is NULL, never
-    /// true, so the app must migrate once more before it can deploy.
+    /// The ledger is `zeroship.app_schema_applies`, which the migration service
+    /// writes one row of per APPLY REQUEST - including a request that applied
+    /// nothing because every document was already journalled. That is deliberate:
+    /// an engine upgrade which changes descriptor bytes without changing any
+    /// schema is repaired by running a migrate that applies nothing, and it is
+    /// only a repair because the row is still written. The engine's OWN journal
+    /// cannot be read here and must not be: it lives in the app's schema, whose
+    /// migrator role owns it and can drop it.
     ///
     /// There is no operator override, and that is not a policy about overrides.
     /// The remedy is a creator-reachable endpoint that is already mandatory in
@@ -466,10 +471,10 @@ impl Registry {
                 "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
                  updated_at = NOW() WHERE id = $3 \
                    AND CASE WHEN $4::text IS NULL \
-                            THEN NOT EXISTS (SELECT 1 FROM zeroship.migrated_migrations \
+                            THEN NOT EXISTS (SELECT 1 FROM zeroship.app_schema_applies \
                                               WHERE app_id = $3 AND status = 'applied') \
                             ELSE $4::text = (SELECT m.descriptor_sha256 \
-                                               FROM zeroship.migrated_migrations m \
+                                               FROM zeroship.app_schema_applies m \
                                               WHERE m.app_id = $3 AND m.status = 'applied' \
                                               ORDER BY m.applied_at DESC NULLS LAST, \
                                                        m.submitted_at DESC, \
@@ -492,7 +497,7 @@ impl Registry {
             }
             let applied_sha256 = tx
                 .query(
-                    "SELECT m.descriptor_sha256 FROM zeroship.migrated_migrations m \
+                    "SELECT m.descriptor_sha256 FROM zeroship.app_schema_applies m \
                       WHERE m.app_id = $1 AND m.status = 'applied' \
                       ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
                                m.migration_id DESC \

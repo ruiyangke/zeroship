@@ -20,12 +20,15 @@
 //! - `NOSUPERUSER NOCREATEROLE NOCREATEDB NOLOGIN NOBYPASSRLS` — no escalation
 //!   surface.
 //! - OWNS the project schema (its DDL + `ALTER DEFAULT PRIVILEGES` targets work),
-//!   with `CREATE, USAGE` on it.
-//! - NO access whatsoever to the meta schema — the journal is unforgeable by
-//!   deny-by-absence (all journal I/O runs as the admin role).
+//!   with `CREATE, USAGE` on it. The engine journal now lives in that same schema
+//!   under the `__zeroship_` prefix, so the migrator owns the journal too. That is
+//!   accepted: an owner's privileges are implicit and cannot be revoked away, so
+//!   the only honest position is that the record of what ran belongs to the tenant
+//!   whose schema it describes. The platform keeps its own record in
+//!   `zeroship.app_schema_applies` and never treats this one as a trust anchor.
 //! - `search_path` = project schema FIRST, then extension schema(s) (default
 //!   `public`, resolution-only) so unqualified `vector(N)`/`geography(...)`
-//!   resolve. Meta schema stays OFF the path.
+//!   resolve.
 //! - `REVOKE ALL` then `GRANT USAGE` on the extension schema(s): resolve the
 //!   shared extension types, never create/write there.
 //! - No grant on `control`/`auth`/`billing`/other project schemas — deny-by-absence.
@@ -108,7 +111,6 @@ pub async fn provision_migrator(
     let role_q = quote_ident(&role);
     let role_lit = quote_lit(&role);
     let proj_q = quote_ident(&cfg.project_schema);
-    let meta_q = quote_ident(&cfg.confinement.meta_schema);
 
     // 1. Create the role idempotently with the locked-down attribute set.
     exec_retry(
@@ -159,21 +161,21 @@ pub async fn provision_migrator(
     )
     .await?;
 
-    // 5. The migrator must have NO access to the meta schema (journal is
-    //    unforgeable by deny-by-absence). REVOKE explicitly + idempotently.
-    exec_retry(
-        admin,
-        &format!(
-            "DO $revoke$ BEGIN
-                IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{meta_lit}') THEN
-                    EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA {meta_q} FROM {role_q}';
-                    EXECUTE 'REVOKE ALL ON SCHEMA {meta_q} FROM {role_q}';
-                END IF;
-             END $revoke$",
-            meta_lit = quote_lit(&cfg.confinement.meta_schema),
-        ),
-    )
-    .await?;
+    // THERE IS NO STEP 5 ANY MORE, and its removal is the change rather than an
+    // omission. It used to REVOKE ALL on the meta schema from the migrator, so the
+    // journal was unforgeable by deny-by-absence. The journal now lives IN the
+    // project schema, which this role OWNS, so there is nothing left to deny:
+    // owner privileges are implicit and cannot be revoked away. A creator can
+    // destroy their own journal, which is accepted - it is their database and
+    // corrupting it breaks only them - and it is why the platform keeps its own
+    // record in `zeroship.app_schema_applies` rather than trusting this one.
+    //
+    // KEEPING IT WAS NOT MERELY VACUOUS, WHICH IS WHY THIS NOTE EXISTS. With
+    // `meta_schema == project_schema` the revoke named the PROJECT schema and
+    // undid step 4 four statements earlier, so every apply failed with
+    // `permission denied for schema <app_uuid>`. Measured 2026-08-28 against a
+    // live PostgreSQL 16: `apply_api_accepts_apps_migrate_owner_and_applies_ir_pg`
+    // answered 422 with exactly that message until this block was deleted.
 
     // 6. Pin search_path: project schema FIRST, then extension schema(s).
     let mut path_parts = vec![proj_q.clone()];

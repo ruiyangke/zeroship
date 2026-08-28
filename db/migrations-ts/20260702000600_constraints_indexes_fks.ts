@@ -22,6 +22,7 @@ export default {
     table("users", { schema: "zeroship" }).unique("users_email_key").add({ columns: ["email"] });
     table("app_members", { schema: "zeroship" }).index("app_members_user_idx").add({ on: ["user_id"] });
     table("app_net_grants", { schema: "zeroship" }).index("app_net_grants_app_id_idx").add({ on: ["app_id"] });
+    table("app_schema_applies", { schema: "zeroship" }).index("app_schema_applies_app_status_idx").add({ on: ["app_id", "status", { column: "submitted_at", order: "desc" }] });
     table("app_session_anchors", { schema: "zeroship" }).index("app_session_anchors_user_idx").add({ on: ["app_id", "global_user_id"], where: (col) => col("revoked_at").isNull() });
     table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_pairwise_sub_idx").add({ on: ["pairwise_sub"] });
     table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_relay_active_idx").add({ on: ["relay_email"], unique: true, where: (col) => col("relay_email").isNotNull().and(col("revoked_at").isNull()) });
@@ -85,9 +86,6 @@ export default {
     table("invoice_payments", { schema: "zeroship" }).index("invoice_payments_dispute_provider_ref_key").add({ on: ["invoice_id", "provider_ref", "kind"], unique: true, where: (col) => col("kind").cast({ to: "text" }).in(["dispute_debit", "dispute_reversal"]) });
     table("invoice_payments", { schema: "zeroship" }).index("invoice_payments_invoice_idx").add({ on: ["invoice_id"] });
     table("invoices", { schema: "zeroship" }).index("invoices_active_period_claim").add({ on: ["creator_id", "period"], unique: true, where: (col) => col("status").cast({ to: "text" }).ne("void") });
-    table("migrated_app_policies", { schema: "zeroship" }).index("migrated_app_policies_app_submitted_idx").add({ on: ["app_id", { column: "submitted_at", order: "desc" }] });
-    table("migrated_migration_audit", { schema: "zeroship" }).index("migrated_migration_audit_app_idx").add({ on: ["app_id", "migration_id", "created_at"] });
-    table("migrated_migrations", { schema: "zeroship" }).index("migrated_migrations_app_status_idx").add({ on: ["app_id", "status", { column: "submitted_at", order: "desc" }] });
     table("oauth_authorization_codes", { schema: "zeroship" }).index("oauth_authorization_codes_expires_at_idx").add({ on: ["expires_at"] });
     table("oauth_grants", { schema: "zeroship" }).index("oauth_grants_client_idx").add({ on: ["client_id"] });
     table("oauth_grants", { schema: "zeroship" }).index("oauth_grants_user_granted_idx").add({ on: ["user_id", { column: "granted_at", order: "desc" }] });
@@ -121,6 +119,8 @@ export default {
     table("app_net_grants", { schema: "zeroship" }).foreignKey("app_net_grants_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_oauth_clients", { schema: "zeroship" }).foreignKey("app_oauth_clients_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_oauth_clients", { schema: "zeroship" }).foreignKey("app_oauth_clients_client_id_fkey").add({ columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
+    table("app_schema_applies", { schema: "zeroship" }).foreignKey("app_schema_applies_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
+    table("app_schema_applies", { schema: "zeroship" }).foreignKey("app_schema_applies_submitted_by_fkey").add({ columns: ["submitted_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
     table("app_scope_defs", { schema: "zeroship" }).foreignKey("app_scope_defs_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_secrets", { schema: "zeroship" }).foreignKey("app_secrets_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_session_anchors", { schema: "zeroship" }).foreignKey("app_session_anchors_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
@@ -164,13 +164,6 @@ export default {
     table("magic_links", { schema: "zeroship" }).foreignKey("magic_links_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
     table("metering_exports", { schema: "zeroship" }).foreignKey("metering_exports_creator_id_fkey").add({ columns: ["creator_id"], references: { table: "creator_billing", columns: ["creator_id"], schema: "zeroship" }, onDelete: "cascade" });
     table("metric_weights", { schema: "zeroship" }).foreignKey("metric_weights_metric_fkey").add({ columns: ["metric"], references: { table: "billing_metrics", columns: ["metric"], schema: "zeroship" }, onDelete: "restrict" });
-    table("migrated_app_policies", { schema: "zeroship" }).foreignKey("migrated_app_policies_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
-    table("migrated_app_policies", { schema: "zeroship" }).foreignKey("migrated_app_policies_submitted_by_fkey").add({ columns: ["submitted_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
-    table("migrated_migration_audit", { schema: "zeroship" }).foreignKey("migrated_migration_audit_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
-    table("migrated_migration_audit", { schema: "zeroship" }).foreignKey("migrated_migration_audit_principal_id_fkey").add({ columns: ["principal_id"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
-    table("migrated_migrations", { schema: "zeroship" }).foreignKey("migrated_migrations_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
-    table("migrated_migrations", { schema: "zeroship" }).foreignKey("migrated_migrations_approved_by_fkey").add({ columns: ["approved_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
-    table("migrated_migrations", { schema: "zeroship" }).foreignKey("migrated_migrations_submitted_by_fkey").add({ columns: ["submitted_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
     table("oauth_authorization_codes", { schema: "zeroship" }).foreignKey("oauth_authorization_codes_client_id_fkey").add({ columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
     table("oauth_authorization_codes", { schema: "zeroship" }).foreignKey("oauth_authorization_codes_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
     table("oauth_clients", { schema: "zeroship" }).foreignKey("oauth_clients_created_by_fkey").add({ columns: ["created_by"], references: { table: "users", columns: ["id"] } });

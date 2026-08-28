@@ -1208,9 +1208,9 @@ async fn insert_applied_migration(
     applied_at: &str,
 ) {
     conn.execute(
-        "INSERT INTO zeroship.migrated_migrations \
+        "INSERT INTO zeroship.app_schema_applies \
             (app_id, migration_id, status, request_body, effective_profile, \
-             ceiling_id, ceiling_version, gated_versions, submitted_by, \
+             ceiling_id, ceiling_version, applied_versions, submitted_by, \
              applied_at, descriptor_sha256) \
          VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
                  '[]'::jsonb, $3, $4::text::timestamptz, $5)",

@@ -1546,7 +1546,7 @@ the committed `.ts` corpus (no SQL/Flyway/Liquibase, no committed `.ir.json`):
 | File | `export const name` | Contents |
 | --- | --- | --- |
 | `20260702000100_schema_roles_extensions.ts` | `schema_roles_extensions` | `zeroship` schema, `citext` ext, 10 roles, 13 domains, 1 sequence |
-| `20260702000200_control_tables.ts` | `control_tables` | 21 control-plane tables (`apps`, `app_members`, `app_secrets`, `migrated_migrations`, …) |
+| `20260702000200_control_tables.ts` | `control_tables` | 19 control-plane tables (`apps`, `app_members`, `app_secrets`, `app_schema_applies`, …) |
 | `20260702000300_auth_oauth_tables.ts` | `auth_oauth_tables` | 28 auth/OIDC tables (`users`, `oauth_clients`, `gateway_sessions`, `signing_keys`, …) |
 | `20260702000400_billing_metering_invoice_tables.ts` | `billing_metering_invoice_tables` | 31 billing tables (`invoices`, `invoice_lines`, `credit_ledger`, `plans`, …) |
 | `20260702000500_sandbox_tables.ts` | `sandbox_tables` | 5 sandbox tables (`sandboxes`, `shares`, `hosts`, `wake_jobs`, partitioned `sandbox_events`) |
@@ -1604,15 +1604,23 @@ via `cargo run` or `ZEROSHIP_MIGRATE_BIN`, targeting compose Postgres on
 `localhost:5440`. It accepts no migration subcommand. The runner records the
 committed platform corpus in-process.
 
-The engine tracks applied work in an append-only journal in a **meta schema (default `zeroship_migrations`)**, so `migrate` runs only pending work and is idempotent. **Do not confuse** the engine journal (`zeroship_migrations.schema_migrations`) with the `migrated_migrations` *table* the corpus creates (the creator migration-workflow store, §11.6). Apply is `BEGIN; <up>; INSERT journal; COMMIT` per step — no whole-bundle transaction. Operator-approved go-lives are gated by the `migrations:approve` (`Action::AppsApproveMigration`) admin-only action and per-version approval scoping ([§9.11](#9-the-apply-engine--durability)).
+The engine tracks applied work in an append-only journal, so `migrate` runs only pending work and is idempotent. Apply is `BEGIN; <up>; INSERT journal; COMMIT` per step — no whole-bundle transaction.
+
+**Where the journal lives depends on who owns the schema.** The PLATFORM corpus keeps its own meta schema, `zeroship_migrations`, because it has no tenant: nothing owns `zeroship` the way a migrator role owns an app schema. A CREATOR app's journal lives in the app's own schema (`"<app_uuid>".__zeroship_schema_migrations` and five siblings), because a tenant does own theirs. On both, the table names carry the `__zeroship_` prefix: the engine bootstraps with `CREATE TABLE IF NOT EXISTS` and its table names are literals, so an unfenced `schema_migrations` in a schema a creator can declare tables in would be silently adopted as the journal.
+
+**A creator can drop their own journal**, and that is accepted rather than fixed: they own the schema, owner privileges are implicit and cannot be revoked away, and corrupting it breaks only them. The platform therefore never treats it as a trust anchor — the deploy precondition reads `zeroship.app_schema_applies` (§11.6), which the migration service writes on the control plane's own database.
 
 ### 11.5 The `sandbox_*` roles + tables shared with the extracted sandbox
 
 The sandbox backend was extracted to the standalone `zeroship-sandbox` repo but **shares this deployment's Postgres**; the contract lives entirely in the platform corpus. **Roles** (`schema_roles_extensions.ts:14-17`): `sandbox_admin` (nologin, DDL-owning), `sandbox_app` (login, runtime), `sandbox_audit` (append-only event writer), `sandbox_gdpr` (deletion/erasure). **Tables** (`sandbox_tables.ts`): `sandboxes`, `shares`, `hosts`, `wake_jobs`, the range-partitioned `sandbox_events` (monthly partitions + a `default` partition via `partitionBy: { range: ["ts"] }`), with regex CHECKs enforcing typed-id shapes. **Grants** (`grants.ts:7-10,32-36`) scope each role's CRUD. The control plane reaches the sandbox over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`), but the *database contract* is these platform-authored roles/tables — so editing `sandbox_tables.ts` here is a cross-repo API change.
 
-### 11.6 The `migrated_*` tables — the platform storing *creator* migration state
+### 11.6 `app_schema_applies` — the platform's own record of a creator apply
 
-The platform schema carries the tables backing the (Confined) creator-migration service — the platform dogfooding its own concepts: `migrated_migrations` (`control_tables.ts:182`, PK `["app_id","migration_id"]`, `status ∈ {submitted,pending_approval,approved,applied,failed}`, storing `request_body`/`effective_profile`/`ceiling_id`/`gated_versions`/`approved_by`/`applied_at`/`last_error`); `migrated_migration_audit` (append-only, enforced by the `reject_migrated_migration_audit_mutation` trigger, storing `effective_profile` + `sealed_profile` JSON + `ceiling_version`); `migrated_app_policies` (per-app ceilings/versions). Granted only to `zeroship_control`. The `effective_profile`/`sealed_profile`/`ceiling_version` columns are the persistent form of the §11.3 seal machinery.
+The platform schema carries ONE table for the creator-migration service: `zeroship.app_schema_applies` (`control_tables.ts`, PK `["app_id","migration_id"]`, `status ∈ {submitted, applied, failed}`, storing `request_body`/`effective_profile`/`ceiling_id`/`ceiling_version`/`descriptor_sha256`/`applied_versions`/`applied_at`/`last_error`). Granted `select, insert, update` to `zeroship_control` only.
+
+**One row per apply REQUEST, not per applied migration**, and that is a requirement rather than an artefact of where the insert sits. The control plane's deploy precondition compares a `.zship`'s `runtime_descriptor.hash` against the NEWEST applied row's `descriptor_sha256`, so an engine upgrade that changes descriptor bytes without changing any schema is repaired by running a migrate that applies nothing — and that only works because the row is still written. `applied_versions` carries the engine's own `outcome.applied`, so a request that advanced nothing is visible as `[]`.
+
+**THREE `migrated_*` TABLES USED TO LIVE HERE and were deleted on 2026-08-28.** `migrated_migrations` carried a `planned → pending_approval → approved → applied` workflow whose approval endpoint no dashboard, CLI or service ever called; `migrated_migration_audit` had one writer and zero readers; `migrated_app_policies` stored a policy that is now declared in the creator's repository and folded at build time, arriving with the apply request. Operator approval of destructive creator migrations is a capability removed on purpose, not an omission.
 
 ### 11.7 The build fold (cross-ref)
 
@@ -1633,7 +1641,7 @@ This ingress is where the §11.3 seal machinery meets the effective-policy meet:
 ### 11.9 Caveats
 
 - The corpus uses `raw({ sql, reason })` where the structured DSL cannot express a construct, such as `trigger().create` for `UPDATE OF <column>`.
-- The engine journal (meta schema `zeroship_migrations`) vs the `migrated_migrations` *content* table are different things (§11.4 vs §11.6). No `.ts` authors the journal itself — consistent with it being engine-internal (bootstrapped by the apply path).
+- The engine journal (`zeroship_migrations.__zeroship_schema_migrations` for the platform corpus) and `zeroship.app_schema_applies` are different things (§11.4 vs §11.6): the first records what the engine ran, the second what the platform accepted. No `.ts` authors the journal itself — consistent with it being engine-internal (bootstrapped by the apply path).
 - `down()` bodies in the platform corpus are **empty** across all nine files — the platform relies on forward-only, additive-with-reviewed-destructive migrations under `--yes`, not programmatic rollback (the generic `rollback` verb "does not yet load platform `.ts`"). MEMORY notes elsewhere flag "platform-.ts rollback broken."
 
 ---

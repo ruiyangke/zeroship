@@ -18,20 +18,18 @@ pub mod api;
 pub mod apply;
 pub mod auth;
 pub mod config;
-pub mod migration_store;
 pub mod policy;
-pub mod policy_store;
 pub mod provisioning;
 pub mod publication;
+pub mod schema_apply_store;
 pub mod session;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use auth::Authenticator;
-use migration_store::MigrationStore;
 use policy::ManagedPolicyConfig;
-use policy_store::AppPolicyStore;
+use schema_apply_store::SchemaApplyStore;
 use zeroship_core::readiness::ReadinessGate;
 
 #[allow(missing_debug_implementations)]
@@ -40,10 +38,9 @@ pub struct MigrationServiceState {
     pub tmp_dir: PathBuf,
     pub authenticator: Arc<dyn Authenticator>,
     pub policy_config: ManagedPolicyConfig,
-    pub policy_store: AppPolicyStore,
-    pub migration_store: MigrationStore,
+    pub schema_apply_store: SchemaApplyStore,
     /// Bounds `/readyz`. The probe opens a connection (this service has no
-    /// shared client to reuse - see `AppPolicyStore::connect`), so the gate's
+    /// shared client to reuse - see `SchemaApplyStore::connect`), so the gate's
     /// TTL is what keeps an unauthenticated probe flood from becoming a
     /// connection flood.
     pub readiness: ReadinessGate,
@@ -53,20 +50,17 @@ impl MigrationServiceState {
     #[must_use]
     pub fn new(
         provision_dsn: String,
-        policy_store_dsn: String,
+        control_dsn: String,
         tmp_dir: PathBuf,
         authenticator: Arc<dyn Authenticator>,
         policy_config: ManagedPolicyConfig,
     ) -> Self {
-        let policy_store = AppPolicyStore::new(policy_store_dsn.clone());
-        let migration_store = MigrationStore::new(policy_store_dsn);
         Self {
             provision_dsn,
             tmp_dir,
             authenticator,
             policy_config,
-            policy_store,
-            migration_store,
+            schema_apply_store: SchemaApplyStore::new(control_dsn),
             readiness: ReadinessGate::with_defaults(),
         }
     }
