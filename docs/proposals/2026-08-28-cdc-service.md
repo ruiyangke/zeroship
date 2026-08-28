@@ -1941,9 +1941,26 @@ Three places, two of them defensible.
 
 Stated as gaps rather than written as facts elsewhere in this document.
 
-- **Whether anything depends on `zeroship_worker` holding `BYPASSRLS`.** Section
-  2.1 asserts only that the attribute is granted in one statement with
-  `REPLICATION`. The consumers were not enumerated.
+- **The `BYPASSRLS` consumers are now enumerated, and the answer is a privilege
+  this service lets the worker drop.** Production RLS has exactly one consumer:
+  the gateway, over four tenant tables - `app_secrets`, `gateway_sessions`,
+  `app_session_anchors`, `app_user_identities` - and its own module states it
+  "connects as the non-bypass `zeroship_gateway` role, so every RLS-table
+  statement it issues is filtered by the policy"
+  (`crates/zeroship-gateway/src/rls.rs:1-20`). No table in `db/migrations-ts/`
+  enables RLS, and no app-schema table has a policy.
+  The worker's attribute has one stated consumer, and it is the thing that
+  moves: **logical decoding.** `crates/zeroship-worker/src/db_posture.rs:96-101`
+  does not merely document this - it **refuses boot** unless the role holds both
+  `REPLICATION` and `BYPASSRLS`, with the message "worker database role requires
+  only REPLICATION and BYPASSRLS for logical decoding".
+  **So that assertion must invert when the relay lands.** Section 4 deletes
+  `change_stream_pg.rs` and moves `wal_consumer.rs` and `replication.rs` out of
+  the worker; after that the worker decodes nothing, and a worker still holding
+  `REPLICATION` and `BYPASSRLS` is carrying two privileges with no consumer. The
+  posture check should then require their **absence**. Whether `BYPASSRLS` was
+  ever needed for decoding at all is a separate question worth asking at that
+  point: the walsender plans no queries, and RLS is a planner-level filter.
 - **The advisory-lock release latency after a hard leader kill.** 12.1. It is
   TCP-keepalive-shaped and no experiment was run.
 - **The pk-membership replacement for `old_tuple`.** 5.3. Specified, not
