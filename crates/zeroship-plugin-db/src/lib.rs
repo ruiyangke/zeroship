@@ -182,11 +182,14 @@ pub(crate) mod change_stream_pg;
 // acquire leases here so all isolates in one worker share one logical slot.
 mod cdc_lifecycle;
 
-// Crate-private in release, pub under `test-helpers` (for tests/integration.rs):
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod audit;
-#[cfg(feature = "test-helpers")]
-pub mod audit;
+// `mod audit` is DELETED, name included. It owned the per-app
+// `__zeroship_migrations` table, which despite the name was never a
+// migration record: it was the provenance log for the DDL the data plane
+// itself issued (`create_index_with_recovery_audited`, the two
+// `ensure_*_index` hooks). With that DDL gone the log has nothing to
+// record, and it went in the same change rather than before it -
+// dropping the log first would have kept the writer while losing the
+// provenance the log existed to give it.
 
 // The `auth` module is always compiled: `auth::bootstrap` carries the
 // per-app PG role machinery the data plane runs on every transaction,

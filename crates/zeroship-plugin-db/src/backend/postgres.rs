@@ -2,14 +2,20 @@
 //!
 //! Wraps the `compio_postgres::Pool` and the configured URL. Every PG-
 //! flavoured call moves here so consumer files (`register_model/*`,
-//! `transaction/*`, `audit.rs`, `migrations.rs`) can stay free of
-//! `compio_postgres::Client` direct references and go through the trait
-//! instead.
+//! `transaction/*`) can stay free of `compio_postgres::Client` direct
+//! references and go through the trait instead.
 //!
 //! The methods are intentionally thin — they forward to the existing
-//! free functions in `crate::audit` / `crate::diff` / `crate::query`
-//! that already do the work. The point of this file is to *name the
-//! seam*, not to relocate every line of SQL.
+//! free functions in `crate::diff` / `crate::query` that already do the
+//! work. The point of this file is to *name the seam*, not to relocate
+//! every line of SQL.
+//!
+//! **No method here emits DDL.** Schema belongs to `zeroship-migrate`,
+//! which authors the pgvector `USING ivfflat` and PostGIS `USING gist`
+//! indexes from the declared `t.vector()` / `t.geoPoint()` fields
+//! (`zeroship-migrate-core/src/render/declarative.rs`, `vector_index_snapshot`
+//! / `geo_index_snapshot`). The two `pg_extension` capability probes below
+//! are the only catalog reads that survive.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -25,7 +31,7 @@ use super::{
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
 #[cfg(any(test, feature = "test-helpers"))]
-use super::{AuditWriter, IndexBuilder, PgLockManager, SchemaIntrospect};
+use super::{PgLockManager, SchemaIntrospect};
 
 /// Single concrete impl of `Backend` backed by `compio_postgres`.
 ///
@@ -49,8 +55,8 @@ pub struct PostgresBackend {
     key_store: crate::encryption::KeyStore,
     /// Cached pgvector extension presence probe.
     ///
-    /// `None` before the first call to [`VectorIndex::ensure_vector_index`]
-    /// or [`VectorIndex::vector_search`]; `Some(true)` / `Some(false)`
+    /// `None` before the first [`VectorIndex::vector_search`] call;
+    /// `Some(true)` / `Some(false)`
     /// after the first `SELECT 1 FROM pg_extension WHERE extname='vector'`
     /// round-trip. The probe is per-backend (so per-isolate, since each
     /// isolate carries its own `PostgresBackend` Rc) and stays cached
@@ -62,8 +68,8 @@ pub struct PostgresBackend {
     /// Cached PostGIS extension presence probe.
     ///
     /// Same shape and lifetime semantics as [`Self::pgvector_available`]:
-    /// `None` until the first `SpatialIndex::ensure_spatial_index` or
-    /// `SpatialIndex::spatial_near` call probes `pg_extension WHERE
+    /// `None` until the first `SpatialIndex::spatial_near` call probes
+    /// `pg_extension WHERE
     /// extname='postgis'`; `Some(true)` / `Some(false)` after. Cached
     /// for the life of the backend (PostGIS is provisioned at admin
     /// time and stays present). Absence surfaces as
@@ -129,24 +135,18 @@ impl PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Capability impls -- six blocks, one per sub-trait:
+// Capability impls -- four blocks, one per sub-trait:
 //
-//   1. `impl SqlExecutor for PostgresBackend`     -- 3 methods.
-//   2. `impl LockManager for PostgresBackend`     -- 3 methods.
-//   4. `impl SchemaIntrospect for PostgresBackend` -- 2 methods +
+//   1. `impl SqlExecutor for PostgresBackend`      -- 3 methods.
+//   2. `impl LockManager for PostgresBackend`      -- 3 methods.
+//   3. `impl SchemaIntrospect for PostgresBackend` -- 2 methods +
 //      `type LiveSchema`.
-//   5. `impl IndexBuilder for PostgresBackend`     -- 1 method.
-//   6. `impl PgSqlExecutor for PostgresBackend`    -- 1 method --
+//   4. `impl PgSqlExecutor for PostgresBackend`    -- 1 method --
 //      the PG-only `pool_handle()` accessor that lets free-function
-//      audit helpers reach `&Pool` without naming `PostgresBackend`.
+//      helpers reach `&Pool` without naming `PostgresBackend`.
 //
 // `impl Backend for PostgresBackend {}` below is a one-line composition
 // marker -- every operation lives on the sub-trait impls above.
-//
-// Audit-row operations: see free fns in `crate::audit`. Open Q1
-// resolution per `docs/archive/p0-implementation-plan.md` §3; consumers
-// reach `&compio_postgres::Pool` through
-// [`PgSqlExecutor::pool_handle`].
 // ---------------------------------------------------------------------------
 
 impl SqlExecutor for PostgresBackend {
@@ -358,69 +358,9 @@ impl SchemaIntrospect for PostgresBackend {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-impl IndexBuilder for PostgresBackend {
-    async fn create_index_with_recovery(
-        &self,
-        app_id: &str,
-        collection: &str,
-        spec: &crate::query::IndexSpec,
-        deploy_id: &str,
-        schema_version: i32,
-    ) -> Result<(), DbError> {
-        create_index_with_recovery_audited(
-            &self.pool,
-            app_id,
-            collection,
-            spec,
-            deploy_id,
-            schema_version,
-        )
-        .await
-    }
-}
-
 impl PgSqlExecutor for PostgresBackend {
     fn pool_handle(&self) -> &Rc<compio_postgres::Pool> {
         &self.pool
-    }
-}
-
-// `AuditWriter` capability. The PG impl is a thin wrapper over
-// the existing `crate::audit::write_audit_row` free function — same SQL,
-// same `RETURNING id` round-trip, same error mapping. The trait method
-// discards the returned id because the only consumer (the SQLite
-// arm's `IndexBuilder::create_index_with_recovery`) writes its audit
-// row in terminal state and doesn't need to transition it; PG's own
-// `create_index_with_recovery_audited` continues to call the free
-// function directly so it can chain `update_audit_status` after, no
-// behaviour change on the PG audit path.
-#[cfg(any(test, feature = "test-helpers"))]
-impl AuditWriter for PostgresBackend {
-    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
-        crate::audit::ensure_audit_table_exists(self.pool.as_ref(), app_id).await
-    }
-
-    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
-        crate::audit::next_schema_version(self.pool.as_ref(), app_id).await
-    }
-
-    async fn write_audit_row_returning_id(
-        &self,
-        app_id: &str,
-        row: &crate::audit::AuditRow,
-    ) -> Result<i64, DbError> {
-        crate::audit::write_audit_row(self.pool.as_ref(), app_id, row).await
-    }
-
-    async fn update_audit_status(
-        &self,
-        app_id: &str,
-        id: i64,
-        new_status: crate::audit::TerminalStatus,
-        error: Option<&str>,
-    ) -> Result<bool, DbError> {
-        crate::audit::update_audit_status(self.pool.as_ref(), app_id, id, new_status, error).await
     }
 }
 
@@ -428,15 +368,20 @@ impl AuditWriter for PostgresBackend {
 // VectorIndex — pgvector adapter
 // ---------------------------------------------------------------------------
 //
-// Two methods:
-//   * `ensure_vector_index` — `CREATE INDEX CONCURRENTLY ... USING ivfflat`
-//      routed through the existing audited CIC retry loop so failures
-//      land in `__zeroship_migrations` like any other index build.
-//   * `vector_search` — `SELECT *, col <op> $1::vector AS _distance
-//      FROM ... ORDER BY col <op> $1::vector LIMIT $2` via `build_vector_search`.
+// One method: `vector_search` — `SELECT *, col <op> $1::vector AS _distance
+// FROM ... ORDER BY col <op> $1::vector LIMIT $2` via `build_vector_search`.
 //
-// Both probe `pg_extension WHERE extname='vector'` on first call and
-// cache the result on `pgvector_available`. Probe absence surfaces as
+// The ivfflat index it reads is NOT created here. `zeroship-migrate` authors
+// it from the declared `t.vector(dims, { metric })` field
+// (`zeroship-migrate-core/src/render/declarative.rs::vector_index_snapshot`,
+// emitted by `zeroship-migrate-postgres/src/ddl.rs::create_index` as
+// `USING ivfflat ("col" vector_<metric>_ops) WITH (lists = 100)`), and the
+// engine's drift pass compares `access_method` so it round-trips. A search
+// against a table whose migration has not been applied is a missing-index
+// sequential scan, not a correctness failure.
+//
+// The probe of `pg_extension WHERE extname='vector'` runs on first call and
+// caches on `pgvector_available`. Absence surfaces as
 // `DbError::Configuration { code: "vector_extension_missing", ... }`.
 // ---------------------------------------------------------------------------
 
@@ -488,69 +433,6 @@ impl PostgresBackend {
 }
 
 impl VectorIndex for PostgresBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_vector_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        column: &str,
-        dims: i32,
-        metric: VectorMetric,
-    ) -> Result<(), DbError> {
-        // Probe first — building an ivfflat index against a database
-        // without pgvector would fail with a less actionable SQLSTATE.
-        self.ensure_pgvector_available().await?;
-
-        // Opclass per metric — see `VectorMetric` rustdoc for the
-        // operator/opclass mapping.
-        let opclass = match metric {
-            VectorMetric::Cosine => "vector_cosine_ops",
-            VectorMetric::L2 => "vector_l2_ops",
-            VectorMetric::InnerProduct => "vector_ip_ops",
-        };
-
-        // Same naming convention as `crate::query::index_name(collection,
-        // &[col], false)` — we route through the existing audited CIC
-        // retry loop, so the spec we synthesise must follow the same
-        // identifier shape `apply.rs` and the audit log expect.
-        let idx_name = crate::query::index_name(collection, &[column], /* unique = */ false);
-        let sql = format!(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {}.{} USING ivfflat ({} {}) WITH (lists = 100)",
-            self.quote_ident(&idx_name),
-            self.quote_ident(app_id),
-            self.quote_ident(collection),
-            self.quote_ident(column),
-            opclass,
-        );
-
-        let spec = crate::query::IndexSpec {
-            name: idx_name,
-            columns: vec![column.to_string()],
-            unique: false,
-            sql,
-            kind: crate::query::IndexKind::Vector { dims, metric },
-        };
-
-        // Reuse the audited retry loop — pgvector index builds inherit
-        // the same INVALID-on-cancel / data-violation / transient
-        // classification machinery as every other CIC on the platform.
-        // `deploy_id` is `'p4_vector_index'` because `ensure_vector_index`
-        // can be called outside the deploy orchestrator (`register_model::apply`
-        // wires it, but the trait surface must stay
-        // callable from a standalone migration script too); the audit
-        // schema accepts arbitrary deploy ids and the `apply.rs` Pass-2
-        // caller overrides this when it routes through the trait.
-        create_index_with_recovery_audited(
-            &self.pool,
-            app_id,
-            collection,
-            &spec,
-            "p4_vector_index",
-            0,
-        )
-        .await
-    }
-
     async fn vector_search(
         &self,
         binding: &crate::binding::DbBinding,
@@ -562,7 +444,7 @@ impl VectorIndex for PostgresBackend {
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         // Probe so a missing extension surfaces with the same typed
-        // error shape `ensure_vector_index` produces — the SDK branches
+        // error shape the capability probe produces — the SDK branches
         // on `e.code === "vector_extension_missing"` regardless of
         // which entry point fired.
         self.ensure_pgvector_available().await?;
@@ -596,13 +478,13 @@ impl VectorIndex for PostgresBackend {
 // SpatialIndex — PostGIS adapter
 // ---------------------------------------------------------------------------
 //
-// Two methods:
-//   * `ensure_spatial_index` — `CREATE INDEX CONCURRENTLY … USING GIST
-//     ("col")`. Routes through the audited CIC retry loop like the
-//     vector adapter does — same INVALID-on-cancel / data-violation /
-//     transient classification machinery.
-//   * `spatial_near` — `WHERE ST_DWithin(col, ST_MakePoint(lng, lat)::
-//     geography, radius) ORDER BY ST_Distance(...) LIMIT $4`.
+// One method: `spatial_near` — `WHERE ST_DWithin(col, ST_MakePoint(lng, lat)::
+// geography, radius) ORDER BY ST_Distance(...) LIMIT $4`.
+//
+// The GiST index it reads is NOT created here. `zeroship-migrate` authors it
+// from the declared `t.geoPoint()` field
+// (`zeroship-migrate-core/src/render/declarative.rs::geo_index_snapshot`,
+// emitted as `USING gist ("col")`).
 //
 // Both probe `pg_extension WHERE extname='postgis'` on first call and
 // cache on `postgis_available`. Absence surfaces as
@@ -654,43 +536,6 @@ impl PostgresBackend {
 }
 
 impl SpatialIndex for PostgresBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_spatial_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        column: &str,
-    ) -> Result<(), DbError> {
-        self.ensure_postgis_available().await?;
-
-        let idx_name = crate::query::index_name(collection, &[column], /* unique = */ false);
-        let sql = format!(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {}.{} USING GIST ({})",
-            self.quote_ident(&idx_name),
-            self.quote_ident(app_id),
-            self.quote_ident(collection),
-            self.quote_ident(column),
-        );
-
-        let spec = crate::query::IndexSpec {
-            name: idx_name,
-            columns: vec![column.to_string()],
-            unique: false,
-            sql,
-            kind: crate::query::IndexKind::Spatial,
-        };
-
-        create_index_with_recovery_audited(
-            &self.pool,
-            app_id,
-            collection,
-            &spec,
-            "p4_spatial_index",
-            0,
-        )
-        .await
-    }
-
     async fn spatial_near(
         &self,
         binding: &crate::binding::DbBinding,
@@ -773,20 +618,6 @@ impl DialectBuilder for PgDialect {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// Return the `IndexSpec::sql` field verbatim. The spec is built
-    /// by `crate::query::build_create_indexes` against the PG dialect
-    /// already (`CREATE [UNIQUE] INDEX CONCURRENTLY …`); the `online`
-    /// flag has no separate consumer here. This may be reshaped
-    /// when SQLite's `IndexBuilder` lands.
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn build_create_index(
-        &self,
-        spec: &crate::query::IndexSpec,
-        _online: bool,
-    ) -> String {
-        spec.sql.clone()
-    }
-
     /// PG mapping for the type vocabulary. Each branch is a single
     /// `&'static str` — matches the column-type names PG accepts in a
     /// `CREATE TABLE` DDL.
@@ -839,15 +670,6 @@ impl DialectBuilder for PostgresBackend {
         PgDialect.quote_ident(name)
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn build_create_index(
-        &self,
-        spec: &crate::query::IndexSpec,
-        online: bool,
-    ) -> String {
-        PgDialect.build_create_index(spec, online)
-    }
-
     fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String {
         PgDialect.map_zs_type(zs_type, opts)
     }
@@ -862,277 +684,9 @@ impl DialectBuilder for PostgresBackend {
 }
 
 // `Backend` is a pure composition marker -- every method
-// lives on a sub-trait impl above. Audit-row operations: see free fns
-// in `crate::audit`. Open Q1 resolution per p0-implementation-plan.md.
+// lives on a sub-trait impl above.
 #[cfg(any(test, feature = "test-helpers"))]
 impl Backend for PostgresBackend {}
-
-// ---------------------------------------------------------------------------
-// create_index_with_recovery_audited -- moved from
-// register_model::apply.
-//
-// SQLSTATE-driven retry loop for `CREATE INDEX CONCURRENTLY`. Postgres
-// CIC can land an INVALID index (a partial build that has to be
-// dropped + retried) or fail outright on a UNIQUE conflict. Every
-// retry, INVALID detection, and terminal failure writes an
-// `index_retry` row to `__zeroship_migrations` so operators can see
-// what the cold-start orchestrator did.
-//
-// Postgres-shaped on purpose — `SqlState` matching is the cleanest
-// way to classify the recovery branches, and other backends that
-// support online index builds would supply their own equivalent
-// behind the same `Backend::create_index_with_recovery` signature.
-// ---------------------------------------------------------------------------
-
-#[cfg(any(test, feature = "test-helpers"))]
-async fn create_index_with_recovery_audited(
-    pool: &compio_postgres::Pool,
-    app_id: &str,
-    collection: &str,
-    spec: &crate::query::IndexSpec,
-    deploy_id: &str,
-    schema_version: i32,
-) -> Result<(), DbError> {
-    use crate::v8_bridge::fmt_db_err;
-    use compio_postgres::error::SqlState;
-
-    const MAX_RETRIES: u32 = 3;
-    let empty: Vec<&str> = Vec::new();
-    let qualified_idx = format!("\"{}\".\"{}\"", app_id, spec.name);
-    let drop_idx_sql = format!(
-        "DROP INDEX CONCURRENTLY IF EXISTS \"{}\".\"{}\"",
-        app_id, spec.name
-    );
-
-    // Helper: wrap a JSON envelope `Value` into a `DbError::SchemaRefused`
-    // tagged `cic_failed`. `serde_json::to_string` is the single source of
-    // truth for escaping — newlines, tabs, or unicode control chars in a
-    // Postgres error message stay inside the envelope's `message` field as
-    // properly-escaped JSON, and the SDK's `JSON.parse` never sees
-    // malformed input (hand-rolled `.replace('"', "\\\"")` did not cover
-    // those cases).
-    let refuse = |value: serde_json::Value| -> DbError {
-        // `to_string` of a `Value` is infallible in practice (the input is
-        // already a tree of JSON-representable nodes); the fallback below
-        // keeps the function total without resorting to `unwrap`.
-        let envelope_json = serde_json::to_string(&value).unwrap_or_else(|_| {
-            String::from("{\"code\":\"cic_failed\",\"reason\":\"envelope serialisation failed\"}")
-        });
-        DbError::SchemaRefused {
-            code: "cic_failed",
-            envelope_json,
-        }
-    };
-
-    let log_retry = |reason: &'static str,
-                     attempt: u32,
-                     sqlstate: Option<String>,
-                     error: Option<String>| {
-        crate::audit::AuditRow {
-            collection: collection.to_string(),
-            phase: crate::audit::Phase::Ddl,
-            change_class: if spec.unique {
-                crate::audit::ChangeClass::Compatible
-            } else {
-                crate::audit::ChangeClass::Additive
-            },
-            change_kind: "index_retry".to_string(),
-            details: serde_json::json!({
-                "reason": reason,
-                "attempt": attempt,
-                "index_name": spec.name,
-                "columns": spec.columns,
-                "unique": spec.unique,
-                "sqlstate": sqlstate,
-                "error": error,
-            }),
-            ddl_sql: Some(spec.sql.clone()),
-            status: crate::audit::InitialStatus::Running,
-            deploy_id: deploy_id.to_string(),
-            schema_version,
-            actor: crate::audit::ActorKind::Auto,
-        }
-    };
-
-    for attempt in 0..=MAX_RETRIES {
-        let create_res = pool.query_text_params(&spec.sql, &empty).await;
-
-        match create_res {
-            Ok(_) => {
-                let check_sql = format!(
-                    "SELECT indisvalid FROM pg_index WHERE indexrelid = '{}'::regclass",
-                    qualified_idx.replace('\'', "''")
-                );
-                // Postgres errors flow through the typed `From<pg::Error>`
-                // impl so SQLSTATE classification (UniqueViolation,
-                // Transient, …) lives in one place — `DbError::from_pg`.
-                let rows = pool.query_text_params(&check_sql, &empty).await?;
-                let valid = rows
-                    .first()
-                    .map(|r| r.try_get::<_, bool>("indisvalid").unwrap_or(false))
-                    .unwrap_or(false);
-                if valid {
-                    return Ok(());
-                }
-
-                // INVALID index — audit the retry, drop, and loop.
-                let row = log_retry("invalid_index_landed", attempt, None, None);
-                if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                    if let Err(audit_err) = crate::audit::update_audit_status(
-                        pool,
-                        app_id,
-                        id,
-                        crate::audit::TerminalStatus::Failed,
-                        Some("index landed INVALID"),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            app_id = %app_id,
-                            audit_id = id,
-                            transition = "Failed/invalid_index",
-                            attempt,
-                            audit_err = %audit_err,
-                            "update_audit_status failed; row stays in 'running' until reset",
-                        );
-                    }
-                }
-                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-                if attempt == MAX_RETRIES {
-                    return Err(refuse(serde_json::json!({
-                        "code": "validation_refused",
-                        "change_kind": "index_retry",
-                        "collection": collection,
-                        "index": spec.name,
-                        "reason": format!(
-                            "index repeatedly landed INVALID after {} retries",
-                            MAX_RETRIES
-                        ),
-                    })));
-                }
-            }
-            Err(e) => {
-                let code = e.code().cloned();
-                let fatal = matches!(
-                    code.as_ref(),
-                    Some(c) if c == &SqlState::UNIQUE_VIOLATION
-                        || c == &SqlState::NOT_NULL_VIOLATION
-                        || c == &SqlState::FOREIGN_KEY_VIOLATION
-                        || c == &SqlState::CHECK_VIOLATION
-                );
-                if fatal {
-                    let code_str = code.as_ref().map(|c| c.code()).unwrap_or("23xxx");
-                    let constraint_kind = if spec.unique { "unique" } else { "index" };
-                    let row = log_retry(
-                        "data_violation",
-                        attempt,
-                        Some(code_str.to_string()),
-                        Some(fmt_db_err(&e)),
-                    );
-                    if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                        if let Err(audit_err) = crate::audit::update_audit_status(
-                            pool,
-                            app_id,
-                            id,
-                            crate::audit::TerminalStatus::Failed,
-                            Some("data violates constraint"),
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                app_id = %app_id,
-                                audit_id = id,
-                                transition = "Failed/data_violation",
-                                sqlstate = code_str,
-                                audit_err = %audit_err,
-                                "update_audit_status failed; row stays in 'running' until reset",
-                            );
-                        }
-                    }
-                    let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-                    return Err(refuse(serde_json::json!({
-                        "code": "unique_violation",
-                        "sqlstate": code_str,
-                        "collection": collection,
-                        "constraint": constraint_kind,
-                        "index": spec.name,
-                        "columns": spec.columns,
-                        "message": fmt_db_err(&e),
-                    })));
-                }
-
-                let transient = matches!(
-                    code.as_ref(),
-                    Some(c) if c == &SqlState::T_R_DEADLOCK_DETECTED
-                        || c == &SqlState::DISK_FULL
-                        || c == &SqlState::OUT_OF_MEMORY
-                );
-
-                let row = log_retry(
-                    if transient {
-                        "transient_retry"
-                    } else {
-                        "non_transient_failure"
-                    },
-                    attempt,
-                    code.as_ref().map(|c| c.code().to_string()),
-                    Some(fmt_db_err(&e)),
-                );
-                if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                    if let Err(audit_err) = crate::audit::update_audit_status(
-                        pool,
-                        app_id,
-                        id,
-                        crate::audit::TerminalStatus::Failed,
-                        Some("index build failed"),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            app_id = %app_id,
-                            audit_id = id,
-                            transition = "Failed/index_build",
-                            attempt,
-                            transient,
-                            audit_err = %audit_err,
-                            "update_audit_status failed; row stays in 'running' until reset",
-                        );
-                    }
-                }
-
-                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-                if !transient || attempt == MAX_RETRIES {
-                    return Err(refuse(serde_json::json!({
-                        "code": "validation_refused",
-                        "change_kind": "index_retry",
-                        "collection": collection,
-                        "index": spec.name,
-                        "sqlstate": code
-                            .as_ref()
-                            .map(|c| c.code())
-                            .unwrap_or("unknown"),
-                        "attempts": attempt + 1,
-                        "message": fmt_db_err(&e),
-                    })));
-                }
-            }
-        }
-    }
-
-    // Loop exited without a terminal `return` — the retry budget is
-    // exhausted yet the last iteration produced neither a success nor a
-    // classified failure. That's an invariant breach, not user input;
-    // surface it as a configuration-class error so the operator log can
-    // tell it apart from a validation refusal.
-    Err(DbError::Configuration {
-        code: "cic_configuration",
-        message: format!(
-            "db: create index '{}' exhausted retry budget without a terminal result",
-            spec.name
-        ),
-        hint: None,
-    })
-}
 
 // ===========================================================================
 // EncryptedColumn + Backup impls on PostgresBackend
@@ -1752,9 +1306,8 @@ mod tests {
     //!
     //! `PostgresBackend` is, by design, a thin facade: every method in
     //! its per-capability impls (`SqlExecutor` / `LockManager` /
-    //! `SchemaIntrospect` / `IndexBuilder`) either
-    //! calls the `Rc<Pool>` directly or forwards into [`crate::audit`] /
-    //! [`crate::diff`] / [`crate::query`] free functions.
+    //! `SchemaIntrospect`) either calls the `Rc<Pool>` directly or
+    //! forwards into [`crate::diff`] / [`crate::query`] free functions.
     //! `impl Backend for PostgresBackend` is a one-line composition
     //! marker -- every method body lives on a sub-trait impl. The only
     //! non-async logic in this file is:
@@ -1788,8 +1341,8 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager,
-        PgLockManager, PgSqlExecutor, RegisterBackend, SchemaIntrospect, SqlExecutor,
+        Backend, DialectBuilder, LockManager, PgLockManager, PgSqlExecutor, RegisterBackend,
+        SchemaIntrospect, SqlExecutor,
     };
 
     /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
@@ -1810,14 +1363,12 @@ mod tests {
         fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
-        fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         fn impls_register_backend<T: RegisterBackend>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
         impls_schema_introspect::<PostgresBackend>();
-        impls_index_builder::<PostgresBackend>();
         impls_pg_sql_executor::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();
         impls_register_backend::<PostgresBackend>();
@@ -1828,13 +1379,6 @@ mod tests {
         // refactor that detaches the impl block fails at type-check.
         fn impls_dialect_builder<T: DialectBuilder>() {}
         impls_dialect_builder::<PostgresBackend>();
-
-        // `AuditWriter` impl wraps the free-function audit
-        // write path. The bound pins the trait wire so a future
-        // refactor that detaches the impl block fails at type-check
-        // here, not at a distant `IndexBuilder` consumer site.
-        fn impls_audit_writer<T: AuditWriter>() {}
-        impls_audit_writer::<PostgresBackend>();
     }
 
     // ---------------------------------------------------------------------

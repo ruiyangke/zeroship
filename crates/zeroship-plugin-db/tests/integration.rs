@@ -1324,224 +1324,6 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     release_pg(pool).await;
 }
 
-// ---------------------------------------------------------------------------
-// 23. A3 — `__zeroship_migrations` audit table is created idempotently and
-// receives rows for every DDL operation performed by the orchestrator.
-//
-// Pre-A3: A1 retries logged via tracing::warn! with a TODO marker. Post-A3
-// the audit table is populated by the four-phase orchestrator so
-// operators can see what ran, when, and by whom.
-// ---------------------------------------------------------------------------
-
-#[compio::test]
-async fn a3_audit_table_created_and_idempotent() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a3_audit_test";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&zeroship_plugin_db::query::build_create_schema(app), &[])
-        .await
-        .unwrap();
-
-    // First call: should create __zeroship_migrations table + 2 indexes.
-    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
-        .await
-        .unwrap();
-
-    // Confirm it exists.
-    let rows = pool
-        .query_text_params(
-            "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
-            &[app, "__zeroship_migrations"],
-        )
-        .await
-        .unwrap();
-    let n: i64 = rows[0].get("n");
-    assert_eq!(n, 1, "audit table should exist");
-
-    // Idempotency — second call must not error.
-    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
-        .await
-        .unwrap();
-    release_pg(pool).await;
-}
-
-// ---------------------------------------------------------------------------
-// A pre-existing audit table with the OLD 7-status
-// CHECK constraint (no `validation_refused`) gets widened
-// by `ensure_audit_table_exists`. The "fresh-table" branch was covered by
-// the test above; this closes the **upgrade path** every existing-app
-// deploy hits.
-//
-// The prior "two consecutive ensure_audit_table_exists calls" check only
-// exercises the no-op rewrite branch (table created with the NEW CHECK,
-// then re-ALTERed to the same body). This test forces the DROP-old /
-// ADD-new path and asserts the post-state accepts `'validation_refused'`.
-// ---------------------------------------------------------------------------
-
-/// CHECK ALTER upgrade path.
-///
-/// Seeds the audit table with the OLD CHECK constraint
-/// (7 statuses, no `validation_refused`), runs `ensure_audit_table_exists`,
-/// and asserts the constraint was widened and now accepts the new value.
-#[compio::test]
-async fn a3_audit_table_check_alter_upgrades_existing_constraint() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a3_audit_alter_upgrade";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&zeroship_plugin_db::query::build_create_schema(app), &[])
-        .await
-        .unwrap();
-
-    // Seed the table with the OLD CHECK body -- the
-    // 7-status list without `validation_refused`. The DDL otherwise
-    // matches the current shape so `ensure_audit_table_exists`'s
-    // CREATE-IF-NOT-EXISTS is a no-op and only the DROP+ADD path runs.
-    let old_create = format!(
-        r#"CREATE TABLE "{app}"."__zeroship_migrations" (
-  id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  collection          TEXT NOT NULL,
-  phase               TEXT NOT NULL,
-  change_class        TEXT NOT NULL,
-  change_kind         TEXT NOT NULL,
-  details             JSONB NOT NULL,
-  ddl_sql             TEXT,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  applied_at          TIMESTAMPTZ,
-  applied_by_kind     TEXT NOT NULL,
-  applied_by_id       TEXT,
-  deploy_id           TEXT NOT NULL,
-  parent_id           BIGINT REFERENCES "{app}"."__zeroship_migrations"(id),
-  schema_version      INTEGER NOT NULL,
-  status              TEXT NOT NULL,
-  error               TEXT,
-  duration_ms         INTEGER,
-  validate_cursor     BIGINT,
-  owner_session_id    TEXT,
-  last_heartbeat_at   TIMESTAMPTZ,
-  dead_letter_pks     JSONB,
-  audit_generation    BIGINT NOT NULL DEFAULT 0,
-  CONSTRAINT __zeroship_migrations_phase_chk CHECK (
-    phase IN ('ddl','validation','backfill','audit')
-  ),
-  CONSTRAINT __zeroship_migrations_class_chk CHECK (
-    change_class IN ('additive','compatible','destructive')
-  ),
-  CONSTRAINT __zeroship_migrations_status_chk CHECK (
-    status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back')
-  )
-)"#
-    );
-    pool.execute(&old_create, &[]).await.unwrap();
-
-    // Sanity-check the seed: the OLD constraint must refuse
-    // `validation_refused` before the migration runs. If this insert
-    // somehow succeeds we'd be testing nothing.
-    let pre_insert = format!(
-        r#"INSERT INTO "{app}"."__zeroship_migrations"
-            (collection, phase, change_class, change_kind, details,
-             applied_by_kind, deploy_id, schema_version, status)
-           VALUES ('c','ddl','additive','create_table','{{}}'::jsonb,
-                   'system','seed_pre',1,'validation_refused')"#
-    );
-    let pre_err = pool
-        .query_text_params(&pre_insert, &[])
-        .await
-        .expect_err("seed CHECK must refuse 'validation_refused' before ALTER");
-    let pre_code = pre_err
-        .code()
-        .map(|c| c.code().to_string())
-        .unwrap_or_default();
-    assert_eq!(
-        pre_code, "23514",
-        "pre-ALTER insert must fail with check_violation (23514), got: {pre_err}"
-    );
-
-    // Run the migration — DROP-old / ADD-new on the named constraint.
-    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
-        .await
-        .unwrap();
-
-    // Verify the constraint body literally contains 'validation_refused'.
-    // `pg_get_constraintdef` returns the canonicalised SQL Postgres stored,
-    // which is the most reliable thing to grep — names alone could match
-    // a stale leftover.
-    let def_rows = pool
-        .query_text_params(
-            "SELECT pg_get_constraintdef(c.oid) AS def \
-             FROM pg_constraint c \
-             JOIN pg_class t ON t.oid = c.conrelid \
-             JOIN pg_namespace n ON n.oid = t.relnamespace \
-             WHERE n.nspname = $1 \
-               AND t.relname = '__zeroship_migrations' \
-               AND c.conname = '__zeroship_migrations_status_chk'",
-            &[app],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        def_rows.len(),
-        1,
-        "expected exactly one status_chk row, got {}",
-        def_rows.len()
-    );
-    let def: String = def_rows[0].get("def");
-    assert!(
-        def.contains("validation_refused"),
-        "post-ALTER status_chk should include validation_refused, got: {def}"
-    );
-
-    // Insert with `status = 'validation_refused'` — must now succeed.
-    let post_insert = format!(
-        r#"INSERT INTO "{app}"."__zeroship_migrations"
-            (collection, phase, change_class, change_kind, details,
-             applied_by_kind, deploy_id, schema_version, status)
-           VALUES ('c','ddl','destructive','drop_column','{{}}'::jsonb,
-                   'system','seed_post',1,'validation_refused')"#
-    );
-    pool.execute(&post_insert, &[])
-        .await
-        .expect("post-ALTER insert of 'validation_refused' must succeed");
-
-    // The constraint is still active — an unknown status must be rejected
-    // with SQLSTATE 23514 (check_violation), proving the widening didn't
-    // accidentally drop the constraint without re-adding it.
-    let bad_insert = format!(
-        r#"INSERT INTO "{app}"."__zeroship_migrations"
-            (collection, phase, change_class, change_kind, details,
-             applied_by_kind, deploy_id, schema_version, status)
-           VALUES ('c','ddl','additive','create_table','{{}}'::jsonb,
-                   'system','seed_bad',2,'invalid_unknown_status')"#
-    );
-    let bad_err = pool
-        .query_text_params(&bad_insert, &[])
-        .await
-        .expect_err("post-ALTER CHECK must still refuse unknown statuses");
-    let bad_code = bad_err
-        .code()
-        .map(|c| c.code().to_string())
-        .unwrap_or_default();
-    assert_eq!(
-        bad_code, "23514",
-        "unknown status must fail with check_violation (23514), got: {bad_err}"
-    );
-    release_pg(pool).await;
-}
-
-// ---------------------------------------------------------------------------
-// 24. A2/A3 — first-deploy registerModel writes audit rows for table +
-// index creation. The four-phase orchestrator drives every change
-// through __zeroship_migrations.
-// ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // 25. A2 — destructive change (drop_column) is refused in strict mode.
@@ -3658,9 +3440,17 @@ async fn vector_search_returns_k_nearest() {
 /// Test gate for `pgvector_extension_missing_reports_typed_error`.
 ///
 /// Drops the `vector` extension (if present), constructs a fresh
-/// backend so the probe cache starts empty, and asserts that calling
-/// `ensure_vector_index` surfaces
+/// backend so the probe cache starts empty, and asserts that
+/// `vector_search` surfaces
 /// `DbError::Configuration { code: "vector_extension_missing", .. }`.
+///
+/// It searches TWICE on purpose. `ensure_pgvector_available` has two
+/// miss arms -- one that runs the `pg_extension` probe and caches
+/// `Some(false)`, one that reads that cache -- and they construct the
+/// error separately. The first call takes the probe arm, the second the
+/// cached arm, so a divergence between them fails here. The pairing used
+/// to fall out of calling `ensure_vector_index` then `vector_search`;
+/// with the DDL half deleted the second arm would otherwise go unruled-on.
 ///
 /// The DROP requires sufficient privileges; tests run as the bootstrap
 /// `postgres` superuser, which has them. If the test environment has
@@ -3693,35 +3483,32 @@ async fn pgvector_extension_missing_reports_typed_error() {
     }
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let ensure_err = VectorIndex::ensure_vector_index(
-        &backend,
-        "vector_missing",
-        "any",
-        "any",
-        128,
-        VectorMetric::Cosine,
-    )
-    .await
-    .expect_err("missing extension must yield a typed error");
 
-    // Also exercise vector_search — the SDK branches on
-    // `e.code === "vector_extension_missing"` from BOTH entry points.
     // No descriptor entry is installed for `vector_missing`, and that is
     // deliberate: `ensure_pgvector_available` runs BEFORE the schema resolve,
     // so the extension error must still be the one that surfaces. If the order
     // ever flipped, this would fail with `collection_not_declared` instead.
-    let search_err = VectorIndex::vector_search(
-        &backend,
-        &DbBinding::cold_start("vector_missing"),
-        "any",
-        "any",
-        &[0.0f32; 8],
-        10,
-        VectorMetric::Cosine,
-        &serde_json::Value::Null,
-    )
-    .await
-    .expect_err("missing extension must yield a typed error on search too");
+    async fn search(
+        backend: &PostgresBackend,
+    ) -> DbError {
+        VectorIndex::vector_search(
+            backend,
+            &DbBinding::cold_start("vector_missing"),
+            "any",
+            "any",
+            &[0.0f32; 8],
+            10,
+            VectorMetric::Cosine,
+            &serde_json::Value::Null,
+        )
+        .await
+        .expect_err("missing extension must yield a typed error on search")
+    }
+
+    // First call: the probe arm (cache empty -> `SELECT 1 FROM pg_extension`).
+    let probe_err = search(&backend).await;
+    // Second call: the cached arm (`pgvector_available == Some(false)`).
+    let cached_err = search(&backend).await;
 
     // RESTORE the extension BEFORE asserting: this test deliberately drops a
     // SHARED, cluster-/db-wide object (the `vector` extension lives in
@@ -3734,23 +3521,21 @@ async fn pgvector_extension_missing_reports_typed_error() {
         .await
         .expect("restore the shared vector extension after the missing-extension probe");
 
-    match ensure_err {
-        DbError::Configuration { code, message, hint } => {
-            assert_eq!(code, "vector_extension_missing", "got {message}");
-            assert!(
-                hint.as_deref()
-                    .map(|h| h.contains("CREATE EXTENSION"))
-                    .unwrap_or(false),
-                "hint must mention `CREATE EXTENSION vector;`: {hint:?}"
-            );
+    for (arm, err) in [("probe", probe_err), ("cached", cached_err)] {
+        match err {
+            DbError::Configuration { code, message, hint } => {
+                assert_eq!(code, "vector_extension_missing", "{arm} arm: got {message}");
+                assert!(
+                    hint.as_deref()
+                        .map(|h| h.contains("CREATE EXTENSION"))
+                        .unwrap_or(false),
+                    "{arm} arm: hint must mention `CREATE EXTENSION vector;`: {hint:?}"
+                );
+            }
+            other => panic!(
+                "{arm} arm: expected Configuration {{ vector_extension_missing }}, got {other:?}"
+            ),
         }
-        other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
-    }
-    match search_err {
-        DbError::Configuration { code, .. } => {
-            assert_eq!(code, "vector_extension_missing");
-        }
-        other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
     }
     drop(backend);
     release_pg(pool).await;
@@ -3969,10 +3754,11 @@ async fn near_returns_within_radius() {
 
 /// Test gate for `postgis_extension_missing_reports_typed_error`.
 ///
-/// When the database has no PostGIS, both `ensure_spatial_index` and
-/// `spatial_near` must surface `DbError::Configuration { code:
-/// "postgis_extension_missing", .. }`. Same shape as
-/// `pgvector_extension_missing_reports_typed_error`.
+/// When the database has no PostGIS, `spatial_near` must surface
+/// `DbError::Configuration { code: "postgis_extension_missing", .. }`.
+/// Same shape as `pgvector_extension_missing_reports_typed_error`,
+/// including the two-call pairing that rules on `ensure_postgis_available`'s
+/// probe arm and its cached arm separately.
 #[compio::test]
 async fn postgis_extension_missing_reports_typed_error() {
     use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
@@ -3998,41 +3784,42 @@ async fn postgis_extension_missing_reports_typed_error() {
     }
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let err = SpatialIndex::ensure_spatial_index(&backend, "postgis_missing", "any", "any")
-        .await
-        .expect_err("missing PostGIS must yield a typed error");
-    match err {
-        DbError::Configuration { code, message, hint } => {
-            assert_eq!(code, "postgis_extension_missing", "got {message}");
-            assert!(
-                hint.as_deref()
-                    .map(|h| h.contains("CREATE EXTENSION"))
-                    .unwrap_or(false),
-                "hint must mention `CREATE EXTENSION postgis;`: {hint:?}"
-            );
-        }
-        other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
-    }
 
     // No descriptor entry, deliberately: the extension probe runs BEFORE the
     // schema resolve, so this must still surface `postgis_extension_missing`.
-    let err = SpatialIndex::spatial_near(
-        &backend,
-        &DbBinding::cold_start("postgis_missing"),
-        "any",
-        "any",
-        GeoPoint { lat: 0.0, lng: 0.0 },
-        1000.0,
-        &serde_json::Value::Null,
-        None,
-    )
-    .await
-    .expect_err("missing PostGIS must yield a typed error on near too");
-    match err {
-        DbError::Configuration { code, .. } => {
-            assert_eq!(code, "postgis_extension_missing");
+    async fn near(backend: &PostgresBackend) -> DbError {
+        SpatialIndex::spatial_near(
+            backend,
+            &DbBinding::cold_start("postgis_missing"),
+            "any",
+            "any",
+            GeoPoint { lat: 0.0, lng: 0.0 },
+            1000.0,
+            &serde_json::Value::Null,
+            None,
+        )
+        .await
+        .expect_err("missing PostGIS must yield a typed error on near")
+    }
+
+    // First call takes the probe arm, second the cached arm.
+    let probe_err = near(&backend).await;
+    let cached_err = near(&backend).await;
+    for (arm, err) in [("probe", probe_err), ("cached", cached_err)] {
+        match err {
+            DbError::Configuration { code, message, hint } => {
+                assert_eq!(code, "postgis_extension_missing", "{arm} arm: got {message}");
+                assert!(
+                    hint.as_deref()
+                        .map(|h| h.contains("CREATE EXTENSION"))
+                        .unwrap_or(false),
+                    "{arm} arm: hint must mention `CREATE EXTENSION postgis;`: {hint:?}"
+                );
+            }
+            other => panic!(
+                "{arm} arm: expected Configuration {{ postgis_extension_missing }}, got {other:?}"
+            ),
         }
-        other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
     }
     drop(backend);
     release_pg(pool).await;
@@ -4403,9 +4190,19 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     //
     // ONE THING HERE IS NOT A FAITHFUL REPRODUCTION, and it is called out rather
     // than hidden: `embedding` gets a bare `vector(3)` column and NO ANN index.
-    // The declared schema asks for a cosine vector index, and that index's DDL
-    // is built by the pgvector adapter in the backend, not by the shared
-    // emitter - it is not recoverable as a literal the way the rest of this is.
+    // The declared schema asks for a cosine vector index, and the engine DOES
+    // emit one -- `vector_index_snapshot` in
+    // `zeroship-migrate-core/src/render/declarative.rs:2888` renders
+    // `USING ivfflat ("embedding" vector_cosine_ops) WITH (lists = 100)`. This
+    // fixture just does not reproduce it, because it hand-writes the DDL rather
+    // than running the engine.
+    //
+    // (That reason REPLACED an older one which said the index "is built by the
+    // pgvector adapter in the backend, not by the shared emitter". That was true
+    // of `VectorIndex::ensure_vector_index`, which is deleted: the data plane
+    // issues no DDL at all now. The absence here is a fixture shortcut, not a
+    // property of the system.)
+    //
     // The column and its dimensionality are faithful; the index is absent. If a
     // future assertion here depends on the ANN index existing, it will fail, and
     // that failure is correct.
@@ -4549,29 +4346,37 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 //       unchanged: it still creates the table from the declared schema.
 // ---------------------------------------------------------------------------
 
-/// Count rows in the per-app audit journal (`__zeroship_migrations`), or `None`
-/// when the table is absent. The OLD PG `registerModel` wrote one audit row per
-/// applied DDL op; the current PG path applies nothing, so this stays put across a
-/// dispatch call -- a direct, faithful "no DDL was issued" probe.
-async fn audit_row_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
-    let exists = pool
-        .query_text_params(
-            "SELECT to_regclass($1) IS NOT NULL AS present",
-            &[format!("\"{app}\".\"__zeroship_migrations\"").as_str()],
-        )
-        .await
-        .ok()?;
-    let present: bool = exists.first()?.get("present");
-    if !present {
-        return None;
-    }
+/// Count every relation `pg_class` holds in the app's schema -- tables, indexes,
+/// sequences, views, virtual and partitioned relations alike -- or `None` when
+/// the schema itself does not exist.
+///
+/// This REPLACED an `audit_row_count` probe that counted rows in
+/// `"<app>"."__zeroship_migrations"`, deleted along with the data-plane DDL it
+/// was the provenance log for. The replacement is deliberately a WIDER
+/// instrument, not a like-for-like one: the old probe could only see DDL that
+/// chose to write an audit row, so a runtime `CREATE INDEX` that skipped the
+/// audit write was invisible to it. This one is keyed on the catalog, so any
+/// relation the dispatch creates moves the number whether or not the code that
+/// created it wanted to be seen.
+///
+/// What it still cannot see: DDL that creates no relation at all -- `ALTER
+/// TABLE ... ADD COLUMN`, `COMMENT ON`, `GRANT`, a `CREATE TRIGGER`. The two
+/// callers below pair it with an explicit relation-existence assertion for the
+/// object each is actually about.
+async fn schema_relation_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
     let rows = pool
         .query_text_params(
-            &format!("SELECT count(*)::bigint AS n FROM \"{app}\".\"__zeroship_migrations\""),
-            &[],
+            "SELECT count(c.oid)::bigint AS n \
+             FROM pg_namespace n \
+             LEFT JOIN pg_class c ON c.relnamespace = n.oid \
+             WHERE n.nspname = $1 \
+             GROUP BY n.oid",
+            &[app],
         )
         .await
         .ok()?;
+    // No row at all means the namespace is absent -- distinct from a namespace
+    // that exists and holds nothing, which returns 0.
     Some(rows.first()?.get::<_, i64>("n"))
 }
 
@@ -4629,16 +4434,16 @@ async fn p5_pg_register_model_issues_no_runtime_ddl() {
     .expect("PG registerModel dispatch must succeed (no-op)");
 
     // PROOF: nothing was created. The OLD path would have CREATE SCHEMA +
-    // CREATE TABLE + the __zeroship_migrations journal + audit rows.
+    // CREATE TABLE + a per-app journal + its indexes.
     assert!(
         !pg_table_exists(&pool, app, "widgets").await,
         "P5 PG cutover: registerModel must NOT create the table at runtime"
     );
     assert_eq!(
-        audit_row_count(&pool, app).await,
+        schema_relation_count(&pool, app).await,
         None,
-        "P5 PG cutover: registerModel must NOT create the audit journal / write \
-         any DDL audit rows at runtime"
+        "P5 PG cutover: registerModel must NOT create the schema, nor any \
+         relation inside it, at runtime"
     );
 
     // Sanity teardown.
@@ -4697,23 +4502,15 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     .await
     .unwrap_or_else(|e| panic!("people fixture (deploy stand-in) failed: {e}"));
 
-    // The engine's apply creates the per-app audit journal on its way through
-    // (`AuditWriter::ensure_audit_table` -> `audit::ensure_audit_table_exists`,
-    // `crates/zeroship-plugin-db/src/backend/postgres.rs:340`). The stand-in
-    // above reproduces the engine's TABLES but not that, so without this the
-    // assertion below asserts a journal nothing ever created - and the whole
-    // point of the test is to compare the journal before and after the runtime
-    // dispatch, which needs it to exist first.
-    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
-        .await
-        .expect("engine stand-in must create the audit journal, as the engine does");
-
-    // Snapshot the audit journal AFTER the engine's apply — the runtime dispatch
-    // below must not add to it.
-    let audit_before = audit_row_count(&pool, app).await;
+    // Snapshot the CATALOG after the engine stand-in's apply -- the runtime
+    // dispatch below must not add a relation to it. This used to snapshot the
+    // row count of a per-app audit journal that the stand-in had to create
+    // first; both the journal and the runtime DDL it recorded are gone.
+    let relations_before = schema_relation_count(&pool, app).await;
     assert!(
-        audit_before.is_some(),
-        "engine stand-in created the journal"
+        relations_before.unwrap_or(0) > 0,
+        "engine stand-in must have created relations to compare against, got \
+         {relations_before:?}"
     );
 
     // === The runtime: install PG backend, run the PRODUCTION dispatch. ===
@@ -4727,12 +4524,12 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     .await
     .expect("PG registerModel dispatch must succeed (no-op apply)");
 
-    // PROOF the runtime issued NO DDL: the audit journal is byte-for-byte the
-    // same count it was after the engine's apply.
+    // PROOF the runtime issued NO relation-creating DDL: the catalog holds
+    // exactly the relations the engine stand-in left.
     assert_eq!(
-        audit_row_count(&pool, app).await,
-        audit_before,
-        "P5 PG cutover: the runtime dispatch must add ZERO DDL audit rows"
+        schema_relation_count(&pool, app).await,
+        relations_before,
+        "P5 PG cutover: the runtime dispatch must create ZERO relations"
     );
 
     // The descriptor install the dispatch CALLER performs in production. The
@@ -4822,9 +4619,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 
     // FINAL proof: still zero runtime DDL after the full CRUD round-trip.
     assert_eq!(
-        audit_row_count(&pool, app).await,
-        audit_before,
-        "P5 PG cutover: CRUD must not have triggered any runtime DDL"
+        schema_relation_count(&pool, app).await,
+        relations_before,
+        "P5 PG cutover: CRUD must not have triggered any relation-creating DDL"
     );
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;

@@ -1,5 +1,4 @@
-//! SQLite vector helpers — `sqlite-vec` `vec0` virtual-table SQL
-//! composition + base-table mirror triggers.
+//! SQLite vector helpers — `sqlite-vec` `vec0` MATCH query composition.
 //!
 //! This implementation (`docs/archive/p4-search-implementation-plan.md` §10,
 //! 2026-05-24 reassessment) swapped from a pure-Rust flat scan
@@ -9,22 +8,25 @@
 //! (`session::register_sqlite_vec_once`); NO `.so` ships, the
 //! bundled-SQLite invariant (design §1) is preserved.
 //!
-//! ## `vec0` model
+//! ## `vec0` model — READ side only
 //!
-//! Each `t.vector(dims, { metric })` column gets a paired `vec0`
-//! virtual table:
+//! Each `t.vector(dims, { metric })` column is paired with a `vec0`
+//! virtual table `"<app>"."<coll>__vec_<col>"` and three AFTER triggers
+//! that mirror `(rowid, <col>)` into it. **This module composes none of
+//! that DDL and neither does any other data-plane path** — schema
+//! belongs to `zeroship-migrate`. The runtime descriptor NAMES the
+//! shadow relation and its triggers (`AuxiliaryObject::ShadowTable`,
+//! `zeroship-migrate-core/src/render/gen_types.rs:219`), which is what
+//! [`vec_table_name`] must agree with; whether it EXISTS is the
+//! migration's business. The builders that used to live here
+//! (`build_create_vec0_sql`, `build_initial_population_sql`, the three
+//! `build_*_trigger_sql`) were `#[cfg(any(test, feature =
+//! "test-helpers"))]`, so no shipped binary ever ran them.
 //!
-//! ```sql
-//! CREATE VIRTUAL TABLE IF NOT EXISTS "<app>"."<coll>__vec_<col>"
-//!   USING vec0("<col>" float[<dims>] distance_metric=<cosine|l2>);
-//! ```
-//!
-//! The base table still carries a `BLOB` column for the vector — that
-//! is the canonical write surface (the SDK's `t.vector()` payload
-//! lands there via the regular INSERT/UPDATE path; the CDC preupdate
-//! hook observes the row image). AFTER triggers mirror `(rowid,
-//! <col>)` into the `vec0` vtable so reads can JOIN base ⟷ vec0 on
-//! rowid and rank by `MATCH` distance:
+//! The base table carries the canonical `BLOB` column for the vector
+//! (the SDK's `t.vector()` payload lands there via the regular
+//! INSERT/UPDATE path; the CDC preupdate hook observes the row image).
+//! Reads JOIN base <-> vec0 on rowid and rank by `MATCH` distance:
 //!
 //! ```sql
 //! SELECT t.*, v.distance AS _distance
@@ -52,25 +54,6 @@
 use crate::backend::VectorMetric;
 use crate::error::DbError;
 use crate::query::quote_ident;
-
-/// Translate a [`VectorMetric`] into the `distance_metric=...` clause
-/// fragment used in a `vec0` virtual-table constructor.
-///
-/// Returns `"cosine"` or `"l2"`. `InnerProduct` is not a vec0-native
-/// metric — callers route through [`reject_inner_product`] before
-/// reaching the SQL builders.
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn metric_keyword(metric: VectorMetric) -> &'static str {
-    match metric {
-        VectorMetric::Cosine => "cosine",
-        VectorMetric::L2 => "l2",
-        // Inner product reached this far: caller skipped the
-        // reject_inner_product check. Default to L2 so the SQL still
-        // parses, but the caller is buggy — this branch should be
-        // unreachable in production.
-        VectorMetric::InnerProduct => "l2",
-    }
-}
 
 /// Reject [`VectorMetric::InnerProduct`] with a typed `DbError` on
 /// SQLite. The PG arm continues to support all three metrics via
@@ -136,123 +119,6 @@ pub(crate) fn build_vector_search_sql(
     ))
 }
 
-/// Build the `CREATE VIRTUAL TABLE IF NOT EXISTS … USING vec0(…)` DDL.
-///
-/// Shape:
-/// ```sql
-/// CREATE VIRTUAL TABLE IF NOT EXISTS "<app>"."<coll>__vec_<col>"
-///   USING vec0("<col>" float[<dims>] distance_metric=<cosine|l2>)
-/// ```
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn build_create_vec0_sql(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    dims: i32,
-    metric: VectorMetric,
-) -> String {
-    let qschema = quote_ident(app_id);
-    let qvtab = quote_ident(&vec_table_name(collection, column));
-    let kw = metric_keyword(metric);
-    // vec0's constructor parser doesn't accept double-quoted column
-    // identifiers (it errors with "Could not parse '…'"). The column
-    // name appears unquoted; identifier safety relies on the SDK's
-    // `validate_field_name` upstream check (`[A-Za-z_][A-Za-z0-9_]*`)
-    // — same alphabet pgvector's pg arm relies on. Embedded `"` and
-    // whitespace would already have been rejected.
-    format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS {qschema}.{qvtab} \
-         USING vec0({column} float[{dims}] distance_metric={kw})"
-    )
-}
-
-/// Build the initial-population `INSERT INTO __vec_<col> SELECT FROM
-/// <coll>` statement. Run exactly once, gated by a `sqlite_master`
-/// presence probe.
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn build_initial_population_sql(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-) -> String {
-    let qschema = quote_ident(app_id);
-    let qvtab = quote_ident(&vec_table_name(collection, column));
-    let qcoll = quote_ident(collection);
-    let qcol = quote_ident(column);
-    format!(
-        "INSERT INTO {qschema}.{qvtab} (rowid, {qcol}) \
-         SELECT rowid, {qcol} FROM {qschema}.{qcoll} WHERE {qcol} IS NOT NULL"
-    )
-}
-
-/// `AFTER INSERT` trigger mirroring `(rowid, <col>)` into the vec0
-/// vtable. The body references the vec0 table without a schema
-/// qualifier — the SQLite engine rule "table referenced inside a
-/// trigger body cannot be qualified by the database name" applies.
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn build_insert_trigger_sql(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-) -> String {
-    let qschema = quote_ident(app_id);
-    let qcoll = quote_ident(collection);
-    let qvtab_unqual = quote_ident(&vec_table_name(collection, column));
-    let qtrg = quote_ident(&format!("{collection}__vec_{column}_ai"));
-    let qcol = quote_ident(column);
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {qschema}.{qtrg} \
-         AFTER INSERT ON {qschema}.{qcoll} \
-         WHEN NEW.{qcol} IS NOT NULL BEGIN \
-         INSERT INTO {qvtab_unqual} (rowid, {qcol}) VALUES (NEW.rowid, NEW.{qcol}); END"
-    )
-}
-
-/// `AFTER DELETE` trigger removing the mirrored row from the vec0
-/// vtable. vec0 supports plain `DELETE FROM v WHERE rowid = ?` (it
-/// internally owns the row and needs no external-content sentinel).
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn build_delete_trigger_sql(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-) -> String {
-    let qschema = quote_ident(app_id);
-    let qcoll = quote_ident(collection);
-    let qvtab_unqual = quote_ident(&vec_table_name(collection, column));
-    let qtrg = quote_ident(&format!("{collection}__vec_{column}_ad"));
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {qschema}.{qtrg} \
-         AFTER DELETE ON {qschema}.{qcoll} BEGIN \
-         DELETE FROM {qvtab_unqual} WHERE rowid = OLD.rowid; END"
-    )
-}
-
-/// `AFTER UPDATE OF <col>` trigger — scoped to the vector column so
-/// unrelated UPDATEs don't churn the vec0 index. Delete-then-insert
-/// pair on the same rowid: vec0 has no `UPDATE` syntax that touches
-/// the vector column directly (a future vec0 release may add it; the
-/// d/i pair is the documented pattern today).
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn build_update_trigger_sql(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-) -> String {
-    let qschema = quote_ident(app_id);
-    let qcoll = quote_ident(collection);
-    let qvtab_unqual = quote_ident(&vec_table_name(collection, column));
-    let qtrg = quote_ident(&format!("{collection}__vec_{column}_au"));
-    let qcol = quote_ident(column);
-    format!(
-        "CREATE TRIGGER IF NOT EXISTS {qschema}.{qtrg} \
-         AFTER UPDATE OF {qcol} ON {qschema}.{qcoll} BEGIN \
-         DELETE FROM {qvtab_unqual} WHERE rowid = OLD.rowid; \
-         INSERT INTO {qvtab_unqual} (rowid, {qcol}) \
-           SELECT NEW.rowid, NEW.{qcol} WHERE NEW.{qcol} IS NOT NULL; END"
-    )
-}
-
 /// Encode `&[f32]` as the raw little-endian byte buffer vec0's MATCH
 /// operand expects. vec0's `vec_f32` constructor accepts a BLOB
 /// whose length is `4 * dims` and reads the bytes as native-endian
@@ -275,12 +141,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metric_keyword_maps_cosine_and_l2() {
-        assert_eq!(metric_keyword(VectorMetric::Cosine), "cosine");
-        assert_eq!(metric_keyword(VectorMetric::L2), "l2");
-    }
-
-    #[test]
     fn reject_inner_product_returns_typed_error() {
         let err = reject_inner_product(VectorMetric::InnerProduct)
             .expect_err("inner product must reject");
@@ -297,83 +157,6 @@ mod tests {
     #[test]
     fn vec_table_name_pattern() {
         assert_eq!(vec_table_name("docs", "embedding"), "docs__vec_embedding");
-    }
-
-    #[test]
-    fn build_create_vec0_sql_shape_cosine() {
-        let sql = build_create_vec0_sql("myapp", "docs", "embedding", 768, VectorMetric::Cosine);
-        assert_eq!(
-            sql,
-            "CREATE VIRTUAL TABLE IF NOT EXISTS \"myapp\".\"docs__vec_embedding\" \
-             USING vec0(embedding float[768] distance_metric=cosine)"
-        );
-    }
-
-    #[test]
-    fn build_create_vec0_sql_shape_l2() {
-        let sql = build_create_vec0_sql("myapp", "docs", "embedding", 4, VectorMetric::L2);
-        assert_eq!(
-            sql,
-            "CREATE VIRTUAL TABLE IF NOT EXISTS \"myapp\".\"docs__vec_embedding\" \
-             USING vec0(embedding float[4] distance_metric=l2)"
-        );
-    }
-
-    #[test]
-    fn build_initial_population_sql_shape() {
-        let sql = build_initial_population_sql("myapp", "docs", "embedding");
-        assert_eq!(
-            sql,
-            "INSERT INTO \"myapp\".\"docs__vec_embedding\" (rowid, \"embedding\") \
-             SELECT rowid, \"embedding\" FROM \"myapp\".\"docs\" WHERE \"embedding\" IS NOT NULL"
-        );
-    }
-
-    #[test]
-    fn build_insert_trigger_sql_shape() {
-        let sql = build_insert_trigger_sql("myapp", "docs", "embedding");
-        assert!(
-            sql.contains("AFTER INSERT ON \"myapp\".\"docs\""),
-            "trigger header references qualified base table: {sql}"
-        );
-        assert!(
-            sql.contains("INSERT INTO \"docs__vec_embedding\""),
-            "trigger body references vec0 vtable unqualified: {sql}"
-        );
-        assert!(
-            sql.contains("WHEN NEW.\"embedding\" IS NOT NULL"),
-            "trigger skips NULL vectors: {sql}"
-        );
-    }
-
-    #[test]
-    fn build_delete_trigger_sql_shape() {
-        let sql = build_delete_trigger_sql("myapp", "docs", "embedding");
-        assert!(
-            sql.contains("AFTER DELETE ON \"myapp\".\"docs\""),
-            "trigger header: {sql}"
-        );
-        assert!(
-            sql.contains("DELETE FROM \"docs__vec_embedding\" WHERE rowid = OLD.rowid"),
-            "trigger body deletes by rowid: {sql}"
-        );
-    }
-
-    #[test]
-    fn build_update_trigger_sql_shape() {
-        let sql = build_update_trigger_sql("myapp", "docs", "embedding");
-        assert!(
-            sql.contains("AFTER UPDATE OF \"embedding\" ON \"myapp\".\"docs\""),
-            "trigger scoped to vector column: {sql}"
-        );
-        assert!(
-            sql.contains("DELETE FROM \"docs__vec_embedding\" WHERE rowid = OLD.rowid"),
-            "trigger body deletes old vector: {sql}"
-        );
-        assert!(
-            sql.contains("INSERT INTO \"docs__vec_embedding\""),
-            "trigger body inserts new vector: {sql}"
-        );
     }
 
     #[test]

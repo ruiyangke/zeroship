@@ -883,24 +883,48 @@ haversine computed during the full-scan post-filter.
 rejects with `code: "POLYGON_OPS_PG_ONLY"`. Use PG for any
 production-scale geo workload.
 
+### Where the search index comes from
+
+**Your migration builds it, not the first query.** Declaring
+`t.vector(dims, { metric })` or `t.geoPoint()` makes the index part of
+your schema, and it is created when you apply migrations — the same
+moment your table is. Nothing is built lazily at runtime, so the first
+`.search()` after a deploy is as fast as the thousandth, and a query
+never blocks behind an index build.
+
+The consequence to know about: **if you add a `.vector()` or
+`.geoPoint()` field and do not apply a migration, the column exists
+with no index behind it.** Searches still return correct results — they
+fall back to a sequential scan — but they get slower as the collection
+grows. `zeroship migrate` is what turns that back into an indexed
+search. There is no runtime path that notices and repairs it.
+
 ### Backend coverage
 
-- **PG vector** — `pgvector` `ivfflat` index built CONCURRENTLY.
-  Production-grade; scales to millions of rows.
+- **PG vector** — `pgvector` `ivfflat` index over the declared metric's
+  operator class (`vector_cosine_ops` / `vector_l2_ops` /
+  `vector_ip_ops`). Production-grade; scales to millions of rows.
 - **SQLite vector** — `sqlite-vec` `vec0` virtual table, statically
   compiled into the binary via the `sqlite-vec` Rust crate (no `.so`
   shipping; the bundled-SQLite invariant is preserved). SIMD distance
   + native dimension validation + `MATCH` query operator. The base
   collection keeps a `BLOB` column for the vector payload; AFTER
   triggers mirror writes into the `<collection>__vec_<column>` vec0
-  vtable so reads can JOIN base ⟷ vec0 on `rowid` and rank by
+  vtable so reads can JOIN base <-> vec0 on `rowid` and rank by
   `MATCH` distance. Metric is pinned at vtable-creation time
   (`distance_metric=cosine|l2`); **inner product is not supported on
   SQLite** — vec0 supports cosine + L2 only, and `metric:
   "inner_product"` surfaces as a typed `VECTOR_UNSUPPORTED_METRIC`
   error. Use PG (pgvector `vector_ip_ops`) for production inner-
   product workloads.
-- **PG geo** — PostGIS `geography(POINT, 4326)` + GIST index; spheroid
+
+  **Not yet built by the migration toolchain.** The `vec0` vtable and
+  its triggers are the one search object nothing creates for you today:
+  on SQLite a `.vector()` field currently migrates to a `BLOB` column
+  with a plain index, and `.search()` against it fails rather than
+  falling back to a scan. Vector search on the `pnpm dev` tier is
+  therefore not usable yet; run vector workloads against PG.
+- **PG geo** — PostGIS `geography(POINT, 4326)` + GiST index; spheroid
   distance via `ST_DWithin` / `ST_Distance`.
 - **SQLite geo** — packed `(lat, lng)` BLOB + full-scan haversine
   (~30 LOC of trig). Dev-tier ceiling; for production geo workloads

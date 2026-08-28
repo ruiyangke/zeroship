@@ -34,7 +34,7 @@ use zeroship_plugin_db::binding::DbBinding;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
-    BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope,
+    BackendHandle, ChangeStream, LockManager, LockScope,
     SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
@@ -678,200 +678,14 @@ fn introspect_after_create_table_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// IndexBuilder (CREATE INDEX) + cross-app FK parse-time check
-// integration tests.
+// Cross-app FK parse-time check.
 //
-// The IndexBuilder-side tests exercise the two terminal branches of
-// `create_index_with_recovery` on the SQLite arm:
-//
-// 1. Happy path — `CREATE [UNIQUE] INDEX IF NOT EXISTS` against a
-//    freshly-created table; the call returns Ok and the index appears
-//    in `PRAGMA index_list`.
-// 2. Unique-constraint violation — the table already carries duplicate
-//    rows, so a `CREATE UNIQUE INDEX` returns the canonical
-//    `DbError::SchemaRefused { code: "validation_refused", ... }`
-//    envelope (wire-compatible with the PG arm at
-//    `backend/postgres.rs::create_index_with_recovery_audited`).
-//
-// The cross-app FK test exercises the pure-Rust validator at
-// `crate::cross_app_fk::reject_cross_app_fk` end-to-end; it is the
-// same module the PG-side integration test imports, so this assertion
-// is mirrored byte-for-byte against the PG path in
-// `tests/integration.rs::cross_app_fk_rejected_at_parse`.
+// The two `create_index_with_recovery` tests that used to head this section
+// (happy path, and the `unique_violation` -> `SchemaRefused` envelope) are
+// DELETED with the `IndexBuilder` capability itself: the data plane no longer
+// has a way to create an index, so there is no branch left to rule on. The
+// `__zeroship_migrations` fixture they provisioned went with them.
 // ---------------------------------------------------------------------------
-
-/// Provision the per-app `__zeroship_migrations` audit table the
-/// `AuditWriter` impl writes into. Only the INSERT path is implemented
-/// at the `AuditWriter` layer; the audit-table provisioning DDL is a
-/// separate concern. We create it inline here so the `unique_violation`
-/// path's best-effort audit
-/// write actually lands during the test (the test still passes if the
-/// write fails — the SchemaRefused envelope assertion is the wire
-/// contract — but covering both halves is cheap).
-async fn ensure_audit_table(backend: &SqliteBackend, app_id: &str) {
-    let sql = format!(
-        "CREATE TABLE IF NOT EXISTS \"{app_id}\".\"__zeroship_migrations\" (\
-             id              INTEGER PRIMARY KEY AUTOINCREMENT, \
-             collection      TEXT NOT NULL, \
-             phase           TEXT NOT NULL, \
-             change_class    TEXT NOT NULL, \
-             change_kind     TEXT NOT NULL, \
-             details         TEXT NOT NULL, \
-             ddl_sql         TEXT, \
-             status          TEXT NOT NULL, \
-             deploy_id       TEXT NOT NULL, \
-             applied_by_kind TEXT NOT NULL, \
-             schema_version  INTEGER NOT NULL\
-         )"
-    );
-    backend
-        .pool_exec(&sql, &[])
-        .await
-        .expect("create __zeroship_migrations audit table");
-}
-
-#[test]
-fn create_index_succeeds() {
-    run(async {
-        let (backend, _dir) = fresh_backend();
-        backend
-            .attach_app_file("app_demo")
-            .await
-            .expect("ensure_app_schema");
-        // Create the user table the index will cover.
-        backend
-            .pool_exec(
-                "CREATE TABLE \"app_demo\".\"things\" (\
-                     id INTEGER PRIMARY KEY, \
-                     name TEXT NOT NULL\
-                 )",
-                &[],
-            )
-            .await
-            .expect("CREATE TABLE things");
-
-        // Build a non-unique index spec. The `sql` field is unused by
-        // the SQLite IndexBuilder impl (which rebuilds the DDL from
-        // `name` + `columns` + `unique` against the SQLite dialect),
-        // so we leave it empty — the test exercises the rebuild path.
-        let spec = IndexSpec {
-            name: "things_name_idx".to_string(),
-            columns: vec!["name".to_string()],
-            unique: false,
-            sql: String::new(),
-            kind: IndexKind::BTree,
-        };
-
-        backend
-            .create_index_with_recovery(
-                "app_demo",
-                "things",
-                &spec,
-                "test_deploy",
-                1,
-            )
-            .await
-            .expect("create_index_with_recovery should succeed on a clean table");
-
-        // Cross-check via SchemaIntrospect: the index must appear in the
-        // PRAGMA-walk output. Routes through the same actor as the
-        // CREATE INDEX, so visibility is guaranteed without an extra
-        // commit/flush step.
-        let live = backend
-            .introspect_schema("app_demo")
-            .await
-            .expect("introspect_schema");
-        let idxs = live
-            .indexes
-            .get("things")
-            .expect("things must have an index map after CREATE INDEX");
-        let info = idxs
-            .get("things_name_idx")
-            .expect("things_name_idx must be present");
-        assert!(!info.is_unique);
-        assert_eq!(info.columns, vec!["name".to_string()]);
-    });
-}
-
-#[test]
-fn create_unique_index_fails_on_duplicate_with_envelope() {
-    run(async {
-        let (backend, _dir) = fresh_backend();
-        backend
-            .attach_app_file("app_demo")
-            .await
-            .expect("ensure_app_schema");
-        ensure_audit_table(&backend, "app_demo").await;
-
-        // Table + two rows with the same `email` value so a UNIQUE
-        // index on `email` cannot land.
-        backend
-            .pool_exec(
-                "CREATE TABLE \"app_demo\".\"users\" (\
-                     id INTEGER PRIMARY KEY, \
-                     email TEXT NOT NULL\
-                 )",
-                &[],
-            )
-            .await
-            .expect("CREATE TABLE users");
-        backend
-            .pool_exec(
-                "INSERT INTO \"app_demo\".\"users\" (email) VALUES ('a@x'), ('a@x')",
-                &[],
-            )
-            .await
-            .expect("INSERT duplicate emails");
-
-        let spec = IndexSpec {
-            name: "users_email_uniq".to_string(),
-            columns: vec!["email".to_string()],
-            unique: true,
-            sql: String::new(),
-            kind: IndexKind::BTree,
-        };
-
-        let err = backend
-            .create_index_with_recovery(
-                "app_demo",
-                "users",
-                &spec,
-                "test_deploy",
-                1,
-            )
-            .await
-            .expect_err("UNIQUE index on duplicate column values must reject");
-
-        // Wire-compatible envelope per `docs/archive/p1-sqlite-implementation-plan.md`
-        // §3.5: code = "validation_refused" with structured `code:
-        // "unique_violation"` (via the inner `constraint: "unique"`
-        // field — the PG arm's envelope shape) inside the JSON body.
-        match err {
-            DbError::SchemaRefused { code, envelope_json } => {
-                assert_eq!(
-                    code, "validation_refused",
-                    "envelope outer code must be `validation_refused` for SDK branching"
-                );
-                let v: serde_json::Value = serde_json::from_str(&envelope_json)
-                    .expect("envelope must be valid JSON");
-                assert_eq!(v["code"], "validation_refused");
-                assert_eq!(v["change_kind"], "index_retry");
-                assert_eq!(v["collection"], "users");
-                assert_eq!(v["index"], "users_email_uniq");
-                assert_eq!(v["constraint"], "unique");
-                // Conflicting-key extraction divergence (plan §3.5):
-                // SQLite errors don't carry the duplicate key value the
-                // way PG's 23505 does. The envelope reports an empty
-                // list and a hint pointing the SDK at a read path.
-                assert!(
-                    v["conflicting_keys"].as_array().map(|a| a.is_empty()).unwrap_or(false),
-                    "conflicting_keys must be the empty list on SQLite (divergence): {v}"
-                );
-            }
-            other => panic!("expected DbError::SchemaRefused, got {other:?}"),
-        }
-    });
-}
 
 #[test]
 fn cross_app_fk_rejected_at_parse() {
@@ -2539,11 +2353,31 @@ fn session_canonical_payload_byte_pin() {
 // diff the two suites side-by-side.
 //
 // Storage: base-table BLOB column with a CHECK constraint (the
-// dimension contract at write time) + a `vec0` virtual table created
-// by `ensure_vector_index` + AFTER triggers that mirror the BLOB
-// column into vec0 on INSERT/UPDATE/DELETE. INSERTs use SQLite's
-// hex-blob literal `x'<hex>'` so we avoid plumbing typed BLOB params
-// through the session actor's `&[String]` surface.
+// dimension contract at write time) + a `vec0` virtual table + AFTER
+// triggers that mirror the BLOB column into vec0 on INSERT/UPDATE/DELETE.
+// INSERTs use SQLite's hex-blob literal `x'<hex>'` so we avoid plumbing
+// typed BLOB params through the session actor's `&[String]` surface.
+//
+// WHO CREATES THE vec0 RELATION, AND WHAT THAT MEANS FOR THESE TESTS.
+// It used to be `VectorIndex::ensure_vector_index` on the data plane,
+// behind `#[cfg(any(test, feature = "test-helpers"))]`. That method is
+// deleted: schema is `zeroship-migrate`'s, and a data plane that can
+// alter schema can disagree with the descriptor describing it.
+//
+// So the fixture below issues the DDL itself, and the honest reading of
+// these tests changed with it. Before, they exercised production code
+// that no shipped binary could reach; now they exercise a fixture that
+// stands in for a migration that DOES NOT EXIST YET -- the SQLite
+// renderer folds a vector field's index to a plain B-tree
+// (`zeroship-migrate-sqlite/src/schema.rs:98`) and the engine states that
+// it never authors a virtual table
+// (`zeroship-migrate-backend/src/error.rs:270`). What they still prove is
+// the SEARCH contract: given the shadow relation the runtime descriptor
+// NAMES (`AuxiliaryObject::ShadowTable`), `vector_search` finds the right
+// rows. What they CANNOT reach, and never could, is a database produced
+// by an actual migration -- on one of those, SQLite `vector_search` fails
+// with "no such table". That gap is pre-existing and is recorded at
+// `backend/sqlite/mod.rs`'s `VectorIndex` block.
 // ---------------------------------------------------------------------------
 
 use zeroship_plugin_db::backend::VectorIndex;
@@ -2586,6 +2420,64 @@ fn mk_unit_vec(i: usize, dims: usize) -> Vec<f32> {
     v
 }
 
+/// Stand in for the migration that ought to author a vector field's `vec0`
+/// shadow relation on SQLite: the virtual table plus the three AFTER triggers
+/// that mirror `(rowid, <col>)` into it.
+///
+/// The names are NOT invented here. `<coll>__vec_<col>` and the `_ai` / `_ad` /
+/// `_au` trigger names are what the runtime descriptor records for the field
+/// (`AuxiliaryObject::ShadowTable`, produced by `auxiliary_objects` in
+/// `zeroship-migrate-core/src/render/gen_types.rs:255`), and what
+/// `backend/sqlite/vector.rs::vec_table_name` joins by. If either side moves,
+/// these tests go red rather than silently searching an empty index.
+///
+/// The vec0 constructor rejects a double-quoted column identifier, so `column`
+/// is spliced unquoted -- the same constraint the deleted production builder
+/// carried. Test-local input only.
+///
+/// No initial-population statement: every caller creates the relation before
+/// inserting rows, so the triggers carry the whole payload.
+async fn create_vec0_shadow_relation(
+    backend: &SqliteBackend,
+    app: &str,
+    coll: &str,
+    column: &str,
+    dims: usize,
+    metric: &str,
+) {
+    let vtab = format!("{coll}__vec_{column}");
+    for sql in [
+        format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS \"{app}\".\"{vtab}\" \
+             USING vec0({column} float[{dims}] distance_metric={metric})"
+        ),
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS \"{app}\".\"{coll}__vec_{column}_ai\" \
+             AFTER INSERT ON \"{app}\".\"{coll}\" \
+             WHEN NEW.\"{column}\" IS NOT NULL BEGIN \
+             INSERT INTO \"{vtab}\" (rowid, \"{column}\") \
+               VALUES (NEW.rowid, NEW.\"{column}\"); END"
+        ),
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS \"{app}\".\"{coll}__vec_{column}_ad\" \
+             AFTER DELETE ON \"{app}\".\"{coll}\" BEGIN \
+             DELETE FROM \"{vtab}\" WHERE rowid = OLD.rowid; END"
+        ),
+        format!(
+            "CREATE TRIGGER IF NOT EXISTS \"{app}\".\"{coll}__vec_{column}_au\" \
+             AFTER UPDATE OF \"{column}\" ON \"{app}\".\"{coll}\" BEGIN \
+             DELETE FROM \"{vtab}\" WHERE rowid = OLD.rowid; \
+             INSERT INTO \"{vtab}\" (rowid, \"{column}\") \
+               SELECT NEW.rowid, NEW.\"{column}\" WHERE NEW.\"{column}\" IS NOT NULL; END"
+        ),
+    ] {
+        backend
+            .pool_exec(&sql, &[])
+            .await
+            .unwrap_or_else(|e| panic!("vec0 shadow-relation fixture failed: {sql}: {e:?}"));
+    }
+}
+
 #[test]
 fn vector_search_returns_k_nearest_sqlite() {
     run(async {
@@ -2623,10 +2515,8 @@ fn vector_search_returns_k_nearest_sqlite() {
         // rows. With the triggers in place, every INSERT into the
         // base table fans out into the vec0 index inside the same
         // transaction; vector_search joins on rowid.
-        backend
-            .ensure_vector_index("vector_topk", "docs", "embedding", 8, VectorMetric::Cosine)
-            .await
-            .expect("ensure_vector_index creates vec0 vtable + triggers");
+        create_vec0_shadow_relation(&backend, "vector_topk", "docs", "embedding", 8, "cosine")
+            .await;
 
         // Insert 100 deterministic unit vectors. Each INSERT fires
         // the `docs__vec_embedding_ai` trigger which mirrors
@@ -2776,10 +2666,8 @@ fn vector_search_respects_filter_sqlite() {
 
         // Create vec0 + triggers BEFORE inserts so the mirror fires
         // for every row.
-        backend
-            .ensure_vector_index("vector_filter", "docs", "embedding", 4, VectorMetric::Cosine)
-            .await
-            .expect("ensure_vector_index");
+        create_vec0_shadow_relation(&backend, "vector_filter", "docs", "embedding", 4, "cosine")
+            .await;
 
         // Insert 10 rows in tenant "a" and 10 rows in tenant "b".
         // The first row of each tenant uses an identical query
@@ -2851,8 +2739,8 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
     // Sanity check on the math: for unit vectors, ||a-b||² = 2 * (1 - cos θ)
     // = 2 * cos_distance. With vec0 the metric is pinned at vtable
     // creation time, so we declare TWO vector columns (one cosine,
-    // one L2) sharing the same source rows. The two `ensure_vector_index`
-    // calls produce two paired vec0 vtables (`docs__vec_emb_cos` /
+    // one L2) sharing the same source rows. The two shadow-relation
+    // fixtures produce two paired vec0 vtables (`docs__vec_emb_cos` /
     // `docs__vec_emb_l2`); the AFTER triggers mirror BOTH columns on
     // every INSERT.
     run(async {
@@ -2885,14 +2773,8 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             }),
         );
 
-        backend
-            .ensure_vector_index("vector_math", "docs", "emb_cos", 4, VectorMetric::Cosine)
-            .await
-            .expect("ensure_vector_index cos");
-        backend
-            .ensure_vector_index("vector_math", "docs", "emb_l2", 4, VectorMetric::L2)
-            .await
-            .expect("ensure_vector_index l2");
+        create_vec0_shadow_relation(&backend, "vector_math", "docs", "emb_cos", 4, "cosine").await;
+        create_vec0_shadow_relation(&backend, "vector_math", "docs", "emb_l2", 4, "l2").await;
 
         let v1 = mk_unit_vec(0, 4);
         let v2 = mk_unit_vec(1, 4);

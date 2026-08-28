@@ -38,24 +38,31 @@
 //! ## Capability traits
 //!
 //! `Backend` is a **pure composition marker** — every operation lives
-//! on one of five focused capability traits:
+//! on one of the focused capability traits:
 //!
 //! - [`SqlExecutor`] — connection lifecycle + run-a-statement.
 //! - [`LockManager`] — session-scoped advisory locks.
 //! - [`SchemaIntrospect`] — live-schema snapshot + row-count estimate.
 //!   Owns the `LiveSchema` associated type that used to live on
 //!   `Backend`.
-//! - [`IndexBuilder`] — `CREATE INDEX CONCURRENTLY` with audit-driven
-//!   retry recovery.
 //!
-//! A sixth PG-only extension trait, [`PgSqlExecutor`], exposes
-//! `pool_handle()` so free-function audit helpers in [`crate::audit`]
-//! can reach `&compio_postgres::Pool` without naming the concrete
-//! backend (see `docs/archive/p0-implementation-plan.md` §3 Q1).
+//! A PG-only extension trait, [`PgSqlExecutor`], exposes `pool_handle()`
+//! so free-function helpers can reach `&compio_postgres::Pool` without
+//! naming the concrete backend.
 //!
-//! The 16 audit-table operations that used to live as methods on
-//! `Backend` (`ensure_audit_table`, `write_audit_row`, …) were deleted;
-//! they stay as `pub`/`pub(crate)` free functions in [`crate::audit`].
+//! **No capability on this surface emits DDL, and that is the point.**
+//! `IndexBuilder` (`CREATE INDEX CONCURRENTLY` with retry recovery),
+//! `AuditWriter` (the `__zeroship_migrations` provenance log that
+//! existed only to record that DDL), and the `ensure_vector_index` /
+//! `ensure_spatial_index` halves of [`VectorIndex`] / [`SpatialIndex`]
+//! are DELETED, names included. Schema belongs to `zeroship-migrate`:
+//! it authors the pgvector `USING ivfflat` and PostGIS `USING gist`
+//! indexes from the declared `t.vector()` / `t.geoPoint()` fields
+//! (`zeroship-migrate-core/src/render/declarative.rs`, `vector_index_snapshot`
+//! at `:2888` and `geo_index_snapshot` at `:2928`, emitted by
+//! `zeroship-migrate-postgres/src/ddl.rs::create_index`). A backend that
+//! can alter schema is a backend that can disagree with the descriptor
+//! describing it.
 
 use std::rc::Rc;
 
@@ -580,114 +587,6 @@ pub trait SchemaIntrospect: 'static {
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError>;
 }
 
-/// Online index-build capability — "create an index without blocking
-/// writers, classify SQLSTATE failures, audit retries".
-///
-/// Carved out of the monolithic `Backend` trait (see
-/// `docs/archive/p0-implementation-plan.md` and
-/// `docs/archive/db-system-design.md` §7). The single method —
-/// `create_index_with_recovery` — runs `CREATE INDEX CONCURRENTLY` with
-/// a SQLSTATE-driven retry loop and writes structured audit rows on
-/// every retry. The `: SqlExecutor` super-bound is load-bearing: the
-/// PG impl pulls the pool through that trait's [`SqlExecutor::Client`]
-/// associated type so the SQLSTATE classification stays in one place.
-#[cfg(any(test, feature = "test-helpers"))]
-pub trait IndexBuilder: SqlExecutor {
-    /// Idempotent `CREATE INDEX CONCURRENTLY` with retry + audit.
-    /// SQLSTATE-driven: unique/not-null/fk/check violations are fatal;
-    /// deadlock / disk-full / OOM retry up to a small budget.
-    ///
-    /// This is the second pass of `register_model::apply` — Postgres-
-    /// specific because CIC is a Postgres feature (the trait keeps the
-    /// signature; alternate backends would have to map to whatever
-    /// online-index primitive they provide).
-    ///
-    /// Returns `Ok(())` on success; on terminal retry-loop failures
-    /// the returned [`DbError::SchemaRefused`] carries a JSON envelope
-    /// the SDK consumes verbatim (`validation_refused` /
-    /// `unique_violation` shapes). Postgres errors during CIC flow
-    /// through the normal `from_pg` path (`UniqueViolation` etc.);
-    /// configuration / invariant breaches surface as
-    /// [`DbError::Configuration`].
-    #[allow(async_fn_in_trait)]
-    async fn create_index_with_recovery(
-        &self,
-        app_id: &str,
-        collection: &str,
-        spec: &crate::query::IndexSpec,
-        deploy_id: &str,
-        schema_version: i32,
-    ) -> Result<(), DbError>;
-}
-
-/// Audit-row writer capability — "persist an audit row for a DDL /
-/// validation / backfill event into the per-app `__zeroship_migrations`
-/// table".
-///
-/// Introduced per decision AW-1 in
-/// `docs/archive/p1-sqlite-implementation-plan.md` §3.5 + §10. The
-/// trait exists so [`IndexBuilder::create_index_with_recovery`] (and
-/// future audit-emitting hooks) can stamp rows without hard-coding the
-/// PG-only [`crate::audit::write_audit_row`] free function.
-///
-/// **Two impls today**:
-///
-/// - PG ([`PostgresBackend`]) — thin wrapper around the existing
-///   [`crate::audit::write_audit_row`] free function reached via
-///   [`PgSqlExecutor::pool_handle`].
-/// - SQLite ([`crate::backend::sqlite::SqliteBackend`]) — routes the
-///   parameterised INSERT through the session actor.
-///
-/// **Why not on `Backend` super-bound?** The trait composition stays
-/// as 5 sub-traits + `'static`. `AuditWriter` is opt-in:
-/// `IndexBuilder` consumers (today, just the per-backend `impl
-/// IndexBuilder for …` methods inside this crate) bound on it
-/// explicitly when they need to write rows. Forcing it onto every
-/// `Backend` would mean a future backend without audit semantics still
-/// has to satisfy the bound — a needless coupling for the small number
-/// of callers.
-///
-/// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
-#[cfg(any(test, feature = "test-helpers"))]
-pub trait AuditWriter: 'static {
-    /// Idempotently create the per-app `__zeroship_migrations` table.
-    #[allow(async_fn_in_trait)]
-    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError>;
-
-    /// Return the next monotonic `schema_version` for `app_id`.
-    #[allow(async_fn_in_trait)]
-    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError>;
-
-    /// Insert a single audit row keyed by `app_id`, returning its PK.
-    #[allow(async_fn_in_trait)]
-    async fn write_audit_row_returning_id(
-        &self,
-        app_id: &str,
-        row: &crate::audit::AuditRow,
-    ) -> Result<i64, DbError>;
-
-    /// Insert a single audit row keyed by `app_id`, discarding the PK.
-    #[allow(async_fn_in_trait)]
-    async fn write_audit_row(
-        &self,
-        app_id: &str,
-        row: &crate::audit::AuditRow,
-    ) -> Result<(), DbError> {
-        self.write_audit_row_returning_id(app_id, row).await?;
-        Ok(())
-    }
-
-    /// Transition a running/pending audit row to a terminal status.
-    #[allow(async_fn_in_trait)]
-    async fn update_audit_status(
-        &self,
-        app_id: &str,
-        id: i64,
-        new_status: crate::audit::TerminalStatus,
-        error: Option<&str>,
-    ) -> Result<bool, DbError>;
-}
-
 /// HMAC-signed session-init capability.
 ///
 /// **Only the SQLite arm implements this.** The PG impl lived at the
@@ -722,7 +621,7 @@ pub trait AuditWriter: 'static {
 /// `async fn` in trait position means this trait is dyn-incompatible.
 /// Consumers route through the [`BackendHandle::as_postgres`] /
 /// [`BackendHandle::as_sqlite`] accessors — the same pattern already
-/// used by [`AuditWriter`] and the `ChangeStream` family.
+/// used by the `ChangeStream` family.
 ///
 /// Not `Send + Sync` for the same single-threaded-per-worker reason
 /// as the rest of the capability traits (Open Q4).
@@ -819,17 +718,6 @@ pub trait DialectBuilder: 'static {
     /// engine's lexical rules. PG: doubled `"`; SQLite: doubled `"`
     /// with embedded-NUL rejection.
     fn quote_ident(&self, name: &str) -> String;
-
-    /// Build a `CREATE INDEX` statement for the given [`crate::query::IndexSpec`].
-    /// `online = true` requests the engine's "concurrent" variant
-    /// (PG: `CREATE INDEX CONCURRENTLY`); SQLite has no concurrent
-    /// build, so the flag is a no-op there.
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn build_create_index(
-        &self,
-        spec: &crate::query::IndexSpec,
-        online: bool,
-    ) -> String;
 
     /// Map a Zeroship-level type string (`"string"`, `"int"`,
     /// `"timestamp"`, …) to the engine's column-type vocabulary.
@@ -1093,14 +981,20 @@ impl Drop for BrokerPauseGuard {
 /// every backend to implement it (including hypothetical future
 /// arms that have no vector primitive), and the consumer migration
 /// path goes through the same `as_*()?.vector_search(...)`
-/// shape the [`AuditWriter`] / `SessionMinter` consumers already use.
+/// shape the `SessionMinter` consumers already use.
 ///
 /// ## Method signatures
 ///
-/// Both methods are `async`, take `&self`, and return `Result<…, DbError>`
-/// — the same shape as the other capability traits. `app_id` /
-/// `collection` / `column` are unquoted identifiers; impls call
-/// through their dialect's `quote_ident` before splicing into SQL.
+/// The one method is `async`, takes `&self`, and returns
+/// `Result<…, DbError>` — the same shape as the other capability
+/// traits. `collection` / `column` are unquoted identifiers; impls
+/// call through their dialect's `quote_ident` before splicing into SQL.
+///
+/// **Search only — the index is not this trait's to create.** The
+/// pgvector ivfflat index is authored by `zeroship-migrate` from the
+/// declared `t.vector(dims, { metric })` field; the SQLite `vec0`
+/// shadow relation is named by the runtime descriptor
+/// (`AuxiliaryObject::ShadowTable`) and is likewise not created here.
 ///
 /// `dims` is the declared vector dimensionality (per SDK
 /// `t.vector(dims)`); impls fail-fast on a dim mismatch at insert
@@ -1118,21 +1012,6 @@ impl Drop for BrokerPauseGuard {
 /// Not `Send + Sync` — same Open Q4 reasoning as the rest of the
 /// capability traits.
 pub trait VectorIndex: 'static {
-    /// Idempotently create the vector index. PG: `CREATE INDEX
-    /// CONCURRENTLY IF NOT EXISTS … USING ivfflat ("col" vector_{metric}_ops)`.
-    /// SQLite: no-op (flat scan needs no index; the CHECK constraint
-    /// is wired at column-DDL time instead).
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(async_fn_in_trait)]
-    async fn ensure_vector_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        column: &str,
-        dims: i32,
-        metric: VectorMetric,
-    ) -> Result<(), DbError>;
-
     /// Return the top-`k` rows ordered by distance ASC. `query` is the
     /// query vector (length must match the column's declared `dims`
     /// or impls return a `vector_dimension_mismatch` typed error).
@@ -1181,18 +1060,6 @@ pub use zeroship_schema::descriptors::VectorMetric;
 /// `intersects`) are deferred. The SQLite impl rejects polygon
 /// input with `Configuration { code: "polygon_ops_pg_only" }`.
 pub trait SpatialIndex: 'static {
-    /// Idempotently create the spatial index. PG: `CREATE INDEX
-    /// CONCURRENTLY … USING GIST ("col")`. SQLite: no-op (haversine
-    /// full-scan needs no index).
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(async_fn_in_trait)]
-    async fn ensure_spatial_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        column: &str,
-    ) -> Result<(), DbError>;
-
     /// Return rows within `radius_m` of `point` ordered by distance
     /// ASC. `limit` of `None` defers to the impl's default.
     #[allow(async_fn_in_trait)]
@@ -1513,8 +1380,7 @@ impl Drop for SchemaPendingGuard {
 /// For ergonomics, the bound is exactly
 /// [`PgSqlExecutor`] (transitively [`SqlExecutor`]) +
 /// [`LockManager`] + [`SchemaIntrospect`] with
-/// `LiveSchema = crate::diff::LiveSchema` + [`IndexBuilder`] +
-/// [`PgLockManager`]. The blanket `impl<T> RegisterBackend for T`
+/// `LiveSchema = crate::diff::LiveSchema` + [`PgLockManager`]. The blanket `impl<T> RegisterBackend for T`
 /// auto-impls the marker for any type that already satisfies the
 /// six sub-bounds (today, [`PostgresBackend`]; tomorrow, any other
 /// concrete impl that wires up the same set).
@@ -1531,7 +1397,6 @@ pub trait RegisterBackend:
     PgSqlExecutor
     + LockManager<Client = compio_postgres::OwnedPooledClient>
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-    + IndexBuilder
     + PgLockManager
     + VectorIndex
     + SpatialIndex
@@ -1544,8 +1409,7 @@ impl<T> RegisterBackend for T where
     T: PgSqlExecutor
         + LockManager<Client = compio_postgres::OwnedPooledClient>
         + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-        + IndexBuilder
-        + PgLockManager
+            + PgLockManager
         + VectorIndex
         + SpatialIndex
         + EncryptedColumn
@@ -1568,19 +1432,17 @@ impl<T> RegisterBackend for T where
 ///   `Client = compio_postgres::OwnedPooledClient`).
 /// - [`LockManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
-/// - [`IndexBuilder`]
 ///
-/// The 16 audit-table operations that used to live here (`ensure_audit_table`,
-/// `next_schema_version`, `write_audit_row`, …) were deleted
-/// — they stay as free functions in [`crate::audit`], reached via
-/// [`PgSqlExecutor::pool_handle`] (Open Q1 resolution, see
-/// `docs/archive/p0-implementation-plan.md` §3 Q1).
+/// The audit-table operations that used to live here
+/// (`ensure_audit_table`, `next_schema_version`, `write_audit_row`, …)
+/// and the `IndexBuilder` capability they existed to record are both
+/// DELETED. They were the provenance log for the only DDL the data
+/// plane still issued; with the DDL gone the log has nothing to record.
 ///
 /// Lifetime invariants (preserved from the pre-carving shape):
 ///
 /// - Methods that take `&Self::Client` use it borrow-only; the caller
-///   owns the client (e.g. the audit free functions borrow it for one
-///   operation).
+///   owns the client.
 /// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
 ///   detached from any pool lifetime — the caller is free to park it
 ///   on the per-isolate context (e.g.
@@ -1594,16 +1456,28 @@ impl<T> RegisterBackend for T where
 /// currently code spans rather than intra-doc links.
 ///
 /// That choice is CONFIGURATION-DEPENDENT, and an earlier version of this note
-/// overstated it as "broken on every doc build". Measured:
+/// overstated it as "broken on every doc build". Re-measured 2026-08-28 with
+/// `--no-deps` (the figures it replaces, 27 and 12, were taken on 2026-08-20
+/// before `mod audit` was deleted):
 ///
-///     cargo doc -p zeroship-plugin-db --document-private-items
-///       -> 27 unresolved links
-///     ... --features test-helpers --document-private-items
-///       -> 12
+/// ```text
+/// cargo doc -p zeroship-plugin-db --document-private-items --no-deps
+///   -> 14 unresolved links
+/// ... --features test-helpers --document-private-items --no-deps
+///   -> 6
+/// ```
+///
+/// That block was INDENTED rather than fenced until 2026-08-28, which made
+/// rustdoc read it as a Rust doctest; `cargo test -p zeroship-plugin-db
+/// --features test-helpers --doc` failed on it with "expected one of `!` or
+/// `::`, found `doc`". Default-feature `--doc` runs stayed green throughout,
+/// because this trait is cfg-gated out of them and the doctest was never
+/// collected - so the failure was invisible to any run that did not pass the
+/// feature.
 ///
 /// Most of this crate is `pub(crate)` by default and `pub` only under
-/// `test-helpers` - lib.rs pairs the two behind cfg for `auth`, `audit`,
-/// `crud`, `encryption` and `backend`. So under the feature these links
+/// `test-helpers` - lib.rs pairs the two behind cfg for `auth`, `crud`,
+/// `encryption` and `backend`. So under the feature these links
 /// RESOLVE, and the spans are only correct for a default-feature doc build.
 ///
 /// THE QUESTION, AND ITS ANSWER AS OF 2026-08-20. Which configuration are this
@@ -1640,7 +1514,6 @@ pub trait Backend:
     SqlExecutor
     + LockManager
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-    + IndexBuilder
     + 'static
 {
 }
@@ -1942,21 +1815,10 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
-    /// Compile-time: [`PostgresBackend`] satisfies the carved
-    /// [`IndexBuilder`] capability trait. The
-    /// `: SqlExecutor` super-bound on `IndexBuilder` plus the
-    /// PG-side `Client = compio_postgres::OwnedPooledClient` constraint pin the
-    /// shape so a regression on either side fails compilation here.
-    fn assert_postgres_backend_impls_index_builder() {
-        fn assert_impl<T: IndexBuilder<Client = compio_postgres::OwnedPooledClient>>() {}
-        assert_impl::<PostgresBackend>();
-    }
-
     /// Compile-time: [`PostgresBackend`] satisfies the PG-only
     /// [`PgSqlExecutor`] extension trait. The free-function
-    /// audit-helper path (Open Q1 resolution) hinges on `pool_handle()`
-    /// being reachable through this trait without naming
-    /// `PostgresBackend`.
+    /// helper path hinges on `pool_handle()` being reachable through
+    /// this trait without naming `PostgresBackend`.
     fn assert_postgres_backend_impls_pg_sql_executor() {
         fn assert_impl<T: PgSqlExecutor>() {}
         assert_impl::<PostgresBackend>();
@@ -2417,7 +2279,6 @@ mod tests {
         let _ = assert_postgres_backend_impls_sql_executor as fn();
         let _ = assert_postgres_backend_impls_lock_manager as fn();
         let _ = assert_postgres_backend_impls_schema_introspect as fn();
-        let _ = assert_postgres_backend_impls_index_builder as fn();
         let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
         let _ = assert_postgres_backend_impls_pg_lock_manager as fn();
         let _ = assert_postgres_backend_impls_register_backend as fn();

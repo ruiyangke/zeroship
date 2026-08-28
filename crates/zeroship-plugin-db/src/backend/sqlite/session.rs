@@ -240,13 +240,6 @@ pub(crate) enum Command {
         params: Vec<String>,
         reply: flume::Sender<Result<u64, DbError>>,
     },
-    /// Run a multi-statement batch through `Connection::execute_batch`.
-    #[cfg(any(test, feature = "test-helpers"))]
-    ExecBatch {
-        reservation: Arc<Reservation>,
-        sql: String,
-        reply: flume::Sender<Result<(), DbError>>,
-    },
     /// Run a row-returning statement; reply with the materialised rows.
     Query {
         reservation: Arc<Reservation>,
@@ -820,19 +813,6 @@ impl SqliteSession {
             reservation: Arc::clone(reservation),
             sql: sql.to_string(),
             params: params.iter().map(|s| (*s).to_string()).collect(),
-            reply: reply_tx,
-        })
-        .await?;
-        recv_reply(reply_rx).await?
-    }
-
-    /// Send an `ExecBatch` command and await the reply.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
-        let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
-        self.send(Command::ExecBatch {
-            reservation: self.autocommit_reservation(),
-            sql: sql.to_string(),
             reply: reply_tx,
         })
         .await?;
@@ -1839,18 +1819,6 @@ impl Actor {
                     let result = self.run_data(&reservation, &sql, |conn| {
                         run_exec(conn, &sql, &params)
                     });
-                    let _ = reply.send(result);
-                }
-                #[cfg(any(test, feature = "test-helpers"))]
-                Command::ExecBatch {
-                    reservation,
-                    sql,
-                    reply,
-                } => {
-                    let result = self
-                        .run_data(&reservation, &sql, |conn| {
-                            conn.execute_batch(&sql).map_err(RunError::Sqlite)
-                        });
                     let _ = reply.send(result);
                 }
                 Command::Query {
