@@ -1069,9 +1069,29 @@ fn quote_lit(value: &str) -> String {
 }
 
 const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
-const WORKER_ROLE: &str = "zeroship_worker";
+/// The ONE login role every worker process connects as.
+///
+/// Precreated by the platform migrations
+/// (`db/migrations-ts/20260818000200_worker_database_authority.ts`); this
+/// service only grants it membership in each app's runtime role.
+///
+/// Public for the same reason [`runtime_app_role_name`] is: the end-to-end
+/// audit-write proof in `apply_api_test` reaches the audit table by the
+/// PRODUCTION identity chain (`zeroship_worker` -> `SET ROLE` the app runtime
+/// role), and a second literal there would be a test agreeing with itself.
+pub const WORKER_ROLE: &str = "zeroship_worker";
 
-fn runtime_app_role_name(app_id: &str) -> String {
+/// The name of the per-app runtime role `provision_runtime_app_role` creates and
+/// grants, derived from the app schema.
+///
+/// PUBLIC SO A TEST CAN ASK PRODUCTION FOR THE NAME instead of re-deriving it.
+/// `apply_api_test`'s end-to-end proof that a real apply leaves this role able to
+/// write the unmask audit row has to name the role; spelling `app_{id}_role` a
+/// second time there would make the assertion agree with its own copy of the
+/// rule rather than with the code, and a rename would leave it probing a role
+/// that does not exist - which reads as a privilege failure, not a stale test.
+#[must_use]
+pub fn runtime_app_role_name(app_id: &str) -> String {
     format!("app_{app_id}_role")
 }
 

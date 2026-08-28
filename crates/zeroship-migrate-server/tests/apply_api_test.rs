@@ -180,25 +180,42 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     // before reaching it.
     let role = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    // THE WORKFLOW JOURNAL SCHEMA IS THE THIRD ONE, and it was leaking. A
+    // successful apply runs `runtime_dependents_sql`, which creates `app_<uuid>`
+    // beside `<uuid>`; this teardown dropped only the latter two.
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; \
+             DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE;",
             q(&format!("{schema}_migrations")),
+            q(&format!("app_{schema}")),
             q(&schema),
         ))
         .await;
-    let _ = conn
-        .batch_execute(&format!(
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{r}') THEN \
-                EXECUTE 'REASSIGN OWNED BY {rq} TO current_user'; \
-                EXECUTE 'DROP OWNED BY {rq}'; \
-                EXECUTE 'DROP ROLE {rq}'; \
-             END IF; END $$;",
-            r = role.replace('\'', "''"),
-            rq = q(&role),
-        ))
-        .await;
+    // BOTH ROLES, and the runtime one was leaking too. Every case here that
+    // reaches a successful apply creates `app_<uuid>_role` and grants
+    // `zeroship_worker` membership in it; only the migrator role was ever
+    // dropped, so a shared test database accumulated one dead role and one dead
+    // worker membership per apply, forever. That is not just untidiness: the
+    // worker's boot-time posture check walks every `app_%_role` membership it
+    // holds, so the leak makes a production-shaped check slower on every run and
+    // muddies any measurement of it (the `runtime_dependents_sql` docstring's
+    // "540 of 540" was taken over a population this suite had been growing).
+    let runtime_role = zeroship_migrate_server::apply::runtime_app_role_name(&schema);
+    for r in [role, runtime_role] {
+        let _ = conn
+            .batch_execute(&format!(
+                "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{r_lit}') THEN \
+                    EXECUTE 'REASSIGN OWNED BY {rq} TO current_user'; \
+                    EXECUTE 'DROP OWNED BY {rq}'; \
+                    EXECUTE 'DROP ROLE {rq}'; \
+                 END IF; END $$;",
+                r_lit = r.replace('\'', "''"),
+                rq = q(&r),
+            ))
+            .await;
+    }
     let _ = conn
         .execute(
             "DELETE FROM zeroship.authz_decisions WHERE resource_id = $1",
@@ -810,8 +827,201 @@ async fn relation_exists(conn: &Client, qualified: &str) -> bool {
     rows[0].get("p")
 }
 
+async fn probe_bool(conn: &Client, sql: &str) -> bool {
+    let rows = conn
+        .query(sql, &[])
+        .await
+        .unwrap_or_else(|e| panic!("probe failed: {sql}: {e}"));
+    rows[0].get(0)
+}
 
+/// Run `sql` under the PRODUCTION runtime identity for `app_schema` and switch
+/// back, whatever happened.
+///
+/// The chain is the worker's, not a shortcut to the app role: `SET SESSION
+/// AUTHORIZATION zeroship_worker` (the one login role every worker process
+/// connects as) then `SET ROLE app_<id>_role`. `runtime_dependents_sql` grants
+/// that membership `WITH INHERIT FALSE`, so the `SET ROLE` is load-bearing -
+/// without it the worker holds no reach into the app schema at all - and the
+/// two-step is exactly what `zeroship-plugin-db` does per request.
+///
+/// Needs a superuser DSN for `SET SESSION AUTHORIZATION`. The migrate service's
+/// own provisioning DSN is that principal (it creates roles and schemas), so a
+/// target that cannot run this could not run the apply above either; the
+/// `expect` names the requirement rather than skipping.
+async fn as_app_runtime_identity(
+    conn: &Client,
+    app_schema: &str,
+    sql: &str,
+) -> Result<(), compio_postgres::Error> {
+    let worker = quote_ident(zeroship_migrate_server::apply::WORKER_ROLE);
+    let runtime = quote_ident(&zeroship_migrate_server::apply::runtime_app_role_name(app_schema));
+    conn.batch_execute(&format!(
+        "SET SESSION AUTHORIZATION {worker}; SET ROLE {runtime};"
+    ))
+    .await
+    .expect(
+        "assuming the worker identity needs a superuser connection and a \
+         zeroship_worker granted membership in the app runtime role - the first \
+         comes from the test DSN, the second from provision_runtime_app_role",
+    );
+    let out = conn.batch_execute(sql).await;
+    let restored = conn.batch_execute("RESET ROLE; RESET SESSION AUTHORIZATION;").await;
+    assert!(
+        restored.is_ok(),
+        "the admin identity must come back on this connection or every later \
+         assertion in this case is measuring the wrong principal: {restored:?}"
+    );
+    out
+}
 
+/// THE APPLY PATH'S OWN CALL ORDER, BOUND - not the constraint re-proved.
+///
+/// `provision_audit_unmask_table` has to run BEFORE THE LAST
+/// `apply::provision_runtime_app_role`, because that function grants the runtime
+/// role `INSERT` and sequence `USAGE` through `GRANT ... ON ALL TABLES/SEQUENCES
+/// IN SCHEMA` - snapshots over what exists when they run. Get it wrong and the
+/// audit table and its `BIGSERIAL` sequence are both unreachable to the only
+/// process that writes them, so every `unmask()` answers `permission denied` and
+/// the record of who read plaintext is lost.
+///
+/// WHY THIS CASE EXISTS AT ALL. `apply::live_audit_unmask_provisioning::
+/// the_audit_table_must_be_provisioned_before_the_runtime_role` already proves
+/// the CONSTRAINT is real, by calling the two functions itself in three orders.
+/// It cannot see `apply.rs`. Swap the audit-table creation with the last
+/// `provision_runtime_app_role` in `apply_ir_request` and that case stays green,
+/// because it never asks what order production uses. This one runs a real apply
+/// through the HTTP surface and then reaches the table the way the worker does,
+/// so the order under test is the order that ships. Measured both ways on
+/// `PostgreSQL` 17.11 (`server_version_num=170011`): green as written, and
+/// `permission denied for table __zeroship_audit_unmask` with the two calls
+/// swapped.
+///
+/// IF THE CREATION WERE DELETED OUTRIGHT rather than moved, this fails one
+/// assertion earlier and says so: `to_regclass` resolves nothing, so the
+/// existence assertion goes first and names deletion. That ordering is
+/// deliberate - `has_table_privilege` ERRORS on a missing relation, and a probe
+/// that panics inside the driver would report a reordering hazard as a malformed
+/// query.
+///
+/// THE REAL INSERT IS THE DECISIVE ASSERTION, and the two catalog probes above
+/// it are only for diagnosis. `has_table_privilege` is blind to schema `USAGE`:
+/// measured on the same server, a role with `INSERT` on a table but no `USAGE`
+/// on its schema probes `t` and still fails the write with `permission denied
+/// for schema`. Only executing the statement covers schema USAGE, the table ACL
+/// and the sequence ACL at once - which is all three objects the ordering hazard
+/// can cost.
+///
+/// WHAT IT DOES NOT BIND. Any position that satisfies the constraint stays green,
+/// including moving the creation down beside the second `provision_runtime_app_role`
+/// - correctly, since the resulting privileges are identical. It also rules only
+/// on the SUCCESS path: a creation moved into the `Ok` arm would leave an app
+/// whose apply was refused with a schema and no audit table, and this case would
+/// not see it. The COLUMNS are the DDL's own NOT NULL set, not a copy of the data
+/// plane's INSERT list, so a column added on the plugin-db side cannot make this
+/// a false red - that pairing is held by
+/// `zeroship-plugin-db/tests/integration.rs`, which drives the real
+/// `write_audit_unmask_row` against this same production DDL.
+#[ntex::test]
+async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer good-token")
+        .set_json(&create_notes_request())
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let schema = app_id.to_string();
+    let table = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
+    let audit = format!("{}.{}", quote_ident(&schema), quote_ident(table));
+    let runtime_role = zeroship_migrate_server::apply::runtime_app_role_name(&schema);
+
+    // DELETION, not reordering: say which one before touching any privilege.
+    assert!(
+        relation_exists(&conn, &audit).await,
+        "a successful apply must leave {audit} in place - the apply path is the \
+         ONLY creator of the unmask audit table since the DDL left the worker, \
+         so if this is absent the creation is gone rather than misplaced"
+    );
+
+    // Diagnosis: which of the two snapshot grants was missed.
+    let lit = |s: &str| s.replace('\'', "''");
+    assert!(
+        probe_bool(
+            &conn,
+            &format!(
+                "SELECT has_table_privilege('{}', '{}', 'INSERT')",
+                lit(&runtime_role),
+                lit(&audit)
+            ),
+        )
+        .await,
+        "the runtime role must hold INSERT on {audit}. GRANT ... ON ALL TABLES \
+         IN SCHEMA is a snapshot, so this is false exactly when apply_ir_request \
+         creates the table AFTER its last provision_runtime_app_role"
+    );
+    assert!(
+        probe_bool(
+            &conn,
+            &format!(
+                "SELECT has_sequence_privilege('{}', pg_get_serial_sequence('{}', 'id'), 'USAGE')",
+                lit(&runtime_role),
+                lit(&audit)
+            ),
+        )
+        .await,
+        "the runtime role must hold USAGE on the BIGSERIAL sequence behind \
+         {audit} - the second object the same ordering mistake costs, and the \
+         one that would still fail if the table grant alone were repaired"
+    );
+
+    // The write itself, as the worker, by the production identity chain.
+    let write = as_app_runtime_identity(
+        &conn,
+        &schema,
+        &format!(
+            "INSERT INTO {audit} (collection, row_pk, \"column\", classification, outcome) \
+             VALUES ('notes', 'row-1', 'body', 'pii', 'granted')"
+        ),
+    )
+    .await;
+    assert!(
+        write.is_ok(),
+        "the worker must be able to write an unmask audit row after a real \
+         apply; this is the statement crud/unmask.rs issues on every plaintext \
+         read, and a failure here is every unmask() in the app returning \
+         permission denied: {write:?}"
+    );
+
+    // And it landed - an INSERT that silently affected nothing would pass the
+    // line above.
+    let rows: i64 = conn
+        .query(&format!("SELECT count(*)::int8 FROM {audit}"), &[])
+        .await
+        .expect("count audit rows")[0]
+        .get(0);
+    assert_eq!(rows, 1, "the audit row must be readable after the write");
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+}
 
 
 #[ntex::test]
