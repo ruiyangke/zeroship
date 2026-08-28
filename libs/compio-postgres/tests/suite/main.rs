@@ -69,6 +69,7 @@ mod copy_interleaving;
 mod copy_out_abandonment;
 mod copy_out_copy_in_resync;
 mod copy_refusal;
+mod differential_config_parsing;
 mod differential_server_errors;
 mod differential_tokio;
 mod differential_type_values;
