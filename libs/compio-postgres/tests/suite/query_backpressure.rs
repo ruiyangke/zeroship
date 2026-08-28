@@ -43,16 +43,20 @@ async fn assert_same_client_recovers(client: &Client, process_id: i32) {
 async fn text_params_resolves_custom_types_without_response_backpressure_deadlock() {
     let client = connect().await;
     let process_id = client.process_id();
+    let type_name = common::test_object_name("cpg_query_text_enum");
     client
-        .batch_execute("CREATE TYPE pg_temp.cpg_query_text_enum AS ENUM ('value')")
+        .batch_execute(&format!(
+            "CREATE TYPE pg_temp.{type_name} AS ENUM ('value')"
+        ))
         .await
         .unwrap();
 
-    let query = "\
-        SELECT 'value'::pg_temp.cpg_query_text_enum, repeat('x', 16384) \
-        FROM generate_series(1, 2048)";
+    let query = format!(
+        "SELECT 'value'::pg_temp.{type_name}, repeat('x', 16384) \
+         FROM generate_series(1, 2048)"
+    );
     let result =
-        compio::time::timeout(QUERY_START_TIMEOUT, client.query_text_params(query, &[])).await;
+        compio::time::timeout(QUERY_START_TIMEOUT, client.query_text_params(&query, &[])).await;
     let completed = match result {
         Ok(Ok(stream)) => {
             drop(stream);
@@ -73,17 +77,21 @@ async fn text_params_resolves_custom_types_without_response_backpressure_deadloc
 async fn query_typed_resolves_custom_types_without_response_backpressure_deadlock() {
     let client = connect().await;
     let process_id = client.process_id();
+    let type_name = common::test_object_name("cpg_query_typed_enum");
     client
-        .batch_execute("CREATE TYPE pg_temp.cpg_query_typed_enum AS ENUM ('value')")
+        .batch_execute(&format!(
+            "CREATE TYPE pg_temp.{type_name} AS ENUM ('value')"
+        ))
         .await
         .unwrap();
 
-    let query = "\
-        SELECT 'value'::pg_temp.cpg_query_typed_enum, repeat('x', 16384) \
-        FROM generate_series(1, 2048)";
+    let query = format!(
+        "SELECT 'value'::pg_temp.{type_name}, repeat('x', 16384) \
+         FROM generate_series(1, 2048)"
+    );
     let result = compio::time::timeout(
         QUERY_START_TIMEOUT,
-        client.query_typed_raw(query, std::iter::empty::<(&str, Type)>()),
+        client.query_typed_raw(&query, std::iter::empty::<(&str, Type)>()),
     )
     .await;
     let completed = match result {
