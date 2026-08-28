@@ -154,3 +154,34 @@ transaction mode with `server_reset_query_always=0` can hand that GUC to
 another frontend. No isolated exact-name run in this sweep had that leaked
 `57014` as its first failure, so it was not used to relabel a different
 observed mechanism.
+
+## The count is a stable core plus a flaky fringe, measured 2026-08-28
+
+The 58 in this document is not a single reading. Three full pooled runs of the
+`suite` target were taken at `85bf15fbe` and `0b509285a`:
+
+    run at 85bf15fbe   58 failed
+    run 1 at 0b509285a 59 failed
+    run 2 at 0b509285a 63 failed
+
+Set-differencing them, rather than comparing totals:
+
+- **58 tests failed in ALL THREE runs.** That intersection is the real
+  category-A residue this document classifies.
+- Run 1 added `read_timeout::copy_input_time_is_not_charged_as_server_read_silence`.
+  It PASSES in isolation against both 6548 and 5455 (1 passed each), so it is
+  not a pooler incompatibility; it is timing-sensitive inside a 670-test serial
+  run under pooled load.
+- Run 2 added four `differential_tokio::*` COPY cases
+  (`copy_out_bytes`, `copy_in_results`, `binary_copy_roundtrip`,
+  `a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one`).
+
+**Do not read a total as a regression signal.** A run reporting 59 or 63 has not
+regressed against 58; it has picked up members of the fringe. Compare the FAILURE
+SET against the 58-name core, the way this section was derived - a total moved by
+five while the core was byte-identical.
+
+The six tests added between those two commits (three startup-handoff cases and
+the `differential_server_errors`, `differential_config_parsing` and
+`differential_copy` oracles) appear in NEITHER fringe, so the new suites are
+pooler-stable.
