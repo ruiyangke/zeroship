@@ -162,6 +162,118 @@ export interface ApplyRequest {
   appliedBy: string
 }
 
+/**
+ * `baselineIr` - adopt a database the authored set has already been applied to,
+ * recording what a fresh apply WOULD have journaled without running any of it.
+ *
+ * PostgreSQL only, and refused at the dialect rather than at the backend so the
+ * operator is told why: adoption is the records-not-run primitive, and MySQL and
+ * SQLite state their refusal of it on `MigrationBackend::record_adoption`.
+ */
+export declare function baselineIr(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: BaselineIrRequest): Promise<BaselineReply>
+
+/**
+ * The typed request for adopting a database the authored set has already been
+ * applied to by some other means.
+ */
+export interface BaselineIrRequest {
+  /**
+   * The deploying app id stamped during guarded lowering. It is folded into
+   * every step checksum, so it must match what a later `status` will use or the
+   * recorded events reconcile as drift.
+   */
+  ownerApp: string
+  /** The confined project schema. */
+  projectSchema: string
+  /**
+   * `"postgres"` selects the journal backend. Adoption is the records-not-run
+   * primitive, which only the PostgreSQL backend implements.
+   */
+  dialect: string
+  /** The project's table-ownership registry. */
+  registry: Record<string, string>
+  /**
+   * The COMPLETE ordered authored set, oldest first. A prefix would record a
+   * prefix and leave the rest pending, which is not adoption.
+   */
+  envelopes: Array<JsonValue>
+  /** Required ordered policy charters, identical to the `applyIr` lowering input. */
+  charterLayers: Array<string>
+  /**
+   * Attach supersession edges over the net-applied journal rows this set does
+   * not account for. Without it those rows are reported and NOTHING is written:
+   * superseding a row is a permanent reinterpretation of another tool's history,
+   * so it is never implied by asking to adopt.
+   */
+  supersedeUnmatched: boolean
+  /**
+   * Compute and report the full event set WITHOUT writing any of it. This is the
+   * same code path the write takes, so the preview cannot drift from the act.
+   */
+  dryRun: boolean
+  /** The actor recorded in the journal. */
+  appliedBy: string
+}
+
+/**
+ * The typed reply for `baselineIr`.
+ *
+ * Reports the complete event set whether or not it was written, because the
+ * operator gate lives in the CLI: a preview and a write must be describable by one
+ * shape, or the thing an operator approves is not the thing that happens.
+ */
+export interface BaselineReply {
+  /**
+   * The events written, in the order they were recorded - or, when nothing was
+   * written, the events that WOULD have been.
+   */
+  recorded: Array<BaselineStepDto>
+  /**
+   * Step identities the journal already holds under the same checksum. These are
+   * skipped, which is what makes a repeated adoption a no-op.
+   */
+  alreadyRecorded: Array<string>
+  /**
+   * Net-applied journal rows no supplied plan accounts for - the same set
+   * `status` reports as `unexpectedJournal`.
+   */
+  unmatched: Array<string>
+  /**
+   * The subset of `unmatched` this adoption records as supersession edges - or,
+   * when nothing was written, the subset it WOULD record. Empty unless the
+   * request asked for it.
+   *
+   * Reported the same way `recorded` is, and that is deliberate rather than
+   * incidental. This field used to be emptied on a dry run, which made a preview
+   * announce a `kind: "squash"` event - an event kind whose entire meaning is the
+   * edges it carries - beside an empty edge list. Supersession is the one part of
+   * an adoption with no undo whatsoever, so it was exactly the part an operator
+   * could not see before approving it.
+   */
+  superseded: Array<string>
+  /**
+   * Whether anything was journaled. `false` for a dry run, for an adoption with
+   * nothing left to record, and for one held back by unreported unmatched rows.
+   *
+   * The ONLY field that distinguishes a preview from a write. Every other field
+   * describes the same event set either way.
+   */
+  wrote: boolean
+}
+
+/** One records-not-run `completed` event an adoption writes. */
+export interface BaselineStepDto {
+  /** The journal identity a fresh apply of this step would have recorded. */
+  version: string
+  /** The step's label, as the journal records it. */
+  name: string
+  /**
+   * `"baseline"`, or `"squash"` for the one event carrying the supersession
+   * edges (`superseded_versions` honours edges only from a `squash`).
+   */
+  kind: string
+}
+
 /** One plan blocked by an outstanding dependency contract. */
 export interface BlockedPlanDto {
   /** Logical id of the blocked plan. */

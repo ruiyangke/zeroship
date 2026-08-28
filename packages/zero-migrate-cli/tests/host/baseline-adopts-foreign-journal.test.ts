@@ -123,6 +123,15 @@ interface StatusJson {
   }>;
 }
 
+/** The `--json` shape of a `baseline` reply (napi camelCases the DTO fields). */
+interface BaselineJson {
+  recorded: Array<{ version: string; name: string; kind: string }>;
+  alreadyRecorded: string[];
+  unmatched: string[];
+  superseded: string[];
+  wrote: boolean;
+}
+
 const TABLES = ["alpha", "beta", "gamma"] as const;
 
 /** The versioned file ordinals a peer runner would have journaled these under. */
@@ -641,6 +650,374 @@ test("baseline refuses a database whose tables the migration set has not created
 
     const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".schema_migrations`);
     assert.equal((rows.rows as Array<{ n: number }>)[0].n, 0, "nothing was recorded");
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${meta}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+/**
+ * THE PEER ENVIRONMENT: every table the corpus builds exists, and the COLUMNS are a
+ * migration behind.
+ *
+ * This is the misuse a table-name presence check cannot see, and it is the likely
+ * one: `DATABASE_URL` still exported from a staging shell, or a production database
+ * a few migrations behind, where the trailing migrations only ALTER. Every table
+ * name matches. Adoption journals the trailing migrations as applied, they will
+ * never run, `apply` reports nothing pending, `status --strict` is green, and the
+ * journal is append-only so the only repair is authoring new migrations that
+ * duplicate effects the journal already claims.
+ *
+ * TWO SCHEMAS, ONE VARIABLE. Both are hand-built from the same DDL and differ in
+ * exactly the column migration 2 adds. The CURRENT one must still adopt - a check
+ * that refuses every real database is worse than none, because the operator reaches
+ * for a bypass - and the BEHIND one must be refused BY NAME. "Schema does not
+ * match" is useless to an operator holding two similar databases; naming
+ * `users.mfa_secret` tells them which one they are pointed at.
+ */
+test("baseline refuses a database whose columns are behind the migration set", async () => {
+  const client = await connectLivePg();
+  const cwd = temporaryDirectory(".cli-baseline-peer-");
+  const behind = uniqueSchema("zm_peer_behind");
+  const current = uniqueSchema("zm_peer_current");
+  const behindMeta = `${behind}_migrations`;
+  const currentMeta = `${current}_migrations`;
+  try {
+    for (const schema of [behind, current]) {
+      await client.query(`CREATE SCHEMA "${schema}"`);
+    }
+    writeFileSync(join(cwd, "policy.behind.toml"), noInjectPolicy(behind));
+    writeFileSync(join(cwd, "policy.current.toml"), noInjectPolicy(current));
+    // GUARDED (`ifNotExists`), for the same reason arm 1 is: it makes the repair the
+    // refusal points at - re-running `apply` against the database that is behind -
+    // actually available, so the last assertion below can measure it rather than
+    // assert it. An unguarded create over an existing table fails outright, which
+    // would prove only that the corpus is unguarded.
+    writeFileSync(
+      join(cwd, "20260801000001_m1_users.ts"),
+      `import { table, t } from "zero-migrate";
+export const name = "m1_users";
+export function schema() {
+  table("users").create({ columns: { id: t.int() }, ifNotExists: true });
+}
+`,
+    );
+    // The trailing migration: an ALTER, which leaves the TABLE NAME unchanged and is
+    // therefore invisible to a presence-only check.
+    writeFileSync(
+      join(cwd, "20260801000002_m2_mfa.ts"),
+      `import { table, t } from "zero-migrate";
+export const name = "m2_mfa";
+export function schema() {
+  table("users").column("mfa_secret").add({ type: t.text() });
+}
+`,
+    );
+
+    // The peer environment: migration 1 applied, migration 2 not.
+    await client.query(`CREATE TABLE "${behind}"."users" (id integer)`);
+    // The database the corpus really describes.
+    await client.query(`CREATE TABLE "${current}"."users" (id integer, mfa_secret text)`);
+
+    const adoptArgs = (schema: string, policy: string) => [
+      "baseline",
+      "--dir=.",
+      `--database-url=${pgUrl()}`,
+      `--schema=${schema}`,
+      `--policy=${policy}`,
+      "--approve",
+    ];
+
+    // CONTROL: the up-to-date database still adopts. Run first, so a refusal here
+    // reads as "the check is wrong" rather than as the case below passing.
+    const control = spawnCli(adoptArgs(current, "policy.current.toml"), cwd);
+    assert.equal(
+      control.status,
+      0,
+      `an up-to-date database must still adopt\n${control.stdout}\n${control.stderr}`,
+    );
+    const controlRows = await client.query(
+      `SELECT count(*)::int AS n FROM "${currentMeta}".schema_migrations WHERE event_kind = 'applied'`,
+    );
+    assert.equal(
+      (controlRows.rows as Array<{ n: number }>)[0].n,
+      2,
+      "the control adoption journals both steps",
+    );
+
+    // THE CASE: --approve is genuine consent, and the database is still wrong.
+    const refused = spawnCli(adoptArgs(behind, "policy.behind.toml"), cwd);
+    assert.equal(
+      refused.status,
+      1,
+      `a database whose columns are behind must be refused\n${refused.stdout}\n${refused.stderr}`,
+    );
+    assert.ok(
+      refused.stderr.includes("users.mfa_secret"),
+      `the refusal must NAME the column that differs\n${refused.stderr}`,
+    );
+
+    // Nothing was journaled, so the database is still repairable by `apply`.
+    const rows = await client.query(
+      `SELECT count(*)::int AS n FROM "${behindMeta}".schema_migrations`,
+    );
+    assert.equal((rows.rows as Array<{ n: number }>)[0].n, 0, "a refused adoption writes nothing");
+
+    // And the repair really is available: `apply` runs the trailing migration and
+    // the column arrives. Without this the refusal could be merely obstructive.
+    //
+    // `--registry` is needed here and not on the adoptions above, and the difference
+    // is the basis each lowers against. Adoption folds from an EMPTY schema, so the
+    // `createTable` in migration 1 registers `users` in the same run and migration 2
+    // inherits that ownership. `apply` lowers onto the LIVE catalog, where the
+    // guarded create is a no-op and migration 2's `addColumn` meets a table with no
+    // registry entry - refused fail-closed. That is the ownership guard working, not
+    // an artifact of this test.
+    writeFileSync(join(cwd, "registry.json"), JSON.stringify({ users: "app_cli" }));
+    const applied = spawnCli(
+      [
+        "apply",
+        "--dir=.",
+        `--database-url=${pgUrl()}`,
+        `--schema=${behind}`,
+        "--policy=policy.behind.toml",
+        "--registry=registry.json",
+        "--approve",
+      ],
+      cwd,
+    );
+    assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
+    const columns = await client.query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'users' ORDER BY column_name`,
+      [behind],
+    );
+    assert.deepEqual(
+      (columns.rows as Array<{ column_name: string }>).map((row) => row.column_name),
+      ["id", "mfa_secret"],
+      "apply is the repair the refusal points at",
+    );
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${behind}" CASCADE;
+         DROP SCHEMA IF EXISTS "${behindMeta}" CASCADE;
+         DROP SCHEMA IF EXISTS "${current}" CASCADE;
+         DROP SCHEMA IF EXISTS "${currentMeta}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A PREVIEW AND A WRITE ARE ONE SHAPE, and `wrote` is the only field that separates
+ * them.
+ *
+ * That is what `BaselineReply` claims of itself
+ * (crates/zeroship-migrate-node/src/wire.rs, the type's own doc) and what the host
+ * contract claims of `dryRun` (packages/zero-migrate-cli/src/index.ts, `baseline`).
+ * The supersession edges are the one part of an adoption with no undo at all - the
+ * journal is append-only, so an edge, once written, stands for as long as its
+ * carrier does - so a preview that lists them as `[]` while carrying a
+ * `kind: "squash"` event was hiding exactly the part an operator is asked to approve.
+ *
+ * Asserted on `--json`, not on the human lines, because the reply is the only thing
+ * a machine consumer sees. The human formatter used to be handed the
+ * `--supersede-unmatched` flag separately and could describe the preview correctly
+ * from that; a gate reading `superseded` out of the JSON to decide whether to
+ * proceed had no such second source and read an empty list on every preview. The
+ * flag argument is gone now, so this arm covers both surfaces at once.
+ */
+test("a baseline preview reports the supersession edges the write would record", async () => {
+  const client = await connectLivePg();
+  const cwd = temporaryDirectory(".cli-baseline-preview-");
+  const schema = uniqueSchema("zm_baseline_preview");
+  const meta = `${schema}_migrations`;
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    writeFileSync(join(cwd, "policy.toml"), noInjectPolicy(schema));
+    TABLES.forEach((tableName, index) => {
+      writeStep(
+        cwd,
+        `2026080100000${index + 1}_m${index + 1}_${tableName}.ts`,
+        `m${index + 1}_${tableName}`,
+        tableName,
+        { guarded: false },
+      );
+    });
+    for (const tableName of TABLES) {
+      await client.query(`CREATE TABLE "${schema}"."${tableName}" (id integer)`);
+    }
+    const bootstrap = spawnCli(
+      ["history", `--database-url=${pgUrl()}`, `--schema=${schema}`, "--policy=policy.toml"],
+      cwd,
+    );
+    assert.equal(bootstrap.status, 0, bootstrap.stderr);
+    const foreignVersions = FOREIGN_ORDINALS.map(migrationIdForVersion);
+    for (const [index, version] of foreignVersions.entries()) {
+      await client.query(
+        `INSERT INTO "${meta}".schema_migrations
+           (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
+         VALUES ('applied', $1, $2, $3, 'peer-runner', 0, 'completed', 'success', 'apply')`,
+        [version, `create_${TABLES[index]}`, `${index}`.repeat(64)],
+      );
+    }
+
+    const baselineArgs = (approve: boolean) => [
+      "baseline",
+      "--dir=.",
+      `--database-url=${pgUrl()}`,
+      `--schema=${schema}`,
+      "--policy=policy.toml",
+      "--supersede-unmatched",
+      "--json",
+      ...(approve ? ["--approve"] : []),
+    ];
+
+    // The preview. It exits 1 (no `--approve`) but still prints the reply first.
+    const preview = spawnCli(baselineArgs(false), cwd);
+    assert.equal(preview.status, 1, `${preview.stdout}\n${preview.stderr}`);
+    const previewReply = JSON.parse(preview.stdout) as BaselineJson;
+    assert.equal(previewReply.wrote, false, preview.stdout);
+    assert.equal(
+      previewReply.recorded[0]?.kind,
+      "squash",
+      `the first event carries the edges\n${preview.stdout}`,
+    );
+    assert.deepEqual(
+      [...previewReply.superseded].sort(),
+      [...foreignVersions].sort(),
+      `a preview must list the edges the write would record\n${preview.stdout}`,
+    );
+    // Nothing was written: the preview is a preview.
+    const afterPreview = await client.query(
+      `SELECT count(*)::int AS n FROM "${meta}".schema_migrations WHERE "by" <> 'peer-runner'`,
+    );
+    assert.equal((afterPreview.rows as Array<{ n: number }>)[0].n, 0, "the preview wrote nothing");
+
+    // The write. One shape: the two replies differ in `wrote` and in nothing else.
+    const wrote = spawnCli(baselineArgs(true), cwd);
+    assert.equal(wrote.status, 0, `${wrote.stdout}\n${wrote.stderr}`);
+    const wroteReply = JSON.parse(wrote.stdout) as BaselineJson;
+    assert.equal(wroteReply.wrote, true, wrote.stdout);
+    assert.deepEqual(
+      { ...previewReply, wrote: true },
+      wroteReply,
+      `the thing an operator approves must be the thing that happens\n${preview.stdout}\n${wrote.stdout}`,
+    );
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${meta}" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+/**
+ * THE ADOPTION THE DRIFT CHECK MUST NOT BREAK, measured rather than argued.
+ *
+ * The refusal above compares a fold of the corpus from an empty schema against a
+ * live PostgreSQL catalog. Those two sides are produced by completely different
+ * machinery - an offline renderer on one, `pg_catalog` on the other - and the
+ * places they are known to disagree are catalogued at length in
+ * `crates/zeroship-migrate-core/src/apply/drift.rs` (deparsed CHECK bodies, index
+ * expression keys, generated-column expressions, view bodies). A structural check
+ * that reported any of those as drift would refuse the ONE adoption that is
+ * unambiguously legitimate, and an operator who cannot adopt a database their own
+ * migrations built will go looking for a bypass.
+ *
+ * So this arm builds the database the honest way - `apply`, for real - then throws
+ * the journal away, which is the situation adoption exists for (a peer runner's
+ * history, a lost meta schema), and requires the adoption to go through. The corpus
+ * carries the facets most likely to diverge: a bounded string, NOT NULL, a
+ * create-time literal default, an ALTER-added column and a secondary index.
+ *
+ * It is the control for the whole feature: without it, "the peer environment is
+ * refused" is equally satisfied by a check that refuses everything.
+ */
+test("baseline adopts a database this corpus itself applied", async () => {
+  const client = await connectLivePg();
+  const cwd = temporaryDirectory(".cli-baseline-selfbuilt-");
+  const schema = uniqueSchema("zm_selfbuilt");
+  const meta = `${schema}_migrations`;
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    writeFileSync(join(cwd, "policy.toml"), noInjectPolicy(schema));
+    writeFileSync(join(cwd, "registry.json"), JSON.stringify({ gadgets: "app_cli" }));
+    writeFileSync(
+      join(cwd, "20260801000001_m1_gadgets.ts"),
+      `import { table, t } from "zero-migrate";
+export const name = "m1_gadgets";
+export function schema() {
+  table("gadgets").create({
+    columns: {
+      sku: t.string({ length: 64 }).notNull(),
+      kind: t.string({ length: 32 }).notNull().default("widget"),
+    },
+  });
+}
+`,
+    );
+    writeFileSync(
+      join(cwd, "20260801000002_m2_price.ts"),
+      `import { table, t } from "zero-migrate";
+export const name = "m2_price";
+export function schema() {
+  table("gadgets").column("price").add({ type: t.int() });
+  table("gadgets").index("gadgets_sku_idx").add({ on: ["sku"] });
+}
+`,
+    );
+
+    const cliArgs = (verb: string) => [
+      verb,
+      "--dir=.",
+      `--database-url=${pgUrl()}`,
+      `--schema=${schema}`,
+      "--policy=policy.toml",
+      "--registry=registry.json",
+      "--approve",
+    ];
+
+    const applied = spawnCli(cliArgs("apply"), cwd);
+    assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
+    const ran = await client.query(
+      `SELECT version, name, checksum FROM "${meta}".schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq`,
+    );
+    const journaled = ran.rows as Array<{ version: string; name: string; checksum: string }>;
+    assert.equal(journaled.length, 3, `three steps really ran: ${JSON.stringify(journaled)}`);
+
+    // Lose the journal. The schema stays exactly as `apply` left it.
+    await client.query(`DROP SCHEMA "${meta}" CASCADE`);
+
+    const adopt = spawnCli(cliArgs("baseline"), cwd);
+    assert.equal(
+      adopt.status,
+      0,
+      `a database this corpus built must adopt\n${adopt.stdout}\n${adopt.stderr}`,
+    );
+    const readopted = await client.query(
+      `SELECT version, name, checksum FROM "${meta}".schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq`,
+    );
+    assert.deepEqual(
+      (readopted.rows as typeof journaled).map((row) => [row.version, row.name, row.checksum]),
+      journaled.map((row) => [row.version, row.name, row.checksum]),
+      "adoption reconstructs the journal the apply wrote, step for step",
+    );
   } finally {
     await client
       .query(

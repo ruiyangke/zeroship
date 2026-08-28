@@ -726,11 +726,22 @@ pub struct BaselineReply {
     /// Net-applied journal rows no supplied plan accounts for - the same set
     /// `status` reports as `unexpectedJournal`.
     pub unmatched: Vec<String>,
-    /// The subset of `unmatched` actually recorded as supersession edges. Empty
-    /// unless the request asked for it AND the write happened.
+    /// The subset of `unmatched` this adoption records as supersession edges - or,
+    /// when nothing was written, the subset it WOULD record. Empty unless the
+    /// request asked for it.
+    ///
+    /// Reported the same way `recorded` is, and that is deliberate rather than
+    /// incidental. This field used to be emptied on a dry run, which made a preview
+    /// announce a `kind: "squash"` event - an event kind whose entire meaning is the
+    /// edges it carries - beside an empty edge list. Supersession is the one part of
+    /// an adoption with no undo whatsoever, so it was exactly the part an operator
+    /// could not see before approving it.
     pub superseded: Vec<String>,
     /// Whether anything was journaled. `false` for a dry run, for an adoption with
     /// nothing left to record, and for one held back by unreported unmatched rows.
+    ///
+    /// The ONLY field that distinguishes a preview from a write. Every other field
+    /// describes the same event set either way.
     pub wrote: bool,
 }
 

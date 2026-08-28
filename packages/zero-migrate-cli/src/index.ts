@@ -650,9 +650,10 @@ export type BaselineOutcome = BaselineReply;
  * the journal is rewritten, because nothing in the journal CAN be (it is append-only
  * by trigger).
  *
- * `dryRun` runs the identical computation and returns the identical reply without
- * writing, so a caller can show an operator exactly the event set the write would
- * produce.
+ * `dryRun` runs the identical computation and returns the identical reply - `wrote`
+ * aside, which is the field that says which one it was - without writing, so a
+ * caller can show an operator exactly the event set the write would produce,
+ * INCLUDING the supersession edges, which are the part with no undo.
  */
 export async function baseline(opts: HostBaselineOptions): Promise<BaselineOutcome> {
   if (opts.driver.kind !== "postgres") {
