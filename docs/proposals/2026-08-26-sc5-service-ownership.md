@@ -120,11 +120,42 @@ must key on.
 ## Fork C: the durable AppIncarnationId
 
 This is the fork the parent proposal names `Fork C` ("what fences a stale
-handle") and defines by pointing back here. **Its storage is open** - the
-identity state lived in a platform-schema row and that schema is deleted; the
-parent's section 6 carries the open question, and the control plane is the
-obvious candidate only because app lifecycle already lives there. What follows
-is the requirement, not the mechanism.
+handle") and defines by pointing back here.
+
+**The storage is decided: two layers, because no single home delivers the four
+properties.**
+
+1. **A control-owned, append-only lifecycle ledger, in a recovery domain
+   independent of the application cluster.** It holds immutable incarnation
+   history, tombstones, and a CAS-controlled head. Recreation appends
+   incarnation B; it never removes incarnation A's tombstone. This is the
+   canonical authority.
+2. **A worker-read-only projection beside the application data**, written only
+   by the lifecycle service and read with a plain `SELECT` before any data SQL.
+   This is the one shape the system schema is for - a separate service writes,
+   the worker only reads - and it gives the worker no privileged operation and
+   no `SECURITY DEFINER` capability.
+
+**The projection is an enforcement cache, not the authority.** It co-rewinds
+with the application data, which is the point: a control-only home can revert to
+incarnation A while the app cluster holds B's data, and an A-handle then passes
+the compare and reaches B's data. Neither layer alone is sufficient, and the two
+cross-check each other's rewinds.
+
+The control plane is the right logical owner, but **not because app lifecycle
+already lives there** - that argument engages none of the four properties. It is
+right because control does not execute creator code, so it is the correct
+process to mint and to CAS. It is *wrong* if it means another row in today's
+`zeroship` schema: control, auth and application data share one cluster today,
+so a whole-cluster restore rewinds the record and the data it fences in the same
+instant. Creator-schema storage is categorically disqualified, because the
+migrator owns that schema.
+
+**Consequently the app must be unavailable to workers after any restore until
+the projection is reconciled from the external ledger under a newly minted,
+out-of-band authority generation.** This is the cost, and it is not optional:
+without an external witness the four properties are unachievable, as the
+measurement below shows.
 
 **These are not schema metadata**, which is why the descriptor cannot absorb
 them and why the deferred DDL-validation feature would not cover them either:
@@ -203,10 +234,36 @@ Two consequences the contract must state rather than imply:
    would permanently deny every app. The contract needs a deliberate, audited
    **re-domain ceremony**, or the platform can never upgrade PostgreSQL.
 
-*Unverified: whether `pg_control_checkpoint().timeline_id` lags promotion,
-because promotion requests a spread rather than immediate checkpoint. It read
-`2` immediately in the run above, but that path reached an end-of-recovery
-checkpoint; a promotion under load may differ.*
+A **logical restore into the same existing cluster** moves neither component
+either, and is a second same-domain rewind.
+
+### How the domain must be observed
+
+Three rules, because the obvious reading of each is wrong:
+
+1. **Take the timeline from the WAL filename, not the control file.**
+   `pg_control_checkpoint().timeline_id` reports the timeline recorded in the
+   latest *completed* checkpoint, and promotion requests a spread checkpoint
+   rather than an immediate one, so the value can lag the very event it exists
+   to detect. `pg_walfile_name(pg_current_wal_lsn())` is constructed from the
+   current WAL *insertion* timeline; its leading eight hex digits are the
+   timeline (measured on PG 16.14: `000000010000000000000020`).
+   `pg_split_walfile_name` is available on PG 16 (verified present in `pg_proc`)
+   and parses it.
+2. **Fail closed whenever `pg_is_in_recovery()` is true.** A recovery paused at
+   its target, or a standby never promoted, serves read-only queries of rewound
+   data on an unchanged timeline. `recovery_target_action` defaults to `pause`
+   precisely so that state can be inspected, so this is a default configuration,
+   not an exotic one.
+3. **`pg_control_system()` carries no timeline at all** - verified, it returns
+   `pg_control_version`, `catalog_version_no`, `system_identifier` and
+   `pg_control_last_modified`. The pair must be assembled from two sources, and
+   a reader that assumes one call yields both will silently compare a constant.
+
+**Timeline ids are not globally unique branch identifiers.** A promoting server
+picks the locally newest timeline plus one, so two replicas promoted in
+isolation from the same ancestor can both choose the same number while
+diverging. The pair is useful provenance; it is not an authority generation.
 
 ### The shape, therefore
 
@@ -230,7 +287,38 @@ checkpoint; a promotion under load may differ.*
 Any home for this state must preserve four properties, which are the ones the
 deleted design paid for: a durable tombstone that is never deleted, a CAS
 against an expected incarnation, an authority domain a restored dump cannot
-assert about itself, and three distinguishable error codes.
+assert about itself, and three distinguishable error codes. **The first is
+bounded rather than absolute** unless the ledger of layer 1 sits outside every
+rewind domain; see the measurement above.
+
+### Dev carries a different type, not a pretend incarnation
+
+The dev tier has no control plane to mint from, no PostgreSQL recovery domain,
+and no deprovision or recreate operation; SC-2 removes the file-resident
+authority row outright. A binding is therefore an explicit sum type:
+
+- **Production (PostgreSQL)** - a durable `AppIncarnationId`, an externally
+  anchored authority generation, and live cluster observation.
+- **Dev (SQLite)** - a process-local attach generation, minted by the connection
+  owner and changed on detach or reattachment.
+
+Do **not** reuse the HMR supervisor generation: it changes for code-lifecycle
+reasons, not for deprovision or recreation. Do **not** mint a per-process random
+value either - dev workflow records persist across restarts, so a per-process
+token would deny replay of every dev workflow after an ordinary restart, which
+is precisely what a developer testing durability is trying to exercise.
+
+The cost is that dev cannot exercise `APP_DEPROVISIONED`,
+`STALE_APP_INCARNATION` or `AUTHORITY_DOMAIN_MISMATCH`; those need PostgreSQL
+integration tests. That is the truth about the tier and is worth stating rather
+than simulating.
+
+**One dev edge is open.** The dev workflow journal is a separate database from
+the app's - `.zeroship/workflows.sqlite` against `.zeroship/dev.sqlite`
+(`crates/zeroship-cli/src/main.rs:334-340`). Deleting or replacing the app file
+therefore leaves an old workflow eligible to replay against the new one. Dev
+needs an atomic reset policy, where the workflow journal resets with the app
+database, or a supervisor-owned project lifecycle generation.
 
 ## Acceptance shape
 
