@@ -112,9 +112,10 @@ tenant-owned in the creator's own schema.
 
 
 
-**Operator: remove `zeroship.migrated_migrations`,
+**One record of what ran, per schema: the engine journal.** Every other store
+of migration state is removed - `zeroship.migrated_migrations`,
 `zeroship_migrations.platform_migration_files`, and
-`db/released_migrations.tsv`.**
+`db/released_migrations.tsv`.
 
 That leaves **one** record of what ran, per schema: the engine journal. It is
 append-only, checksummed, and enforced by an immutability trigger on the
@@ -169,10 +170,11 @@ made tenant-owned journals acceptable in the first place.
   *"submit, approval, pending rejection, and apply outcomes"* - three of those
   four actions belong to the approval flow that is unreachable, and the fourth
   duplicates the journal;
-- **`zeroship.migrated_app_policies`, and `policy_store.rs` with it.** Operator,
-  2026-08-28: *"we should not persist policy in the database ... even so, we
-  should not make it editable in the runtime, everything should be in the
-  crafting scope."*
+- **`zeroship.migrated_app_policies`, and `policy_store.rs` with it.**
+  **Policy is never persisted in the database and never mutable at runtime. It
+  is declared in the crafting scope.** That holds whether or not per-app policy
+  customization is supported - the objection is to the shape, not to the
+  feature.
 
   **This is decision 3's principle applied to migration policy.** Decision 3
   made the mask policy code-managed, folded at build time, delivered in the
