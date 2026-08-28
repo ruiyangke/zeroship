@@ -274,12 +274,42 @@ export type PolicyCmd = "all" | "select" | "insert" | "update" | "delete";
 export type FuncArgMode = "in" | "out" | "inout";
 
 /**
- * **VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately
- * 2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is
- * REJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan
- * even runs.
+ * **VENDOR** - the CLOSED `CREATE FUNCTION ... LANGUAGE` lexicon. A deliberately
+ * 2-set: the plain SQL body language, or the TARGET'S OWN procedural language.
+ * An untrusted PL (`plpythonu`/`plperlu`/`c`) has no spelling here at all, so it
+ * is REJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list
+ * scan even runs.
+ *
+ * The set is closed HERE; the TOKEN each member renders to belongs to the backend.
+ * PostgreSQL turns `procedural` into `LANGUAGE plpgsql` - verified 2026-08-28 on a
+ * live apply of db/migrations-ts, where all 16 platform functions land with
+ * `pg_language.lanname = 'plpgsql'`.
+ *
+ * HAND-EDITED 2026-08-28, IN A GENERATED FILE, AND HERE IS WHY.
+ * This said `"plpgsql" | "sql"` long after the IR renamed the variant to
+ * `Procedural`. The schema has been right the whole time
+ * (crates/zeroship-migrate/ir-envelope.schema.json:7021-7035, `"const":
+ * "procedural"`), so this file was simply stale, and the platform corpus that
+ * trusted it authored `language: "plpgsql"` and was refused by the engine with
+ * `unknown variant `plpgsql`, expected `procedural` or `sql``.
+ *
+ * REGENERATING IS THE RIGHT FIX AND IT DOES NOT WORK YET. `pnpm --filter
+ * @zeroship/migrate gen:ir-types` first throws `enum def PgExtractField missing
+ * from schema` (the generator's ENUM_DEFS census still names a def the schema
+ * dropped); remove that entry and the regeneration then FAILS THE TYPECHECK,
+ * measured, because `src/generated/ir.ts:62,95,229` and `src/types.ts:39,77,651`
+ * still import `PgExtractField` from this module. So a real regeneration has to
+ * land those three files in the same pass. Baseline `pnpm --filter
+ * @zeroship/migrate typecheck` exits 0; with a straight regeneration it exits 2.
+ *
+ * A LATER REGENERATION WILL REVERT THIS LINE, and that is fine ONLY if it is the
+ * full pass described above - it will produce `"procedural" | "sql"` itself.
+ * What must not happen is someone regenerating, hitting the typecheck failure,
+ * and reverting the whole thing back to `plpgsql`.
+ *
+ * Background: docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md
  */
-export type FuncLanguage = "plpgsql" | "sql";
+export type FuncLanguage = "procedural" | "sql";
 
 /**
  * **VENDOR** — the CLOSED function-volatility lexicon.
