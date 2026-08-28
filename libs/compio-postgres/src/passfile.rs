@@ -152,8 +152,13 @@ fn unescape_password(buf: &[u8]) -> Vec<u8> {
 /// than mocked.
 pub(crate) fn lookup_in_contents(contents: &[u8], key: PassfileKey<'_>) -> Option<Vec<u8>> {
     for line in contents.split(|byte| *byte == b'\n') {
-        // Tolerate CRLF: the trailing CR is not part of the password.
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        // `pg_strip_crlf` removes every trailing CR/LF byte, not just one.
+        // `split` consumed the LFs; remove all CRs that immediately preceded
+        // them (or ended the final line) without trimming significant spaces.
+        let mut line = line;
+        while let Some(stripped) = line.strip_suffix(b"\r") {
+            line = stripped;
+        }
         if line.is_empty() || line.first() == Some(&b'#') {
             continue;
         }
@@ -324,6 +329,15 @@ mod tests {
     fn a_crlf_line_ending_is_not_part_of_the_password() {
         let found = find(
             "10.0.0.1:5432:db:alice:secret\r\n",
+            key("10.0.0.1", "5432", "db", "alice"),
+        );
+        assert_eq!(found.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn every_trailing_carriage_return_is_stripped() {
+        let found = find(
+            "10.0.0.1:5432:db:alice:secret\r\r\n",
             key("10.0.0.1", "5432", "db", "alice"),
         );
         assert_eq!(found.as_deref(), Some("secret"));
