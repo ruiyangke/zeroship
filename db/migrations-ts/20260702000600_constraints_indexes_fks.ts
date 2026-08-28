@@ -66,7 +66,7 @@ export default {
     table("hosts", { schema: "zeroship" }).index("idx_hosts_status_heartbeat").add({ on: ["status", "last_heartbeat"] });
     table("payouts", { schema: "zeroship" }).index("idx_payouts_creator_time").add({ on: ["creator_id", { column: "occurred_at", order: "desc" }] });
     table("provider_dead_letter", { schema: "zeroship" }).index("idx_provider_dead_letter_provider_created").add({ on: ["provider_id", { column: "created_at", order: "desc" }] });
-    table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_ts_brin").add({ on: ["ts"], using: "brin", with: { pagesPerRange: 32 } });
+    table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_ts_brin").add({ on: ["ts"], using: "brin", postgres: { pages_per_range: 32 } });
     table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_sandbox_ts").add({ on: ["sandbox_id", "ts"] });
     table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_user_id_ts").add({ on: ["user_id", "ts"] });
     table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_metering")

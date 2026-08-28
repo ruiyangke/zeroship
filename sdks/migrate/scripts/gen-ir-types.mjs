@@ -46,6 +46,25 @@ const ENUM_DEFS = [
   "EmptyContainerKind",
   "CastTarget",
   "ExtractField",
+  // THIS GENERATOR DOES NOT RUN, and the next line is why: the schema no longer
+  // has a `PgExtractField` def (it was folded into `ExtractField`), so the loop
+  // below throws `enum def PgExtractField missing from schema` before writing
+  // anything. Measured 2026-08-28. That is how the committed enums.ts came to sit
+  // stale for `FuncLanguage`, which the platform corpus then trusted and got
+  // refused by the engine for.
+  //
+  // DELETING THIS LINE IS NOT THE FIX ON ITS OWN. It makes the generator run, and
+  // the output then fails `pnpm --filter @zeroship/migrate typecheck` (exit 2,
+  // baseline is 0) because src/generated/ir.ts:62,95,229 and src/types.ts:39,77,651
+  // still import `PgExtractField` from the generated module. Those three files are
+  // hand-authored and must move in the same pass.
+  //
+  // The census is also short: the schema holds 33 closed string enums and this
+  // list names 30 of them, omitting ColumnCollation, IrClassification, IrMaskKind
+  // and VectorMetric. A hardcoded list of names is a census, and this is what a
+  // stale census looks like.
+  //
+  // Background: docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md
   "PgExtractField",
   // Aggregate function tokens (§3.4/§3.6): count/sum/avg/min/max plus PG-first
   // stringAgg/arrayAgg/boolAnd/boolOr — the closed `AggFunc` enum consumed by the
