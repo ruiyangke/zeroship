@@ -796,8 +796,11 @@ design beside the claim it replaces, and its **reversal history is in
 
 ### Decision 10, 2026-08-28: no DDL in the data plane
 
-**Operator: "the migration is not part of the plugin-db, it's managed by the
-zeroship-migrate, we should clean everything ddl related from the plugin-db."**
+**Schema change belongs to `zeroship-migrate`. The data plane emits no DDL.**
+
+Every DDL-emitting path leaves `zeroship-plugin-db`. Migration is not a
+data-plane concern, and a runtime that can alter schema is a runtime that can
+disagree with the descriptor describing it.
 
 This is the principle decisions 7 and 8 implied and never stated. Those made the
 descriptor the sole schema *authority* and deleted live introspection; this
@@ -855,18 +858,18 @@ the need to enumerate it.
 
 ### Decision 9, 2026-08-28: enforce the descriptor, and flip anyway
 
-Two operator statements settled SC-6.
+Two rulings settled SC-6.
 
-**"Silent break is nothing, we have no users and no apps yet."** That discounts
-two of the flip's three costs outright - the 22-site churn and the
-type-and-constraint swap are exactly what pre-launch is for. **Only the third
-survives:** the migration engine cannot see this change (it compares names, and
-the names do not move), so the flip's migration is hand-authored with nothing
-verifying it. That is a one-time correctness problem rather than an ongoing one,
-and it is the piece that touches real column data - so it owes a mutation-proved
-test before it runs anywhere.
+**A breaking change costs nothing pre-launch, so breakage is not a cost.** With
+no users and no deployed apps, the flip's 22-site churn and its
+type-and-constraint swap are exactly what pre-launch exists for, and neither
+counts against it. **Only the third cost survives:** the migration engine cannot
+see this change - it compares names, and the names do not move - so the flip's
+migration is hand-authored with nothing verifying it. That is a one-time
+correctness problem rather than an ongoing one, and it is the piece that touches
+real column data, so it owes a mutation-proved test before it runs anywhere.
 
-**"The descriptor must not get wrong."** This is the primary work, and it is
+**Descriptor correctness is an enforced invariant, not an expectation.** This is
 larger than the deploy-ordering guard an earlier revision of this page proposed,
 because there are **three** ways the descriptor goes wrong and decisions 7 and 8
 removed the runtime check that caught all of them:
