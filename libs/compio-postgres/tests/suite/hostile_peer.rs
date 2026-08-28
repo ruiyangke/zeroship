@@ -227,6 +227,13 @@ fn notification_frame(process_id: i32, channel: &str, payload: &str) -> Vec<u8> 
     backend_frame(b'A', &body)
 }
 
+fn notice_frame(message: &str) -> Vec<u8> {
+    let mut body = b"SNOTICE\0VNOTICE\0C00000\0M".to_vec();
+    body.extend_from_slice(message.as_bytes());
+    body.extend_from_slice(&[0, 0]);
+    backend_frame(b'N', &body)
+}
+
 fn parameter_status_frame(name: &str, value: &str) -> Vec<u8> {
     let mut body = name.as_bytes().to_vec();
     body.push(0);
@@ -622,6 +629,44 @@ fn complete_startup(stream: &mut (impl Read + Write), process_id: i32) {
         .write_all(&response)
         .expect("write scripted startup response");
     stream.flush().expect("flush scripted startup response");
+}
+
+/// Send startup's terminal sequence and one post-ReadyForQuery frame in a
+/// single socket write, then answer one query as a wire-order barrier.
+fn startup_with_trailing_frame_server(process_id: i32, trailing: Vec<u8>) -> StubServer {
+    StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+        let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+        response.extend_from_slice(&parameter_status_frame("application_name", "before_ready"));
+        let mut key_data = process_id.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&1234i32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &key_data));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        response.extend_from_slice(&trailing);
+
+        let written = stream
+            .write(&response)
+            .expect("write coalesced scripted startup response");
+        assert_eq!(
+            written,
+            response.len(),
+            "the startup response did not fit in one socket write"
+        );
+        stream
+            .flush()
+            .expect("flush coalesced scripted startup response");
+
+        assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+        let mut query_response = backend_frame(b'C', b"SELECT 1\0");
+        query_response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        stream
+            .write_all(&query_response)
+            .expect("write startup-tail barrier response");
+        stream.flush().expect("flush startup-tail barrier response");
+        thread::sleep(Duration::from_millis(300));
+    })
 }
 
 fn expect_simple_query(stream: &mut (impl Read + Write)) -> Vec<u8> {
@@ -1114,6 +1159,119 @@ async fn protocol_negotiation_after_startup_completion_is_refused() {
     })
     .await
     .expect("post-startup negotiation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_handoff_preserves_a_trailing_notification() {
+    use futures_util::StreamExt;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = startup_with_trailing_frame_server(
+            910,
+            notification_frame(910, "startup_tail", "notification_payload"),
+        );
+        let (client, mut connection) = stub_config(server.addr)
+            .connect(compio_postgres::NoTls)
+            .await
+            .expect("connect to startup-tail notification peer");
+        let mut messages = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        client
+            .batch_execute("SELECT 1")
+            .await
+            .expect("cross the startup-tail wire-order barrier");
+        match messages.next().await {
+            Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                assert_eq!(notification.process_id(), 910);
+                assert_eq!(notification.channel(), "startup_tail");
+                assert_eq!(notification.payload(), "notification_payload");
+            }
+            other => panic!("the trailing startup notification was lost: {other:?}"),
+        }
+
+        drop(client);
+        driver
+            .await
+            .expect("startup-tail notification connection task panicked")
+            .expect("startup-tail notification connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("startup-tail notification test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_handoff_applies_a_trailing_parameter_status() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = startup_with_trailing_frame_server(
+            911,
+            parameter_status_frame("application_name", "after_ready"),
+        );
+        let (client, connection) = stub_config(server.addr)
+            .connect(compio_postgres::NoTls)
+            .await
+            .expect("connect to startup-tail parameter peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        client
+            .batch_execute("SELECT 1")
+            .await
+            .expect("cross the startup-tail wire-order barrier");
+        assert_eq!(
+            client.parameter("application_name").as_deref(),
+            Some("after_ready"),
+            "the trailing ParameterStatus left the startup value stale"
+        );
+
+        drop(client);
+        driver
+            .await
+            .expect("startup-tail parameter connection task panicked")
+            .expect("startup-tail parameter connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("startup-tail parameter test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_handoff_preserves_a_trailing_notice() {
+    use futures_util::StreamExt;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = startup_with_trailing_frame_server(
+            912,
+            notice_frame("notice after startup ReadyForQuery"),
+        );
+        let (client, mut connection) = stub_config(server.addr)
+            .connect(compio_postgres::NoTls)
+            .await
+            .expect("connect to startup-tail notice peer");
+        let mut messages = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        client
+            .batch_execute("SELECT 1")
+            .await
+            .expect("cross the startup-tail wire-order barrier");
+        match messages.next().await {
+            Some(compio_postgres::AsyncMessage::Notice(notice)) => {
+                assert_eq!(notice.severity(), "NOTICE");
+                assert_eq!(notice.message(), "notice after startup ReadyForQuery");
+            }
+            other => panic!("the trailing startup notice was lost: {other:?}"),
+        }
+
+        drop(client);
+        driver
+            .await
+            .expect("startup-tail notice connection task panicked")
+            .expect("startup-tail notice connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("startup-tail notice test exceeded its outer watchdog");
 }
 
 #[compio::test]
