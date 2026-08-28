@@ -1874,23 +1874,16 @@ async function runHistory(args: Args): Promise<number> {
  * ran and supersedes rows another tool wrote, in a journal with no undo, so a
  * summary reporting only counts would be asking for consent to an unnamed set.
  *
- * `gates.supersedeUnmatched` has to be passed in, and that is compensating for a
- * gap in the reply rather than a preference. `BaselineReply.superseded` is
- * documented, and implemented, as the rows ACTUALLY recorded as edges - it is
- * emptied unless the write happened (crates/zeroship-migrate-node/src/verbs.rs:1388,
- * crates/zeroship-migrate-node/src/wire.rs:729-731). So a preview run with
- * `--supersede-unmatched` returns `superseded: []` while carrying a `kind: "squash"`
- * event whose whole meaning is the edges it does not list, and the surrounding
- * claim that a dry run "returns the identical reply without writing"
- * (packages/zero-migrate-cli/src/index.ts:653-655) does not hold for the single
- * most irreversible part of the operation. Measured: the same invocation with and
- * without `--approve` differs in exactly that field. Reading the intent from the
- * flag here keeps the preview complete without redefining what the field means.
+ * The reply is the only input, and it used not to be enough. `BaselineReply.superseded`
+ * was emptied unless the write happened, so this function had to be told separately
+ * whether `--supersede-unmatched` was passed in order to describe a preview
+ * truthfully - a second source for a fact the reply was already supposed to carry,
+ * and one a `--json` consumer had no access to at all. The addon reports the
+ * intended edge set now and `wrote` alone separates a preview from a write
+ * (crates/zeroship-migrate-node/src/wire.rs, `BaselineReply::superseded`), so the
+ * gate argument is gone rather than kept in step with it.
  */
-export function formatBaselineHuman(
-  outcome: BaselineOutcome,
-  gates: { supersedeUnmatched: boolean },
-): string {
+export function formatBaselineHuman(outcome: BaselineOutcome): string {
   const lines = [
     outcome.wrote
       ? `baseline: recorded ${outcome.recorded.length} event(s)`
@@ -1904,15 +1897,15 @@ export function formatBaselineHuman(
   }
   const superseded = new Set(outcome.superseded);
   for (const version of outcome.unmatched) {
-    if (superseded.has(version)) {
+    if (!superseded.has(version)) {
+      lines.push(`  unmatched ${version} (journal row this set does not account for)`);
+    } else if (outcome.wrote) {
       lines.push(`  superseded ${version} (journal row this set does not account for)`);
-    } else if (gates.supersedeUnmatched) {
+    } else {
       lines.push(
         `  would supersede ${version} (journal row this set does not account for; ` +
           `permanent, and recorded only on an approved run)`,
       );
-    } else {
-      lines.push(`  unmatched ${version} (journal row this set does not account for)`);
     }
   }
   if (outcome.recorded.length === 0 && outcome.alreadyRecorded.length === 0) {
@@ -1962,8 +1955,9 @@ export function baselineRefusal(
  *
  * A run without `--approve` is a dry run through the identical code path, so the
  * previewed event set cannot drift from the act it previews. `--json` emits the
- * addon reply verbatim, which means its `superseded` is the recorded set rather
- * than the intended one on a dry run - see [`formatBaselineHuman`].
+ * addon reply verbatim, and that reply describes what the write WOULD do in every
+ * field except `wrote` - so the machine-readable preview and the human one now say
+ * the same thing about the supersession edges, which is the part with no undo.
  */
 async function runBaseline(args: Args): Promise<number> {
   if (!args.databaseUrl) {
@@ -2000,7 +1994,7 @@ async function runBaseline(args: Args): Promise<number> {
   process.stdout.write(
     args.json
       ? `${JSON.stringify(outcome, null, 2)}\n`
-      : formatBaselineHuman(outcome, { supersedeUnmatched: args.supersedeUnmatched }),
+      : formatBaselineHuman(outcome),
   );
   const refusal = baselineRefusal(outcome, {
     supersedeUnmatched: args.supersedeUnmatched,

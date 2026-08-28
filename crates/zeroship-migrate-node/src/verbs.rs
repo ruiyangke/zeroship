@@ -1186,14 +1186,19 @@ struct AdoptionRow {
 /// # What is verified, and what is asserted
 ///
 /// VERIFIED, under the lock: the corpus's projected final schema is folded from the
-/// same ops (`fold_ops_onto` over an empty base) and every table in it must exist in
-/// the live catalog; no step may already be journaled under a DIFFERENT checksum; no
-/// step may be mid-flight; and journal rows the corpus does not account for are
-/// reported by name.
+/// same ops (`fold_ops_onto` over an empty base) and STRUCTURALLY COMPARED against
+/// the live catalog by `zeroship_migrate::diff_snapshots`, which reaches columns,
+/// indexes, constraints, sequences, views, roles and extensions - see
+/// [`assert_corpus_output_is_live`] for which classes of difference refuse and why
+/// one of them is tolerated; no step may already be journaled under a DIFFERENT
+/// checksum; no step may be mid-flight; and journal rows the corpus does not account
+/// for are reported by name.
 ///
-/// ASSERTED BY THE OPERATOR, and NOT checked: that the live schema is the RESULT of
-/// this corpus rather than merely compatible with it. Column types, indexes,
-/// constraints and data are not compared. That is why the caller gates this on an
+/// ASSERTED BY THE OPERATOR, and NOT checked: the DATA. A schema that matches
+/// column for column can still hold rows a migration's backfill never wrote, and
+/// nothing here looks at a row. The structural check also tolerates objects the live
+/// catalog has and the corpus does not, which is what lets a trailing migration that
+/// only DROPS slip through. That residual is why the caller still gates this on an
 /// explicit approval and why the reply enumerates every event before it is written.
 #[allow(clippy::too_many_arguments)]
 pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
@@ -1385,7 +1390,14 @@ pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
                 .collect(),
             already_recorded,
             unmatched,
-            superseded: if wrote { superseded } else { Vec::new() },
+            // The edges this adoption WOULD write, not the ones it did. `recorded`
+            // is already reported that way (`wire.rs`), and this field was the one
+            // exception: emptied on a dry run, it left a preview announcing a
+            // `kind: "squash"` event - whose entire meaning is its edges - beside an
+            // empty edge list, so the single most irreversible part of the operation
+            // was the one part the preview omitted. `wrote` below is what separates
+            // a preview from a write, and it is now the ONLY field that does.
+            superseded,
             wrote,
         })
     }
@@ -1402,7 +1414,7 @@ pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
     }
 }
 
-/// Refuse an adoption whose corpus builds tables this database does not have.
+/// Refuse an adoption whose corpus does not describe the database it is pointed at.
 ///
 /// The worst realistic misuse of a records-not-run verb is pointing it at the WRONG
 /// database - an empty one, or a peer environment - which journals a whole history
@@ -1416,9 +1428,44 @@ pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
 /// A fold that cannot replay is a refusal, not a skip: an unverifiable adoption is
 /// exactly the one not to wave through.
 ///
-/// This is a PRESENCE check, not an equivalence check. It cannot see a column type
-/// that differs, an index that was never built, or a constraint the corpus declares
-/// and the database lacks. It catches the wrong database, not a subtly wrong one.
+/// The comparison is [`zeroship_migrate::diff_snapshots`] - the same structural
+/// differ `status`'s drift surface runs - so it reaches columns, indexes,
+/// constraints, sequences, views, roles and extensions rather than table names. It
+/// used to compare `projected.tables.keys()` against `live.tables` and discard the
+/// rest of both snapshots, which caught the wrong database and NOT the subtly wrong
+/// one: a peer environment whose trailing migrations only ALTER has every table
+/// name present, so adoption journaled those ALTERs as applied and the columns the
+/// app needs never arrived.
+///
+/// # Which classes of difference are fatal
+///
+/// **`missing` and `altered` refuse.** Both mean the live schema is not what this
+/// corpus produces, and adoption's whole effect is to guarantee nothing will ever
+/// fix that. `diff_snapshots` is the differ the `fold_live` suites
+/// (`crates/zeroship-migrate/tests/fold_live/`) already require to report
+/// `is_clean()` for a corpus `PostgreSQL` really applied, so a clean verdict here is
+/// the same verdict a real apply earns.
+///
+/// **`unexpected` is TOLERATED**, and the reason is that adoption must be possible.
+/// A live database legitimately carries objects this corpus never authored - an
+/// out-of-band table, a column a DBA added, an index another tool built - and
+/// refusing those refuses every real adoption, which only teaches an operator to
+/// look for a bypass.
+///
+/// WHAT THAT GIVES UP, and it is not nothing: a trailing migration that only DROPS
+/// lands in `unexpected` rather than `missing`. A peer environment one migration
+/// behind a `dropColumn` shows the surviving column as unexpected, adoption records
+/// the drop as applied, and the column stays forever - the same harm as the
+/// never-added column above, arriving through the tolerated bucket. Separating "an
+/// object the corpus dropped" from "an object the corpus never knew" needs the set
+/// of names the ops TOUCHED, which a folded final snapshot does not carry; closing
+/// it means threading that set out of the fold. Until then this refusal is
+/// one-sided by construction, and saying so is the point.
+///
+/// Note that roles, schemas and extensions are only ever reported as `missing` by
+/// `diff_snapshots` (it pushes no `unexpected` for them), so tolerating `unexpected`
+/// costs nothing on those classes - a live catalog's extra roles and extensions were
+/// never going to be reported in the first place.
 async fn assert_corpus_output_is_live<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
@@ -1453,22 +1500,185 @@ async fn assert_corpus_output_is_live<B: MigrationBackend>(
         .snapshot_schema(cfg)
         .await
         .map_err(|error| format!("live schema introspection failed: {error}"))?;
-    let missing: Vec<&str> = projected
-        .tables
-        .keys()
-        .filter(|table| !live.tables.contains_key(*table))
-        .map(String::as_str)
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
+    let drift =
+        zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &projected, &live);
+    if let Some(refusal) = adoption_drift_refusal(project_schema, &drift) {
+        return Err(refusal);
     }
-    Err(format!(
-        "refusing to adopt {project_schema}: this migration set builds table(s) the database \
-         does not have: {}. Adoption records migrations as applied WITHOUT running them, so \
-         doing it here would leave a schema nothing will ever create. Apply the set instead, \
-         or point this at the database that already has it",
-        missing.join(", ")
-    ))
+    Ok(())
+}
+
+/// How many differences of ONE class the refusal spells out before it stops naming
+/// and starts counting.
+///
+/// The two databases this refusal separates are at opposite ends of the range. A
+/// stale peer environment differs by a handful of columns and is named in full,
+/// which is the case the naming exists for. The wrong database entirely differs by
+/// everything, and several hundred lines of names tell an operator less than twenty
+/// plus a total does. The total is always printed, so the cap hides the identity of
+/// some differences but never their existence or their number.
+const ADOPTION_DRIFT_SAMPLE: usize = 20;
+
+/// One `class: name` block of the refusal, capped at [`ADOPTION_DRIFT_SAMPLE`].
+fn drift_refusal_lines(class: &str, items: &[String], into: &mut String) {
+    use std::fmt::Write as _;
+    for item in items.iter().take(ADOPTION_DRIFT_SAMPLE) {
+        let _ = write!(into, "\n  {class}: {item}");
+    }
+    if let Some(rest) = items
+        .len()
+        .checked_sub(ADOPTION_DRIFT_SAMPLE)
+        .filter(|n| *n > 0)
+    {
+        let _ = write!(into, "\n  ... and {rest} more {class}");
+    }
+}
+
+/// The refusal a structural comparison earns, or `None` when this database is the
+/// one the corpus describes.
+///
+/// Pure, so the classification decision - fail on `missing` and `altered`, tolerate
+/// `unexpected` - is stated once and tested without a database. See
+/// [`assert_corpus_output_is_live`] for why each class falls where it does.
+///
+/// The differences are NAMED. An operator running this holds two similar databases
+/// and needs to learn which one they are pointed at; "the schema does not match"
+/// tells them only that they were right to be unsure.
+fn adoption_drift_refusal(
+    project_schema: &str,
+    drift: &zeroship_migrate::StructuralDrift,
+) -> Option<String> {
+    let missing = &drift.missing_objects;
+    let altered: Vec<String> = drift
+        .altered_objects
+        .iter()
+        .map(|object| {
+            format!(
+                "{} {}: {} is `{}` here, `{}` in the database",
+                object.table, object.object, object.field, object.expected, object.actual
+            )
+        })
+        .collect();
+    if missing.is_empty() && altered.is_empty() {
+        return None;
+    }
+    let total = missing.len() + altered.len();
+    let mut message = format!(
+        "refusing to adopt {project_schema}: this database is not what the migration set \
+         produces ({total} difference(s))"
+    );
+    drift_refusal_lines("missing", missing, &mut message);
+    drift_refusal_lines("altered", &altered, &mut message);
+    message.push_str(
+        "\nAdoption records migrations as applied WITHOUT running them, so nothing would ever \
+         apply the differences above: `apply` would report nothing pending, `status --strict` \
+         would report clean, and the journal is append-only so there is no undo. This is what \
+         a database a few migrations behind looks like - a stale DATABASE_URL, or a peer \
+         environment. Apply the set instead, or point this at the database that already has it",
+    );
+    Some(message)
+}
+
+#[cfg(test)]
+mod adoption_drift_tests {
+    use super::{adoption_drift_refusal, ADOPTION_DRIFT_SAMPLE};
+    use zeroship_migrate::{AlteredObject, StructuralDrift};
+
+    fn altered(
+        table: &str,
+        object: &str,
+        field: &str,
+        expected: &str,
+        actual: &str,
+    ) -> AlteredObject {
+        AlteredObject {
+            table: table.to_string(),
+            object: object.to_string(),
+            field: field.to_string(),
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_matching_database_earns_no_refusal() {
+        assert!(adoption_drift_refusal("app", &StructuralDrift::default()).is_none());
+    }
+
+    /// THE PEER ENVIRONMENT. Every table name matches and one column is behind, so
+    /// the presence-only predicate this replaced saw nothing at all.
+    #[test]
+    fn a_missing_column_refuses_and_names_itself() {
+        let drift = StructuralDrift {
+            missing_objects: vec!["users.mfa_secret".to_string()],
+            ..StructuralDrift::default()
+        };
+        let refusal = adoption_drift_refusal("app", &drift).expect("a missing column refuses");
+        assert!(refusal.contains("users.mfa_secret"), "{refusal}");
+        assert!(refusal.contains("1 difference(s)"), "{refusal}");
+    }
+
+    #[test]
+    fn an_altered_column_refuses_and_names_the_field_and_both_values() {
+        let drift = StructuralDrift {
+            altered_objects: vec![altered(
+                "users",
+                "column id",
+                "data_type",
+                "integer",
+                "bigint",
+            )],
+            ..StructuralDrift::default()
+        };
+        let refusal = adoption_drift_refusal("app", &drift).expect("an altered column refuses");
+        assert!(refusal.contains("users column id"), "{refusal}");
+        assert!(refusal.contains("data_type"), "{refusal}");
+        assert!(
+            refusal.contains("integer") && refusal.contains("bigint"),
+            "{refusal}"
+        );
+    }
+
+    /// The tolerated class, stated as a test rather than as a comment: a live
+    /// catalog carrying objects this corpus never authored is the NORMAL shape of a
+    /// database worth adopting, and refusing it refuses every real adoption.
+    #[test]
+    fn unexpected_objects_alone_do_not_refuse() {
+        let drift = StructuralDrift {
+            unexpected_objects: vec![
+                "legacy_audit".to_string(),
+                "users.dba_hotfix".to_string(),
+                "sequence some_other_tool_seq".to_string(),
+            ],
+            ..StructuralDrift::default()
+        };
+        assert!(adoption_drift_refusal("app", &drift).is_none());
+    }
+
+    /// The cap names some differences and counts all of them. A refusal that
+    /// silently truncated would understate how wrong the database is, which is the
+    /// one thing an operator holding two similar databases must not be misled about.
+    #[test]
+    fn the_sample_cap_still_reports_the_total() {
+        let missing: Vec<String> = (0..ADOPTION_DRIFT_SAMPLE + 5)
+            .map(|n| format!("users.c{n}"))
+            .collect();
+        let drift = StructuralDrift {
+            missing_objects: missing,
+            ..StructuralDrift::default()
+        };
+        let refusal = adoption_drift_refusal("app", &drift).expect("missing columns refuse");
+        assert!(
+            refusal.contains(&format!("{} difference(s)", ADOPTION_DRIFT_SAMPLE + 5)),
+            "{refusal}"
+        );
+        assert!(refusal.contains("and 5 more missing"), "{refusal}");
+        assert!(refusal.contains("users.c0"), "{refusal}");
+        assert!(
+            !refusal.contains(&format!("users.c{}", ADOPTION_DRIFT_SAMPLE + 4)),
+            "{refusal}"
+        );
+    }
 }
 #[cfg(test)]
 mod status_projection_tests {
