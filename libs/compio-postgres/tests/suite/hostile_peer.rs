@@ -461,6 +461,20 @@ struct GatedSplitWriteHalf {
     gate: SharedSplitFailureGate,
 }
 
+/// A splittable in-memory transport that returns exactly one scripted backend
+/// batch per read and then EOF. Keeping the batches separate makes response
+/// channel backpressure deterministic instead of depending on TCP coalescing.
+struct OrderedBatchPeer {
+    startup: Option<Vec<u8>>,
+    responses: std::collections::VecDeque<Vec<u8>>,
+}
+
+struct OrderedBatchReadHalf {
+    responses: std::collections::VecDeque<Vec<u8>>,
+}
+
+struct OrderedBatchWriteHalf;
+
 async fn copy_scripted_read<B: compio::buf::IoBufMut>(
     bytes: Vec<u8>,
     buf: B,
@@ -590,6 +604,68 @@ impl compio::io::AsyncWrite for GatedSplitWriteHalf {
     }
 }
 
+impl compio::io::AsyncRead for OrderedBatchPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.startup.take() {
+            Some(startup) => copy_scripted_read(startup, buf).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl compio::io::AsyncWrite for OrderedBatchPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for OrderedBatchPeer {
+    type ReadHalf = OrderedBatchReadHalf;
+    type WriteHalf = OrderedBatchWriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Ok((
+            OrderedBatchReadHalf {
+                responses: self.responses,
+            },
+            OrderedBatchWriteHalf,
+        ))
+    }
+}
+
+impl compio::io::AsyncRead for OrderedBatchReadHalf {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.responses.pop_front() {
+            Some(response) => copy_scripted_read(response, buf).await,
+            None => compio::BufResult(Ok(0), buf),
+        }
+    }
+}
+
+impl compio::io::AsyncWrite for OrderedBatchWriteHalf {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A frame whose declared length is a lie. `declared` replaces the real one, so
 /// a value below the payload truncates it and a value above it makes the driver
 /// wait for bytes that are never coming.
@@ -695,6 +771,148 @@ fn stub_config(addr: SocketAddr) -> Config {
         .ssl_mode(SslMode::Disable)
         .connect_timeout(Duration::from_secs(1));
     config
+}
+
+/// `Config::connect_raw` has no descriptor-release handle, so dropping the
+/// last client leaves the connection task able to deliver `PostgreSQL`'s clean
+/// shutdown frame. A completed query is the control that the multiplexed loop
+/// was live before teardown began.
+#[compio::test]
+async fn dropping_a_raw_client_sends_terminate_after_a_completed_query() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 913);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+
+            let mut response = backend_frame(b'C', b"SELECT 1\0");
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write successful query response");
+            stream.flush().expect("flush successful query response");
+
+            assert!(
+                expect_frontend_frame_from(&mut stream, b'X').is_empty(),
+                "Terminate declared a body instead of PostgreSQL's exact length 4"
+            );
+        });
+
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting to the Terminate peer hung")
+        .expect("connect to the Terminate peer");
+        let config = stub_config(server.addr);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("raw startup for the Terminate test hung")
+        .expect("complete raw startup for the Terminate test");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the Terminate control query hung")
+            .expect("the Terminate control query failed");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the control query returned extra messages"
+        );
+        assert!(
+            matches!(
+                messages.first(),
+                Some(compio_postgres::SimpleQueryMessage::CommandComplete(1))
+            ),
+            "the control query did not complete successfully: {messages:?}"
+        );
+
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the raw connection did not shut down after Terminate")
+            .expect("the raw connection task panicked")
+            .expect("the raw connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("raw Terminate test exceeded its outer watchdog");
+}
+
+/// A response sender has capacity one, so a burst of separately-read command
+/// batches must use the connection's pending-response FIFO. The terminal EOF
+/// is deliberately queued behind that burst: it must not cancel a stashed
+/// batch before the caller receives every command in wire order.
+#[compio::test]
+async fn multiplexed_pending_batches_arrive_before_the_terminal_read() {
+    use futures_util::StreamExt;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        const BATCHES: u64 = 128;
+
+        let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+        let mut key_data = 914i32.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&1234i32.to_be_bytes());
+        startup.extend_from_slice(&backend_frame(b'K', &key_data));
+        startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut responses = std::collections::VecDeque::new();
+        for count in 1..=BATCHES {
+            responses.push_back(backend_frame(b'C', format!("SELECT {count}\0").as_bytes()));
+        }
+        responses.push_back(backend_frame(b'Z', b"I"));
+
+        let peer = OrderedBatchPeer {
+            startup: Some(startup),
+            responses,
+        };
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse ordered-batch config");
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("ordered-batch startup hung")
+        .expect("connect ordered-batch transport");
+        let stream = client
+            .simple_query_raw("SELECT scripted_batch")
+            .await
+            .expect("enqueue the ordered-batch query");
+        let mut stream = Box::pin(stream);
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let driver_result = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the ordered-batch connection task did not stop after EOF")
+            .expect("the ordered-batch connection task panicked");
+
+        let mut delivered = Vec::new();
+        while let Some(message) = stream.next().await {
+            match message.expect("a terminal read overtook a stashed response batch") {
+                compio_postgres::SimpleQueryMessage::CommandComplete(count) => {
+                    delivered.push(count);
+                }
+                other => panic!("the scripted command burst produced {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            (1..=BATCHES).collect::<Vec<_>>(),
+            "multiplexed response batches did not stay in wire order"
+        );
+
+        drop(client);
+        driver_result.expect("the ordered-batch connection did not close cleanly");
+    }))
+    .await
+    .expect("multiplexed pending-response FIFO test exceeded its outer watchdog");
 }
 
 async fn plaintext_sasl_refusal(
