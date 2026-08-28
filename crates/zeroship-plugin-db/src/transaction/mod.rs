@@ -90,6 +90,20 @@
 
 #![allow(unsafe_code)]
 
+/// The SC-1 transaction protocol reducer.
+///
+/// A pure state machine - nine states, one gate for every forcing publisher,
+/// one deadline slot, one lifecycle classifier - which the V8 orchestrator
+/// above will be rebuilt onto. It performs no I/O and owns no session, which
+/// is what makes SC-1's invariants checkable without a database.
+///
+/// It is deliberately not wired into [`transaction_dispatch`] yet: the
+/// orchestrator's begin / settle paths carry the defects SC-1 names (DBR-03's
+/// "an absent client is proof terminal SQL ran", DBR-11's leaked claim,
+/// depth-derived savepoint names), and moving them onto the reducer is the
+/// next step rather than part of building it.
+pub mod reducer;
+
 use std::cell::Cell;
 
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
