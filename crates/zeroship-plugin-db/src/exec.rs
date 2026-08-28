@@ -1127,7 +1127,7 @@ mod tests {
             });
 
             let client = backend
-                .acquire_dedicated_client()
+                .acquire_dedicated_client("app_exec")
                 .await
                 .expect("acquire tx client");
             backend
@@ -1344,7 +1344,7 @@ mod tests {
             // is parked in the per-isolate slot — exactly the state a
             // creator callback leaves behind across an `await`.
             let client = backend
-                .acquire_dedicated_client()
+                .acquire_dedicated_client("app_a")
                 .await
                 .expect("acquire tx client");
             backend
@@ -1434,7 +1434,7 @@ mod tests {
             });
 
             let client = backend
-                .acquire_dedicated_client()
+                .acquire_dedicated_client("app_exec_cancel")
                 .await
                 .expect("acquire tx client");
             backend

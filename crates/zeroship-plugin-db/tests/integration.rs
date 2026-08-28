@@ -6752,7 +6752,7 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     let client = {
         use zeroship_plugin_db::backend::SqlExecutor as _;
         backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_pool_probe")
             .await
             .expect("dedicated client")
     };
@@ -6803,7 +6803,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
 
     use zeroship_plugin_db::backend::SqlExecutor as _;
     let first = backend
-        .acquire_dedicated_client()
+        .acquire_dedicated_client("app_pool_probe")
         .await
         .expect("first dedicated client");
 
@@ -6812,7 +6812,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     // Conservative policy, and OWED a real decision: queue on the pool's
     // acquire timeout rather than refuse immediately, no per-app fairness, and
     // the ceiling is whatever the shared data pool is sized to.
-    let second = backend.acquire_dedicated_client().await;
+    let second = backend.acquire_dedicated_client("app_pool_probe").await;
     let err = second.expect_err(
         "a second dedicated client must be bounded by the pool, not opened \
          directly - an unbounded model is how one worker exhausts max_connections",
@@ -6829,7 +6829,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     // And the ceiling is a queue, not a wall: once the lease returns, the next
     // checkout succeeds.
     let third = backend
-        .acquire_dedicated_client()
+        .acquire_dedicated_client("app_pool_probe")
         .await
         .expect("checkout after the first lease returned");
     drop(third);

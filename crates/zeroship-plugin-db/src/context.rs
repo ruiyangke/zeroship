@@ -1353,7 +1353,7 @@ mod tests {
         )
         .expect("open sqlite backend");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("slot_state_probe")
             .await
             .expect("acquire sqlite client");
         TxConnection::Sqlite(client)

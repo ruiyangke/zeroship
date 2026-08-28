@@ -210,7 +210,12 @@ impl SqlExecutor for PostgresBackend {
     ///    Nothing here reserves headroom for autocommit work, and adding a
     ///    reservation is a sizing decision - like (1) - that this change does
     ///    not get to take on its own.
-    async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
+    ///
+    /// `_app_id` is unused here and that is correct rather than lazy: a pooled
+    /// checkout is app-agnostic, and the per-app constraint the PostgreSQL arm
+    /// does enforce is the role, applied separately by
+    /// `transaction::apply_per_app_role` on the connection this returns.
+    async fn acquire_dedicated_client(&self, _app_id: &str) -> Result<Self::Client, DbError> {
         self.pool.get_owned().await.map_err(|e| {
             // Walk the source chain. The pool renders an exhausted acquire as
             // the generic "error connecting to server" wrapper and puts

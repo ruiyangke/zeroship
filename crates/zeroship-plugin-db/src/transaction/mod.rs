@@ -707,7 +707,7 @@ async fn exec_begin_or_savepoint(
     match &backend {
         crate::backend::BackendHandle::Postgres(pg) => {
             let begin_sql = build_begin_sql(isolation_level)?;
-            let client = pg.acquire_dedicated_client().await?;
+            let client = pg.acquire_dedicated_client(app_id).await?;
             let tx_client = TxConnection::Postgres(client);
             client_exec_on_tx(&backend, &tx_client, &begin_sql, &[]).await?;
             let TxConnection::Postgres(client) = tx_client else {
@@ -737,7 +737,14 @@ async fn exec_begin_or_savepoint(
             // the caller-provided string defensively for parity with the
             // PG arm, then issue a plain `BEGIN`.
             let _ = build_begin_sql(isolation_level)?;
-            let client = sq.acquire_dedicated_client().await?;
+            // Bind the app's file into the session BEFORE its transaction
+            // connection is opened. The connection ATTACHes only this app's
+            // file, and it reads the path from the session's attachment list,
+            // so an app that has never been attached would get a transaction
+            // lane that cannot see its own tables. Idempotent: `attach_app_file`
+            // returns on a cache hit without issuing SQL.
+            sq.attach_app_file(app_id).await?;
+            let client = sq.acquire_dedicated_client(app_id).await?;
             let tx_client = TxConnection::Sqlite(client);
             client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
             let TxConnection::Sqlite(client) = tx_client else {

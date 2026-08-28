@@ -118,7 +118,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
             .await
             .expect("attach the matrix app database");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         // `query` materialises every cell as `Option<String>` and renders a BLOB
@@ -165,7 +165,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
 /// `test-helpers`-gated handle accessor.
 async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
     let client = backend
-        .acquire_dedicated_client()
+        .acquire_dedicated_client("default")
         .await
         .expect("acquire client");
     let sql = format!("PRAGMA {pragma}");
@@ -226,7 +226,7 @@ fn client_exec_round_trip() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire_dedicated_client");
         // DDL via the handle — both paths route through the same
@@ -292,7 +292,7 @@ fn ensure_app_schema_attaches_file() {
         // succeeding is the assertion (a missing alias surfaces as
         // `no such database: app_demo`).
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -346,10 +346,14 @@ fn ensure_app_schema_isolates_per_app() {
             .expect("CREATE TABLE in app_a");
 
         // The table must be visible in `app_a`'s catalog.
-        let client = backend
-            .acquire_dedicated_client()
-            .await
-            .expect("acquire client");
+        //
+        // On the AUTOCOMMIT client deliberately. `op_conn` is the connection
+        // that carries every attached app, and this test reads two apps'
+        // catalogs from one handle. A transaction client would refuse the
+        // second read by construction now that a transaction connection
+        // ATTACHes only its own app - which is a different property, ruled on
+        // by `a_transaction_lane_cannot_address_another_apps_tables`.
+        let client = backend.autocommit_client();
         let rows_a = client
             .query(
                 "SELECT name FROM \"app_a\".sqlite_master WHERE type = 'table'",
@@ -413,7 +417,7 @@ fn lock_try_acquire_blocks_second() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         // First acquire on a fresh registry must succeed — the legacy
@@ -447,7 +451,7 @@ fn lock_release_unblocks() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         backend
@@ -488,7 +492,7 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let scope = LockScope::GlobalApp {
@@ -583,7 +587,7 @@ fn introspect_after_create_table_round_trip() {
         // columns, plus a non-PK index, so the introspect output
         // exercises every PRAGMA branch.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         backend
@@ -3518,7 +3522,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 .expect("build insertMany");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
         client
@@ -3643,7 +3647,7 @@ const _procedures = { setup, upsertInsert };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let rows = client
@@ -3745,7 +3749,7 @@ const _procedures = { setup, upsertConflict };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let typed = client
@@ -3871,7 +3875,7 @@ const _procedures = { setup, upsertConflict };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let typed = client
@@ -3990,7 +3994,7 @@ const _procedures = { setup, seed, updateByEmail };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let typed = client
@@ -4135,7 +4139,7 @@ const _procedures = { setup, seed, updateManyByName };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let typed = client
@@ -4270,7 +4274,7 @@ const _procedures = { setup, overflow };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let state = client
@@ -4433,7 +4437,7 @@ const _procedures = { setup, seed, failBulk, failBulkInsideTransaction };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let typed = client
@@ -4727,7 +4731,7 @@ const _procedures = { setup, seed, nestedCasUpdate };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let rows = client
@@ -4812,7 +4816,7 @@ const _procedures = { setup, seed, nestedCasUpdateMany };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let rows = client
@@ -4900,7 +4904,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
         // simplest cross-test path: re-encode the BLOB as hex via SQL
         // (`hex(ssn)`) and parse back to bytes here.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -4970,7 +4974,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
             .expect("INSERT");
 
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -5085,7 +5089,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
         // Equality lookup on P0's ciphertext should match exactly 20
         // rows (0, 5, 10, ..., 95).
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let p0_lit = sqlite_blob_literal(&ciphertexts[0]);
@@ -5179,7 +5183,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 
         // Read row B's ssn back and try to decrypt with row B's AAD.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -5393,7 +5397,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // it as a query and drop the rows. The session's `query`
         // surface runs through the same `decode_blob_params` path.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let _affected = client
@@ -5559,7 +5563,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let _ = client
@@ -5635,7 +5639,7 @@ fn aliased_select_serves_masked_sibling_sqlite() {
             .expect("build_insert_with_dialect");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         client
@@ -5854,7 +5858,7 @@ fn snapshot_restore_round_trip_sqlite() {
         }
         // Sanity: row count is N.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -6064,7 +6068,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
         // (b) — live > snap (the concurrent writer's commits past the
         // snapshot's read mark are visible in live but NOT in snap).
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let live_rows = client
@@ -6142,7 +6146,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
         // acquire. The `to_keys` derivation is identical to what the
         // snapshot impl computes.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
         let scope = LockScope::GlobalApp {
@@ -6275,7 +6279,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
         // only fires after the hash verify; an early-refuse contract
         // means the live file is bit-for-bit unchanged.)
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -6460,7 +6464,7 @@ fn unmask_with_auto_actor_returns_plaintext() {
         let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -6738,7 +6742,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -7654,7 +7658,7 @@ fn drift_check_handles_encrypted_column() {
         let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
             .expect("build_insert");
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -8285,7 +8289,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
         // `created_at IS NOT NULL`. Pin the canonical shape the DDL
         // promises.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -8386,7 +8390,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
             .expect("build_insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client (insert)");
         let returning_rows = client
@@ -8514,7 +8518,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             .expect("build posts insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_demo")
             .await
             .expect("client");
         client
@@ -8590,7 +8594,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.expect("INSERT");
 
         // UPDATE via the system-fields-aware builder.
@@ -8670,7 +8674,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
 
         // CAS at the correct version (1).
@@ -8740,7 +8744,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
 
         // CAS at the wrong version (row is at 1; we expect 99).
@@ -8811,7 +8815,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
 
         // First UPDATE at version=1 wins.
@@ -8897,7 +8901,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
 
         // No version in filter — last-writer-wins. Three consecutive
@@ -8981,7 +8985,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
 
         let filter = serde_json::json!({ "id": "post_sd1" });
@@ -9049,7 +9053,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
 
         let filter = serde_json::json!({ "id": "post_idem" });
@@ -9105,7 +9109,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             let ins =
                 build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
             let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-            let client = backend.acquire_dedicated_client().await.unwrap();
+            let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
             client.query(&ins.sql, &p).await.unwrap();
         }
         let ab = SystemFieldAutoBump {
@@ -9121,7 +9125,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         )
         .unwrap();
         let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&sd.sql, &p).await.unwrap();
 
         let q = build_find_with_schema_and_unmask_and_soft_delete(
@@ -9189,7 +9193,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
 
         let ab = SystemFieldAutoBump {
@@ -9261,7 +9265,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
 
         let ab = SystemFieldAutoBump {
@@ -9321,7 +9325,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         let ins =
             build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
 
         let find_default = build_find_with_schema_and_unmask_and_soft_delete(
@@ -9436,7 +9440,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             let ins =
                 build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
             let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
-            let client = backend.acquire_dedicated_client().await.unwrap();
+            let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
             client.query(&ins.sql, &p).await.unwrap();
         }
         backend
@@ -9460,7 +9464,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
         )
         .unwrap();
         let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
-        let client = backend.acquire_dedicated_client().await.unwrap();
+        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         let returning = client.query(&sd.sql, &p).await.unwrap();
         assert_eq!(
             returning.len(),
@@ -9517,7 +9521,7 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
 
@@ -9581,7 +9585,7 @@ fn nested_savepoint_release_keeps_both_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire client");
 
@@ -9675,7 +9679,7 @@ fn p5_sqlite_register_model_applies_no_ddl() {
         // PROOF 1: the app file was ATTACHed (so the data plane can read it) and
         // carries NO table for the declared collection.
         let client = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client(app)
             .await
             .expect("acquire client");
         let rows = client
@@ -9787,7 +9791,7 @@ fn p6b_apply_ahead_then_register_lets_the_data_plane_read_the_table() {
             .await
             .expect("the data plane must WRITE the table the migration created");
 
-        let client = backend.acquire_dedicated_client().await.expect("client");
+        let client = backend.acquire_dedicated_client(app).await.expect("client");
         let rows = client
             .query(
                 &format!(r#"SELECT body, pinned FROM "{app}"."{collection}" WHERE id = 'note_1'"#),
@@ -9963,7 +9967,7 @@ fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
             .expect("seed");
 
         let tx = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire tx client");
         backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
@@ -10060,7 +10064,7 @@ fn a_cancellation_interrupts_a_statement_that_is_already_running() {
 
         let (backend, _dir) = fresh_backend();
         let tx = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire tx client");
         let cancel = tx
@@ -10131,7 +10135,7 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
             .expect("create table");
 
         let tx = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire tx client");
         let cancel = tx.cancel_handle().expect("cancel handle");
@@ -10200,7 +10204,7 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
         // by a dropped future is exactly how SC-1 step 9 will arm this.
         let stale_cancel = {
             let first = backend
-                .acquire_dedicated_client()
+                .acquire_dedicated_client("default")
                 .await
                 .expect("acquire the first transaction");
             let cancel = first.cancel_handle().expect("cancel handle for R1");
@@ -10217,7 +10221,7 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
 
         // R2 takes the lane R1 gave up, and opens its own transaction.
         let second = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire the second transaction");
         backend
@@ -10292,7 +10296,7 @@ fn a_second_cancellation_is_answered_not_re_executed() {
             .expect("create table");
 
         let tx = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("default")
             .await
             .expect("acquire tx client");
         let cancel = tx.cancel_handle().expect("cancel handle");
@@ -10406,7 +10410,7 @@ fn writes_on_both_connections_reach_the_broker() {
 
         // tx_conn: a write inside an explicit creator transaction, committed.
         let tx = backend
-            .acquire_dedicated_client()
+            .acquire_dedicated_client("app_cdc")
             .await
             .expect("acquire tx client");
         backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
@@ -10442,6 +10446,391 @@ fn writes_on_both_connections_reach_the_broker() {
             vec!["from_op_conn".to_string(), "from_tx_conn".to_string()],
             "a write on EACH connection must reach the broker; a dispatcher \
              installed on only one drops the other silently. got {msgs:?}"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The per-app transaction lane - defect L22b
+//
+// SC-1 admits one top-level transaction per `(runtime_instance_id, app_id)`.
+// One shared transaction connection enforced one per
+// `(runtime_instance_id, session)` instead, so app B's `db.transaction()` was
+// refused while app A held one. These arms rule on the key, on the boundary the
+// split creates, and on the refusal that remains.
+// ---------------------------------------------------------------------------
+
+/// Two apps hold open transactions at the same time on one session.
+///
+/// **This is the arm that fails before the per-app lane.** Against the shared
+/// connection app B's acquire returned
+/// `transaction_connection_busy: "db: this SQLite session already holds an open
+/// transaction on tx_conn"` - a refusal caused entirely by another tenant.
+#[test]
+fn two_apps_hold_transactions_at_the_same_time() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.attach_app_file("app_a").await.expect("attach app_a");
+        backend.attach_app_file("app_b").await.expect("attach app_b");
+        for app in ["app_a", "app_b"] {
+            backend
+                .pool_exec(
+                    &format!("CREATE TABLE \"{app}\".\"t\" (id INTEGER PRIMARY KEY, v TEXT)"),
+                    &[],
+                )
+                .await
+                .expect("create table");
+        }
+
+        let a = backend
+            .acquire_dedicated_client("app_a")
+            .await
+            .expect("app_a acquires its transaction connection");
+        backend.client_exec(&a, "BEGIN", &[]).await.expect("BEGIN a");
+        backend
+            .client_exec(&a, "INSERT INTO \"app_a\".\"t\" (v) VALUES ('a')", &[])
+            .await
+            .expect("app_a writes inside its transaction");
+
+        // The whole defect: this used to be refused because app A - a
+        // DIFFERENT tenant - was holding the one transaction connection.
+        let b = backend
+            .acquire_dedicated_client("app_b")
+            .await
+            .expect("app_b must get its own transaction connection while app_a holds one");
+        backend.client_exec(&b, "BEGIN", &[]).await.expect("BEGIN b");
+        backend
+            .client_exec(&b, "INSERT INTO \"app_b\".\"t\" (v) VALUES ('b')", &[])
+            .await
+            .expect("app_b writes inside its transaction");
+
+        // Both settle independently, and each one's write lands in its own
+        // file: two connections, two transactions, no interleaving.
+        assert_eq!(
+            backend
+                .settle_transaction_for_tests(&b, TerminalIntent::Commit)
+                .await
+                .expect("commit b"),
+            TerminalOutcome::Committed
+        );
+        assert_eq!(
+            backend
+                .settle_transaction_for_tests(&a, TerminalIntent::Commit)
+                .await
+                .expect("commit a"),
+            TerminalOutcome::Committed
+        );
+        let probe = backend.autocommit_client();
+        for (app, want) in [("app_a", "a"), ("app_b", "b")] {
+            let rows = probe
+                .query(&format!("SELECT v FROM \"{app}\".\"t\""), &[])
+                .await
+                .expect("read back");
+            assert_eq!(rows.len(), 1, "{app} must hold exactly its own row");
+            assert_eq!(rows[0][0].as_deref(), Some(want));
+        }
+    });
+}
+
+/// A transaction connection carries ONE app's file, so a creator transaction
+/// cannot address another tenant's tables at all.
+///
+/// The control for the arm above, and a boundary rather than a convention: the
+/// shared connection had every attached app's alias on it, so this same
+/// `DELETE` **succeeded** and removed another tenant's row. Nothing in the SQL
+/// builders emits a foreign alias today (`cross_app_fk.rs` refuses one at parse
+/// time and has no production caller), which is exactly why the connection is
+/// the place to enforce it.
+#[test]
+fn a_transaction_lane_cannot_address_another_apps_tables() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.attach_app_file("app_a").await.expect("attach app_a");
+        backend.attach_app_file("app_b").await.expect("attach app_b");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_a\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)",
+                &[],
+            )
+            .await
+            .expect("create app_a.secret");
+        backend
+            .pool_exec("INSERT INTO \"app_a\".\"secret\" (v) VALUES ('tenant-a')", &[])
+            .await
+            .expect("seed app_a.secret");
+
+        let b = backend
+            .acquire_dedicated_client("app_b")
+            .await
+            .expect("acquire app_b's transaction connection");
+        backend.client_exec(&b, "BEGIN", &[]).await.expect("BEGIN b");
+        let leaked = backend
+            .client_exec(&b, "DELETE FROM \"app_a\".\"secret\"", &[])
+            .await
+            .expect_err("app_b's transaction must not reach app_a's tables");
+        assert!(
+            format!("{leaked}").contains("no such table"),
+            "the refusal must be SQLite not knowing the alias, not an \
+             application-level check; got {leaked:?}"
+        );
+
+        // The row is still there. A refusal that let the DELETE through and
+        // reported an error afterwards would be worse than no check.
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT v FROM \"app_a\".\"secret\"", &[])
+            .await
+            .expect("read app_a.secret back");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_deref(), Some("tenant-a"));
+    });
+}
+
+/// The refusal that survives, and the message that must name the app.
+///
+/// A second top-level transaction for the SAME app is still refused
+/// immediately. What changed is that this is now the *only* producer of
+/// `transaction_connection_busy` on this path, so the message can say whose
+/// transaction it is - defect L22b's "reads as your transaction when it is
+/// another tenant's" is gone with the cause.
+#[test]
+fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.attach_app_file("app_a").await.expect("attach app_a");
+        let first = backend
+            .acquire_dedicated_client("app_a")
+            .await
+            .expect("first acquire");
+        backend
+            .client_exec(&first, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
+
+        let err = backend
+            .acquire_dedicated_client("app_a")
+            .await
+            .expect_err("a second transaction for the same app must be refused");
+        match &err {
+            DbError::ValidationFailed { code, message, hint } => {
+                assert_eq!(*code, "transaction_connection_busy", "got {err:?}");
+                assert!(
+                    message.contains("app_a"),
+                    "the message must name the app whose transaction it is; got {message:?}"
+                );
+                assert!(hint.is_some(), "the remedy is the creator's, so say it");
+            }
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+
+        // Dropping the first lease frees the app's lane immediately - no queue
+        // round trip - so the next acquire succeeds.
+        drop(first);
+        backend
+            .acquire_dedicated_client("app_a")
+            .await
+            .expect("the app's lane is free once its lease drops");
+    });
+}
+
+/// An idle transaction connection is evicted to make room for a new app, and
+/// only a session whose every lane is mid-transaction refuses - under a code of
+/// its own.
+///
+/// Bounded per-tenant resources are the point: without the cap every app that
+/// ever opened a transaction would hold a connection for the session's life.
+/// The two halves differ in ONE variable - whether the incumbent lanes are
+/// still inside a transaction - so the eviction path cannot be mistaken for the
+/// refusal path.
+#[test]
+fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let cap = zeroship_plugin_db::backend::sqlite::session::MAX_TX_LANES_FOR_TESTS;
+
+        // Half one: `cap` apps that each settle. Every lane is idle, so the
+        // next app evicts one and is admitted.
+        for i in 0..cap {
+            let app = format!("cap_a{i}");
+            backend.attach_app_file(&app).await.expect("attach");
+            let client = backend
+                .acquire_dedicated_client(&app)
+                .await
+                .expect("acquire under the cap");
+            drop(client);
+        }
+        let app = format!("cap_a{cap}");
+        backend.attach_app_file(&app).await.expect("attach");
+        backend
+            .acquire_dedicated_client(&app)
+            .await
+            .expect("an idle lane must be evicted rather than refusing");
+
+        // Half two: `cap` apps that all HOLD their transactions. Now there is
+        // nothing to evict.
+        let (backend, _dir) = fresh_backend();
+        let mut held = Vec::new();
+        for i in 0..cap {
+            let app = format!("cap_b{i}");
+            backend.attach_app_file(&app).await.expect("attach");
+            let client = backend
+                .acquire_dedicated_client(&app)
+                .await
+                .expect("acquire under the cap");
+            backend.client_exec(&client, "BEGIN", &[]).await.expect("BEGIN");
+            held.push(client);
+        }
+        let app = format!("cap_b{cap}");
+        backend.attach_app_file(&app).await.expect("attach");
+        let err = backend
+            .acquire_dedicated_client(&app)
+            .await
+            .expect_err("every lane is mid-transaction, so this must be refused");
+        match &err {
+            DbError::ValidationFailed { code, .. } => assert_eq!(
+                *code, "transaction_lanes_exhausted",
+                "contention with OTHER apps must not arrive under the same code as this \
+                 app's own overlapping transaction; got {err:?}"
+            ),
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+        drop(held);
+    });
+}
+
+/// `SQLITE_BUSY_SNAPSHOT` on a write upgrade - the last of SC-2's three owed
+/// arms.
+///
+/// SC-2 names it "the real serialization point" and the epoch bullet rests on
+/// it. It needs a read snapshot held open ACROSS commands, which the autocommit
+/// lane cannot express (one reservation per command, `BEGIN DEFERRED ...
+/// COMMIT` around each). **The transaction lane can**: its `BEGIN` and its
+/// statements are separate commands on one connection, so another connection
+/// can commit in between.
+///
+/// What this fixture reaches and what it does NOT: the table lives in `main`,
+/// the session's own database, which the boot PRAGMAs put in **WAL**. That is
+/// what makes `SQLITE_BUSY_SNAPSHOT` (517) possible at all. An app's own file
+/// is a different story - see
+/// `an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal`, the
+/// control that pins why.
+#[test]
+fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+        backend
+            .pool_exec("INSERT INTO t (v) VALUES ('seed')", &[])
+            .await
+            .expect("seed");
+
+        let tx = backend
+            .acquire_dedicated_client("snapshot_app")
+            .await
+            .expect("acquire tx client");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        // The read is what takes the deferred snapshot. Without it `BEGIN`
+        // alone has taken no snapshot and the write below simply succeeds -
+        // which is the arm's whole difficulty and why it stayed owed.
+        let seen = tx
+            .query("SELECT COUNT(*) FROM t", &[])
+            .await
+            .expect("snapshot read");
+        assert_eq!(seen[0][0].as_deref(), Some("1"));
+
+        // A different connection commits. `op_conn` is a separate SQLite
+        // connection to the same WAL database, so this moves the WAL past the
+        // snapshot the transaction is pinned to.
+        backend
+            .pool_exec("INSERT INTO t (v) VALUES ('from-op-conn')", &[])
+            .await
+            .expect("op_conn write commits");
+
+        let started = std::time::Instant::now();
+        let err = backend
+            .client_exec(&tx, "INSERT INTO t (v) VALUES ('upgrade')", &[])
+            .await
+            .expect_err("a write on a stale WAL snapshot must be refused");
+        let elapsed = started.elapsed();
+        match &err {
+            DbError::LockContention { message } => assert!(
+                message.contains("database is locked") || message.contains("busy"),
+                "got {message:?}"
+            ),
+            other => panic!(
+                "SQLITE_BUSY_SNAPSHOT must map to LockContention, not an opaque \
+                 fault; got {other:?}"
+            ),
+        }
+        // The discriminator between 517 and a plain 5. `busy_timeout` is 5000 ms
+        // (`BOOT_PRAGMAS`), and SQLite does NOT invoke the busy handler for
+        // SQLITE_BUSY_SNAPSHOT because retrying can never succeed - so an
+        // ordinary lock conflict would have sat here for five seconds and this
+        // one returns at once. Without this the assertion above passes on
+        // either code and the arm proves only that something was locked.
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "a snapshot conflict must not go through the busy handler; waited {elapsed:?}, \
+             which is the shape of a plain SQLITE_BUSY waiting out busy_timeout"
+        );
+
+        // And the transaction is still the caller's to end: the refusal is a
+        // refusal, not a teardown.
+        assert_eq!(
+            backend
+                .settle_transaction_for_tests(&tx, TerminalIntent::Rollback)
+                .await
+                .expect("rollback"),
+            TerminalOutcome::RolledBack
+        );
+    });
+}
+
+/// The control that names what the arm above cannot reach: an app's own file is
+/// **not** in WAL, so the same schedule cannot produce
+/// `SQLITE_BUSY_SNAPSHOT` there.
+///
+/// `PRAGMA journal_mode` is per database and does NOT propagate across `ATTACH`
+/// (measured: attaching a fresh file to a WAL connection leaves it `delete`),
+/// and the migration engine pins every app file to DELETE outright and refuses
+/// to run otherwise -
+/// `crates/zeroship-migrate-sqlite/src/backend/actor.rs:719-729`. So the arm
+/// above proves the mapping and the lane mechanics; it does not prove anything
+/// about app data. This one records which mode app data is actually in, so a
+/// change to that fact fails here rather than silently making the arm above
+/// describe a world we do not run in.
+#[test]
+fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.attach_app_file("jm_app").await.expect("attach");
+
+        let mode = backend
+            .autocommit_client()
+            .query("PRAGMA \"jm_app\".journal_mode", &[])
+            .await
+            .expect("read the attached file's journal mode");
+        assert_eq!(
+            mode[0][0].as_deref(),
+            Some("delete"),
+            "an ATTACHed app file does not inherit main's WAL mode, and the migration \
+             engine pins it to DELETE; SQLITE_BUSY_SNAPSHOT cannot arise on app data \
+             while that is true"
+        );
+
+        let main_mode = backend
+            .autocommit_client()
+            .query("PRAGMA main.journal_mode", &[])
+            .await
+            .expect("read main's journal mode");
+        assert_eq!(
+            main_mode[0][0].as_deref(),
+            Some("wal"),
+            "the control: the session's own database IS in WAL, so the two databases \
+             on one connection genuinely differ"
         );
     });
 }
