@@ -60,11 +60,70 @@ decoding the same 40,002 changes, total 1,335ms against 309ms for one slot
 information is `O(total_WAL)`. Raising the GUC buys a constant against a term
 that should not exist.
 
-**Blocks:** finalising SC-3, and starting the IR implementation. Building the IR
-against the current transport means building it twice.
+**Blocks (CORRECTED 2026-08-28 - the earlier claim was too broad).** This page
+said L12 blocks "finalising SC-3, and starting the IR implementation", and also
+said, three sections later, that the plan crate unblocks SC-3 in parallel. Both
+could not be true. **The narrow statement is the correct one:**
 
-**Recommendation on the table, undecided:** a dedicated CDC service owning O(1)
-slots. Detail and the four options: defect register, under L12.
+| SC-3 surface | blocked by L12? |
+| --- | --- |
+| shared normative core, read family, write, search, unmask | **No.** No transport dependency |
+| relation family's **live-query** lowering | Yes - `read_set.rs` is relation-unaware |
+| **effects** family (the publication a committed mutation owes the broker) | Yes - transport choice changes the node shape |
+
+The existence proof is on disk: `crates/zeroship-data-plan` implements the core
+plus the read family with **zero dependencies**, references neither
+subscriptions nor CDC nor WAL, and builds and tests without a database.
+
+**Recommendation, and the reason it is stronger than the register states:** a
+dedicated CDC relay owning O(1) slots.
+
+**The decisive argument is not slot count - it is a credential.** Consuming a
+logical slot requires the connecting role to hold PostgreSQL's `REPLICATION`
+attribute, and there is no narrower grant (`CheckSlotPermissions` is
+`has_rolreplication(GetUserId())` and gates every slot function). This platform
+grants it to the login role of the process that **executes creator code**:
+
+```sql
+ALTER ROLE zeroship_worker WITH LOGIN ... INHERIT REPLICATION BYPASSRLS
+-- db/migrations-ts/20260818000200_worker_database_authority.ts:35
+```
+
+The line four below it does the opposite for another role
+(`zeroship_workflow_owner ... NOREPLICATION NOBYPASSRLS`), so the correct
+pattern is visible in the same file.
+
+**So the CURRENT transport already violates decision 5**, the key invariant this
+repository adopted on 2026-08-27: a privileged capability held by the process
+that runs creator code "does not create a boundary; it creates the *appearance*
+of one". `REPLICATION` is cluster-wide; `BYPASSRLS` defeats row-level security.
+Only moving WAL consumption into a process that does not execute creator code
+lets `zeroship_worker` drop both - which is the relay. A thinner "privileged
+slot janitor the worker calls" is exactly the shape the invariant forbids.
+
+This is recorded as **L30**. It reframes the relay from "the expensive option we
+might defer" to "the option that closes a present-tense trust-model violation",
+and it is the one argument the four-option analysis in the register omits.
+
+**Also verified, in the PostgreSQL sources rather than from memory** (REL_16 and
+REL_18, both read): a publication filter cannot reduce decode cost. `DecodeInsert`
+applies only three pre-queue filters (TOAST-internal, other-database, replication
+origin) and then queues the change; the plugin API exposes no filter-by-relation
+callback at all, and `pgoutput` checks table membership and row filters at commit
+replay, **after** decode, buffering, and per-slot spill to disk. The 4.32-of-5.00
+multiplier is structural, not an artifact, and no publication design escapes it.
+
+**Cheaper middle path that deserves weighing before scaffolding a new service:**
+`zeroship-migrated` is already privileged and already owns publications, so it
+could host the shared slots and publish to `zeroship-stream` without a greenfield
+service. **And the honest case for deferring:** CHWBL already routes an app's
+traffic to one worker, so at launch scale (app x worker) collapses toward
+(app x 1), and raising the GUC would cover it. The relay still wins eventually on
+both the multiplier and the credential; "eventually" could be post-launch.
+
+**Unmeasured and must not be quoted until it is:** the added
+WAL -> relay -> stream -> worker latency. That is the one genuine regression the
+relay introduces.
 
 ### 2. SC-6's masking storage flip is blocked on a defect in itself
 
