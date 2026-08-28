@@ -63,6 +63,48 @@ Two consequences, and the second is the one that matters for sequencing:
    Discovering that during implementation rather than here is how a step that
    was scoped as days becomes weeks.
 
+### Evidence bearing on that question, gathered 2026-08-28
+
+The open question is *who is waiting for the terminal verdict*. If nothing
+durable awaits it, the in-memory gate is the design and the artifact's cutoff
+machinery is over-built.
+
+**The one candidate that could have forced a durable registry is a workflow
+step, and it does not - because the layer above already carries the durability.**
+
+- Durable workflows keep a **journal**: `StepCheckpoint`, `StepOutcome` and
+  `StepResult` (`crates/zeroship-control/src/cron/workflow_engine.rs:35`),
+  `JournalStepRecord` (`sdks/workflows/src/journal.ts:64`).
+- **All I/O is forced inside a journaled step.** The workflow body refuses
+  direct I/O by construction - *"workflow bodies may not perform I/O directly -
+  move fetch(...) inside step.run(...) or use step.sideEffect(...)"*
+  (`journal.ts:30`), with the same treatment for timers (`:32`).
+- `crates/zeroship-plugin-workflow/src/` contains exactly **one** `transaction`
+  reference, `client.transaction()` at `claim.rs:68` - the platform's own claim
+  record, not a creator's `db.transaction()`.
+
+So a creator transaction inside a workflow runs **inside a journaled step**, and
+process death is handled by replay against that journal. Adding a durable
+`FenceJobRegistry` to this contract would put a **second durable job system
+underneath one that already exists** and already owns this failure mode.
+
+**Therefore the recommended answer is NO: terminal delivery need not survive
+process death, and the simpler in-memory gate below is the design.**
+
+**The caveat, stated rather than fixed here.** If a step commits and the process
+dies before the journal records the outcome, replay re-runs the step - so a
+transaction inside a step is **at-least-once**. That is the workflow layer's
+idempotency contract and belongs in `docs/reference/workflows.md`, not in this
+protocol. Solving it here would be solving it in the wrong layer, and twice.
+
+**Reversibility is why this is the cheap answer to give now:** the registry can
+be added later without redesigning the reducer. The reverse - building it and
+discovering the journal already covered the case - cannot be undone as cheaply.
+
+*Unverified: whether any NON-workflow durable consumer awaits a transaction
+terminal. I checked the workflow path because it was the strongest candidate;
+I did not enumerate every caller.*
+
 ### Terms this contract uses but does not define
 
 Four pieces of vocabulary appear in the rules, the guard order and the
