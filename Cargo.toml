@@ -3,6 +3,7 @@ members = ["crates/*", "libs/*"]
 resolver = "3"
 exclude = [
     "crates/zeroship-runtime/benches/ntex-bench",
+    "libs/compio-postgres/vendor/postgres-types",
     "refs",
 ]
 
