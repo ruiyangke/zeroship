@@ -125,7 +125,102 @@ can `DROP` or rewrite it, and owner privileges cannot be revoked. So:
   there is no separate meta schema to revoke. Delete it rather than leave a
   revoke that names nothing.
 
-### The prefix is load-bearing, not cosmetic - and it needs an engine change
+### The final naming, decided 2026-08-28
+
+**Operator: everything prefixed `__zeroship_`.** That inherits the existing
+fence for free - `validate_collection` already refuses the `__zeroship` prefix
+for table names (`zeroship-schema/src/query.rs`, beside `pg_`), so no new
+reservation is needed and the prefix means one consistent thing everywhere:
+**the platform owns this name.**
+
+**The pattern already exists and works.** `__zeroship_migrations` has lived in
+the creator's data schema since before this discussion, created by
+`plugin-db/src/audit.rs:236`. The engine journal is joining an established
+arrangement, not inventing one.
+
+**But that existing table forces a rename, because the names collide in
+MEANING:**
+
+| name | what it actually is |
+| --- | --- |
+| `__zeroship_migrations` (existing) | the runtime **DDL audit log** - `collection`, `phase`, `change_class`, `change_kind`, `details` jsonb, `ddl_sql`, `applied_by_kind`, `deploy_id`, self-referencing `parent_id` |
+| `__zeroship_schema_migrations` (incoming) | the engine's **migration journal** - `event_kind`, `version`, `checksum`, `at`, `by` |
+
+Two nearly identical identifiers, different meanings, in one schema. That is how
+a future reader joins the wrong table.
+
+**Operator, 2026-08-28: "we need to remove `__zeroship_migrations` from the
+audit."** Tracing what actually writes it turns that from a rename into a
+sharper cleanup.
+
+**The table does not record migrations.** Its three production writers are all
+inside one function, `create_index_with_recovery_audited`
+(`plugin-db/src/backend/postgres.rs:888`), reached from exactly three places:
+
+| call site | enclosing function |
+| --- | --- |
+| `postgres.rs:371` | `create_index_with_recovery` |
+| `postgres.rs:543` | **`ensure_vector_index`** |
+| `postgres.rs:683` | **`ensure_spatial_index`** |
+
+The last two are **lazy runtime DDL** - the runtime creating an index on demand
+when a vector or spatial query needs one. So `__zeroship_migrations` is the
+provenance log for **DDL the runtime issues outside the migration path**, under
+a name that says the opposite.
+
+**Which makes the table a symptom, not the problem.** Operator decision 8 made
+the descriptor the sole schema authority and deleted live introspection on the
+principle that the data plane does not discover or change schema. A runtime that
+still creates indexes lazily contradicts that, and the audit table exists
+precisely to record the contradiction.
+
+**So the removal has two shapes and they are not equivalent:**
+
+1. **Delete the table, keep lazy DDL.** Cheapest, and wrong - it removes the
+   only record of unattributed DDL while leaving the DDL. The audit module's own
+   doc (`audit.rs:20-42`) is the passage `AGENTS.md` quotes when refusing a
+   `SECURITY DEFINER` writer, on the grounds that *"the worker pool is the only
+   writer, so provenance is enforced at the Rust call boundary"*. Deleting the
+   log keeps the writer and drops the provenance.
+2. **Move vector and spatial index creation into migrations, then delete the
+   table because nothing writes it.** This is the coherent end state: it
+   finishes decision 8 rather than working around it, and the audit table
+   disappears as a consequence rather than as an edit.
+
+**Recommended: 2.** It also removes the lazy-DDL sites that the design's own
+invariant 7 was written about and never fully enumerated - measured earlier at
+**six** ungated `CREATE TABLE IF NOT EXISTS` across three tables, where the
+invariant asserted three.
+
+Verified free of the freeze either way: `grep '__zeroship_migrations'
+db/migrations-ts/*.ts` returns **nothing**. The table is created by runtime code
+in the app's own schema, sits in no platform migration, and holds no creator
+data pre-launch.
+
+**Consequence for the naming above:** with the audit table gone, the collision
+disappears and the engine journal can simply take `__zeroship_schema_migrations`
+and siblings, with no rename needed on either side.
+
+**The resulting set in `<app_id>`:**
+
+```
+__zeroship_ddl_audit                      (renamed from __zeroship_migrations)
+__zeroship_schema_migrations              (the six, moved in from the meta schema)
+__zeroship_schema_migrations_supersedes
+__zeroship_schema_migrations_inflight
+__zeroship_schema_pending_contracts
+__zeroship_schema_deploy_recovery
+__zeroship_schema_backfills
+```
+
+and `zeroship_migrate.<table>` for the platform's own, per the same instruction.
+
+**Note the workflow journal is a different schema and is already conformant:**
+`app_<uuid>` holds `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}`
+(`plugin-workflow/src/store/pg.rs`, schema from `app_schema_for()`). It needs no
+change and should not be folded in - it is a separate service's journal.
+
+### Why the engine change is still needed
 
 Verified 2026-08-28, and this is the part that decides the work:
 
