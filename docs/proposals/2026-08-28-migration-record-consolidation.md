@@ -95,7 +95,72 @@ journal and none of it should be. The recommendation is not to delete the
 ledger - it is to stop using the ledger as the answer to *"what ran?"*, which is
 the one question it cannot answer correctly.
 
-## DECIDED 2026-08-28: the naming, with one correction
+## FINAL DECISION 2026-08-28: everything in the creator-accessible schema
+
+**Operator, on being shown the ownership objection below and reaffirming:**
+*"place everything inside the creator accessible schema, no new schema, the
+creator is responsible for the migration."*
+
+**This supersedes the sibling-schema compromise recorded further down.** The
+reasoning is a position, not an oversight: if the creator owns their database
+and their migrations, the journal is **their** bookkeeping. A creator who
+corrupts it breaks their own app, which is their problem, not a platform
+integrity failure.
+
+**What that costs, stated so it is not rediscovered.** The platform can no
+longer treat the creator journal as a trust anchor - a tenant owning the schema
+can `DROP` or rewrite it, and owner privileges cannot be revoked. So:
+
+- `zeroship.migrated_migrations` **remains** the platform's answer to "did this
+  app's migrations apply", and the consolidation recommended above applies to
+  **platform** migrations only.
+- **The rollback hole must be closed platform-side**, not by reading the
+  journal. The workable fix without the journal: record what the engine
+  **reported as applied** (`outcome.applied`) on the ledger row alongside the
+  declared descriptor. A re-submitted old IR produces `applied: []`, so the row
+  records that nothing advanced and the precondition can compare against the
+  newest row that actually applied something. That keeps the per-request write
+  the engine-upgrade case needs while removing the backwards move.
+- `provisioning.rs` step 5's `REVOKE ALL ON ... SCHEMA {meta}` becomes moot -
+  there is no separate meta schema to revoke. Delete it rather than leave a
+  revoke that names nothing.
+
+### The prefix is load-bearing, not cosmetic - and it needs an engine change
+
+Verified 2026-08-28, and this is the part that decides the work:
+
+1. **The engine's journal table names are LITERALS.** Only `{meta}` is
+   interpolated (`zeroship-migrate-postgres/src/backend/journal_sql.rs:128`,
+   `:178`, `:224`, `:327`, `:342`, plus `schema_backfills`):
+   `schema_migrations`, `schema_migrations_supersedes`,
+   `schema_migrations_inflight`, `schema_pending_contracts`,
+   `schema_deploy_recovery`, `schema_backfills`. `conn.rs` exposes `meta_schema`
+   and no table-name knob.
+2. **`validate_collection` fences only `pg_` and `__zeroship`** for table names.
+   **So a creator CAN declare a table named `schema_migrations`.**
+3. The engine creates its journal with `CREATE TABLE IF NOT EXISTS`. A
+   creator-declared `schema_migrations` in the same schema would therefore be
+   silently **adopted as the journal**, or collide on shape.
+
+So co-habitation without a prefix is a live collision, and the operator's
+`zeroship_migrate_` prefix is exactly what prevents it.
+
+**The work this implies, in dependency order:**
+
+1. **Engine:** prefix the six journal tables to `zeroship_migrate_*`, or add a
+   table-prefix config. Our copy is in-sourced at `crates/zeroship-migrate-*`,
+   so this is an ordinary change - not a vendored-submodule edit.
+2. **Reserve the prefix in `validate_collection`**, beside `pg_` and
+   `__zeroship`. **Without this the prefix is decoration** - a creator can still
+   declare `zeroship_migrate_schema_migrations` and collide deliberately. This
+   step is what converts a naming convention into a guarantee.
+3. **Config:** `meta_schema` becomes the app's own schema.
+4. **Platform:** `zeroship_migrations` schema becomes `zeroship_migrate`.
+5. **Delete** `provisioning.rs` step 5's now-meaningless revoke.
+6. **A migration** moving existing journal objects, remembering that
+   `db/migrations-ts` files already applied are frozen.
+
+## SUPERSEDED: the naming, with one correction
 
 Operator instruction: place creator migration records under
 `<app_schema>.zeroship_migrate_<table>`, and platform records under
