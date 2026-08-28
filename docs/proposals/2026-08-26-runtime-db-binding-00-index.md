@@ -762,6 +762,66 @@ design beside the claim it replaces, and its **reversal history is in
 | 7 | **`__zeroship_admin` is deleted ENTIRELY, and there is no schema epoch.** The runtime descriptor is the authority |
 | 8 | **The data plane performs NO live introspection at all.** Startup DDL validation is deferred, not designed |
 | 9 | **The descriptor MUST NOT get wrong, and the masking flip lands anyway as a second line of defence** |
+| 10 | **Migration is NOT part of plugin-db. It belongs to zeroship-migrate. Every DDL-emitting path leaves the data plane** |
+
+### Decision 10, 2026-08-28: no DDL in the data plane
+
+**Operator: "the migration is not part of the plugin-db, it's managed by the
+zeroship-migrate, we should clean everything ddl related from the plugin-db."**
+
+This is the principle decisions 7 and 8 implied and never stated. Those made the
+descriptor the sole schema *authority* and deleted live introspection; this
+finishes the thought - **the data plane does not read schema and does not write
+it either.** It resolves several threads that were being argued separately: the
+audit table's fate, lazy index creation, and what `register_model` is for.
+
+**The surface is much smaller than "113 DDL lines in 12 files" suggests.**
+Measured 2026-08-28 across `crates/zeroship-plugin-db/src/`:
+
+| | finding |
+| --- | --- |
+| `register_model/` | **zero DDL.** Already inert, exactly as `plugin-db/Cargo.toml:128-130` claims. 237 lines that are now purely the descriptor's transport |
+| SQLite backend | **zero production DDL.** Every `CREATE TABLE` under `backend/sqlite/` is a test fixture in `reservation.rs`'s test module |
+| `crud/mask_backfill.rs`, `crud/mask_drift.rs` | gated `#[cfg(any(test, feature = "test-helpers"))]`, ship in no production binary |
+| **`backend/postgres.rs`** | **two statements. That is the whole live surface** |
+
+```
+postgres.rs:518   CREATE INDEX CONCURRENTLY ... USING ivfflat   (vector search)
+postgres.rs:668   CREATE INDEX CONCURRENTLY ... USING GIST      (spatial search)
+```
+
+**And the audit table exists only to log those two.** Its three production
+writers are all inside `create_index_with_recovery_audited` (`:888`), reached
+from `create_index_with_recovery` (`:371`), `ensure_vector_index` (`:543`) and
+`ensure_spatial_index` (`:683`). So `__zeroship_migrations` is not a migration
+record at all - it is the provenance log for the only DDL the data plane still
+issues.
+
+**The cleanup, in dependency order:**
+
+1. Move vector and spatial index creation into the migration path, so a
+   `.vector()` or `.spatial()` field declares its index the way every other
+   index is declared.
+2. Delete `ensure_vector_index`, `ensure_spatial_index`,
+   `create_index_with_recovery`, `create_index_with_recovery_audited`.
+3. Delete `audit.rs` entirely, and the `Backend` trait methods
+   `ensure_audit_table`, `write_audit_row`, `next_schema_version`, plus their
+   SQLite implementations. **Nothing writes the table once step 2 lands** - the
+   deletion is a consequence, not an edit.
+4. `__zeroship_migrations` disappears from creator schemas, which also removes
+   the name collision with the engine journal moving in under decision on
+   naming - so the journal takes `__zeroship_schema_migrations` with no rename
+   needed on either side.
+
+**Why the order matters:** deleting the audit table first would keep the DDL
+writer and drop its provenance, which is the one thing `audit.rs:20-42` - the
+passage `AGENTS.md` quotes when refusing a `SECURITY DEFINER` writer - exists to
+guarantee.
+
+**This also closes invariant 7's unfinished enumeration.** That invariant
+asserted three lazy-DDL sites and named one; a measurement found six ungated
+`CREATE TABLE IF NOT EXISTS` across three tables. Removing the category removes
+the need to enumerate it.
 
 ### Decision 9, 2026-08-28: enforce the descriptor, and flip anyway
 
