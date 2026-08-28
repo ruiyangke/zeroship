@@ -21,8 +21,9 @@
 
 use zeroship_data_plan::render::postgres;
 use zeroship_data_plan::{
-    CompareOp, Direction, Ident, IdentRole, Literal, MembershipOp, NullOrder, Operand, OrderKey,
-    Predicate, ProjectedField, Projection, RowLimit, Select,
+    ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, CompareOp, Direction,
+    Ident, IdentRole, Insert, Literal, MembershipOp, NullOrder, Operand, OrderKey, Predicate,
+    ProjectedField, Projection, Returning, RowLimit, Select, Update, WriteValue,
 };
 
 fn column(name: &str) -> Ident {
@@ -64,9 +65,10 @@ fn plan(projection_order: [&str; 2], conjunct_order: [(&str, i64); 2]) -> Select
         projection,
     )
     .namespace(Ident::parse_as("app_1", IdentRole::Namespace).expect("namespace"))
-    .filter(Predicate::and(
-        conjunct_order.iter().map(|(n, v)| eq(n, *v)).collect(),
-    ))
+    .filter(
+        Predicate::and(conjunct_order.iter().map(|(n, v)| eq(n, *v)).collect())
+            .expect("within the depth bound"),
+    )
     .order_by(vec![OrderKey {
         path: zeroship_data_plan::FieldPath::column(column("name")),
         direction: Direction::Ascending,
@@ -107,11 +109,12 @@ fn opposite_insertion_permutations_render_to_one_canonical_fixture() {
 #[test]
 fn plans_built_by_different_paths_produce_one_statement() {
     let nested = Predicate::and(vec![
-        Predicate::and(vec![eq("score", 90), eq("age", 30)]),
+        Predicate::and(vec![eq("score", 90), eq("age", 30)]).expect("shallow"),
         eq("age", 30),
         Predicate::always(),
-    ]);
-    let flat = Predicate::and(vec![eq("age", 30), eq("score", 90)]);
+    ])
+    .expect("shallow");
+    let flat = Predicate::and(vec![eq("age", 30), eq("score", 90)]).expect("shallow");
     assert_eq!(nested, flat, "the two authoring paths did not converge");
 
     let projection = Projection::rows(vec![field("name")]).expect("row projection");
@@ -184,6 +187,184 @@ fn permuted_membership_sets_render_identically() {
         [Literal::Int(1), Literal::Int(2), Literal::Int(3)]
     );
     println!("ruled on 2 permutations of 1 membership set");
+}
+
+// ---------------------------------------------------------------------------
+// The write family. Same specification, same mutation discipline: the
+// divergence arms live in `src/render/postgres.rs`, because they call the
+// private writers directly, which is the only way to render an
+// un-canonicalised column or assignment list without exposing a public way to
+// do so.
+// ---------------------------------------------------------------------------
+
+/// The `RETURNING` list both write fixtures below produce: one declared column
+/// unioned with the seven platform fields, in canonical alias order.
+const RETURNING_LIST: &str = concat!(
+    r#" RETURNING "created_at" AS "created_at", "created_by" AS "created_by", "#,
+    r#""deleted_at" AS "deleted_at", "email" AS "email", "id" AS "id", "#,
+    r#""name" AS "name", "updated_at" AS "updated_at", "#,
+    r#""updated_by" AS "updated_by", "version" AS "version""#
+);
+
+fn write_returning(order: [&str; 2]) -> Returning {
+    Returning::rows(
+        Projection::rows(order.iter().map(|n| field(n)).collect()).expect("row projection"),
+    )
+    .expect("returning")
+}
+
+fn namespace() -> Ident {
+    Ident::parse_as("app_1", IdentRole::Namespace).expect("namespace")
+}
+
+fn users() -> Ident {
+    Ident::parse_as("users", IdentRole::Collection).expect("collection")
+}
+
+/// The column list of an INSERT is an unordered set from the caller's side - a
+/// document's keys - so two callers who wrote the same document with the keys
+/// in different orders must produce one statement AND one binding order. The
+/// second half is what makes this different from the projection case: the
+/// values follow the columns, so a non-canonical column list also permutes the
+/// parameters.
+#[test]
+fn permuted_insert_columns_render_to_one_canonical_fixture() {
+    let canonical = format!(
+        r#"INSERT INTO "app_1"."users" ("email", "name") VALUES ($1, $2){RETURNING_LIST}"#
+    );
+
+    let build = |cells: [(&str, i64); 2], returning: [&str; 2]| {
+        Insert::builder(users(), write_returning(returning), BindBudget::POSTGRES)
+            .namespace(namespace())
+            .row(
+                cells
+                    .iter()
+                    .map(|(n, v)| {
+                        ColumnValue::new(column(n), WriteValue::Bind(Literal::Int(*v)))
+                    })
+                    .collect(),
+            )
+            .build()
+            .expect("valid insert")
+    };
+
+    let forwards = build([("name", 1), ("email", 2)], ["name", "email"]);
+    let backwards = build([("email", 2), ("name", 1)], ["email", "name"]);
+
+    let a = postgres::render_insert(&forwards).expect("renders");
+    let b = postgres::render_insert(&backwards).expect("renders");
+    assert_eq!(a.sql(), canonical, "forward permutation drifted");
+    assert_eq!(b.sql(), canonical, "reverse permutation drifted");
+    assert_eq!(
+        a.params(),
+        &[Literal::Int(2), Literal::Int(1)],
+        "parameters must follow the canonical column order, not the authored one"
+    );
+    assert_eq!(a.params(), b.params());
+    println!("ruled on 2 permutations against 1 fixture");
+}
+
+/// The `SET` list is likewise unordered: every assignment in one `UPDATE` reads
+/// the row as it was before the statement, so the clauses do not chain and the
+/// authored order is not observable.
+#[test]
+fn permuted_update_assignments_render_to_one_canonical_fixture() {
+    let canonical = format!(
+        concat!(
+            r#"UPDATE "app_1"."users" SET "name" = $1, "version" = "version" + $2 "#,
+            r#"WHERE "ctid" IN (SELECT "ctid" FROM "app_1"."users" "#,
+            r#"WHERE ("age" = $3 AND "score" = $4) LIMIT $5 FOR UPDATE){}"#
+        ),
+        RETURNING_LIST
+    );
+
+    let name = || {
+        ColumnAssignment::new(column("name"), Assignment::bind(Literal::Int(7)))
+    };
+    let version = || {
+        ColumnAssignment::new(
+            column("version"),
+            Assignment::arithmetic(ArithmeticOp::Add, Literal::Int(1)).expect("numeric"),
+        )
+    };
+
+    let build = |sets: [ColumnAssignment; 2],
+                 conjuncts: [(&str, i64); 2],
+                 returning: [&str; 2]| {
+        let mut builder = Update::builder(
+            users(),
+            RowLimit::new(25).expect("limit"),
+            write_returning(returning),
+        )
+        .namespace(namespace())
+        .filter(
+            Predicate::and(conjuncts.iter().map(|(n, v)| eq(n, *v)).collect())
+                .expect("within the depth bound"),
+        );
+        for assignment in sets {
+            builder = builder.set(assignment);
+        }
+        builder.build().expect("valid update")
+    };
+
+    let forwards = build(
+        [name(), version()],
+        [("age", 30), ("score", 90)],
+        ["name", "email"],
+    );
+    let backwards = build(
+        [version(), name()],
+        [("score", 90), ("age", 30)],
+        ["email", "name"],
+    );
+
+    let a = postgres::render_update(&forwards).expect("renders");
+    let b = postgres::render_update(&backwards).expect("renders");
+    assert_eq!(a.sql(), canonical, "forward permutation drifted");
+    assert_eq!(b.sql(), canonical, "reverse permutation drifted");
+    assert_eq!(
+        a.params(),
+        &[
+            Literal::Int(7),
+            Literal::Int(1),
+            Literal::Int(30),
+            Literal::Int(90),
+            Literal::Int(25),
+        ],
+        "parameters must follow the canonical statement order"
+    );
+    assert_eq!(a.params(), b.params());
+    println!("ruled on 2 permutations against 1 fixture");
+}
+
+/// The ROWS of an insert are the one write list a canonicaliser must NOT touch,
+/// and the reason is the same one that protects `ORDER BY`: the order is
+/// observable. `RETURNING` yields the rows in insertion order, so reordering
+/// them reorders the result the caller stitches ids back onto.
+#[test]
+fn insert_rows_keep_their_authored_order() {
+    let build = |rows: [i64; 2]| {
+        let mut builder =
+            Insert::builder(users(), Returning::nothing(), BindBudget::POSTGRES);
+        for value in rows {
+            builder = builder.row(vec![ColumnValue::new(
+                column("n"),
+                WriteValue::Bind(Literal::Int(value)),
+            )]);
+        }
+        postgres::render_insert(&builder.build().expect("valid insert"))
+            .expect("renders")
+            .params()
+            .to_vec()
+    };
+    let ab = build([1, 2]);
+    let ba = build([2, 1]);
+    assert_ne!(
+        ab, ba,
+        "the row order was canonicalised, which changes which row RETURNING yields first"
+    );
+    assert_eq!(ab, vec![Literal::Int(1), Literal::Int(2)]);
+    println!("ruled on 2 row permutations");
 }
 
 /// `ORDER BY` is the one list a canonicaliser must NOT touch: `ORDER BY a, b`

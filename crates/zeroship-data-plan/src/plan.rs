@@ -34,7 +34,7 @@
 
 use crate::ident::Ident;
 use crate::path::FieldPath;
-use crate::predicate::Predicate;
+use crate::predicate::{Predicate, MAX_PREDICATE_DEPTH};
 use crate::projection::{Projection, ProjectionKind, ProjectionSource};
 use core::fmt;
 
@@ -306,6 +306,18 @@ impl SelectBuilder {
     ///
     /// [`PlanError`], naming the invariant that failed.
     pub fn build(self) -> Result<Select, PlanError> {
+        // BEFORE `canonical()`, which recurses - and before `mentions_aggregate`
+        // and the renderer, which also do. `Predicate`'s smart constructors
+        // already refuse an over-deep tree, but its variants are public, so a
+        // caller can assemble one by hand; this is the boundary every predicate
+        // must cross to become executable, and it is where the bound is closed.
+        for (position, predicate) in [("filter", &self.filter), ("having", &self.having)] {
+            let depth = predicate.depth();
+            if depth > MAX_PREDICATE_DEPTH {
+                return Err(PlanError::PredicateTooDeep { position, depth });
+            }
+        }
+
         let filter = self.filter.canonical();
         let having = self.having.canonical();
 
@@ -383,11 +395,22 @@ impl SelectBuilder {
 
 /// A runtime database operation.
 ///
-/// One variant today. See the module note on why the other five families are
-/// absent rather than stubbed.
+/// Two families today: read, and write. See the module note on why the other
+/// four are absent rather than stubbed.
+///
+/// **`insert` and `insertMany` share one variant**, because they share one
+/// statement: `INSERT INTO t (a) VALUES ($1)` is what both produce for a single
+/// row, and a second variant would give one logical plan two spellings. The
+/// canonical-form property that lets a prepared statement be shared rests on
+/// there being exactly one - the same argument that makes
+/// [`crate::Predicate::range`] a constructor rather than a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbPlan {
     Select(Select),
+    /// One or more rows, one statement. See [`crate::write::Insert`].
+    Insert(crate::write::Insert),
+    Update(crate::write::Update),
+    Delete(crate::write::Delete),
 }
 
 /// Why a plan was refused.
@@ -400,6 +423,13 @@ pub enum PlanError {
     HavingWithoutAggregate,
     UngroupedProjectedField { alias: String },
     UngroupedOrderKey { column: String },
+    /// A predicate nested past [`MAX_PREDICATE_DEPTH`]. `position` names which
+    /// of the two a read carries, because the same text is legal in one and the
+    /// error would otherwise send the reader to the wrong clause.
+    PredicateTooDeep {
+        position: &'static str,
+        depth: usize,
+    },
 }
 
 impl fmt::Display for PlanError {
@@ -430,6 +460,11 @@ impl fmt::Display for PlanError {
             Self::UngroupedOrderKey { column } => write!(
                 f,
                 "'{column}' orders a grouped read but is not a grouping key"
+            ),
+            Self::PredicateTooDeep { position, depth } => write!(
+                f,
+                "the {position} is nested {depth} deep, over the maximum of \
+                 {MAX_PREDICATE_DEPTH}"
             ),
         }
     }

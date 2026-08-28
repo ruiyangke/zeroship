@@ -20,7 +20,14 @@
 //!   defect where a null silently became an empty string is unrepresentable
 //!   rather than merely repaired;
 //! * a plan renders **deterministically**, so two callers who expressed the
-//!   same query differently share one prepared statement.
+//!   same query differently share one prepared statement;
+//! * a predicate is **bounded in depth** ([`MAX_PREDICATE_DEPTH`]) as well as in
+//!   width. Depth is the bound that matters: width is heap work, height is stack
+//!   frames, and Rust has no recursion limit, so an over-deep tree aborts the
+//!   worker rather than failing a request. `Predicate` is the only recursive
+//!   type here, and the bound is checked at construction, ahead of all four of
+//!   its recursive surfaces - `canonical`, the lowering, `mentions_aggregate`,
+//!   and the derived `Ord`/`Hash` that `canonical`'s own sort calls.
 //!
 //! There is no `raw_sql` and no way to add one without changing the shape of
 //! every node: nothing in the public surface accepts a `String` in a position
@@ -42,12 +49,22 @@
 //! # Scope
 //!
 //! SC-3 names six plan families - read, relation, write, search, unmask and
-//! effects - and this crate builds **one**, the read family, plus the shared
+//! effects - and this crate builds **two**, read and write, plus the shared
 //! core underneath all six. That split is the document's own: per-family node
 //! spelling is deliberately left to each family's port, because a family that
 //! gets its own shape wrong costs that family a revision, whereas a shared
 //! expression node fixed wrongly by whoever ports first costs every family
 //! after it.
+//!
+//! The write family adds two shapes the read family had no use for and takes
+//! care not to add a third. [`write::WriteValue::Null`] makes a written NULL a
+//! node rather than a literal, and [`write::Arithmetic`] makes `col = col + 1`
+//! expressible - which it must be, because `query.rs:3907` emits
+//! `"version" = "version" + 1` on every dispatched update. Both are closed
+//! shapes confined to the SET/VALUES position; neither is a general expression
+//! node, because a general one would fix the shared grammar for search, unmask
+//! and effects too. See [`write`] for the full argument, including what it
+//! costs to leave the `jsonb` update operators out.
 //!
 //! Nothing here emits DDL. The runtime executes none, so `CREATE TABLE`,
 //! indexes, constraints and `ALTER` belong to the migration and schema side and
@@ -60,6 +77,7 @@ pub mod plan;
 pub mod predicate;
 pub mod projection;
 pub mod render;
+pub mod write;
 
 pub use ident::{Ident, IdentError, IdentRole, MASKED_SUFFIX, MAX_IDENT_BYTES};
 pub use literal::{Finite, Literal, LiteralError, LiteralSet, MAX_MEMBERSHIP_LIST_LEN};
@@ -70,10 +88,15 @@ pub use plan::{
 };
 pub use predicate::{
     AggregateFunc, AggregateRef, CompareOp, EscapeChar, MembershipOp, Operand, PatternOp,
-    Predicate, PredicateError, RangeBounds, TextPattern,
+    Predicate, PredicateError, RangeBounds, TextPattern, MAX_PREDICATE_DEPTH,
 };
 pub use projection::{
     Exposure, ProjectedField, Projection, ProjectionError, ProjectionKind, ProjectionSource,
     PLATFORM_FIELD_NAMES,
 };
 pub use render::RenderedSql;
+pub use write::{
+    Arithmetic, ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, Delete,
+    DeleteBuilder, Insert, InsertBuilder, Returning, Update, UpdateBuilder, WriteError, WriteValue,
+    MAX_INSERT_ROWS,
+};
