@@ -314,9 +314,10 @@ impl SqliteBackend {
             // A `:memory:` control session becomes a FILE inside the temp dir
             // that already exists for this case, not a true in-memory database.
             //
-            // SC-2's two connections force this: `Connection::open(":memory:")`
-            // twice yields two PRIVATE, unrelated databases, so `op_conn` and
-            // `tx_conn` would not share a single byte. The alternatives are
+            // SC-2's split connections force this: `Connection::open(":memory:")`
+            // twice yields two PRIVATE, unrelated databases, so `op_conn` and a
+            // transaction connection would not share a single byte. The
+            // alternatives are
             // worse - a shared-cache `file:...?mode=memory&cache=shared` URI
             // cannot run WAL and changes locking to table granularity - and the
             // file is just as ephemeral: the `TempDir` deletes it on drop.
@@ -592,18 +593,23 @@ impl SqliteBackend {
 impl SqlExecutor for SqliteBackend {
     type Client = SqliteSessionHandle;
 
-    async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
-        // SC-2 Decision 1: a dedicated client is a reservation on `tx_conn`,
-        // the connection kept for at most one explicit creator transaction.
-        // Everything else - `pool_exec`, an unbound handle's `exec` - runs on
-        // `op_conn` instead, which is what retires the divergence formerly
-        // recorded at `tx_route.rs:119-124`: an app's autocommit work no
-        // longer executes inside that app's open transaction.
+    async fn acquire_dedicated_client(&self, app_id: &str) -> Result<Self::Client, DbError> {
+        // SC-2 Decision 1: a dedicated client is a reservation on THIS APP's
+        // transaction connection, kept for at most one explicit creator
+        // transaction. Everything else - `pool_exec`, an unbound handle's
+        // `exec` - runs on the shared `op_conn` instead, which is what retires
+        // the divergence formerly recorded at `tx_route.rs:119-124`: an app's
+        // autocommit work no longer executes inside that app's open
+        // transaction.
+        //
+        // Per app, not per session: one shared transaction connection made the
+        // admission key `(runtime_instance_id, session)` and refused app B
+        // while app A held a transaction (defect L22b).
         //
         // The lease is RAII. Dropping every clone of the returned handle frees
         // the lane and rolls back anything the transaction left open, so a
         // caller that never settles cannot strand the next one.
-        let lease = self.session.reserve_transaction().await?;
+        let lease = self.session.reserve_transaction(app_id).await?;
         Ok(SqliteSessionHandle::with_lease(self.session.clone(), lease))
     }
 

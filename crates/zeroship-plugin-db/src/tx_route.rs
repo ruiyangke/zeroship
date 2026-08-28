@@ -120,9 +120,10 @@ impl TxRoute {
     /// one connection, so a correctly pool-routed write still executed inside
     /// whatever transaction that connection was holding, and died with its
     /// `ROLLBACK`. SC-2 Decision 1 retired that on 2026-08-27 - the actor now
-    /// keeps `tx_conn` and `op_conn` per session, so both tiers have somewhere
-    /// else to send it. The `docs/reference/sqlite-divergences.md` row is
-    /// marked retired in the same change.
+    /// keeps a shared `op_conn` and a transaction connection **per app**, so
+    /// both tiers have somewhere else to send it. The
+    /// `docs/reference/sqlite-divergences.md` row is marked retired in the same
+    /// change.
     ///
     /// What SQLite still cannot give, and no number of connections would: an
     /// autocommit *write* contends for the single writer lock an open

@@ -831,7 +831,7 @@ mod tests {
                     .expect("build insert");
             let insert_params: Vec<&str> = insert_built.params.iter().map(String::as_str).collect();
             let client = backend
-                .acquire_dedicated_client()
+                .acquire_dedicated_client(app_id)
                 .await
                 .expect("acquire client");
             client

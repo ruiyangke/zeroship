@@ -1,28 +1,52 @@
-//! `SqliteSession` - the two-connection, reservation-qualified SQLite actor.
+//! `SqliteSession` - the reservation-qualified SQLite actor.
 //!
-//! One OS thread owns **two** `rusqlite::Connection`s per session and drains a
-//! bounded [`flume`] mpsc queue of [`Command`]s.
+//! One OS thread owns one shared autocommit connection plus one transaction
+//! connection **per app that has opened a transaction**, and drains a bounded
+//! [`flume`] mpsc queue of [`Command`]s.
 //!
-//! ## SC-2 Decision 1: two connections, one loop
+//! ## SC-2 Decision 1: split connections, one loop
 //!
 //! `docs/proposals/2026-08-26-sc2-sqlite-actor-protocol.md`:
 //!
-//! - **`tx_conn`** - reserved to at most one explicit creator transaction;
-//! - **`op_conn`** - autocommit operations, each wrapped in
+//! - **a transaction connection per app** - each reserved to at most one
+//!   explicit creator transaction, opened lazily on that app's first
+//!   `db.transaction()` and ATTACHing only that app's file;
+//! - **`op_conn`** - autocommit operations for every app, each wrapped in
 //!   `BEGIN DEFERRED ... COMMIT` where the statement permits it.
 //!
-//! WAL permits that concurrency; one connection cannot. This **retires** the
+//! One connection cannot express that separation at all. This **retires** the
 //! divergence formerly recorded at `tx_route.rs:119-124`: an app's autocommit
 //! reads no longer execute inside that app's open creator transaction, and an
 //! autocommit write is no longer destroyed by that transaction's `ROLLBACK`.
 //!
-//! **One loop owns both connections.** Two loops would need their own
-//! coordination to keep a reservation's commands ordered, which is the problem
-//! the reservation exists to solve. So "unblocked" is precise: commands for the
-//! *other* reservation are dispatched **between** commands of the first, not
-//! concurrently with a single command. An autocommit *write* still contends
-//! for SQLite's single writer lock and waits up to `busy_timeout`; no number
-//! of connections changes that.
+//! **Why the transaction half is per app and the autocommit half is not.** The
+//! transaction connection carries state across commands - an open `BEGIN` -
+//! so a shared one made the admission key `(runtime_instance_id, session)`
+//! and refused app B's `db.transaction()` while app A held one (defect L22b).
+//! An autocommit reservation is minted per command and settles at that
+//! command's completion, so `op_conn` has no cross-command state for two apps
+//! to share; splitting it would buy scheduling parallelism, which a single
+//! actor thread cannot deliver anyway. The count is bounded by
+//! [`MAX_TX_LANES`], and an idle lane is closed to make room.
+//!
+//! **One loop owns every connection.** Per-connection loops would need their
+//! own coordination to keep a reservation's commands ordered, which is the
+//! problem the reservation exists to solve. So "unblocked" is precise: commands
+//! for the *other* reservation are dispatched **between** commands of the
+//! first, not concurrently with a single command - including across apps. An
+//! autocommit *write* still contends for SQLite's single writer lock and waits
+//! up to `busy_timeout`; no number of connections changes that.
+//!
+//! **What WAL does and does not buy here.** The session's own database is in
+//! WAL, so concurrent readers there are genuine. An app's `zs-<app>.sqlite` is
+//! **not**: `PRAGMA journal_mode` is per database and does not propagate across
+//! `ATTACH`, and the migration engine pins app files to DELETE and refuses to
+//! run otherwise
+//! (`crates/zeroship-migrate-sqlite/src/backend/actor.rs:719-729`). Rollback
+//! journalling still lets a reader hold `SHARED` while a writer holds
+//! `RESERVED`, which is what the concurrency arm needs, but there is no
+//! per-connection snapshot on app data and no `SQLITE_BUSY_SNAPSHOT` there.
+//! `docs/reference/sqlite-divergences.md` carries the creator-facing form.
 //!
 //! ## SC-2 Decision 2: cancellation interrupts in-flight statements
 //!
@@ -34,7 +58,7 @@
 //!
 //! ## Bootstrap PRAGMAs
 //!
-//! Both connections run, in this order:
+//! Every connection runs, in this order:
 //!
 //! ```sql
 //! PRAGMA journal_mode = WAL;
@@ -45,9 +69,9 @@
 //!
 //! `journal_mode=WAL` MUST come first: `synchronous=NORMAL` is crash-safe in
 //! WAL and is not in rollback-journal mode. `busy_timeout=5000` is the retry
-//! budget before `SQLITE_BUSY` surfaces - and with two connections it is now
-//! load-bearing rather than incidental, because an autocommit write really can
-//! meet a write lock held by `tx_conn`.
+//! budget before `SQLITE_BUSY` surfaces - and with the connections split it is
+//! now load-bearing rather than incidental, because an autocommit write really
+//! can meet a write lock held by a transaction connection.
 //!
 //! ## Cancellation safety of a dropped caller future
 //!
@@ -59,6 +83,7 @@
 //! target connection and enqueues `Cancel`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,8 +95,21 @@ use crate::backend::sqlite::cdc::CommitPacket;
 use crate::backend::sqlite::error::from_sqlite;
 use crate::backend::sqlite::reservation::{
     self, CancelCleanup, CancelIntent, Lane, Reservation, ReservationKind, TerminalOutcome,
+    TxLaneId,
 };
 use crate::error::DbError;
+
+/// Wire code for "this session cannot open another app's transaction
+/// connection right now".
+///
+/// A code of its own, not another `transaction_connection_busy`, because the
+/// remedies are opposite and only one of them is the creator's to act on:
+/// `transaction_connection_busy` means *this* app already has a transaction
+/// open and the creator must finish it, while this one means the dev process is
+/// hosting more apps than it has transaction connections for and the creator's
+/// own code is blameless. Defect L22b is exactly what happens when one code
+/// covers both.
+pub(crate) const TX_LANES_EXHAUSTED: &str = "transaction_lanes_exhausted";
 
 /// One-shot `sqlite-vec` auto-extension registration.
 ///
@@ -175,10 +213,21 @@ pub enum TerminalIntent {
 /// the class of bug the pre-SC-2 shape could not even express: commands then
 /// carried SQL and a reply channel and nothing else.
 pub(crate) enum Command {
-    /// Bind `tx_conn` to a transaction reservation. Any transaction the
-    /// previous binding left open is rolled back first, so a lease that was
+    /// Bind this app's transaction connection to a transaction reservation,
+    /// opening the connection if the app does not have one yet. Any transaction
+    /// the previous binding left open is rolled back first, so a lease that was
     /// dropped without settling cannot leak its transaction into the next one.
-    Reserve { reservation: Arc<Reservation> },
+    ///
+    /// The `app_id` rides along because the actor - not the caller - owns
+    /// connections, so the actor is what has to know which file to bind. The
+    /// reply carries the open failure: without it a lane that could not be
+    /// opened would be discovered by the next command's ownership check, under
+    /// the wrong error.
+    Reserve {
+        reservation: Arc<Reservation>,
+        app_id: String,
+        reply: flume::Sender<Result<(), DbError>>,
+    },
     /// Retire a transaction reservation, rolling back anything it left open.
     /// Sent best-effort from the lease's `Drop`; the `Reserve` above repeats
     /// the same cleanup, so a lost `Release` cannot strand the lane.
@@ -278,12 +327,17 @@ struct LaneInterrupt {
     handle: Mutex<rusqlite::InterruptHandle>,
 }
 
-/// The interrupt handles for a session's two connections, shared between the
-/// actor thread (which replaces them on recycle) and every caller holding a
-/// cancel handle.
+/// The interrupt handles for a session's connections, shared between the actor
+/// thread (which creates and replaces them) and every caller holding a cancel
+/// handle.
+///
+/// `op` is a field and the transaction lanes are a map because their lifetimes
+/// differ in kind: `op_conn` exists for the session's whole life, while an
+/// app's transaction connection is opened on that app's first
+/// `db.transaction()` and can be evicted again.
 pub struct Interrupts {
     op: LaneInterrupt,
-    tx: LaneInterrupt,
+    tx: Mutex<HashMap<TxLaneId, LaneInterrupt>>,
 }
 
 impl std::fmt::Debug for Interrupts {
@@ -293,28 +347,28 @@ impl std::fmt::Debug for Interrupts {
 }
 
 impl Interrupts {
-    fn new(op: rusqlite::InterruptHandle, tx: rusqlite::InterruptHandle) -> Self {
+    fn new(op: rusqlite::InterruptHandle) -> Self {
         Self {
             op: LaneInterrupt {
                 generation: AtomicU64::new(0),
                 handle: Mutex::new(op),
             },
-            tx: LaneInterrupt {
-                generation: AtomicU64::new(0),
-                handle: Mutex::new(tx),
-            },
+            tx: Mutex::new(HashMap::new()),
         }
     }
 
-    fn lane(&self, lane: Lane) -> &LaneInterrupt {
-        match lane {
-            Lane::Op => &self.op,
-            Lane::Tx => &self.tx,
-        }
+    fn tx_map(&self) -> std::sync::MutexGuard<'_, HashMap<TxLaneId, LaneInterrupt>> {
+        self.tx
+            .lock()
+            .expect("sqlite tx interrupt registry mutex poisoned")
     }
 
     /// Interrupt `lane`'s connection, but only if it is still the generation
     /// the caller aimed at. Returns whether the interrupt was delivered.
+    ///
+    /// A transaction lane that no longer exists (evicted, or never opened)
+    /// reports `false` for the same reason a stale generation does: there is no
+    /// connection this cancellation has any right to touch.
     ///
     /// `#[allow(dead_code)]` is REAL, not defensive, and worth stating plainly:
     /// **nothing in production cancels a SQLite command yet.** SC-2 asked for
@@ -324,30 +378,87 @@ impl Interrupts {
     /// [`SqliteCancelHandle`] and [`SqliteCancelGuard`].
     #[allow(dead_code)]
     fn interrupt(&self, lane: Lane, generation: u64) -> bool {
-        let entry = self.lane(lane);
-        if entry.generation.load(Ordering::SeqCst) != generation {
-            return false;
+        fn fire(entry: &LaneInterrupt, generation: u64) -> bool {
+            if entry.generation.load(Ordering::SeqCst) != generation {
+                return false;
+            }
+            entry
+                .handle
+                .lock()
+                .expect("sqlite interrupt handle mutex poisoned")
+                .interrupt();
+            true
         }
-        entry
-            .handle
-            .lock()
-            .expect("sqlite interrupt handle mutex poisoned")
-            .interrupt();
-        true
+        match lane {
+            Lane::Op => fire(&self.op, generation),
+            Lane::Tx(id) => match self.tx_map().get(&id) {
+                Some(entry) => fire(entry, generation),
+                None => false,
+            },
+        }
     }
 
-    /// Publish a recycled connection's handle under a new generation.
+    /// Publish a connection's handle under `generation`, creating the lane
+    /// entry when it is new.
     fn replace(&self, lane: Lane, generation: u64, handle: rusqlite::InterruptHandle) {
-        let entry = self.lane(lane);
-        *entry
-            .handle
-            .lock()
-            .expect("sqlite interrupt handle mutex poisoned") = handle;
-        entry.generation.store(generation, Ordering::SeqCst);
+        fn store(entry: &LaneInterrupt, generation: u64, handle: rusqlite::InterruptHandle) {
+            *entry
+                .handle
+                .lock()
+                .expect("sqlite interrupt handle mutex poisoned") = handle;
+            entry.generation.store(generation, Ordering::SeqCst);
+        }
+        match lane {
+            Lane::Op => store(&self.op, generation, handle),
+            Lane::Tx(id) => {
+                let mut map = self.tx_map();
+                match map.get(&id) {
+                    Some(entry) => store(entry, generation, handle),
+                    None => {
+                        map.insert(
+                            id,
+                            LaneInterrupt {
+                                generation: AtomicU64::new(generation),
+                                handle: Mutex::new(handle),
+                            },
+                        );
+                    }
+                }
+            }
+        }
     }
 
+    /// Retire a transaction lane's connection: bump its generation so an
+    /// interrupt aimed at the closed connection is refused, and return the
+    /// generation a replacement must be published under.
+    ///
+    /// The entry is kept rather than removed. Removing it would make
+    /// [`Self::generation`] read `0` again for a reused lane id, which is the
+    /// generation a *previous* incarnation's reservation carries - the one
+    /// thing the generation exists to tell apart.
+    fn retire(&self, id: TxLaneId) -> u64 {
+        match self.tx_map().get(&id) {
+            Some(entry) => entry.generation.fetch_add(1, Ordering::SeqCst) + 1,
+            None => 0,
+        }
+    }
+
+    /// The generation currently published for `lane`.
+    ///
+    /// A transaction lane the actor has not opened yet reads `0`. That is a
+    /// starting guess, not the authority: the actor stamps the real generation
+    /// onto the reservation when it binds it (see
+    /// [`super::reservation::Reservation::adopt_generation`]), because only the
+    /// actor knows whether the connection it opened is the first incarnation of
+    /// that lane or a replacement.
     fn generation(&self, lane: Lane) -> u64 {
-        self.lane(lane).generation.load(Ordering::SeqCst)
+        match lane {
+            Lane::Op => self.op.generation.load(Ordering::SeqCst),
+            Lane::Tx(id) => self
+                .tx_map()
+                .get(&id)
+                .map_or(0, |entry| entry.generation.load(Ordering::SeqCst)),
+        }
     }
 }
 
@@ -375,7 +486,11 @@ pub struct SqliteSession {
     /// Monotonic reservation ids. Shared with nothing else; ids are opaque and
     /// only ever compared for equality.
     next_reservation: Cell<u64>,
-    /// The transaction lane's current owner, held weakly.
+    /// Each app's transaction lane id and that lane's current owner, held
+    /// weakly. **Keyed by `app_id`, and that is the whole of defect L22b's
+    /// fix**: admission is per app, matching SC-1's
+    /// `(runtime_instance_id, app_id)`, where one shared entry made it
+    /// `(runtime_instance_id, session)`.
     ///
     /// This is the **admission** authority, and it is caller-side deliberately:
     /// a `Weak` that no longer upgrades is proof the previous lease was
@@ -391,7 +506,10 @@ pub struct SqliteSession {
     /// admission on that count made a released lease look live, and a loop
     /// that takes a lease per iteration would fail intermittently. `TxLease`
     /// is never cloned into a command, so its count is exactly lease liveness.
-    tx_owner: RefCell<Option<Weak<TxLeaseAlive>>>,
+    tx_lanes: RefCell<HashMap<String, TxLaneSlot>>,
+    /// Monotonic transaction-lane ids. An app keeps its id for the session's
+    /// life even if the actor evicts the connection behind it.
+    next_tx_lane: Cell<u32>,
     /// Worker `JoinHandle`. Held only so the OS thread is tracked (we never
     /// join it from the session side - cancellation is signalled via the
     /// `Shutdown` command + sender drop).
@@ -404,13 +522,57 @@ impl std::fmt::Debug for SqliteSession {
     }
 }
 
-/// Startup handshake payload: the worker publishes both connections' interrupt
-/// handles once the PRAGMA bootstrap and CDC install have succeeded.
+/// One app's slot in [`SqliteSession::tx_lanes`].
+struct TxLaneSlot {
+    id: TxLaneId,
+    owner: Option<Weak<TxLeaseAlive>>,
+}
+
+impl TxLaneSlot {
+    fn is_live(&self) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|previous| previous.strong_count() > 0)
+    }
+}
+
+/// How many app transaction connections one session may hold open at once.
+///
+/// A bound, not a tuning knob: without one, every app that ever opened a
+/// transaction keeps a connection (and its file descriptors) for the session's
+/// life, which is unbounded per-tenant resource growth on a shared process. An
+/// idle lane is evicted to make room; only when every lane is mid-transaction
+/// does a new app get [`TX_LANES_EXHAUSTED`] - a refusal with a code of its own
+/// so it is never confused with an app's own overlapping transaction.
+///
+/// Eight is chosen against the vector this backend actually runs in: SQLite is
+/// the dev tier, `crates/zeroship-worker/src/main.rs:328-334` refuses to boot
+/// on a SQLite DSN, and `crates/zeroship-runtime/src/core/serve.rs:173-179`
+/// clamps `zeroship serve` to one worker thread on one, so the live case is a
+/// single app and eight is seven spare.
+const MAX_TX_LANES: usize = 8;
+
+/// The cap, for the arm that rules on it.
+///
+/// Exported rather than repeated as a literal in the test: a test that spells
+/// its own `8` keeps passing when the cap moves, over a fixture that no longer
+/// reaches the boundary it claims to.
+#[cfg(feature = "test-helpers")]
+pub const MAX_TX_LANES_FOR_TESTS: usize = MAX_TX_LANES;
+
+/// Startup handshake payload: the worker publishes `op_conn`'s interrupt
+/// handle once the PRAGMA bootstrap and CDC install have succeeded. Transaction
+/// lanes register theirs later, as they are opened.
 type StartupSignal = Result<Arc<Interrupts>, DbError>;
 
 impl SqliteSession {
-    /// Open a SQLite database at `db_path`, open its two connections and spawn
-    /// the actor.
+    /// Open a SQLite database at `db_path`, open its autocommit connection and
+    /// spawn the actor.
+    ///
+    /// Transaction connections are NOT opened here: an app gets one on its
+    /// first `db.transaction()`. A dev process whose app never opens an
+    /// explicit transaction therefore holds one connection where it used to
+    /// hold two.
     ///
     /// The worker runs the bootstrap PRAGMA sequence synchronously on both
     /// connections before entering the receive loop; any failure surfaces here
@@ -469,13 +631,14 @@ impl SqliteSession {
         // independently of any compio runtime - flume's `recv()` parks on
         // `std::thread::park`, so blocking briefly here does not stall the
         // runtime. This constructor is called once per backend at boot and the
-        // worker reports within two connections' worth of PRAGMAs.
+        // worker reports within one connection's worth of PRAGMAs.
         match startup_rx.recv() {
             Ok(Ok(interrupts)) => Ok(Self {
                 tx,
                 interrupts,
                 next_reservation: Cell::new(1),
-                tx_owner: RefCell::new(None),
+                tx_lanes: RefCell::new(HashMap::new()),
+                next_tx_lane: Cell::new(0),
                 _worker: worker,
             }),
             Ok(Err(e)) => Err(e),
@@ -513,14 +676,15 @@ impl SqliteSession {
         self.autocommit_reservation()
     }
 
-    /// Reserve `tx_conn` for one explicit creator transaction.
+    /// Reserve `app_id`'s transaction connection for one explicit creator
+    /// transaction, opening that connection if the app has none yet.
     ///
-    /// Refuses with a typed error while another lease is live. "Live" is
+    /// Refuses with a typed error while **that app's** lease is live. "Live" is
     /// decided by whether the previous `Weak` still upgrades, so a lease
     /// dropped without settling frees the lane immediately rather than after a
     /// queue round trip.
     ///
-    /// ## Policy chosen here, and OWED to a later decision
+    /// ## Policy chosen here
     ///
     /// Two questions the design did not settle. Both are answered by the code
     /// below, so they are stated here rather than discovered - the Postgres
@@ -529,26 +693,26 @@ impl SqliteSession {
     /// `acquire_dedicated_client`, and these are this half's.
     ///
     /// 1. **Exhaustion: refuse immediately, do not queue.** A second
-    ///    `db.transaction()` gets `transaction_connection_busy` at once rather
-    ///    than waiting for the lane. Conservative because a refusal is decided
-    ///    from state the caller can see and needs no deadline to be safe; the
-    ///    Postgres half queues on the pool's `acquire_timeout` instead, so the
-    ///    two arms differ in what a creator observes under contention. When
-    ///    SC-1's deadline lands, whether this becomes a bounded wait is that
-    ///    decision's to make.
-    /// 2. **Scope of the admission key.** SC-1 keys a transaction slot on
-    ///    `(runtime_instance_id, app_id)`. One `SqliteSession` serves **every**
-    ///    ATTACHed app, so the key here is effectively
-    ///    `(runtime_instance_id, session)`: app B's `db.transaction()` is
-    ///    refused while app A holds one. That is narrower than SC-1 asks for
-    ///    and it is a property of the one-file-per-app-with-one-actor layout,
-    ///    not of this function - widening it means a `tx_conn` per app, which
-    ///    is a connection-count decision nobody has taken.
+    ///    `db.transaction()` *for the same app* gets
+    ///    `transaction_connection_busy` at once rather than waiting for the
+    ///    lane. Conservative because a refusal is decided from state the caller
+    ///    can see and needs no deadline to be safe; the Postgres half queues on
+    ///    the pool's `acquire_timeout` instead, so the two arms differ in what a
+    ///    creator observes under contention. When SC-1's deadline lands, whether
+    ///    this becomes a bounded wait is that decision's to make.
+    /// 2. **Scope of the admission key: `(session, app_id)`.** SC-1 keys a
+    ///    transaction slot on `(runtime_instance_id, app_id)` and this is the
+    ///    same key, because a session is one runtime instance's SQLite
+    ///    resources. It was `(runtime_instance_id, session)` until the
+    ///    transaction connection became per app - one shared connection meant
+    ///    app B's `db.transaction()` was refused while app A held one, which is
+    ///    defect L22b.
     ///
     /// Both are visible to creators, so they are also written down in
     /// `docs/reference/sqlite-divergences.md`; keep the two in step.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
+        app_id: &str,
     ) -> Result<Rc<TxLease>, DbError> {
         // The lease is created and published BEFORE the `Reserve` is queued, so
         // that dropping this future mid-send frees the lane rather than
@@ -557,27 +721,57 @@ impl SqliteSession {
         // own `Reserve` is a no-op (the ids do not match) and the next
         // `Reserve`'s unconditional cleanup covers the binding anyway.
         let lease = {
-            let mut owner = self.tx_owner.borrow_mut();
-            if owner.as_ref().is_some_and(|previous| previous.strong_count() > 0) {
-                return Err(DbError::validation(
+            let mut lanes = self.tx_lanes.borrow_mut();
+            if lanes.get(app_id).is_some_and(TxLaneSlot::is_live) {
+                return Err(DbError::validation_hinted(
                     "transaction_connection_busy",
-                    "db: this SQLite session already holds an open transaction on tx_conn; \
-                     one explicit transaction at a time",
+                    format!(
+                        "db: app '{app_id}' already holds an open transaction on its SQLite \
+                         transaction connection; one explicit transaction at a time"
+                    ),
+                    "Commit or roll back the open db.transaction(...) before starting another \
+                     one for this app.",
                 ));
             }
+            // Drop slots whose lease is gone before minting a new id, so a
+            // process that cycles through app ids does not accumulate them.
+            if lanes.len() >= MAX_TX_LANES {
+                lanes.retain(|held, slot| held == app_id || slot.is_live());
+            }
+            let id = match lanes.get(app_id) {
+                Some(slot) => slot.id,
+                None => {
+                    let next = self.next_tx_lane.get();
+                    self.next_tx_lane.set(next + 1);
+                    TxLaneId(next)
+                }
+            };
             let alive = Arc::new(TxLeaseAlive);
-            *owner = Some(Arc::downgrade(&alive));
+            lanes.insert(
+                app_id.to_string(),
+                TxLaneSlot {
+                    id,
+                    owner: Some(Arc::downgrade(&alive)),
+                },
+            );
             Rc::new(TxLease {
                 alive,
-                reservation: self.mint(Lane::Tx, ReservationKind::Transaction),
+                reservation: self.mint(Lane::Tx(id), ReservationKind::Transaction),
                 tx: self.tx.clone(),
             })
         };
 
+        let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
         self.send(Command::Reserve {
             reservation: Arc::clone(lease.reservation()),
+            app_id: app_id.to_string(),
+            reply: reply_tx,
         })
         .await?;
+        // The lease is dropped on the error path by falling out of scope, which
+        // frees the slot: an app whose connection could not be opened must not
+        // be left looking busy.
+        recv_reply(reply_rx).await??;
 
         Ok(lease)
     }
@@ -594,9 +788,16 @@ impl SqliteSession {
     pub fn unregistered_transaction_handle_for_tests(
         self: &Rc<Self>,
     ) -> SqliteSessionHandle {
+        // `u32::MAX` is a lane id `next_tx_lane` cannot reach before the
+        // process runs out of memory, so the actor has never opened it and
+        // never will - which is exactly the "names a connection it does not
+        // own" condition this handle exists to produce.
         let lease = Rc::new(TxLease {
             alive: Arc::new(TxLeaseAlive),
-            reservation: self.mint(Lane::Tx, ReservationKind::Transaction),
+            reservation: self.mint(
+                Lane::Tx(TxLaneId(u32::MAX)),
+                ReservationKind::Transaction,
+            ),
             tx: self.tx.clone(),
         });
         SqliteSessionHandle::with_lease(Rc::clone(self), lease)
@@ -1200,7 +1401,7 @@ pub fn arm_next_command_gate_for_tests() -> NextCommandGate {
 // The actor
 // ---------------------------------------------------------------------------
 
-/// One of the actor's two connections.
+/// One of the actor's connections.
 struct LaneConn {
     conn: Connection,
     generation: u64,
@@ -1213,19 +1414,35 @@ struct LaneConn {
     _dispatcher: Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>,
 }
 
+/// One app's transaction connection, plus the bookkeeping that decides who may
+/// use it.
+struct TxLane {
+    conn: LaneConn,
+    /// The app whose file this connection has ATTACHed. It has **only** that
+    /// one, which is what makes a transaction unable to name another tenant's
+    /// tables at all rather than merely by convention.
+    app_id: String,
+    /// The reservation whose transaction state this connection currently holds.
+    bound: Option<u64>,
+    /// The command sequence at which this lane was last used, for eviction.
+    last_used: u64,
+}
+
 struct Actor {
     op: LaneConn,
-    tx: LaneConn,
+    /// Per-app transaction connections, keyed by the lane id the session
+    /// assigned. Bounded by [`MAX_TX_LANES`]; an idle lane is evicted to make
+    /// room for a new app.
+    tx: HashMap<TxLaneId, TxLane>,
     interrupts: Arc<Interrupts>,
-    /// `(alias, path)` for every ATTACH, replayed onto a recycled connection.
+    /// `(alias, path)` for every ATTACH, replayed onto a recycled connection
+    /// and read when a transaction lane is opened for that app.
     attachments: Vec<(String, String)>,
-    /// The reservation whose transaction state `tx_conn` currently holds.
-    tx_bound: Option<u64>,
     /// The reservation that last ran a command on `op_conn`.
     ///
     /// `op_conn`'s owner is short-lived by construction - one autocommit
     /// reservation, one command - so this is not an admission gate the way
-    /// [`Self::tx_bound`] is. It names the lane's current occupant, which is
+    /// [`TxLane::bound`] is. It names the lane's current occupant, which is
     /// what a refusal has to report and what a later cancellation has to check.
     op_bound: Option<u64>,
     db_path: PathBuf,
@@ -1269,12 +1486,7 @@ impl Actor {
     ) -> Result<Self, DbError> {
         let (op_conn, op_dispatcher) =
             open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref())?;
-        let (tx_conn, tx_dispatcher) =
-            open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref())?;
-        let interrupts = Arc::new(Interrupts::new(
-            op_conn.get_interrupt_handle(),
-            tx_conn.get_interrupt_handle(),
-        ));
+        let interrupts = Arc::new(Interrupts::new(op_conn.get_interrupt_handle()));
         Ok(Self {
             op: LaneConn {
                 conn: op_conn,
@@ -1282,15 +1494,9 @@ impl Actor {
                 quarantined: false,
                 _dispatcher: op_dispatcher,
             },
-            tx: LaneConn {
-                conn: tx_conn,
-                generation: 0,
-                quarantined: false,
-                _dispatcher: tx_dispatcher,
-            },
+            tx: HashMap::new(),
             interrupts,
             attachments: Vec::new(),
-            tx_bound: None,
             op_bound: None,
             db_path,
             app_id,
@@ -1299,11 +1505,58 @@ impl Actor {
         })
     }
 
-    fn lane_mut(&mut self, lane: Lane) -> &mut LaneConn {
+    fn lane_mut(&mut self, lane: Lane) -> Option<&mut LaneConn> {
         match lane {
-            Lane::Op => &mut self.op,
-            Lane::Tx => &mut self.tx,
+            Lane::Op => Some(&mut self.op),
+            Lane::Tx(id) => self.tx.get_mut(&id).map(|entry| &mut entry.conn),
         }
+    }
+
+    /// The connection behind `lane`, or a typed error when the lane is gone.
+    ///
+    /// Every caller reaches this only after [`Self::check_owner`] has passed,
+    /// so the `None` arm is not expected to fire. It is a `Result` rather than
+    /// an `expect` because this runs on the actor thread: a panic here would
+    /// take the loop down and strand every caller waiting on a reply, which is
+    /// a worse failure than the one it would be reporting.
+    fn conn_of(&mut self, lane: Lane) -> Result<&Connection, DbError> {
+        match self.lane_mut(lane) {
+            Some(entry) => Ok(&entry.conn),
+            None => Err(DbError::internal(format!(
+                "sqlite actor: {} vanished mid-command",
+                lane.name()
+            ))),
+        }
+    }
+
+    fn lane_ref(&self, lane: Lane) -> Option<&LaneConn> {
+        match lane {
+            Lane::Op => Some(&self.op),
+            Lane::Tx(id) => self.tx.get(&id).map(|entry| &entry.conn),
+        }
+    }
+
+    /// The reservation currently bound to `lane`, if any.
+    fn lane_bound(&self, lane: Lane) -> Option<u64> {
+        match lane {
+            Lane::Op => self.op_bound,
+            Lane::Tx(id) => self.tx.get(&id).and_then(|entry| entry.bound),
+        }
+    }
+
+    /// The error a command naming a transaction lane the actor does not hold
+    /// gets. It is a non-owner condition, not a distinct class: the connection
+    /// this reservation claims is not one the actor has bound to it, which is
+    /// the same statement as an id mismatch.
+    fn no_such_lane(reservation: &Reservation) -> DbError {
+        DbError::validation(
+            "reservation_not_owner",
+            format!(
+                "db: reservation {} names a transaction connection this session does not \
+                 hold (the app has no open transaction connection)",
+                reservation.id()
+            ),
+        )
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -1323,8 +1576,27 @@ impl Actor {
             self.app_id.clone(),
             self.packet_tx.clone(),
         );
-        let attachments = self.attachments.clone();
-        let entry = self.lane_mut(lane);
+        // A transaction lane replays only its own app's ATTACH; `op_conn`
+        // replays every one. Restoring the full list onto a transaction lane
+        // would hand it the reach the per-app split just removed.
+        let attachments: Vec<(String, String)> = match lane {
+            Lane::Op => self.attachments.clone(),
+            Lane::Tx(id) => {
+                let Some(entry) = self.tx.get(&id) else {
+                    return;
+                };
+                let owner = entry.app_id.clone();
+                self.attachments
+                    .iter()
+                    .filter(|(alias, _)| alias == &owner)
+                    .cloned()
+                    .collect()
+            }
+        };
+        let interrupts = Arc::clone(&self.interrupts);
+        let Some(entry) = self.lane_mut(lane) else {
+            return;
+        };
         let generation = entry.generation + 1;
         match open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref()) {
             Ok((conn, dispatcher)) => {
@@ -1343,7 +1615,7 @@ impl Actor {
                 entry._dispatcher = dispatcher;
                 entry.generation = generation;
                 entry.quarantined = false;
-                self.interrupts.replace(lane, generation, handle);
+                interrupts.replace(lane, generation, handle);
                 tracing::warn!(
                     lane = lane.name(),
                     generation,
@@ -1366,26 +1638,115 @@ impl Actor {
     /// Apply an outcome's quarantine verdict, recycling immediately.
     fn apply_outcome(&mut self, lane: Lane, outcome: &TerminalOutcome) {
         if outcome.quarantines() {
-            self.lane_mut(lane).quarantined = true;
+            if let Some(entry) = self.lane_mut(lane) {
+                entry.quarantined = true;
+            }
             self.recycle(lane);
         }
     }
 
-    /// Roll back anything a departing transaction reservation left open.
-    fn unbind_tx(&mut self) {
-        self.tx_bound = None;
-        if self.tx.conn.is_autocommit() {
+    /// Roll back anything a departing transaction reservation left open on
+    /// `id`'s connection.
+    fn unbind_tx(&mut self, id: TxLaneId) {
+        let Some(entry) = self.tx.get_mut(&id) else {
+            return;
+        };
+        entry.bound = None;
+        if entry.conn.conn.is_autocommit() {
             return;
         }
-        let raw = self.tx.conn.execute_batch("ROLLBACK");
-        let outcome = reservation::classify_rollback(&self.tx.conn, raw, false, None);
+        let raw = entry.conn.conn.execute_batch("ROLLBACK");
+        let outcome = reservation::classify_rollback(&entry.conn.conn, raw, false, None);
         if outcome.quarantines() {
             tracing::error!(
                 outcome = ?outcome,
                 "sqlite actor: a released transaction lease left tx_conn in an unproved state"
             );
         }
-        self.apply_outcome(Lane::Tx, &outcome);
+        self.apply_outcome(Lane::Tx(id), &outcome);
+    }
+
+    /// Open `app_id`'s transaction connection, evicting an idle lane first when
+    /// the session is already at [`MAX_TX_LANES`].
+    ///
+    /// The connection's `main` is the session's own database, exactly as
+    /// `op_conn`'s is, so unqualified SQL means the same thing on both. What it
+    /// does NOT get is the other apps' ATTACHes: a transaction lane carries one
+    /// app's file and no other, so a creator transaction cannot name another
+    /// tenant's tables even if a SQL builder were tricked into emitting one.
+    fn open_tx_lane(&mut self, id: TxLaneId, app_id: &str) -> Result<u64, DbError> {
+        if self.tx.len() >= MAX_TX_LANES {
+            let victim = self
+                .tx
+                .iter()
+                .filter(|(held, entry)| **held != id && entry.bound.is_none())
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(held, _)| *held);
+            match victim {
+                Some(held) => self.close_tx_lane(held),
+                None => {
+                    return Err(DbError::validation_hinted(
+                        TX_LANES_EXHAUSTED,
+                        format!(
+                            "db: this SQLite session already holds {MAX_TX_LANES} apps' \
+                             transaction connections and all of them are mid-transaction, so \
+                             app '{app_id}' cannot open one"
+                        ),
+                        "This is contention with OTHER apps sharing this dev process, not a \
+                         fault in your code - retry.",
+                    ));
+                }
+            }
+        }
+
+        let path = self
+            .attachments
+            .iter()
+            .find(|(alias, _)| alias == app_id)
+            .map(|(_, path)| path.clone());
+        let (conn, dispatcher) = open_lane_connection(
+            &self.db_path,
+            self.app_id.as_deref(),
+            self.packet_tx.as_ref(),
+        )?;
+        if let Some(path) = &path {
+            run_attach(&conn, app_id, path)?;
+        }
+        let handle = conn.get_interrupt_handle();
+        // The generation a previous incarnation of this lane id left behind, or
+        // 0 on a first open. Publishing it - rather than always 0 - is what
+        // keeps a reservation from the closed connection out of this one.
+        let generation = self.interrupts.generation(Lane::Tx(id));
+        self.interrupts.replace(Lane::Tx(id), generation, handle);
+        let seq = self.seq;
+        self.tx.insert(
+            id,
+            TxLane {
+                conn: LaneConn {
+                    conn,
+                    generation,
+                    quarantined: false,
+                    _dispatcher: dispatcher,
+                },
+                app_id: app_id.to_string(),
+                bound: None,
+                last_used: seq,
+            },
+        );
+        Ok(generation)
+    }
+
+    /// Close an idle transaction lane, bumping its generation so an interrupt
+    /// aimed at the connection just closed cannot reach its replacement.
+    fn close_tx_lane(&mut self, id: TxLaneId) {
+        if let Some(entry) = self.tx.remove(&id) {
+            debug_assert!(
+                entry.bound.is_none(),
+                "close_tx_lane must not drop a bound transaction connection"
+            );
+            drop(entry);
+        }
+        self.interrupts.retire(id);
     }
 
     /// Refuse a command whose reservation does not own the connection it would
@@ -1408,9 +1769,8 @@ impl Actor {
     /// `statement_cancelled`: the wrong error naming the wrong reason.
     fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
         let lane = reservation.lane();
-        let entry = match lane {
-            Lane::Op => &self.op,
-            Lane::Tx => &self.tx,
+        let Some(entry) = self.lane_ref(lane) else {
+            return Err(Self::no_such_lane(reservation));
         };
         if entry.quarantined {
             return Err(DbError::Coded {
@@ -1424,13 +1784,13 @@ impl Actor {
             });
         }
         match lane {
-            Lane::Tx if self.tx_bound != Some(reservation.id()) => {
+            Lane::Tx(_) if self.lane_bound(lane) != Some(reservation.id()) => {
                 Err(DbError::validation(
                     "reservation_not_owner",
                     format!(
                         "db: reservation {} does not own tx_conn (current owner: {:?})",
                         reservation.id(),
-                        self.tx_bound
+                        self.lane_bound(lane)
                     ),
                 ))
             }
@@ -1455,17 +1815,19 @@ impl Actor {
                 let _ = gate.release_rx.recv();
             }
             match cmd {
-                Command::Reserve { reservation } => {
-                    // Whatever the previous binding left open is rolled back
-                    // here, not merely on `Release`: a lease dropped without
-                    // settling, or a `Release` lost to a full queue, must not
-                    // leak its transaction into the next reservation.
-                    self.unbind_tx();
-                    self.tx_bound = Some(reservation.id());
+                Command::Reserve {
+                    reservation,
+                    app_id,
+                    reply,
+                } => {
+                    let result = self.run_reserve(&reservation, &app_id);
+                    let _ = reply.send(result);
                 }
                 Command::Release { reservation } => {
-                    if self.tx_bound == Some(reservation.id()) {
-                        self.unbind_tx();
+                    if let Some(id) = reservation.lane().tx_id() {
+                        if self.lane_bound(reservation.lane()) == Some(reservation.id()) {
+                            self.unbind_tx(id);
+                        }
                     }
                 }
                 Command::Exec {
@@ -1557,6 +1919,60 @@ impl Actor {
         // happens on close.
     }
 
+    /// Bind an app's transaction connection to `reservation`, opening it if the
+    /// app has none.
+    ///
+    /// Whatever the previous binding left open is rolled back here, not merely
+    /// on `Release`: a lease dropped without settling, or a `Release` lost to a
+    /// full queue, must not leak its transaction into the next reservation.
+    fn run_reserve(
+        &mut self,
+        reservation: &Arc<Reservation>,
+        app_id: &str,
+    ) -> Result<(), DbError> {
+        let Some(id) = reservation.lane().tx_id() else {
+            return Err(DbError::internal(
+                "sqlite actor: Reserve names the autocommit lane, which is never reserved",
+            ));
+        };
+        // A lane id belongs to one app for the session's life (the session mints
+        // a fresh id for an app it has pruned), so a mismatch here is a bug
+        // rather than a state to serve. Rebuild instead of running an app's
+        // transaction against another app's connection.
+        if self.tx.get(&id).is_some_and(|entry| entry.app_id != app_id) {
+            tracing::error!(
+                lane = id.0,
+                app_id,
+                "sqlite actor: transaction lane id reused across apps; rebuilding it"
+            );
+            self.unbind_tx(id);
+            if let Some(entry) = self.tx.get_mut(&id) {
+                entry.bound = None;
+            }
+            self.close_tx_lane(id);
+        }
+        if self.tx.contains_key(&id) {
+            self.unbind_tx(id);
+        } else {
+            self.open_tx_lane(id, app_id)?;
+        }
+        // Read the generation AFTER the rollback above: `unbind_tx` can
+        // quarantine and recycle the connection, which bumps it.
+        let Some(generation) = self.tx.get(&id).map(|entry| entry.conn.generation) else {
+            return Err(Self::no_such_lane(reservation));
+        };
+        // Stamp before binding: from the caller's side the reservation becomes
+        // usable the instant this command's reply lands, so the generation it
+        // reports must already be the connection's.
+        reservation.adopt_generation(generation);
+        let seq = self.seq;
+        if let Some(entry) = self.tx.get_mut(&id) {
+            entry.bound = Some(reservation.id());
+            entry.last_used = seq;
+        }
+        Ok(())
+    }
+
     /// Execute one data command under `reservation`.
     ///
     /// The order is the protocol: validate ownership, transition to `Running`
@@ -1602,14 +2018,14 @@ impl Actor {
         // `is_autocommit` here is the same authority the terminal classifier
         // uses, applied one step earlier.
         let wrap = reservation.kind() == ReservationKind::Autocommit
-            && self.lane_mut(lane).conn.is_autocommit()
+            && self.conn_of(lane)?.is_autocommit()
             && permits_explicit_transaction(sql);
 
         let result = if wrap {
             self.run_wrapped_autocommit(reservation, lane, op)
         } else {
             reservation.mark_began();
-            let conn = &self.lane_mut(lane).conn;
+            let conn = self.conn_of(lane)?;
             op(conn).map_err(RunError::into_db)
         };
         reservation.leave_running();
@@ -1623,7 +2039,7 @@ impl Actor {
         op: impl FnOnce(&Connection) -> Result<T, RunError>,
     ) -> Result<T, DbError> {
         {
-            let conn = &self.lane_mut(lane).conn;
+            let conn = self.conn_of(lane)?;
             reservation.mark_began();
             if let Err(e) = conn.execute_batch("BEGIN DEFERRED") {
                 return Err(from_sqlite(e));
@@ -1631,7 +2047,7 @@ impl Actor {
         }
 
         let raw = {
-            let conn = &self.lane_mut(lane).conn;
+            let conn = self.conn_of(lane)?;
             op(conn)
         };
 
@@ -1639,7 +2055,7 @@ impl Actor {
             Err(e) => {
                 // SC-2 consequence 3: an autocommit operation error must never
                 // be followed by a COMMIT. Terminalize first.
-                let conn = &self.lane_mut(lane).conn;
+                let conn = self.conn_of(lane)?;
                 let rollback = conn.execute_batch("ROLLBACK");
                 let outcome = reservation::classify_rollback(conn, rollback, false, None);
                 self.apply_outcome(lane, &outcome);
@@ -1650,14 +2066,14 @@ impl Actor {
                     // A cancellation claimed the terminal first. Roll back and
                     // report the cancellation; the value is discarded because
                     // its transaction is about to be undone.
-                    let conn = &self.lane_mut(lane).conn;
+                    let conn = self.conn_of(lane)?;
                     let rollback = conn.execute_batch("ROLLBACK");
                     let outcome = reservation::classify_rollback(conn, rollback, true, None);
                     reservation.store_outcome(outcome.clone());
                     self.apply_outcome(lane, &outcome);
                     return Err(outcome.into_result().unwrap_err());
                 }
-                let conn = &self.lane_mut(lane).conn;
+                let conn = self.conn_of(lane)?;
                 let commit = conn.execute_batch("COMMIT");
                 let outcome = reservation::classify_commit(conn, commit);
                 reservation.store_outcome(outcome.clone());
@@ -1680,12 +2096,12 @@ impl Actor {
 
         if intent == TerminalIntent::Commit && !reservation.claim_completed() {
             // A cancellation holds the terminal. Do not commit.
-            let conn = &self.lane_mut(lane).conn;
+            let conn = self.conn_of(lane)?;
             let rollback = conn.execute_batch("ROLLBACK");
             let outcome = reservation::classify_rollback(conn, rollback, true, None);
             reservation.store_outcome(outcome.clone());
             self.apply_outcome(lane, &outcome);
-            self.tx_bound = None;
+            self.clear_tx_binding(lane);
             return Ok(outcome);
         }
         if intent == TerminalIntent::Rollback {
@@ -1703,7 +2119,7 @@ impl Actor {
         let _ = reservation.enter_running(seq);
         reservation.mark_began();
         let outcome = {
-            let conn = &self.lane_mut(lane).conn;
+            let conn = self.conn_of(lane)?;
             match intent {
                 TerminalIntent::Commit => {
                     let raw = conn.execute_batch("COMMIT");
@@ -1718,7 +2134,7 @@ impl Actor {
         reservation.leave_running();
         reservation.store_outcome(outcome.clone());
         self.apply_outcome(lane, &outcome);
-        self.tx_bound = None;
+        self.clear_tx_binding(lane);
         Ok(outcome)
     }
 
@@ -1733,20 +2149,27 @@ impl Actor {
     /// 2. **The connection was replaced.** A quarantined lane is closed,
     ///    reopened and its generation bumped; nothing this reservation did
     ///    survives on the replacement.
+    /// 3. **The lane is gone.** A transaction connection evicted to make room
+    ///    for another app took its transaction with it, so there is nothing
+    ///    here to roll back either.
     fn cancellation_still_owns_lane(&self, reservation: &Reservation) -> bool {
         let lane = reservation.lane();
-        let entry = match lane {
-            Lane::Op => &self.op,
-            Lane::Tx => &self.tx,
+        let Some(entry) = self.lane_ref(lane) else {
+            return false;
         };
         if entry.generation != reservation.generation() {
             return false;
         }
-        let bound = match lane {
-            Lane::Op => self.op_bound,
-            Lane::Tx => self.tx_bound,
-        };
-        bound == Some(reservation.id())
+        self.lane_bound(lane) == Some(reservation.id())
+    }
+
+    /// Release `lane`'s binding if it is a transaction lane.
+    fn clear_tx_binding(&mut self, lane: Lane) {
+        if let Some(id) = lane.tx_id() {
+            if let Some(entry) = self.tx.get_mut(&id) {
+                entry.bound = None;
+            }
+        }
     }
 
     /// Resolve a cancellation: roll the reservation's connection back, retire
@@ -1781,8 +2204,10 @@ impl Actor {
                 cause: None,
             };
             reservation.store_outcome(outcome.clone());
-            if reservation.lane() == Lane::Tx && self.tx_bound == Some(reservation.id()) {
-                self.tx_bound = None;
+            if reservation.lane().is_tx()
+                && self.lane_bound(reservation.lane()) == Some(reservation.id())
+            {
+                self.clear_tx_binding(reservation.lane());
             }
             return outcome;
         }
@@ -1809,31 +2234,60 @@ impl Actor {
         // because there was no transaction" is classified by `is_autocommit`,
         // not treated as a failure.
         let outcome = {
-            let conn = &self.lane_mut(lane).conn;
+            // `cancellation_still_owns_lane` above already proved the lane is
+            // present, so the `None` arm is unreachable; it reports rather than
+            // panicking because this runs on the actor thread.
+            let Some(conn) = self.lane_mut(lane).map(|entry| &entry.conn) else {
+                let outcome = TerminalOutcome::Cancelled {
+                    cleanup: CancelCleanup::AlreadyRetired,
+                    cause: None,
+                };
+                reservation.store_outcome(outcome.clone());
+                return outcome;
+            };
             let raw = conn.execute_batch("ROLLBACK");
             reservation::classify_rollback(conn, raw, true, None)
         };
         reservation.store_outcome(outcome.clone());
         self.apply_outcome(lane, &outcome);
         match lane {
-            Lane::Tx if self.tx_bound == Some(reservation.id()) => self.tx_bound = None,
+            Lane::Tx(_) if self.lane_bound(lane) == Some(reservation.id()) => {
+                self.clear_tx_binding(lane);
+            }
             Lane::Op if self.op_bound == Some(reservation.id()) => self.op_bound = None,
             _ => {}
         }
         outcome
     }
 
-    /// ATTACH on both connections, or on neither.
+    /// ATTACH on `op_conn` and on this app's transaction connection, or on
+    /// neither.
     ///
     /// The asymmetric outcome is the one to avoid: `op_conn` sees the app and
-    /// `tx_conn` does not, so an ordinary read succeeds and the same app's
-    /// transaction fails with "no such table". SQLite refuses `ATTACH` inside
-    /// an explicit transaction, so this genuinely can fail on `tx_conn` alone -
-    /// while another app holds a creator transaction open - and the DETACH
-    /// below is what keeps that a clean failure rather than a split view.
+    /// the transaction connection does not, so an ordinary read succeeds and
+    /// the same app's transaction fails with "no such table". SQLite refuses
+    /// `ATTACH` inside an explicit transaction, so this can still fail on the
+    /// transaction connection alone, and the DETACH below is what keeps that a
+    /// clean failure rather than a split view.
+    ///
+    /// **Only this app's transaction connection**, which is the point of the
+    /// per-app split: another tenant's lane never learns the alias, so its
+    /// transaction cannot name this app's tables even by accident. It also
+    /// narrows the failure above - it used to fire while *another* app held a
+    /// transaction open, and now only this app's own open transaction can
+    /// cause it.
     fn run_attach_both(&mut self, app_id: &str, db_path: &str) -> Result<(), DbError> {
         run_attach(&self.op.conn, app_id, db_path)?;
-        if let Err(e) = run_attach(&self.tx.conn, app_id, db_path) {
+        let owner = self
+            .tx
+            .iter()
+            .find(|(_, entry)| entry.app_id == app_id)
+            .map(|(id, _)| *id);
+        let lane_attach = match owner.and_then(|id| self.tx.get(&id)) {
+            Some(entry) => run_attach(&entry.conn.conn, app_id, db_path),
+            None => Ok(()),
+        };
+        if let Err(e) = lane_attach {
             let escaped_alias = app_id.replace('"', "\"\"");
             let _ = self
                 .op
@@ -1854,7 +2308,21 @@ impl Actor {
         temp_path: &str,
         live_path: &str,
     ) -> Result<(), DbError> {
-        let result = run_reattach_file(&self.op.conn, &self.tx.conn, app_id, temp_path, live_path);
+        let owner = self
+            .tx
+            .iter()
+            .find(|(_, entry)| entry.app_id == app_id)
+            .map(|(id, _)| *id);
+        let result = match owner.and_then(|id| self.tx.get(&id)) {
+            Some(entry) => run_reattach_file(
+                &self.op.conn,
+                Some(&entry.conn.conn),
+                app_id,
+                temp_path,
+                live_path,
+            ),
+            None => run_reattach_file(&self.op.conn, None, app_id, temp_path, live_path),
+        };
         if result.is_ok() {
             self.attachments
                 .retain(|(alias, _)| alias.as_str() != app_id);
@@ -2147,7 +2615,7 @@ fn run_vacuum_into(
 /// after `op_conn` detached, `op_conn`'s alias is restored before returning.
 fn run_reattach_file(
     op_conn: &Connection,
-    tx_conn: &Connection,
+    tx_conn: Option<&Connection>,
     app_id: &str,
     temp_path: &str,
     live_path: &str,
@@ -2167,7 +2635,15 @@ fn run_reattach_file(
             ),
         }
     })?;
-    if let Err(e) = tx_conn.execute_batch(&detach_sql) {
+    // `tx_conn` is `None` when this app has no transaction connection open -
+    // the common case, since a lane exists only after the app's first
+    // `db.transaction()`. There is then nothing to detach and nothing to
+    // restore.
+    let tx_detach = match tx_conn {
+        Some(tx_conn) => tx_conn.execute_batch(&detach_sql),
+        None => Ok(()),
+    };
+    if let Err(e) = tx_detach {
         // Restore op_conn's alias so the session does not lose it over a
         // failure that changed nothing on disk.
         let _ = op_conn.execute_batch(&attach_live_sql);
@@ -2182,7 +2658,9 @@ fn run_reattach_file(
     // Step 2 - atomic rename.
     if let Err(e) = std::fs::rename(temp_path, live_path) {
         let _ = op_conn.execute_batch(&attach_live_sql);
-        let _ = tx_conn.execute_batch(&attach_live_sql);
+        if let Some(tx_conn) = tx_conn {
+            let _ = tx_conn.execute_batch(&attach_live_sql);
+        }
         return Err(DbError::Internal {
             message: format!(
                 "ReattachFile: std::fs::rename({temp_path:?} -> {live_path:?}) failed: {e}; \
@@ -2194,7 +2672,11 @@ fn run_reattach_file(
     }
 
     // Step 3 - ATTACH the new file under the original alias on both.
-    for (conn, name) in [(op_conn, "op_conn"), (tx_conn, "tx_conn")] {
+    let targets: Vec<(&Connection, &str)> = match tx_conn {
+        Some(tx_conn) => vec![(op_conn, "op_conn"), (tx_conn, "tx_conn")],
+        None => vec![(op_conn, "op_conn")],
+    };
+    for (conn, name) in targets {
         conn.execute_batch(&attach_live_sql).map_err(|e| {
             DbError::Internal {
                 message: format!(
@@ -2327,7 +2809,7 @@ mod tests {
 
         run_reattach_file(
             &op,
-            &tx,
+            Some(&tx),
             "app_demo",
             temp_path.to_str().unwrap(),
             live_path.to_str().unwrap(),
@@ -2362,7 +2844,7 @@ mod tests {
 
         let result = run_reattach_file(
             &op,
-            &tx,
+            Some(&tx),
             "never_attached",
             temp.to_str().unwrap(),
             live.to_str().unwrap(),

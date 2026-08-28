@@ -45,26 +45,57 @@ use rusqlite::Connection;
 
 use crate::error::DbError;
 
-/// Which of an attached app's two connections a command runs on.
+/// Opaque identifier for one app's transaction lane.
 ///
-/// SC-2 Decision 1: `tx_conn` is reserved to at most one explicit creator
-/// transaction, `op_conn` serves autocommit work. Two connections, one actor
-/// loop - see the module docs on [`super::session`].
+/// Assigned by the session when an app first reserves a transaction and reused
+/// for that app's whole life on the session. It is NOT the app id: the actor
+/// and the caller both need a `Copy` key they can put inside a [`Lane`], and an
+/// app id is a `String`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct TxLaneId(pub(crate) u32);
+
+/// Which connection a command runs on.
+///
+/// SC-2 Decision 1: a transaction connection is reserved to at most one
+/// explicit creator transaction, `op_conn` serves autocommit work.
+///
+/// **The transaction half is per app, and that is the admission key.** SC-1
+/// admits one top-level transaction per `(runtime_instance_id, app_id)`; a
+/// single shared transaction connection enforced one per
+/// `(runtime_instance_id, session)` instead, so app B's `db.transaction()` was
+/// refused while app A held one (defect L22b). Carrying the lane id here is
+/// what makes the two keys the same key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lane {
     /// `op_conn` - autocommit operations, each wrapped in
-    /// `BEGIN DEFERRED ... COMMIT` where the statement permits it.
+    /// `BEGIN DEFERRED ... COMMIT` where the statement permits it. One
+    /// connection serves every app: an autocommit reservation is minted per
+    /// command and settles at that command's completion, so there is no
+    /// cross-command state for two apps to share.
     Op,
-    /// `tx_conn` - at most one explicit creator transaction at a time.
-    Tx,
+    /// One app's transaction connection - at most one explicit creator
+    /// transaction at a time, and that "one" is per app.
+    Tx(TxLaneId),
 }
 
 impl Lane {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Op => "op_conn",
-            Self::Tx => "tx_conn",
+            Self::Tx(_) => "tx_conn",
         }
+    }
+
+    /// The transaction lane id, if this is a transaction lane.
+    pub(crate) fn tx_id(self) -> Option<TxLaneId> {
+        match self {
+            Self::Op => None,
+            Self::Tx(id) => Some(id),
+        }
+    }
+
+    pub(crate) fn is_tx(self) -> bool {
+        matches!(self, Self::Tx(_))
     }
 }
 
@@ -87,10 +118,18 @@ pub struct Reservation {
     id: u64,
     lane: Lane,
     kind: ReservationKind,
-    /// The lane connection generation this reservation was minted against. A
+    /// The lane connection generation this reservation is bound to. A
     /// quarantined connection is recycled and its generation bumped, so an
     /// interrupt aimed at the old connection cannot land on its replacement.
-    generation: u64,
+    ///
+    /// Atomic because the caller's mint-time reading is a **guess** for a
+    /// transaction lane: the caller mints before the actor has opened (or
+    /// reopened) the connection, so only the actor knows which incarnation the
+    /// reservation actually got. It stamps the truth in
+    /// [`Self::adopt_generation`] before it acknowledges the reservation, which
+    /// is strictly before the caller can issue a command or a cancellation on
+    /// it.
+    generation: AtomicU64,
     terminal: AtomicU8,
     /// Non-zero while the actor is executing a command for this reservation.
     /// The value is that command's sequence number.
@@ -126,7 +165,7 @@ impl Reservation {
             id,
             lane,
             kind,
-            generation,
+            generation: AtomicU64::new(generation),
             terminal: AtomicU8::new(TERMINAL_PENDING),
             running_seq: AtomicU64::new(0),
             cancel_seq: AtomicU64::new(0),
@@ -149,7 +188,21 @@ impl Reservation {
     }
 
     pub(crate) fn generation(&self) -> u64 {
-        self.generation
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Actor side: record the generation of the connection this reservation was
+    /// actually bound to.
+    ///
+    /// Called from the `Reserve` handler before it acknowledges, so the value a
+    /// canceller reads is the actor's, never the caller's mint-time guess. It
+    /// closes a race the guess alone cannot: an idle lane evicted between the
+    /// mint and the bind is reopened under a bumped generation, and a
+    /// reservation left carrying the pre-eviction reading would aim its
+    /// interrupt at - and have its cancellation cleanup silently skipped on -
+    /// the wrong incarnation.
+    pub(crate) fn adopt_generation(&self, generation: u64) {
+        self.generation.store(generation, Ordering::SeqCst);
     }
 
     pub(crate) fn began(&self) -> bool {
@@ -763,7 +816,7 @@ mod tests {
 
     #[test]
     fn a_cancel_before_execution_starts_stops_the_actor_from_running() {
-        let r = Reservation::new(1, Lane::Tx, ReservationKind::Transaction, 0);
+        let r = Reservation::new(1, Lane::Tx(TxLaneId(0)), ReservationKind::Transaction, 0);
         assert_eq!(r.request_cancel(), CancelIntent::Set);
         assert!(
             !r.enter_running(7),
@@ -783,7 +836,7 @@ mod tests {
     /// rollback issued.
     #[test]
     fn a_cancel_after_the_completion_claim_neither_interrupts_nor_rolls_back() {
-        let r = Reservation::new(3, Lane::Tx, ReservationKind::Transaction, 0);
+        let r = Reservation::new(3, Lane::Tx(TxLaneId(0)), ReservationKind::Transaction, 0);
         assert!(r.claim_completed());
         r.store_outcome(TerminalOutcome::Committed);
 
@@ -797,7 +850,7 @@ mod tests {
 
     #[test]
     fn a_completion_cannot_claim_a_terminal_a_cancellation_already_holds() {
-        let r = Reservation::new(4, Lane::Tx, ReservationKind::Transaction, 0);
+        let r = Reservation::new(4, Lane::Tx(TxLaneId(0)), ReservationKind::Transaction, 0);
         assert_eq!(r.request_cancel(), CancelIntent::Set);
         assert!(r.claim_cancelled());
         assert!(
@@ -814,7 +867,7 @@ mod tests {
     /// `Cancel` destroys a stranger's open transaction.
     #[test]
     fn a_second_cancellation_claim_on_the_same_terminal_is_refused() {
-        let r = Reservation::new(5, Lane::Tx, ReservationKind::Transaction, 0);
+        let r = Reservation::new(5, Lane::Tx(TxLaneId(0)), ReservationKind::Transaction, 0);
         assert_eq!(r.request_cancel(), CancelIntent::Set);
         assert!(r.claim_cancelled(), "the first claim must win the terminal");
         assert!(
@@ -830,7 +883,7 @@ mod tests {
     /// proved and `into_result` turned it into `Ok(())`.
     #[test]
     fn a_claimed_terminal_with_no_stored_outcome_is_indeterminate_not_committed() {
-        let r = Reservation::new(6, Lane::Tx, ReservationKind::Transaction, 0);
+        let r = Reservation::new(6, Lane::Tx(TxLaneId(0)), ReservationKind::Transaction, 0);
         assert!(r.claim_completed());
         assert_eq!(r.stored_outcome(), None, "precondition: nothing recorded");
 
@@ -855,7 +908,7 @@ mod tests {
     /// that outcome is the answer and is not overwritten by the default.
     #[test]
     fn a_claimed_terminal_reports_the_outcome_its_winner_recorded() {
-        let r = Reservation::new(7, Lane::Tx, ReservationKind::Transaction, 0);
+        let r = Reservation::new(7, Lane::Tx(TxLaneId(0)), ReservationKind::Transaction, 0);
         assert!(r.claim_completed());
         r.store_outcome(TerminalOutcome::Committed);
 

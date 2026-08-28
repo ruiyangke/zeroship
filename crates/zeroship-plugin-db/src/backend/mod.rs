@@ -109,17 +109,23 @@ pub trait SqlExecutor: 'static {
     /// naming the underlying SQL driver.
     type Client;
 
-    /// Acquire a dedicated (non-pooled) connection. Caller owns the
-    /// lifetime — used by the migration lock and the native
+    /// Acquire a dedicated (non-pooled) connection for `app_id`. Caller owns
+    /// the lifetime — used by the migration lock and the native
     /// `db.transaction(fn)` orchestrator, which need a
     /// connection that survives across pool-return points.
     ///
-    /// For Postgres this opens a fresh `compio_postgres::connect(...)`
-    /// against the configured URL and spawns the connection task; for
-    /// future backends this maps to whatever "long-lived session"
-    /// primitive that backend exposes.
+    /// **`app_id` is the admission key, not a label.** SC-1 admits one
+    /// top-level transaction per `(runtime_instance_id, app_id)`, and a backend
+    /// that cannot see the app cannot enforce that key: the SQLite arm handed
+    /// out one shared transaction connection and so refused app B while app A
+    /// held one (defect L22b). Postgres checks out from a pool and needs no
+    /// per-app routing, so it ignores the argument; that asymmetry is the
+    /// point, not an oversight.
+    ///
+    /// For Postgres this is a pooled checkout; for SQLite it opens (or reuses)
+    /// that app's own transaction connection.
     #[allow(async_fn_in_trait)]
-    async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError>;
+    async fn acquire_dedicated_client(&self, app_id: &str) -> Result<Self::Client, DbError>;
 
     /// Execute a SQL statement against the pool with text-encoded
     /// parameters. Returns the count of affected rows (read paths
@@ -1723,7 +1729,7 @@ impl BackendHandle {
     /// let pg = backend
     ///     .as_postgres()
     ///     .ok_or_else(unsupported_backend_op_error)?;
-    /// pg.acquire_dedicated_client().await
+    /// pg.acquire_dedicated_client(app_id).await
     /// ```
     ///
     /// Returns `None` on the SQLite arm. The `Option`-shaped signature
@@ -2278,7 +2284,10 @@ mod tests {
         impl SqlExecutor for ContendingMock {
             type Client = MockClient;
 
-            async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
+            async fn acquire_dedicated_client(
+                &self,
+                _app_id: &str,
+            ) -> Result<Self::Client, DbError> {
                 unreachable!("not exercised by try_acquire_with_backoff")
             }
 
