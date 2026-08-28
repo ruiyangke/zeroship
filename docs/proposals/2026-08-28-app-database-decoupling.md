@@ -499,10 +499,14 @@ directly, two arms differing only in the grant's inherit option:
 | 18.4 | `180004` | row returned | `permission denied for schema` |
 
 `SET ROLE` continues to work in every arm, so narrowing is unaffected. The
-option is therefore not a 16-only detail that a later major withdraws, and the
-open item "re-run the probes on the deployed major" is closed for 16, 17 and 18.
-It remains open for any major below 16, where the per-membership inherit option
-does not exist.
+option is therefore not a 16-only detail that a later major withdraws.
+
+**This closes section 15's item 2 only, and nothing else.** Items 1 and 3
+through 8 remain measured on 18.4 alone - the revocation bound, the column-list
+grant, `BYPASSRLS` under `SET ROLE`, and the logical-decoding column filter have
+NOT been re-run on 16 or 17. Do not read the table above as re-measuring the
+probe set. Item 2 also remains open for any major below 16, where the
+per-membership inherit option does not exist.
 
 First, encryption stops fencing co-grant-holders. The `app_id` salt today means a co-tenant physically
 cannot decrypt; that is a fail-closed accident of a mechanism built for cross-tenant *replay*, and it
