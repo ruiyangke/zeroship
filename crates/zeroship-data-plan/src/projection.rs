@@ -84,6 +84,69 @@ pub enum Exposure {
     Internal,
 }
 
+/// The synthetic scalar a search ranks by.
+///
+/// # This is a KIND, not an expression, and the distinction is load-bearing
+///
+/// The variant says only *which* scalar the row carries. Everything needed to
+/// compute it (the column, the query vector, the metric, the point, the radius)
+/// lives on the [`crate::SearchCriterion`] the plan already holds, and the
+/// lowering reads it from there.
+///
+/// Carrying the operands here instead would put them in the plan **twice**, and
+/// two copies of one fact is two spellings of one query: a projection whose
+/// scalar disagreed with the criterion would render a statement that ranks by
+/// one vector and filters by another. The canonical-form property rests on
+/// there being exactly one place each fact lives.
+///
+/// The consequence is that a scalar is only meaningful inside a search, which
+/// is enforced rather than documented: [`Projection::rows`] and
+/// [`Projection::aggregate`] refuse one, so the only way a
+/// [`ProjectionSource::SearchScalar`] exists is
+/// [`crate::SearchBuilder::build`] installing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SearchScalarKind {
+    /// Distance from the row's vector to the query vector, under the
+    /// criterion's metric. Smaller is nearer, for every metric.
+    VectorDistance,
+    /// Distance in metres from the row's point to the query point.
+    GeoDistanceMetres,
+}
+
+impl SearchScalarKind {
+    /// The output name this scalar is projected under.
+    ///
+    /// These are the names the shipped builders emit - `_distance`
+    /// (`crates/zeroship-schema/src/query.rs:5007`) and `_distance_m`
+    /// (`:5075`) - and they are spelled at **exactly one site**, here, for the
+    /// same reason [`Ident::masked_sibling_of`] exists: a leading `_` is
+    /// refused for a column ([`crate::IdentRole::Column`]) and permitted for an
+    /// alias ([`crate::IdentRole::Alias`]), so the platform can name these and
+    /// a creator cannot shadow them. A second site that spelled the name would
+    /// be a second place that fence could be argued around.
+    #[must_use]
+    pub const fn alias_str(self) -> &'static str {
+        match self {
+            Self::VectorDistance => "_distance",
+            Self::GeoDistanceMetres => "_distance_m",
+        }
+    }
+
+    /// The alias as a validated identifier.
+    ///
+    /// Fallible rather than a constant because it goes through
+    /// [`Ident::parse_as`] like every other identifier in this crate. It cannot
+    /// fail in practice - both names are short ASCII that clear
+    /// [`crate::IdentRole::Alias`]'s fences - and
+    /// `the_search_scalar_aliases_are_legal_aliases_and_illegal_columns`
+    /// asserts exactly that, so the day a fence changes is the day this says so
+    /// instead of projecting a name the backend will reject.
+    fn alias(self) -> Result<Ident, ProjectionError> {
+        Ident::parse_as(self.alias_str(), IdentRole::Alias)
+            .map_err(|source| ProjectionError::Alias { source })
+    }
+}
+
 /// Where a projected value comes from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProjectionSource {
@@ -93,6 +156,9 @@ pub enum ProjectionSource {
     /// also what keeps key resolution off the default read path.
     MaskedSibling { parent: Ident, sibling: Ident },
     Aggregate(AggregateRef),
+    /// The scalar a search ranks by. Only reachable inside a
+    /// [`crate::Search`]; see [`SearchScalarKind`].
+    SearchScalar(SearchScalarKind),
 }
 
 /// One output column.
@@ -163,6 +229,12 @@ impl ProjectedField {
     pub const fn is_aggregate(&self) -> bool {
         matches!(self.source, ProjectionSource::Aggregate(_))
     }
+
+    /// Whether this field is a search's ranking scalar.
+    #[must_use]
+    pub const fn is_search_scalar(&self) -> bool {
+        matches!(self.source, ProjectionSource::SearchScalar(_))
+    }
 }
 
 /// Whether a projection returns rows or an aggregation.
@@ -207,6 +279,7 @@ impl Projection {
                 alias: field.alias.as_str().to_string(),
             });
         }
+        Self::refuse_search_scalar(&declared)?;
         let mut fields = declared;
         Self::refuse_duplicate_aliases(&fields)?;
         for name in PLATFORM_FIELD_NAMES {
@@ -249,6 +322,7 @@ impl Projection {
         if !fields.iter().any(ProjectedField::is_aggregate) {
             return Err(ProjectionError::NoAggregate);
         }
+        Self::refuse_search_scalar(&fields)?;
         if let Some(field) = fields
             .iter()
             .find(|f| matches!(f.source, ProjectionSource::MaskedSibling { .. }))
@@ -274,6 +348,52 @@ impl Projection {
     fn canonicalise(mut fields: Vec<ProjectedField>) -> Vec<ProjectedField> {
         fields.sort_by(|a, b| a.alias.cmp(&b.alias));
         fields
+    }
+
+    /// Append a search's ranking scalar to a row projection.
+    ///
+    /// `pub(crate)` and called from exactly one place
+    /// ([`crate::SearchBuilder::build`]), which is what makes
+    /// [`ProjectionSource::SearchScalar`] unreachable outside a search. A
+    /// scalar in a plain `SELECT` would have no criterion to read its operands
+    /// from, so the renderer would have to either invent them or refuse - and a
+    /// shape whose only two outcomes are "invent" and "refuse" is a shape that
+    /// should not be constructible.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectionError::DuplicateAlias`] if the caller's declared fields
+    /// already claim the scalar's alias. That is reachable: a creator schema
+    /// cannot declare a `_`-prefixed **column**, but an internal-exposure field
+    /// may be projected under a `_`-prefixed **alias**, and this is where the
+    /// two would collide.
+    pub(crate) fn with_search_scalar(
+        mut self,
+        kind: SearchScalarKind,
+    ) -> Result<Self, ProjectionError> {
+        let alias = kind.alias()?;
+        self.fields.push(ProjectedField {
+            source: ProjectionSource::SearchScalar(kind),
+            alias,
+            // Declared, not Platform: the creator asked for a ranked search and
+            // the rank is the answer. A `Platform` exposure would project the
+            // distance and then strip it before user code, which is the one
+            // column a search exists to return.
+            exposure: Exposure::Declared,
+        });
+        Self::refuse_duplicate_aliases(&self.fields)?;
+        self.fields = Self::canonicalise(self.fields);
+        Ok(self)
+    }
+
+    /// A caller may not spell a ranking scalar; see [`SearchScalarKind`].
+    fn refuse_search_scalar(fields: &[ProjectedField]) -> Result<(), ProjectionError> {
+        if let Some(field) = fields.iter().find(|f| f.is_search_scalar()) {
+            return Err(ProjectionError::SearchScalarOutsideSearch {
+                alias: field.alias.as_str().to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn refuse_duplicate_aliases(fields: &[ProjectedField]) -> Result<(), ProjectionError> {
@@ -333,6 +453,8 @@ pub enum ProjectionError {
     AggregateInRowProjection { alias: String },
     MaskedSiblingInAggregate { alias: String },
     NoAggregate,
+    /// A ranking scalar was offered to a projection that is not a search's.
+    SearchScalarOutsideSearch { alias: String },
 }
 
 impl fmt::Display for ProjectionError {
@@ -362,6 +484,11 @@ impl fmt::Display for ProjectionError {
             Self::NoAggregate => f.write_str(
                 "an aggregate projection must contain at least one aggregate; use \
                  Projection::rows",
+            ),
+            Self::SearchScalarOutsideSearch { alias } => write!(
+                f,
+                "'{alias}' is a search's ranking scalar and has no operands outside one; \
+                 build a Search, whose builder installs it"
             ),
         }
     }

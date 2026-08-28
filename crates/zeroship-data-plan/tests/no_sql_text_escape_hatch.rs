@@ -41,6 +41,17 @@ const PLAN_TYPES: &[&str] = &[
     "pub enum WriteValue",
     "pub struct Returning",
     "pub struct BindBudget",
+    // The search family. Listed for the same reason the write family's types
+    // are: without them the two gates below scan read and write and call it the
+    // crate, and a `raw_sql` slot or a serde derive added to `search.rs` would
+    // be ruled on by nothing.
+    "pub struct Search",
+    "pub enum SearchCriterion",
+    "pub enum SearchScalarKind",
+    "pub enum VectorMetric",
+    "pub struct QueryVector",
+    "pub struct GeoPoint",
+    "pub struct RadiusMetres",
 ];
 
 fn crate_root() -> PathBuf {

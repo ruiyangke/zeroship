@@ -30,8 +30,9 @@ use crate::plan::{DbPlan, Direction, NullOrder, OrderKey, RowLimit, Select};
 use crate::predicate::{
     AggregateRef, CompareOp, MembershipOp, Operand, PatternOp, Predicate, TextPattern,
 };
-use crate::projection::{ProjectedField, ProjectionSource};
+use crate::projection::{ProjectedField, ProjectionSource, SearchScalarKind};
 use crate::render::{RenderedSql, ValueFormat};
+use crate::search::{Search, SearchCriterion, VectorMetric};
 use crate::write::{
     Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue,
 };
@@ -70,6 +71,7 @@ pub fn render(plan: &DbPlan) -> Result<RenderedSql, RenderError> {
         DbPlan::Insert(insert) => render_insert(insert),
         DbPlan::Update(update) => render_update(update),
         DbPlan::Delete(delete) => render_delete(delete),
+        DbPlan::Search(search) => render_search(search),
     }
 }
 
@@ -91,7 +93,12 @@ pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
             out.sql.push_str(", ");
         }
         first = false;
-        write_projected_field(&mut out, field)?;
+        // `None`: a read has no criterion, so a ranking scalar has no operands
+        // to read. `Projection::rows` refuses one, so this is unreachable by
+        // construction - and it is still a typed refusal rather than an
+        // `unreachable!`, because the day that constructor gains a bypass is
+        // the day this must say so rather than abort a worker thread.
+        write_projected_field(&mut out, field, None)?;
     }
 
     out.sql.push_str(" FROM ");
@@ -278,6 +285,255 @@ pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
     Ok(RenderedSql::new(out.sql, out.params))
 }
 
+/// Lower a ranked search.
+///
+/// ```text
+/// SELECT .., "emb" <=> $1::vector AS "_distance" FROM "ns"."t"
+///   WHERE ..  ORDER BY "emb" <=> $1::vector ASC  LIMIT $2
+///
+/// SELECT .., ST_Distance("loc", ST_MakePoint($1, $2)::geography) AS "_distance_m"
+///   FROM "ns"."t"
+///   WHERE ST_DWithin("loc", ST_MakePoint($1, $2)::geography, $3) AND ..
+///   ORDER BY ST_Distance("loc", ST_MakePoint($1, $2)::geography) ASC  LIMIT $4
+/// ```
+///
+/// # The `ORDER BY` re-emits the expression, and that is not redundancy
+///
+/// `PostgreSQL` would accept `ORDER BY "_distance"` - it resolves an output
+/// column name in an `ORDER BY` - and the shipped geo builder writes exactly
+/// that (`crates/zeroship-schema/src/query.rs:5082`) while the shipped vector
+/// builder re-emits the expression (`:5013`). One of the two spellings has to
+/// win here, and it is the expression, for a reason that is specific to this
+/// family: an `hnsw` or `ivfflat` index answers a `k`-nearest query only when
+/// the sort key is the indexed distance *expression*, and `PostGIS`'s `GiST` index
+/// works the same way. Sorting by an alias leaves the planner to prove the two
+/// are the same thing.
+///
+/// The operand is bound **once** and referenced twice; see [`Writer::bind`] for
+/// what that saves.
+///
+/// # The radius is a criterion, not a filter
+///
+/// `ST_DWithin` is emitted before the caller's filter and unconditionally, so a
+/// geo search cannot be built without its bound - the same argument that makes
+/// a bounded write's `LIMIT` subquery unconditional. `ST_DWithin` rather than
+/// `ST_Distance(..) <= r` is what lets the `GiST` index serve the predicate; the
+/// two are equivalent on `geography` and only one is indexable.
+///
+/// # Errors
+///
+/// [`RenderError`] if the filter, the projection or a tiebreak carries a node
+/// this backend does not serve. **No metric is refused here**: `pgvector`
+/// serves all three, and the one a backend cannot serve is refused by *that*
+/// backend - see [`crate::search`].
+pub fn render_search(plan: &Search) -> Result<RenderedSql, RenderError> {
+    let mut out = Writer::default();
+
+    // The criterion's operands are bound FIRST, before the projection is
+    // written, because the scalar in the select list is the first thing that
+    // needs them and a slot must exist before it can be referenced. Binding
+    // ahead of the walk also fixes the parameter order as a function of the
+    // plan rather than of where in the projection the scalar happened to sort.
+    let slots = bind_criterion(&mut out, plan.criterion());
+
+    out.sql.push_str("SELECT ");
+    let mut first = true;
+    for field in plan.projection().fields() {
+        if !first {
+            out.sql.push_str(", ");
+        }
+        first = false;
+        write_projected_field(&mut out, field, Some(&slots))?;
+    }
+
+    out.sql.push_str(" FROM ");
+    write_qualified_table(&mut out, plan.namespace(), plan.collection());
+
+    // The geo criterion contributes a WHERE term of its own; the vector one
+    // does not, because a k-nearest search has no radius to bound it.
+    let has_filter = plan.filter() != &Predicate::always();
+    match &slots {
+        CriterionSlots::Vector { .. } => {
+            if has_filter {
+                out.sql.push_str(" WHERE ");
+                write_predicate(&mut out, plan.filter())?;
+            }
+        }
+        CriterionSlots::Geo { .. } => {
+            out.sql.push_str(" WHERE ");
+            write_within_radius(&mut out, &slots);
+            if has_filter {
+                out.sql.push_str(" AND ");
+                write_predicate(&mut out, plan.filter())?;
+            }
+        }
+    }
+
+    out.sql.push_str(" ORDER BY ");
+    write_distance_expr(&mut out, &slots, plan.criterion().scalar())?;
+    // Always explicit, and always ascending: every metric this family carries
+    // is "smaller is nearer", including the negated inner product. The keyword
+    // is written rather than left to the default so the statement says what it
+    // means, for the same reason `write_order_key` spells NULLS FIRST/LAST.
+    out.sql.push_str(" ASC");
+    for key in plan.tiebreak() {
+        out.sql.push_str(", ");
+        write_order_key(&mut out, key)?;
+    }
+
+    // No OFFSET. A k-nearest search has no paginated form here and did not have
+    // one before: `build_vector_search` and `build_spatial_near` emit LIMIT and
+    // nothing else. See the note in `crate::search` on what that costs.
+    out.sql.push_str(" LIMIT ");
+    out.write_param(Literal::Int(plan.limit().get()));
+
+    Ok(RenderedSql::new(out.sql, out.params))
+}
+
+/// The parameter slots a criterion's operands occupy.
+///
+/// Carrying the *slots* rather than the operands is what lets the distance
+/// expression be written twice from one binding, and it also means the two
+/// occurrences cannot disagree: there is one slot number, so there is one
+/// value.
+#[derive(Debug)]
+enum CriterionSlots {
+    Vector {
+        column: Ident,
+        metric: VectorMetric,
+        query: usize,
+    },
+    Geo {
+        column: Ident,
+        longitude: usize,
+        latitude: usize,
+        radius: usize,
+    },
+}
+
+/// Bind a criterion's operands, writing nothing.
+fn bind_criterion(out: &mut Writer, criterion: &SearchCriterion) -> CriterionSlots {
+    match criterion {
+        SearchCriterion::Vector {
+            column,
+            query,
+            metric,
+        } => CriterionSlots::Vector {
+            column: column.clone(),
+            metric: *metric,
+            query: out.bind(Literal::Vector(query.clone())),
+        },
+        SearchCriterion::Geo {
+            column,
+            point,
+            radius,
+        } => CriterionSlots::Geo {
+            column: column.clone(),
+            // Longitude first. `ST_MakePoint` is `(x, y)`, which is
+            // `(longitude, latitude)` - the inverse of the `{lat, lng}` order
+            // every layer above uses. The accessors are spelled in full at both
+            // ends so the transposition has to be written to happen.
+            longitude: out.bind(Literal::Float(point.longitude())),
+            latitude: out.bind(Literal::Float(point.latitude())),
+            radius: out.bind(Literal::Float(radius.get())),
+        },
+    }
+}
+
+/// `ST_MakePoint($lng, $lat)::geography`.
+fn write_geography_point(out: &mut Writer, longitude: usize, latitude: usize) {
+    out.sql.push_str("ST_MakePoint(");
+    out.write_bound(longitude);
+    out.sql.push_str(", ");
+    out.write_bound(latitude);
+    out.sql.push_str(")::geography");
+}
+
+/// The scalar a search ranks by, as an expression.
+///
+/// Every `PostgreSQL`-specific spelling in this family is in this function and
+/// its two helpers: the three `pgvector` operators and the two `PostGIS`
+/// functions. None of them appears in [`crate::search`], which is the property
+/// that lets a second backend compute the same scalar by a completely different
+/// mechanism - `SQLite` ranks a vector search by joining a `vec0` virtual table
+/// and reading `v.distance`, which is not this expression with a different
+/// operator.
+fn write_distance_expr(
+    out: &mut Writer,
+    slots: &CriterionSlots,
+    kind: SearchScalarKind,
+) -> Result<(), RenderError> {
+    match (slots, kind) {
+        (
+            CriterionSlots::Vector {
+                column,
+                metric,
+                query,
+            },
+            SearchScalarKind::VectorDistance,
+        ) => {
+            out.sql.push_str(&quote(column));
+            // The operator/opclass pairing is `pgvector`'s:
+            // `<=>`/`vector_cosine_ops`, `<->`/`vector_l2_ops`,
+            // `<#>`/`vector_ip_ops`. `<#>` returns the NEGATIVE inner product,
+            // which is why one ascending sort ranks all three.
+            out.sql.push_str(match metric {
+                VectorMetric::Cosine => " <=> ",
+                VectorMetric::L2 => " <-> ",
+                VectorMetric::InnerProduct => " <#> ",
+            });
+            out.write_bound(*query);
+            Ok(())
+        }
+        (
+            CriterionSlots::Geo {
+                column,
+                longitude,
+                latitude,
+                ..
+            },
+            SearchScalarKind::GeoDistanceMetres,
+        ) => {
+            out.sql.push_str("ST_Distance(");
+            out.sql.push_str(&quote(column));
+            out.sql.push_str(", ");
+            write_geography_point(out, *longitude, *latitude);
+            out.sql.push(')');
+            Ok(())
+        }
+        // Unreachable: `SearchBuilder::build` installs the scalar from
+        // `criterion.scalar()`, so the pair always matches. Typed rather than
+        // `unreachable!` for the reason the whole crate prefers that - a
+        // panicking arm in the worker takes every co-tenanted app with it.
+        _ => Err(RenderError::Unsupported {
+            node: "a search scalar of a different kind from its criterion",
+            reason: "the scalar and the criterion disagree about what is being ranked",
+        }),
+    }
+}
+
+/// `ST_DWithin("col", ST_MakePoint($lng, $lat)::geography, $radius)`.
+fn write_within_radius(out: &mut Writer, slots: &CriterionSlots) {
+    let CriterionSlots::Geo {
+        column,
+        longitude,
+        latitude,
+        radius,
+    } = slots
+    else {
+        // The caller matched on the variant to get here; a vector criterion has
+        // no radius term and never reaches this.
+        return;
+    };
+    out.sql.push_str("ST_DWithin(");
+    out.sql.push_str(&quote(column));
+    out.sql.push_str(", ");
+    write_geography_point(out, *longitude, *latitude);
+    out.sql.push_str(", ");
+    out.write_bound(*radius);
+    out.sql.push(')');
+}
+
 /// Statement text under construction, plus the parameters bound so far.
 ///
 /// One structure for both so a placeholder number can never be written without
@@ -296,9 +552,42 @@ impl Writer {
     /// dispatch in the parent module, so the *type* of the value decides it and
     /// no call site gets to spell one itself.
     fn write_param(&mut self, value: Literal) {
-        let slot = self.params.len() + 1;
-        let placeholder = crate::render::placeholder_for(&PostgresValueFormat, slot, &value);
+        let slot = self.bind(value);
+        self.write_bound(slot);
+    }
+
+    /// Bind a value **without** writing anything, returning its slot.
+    ///
+    /// Paired with [`Writer::write_bound`] for the one shape that needs a
+    /// parameter in two places: a search's distance expression appears in the
+    /// select list and again in the `ORDER BY`, and the operand is the same
+    /// value both times. Binding it twice would be correct and would put a
+    /// second copy of the query vector on the wire - for a 1536-dimension
+    /// embedding, roughly 12 KB of duplicated text per search. Today's builder
+    /// re-uses `$1` for exactly this reason
+    /// (`crates/zeroship-schema/src/query.rs:5006-5013`).
+    fn bind(&mut self, value: Literal) -> usize {
         self.params.push(value);
+        self.params.len()
+    }
+
+    /// Write the placeholder for a slot [`Writer::bind`] already took.
+    ///
+    /// The spelling is read back off the bound value, so it goes through the
+    /// same exhaustive dispatch as a first occurrence and a re-use cannot spell
+    /// a cast the first occurrence did not.
+    ///
+    /// # Panics
+    ///
+    /// Only if `slot` was never bound, which no caller here can arrange: every
+    /// slot comes from a [`Writer::bind`] on the same `Writer`, and the vector
+    /// only grows.
+    fn write_bound(&mut self, slot: usize) {
+        let value = self
+            .params
+            .get(slot - 1)
+            .expect("a slot is only ever written after bind() returned it");
+        let placeholder = crate::render::placeholder_for(&PostgresValueFormat, slot, value);
         self.sql.push_str(&placeholder);
     }
 }
@@ -338,6 +627,19 @@ impl ValueFormat for PostgresValueFormat {
 
     fn bytes_placeholder(&self, slot: usize) -> String {
         format!("${slot}")
+    }
+
+    /// `$n::vector`, and the cast is not decoration.
+    ///
+    /// The `vector` type is created by `CREATE EXTENSION vector`, so its OID is
+    /// per-database and is not a constant the driver can know at compile time.
+    /// Binding the value as text and casting is what sidesteps the binary
+    /// protocol's type-discovery handshake - the reason
+    /// `crates/zeroship-schema/src/query.rs:4936-4940` gives for the same
+    /// choice. Unlike the `bytes` wrapper this crate deleted, this one does
+    /// real work and stays.
+    fn vector_placeholder(&self, slot: usize) -> String {
+        format!("${slot}::vector")
     }
 
     fn current_timestamp_expr(&self) -> &'static str {
@@ -498,12 +800,19 @@ fn write_returning(out: &mut Writer, returning: &Returning) -> Result<(), Render
             out.sql.push_str(", ");
         }
         first = false;
-        write_projected_field(out, field)?;
+        write_projected_field(out, field, None)?;
     }
     Ok(())
 }
 
-fn write_projected_field(out: &mut Writer, field: &ProjectedField) -> Result<(), RenderError> {
+/// `slots` carries the parameter slots a search's criterion already bound, so a
+/// ranking scalar in the select list re-uses them instead of re-binding. It is
+/// `None` for every family that has no criterion.
+fn write_projected_field(
+    out: &mut Writer,
+    field: &ProjectedField,
+    slots: Option<&CriterionSlots>,
+) -> Result<(), RenderError> {
     match &field.source {
         ProjectionSource::Column(column) => out.sql.push_str(&quote(column)),
         ProjectionSource::Path(path) => write_path(out, path)?,
@@ -512,6 +821,16 @@ fn write_projected_field(out: &mut Writer, field: &ProjectedField) -> Result<(),
         // string and there is no `<col>_masked` key for a caller to find.
         ProjectionSource::MaskedSibling { sibling, .. } => out.sql.push_str(&quote(sibling)),
         ProjectionSource::Aggregate(aggregate) => write_aggregate(out, aggregate),
+        ProjectionSource::SearchScalar(kind) => {
+            let Some(slots) = slots else {
+                return Err(RenderError::Unsupported {
+                    node: "a search scalar outside a search",
+                    reason: "the scalar's operands live on the plan's criterion, and a \
+                             plan without one has nothing to compute it from",
+                });
+            };
+            write_distance_expr(out, slots, *kind)?;
+        }
     }
     // The alias is always emitted, even when it repeats the column name. A
     // conditional `AS` would make the statement depend on whether two strings

@@ -49,12 +49,20 @@
 //! # Scope
 //!
 //! SC-3 names six plan families - read, relation, write, search, unmask and
-//! effects - and this crate builds **two**, read and write, plus the shared
-//! core underneath all six. That split is the document's own: per-family node
-//! spelling is deliberately left to each family's port, because a family that
-//! gets its own shape wrong costs that family a revision, whereas a shared
-//! expression node fixed wrongly by whoever ports first costs every family
-//! after it.
+//! effects - and this crate builds **three**, read, write and search, plus the
+//! shared core underneath all six. That split is the document's own:
+//! per-family node spelling is deliberately left to each family's port, because
+//! a family that gets its own shape wrong costs that family a revision, whereas
+//! a shared expression node fixed wrongly by whoever ports first costs every
+//! family after it.
+//!
+//! The search family is vector and spatial, **and only those two** - SC-3 is
+//! explicit that full-text search was deleted and that the IR must not carry a
+//! family for a feature that no longer exists. See [`search`], which records
+//! the sweep that checked it rather than taking the document's word, and which
+//! argues the two decisions the family forces: how a plan expresses a
+//! capability only one backend has, and why the ranking key is structural
+//! rather than a caller-supplied sort.
 //!
 //! The write family adds two shapes the read family had no use for and takes
 //! care not to add a third. [`write::WriteValue::Null`] makes a written NULL a
@@ -77,10 +85,14 @@ pub mod plan;
 pub mod predicate;
 pub mod projection;
 pub mod render;
+pub mod search;
 pub mod write;
 
 pub use ident::{Ident, IdentError, IdentRole, MASKED_SUFFIX, MAX_IDENT_BYTES};
-pub use literal::{Finite, Literal, LiteralError, LiteralSet, MAX_MEMBERSHIP_LIST_LEN};
+pub use literal::{
+    Finite, Finite32, Literal, LiteralError, LiteralSet, QueryVector, MAX_MEMBERSHIP_LIST_LEN,
+    MAX_VECTOR_DIMS,
+};
 pub use path::{FieldPath, JsonKey, PathError, MAX_JSON_KEY_BYTES, MAX_PATH_SEGMENTS};
 pub use plan::{
     DbPlan, Direction, NullOrder, OrderKey, PlanError, RowLimit, RowOffset, Select, SelectBuilder,
@@ -92,7 +104,11 @@ pub use predicate::{
 };
 pub use projection::{
     Exposure, ProjectedField, Projection, ProjectionError, ProjectionKind, ProjectionSource,
-    PLATFORM_FIELD_NAMES,
+    SearchScalarKind, PLATFORM_FIELD_NAMES,
+};
+pub use search::{
+    GeoPoint, RadiusMetres, Search, SearchBuilder, SearchCriterion, SearchError, VectorMetric,
+    MAX_RADIUS_METRES,
 };
 pub use render::RenderedSql;
 pub use write::{

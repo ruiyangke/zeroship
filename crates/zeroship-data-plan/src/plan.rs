@@ -349,6 +349,16 @@ impl SelectBuilder {
                     ProjectionSource::MaskedSibling { parent, .. } => {
                         FieldPath::column(parent.clone())
                     }
+                    // Refused by `Projection::rows` and `Projection::aggregate`
+                    // both, so no `Select` can carry one. Kept as an explicit
+                    // arm for the same reason as the one above: a family added
+                    // later must not slip past the grouping check by adding a
+                    // variant alone.
+                    ProjectionSource::SearchScalar(kind) => {
+                        return Err(PlanError::SearchScalarInRead {
+                            alias: kind.alias_str(),
+                        })
+                    }
                 };
                 if !group_by.contains(&key) {
                     return Err(PlanError::UngroupedProjectedField {
@@ -395,8 +405,8 @@ impl SelectBuilder {
 
 /// A runtime database operation.
 ///
-/// Two families today: read, and write. See the module note on why the other
-/// four are absent rather than stubbed.
+/// Three families today: read, write, and search. See the module note on why
+/// the other three are absent rather than stubbed.
 ///
 /// **`insert` and `insertMany` share one variant**, because they share one
 /// statement: `INSERT INTO t (a) VALUES ($1)` is what both produce for a single
@@ -404,6 +414,14 @@ impl SelectBuilder {
 /// canonical-form property that lets a prepared statement be shared rests on
 /// there being exactly one - the same argument that makes
 /// [`crate::Predicate::range`] a constructor rather than a node.
+///
+/// **`search` and `near` likewise share one variant.** They differ in what they
+/// rank by, which is a [`crate::SearchCriterion`], not in the statement's
+/// shape: both project a synthetic distance, filter, order by that distance
+/// ascending and bound the result. Today they are two functions
+/// (`crates/zeroship-schema/src/query.rs:4951` and `:5040`) that had drifted
+/// into ordering by two different things - the distance *expression* on one and
+/// the output *alias* on the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbPlan {
     Select(Select),
@@ -411,6 +429,8 @@ pub enum DbPlan {
     Insert(crate::write::Insert),
     Update(crate::write::Update),
     Delete(crate::write::Delete),
+    /// A ranked search. See [`crate::search::Search`].
+    Search(crate::search::Search),
 }
 
 /// Why a plan was refused.
@@ -430,6 +450,9 @@ pub enum PlanError {
         position: &'static str,
         depth: usize,
     },
+    /// A search's ranking scalar reached a read. Unreachable through
+    /// [`Projection::rows`], which refuses it; this is the second fence.
+    SearchScalarInRead { alias: &'static str },
 }
 
 impl fmt::Display for PlanError {
@@ -465,6 +488,11 @@ impl fmt::Display for PlanError {
                 f,
                 "the {position} is nested {depth} deep, over the maximum of \
                  {MAX_PREDICATE_DEPTH}"
+            ),
+            Self::SearchScalarInRead { alias } => write!(
+                f,
+                "'{alias}' is a search's ranking scalar and has no operands in a read; \
+                 build a Search"
             ),
         }
     }
