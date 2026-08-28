@@ -6,7 +6,7 @@
 //!
 //! Two hardening properties are load-bearing and must survive any rewrite:
 //! the length cap (which stops a malformed server from OOM-ing the driver;
-//! 64 MB by default, see `Config::max_message_size`) and the zero-copy `BytesMut::split` flush path.
+//! 64 MiB by default, see `Config::max_message_size`) and the zero-copy `BytesMut::split` flush path.
 
 use crate::Error;
 use bytes::BytesMut;
@@ -69,7 +69,7 @@ pub(crate) trait WriteFramer {
 const READ_BUF_CAPACITY: usize = 8192;
 
 /// Per-`fill()` syscall chunk size. We do not allocate `min_bytes`-sized
-/// buffers up front (a 64 MB frame arriving in 16 KB chunks would cause
+/// buffers up front (a 64 MiB frame arriving in 16 KB chunks would cause
 /// ~260 GB of heap churn). Instead, each read pulls at most this many
 /// bytes and the outer `while` loop issues as many reads as needed to
 /// satisfy `min_bytes`.
@@ -468,7 +468,7 @@ where
     /// field, which itself counts its own 4 bytes but not the 1-byte tag)
     /// would exceed `DEFAULT_MAX_MESSAGE_SIZE`. O(1) - called before we buffer the
     /// payload, so a malicious server can't coerce us to allocate up to
-    /// 64 MB per connection.
+    /// 64 MiB per connection.
     pub fn validate_length(&self, length: u32) -> Result<(), Error> {
         let total = 1u64 + u64::from(length);
         if total > self.max_message_size as u64 {

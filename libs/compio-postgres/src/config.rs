@@ -620,8 +620,9 @@ pub enum Host {
 ///     libpq, the setting is ignored on TCP connections.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
 ///     path to the directory containing Unix domain sockets. On Linux, `@` selects the abstract Unix-socket namespace.
-///     Otherwise, it is treated as a hostname. Multiple hosts can be specified, separated by commas. Each host will be
-///     tried in turn when connecting. Required if connecting with the `connect` method.
+///     Otherwise, it is treated as a hostname. Multiple hosts can be specified, separated by commas. By default they
+///     are tried in order; `load_balance_hosts=random` randomizes them. Either `host` or `hostaddr` is required by
+///     this driver's `connect` method.
 /// * `sslnegotiation` - TLS negotiation method. If set to `direct`, the client
 ///     will perform direct TLS handshake, this only works for PostgreSQL 17 and
 ///     newer.
@@ -637,17 +638,18 @@ pub enum Host {
 ///     If this parameter is not specified, the value of `host` will be looked up to find the corresponding IP address,
 ///     or if host specifies an IP address, that value will be used directly.
 ///     Using `hostaddr` allows the application to avoid a host name look-up, which might be important in applications
-///     with time constraints. However, a host name is required for TLS certificate verification.
+///     with time constraints. However, a host name is required for
+///     `verify-full` TLS certificate verification.
 ///     Specifically:
 ///         * If `hostaddr` is specified without `host`, the value for `hostaddr` gives the server network address.
-///             The connection attempt will fail if the authentication method requires a host name;
+///             The connection attempt will fail with `sslmode=verify-full`;
 ///         * If `host` is specified without `hostaddr`, a host name lookup occurs;
 ///         * If both `host` and `hostaddr` are specified, the value for `hostaddr` gives the server network address.
-///             The value for `host` is ignored unless the authentication method requires it,
-///             in which case it will be used as the host name.
+///             The value for `host` remains the TLS/SNI identity and the host
+///             used for password-file matching.
 /// * `port` - The port to connect to. Multiple ports can be specified, separated by commas. The number of ports must be
-///     either 1, in which case it will be used for all hosts, or the same as the number of hosts. Defaults to 5432 if
-///     omitted or the empty string.
+///     either 1, in which case it will be used for all configured endpoints, or the same as the number of `host` or
+///     `hostaddr` entries. Defaults to 5432 if omitted or the empty string.
 /// * `connect_timeout` - The time limit in seconds applied to each address tried, covering TLS negotiation, startup,
 ///     and authentication, and applied once more to each host entry's name resolution. Hostnames can resolve to
 ///     multiple IP addresses, and the limit restarts for each, as libpq's does. Defaults to no timeout.
@@ -713,7 +715,7 @@ pub enum Host {
 /// where this driver connects, and as whom, comes from the `Config` or the connection string.
 ///
 /// That is not only a preference here, it is a workspace rule with a gate behind it: a published
-/// library takes resolved options from its caller, and `crates/core/tests/config_env_access_gate.rs`
+/// library takes resolved options from its caller, and `crates/zeroship-core/tests/config_env_access_gate.rs`
 /// rejects a raw environment read anywhere in this crate's sources, against an exemption list that
 /// is deliberately empty.
 ///
@@ -972,15 +974,17 @@ impl Config {
         self.ssl_key_log_file.as_deref()
     }
 
-    /// Sets the largest single backend message this connection will accept.
+    /// Sets the largest single backend message accepted for application
+    /// traffic after connection setup.
     ///
-    /// Defaults to 64 MB. The cap exists because a message's length field is
-    /// read BEFORE its body, so a server claiming a multi-GB message would
-    /// otherwise have the driver allocate for it; rejecting on the header
-    /// bounds that for nothing.
+    /// Startup, authentication, and target-session probing always use the
+    /// default ceiling. The data phase defaults to 64 MiB. The cap exists
+    /// because a message's length field is read BEFORE its body, so a server
+    /// claiming a multi-GB message would otherwise have the driver allocate
+    /// for it; rejecting on the header bounds that for nothing.
     ///
     /// Raise it when the rows are genuinely large - PostgreSQL will send a
-    /// single value of up to 1 GB, and at the default such a value cannot be
+    /// single value of up to 1 GiB, and at the default such a value cannot be
     /// read at all. Raising it trades that ceiling for the memory a hostile or
     /// broken server could make one connection reserve, so raise it to what
     /// the data needs rather than to the maximum.
@@ -990,7 +994,7 @@ impl Config {
     }
 
     /// Gets the configured maximum message size, if one was set. `None` means
-    /// the 64 MB default applies.
+    /// the 64 MiB default applies.
     pub fn get_max_message_size(&self) -> Option<usize> {
         self.max_message_size
     }
@@ -1451,10 +1455,13 @@ impl Config {
 
     /// Adds a host to the configuration.
     ///
-    /// Multiple hosts can be specified by calling this method multiple times, and each will be tried in order. On Unix
-    /// systems, a host starting with a `/` is interpreted as a path to a directory containing Unix domain sockets.
-    /// On Linux, a host starting with `@` selects the abstract Unix-socket namespace.
-    /// There must be either no hosts, or the same number of hosts as hostaddrs.
+    /// Multiple hosts can be specified by calling this method multiple times.
+    /// They are tried in insertion order unless
+    /// [`LoadBalanceHosts::Random`] is selected. On Unix systems, a host
+    /// starting with a `/` is interpreted as a path to a directory containing
+    /// Unix domain sockets. On Linux, a host starting with `@` selects the
+    /// abstract Unix-socket namespace. When both hosts and hostaddrs are
+    /// present, they must have the same length.
     pub fn host(&mut self, host: impl Into<String>) -> &mut Config {
         let host = host.into();
 
@@ -1510,8 +1517,10 @@ impl Config {
 
     /// Adds a hostaddr to the configuration.
     ///
-    /// Multiple hostaddrs can be specified by calling this method multiple times, and each will be tried in order.
-    /// There must be either no hostaddrs, or the same number of hostaddrs as hosts.
+    /// Multiple hostaddrs can be specified by calling this method multiple
+    /// times. They are tried in insertion order unless
+    /// [`LoadBalanceHosts::Random`] is selected. When both hostaddrs and hosts
+    /// are present, they must have the same length.
     pub fn hostaddr(&mut self, hostaddr: IpAddr) -> &mut Config {
         self.hostaddr.push(Some(hostaddr));
         self
@@ -1519,9 +1528,10 @@ impl Config {
 
     /// Adds a port to the configuration.
     ///
-    /// Multiple ports can be specified by calling this method multiple times. There must either be no ports, in which
-    /// case the default of 5432 is used, a single port, in which it is used for all hosts, or the same number of ports
-    /// as hosts.
+    /// Multiple ports can be specified by calling this method multiple times.
+    /// There must either be no ports, in which case the default of 5432 is
+    /// used, a single port, in which case it is used for every endpoint, or the
+    /// same number of ports as configured host or hostaddr entries.
     pub fn port(&mut self, port: u16) -> &mut Config {
         self.port.push(port);
         self
@@ -1595,8 +1605,8 @@ impl Config {
         self
     }
 
-    /// Gets the TCP user timeout, if one has been set with the
-    /// `user_timeout` method.
+    /// Gets the TCP user timeout, if one has been set with
+    /// [`Config::tcp_user_timeout`].
     pub fn get_tcp_user_timeout(&self) -> Option<&Duration> {
         self.tcp_user_timeout.as_ref()
     }
