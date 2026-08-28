@@ -227,10 +227,47 @@ them needs a NEW migration dated after the last applied file, not an edit. And
 reads it (`released_ledger_misordered`) must move to the journal in the same
 change or it silently stops guarding.
 
-## The freeze rule, and why it exists
+## DECIDED 2026-08-28: the platform corpus may be rewritten
+
+**Pre-release, the goal for `db/migrations-ts/` is clean and correct, not
+preserved. Fixing or rewriting any of the 36 files is permitted, including the
+applied ones.**
+
+This lifts the constraint that was shaping the removals below: they no longer
+need a NEW migration appended after the last applied file. `migrated_migrations`,
+`migrated_migration_audit` and `migrated_app_policies` can simply stop being
+created, by editing `20260702000200_control_tables.ts`. The `migrated_*` naming
+fossil disappears with them rather than being inherited.
+
+**ONE CONSTRAINT SURVIVES, and it is mechanical rather than a matter of
+discipline.** A deployment exists holding real rows and a journal. The
+`baseline` verb (`crates/zeroship-migrate-node/src/verbs.rs:1204`) adopts a
+foreign journal, but `assert_corpus_output_is_live` (`:1261`) **refuses to adopt
+a database that is not what the corpus produces** - it diffs full snapshots and
+names what differs. So:
+
+| rewrite | can the deployment be re-baselined? |
+| --- | --- |
+| cosmetic - same resulting schema | **yes.** Rewrite, re-baseline, done |
+| schema-changing - e.g. dropping the three `migrated_*` tables | **no.** Adoption refuses, correctly |
+
+For a schema-changing rewrite the deployment must either have the delta applied
+first, or **be recreated**. Pre-release, with no production users, recreating is
+the clean option and should be the default - it also discharges every stale
+checksum in one step.
+
+**What this does NOT license:** shipping a corpus nobody has applied end to end.
+`d92efa740` rewrote all 35 files into the `schema()` form and the result was
+never applied by anything until 2026-08-28, when it turned out two files could
+not be authored at all (a BRIN option flattened to an unrepresentable vendor
+attribute, and a `language:` value the IR had renamed). A rewrite must be proved
+against a fresh database before it is trusted.
+
+## The freeze rule, and why it applied
 
 *Moved here from `AGENTS.md` on 2026-08-28: it is operational detail about a
-subsystem, not a high-level guideline.*
+subsystem, not a high-level guideline. Retained because it explains what the
+re-baseline is discharging.*
 
 **A migration file that a deployed database has applied is FROZEN.** The
 platform schema IS deployed: a running deployment holds `zeroship` with real
