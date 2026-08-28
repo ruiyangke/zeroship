@@ -5906,6 +5906,169 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     release_pg(admin_pool).await;
 }
 
+/// EVERY statement `dispatch_unmask` issues must go through `SET LOCAL ROLE`,
+/// including the audit INSERT.
+///
+/// WHY THE SIBLING ABOVE DOES NOT COVER THIS.
+/// `unmask_fetch_runs_under_per_app_role_via_rls` blocks the login role with
+/// FORCE RLS on the DATA table only, and its login role holds an INHERITING
+/// membership plus direct `USAGE`/`SELECT` grants. The audit table carries no
+/// RLS, so `write_audit_unmask_row`'s INSERT succeeded there through ambient
+/// inheritance whether or not it was fenced - it passed identically before and
+/// after this fix, which is the one shape a regression guard must not have.
+///
+/// THE FIXTURE IS PRODUCTION'S POSTURE, not an RLS stand-in for it. The login
+/// role is granted the app role `WITH INHERIT FALSE` - what
+/// `zeroship-migrate-server`'s `runtime_dependents_sql` now emits - and NOTHING
+/// directly. Under that grant a statement that omits `SET LOCAL ROLE` has no
+/// privilege at all, so this case binds the whole dispatch rather than one
+/// table: fetch, decrypt-or-plaintext, and audit all have to narrow or the
+/// call fails.
+///
+/// FAILS BEFORE THE FIX with `permission denied for table
+/// __zeroship_audit_unmask`, because `write_audit_unmask_row` took
+/// `pg.pool_handle()` and issued the INSERT on a bare checkout.
+#[compio::test]
+async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
+    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+
+    let url = require_pg().await;
+    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "p6a_unmask_audit_fence";
+    let coll = "patients";
+    let role = provision_app_with_role(&admin_pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    let schema = json!({
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "phi" }
+        }
+    });
+    admin_pool
+        .execute(
+            &format!(
+                "CREATE TABLE \"{app}\".\"{coll}\" (\
+                   id TEXT PRIMARY KEY, ssn TEXT, ssn_masked TEXT)"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    admin_pool
+        .execute(
+            &format!(
+                "INSERT INTO \"{app}\".\"{coll}\" (id, ssn, ssn_masked) \
+                 VALUES ('p1', '555-44-3333', '***-**-3333')"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    // Re-run AFTER the collection exists: the runtime role's DML comes from
+    // `GRANT ... ON ALL TABLES IN SCHEMA`, a snapshot over what exists then.
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+
+    let login_role = "p6a_unmask_audit_login";
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    admin_pool
+        .execute(
+            &format!("CREATE ROLE \"{login_role}\" LOGIN PASSWORD 'test' INHERIT"),
+            &[],
+        )
+        .await
+        .unwrap();
+    // The production grant. `INHERIT` on the role above is deliberate and is
+    // the point: the ROLE ATTRIBUTE says inherit, the MEMBERSHIP says do not,
+    // and PostgreSQL 16+ honours the membership - so this fixture also pins
+    // that the attribute is not what fences anything.
+    admin_pool
+        .execute(
+            &format!("GRANT \"{role}\" TO \"{login_role}\" WITH INHERIT FALSE"),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let login_url = login_role_test_url(&url, login_role, "test");
+    let login_pool = std::rc::Rc::new(Pool::connect(&login_url, 4).await.unwrap());
+
+    // THE CONTROL. Without this the case would pass just as happily if the app
+    // role had never been granted anything: "denied" is the resting state of a
+    // role with no privileges. This proves the login role is genuinely fenced
+    // out, so the success below can only come from narrowing.
+    let ambient = login_pool
+        .query_text_params(
+            &format!("SELECT ssn FROM \"{app}\".\"{coll}\" WHERE id = 'p1'"),
+            &[],
+        )
+        .await;
+    assert!(
+        ambient.is_err(),
+        "the login role must reach nothing ambiently under WITH INHERIT FALSE"
+    );
+
+    zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+
+    let result = unmask::dispatch_unmask(
+        &DbBinding::cold_start(app),
+        UnmaskFieldArgs {
+            collection: coll.to_string(),
+            row_pk: "p1".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(json!({ "kind": "auto" })),
+            reason: Some("audit fence regression".to_string()),
+        },
+    )
+    .await
+    .expect(
+        "every statement in dispatch_unmask must narrow to the per-app role - \
+         a failure here names the one that did not",
+    );
+    assert_eq!(result.plaintext, "555-44-3333");
+
+    // THE AUDIT ROW MUST EXIST. `dispatch_unmask` propagates the INSERT's error
+    // with `?`, so a swallowed audit write would return plaintext with no
+    // record of who read it - strictly worse than refusing. Read back through
+    // the ADMIN pool, which is not the one under test.
+    let audited = admin_pool
+        .query_text_params(
+            &format!(
+                "SELECT outcome FROM \"{app}\".\"__zeroship_audit_unmask\" \
+                  WHERE collection = $1 AND row_pk = 'p1' AND \"column\" = 'ssn'"
+            ),
+            &[coll],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        audited.len(),
+        1,
+        "the granted unmask must have written exactly one audit row"
+    );
+    assert_eq!(audited[0].get::<_, &str>("outcome"), "granted");
+
+    drop(login_pool);
+    let _ = admin_pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+    release_pg(admin_pool).await;
+}
+
 /// Regression fence for the PG mask-policy arm.
 ///
 /// Until 2026-08-27 `dispatch_set_mask_policy` wrote through
