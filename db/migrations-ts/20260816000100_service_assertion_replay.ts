@@ -1,7 +1,5 @@
 import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 
-export const name = "service_assertion_replay";
-
 // The `jti` single-use cache behind the JWT service-assertion mechanism
 // (crates/core/src/service_assertion.rs, crates/authn/src/service_replay.rs).
 //
@@ -63,85 +61,84 @@ export const name = "service_assertion_replay";
 // sweep is housekeeping and not a correctness dependency.
 const SCHEMA = "service_authn";
 
-export function up() {
-  schema(SCHEMA).create({ ifNotExists: true });
+export default {
+  name: "service_assertion_replay",
+  schema() {
+    schema(SCHEMA).create({ ifNotExists: true });
 
-  table("service_assertion_replay", { schema: SCHEMA }).create({
-    columns: {
-      replay_key: t.text().notNull(),
-      expires_at: t.timestamp().notNull(),
-    },
-    primaryKey: ["replay_key"],
-  });
+    table("service_assertion_replay", { schema: SCHEMA }).create({
+      columns: {
+        replay_key: t.text().notNull(),
+        expires_at: t.timestamp().notNull(),
+      },
+      primaryKey: ["replay_key"],
+    });
 
-  // The sweep is `DELETE ... WHERE expires_at <= now()`. Without this index it
-  // is a sequential scan over every live claim.
-  table("service_assertion_replay", { schema: SCHEMA })
-    .index("service_assertion_replay_expiry_idx")
-    .add({ on: ["expires_at"] });
+    // The sweep is `DELETE ... WHERE expires_at <= now()`. Without this index it
+    // is a sequential scan over every live claim.
+    table("service_assertion_replay", { schema: SCHEMA })
+      .index("service_assertion_replay_expiry_idx")
+      .add({ on: ["expires_at"] });
 
-  // INSERT and UPDATE are both needed by the single claim statement: it is
-  // `INSERT ... ON CONFLICT DO UPDATE ... WHERE`, and PostgreSQL requires
-  // UPDATE privilege to PLAN that arm even when it never fires. This is the
-  // same class as 20260812000000 and 20260812000200, where insert-only grants
-  // made production upserts fail at plan time. DELETE is for the sweep.
-  //
-  // SELECT IS ALSO REQUIRED, and an earlier revision of this file argued it
-  // away. PostgreSQL's rule is about COLUMN READS, not about RETURNING:
-  // UPDATE and DELETE need SELECT on every column read in an expression or a
-  // condition. The claim reads `expires_at` in the DO UPDATE arm's WHERE and
-  // the sweep reads it in its own WHERE, so both statements need it. MEASURED
-  // on a scratch database built by zeroship-platform-migrate from this
-  // directory: with insert/update/delete only, every one of the four roles
-  // below got `permission denied for table service_assertion_replay` for BOTH
-  // statements; adding select made all eight succeed. Controls, same role,
-  // one variable each: dropping the WHERE from the upsert is still denied
-  // (the DO UPDATE arm alone needs it), and a DELETE with no WHERE succeeds.
-  // Withholding it would have failed 100% of inbound service-to-service calls
-  // the day a service was wired to PostgresReplayStore, via the verifier's
-  // fail-closed arm, with a Postgres permission error in the log and nothing
-  // naming grants.
-  //
-  // What SELECT concedes is bounded: a service that already holds insert and
-  // delete here can read the `<iss>|<jti>` keys of other services' in-flight
-  // assertions. A `jti` is not a credential -- the assertion carrying it is
-  // signed, single use, and bound to its own audience -- and every grantee is
-  // itself one of the services whose keys are in the table.
-  //
-  // Granted to every role that runs a service which VERIFIES assertions. There
-  // is no `zeroship_migrated` role in db/migrations-ts/20260702000100_schema_
-  // roles_extensions.ts, so migrated is absent here; it will need a grant when
-  // it gets a role, and that is called out rather than pre-granted to a role
-  // that does not exist.
-  grant({
-    privileges: ["select", "insert", "update", "delete"],
-    on: {
-      kind: "table",
-      schema: SCHEMA,
-      names: ["service_assertion_replay"],
-    },
-    to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
-  });
+    // INSERT and UPDATE are both needed by the single claim statement: it is
+    // `INSERT ... ON CONFLICT DO UPDATE ... WHERE`, and PostgreSQL requires
+    // UPDATE privilege to PLAN that arm even when it never fires. This is the
+    // same class as 20260812000000 and 20260812000200, where insert-only grants
+    // made production upserts fail at plan time. DELETE is for the sweep.
+    //
+    // SELECT IS ALSO REQUIRED, and an earlier revision of this file argued it
+    // away. PostgreSQL's rule is about COLUMN READS, not about RETURNING:
+    // UPDATE and DELETE need SELECT on every column read in an expression or a
+    // condition. The claim reads `expires_at` in the DO UPDATE arm's WHERE and
+    // the sweep reads it in its own WHERE, so both statements need it. MEASURED
+    // on a scratch database built by zeroship-platform-migrate from this
+    // directory: with insert/update/delete only, every one of the four roles
+    // below got `permission denied for table service_assertion_replay` for BOTH
+    // statements; adding select made all eight succeed. Controls, same role,
+    // one variable each: dropping the WHERE from the upsert is still denied
+    // (the DO UPDATE arm alone needs it), and a DELETE with no WHERE succeeds.
+    // Withholding it would have failed 100% of inbound service-to-service calls
+    // the day a service was wired to PostgresReplayStore, via the verifier's
+    // fail-closed arm, with a Postgres permission error in the log and nothing
+    // naming grants.
+    //
+    // What SELECT concedes is bounded: a service that already holds insert and
+    // delete here can read the `<iss>|<jti>` keys of other services' in-flight
+    // assertions. A `jti` is not a credential -- the assertion carrying it is
+    // signed, single use, and bound to its own audience -- and every grantee is
+    // itself one of the services whose keys are in the table.
+    //
+    // Granted to every role that runs a service which VERIFIES assertions. There
+    // is no `zeroship_migrated` role in db/migrations-ts/20260702000100_schema_
+    // roles_extensions.ts, so migrated is absent here; it will need a grant when
+    // it gets a role, and that is called out rather than pre-granted to a role
+    // that does not exist.
+    grant({
+      privileges: ["select", "insert", "update", "delete"],
+      on: {
+        kind: "table",
+        schema: SCHEMA,
+        names: ["service_assertion_replay"],
+      },
+      to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+    });
 
-  // Reaching the table needs USAGE on the schema holding it. No role carries
-  // `service_authn` on its `search_path`, so this grants reach and nothing else.
-  grant({
-    privileges: ["usage"],
-    on: { kind: "schema", names: [SCHEMA] },
-    to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
-  });
+    // Reaching the table needs USAGE on the schema holding it. No role carries
+    // `service_authn` on its `search_path`, so this grants reach and nothing else.
+    grant({
+      privileges: ["usage"],
+      on: { kind: "schema", names: [SCHEMA] },
+      to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+    });
 
-  // A newly created schema grants CREATE to nobody but its owner, so this is a
-  // no-op today. It is written down because the whole point of the split is
-  // that a grantee cannot add relations to this zone, and a privilege that is
-  // only absent by default is one a later `GRANT ALL` restores silently.
-  revoke({
-    privileges: ["create"],
-    on: { kind: "schema", names: [SCHEMA] },
-    from: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
-  });
-}
-
-export function down() {
-
-}
+    // A newly created schema grants CREATE to nobody but its owner, so this is a
+    // no-op today. It is written down because the whole point of the split is
+    // that a grantee cannot add relations to this zone, and a privilege that is
+    // only absent by default is one a later `GRANT ALL` restores silently.
+    revoke({
+      privileges: ["create"],
+      on: { kind: "schema", names: [SCHEMA] },
+      from: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+    });
+  },
+};

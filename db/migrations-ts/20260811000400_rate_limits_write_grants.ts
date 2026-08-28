@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "rate_limits_write_grants";
-
 // The shared token-bucket limiter could not write its own bucket, so the
 // throttle failed closed and took the whole control admin API with it.
 //
@@ -30,15 +28,18 @@ export const name = "rate_limits_write_grants";
 //
 // `delete` is left in place for both: the limiter has a sweep path, and this
 // migration is scoped to the privileges the consume statement needs.
-export function up() {
-  grant({
-    privileges: ["insert", "update"],
-    on: { kind: "table", schema: "zeroship", names: ["rate_limits"] },
-    to: ["zeroship_control"],
-  });
-  grant({
-    privileges: ["update"],
-    on: { kind: "table", schema: "zeroship", names: ["rate_limits"] },
-    to: ["zeroship_auth"],
-  });
-}
+export default {
+  name: "rate_limits_write_grants",
+  schema() {
+    grant({
+      privileges: ["insert", "update"],
+      on: { kind: "table", schema: "zeroship", names: ["rate_limits"] },
+      to: ["zeroship_control"],
+    });
+    grant({
+      privileges: ["update"],
+      on: { kind: "table", schema: "zeroship", names: ["rate_limits"] },
+      to: ["zeroship_auth"],
+    });
+  },
+};

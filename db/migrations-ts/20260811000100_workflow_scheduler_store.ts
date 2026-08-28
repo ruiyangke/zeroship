@@ -1,7 +1,5 @@
 import { table, t, now, grant } from "@zeroship/migrate";
 
-export const name = "workflow_scheduler_store";
-
 // The workflow scheduler store was created at RUNTIME, which no least-privilege
 // deployment can do.
 //
@@ -40,47 +38,46 @@ function zs(name) {
   return table(name, { schema: SCHEMA });
 }
 
-export function up() {
-  zs("workflow_scheduler_timers").create({
-    columns: {
-      run_id: t.text().notNull(),
-      app_id: t.uuid().notNull(),
-      wake_at: t.timestamp().notNull(),
-      generation: t.bigInt().notNull().default(0),
-      registered_at: t.timestamp().notNull().default(now()),
-    },
-    primaryKey: ["run_id"],
-  });
-  zs("workflow_scheduler_timers").index("workflow_scheduler_timers_due_idx").add({ on: ["wake_at"] });
+export default {
+  name: "workflow_scheduler_store",
+  schema() {
+    zs("workflow_scheduler_timers").create({
+      columns: {
+        run_id: t.text().notNull(),
+        app_id: t.uuid().notNull(),
+        wake_at: t.timestamp().notNull(),
+        generation: t.bigInt().notNull().default(0),
+        registered_at: t.timestamp().notNull().default(now()),
+      },
+      primaryKey: ["run_id"],
+    });
+    zs("workflow_scheduler_timers").index("workflow_scheduler_timers_due_idx").add({ on: ["wake_at"] });
 
-  zs("workflow_scheduler_inflight").create({
-    columns: {
-      run_id: t.text().notNull(),
-      app_id: t.uuid().notNull(),
-      deadline: t.timestamp().notNull(),
-      dispatch_generation: t.bigInt().notNull(),
-      dispatched_at: t.timestamp().notNull().default(now()),
-    },
-    primaryKey: ["run_id"],
-  });
-  zs("workflow_scheduler_inflight").index("workflow_scheduler_inflight_deadline_idx").add({ on: ["deadline"] });
+    zs("workflow_scheduler_inflight").create({
+      columns: {
+        run_id: t.text().notNull(),
+        app_id: t.uuid().notNull(),
+        deadline: t.timestamp().notNull(),
+        dispatch_generation: t.bigInt().notNull(),
+        dispatched_at: t.timestamp().notNull().default(now()),
+      },
+      primaryKey: ["run_id"],
+    });
+    zs("workflow_scheduler_inflight").index("workflow_scheduler_inflight_deadline_idx").add({ on: ["deadline"] });
 
-  // Exactly the store's working set, measured by sweeping store.rs for the verbs
-  // it issues against each table: INSERT/DELETE/SELECT on both, plus UPDATE on
-  // inflight and the ON CONFLICT UPDATE arm of register_timer. TRUNCATE is used
-  // only by clear_for_tests, which runs under a privileged DSN, so it is not
-  // granted here.
-  grant({
-    privileges: ["select", "insert", "update", "delete"],
-    on: {
-      kind: "table",
-      schema: SCHEMA,
-      names: ["workflow_scheduler_timers", "workflow_scheduler_inflight"],
-    },
-    to: ["zeroship_control"],
-  });
-}
-
-export function down() {
-
-}
+    // Exactly the store's working set, measured by sweeping store.rs for the verbs
+    // it issues against each table: INSERT/DELETE/SELECT on both, plus UPDATE on
+    // inflight and the ON CONFLICT UPDATE arm of register_timer. TRUNCATE is used
+    // only by clear_for_tests, which runs under a privileged DSN, so it is not
+    // granted here.
+    grant({
+      privileges: ["select", "insert", "update", "delete"],
+      on: {
+        kind: "table",
+        schema: SCHEMA,
+        names: ["workflow_scheduler_timers", "workflow_scheduler_inflight"],
+      },
+      to: ["zeroship_control"],
+    });
+  },
+};

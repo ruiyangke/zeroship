@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "control_app_oauth_clients_update";
-
 // `zeroship_control` could not provision a per-app OAuth client.
 //
 // crates/control/src/app_oauth_client.rs:591 (production; the file's
@@ -31,10 +29,13 @@ export const name = "control_app_oauth_clients_update";
 // Scoped to UPDATE on this one table -- the minimum the statement needs. The
 // sibling INSERT into zeroship.app_scope_defs a few lines below is a plain
 // INSERT with no ON CONFLICT, so it needs nothing and is deliberately untouched.
-export function up() {
-  grant({
-    privileges: ["update"],
-    on: { kind: "table", schema: "zeroship", names: ["app_oauth_clients"] },
-    to: ["zeroship_control"],
-  });
-}
+export default {
+  name: "control_app_oauth_clients_update",
+  schema() {
+    grant({
+      privileges: ["update"],
+      on: { kind: "table", schema: "zeroship", names: ["app_oauth_clients"] },
+      to: ["zeroship_control"],
+    });
+  },
+};

@@ -1,7 +1,5 @@
 import { raw } from "@zeroship/migrate";
 
-export const name = "control_workflow_journal_access";
-
 // Control could not read ANY per-app workflow journal. `app_<uuid>` is created
 // AUTHORIZATION zeroship_workflow_owner (crates/migrated/src/provisioning.rs,
 // workflow_journal_schema_sql) and 20260818000200 granted that role to
@@ -34,17 +32,13 @@ export const name = "control_workflow_journal_access";
 // with a different owner (see the doc comment on
 // migrated::provisioning::workflow_journal_schema_name), so this grant gives
 // control no reach into creator tables.
-export function up() {
-  raw({
-    sql: "GRANT zeroship_workflow_owner TO zeroship_control",
-    reason:
-      "control provisions and sweeps per-app workflow journals; SET ROLE needs membership, not privileges",
-  });
-}
-
-export function down() {
-  raw({
-    sql: "REVOKE zeroship_workflow_owner FROM zeroship_control",
-    reason: "the role DSL does not express role-membership revocation",
-  });
-}
+export default {
+  name: "control_workflow_journal_access",
+  schema() {
+    raw({
+      sql: "GRANT zeroship_workflow_owner TO zeroship_control",
+      reason:
+        "control provisions and sweeps per-app workflow journals; SET ROLE needs membership, not privileges",
+    });
+  },
+};

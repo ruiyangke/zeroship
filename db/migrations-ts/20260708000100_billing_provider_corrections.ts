@@ -1,11 +1,11 @@
 import { raw } from "@zeroship/migrate";
 
-export const name = "billing_provider_corrections";
-
-export function up() {
-  raw({
-    reason: "S7 billing-provider correction findings add provider drift and late adjustment kinds.",
-    sql: `
+export default {
+  name: "billing_provider_corrections",
+  schema() {
+    raw({
+      reason: "S7 billing-provider correction findings add provider drift and late adjustment kinds.",
+      sql: `
 ALTER DOMAIN zeroship.reconciliation_finding_kind
   DROP CONSTRAINT reconciliation_finding_kind_check;
 ALTER DOMAIN zeroship.reconciliation_finding_kind
@@ -25,11 +25,11 @@ ALTER DOMAIN zeroship.reconciliation_finding_kind
     'terminal_period_trueup'
   ));
 `,
-  });
+    });
 
-  raw({
-    reason: "S7 signed correction invoice lines need a line kind and stable correction dedup key.",
-    sql: `
+    raw({
+      reason: "S7 signed correction invoice lines need a line kind and stable correction dedup key.",
+      sql: `
 ALTER TABLE zeroship.invoice_lines
   ADD COLUMN line_kind text NOT NULL DEFAULT 'usage',
   ADD COLUMN correction_dedup_key text;
@@ -51,9 +51,6 @@ CREATE UNIQUE INDEX invoice_lines_correction_dedup_key_key
   ON zeroship.invoice_lines (correction_dedup_key)
   WHERE correction_dedup_key IS NOT NULL;
 `,
-  });
-}
-
-export function down() {
-
-}
+    });
+  },
+};

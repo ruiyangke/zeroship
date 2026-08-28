@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "control_audit_grants";
-
 // `zeroship_control` could neither write the authorization audit trail nor run
 // its own retention sweep.
 //
@@ -57,15 +55,18 @@ export const name = "control_audit_grants";
 // it is not a service in deploy/compose/docker-compose.yml and has no role of
 // its own, so there is nothing to grant to yet. If it is ever deployed under a
 // least-privilege role, it needs INSERT on authz_decisions for the same reason.
-export function up() {
-  grant({
-    privileges: ["select", "delete"],
-    on: { kind: "table", schema: "zeroship", names: ["app_audit"] },
-    to: ["zeroship_control"],
-  });
-  grant({
-    privileges: ["select", "insert", "delete"],
-    on: { kind: "table", schema: "zeroship", names: ["authz_decisions"] },
-    to: ["zeroship_control"],
-  });
-}
+export default {
+  name: "control_audit_grants",
+  schema() {
+    grant({
+      privileges: ["select", "delete"],
+      on: { kind: "table", schema: "zeroship", names: ["app_audit"] },
+      to: ["zeroship_control"],
+    });
+    grant({
+      privileges: ["select", "insert", "delete"],
+      on: { kind: "table", schema: "zeroship", names: ["authz_decisions"] },
+      to: ["zeroship_control"],
+    });
+  },
+};

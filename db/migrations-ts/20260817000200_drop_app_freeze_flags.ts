@@ -1,7 +1,5 @@
 import { table } from "@zeroship/migrate";
 
-export const name = "drop_app_freeze_flags";
-
 // Both columns were operator freeze levers, written only by the two admin
 // routes deleted in the same change and read only by the Cedar entity builder.
 // Neither ever reached the data plane: an app carrying either flag kept serving
@@ -17,11 +15,10 @@ export const name = "drop_app_freeze_flags";
 // One migration, not two: they are the same removal, they were introduced
 // together on `zeroship.apps`, and splitting them would leave an intermediate
 // state whose only difference is which of two identical dead levers survives.
-export function up() {
-  table("apps", { schema: "zeroship" }).column("suspended").drop({ ifExists: true });
-  table("apps", { schema: "zeroship" }).column("audit_locked").drop({ ifExists: true });
-}
-
-export function down() {
-
-}
+export default {
+  name: "drop_app_freeze_flags",
+  schema() {
+    table("apps", { schema: "zeroship" }).column("suspended").drop({ ifExists: true });
+    table("apps", { schema: "zeroship" }).column("audit_locked").drop({ ifExists: true });
+  },
+};

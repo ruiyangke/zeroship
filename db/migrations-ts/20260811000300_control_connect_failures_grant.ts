@@ -1,7 +1,5 @@
 import { grant } from "@zeroship/migrate";
 
-export const name = "control_connect_failures_grant";
-
 // `zeroship_control` held NO privilege of any kind on
 // zeroship.connect_checkout_failures, and two production paths use it.
 //
@@ -37,10 +35,13 @@ export const name = "control_connect_failures_grant";
 //
 // This is a NEW migration rather than an edit to 20260702000900 because that one
 // has already been applied and is checksummed.
-export function up() {
-  grant({
-    privileges: ["select", "insert"],
-    on: { kind: "table", schema: "zeroship", names: ["connect_checkout_failures"] },
-    to: ["zeroship_control"],
-  });
-}
+export default {
+  name: "control_connect_failures_grant",
+  schema() {
+    grant({
+      privileges: ["select", "insert"],
+      on: { kind: "table", schema: "zeroship", names: ["connect_checkout_failures"] },
+      to: ["zeroship_control"],
+    });
+  },
+};
