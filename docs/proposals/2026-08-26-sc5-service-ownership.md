@@ -163,6 +163,51 @@ tombstone: the deprovisioned app's authority row returns with no creator API
 having reused anything. A fence that a routine operator recovery can erase is
 not a fence.
 
+### The domain does not see every rewind
+
+**Measured on PostgreSQL 17.11**, two runs differing in exactly one variable -
+whether `recovery.signal` was present:
+
+| recovery shape | `system_identifier` | `timeline_id` | data |
+| --- | --- | --- | --- |
+| SIGKILL, restart (crash recovery) | unchanged | **1, unchanged** | replayed |
+| basebackup + `recovery.signal` + promote | unchanged | **2** | rewound |
+
+A new timeline is created only when **archive** recovery completes. Crash
+recovery replays whatever WAL is on disk and comes up on the same
+`(system_identifier, timeline_id)`. So restoring a filesystem, EBS, ZFS or LVM
+snapshot and starting the server **without** `recovery.signal` rewinds the data
+and leaves the authority domain byte-identical - and that is the most common
+cloud restore shape.
+
+The paragraph above sets the standard this fails: *"A fence that a routine
+operator recovery can erase is not a fence."* The domain qualification defends
+the promoting recoveries and is blind to the non-promoting ones.
+
+Two consequences the contract must state rather than imply:
+
+1. **The tombstone property is bounded, not absolute.** "Never deleted" holds
+   only against rewinds the domain can observe. Against a snapshot restore that
+   bypasses archive recovery, **no database-resident record survives anywhere** -
+   not in the app cluster, not in the control plane, because restoring either
+   rewinds that side's own tombstone. The honest statement of property 1 is
+   "never deleted, except by a restore that bypasses archive recovery", carried
+   with an operator rule that restores use `recovery.signal`. A witness outside
+   every rewind domain - an append-only ledger mirrored to the blob store - is
+   the only construction that would make the absolute form true.
+2. **`pg_upgrade` moves the domain with no rewind at all.** It builds a fresh
+   `initdb` cluster, and a fresh cluster mints a fresh `system_identifier`
+   (measured: two independently initialised containers report
+   `7679151263737716786` and `7678445743677390892`). Because the incarnation
+   comparison is terminal with no re-resolution, a routine major-version upgrade
+   would permanently deny every app. The contract needs a deliberate, audited
+   **re-domain ceremony**, or the platform can never upgrade PostgreSQL.
+
+*Unverified: whether `pg_control_checkpoint().timeline_id` lags promotion,
+because promotion requests a spread rather than immediate checkpoint. It read
+`2` immediately in the run above, but that path reached an end-of-recovery
+checkpoint; a promotion under load may differ.*
+
 ### The shape, therefore
 
 1. An opaque 128-bit `AppIncarnationId`, minted **by the privileged server side,
