@@ -338,6 +338,93 @@ advisory lock around reconciliation. It is small, but it is invisible until two
 tenants migrate at the same moment - and it did not exist before, because a
 per-app publication has exactly one writer.
 
+### Prior-art study, 2026-08-28: Salesforce, Supabase, Debezium, Vitess, Materialize, Cockroach, Kinesis, client-facing
+
+Ten agents, eight systems, then a synthesis and an adversarial critique of the
+synthesis. The critique found the synthesizer had read the design SUMMARY rather
+than the 1117-line document and refuted several of its own findings, which is
+why the list below is short: it is what survived.
+
+**8a. THE DEDUP RULE LOSES EVERY ROW OF A TRANSACTION AFTER THE FIRST.** Section
+6.3 says the worker keeps the highest `commit_lsn` per app and drops anything
+**at or below** it. **Every change in one pgoutput transaction carries the SAME
+`commit_lsn`**, and the frame table in 5.2 has no transaction boundary. So a
+two-row transaction delivers row 1 and drops row 2, silently and always.
+
+*This page's own ASCII walkthrough of the mechanism was internally inconsistent
+about exactly this - it annotated the second row "same commit, 2 rows: both
+applied, one LSN" while the stated rule drops it. The gloss hid the bug.*
+
+The fix needs a second discriminator: an in-transaction sequence, or an explicit
+transaction boundary frame. Salesforce solved the same problem with three header
+fields - `commitNumber` orders transactions, `transactionKey` brackets one,
+`sequenceNumber` orders within it.
+
+**8b. "Reset the watermark when the Hello term increases" is wrong, and
+backwards.** A new leader replaying from `confirmed_flush_lsn` produces only
+**duplicates**, which the monotone rule already drops. So the reset converts
+every routine leader change into a duplicate storm - while still not covering
+the one case that genuinely invalidates a watermark, a **PostgreSQL timeline
+change**. Nothing in the design reads or validates the upstream timeline;
+Materialize gates on `publication_details.timeline_id` for exactly this.
+
+**8c. Confirming on "the relay's own durability" was validated against a false
+analogy.** The synthesis cited Materialize as precedent. **Materialize's
+durability is a persist shard; ours is an in-memory ring that section 5.1
+explicitly declines to make durable.** Confirming an LSN on volatile state means
+a relay crash loses the rows AND the WAL that held them. This is the same hazard
+found independently in the keepalive handler (finding 6 above), generalised: the
+relay must never confirm past what it can actually replay.
+
+### Blind spots - problems every studied system solved and this design does not mention
+
+Ranked by how sharply the corpus predicts the failure:
+
+1. **Slow-consumer policy.** Push-only, no credit, no eviction timer, no
+   admission control, no stated behaviour for a worker that stops reading its
+   HTTP body. Vitess #11169: a slow VStream client plus a capacity-1 buffer
+   blocked `servePrimary()` and **hung a replica promotion** - consumer
+   backpressure reached the HA control plane. Ours would block the ring writer,
+   which blocks LSN confirmation, which re-arms the WAL growth section 7.2
+   exists to prevent.
+2. **Per-app fault isolation inside one process.** Nothing states what happens
+   when decode, projection or a ring write fails for ONE app. Supabase's
+   un-trapped per-subscriber loop produced project-wide outages **three times
+   from three unrelated causes**, the newest still unfixed on main. Our loop is
+   per app in one process for **every tenant on the cluster** - same shape,
+   larger blast radius.
+3. **What the relay measures.** No observability section, while 12.1 concedes
+   the relay is "a single point of failure for every live query on the cluster".
+   Worse than an omission because of the retention inversion: confirming on ring
+   durability means `confirmed_flush_lsn` advances **at full speed during total
+   delivery failure**, so the most obvious health signal moves fastest when
+   delivery is dead.
+4. **Ring sizing.** The ring is named in seven places and dimensioned in none -
+   no byte depth, no time depth, no per-app cap, no eviction policy. Every
+   comparable system publishes its number: Salesforce 72h, Kinesis 24h,
+   DynamoDB 24h hard, Neon a 40-hour slot reaper, Cockroach
+   `changefeed.protect_timestamp.max_age` 4 days.
+5. **No lossy-degradation vocabulary.** `Resync` is a total per-app reset; there
+   is no frame meaning "I could not represent this change" and no oversize
+   policy. Salesforce made this first-class (`GAP_UPDATE`, `GAP_OVERFLOW`);
+   Debezium ships `unavailable.value.placeholder`. The systems that chose
+   silence are the cautionary ones - Supabase strips every field over 64 bytes
+   from an oversized row and reports it only in a side-channel, so the consumer
+   gets something that passes structural validation and is missing exactly the
+   large fields that mattered.
+6. **The relay's own leak surface.** The masking control is "plaintext never
+   enters the process", which is strong for masked columns - but the relay holds
+   **every tenant's unmasked rows in one process** and the design says nothing
+   about logs, `/metrics`, tracing, ring dumps or debug routes. Vitess
+   CVE-2026-65959 is one forgotten `acl.CheckAccessHTTP` on one debug handler
+   streaming live DML with bound values. Every filed Debezium data-exposure bug
+   is a logging bug.
+
+**Explicitly NOT a blind spot, per the critique:** initial snapshot / cold
+start. The synthesis billed it largest; section 7.3 dissolves it, because the
+live-query client already does a full `rerun()` on every event, so no client
+state bootstraps through the relay.
+
 **What it does NOT need to re-derive:** the decode multiplier is structural.
 Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
 filters run at commit replay, **after** decode, buffering and per-slot spill,
