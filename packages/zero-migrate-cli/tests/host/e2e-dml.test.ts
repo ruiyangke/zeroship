@@ -225,7 +225,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
   const readProgress = async (): Promise<BackfillProgress> => {
     const result = await client.query(
       `SELECT rows_done, batches_done, last_cursor, complete
-         FROM "${metaSchema}".schema_backfills
+         FROM "${metaSchema}".__zeroship_schema_backfills
         WHERE name = 'raise_remaining_scores'`,
     );
     assert.equal(result.rows.length, 1, "one resumable backfill progress row exists");
@@ -256,7 +256,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
     });
 
     const journal = await client.query(
-      `SELECT name FROM "${metaSchema}".schema_migrations
+      `SELECT name FROM "${metaSchema}".__zeroship_schema_migrations
         WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     const journalNames = journal.rows.map((row: { name: string }) => row.name);
@@ -279,7 +279,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
     );
 
     const journalAfterRerun = await client.query(
-      `SELECT name FROM "${metaSchema}".schema_migrations
+      `SELECT name FROM "${metaSchema}".__zeroship_schema_migrations
         WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     assert.deepEqual(

@@ -313,7 +313,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                    FROM pg_catalog.pg_class AS c
                    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
                   WHERE n.nspname = $1
-                    AND c.relname = 'schema_migrations'
+                    AND c.relname = '__zeroship_schema_migrations'
                     AND c.relkind IN ('r', 'p')
                   LIMIT 1",
                 &[cfg.confinement.meta_schema.as_str().into()],
@@ -1263,7 +1263,8 @@ mod recording_session_genericity {
             !rec.log
                 .borrow()
                 .iter()
-                .any(|entry| entry.contains("CREATE TABLE") && entry.contains("schema_backfills")),
+                .any(|entry| entry.contains("CREATE TABLE")
+                    && entry.contains("__zeroship_schema_backfills")),
             "status must not bootstrap progress state"
         );
     }
@@ -1287,7 +1288,7 @@ mod recording_session_genericity {
             .iter()
             .find(|entry| {
                 entry.contains("CREATE TABLE IF NOT EXISTS")
-                    && entry.contains("schema_migrations (")
+                    && entry.contains("__zeroship_schema_migrations (")
             })
             .expect("fresh journal table DDL");
         assert!(
@@ -1296,7 +1297,7 @@ mod recording_session_genericity {
         );
         assert!(
             log.iter().any(|entry| {
-                entry.contains("ALTER TABLE \"proj_x_migrations\".schema_migrations")
+                entry.contains("ALTER TABLE \"proj_x_migrations\".__zeroship_schema_migrations")
                     && entry.contains("ADD COLUMN IF NOT EXISTS down TEXT")
             }),
             "legacy journal bootstrap must add nullable down idempotently: {log:?}"

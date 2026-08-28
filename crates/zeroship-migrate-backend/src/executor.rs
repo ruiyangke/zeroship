@@ -286,7 +286,7 @@ pub enum ApplyError {
          apply, and zero-migrate cannot prove its `up` is safe to re-run ({reason}), so it \
          will not replay statements that may already have committed. Inspect the live schema \
          against the migration SQL, restore and verify the complete pre-migration shape \
-         yourself, clear the marker with DELETE FROM \"{meta_schema}\".schema_migrations_inflight \
+         yourself, clear the marker with DELETE FROM \"{meta_schema}\".__zeroship_schema_migrations_inflight \
          WHERE version = '{version}', then run apply again. Clearing the marker inspects \
          nothing: it records your assertion about the shape. Do not hand-write a completed \
          event into the append-only journal"

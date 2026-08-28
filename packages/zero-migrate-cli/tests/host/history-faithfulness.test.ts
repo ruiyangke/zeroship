@@ -165,7 +165,7 @@ test("history reports every journal event, in order, across a rollback and a re-
 
     const { rows: raw } = await client.query(
       `SELECT event_seq::text AS seq, version, name, event_kind
-         FROM "${meta}".schema_migrations ORDER BY event_seq`,
+         FROM "${meta}".__zeroship_schema_migrations ORDER BY event_seq`,
     );
     // The premise: without a rollback in the middle there is nothing to be
     // faithful ABOUT, and a one-row-per-migration history would pass.

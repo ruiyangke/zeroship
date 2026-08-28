@@ -176,7 +176,7 @@ async fn journal_events(
     let rows = session
         .query(
             &format!(
-                "SELECT version, event_kind, kind FROM {meta}.schema_migrations \
+                "SELECT version, event_kind, kind FROM {meta}.__zeroship_schema_migrations \
                   ORDER BY event_seq"
             ),
             &[],
@@ -209,7 +209,7 @@ async fn supersession_edges(
             // driver has no reason to decode here, and `*` makes reading the two
             // columns under test depend on every other column's type.
             &format!(
-                "SELECT squash_version, superseded_version FROM {meta}.schema_migrations_supersedes"
+                "SELECT squash_version, superseded_version FROM {meta}.__zeroship_schema_migrations_supersedes"
             ),
             &[],
         )

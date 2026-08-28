@@ -1,4 +1,15 @@
-//! The migration journal's dialect-neutral vocabulary - `schema_migrations`.
+//! The migration journal's dialect-neutral vocabulary - the `schema_migrations`
+//! events table.
+//!
+//! **The table NAMES below are the neutral spelling, not PostgreSQL's.** The
+//! PostgreSQL backend fences every journal/meta table behind the platform
+//! `__zeroship_` prefix (`__zeroship_schema_migrations`,
+//! `__zeroship_schema_migrations_inflight`, ...) because those tables may share a
+//! schema with creator-declared tables and its `CREATE TABLE IF NOT EXISTS`
+//! bootstrap would otherwise ADOPT a creator table of the same name. MySQL and
+//! SQLite keep the unprefixed names: MySQL's journal has its own meta schema and
+//! SQLite's lives in a separately attached `_mig` database, so neither can
+//! collide with a creator table.
 //!
 //! This module names the journal's shared CONCEPTS and nothing else: the wire
 //! enums ([`Phase`], [`EventKind`], [`JournaledKind`], [`PendingState`],
@@ -330,7 +341,7 @@ pub struct PendingContractRecord<'a> {
 /// The deploy-scoped recovery SCOPE threaded into the EXPAND obligation write so
 /// the obligation row and its recovery marker are committed in ONE transaction
 /// When present, `record_pending_contract_with_recovery` appends a
-/// `state='in_progress'` row to `schema_deploy_recovery` in the SAME `BEGIN ... COMMIT`
+/// `state='in_progress'` row to `__zeroship_schema_deploy_recovery` in the SAME `BEGIN ... COMMIT`
 /// as the `pending` obligation row - so every outstanding obligation ALWAYS has a
 /// marker (closing the obligation-vs-marker crash window: the two
 /// rows commit atomically or not at all).
@@ -518,7 +529,7 @@ pub struct DeployRecovery {
     /// The per-deploy id (UUIDv7) the EXPAND was opened under.
     pub deploy_id: String,
     /// The obligation key (the EXPAND's E2 trigger version) this row marks for
-    /// recovery - the join key into `schema_pending_contracts`.
+    /// recovery - the join key into `__zeroship_schema_pending_contracts`.
     pub pending_version: String,
 }
 
@@ -581,7 +592,7 @@ mod tests {
     }
 
     /// The cross-deploy pending-contract `state`/`resolution` wire contract is
-    /// byte-exact: the `schema_pending_contracts` CHECK constraints, the writers,
+    /// byte-exact: the `__zeroship_schema_pending_contracts` CHECK constraints, the writers,
     /// and the net-state reader (`outstanding_pending_contracts`) all interpolate these
     /// literals from this single typed source. A drift here would
     /// silently un-gate the interlock (a `pending` row never read back). Pin them.

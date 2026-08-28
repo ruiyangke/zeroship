@@ -1,5 +1,5 @@
 //! The PostgreSQL journal: schema, immutability trigger, and every statement
-//! that reads or writes `<meta>.schema_migrations`.
+//! that reads or writes `<meta>.__zeroship_schema_migrations`.
 //!
 //! This is the PostgreSQL analogue of the MySQL `zeroship_migrate_mysql::backend::journal_sql`
 //! and SQLite `zeroship_migrate_sqlite::backend::journal_sql` modules. The three backends
@@ -16,14 +16,14 @@
 //! one transaction), and the net state of a version is its **latest event** on
 //! that scale. [`applied`] reads net state off it.
 //!
-//! The journal of record, `<meta>.schema_migrations`, is guarded by an
+//! The journal of record, `<meta>.__zeroship_schema_migrations`, is guarded by an
 //! **immutability trigger** that rejects UPDATE and DELETE outright. A
 //! correction is a *new* row, never an edit.
 //!
 //! Non-transactional migrations (`CREATE INDEX CONCURRENTLY`, ...) cannot wrap
 //! their DDL + journal write in one transaction, so they use a **two-phase**
 //! protocol around a *separate* mutable side-table,
-//! `<meta>.schema_migrations_inflight`: write a `started` marker -> run the DDL
+//! `<meta>.__zeroship_schema_migrations_inflight`: write a `started` marker -> run the DDL
 //! -> insert the immutable `completed` row -> drop the marker. A crash leaves a
 //! lone `started` marker, which the executor's recovery path detects on the
 //! next apply. The inflight table is deliberately NOT immutable (the marker
@@ -79,7 +79,7 @@ pub async fn ensure_journal<D: SqlSession>(
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let trg_fn = quote_ident(&format!(
-        "{}_schema_migrations_immutable",
+        "{}___zeroship_schema_migrations_immutable",
         cfg.confinement.meta_schema
     ))?;
     let meta_lit = cfg.confinement.meta_schema.replace('\'', "''");
@@ -125,7 +125,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // three NULL). `by`/`at` unify the separate actor and timestamp columns the two
     // event kinds used to carry.
     conn.batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
+        "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_migrations (
             event_seq   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             event_kind  TEXT NOT NULL CHECK (event_kind IN ('applied','rolled_back')),
             version     TEXT NOT NULL,
@@ -138,7 +138,7 @@ pub async fn ensure_journal<D: SqlSession>(
             phase       TEXT CHECK (phase IS NULL OR phase IN ('started','completed')),
             outcome     TEXT,
             kind        TEXT CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable')),
-            CONSTRAINT schema_migrations_event_shape CHECK (
+            CONSTRAINT __zeroship_schema_migrations_event_shape CHECK (
                 (event_kind = 'applied'
                      AND kind IS NOT NULL AND phase IS NOT NULL AND outcome IS NOT NULL)
                 OR
@@ -153,7 +153,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // nullable so those immutable historical rows remain valid; new applied
     // events store the exact reverse SQL that rollback must replay.
     conn.batch(&format!(
-        "ALTER TABLE {meta}.schema_migrations
+        "ALTER TABLE {meta}.__zeroship_schema_migrations
              ADD COLUMN IF NOT EXISTS down TEXT"
     ))
     .await?;
@@ -169,13 +169,13 @@ pub async fn ensure_journal<D: SqlSession>(
     // are recorded LAST (after the `completed` row), so a net-applied squash
     // always has its full edge set; a partial edge set never exists because the
     // squash's `completed` row + its edges are written in one transaction by the
-    // caller. (No FK to `schema_migrations` - that table allows multiple
+    // caller. (No FK to `__zeroship_schema_migrations` - that table allows multiple
     // `completed` rows per version, so there is no single PK to reference; the
     // squash_version is validated by the caller before journaling.)
     // (No shared sequence: supersedes is a relation [set-membership of edges],
     // not part of the event total order, so it gets its OWN native IDENTITY PK.)
     conn.batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
+        "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_migrations_supersedes (
             id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             squash_version     TEXT NOT NULL,
             superseded_version TEXT NOT NULL,
@@ -193,7 +193,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // touches the rename's table while the contract is still outstanding.
     //
     // **Append-only + immutable (trigger below), exactly like
-    // `schema_migrations`.** An obligation is born `pending`; it is discharged
+    // `__zeroship_schema_migrations`.** An obligation is born `pending`; it is discharged
     // by APPENDING a `resolved` row (never a DELETE/UPDATE). The NET state per
     // `pending_version` is the latest `event_seq` row (DISTINCT-ON-latest, the
     // same pattern `applied` uses). A `pending` row with no later `resolved`
@@ -202,7 +202,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // **Unforgeable by the migrator (deny-by-absence).** It lives in the meta
     // schema, which the migrator role has NO grant on (`role.rs` REVOKE +
     // search_path exclusion). All writes are by the ADMIN role on the executor
-    // path, mirroring the journal-forgery defense for `schema_migrations`: a
+    // path, mirroring the journal-forgery defense for `__zeroship_schema_migrations`: a
     // creator migration's `up` (running as the migrator) can neither plant a
     // bogus `resolved` row (suppressing the interlock) nor a bogus `pending`
     // row (wedging an unrelated table).
@@ -221,7 +221,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // sub-version that no plan-level set ever exposes;
     // `contract_versions` is the JSON array of C1/C2 ids.
     conn.batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_pending_contracts (
+        "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_pending_contracts (
             event_seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             state             TEXT NOT NULL CHECK (state IN ('pending','resolved')),
             owner_app         TEXT,
@@ -235,7 +235,7 @@ pub async fn ensure_journal<D: SqlSession>(
             resolution        TEXT CHECK (resolution IS NULL OR resolution IN ('applied','aborted')),
             \"by\"              TEXT NOT NULL,
             \"at\"              TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CONSTRAINT schema_pending_contracts_state_shape CHECK (
+            CONSTRAINT __zeroship_schema_pending_contracts_state_shape CHECK (
                 (state = 'pending'  AND resolution IS NULL)
                 OR
                 (state = 'resolved' AND resolution IS NOT NULL)
@@ -247,7 +247,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // Existing rows remain NULL and therefore cannot be resolved through an
     // owner-asserting public call; every new row written below carries the value.
     conn.batch(&format!(
-        "ALTER TABLE {meta}.schema_pending_contracts
+        "ALTER TABLE {meta}.__zeroship_schema_pending_contracts
              ADD COLUMN IF NOT EXISTS owner_app TEXT"
     ))
     .await?;
@@ -256,7 +256,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // A multi-file APPROVED bundle applies per-step with NO whole-bundle
     // transaction (`executor.rs`: BEGIN;up;journal;COMMIT per migration). So an
     // in-scope online-rename EXPAND in file A commits durably (E1/E2/E3 +
-    // dual-write trigger + the `schema_pending_contracts` obligation) BEFORE a
+    // dual-write trigger + the `__zeroship_schema_pending_contracts` obligation) BEFORE a
     // LATER file B in the SAME deploy can fail at apply for a runtime reason the
     // read-only pre-validation cannot predict. Pre- that left file A's table
     // half-renamed behind the creator's 4xx, owing a pending contract.
@@ -318,13 +318,13 @@ pub async fn ensure_journal<D: SqlSession>(
     // in the happy path.
     //
     // **Append-only + immutable + admin-only** (same posture as
-    // `schema_pending_contracts`): `state` transitions
+    // `__zeroship_schema_pending_contracts`): `state` transitions
     // in_progress->committed/aborted/reconciled by APPENDING a row (never
     // UPDATE/DELETE); the net state per (deploy_id, pending_version) is the latest
     // `event_seq` row. The migrator role has NO grant on the meta schema, so a
     // creator migration can neither forge nor suppress a recovery marker.
     conn.batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_deploy_recovery (
+        "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_deploy_recovery (
             event_seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deploy_id        TEXT NOT NULL,
             pending_version  TEXT NOT NULL,
@@ -339,7 +339,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // guarded by the immutability trigger - the marker is deleted on
     // completion / recovery.
     conn.batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_inflight (
+        "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_migrations_inflight (
             version     TEXT PRIMARY KEY,
             name        TEXT NOT NULL,
             checksum    TEXT NOT NULL,
@@ -351,7 +351,7 @@ pub async fn ensure_journal<D: SqlSession>(
 
     // 3. Immutability trigger function (billing-ledger pattern,
     // 0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
-    // append-only tables (the consolidated schema_migrations events table +
+    // append-only tables (the consolidated __zeroship_schema_migrations events table +
     // ..._supersedes).
     //
     // GUARDED ON `pg_proc.prosrc` rather than issued unconditionally. A bare
@@ -380,7 +380,7 @@ pub async fn ensure_journal<D: SqlSession>(
         "\n         ",
     );
     let trg_fn_lit = format!(
-        "{}_schema_migrations_immutable",
+        "{}___zeroship_schema_migrations_immutable",
         cfg.confinement.meta_schema
     )
     .replace('\'', "''");
@@ -404,16 +404,16 @@ pub async fn ensure_journal<D: SqlSession>(
     //
     // DO NOT TRUST THIS COMMENT OVER THE LOOP - it has been wrong twice. It
     // originally said "BOTH ... the consolidated events table + ..._supersedes",
-    // written before `schema_pending_contracts` joined; the correction that
+    // written before `__zeroship_schema_pending_contracts` joined; the correction that
     // replaced it said THREE and asserted `..._deploy_recovery` was excluded on
     // purpose, which the loop directly below disproves. Verified live against
     // PostgreSQL, per meta table:
     //
-    //     schema_deploy_recovery         triggers=2   TRUNCATE refused
-    //     schema_migrations              triggers=2   TRUNCATE refused
-    //     schema_migrations_supersedes   triggers=2   TRUNCATE refused
-    //     schema_pending_contracts       triggers=2   TRUNCATE refused
-    //     schema_migrations_inflight     triggers=0   TRUNCATE allowed
+    //     __zeroship_schema_deploy_recovery         triggers=2   TRUNCATE refused
+    //     __zeroship_schema_migrations              triggers=2   TRUNCATE refused
+    //     __zeroship_schema_migrations_supersedes   triggers=2   TRUNCATE refused
+    //     __zeroship_schema_pending_contracts       triggers=2   TRUNCATE refused
+    //     __zeroship_schema_migrations_inflight     triggers=0   TRUNCATE allowed
     //
     // `..._inflight` is the ONLY meta table left mutable, and deliberately so: it
     // is the side-table an operator clears by hand to recover an interrupted
@@ -424,7 +424,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // - `BEFORE UPDATE OR DELETE... FOR EACH ROW` - blocks row mutation.
     // - `BEFORE TRUNCATE... FOR EACH STATEMENT` - blocks TRUNCATE, which
     // row-level triggers DO NOT fire on. Without the statement-level
-    // TRUNCATE trigger, `TRUNCATE {meta}.schema_migrations` would silently
+    // TRUNCATE trigger, `TRUNCATE {meta}.__zeroship_schema_migrations` would silently
     // wipe the append-only journal. (Defense-in-depth: TRUNCATE is only
     // reachable on the trusted-admin path - the migrator role has no grant
     // on the meta schema - but the journal must be immutable by
@@ -443,10 +443,10 @@ pub async fn ensure_journal<D: SqlSession>(
     // (`trg_q`) for uniformity, and the existence check compares the raw name
     // as a string literal (`trg_lit`).
     for tbl in [
-        "schema_migrations",
-        "schema_migrations_supersedes",
-        "schema_pending_contracts",
-        "schema_deploy_recovery",
+        "__zeroship_schema_migrations",
+        "__zeroship_schema_migrations_supersedes",
+        "__zeroship_schema_pending_contracts",
+        "__zeroship_schema_deploy_recovery",
     ] {
         for (trg, level, events) in [
             ("zs_immutable_trg", "FOR EACH ROW", "UPDATE OR DELETE"),
@@ -486,7 +486,7 @@ pub async fn ensure_journal<D: SqlSession>(
 ///
 /// The journal is append-only, including rollback: an `applied` row is
 /// never deleted; rollback **appends** a `rolled_back` event to the SAME
-/// `schema_migrations` events table, and a re-apply appends a fresh `applied`
+/// `__zeroship_schema_migrations` events table, and a re-apply appends a fresh `applied`
 /// row. So a version can carry several events over rollback<->re-apply cycles. The
 /// NET state of a version is decided by its **latest event** on the native
 /// monotonic `event_seq` (IDENTITY PK) scale:
@@ -529,7 +529,7 @@ pub async fn applied<D: SqlSession>(
                 "WITH latest AS (
                      SELECT DISTINCT ON (version)
                             version, checksum, down, event_kind, kind AS mig_kind, event_seq
-                       FROM {meta}.schema_migrations
+                       FROM {meta}.__zeroship_schema_migrations
                       ORDER BY version, event_seq DESC
                  ),
                  net_applied AS (
@@ -542,7 +542,7 @@ pub async fn applied<D: SqlSession>(
                      UNION ALL
                      SELECT version, checksum, NULL AS down, NULL AS mig_kind, 0::bigint AS event_seq,
                             'started' AS phase
-                       FROM {meta}.schema_migrations_inflight i
+                       FROM {meta}.__zeroship_schema_migrations_inflight i
                       WHERE NOT EXISTS (
                           SELECT 1 FROM net_applied n WHERE n.version = i.version
                       )
@@ -602,7 +602,7 @@ pub async fn net_rolled_back<D: SqlSession>(
                      SELECT DISTINCT ON (version)
                             version, name, checksum, \"by\" AS actor, exec_ms,
                             \"at\" AS at, event_kind
-                       FROM {meta}.schema_migrations
+                       FROM {meta}.__zeroship_schema_migrations
                       ORDER BY version, event_seq DESC
                  )
                  SELECT version, name, checksum, actor,
@@ -649,7 +649,7 @@ pub async fn history<D: SqlSession>(
                 "SELECT event_seq, version, name,
                         to_char(\"at\", 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS at,
                         exec_ms, \"by\" AS actor, checksum, event_kind
-                   FROM {meta}.schema_migrations
+                   FROM {meta}.__zeroship_schema_migrations
                  ORDER BY event_seq"
             ),
             &[],
@@ -705,7 +705,7 @@ pub async fn record_rolled_back<D: SqlSession>(
     let n = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations
+                "INSERT INTO {meta}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms)
                  VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
                 rolled_back = EventKind::RolledBack.as_str()
@@ -740,7 +740,7 @@ pub async fn record_started<D: SqlSession>(
     let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
-            "INSERT INTO {meta}.schema_migrations_inflight
+            "INSERT INTO {meta}.__zeroship_schema_migrations_inflight
                  (version, name, checksum, applied_by)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (version) DO NOTHING"
@@ -775,7 +775,7 @@ pub async fn record_completed<D: SqlSession>(
     let n = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations
+                "INSERT INTO {meta}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
                  VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6)",
                 applied = EventKind::Applied.as_str()
@@ -792,7 +792,7 @@ pub async fn record_completed<D: SqlSession>(
         .await?;
     debug_assert_eq!(n, 1, "record_completed must insert exactly one journal row");
     conn.exec(
-        &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
+        &format!("DELETE FROM {meta}.__zeroship_schema_migrations_inflight WHERE version = $1"),
         &[rec.version.into()],
     )
     .await?;
@@ -823,7 +823,7 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
                      SELECT DISTINCT ON (pending_version)
                             pending_version, plan_version, owner_app, \"table\", from_col,
                             to_col, ty, contract_versions
-                       FROM {meta}.schema_pending_contracts
+                       FROM {meta}.__zeroship_schema_pending_contracts
                       WHERE state = '{pending}'
                       ORDER BY pending_version, event_seq DESC
                  )
@@ -832,7 +832,7 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
                    FROM latest_pending p
                   WHERE NOT EXISTS (
                             SELECT 1
-                              FROM {meta}.schema_pending_contracts r
+                              FROM {meta}.__zeroship_schema_pending_contracts r
                              WHERE r.pending_version = p.pending_version
                                AND r.state = '{resolved}'
                         )
@@ -886,7 +886,7 @@ pub async fn resolved_pending_contracts<D: SqlSession>(
                 "SELECT DISTINCT ON (pending_version)
                         pending_version, plan_version, owner_app, \"table\", from_col, to_col,
                         ty, contract_versions, resolution
-                   FROM {meta}.schema_pending_contracts
+                   FROM {meta}.__zeroship_schema_pending_contracts
                   WHERE state = '{resolved}'
                   ORDER BY pending_version, event_seq DESC",
                 resolved = PendingState::Resolved.as_str()
@@ -1108,13 +1108,13 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
     let obligation_sql = format!(
-        "INSERT INTO {meta}.schema_pending_contracts
+        "INSERT INTO {meta}.__zeroship_schema_pending_contracts
              (state, owner_app, \"table\", from_col, to_col, ty, pending_version,
               plan_version, contract_versions, \"by\")
          SELECT '{pending}', $1, $2, $3, $4, $5, $6, $7, $8, $9
           WHERE NOT EXISTS (
                     SELECT 1
-                      FROM {meta}.schema_pending_contracts
+                      FROM {meta}.__zeroship_schema_pending_contracts
                      WHERE pending_version = $6
                        AND state = '{resolved}'
                 )",
@@ -1154,7 +1154,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
         let m = conn
             .exec(
                 &format!(
-                    "INSERT INTO {meta}.schema_deploy_recovery
+                    "INSERT INTO {meta}.__zeroship_schema_deploy_recovery
                          (deploy_id, pending_version, state, \"by\")
                      VALUES ($1, $2, 'in_progress', $3)"
                 ),
@@ -1216,7 +1216,7 @@ pub async fn resolve_pending_contract<D: SqlSession>(
     let n = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_pending_contracts
+                "INSERT INTO {meta}.__zeroship_schema_pending_contracts
                      (state, owner_app, \"table\", from_col, to_col, ty, pending_version,
                       plan_version, contract_versions, resolution, \"by\")
                  VALUES ('{resolved}', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
@@ -1272,7 +1272,7 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
     let n = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_deploy_recovery
+                "INSERT INTO {meta}.__zeroship_schema_deploy_recovery
                      (deploy_id, pending_version, state, \"by\")
                  VALUES ($1, $2, 'committed', $3)"
             ),
@@ -1357,7 +1357,7 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
     let n = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_deploy_recovery
+                "INSERT INTO {meta}.__zeroship_schema_deploy_recovery
                      (deploy_id, pending_version, state, \"by\")
                  VALUES ($1, $2, 'reconciled', $3)"
             ),
@@ -1373,7 +1373,7 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
 
 /// Read the deploy-recovery markers that are net-`in_progress` (latest event per
 /// `(deploy_id, pending_version)` is `in_progress`) AND whose obligation is STILL
-/// outstanding in `schema_pending_contracts` (/ - the crash-recovery
+/// outstanding in `__zeroship_schema_pending_contracts` (/ - the crash-recovery
 /// leg's resume input).
 ///
 /// The outstanding-obligation join is what makes resume idempotent + correct: a
@@ -1409,16 +1409,16 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
                 "WITH latest_recovery AS (
                      SELECT DISTINCT ON (deploy_id, pending_version)
                             deploy_id, pending_version, state
-                       FROM {meta}.schema_deploy_recovery
+                       FROM {meta}.__zeroship_schema_deploy_recovery
                       ORDER BY deploy_id, pending_version, event_seq DESC
                  ),
                  unresolved_obligation AS (
                      SELECT DISTINCT ON (pending_version) pending_version
-                       FROM {meta}.schema_pending_contracts p
+                       FROM {meta}.__zeroship_schema_pending_contracts p
                       WHERE p.state = '{pending}'
                         AND NOT EXISTS (
                             SELECT 1
-                              FROM {meta}.schema_pending_contracts resolved
+                              FROM {meta}.__zeroship_schema_pending_contracts resolved
                              WHERE resolved.pending_version = p.pending_version
                                AND resolved.state = '{resolved}'
                         )
@@ -1448,8 +1448,8 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
 /// Read the set of versions **superseded by a net-applied squash**.
 ///
 /// A version `v_i` is satisfied-by-supersession when some squash `S` with an edge
-/// `S -> v_i` in `schema_migrations_supersedes` is itself **net-applied** (its
-/// latest event in the consolidated `schema_migrations` table has
+/// `S -> v_i` in `__zeroship_schema_migrations_supersedes` is itself **net-applied** (its
+/// latest event in the consolidated `__zeroship_schema_migrations` table has
 /// `event_kind='applied'`) AND `S`'s recorded `kind` is `'squash'`. The executor
 /// unions this with the net-applied set
 /// to compute `pending`, so a superseded `v_i` is never (re-)run.
@@ -1475,7 +1475,7 @@ pub async fn superseded_versions<D: SqlSession>(
             &format!(
                 "WITH latest AS (
                      SELECT DISTINCT ON (version) version, event_kind, kind AS mig_kind
-                       FROM {meta}.schema_migrations
+                       FROM {meta}.__zeroship_schema_migrations
                       ORDER BY version, event_seq DESC
                  ),
                  net_applied_squashes AS (
@@ -1488,7 +1488,7 @@ pub async fn superseded_versions<D: SqlSession>(
                       WHERE event_kind = '{applied}' AND mig_kind = 'squash'
                  )
                  SELECT DISTINCT s.superseded_version AS v
-                   FROM {meta}.schema_migrations_supersedes s
+                   FROM {meta}.__zeroship_schema_migrations_supersedes s
                    JOIN net_applied_squashes n ON n.version = s.squash_version
                   ORDER BY 1",
                 applied = EventKind::Applied.as_str()
@@ -1545,7 +1545,7 @@ pub async fn latest_completed_checksums<D: SqlSession>(
         .query(
             &format!(
                 "SELECT DISTINCT ON (version) version, checksum
-                   FROM {meta}.schema_migrations
+                   FROM {meta}.__zeroship_schema_migrations
                   WHERE event_kind = '{applied}' AND kind = 'repeatable'
                   ORDER BY version, event_seq DESC",
                 applied = EventKind::Applied.as_str()
@@ -1642,7 +1642,7 @@ async fn record_baseline_inner<D: SqlSession>(
     let n = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations
+                "INSERT INTO {meta}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
                  VALUES ('{applied}', $1, $2, $3, $4, 0, 'completed', 'success', $5)",
                 applied = EventKind::Applied.as_str()
@@ -1660,7 +1660,7 @@ async fn record_baseline_inner<D: SqlSession>(
     for sup in rec.supersedes {
         conn.exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations_supersedes
+                "INSERT INTO {meta}.__zeroship_schema_migrations_supersedes
                      (squash_version, superseded_version)
                  VALUES ($1, $2)"
             ),
@@ -1688,7 +1688,7 @@ pub async fn clear_inflight<D: SqlSession>(
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.exec(
-        &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
+        &format!("DELETE FROM {meta}.__zeroship_schema_migrations_inflight WHERE version = $1"),
         &[version.into()],
     )
     .await?;

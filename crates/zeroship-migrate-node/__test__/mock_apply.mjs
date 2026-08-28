@@ -67,7 +67,7 @@ function check(cond, msg) { if (!cond) { console.error('FAIL:', msg); ok = false
 
 check(recorded.length > 0, 'host driver was never called (TSFN bridge did not fire)');
 check(
-  recorded.some(s => s.includes('schema_migrations') || s.includes('union_all')),
+  recorded.some(s => s.includes('__zeroship_schema_migrations') || s.includes('union_all')),
   'journal read never reached the host driver'
 );
 check(status.currentVersion === null || status.currentVersion === undefined, `expected null currentVersion on empty journal, got ${status.currentVersion}`);

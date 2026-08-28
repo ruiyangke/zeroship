@@ -191,7 +191,7 @@ test("apply racing rollback leaves a journal and a schema that agree", async (ct
     // exceed its `rolled_back` count by at most one, and never trail it.
     const { rows: events } = await client.query(
       `SELECT version, event_kind, count(*)::int AS n
-         FROM "${meta}".schema_migrations
+         FROM "${meta}".__zeroship_schema_migrations
         WHERE phase IS NULL OR phase = 'completed'
         GROUP BY version, event_kind`,
       [],
@@ -220,7 +220,7 @@ test("apply racing rollback leaves a journal and a schema that agree", async (ct
     const present = new Set(live.map((row) => row.table_name as string));
 
     const { rows: named } = await client.query(
-      `SELECT version, name FROM "${meta}".schema_migrations
+      `SELECT version, name FROM "${meta}".__zeroship_schema_migrations
         WHERE event_kind = 'applied' AND phase = 'completed'`,
       [],
     );

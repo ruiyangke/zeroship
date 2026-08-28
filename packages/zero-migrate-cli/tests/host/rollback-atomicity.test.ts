@@ -95,7 +95,7 @@ test("a failed journal append takes the teardown down with it", async (ctx) => {
 
   const journalKinds = async (): Promise<string[]> => {
     const { rows } = await client.query(
-      `SELECT event_kind FROM "${meta}".schema_migrations ORDER BY event_kind`,
+      `SELECT event_kind FROM "${meta}".__zeroship_schema_migrations ORDER BY event_kind`,
     );
     return rows.map((row) => row.event_kind as string);
   };
@@ -132,7 +132,7 @@ test("a failed journal append takes the teardown down with it", async (ctx) => {
 
     // Fail the journal's `rolled_back` append, and nothing else.
     await client.query(
-      `ALTER TABLE "${meta}".schema_migrations
+      `ALTER TABLE "${meta}".__zeroship_schema_migrations
          ADD CONSTRAINT no_rb CHECK (event_kind <> 'rolled_back')`,
     );
 
@@ -159,7 +159,7 @@ test("a failed journal append takes the teardown down with it", async (ctx) => {
     // THE CONTROL. Remove the induced fault and the same call must succeed -
     // otherwise the arm above is equally consistent with a rollback that simply
     // never works, and the atomicity claim would be untested either way.
-    await client.query(`ALTER TABLE "${meta}".schema_migrations DROP CONSTRAINT no_rb`);
+    await client.query(`ALTER TABLE "${meta}".__zeroship_schema_migrations DROP CONSTRAINT no_rb`);
     await unwind();
     assert.equal(await widgetsExists(), false, "a clean rollback must remove the table");
     assert.deepEqual(

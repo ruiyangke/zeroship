@@ -160,7 +160,7 @@ test("PostgreSQL: the CLI rolls an applied migration back and leaves it pending"
       },
       async () => {
         const result = await client.query(
-          `SELECT count(*)::int AS n FROM "${metaSchema}".schema_migrations
+          `SELECT count(*)::int AS n FROM "${metaSchema}".__zeroship_schema_migrations
             WHERE event_kind = 'rolled_back'`,
         );
         return Number((result.rows[0] as { n: number }).n);

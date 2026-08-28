@@ -869,7 +869,7 @@ impl SqlSession for PgDevSession {
     }
 
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError> {
-        if sql.contains(".schema_pending_contracts")
+        if sql.contains(".__zeroship_schema_pending_contracts")
             && sql.contains("VALUES ('resolved'")
             && self
                 .fail_next_resolved_pending_contract_insert

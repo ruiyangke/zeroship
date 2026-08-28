@@ -189,7 +189,7 @@ test("baseline adopts a live schema whose journal is in a foreign id family", as
     const foreignVersions = FOREIGN_ORDINALS.map(migrationIdForVersion);
     for (const [index, version] of foreignVersions.entries()) {
       await client.query(
-        `INSERT INTO "${meta}".schema_migrations
+        `INSERT INTO "${meta}".__zeroship_schema_migrations
            (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
          VALUES ('applied', $1, $2, $3, 'peer-runner', 0, 'completed', 'success', 'apply')`,
         [version, `create_${TABLES[index]}`, `${index}`.repeat(64)],
@@ -251,7 +251,7 @@ test("baseline adopts a live schema whose journal is in a foreign id family", as
     // The foreign rows are still there -- the journal is append-only, and adoption
     // REINTERPRETS them rather than erasing them.
     const surviving = await client.query(
-      `SELECT version FROM "${meta}".schema_migrations WHERE "by" = 'peer-runner'`,
+      `SELECT version FROM "${meta}".__zeroship_schema_migrations WHERE "by" = 'peer-runner'`,
     );
     assert.equal((surviving.rows as unknown[]).length, foreignVersions.length);
   } finally {
@@ -318,7 +318,7 @@ test("baseline repairs a database whose status verb cannot even reconcile", asyn
     const foreignVersions = FOREIGN_ORDINALS.map(migrationIdForVersion);
     for (const [index, version] of foreignVersions.entries()) {
       await client.query(
-        `INSERT INTO "${meta}".schema_migrations
+        `INSERT INTO "${meta}".__zeroship_schema_migrations
            (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
          VALUES ('applied', $1, $2, $3, 'peer-runner', 0, 'completed', 'success', 'apply')`,
         [version, `create_${TABLES[index]}`, `${index}`.repeat(64)],
@@ -424,7 +424,7 @@ test("the checksum baseline records is the one a real apply writes, and drift re
     assert.equal(bootstrap.status, 0, bootstrap.stderr);
     for (const [index, version] of FOREIGN_ORDINALS.map(migrationIdForVersion).entries()) {
       await client.query(
-        `INSERT INTO "${adoptedMeta}".schema_migrations
+        `INSERT INTO "${adoptedMeta}".__zeroship_schema_migrations
            (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
          VALUES ('applied', $1, $2, $3, 'peer-runner', 0, 'completed', 'success', 'apply')`,
         [version, `create_${TABLES[index]}`, `${index}`.repeat(64)],
@@ -464,7 +464,7 @@ test("the checksum baseline records is the one a real apply writes, and drift re
     // actor filter would silently compare one journal against an empty set.
     const journal = async (meta: string) => {
       const rows = await client.query(
-        `SELECT version, name, checksum FROM "${meta}".schema_migrations
+        `SELECT version, name, checksum FROM "${meta}".__zeroship_schema_migrations
           WHERE event_kind = 'applied' AND "by" <> 'peer-runner' ORDER BY event_seq`,
       );
       return rows.rows as Array<{ version: string; name: string; checksum: string }>;
@@ -482,7 +482,7 @@ test("the checksum baseline records is the one a real apply writes, and drift re
     // The control: change ONLY the recorded checksum for one adopted version.
     const target = recorded[1];
     await client.query(
-      `INSERT INTO "${adoptedMeta}".schema_migrations
+      `INSERT INTO "${adoptedMeta}".__zeroship_schema_migrations
          (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
        VALUES ('applied', $1, $2, $3, 'tamper', 0, 'completed', 'success', 'baseline')`,
       [target.version, target.name, "f".repeat(64)],
@@ -551,7 +551,7 @@ test("baseline refuses to write without --approve, and prints what it would reco
     assert.match(refused.stdout, /create_table_alpha/, refused.stdout);
 
     // Nothing was written.
-    const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".schema_migrations`);
+    const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".__zeroship_schema_migrations`);
     assert.equal((rows.rows as Array<{ n: number }>)[0].n, 0, "a refused baseline writes nothing");
   } finally {
     await client
@@ -583,7 +583,7 @@ test("baseline refuses unmatched journal rows unless --supersede-unmatched is gi
     assert.equal(bootstrap.status, 0, bootstrap.stderr);
     const foreign = migrationIdForVersion(20260101000001n);
     await client.query(
-      `INSERT INTO "${meta}".schema_migrations
+      `INSERT INTO "${meta}".__zeroship_schema_migrations
          (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
        VALUES ('applied', $1, 'create_alpha', $2, 'peer-runner', 0, 'completed', 'success', 'apply')`,
       [foreign, "a".repeat(64)],
@@ -604,7 +604,7 @@ test("baseline refuses unmatched journal rows unless --supersede-unmatched is gi
     assert.match(refused.stderr, /--supersede-unmatched/, refused.stderr);
     assert.ok(refused.stderr.includes(foreign), refused.stderr);
 
-    const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".schema_migrations`);
+    const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".__zeroship_schema_migrations`);
     assert.equal(
       (rows.rows as Array<{ n: number }>)[0].n,
       1,
@@ -648,7 +648,7 @@ test("baseline refuses a database whose tables the migration set has not created
     assert.equal(refused.status, 1, `${refused.stdout}\n${refused.stderr}`);
     assert.match(refused.stderr, /alpha/, refused.stderr);
 
-    const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".schema_migrations`);
+    const rows = await client.query(`SELECT count(*)::int AS n FROM "${meta}".__zeroship_schema_migrations`);
     assert.equal((rows.rows as Array<{ n: number }>)[0].n, 0, "nothing was recorded");
   } finally {
     await client
@@ -743,7 +743,7 @@ export function schema() {
       `an up-to-date database must still adopt\n${control.stdout}\n${control.stderr}`,
     );
     const controlRows = await client.query(
-      `SELECT count(*)::int AS n FROM "${currentMeta}".schema_migrations WHERE event_kind = 'applied'`,
+      `SELECT count(*)::int AS n FROM "${currentMeta}".__zeroship_schema_migrations WHERE event_kind = 'applied'`,
     );
     assert.equal(
       (controlRows.rows as Array<{ n: number }>)[0].n,
@@ -765,7 +765,7 @@ export function schema() {
 
     // Nothing was journaled, so the database is still repairable by `apply`.
     const rows = await client.query(
-      `SELECT count(*)::int AS n FROM "${behindMeta}".schema_migrations`,
+      `SELECT count(*)::int AS n FROM "${behindMeta}".__zeroship_schema_migrations`,
     );
     assert.equal((rows.rows as Array<{ n: number }>)[0].n, 0, "a refused adoption writes nothing");
 
@@ -864,7 +864,7 @@ test("a baseline preview reports the supersession edges the write would record",
     const foreignVersions = FOREIGN_ORDINALS.map(migrationIdForVersion);
     for (const [index, version] of foreignVersions.entries()) {
       await client.query(
-        `INSERT INTO "${meta}".schema_migrations
+        `INSERT INTO "${meta}".__zeroship_schema_migrations
            (event_kind, version, name, checksum, "by", exec_ms, phase, outcome, kind)
          VALUES ('applied', $1, $2, $3, 'peer-runner', 0, 'completed', 'success', 'apply')`,
         [version, `create_${TABLES[index]}`, `${index}`.repeat(64)],
@@ -899,7 +899,7 @@ test("a baseline preview reports the supersession edges the write would record",
     );
     // Nothing was written: the preview is a preview.
     const afterPreview = await client.query(
-      `SELECT count(*)::int AS n FROM "${meta}".schema_migrations WHERE "by" <> 'peer-runner'`,
+      `SELECT count(*)::int AS n FROM "${meta}".__zeroship_schema_migrations WHERE "by" <> 'peer-runner'`,
     );
     assert.equal((afterPreview.rows as Array<{ n: number }>)[0].n, 0, "the preview wrote nothing");
 
@@ -994,7 +994,7 @@ export function schema() {
     const applied = spawnCli(cliArgs("apply"), cwd);
     assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
     const ran = await client.query(
-      `SELECT version, name, checksum FROM "${meta}".schema_migrations
+      `SELECT version, name, checksum FROM "${meta}".__zeroship_schema_migrations
         WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     const journaled = ran.rows as Array<{ version: string; name: string; checksum: string }>;
@@ -1010,7 +1010,7 @@ export function schema() {
       `a database this corpus built must adopt\n${adopt.stdout}\n${adopt.stderr}`,
     );
     const readopted = await client.query(
-      `SELECT version, name, checksum FROM "${meta}".schema_migrations
+      `SELECT version, name, checksum FROM "${meta}".__zeroship_schema_migrations
         WHERE event_kind = 'applied' ORDER BY event_seq`,
     );
     assert.deepEqual(

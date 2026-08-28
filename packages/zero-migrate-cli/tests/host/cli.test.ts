@@ -347,7 +347,7 @@ test("CLI scaffold under an inline dash-leading --dir applies to live PostgreSQL
     assert.equal(applied.status, 0, applied.stderr);
 
     const journal = await client.query(
-      `SELECT event_kind, name FROM "${schema}_migrations".schema_migrations
+      `SELECT event_kind, name FROM "${schema}_migrations".__zeroship_schema_migrations
         ORDER BY event_seq`,
     );
     assert.deepEqual(

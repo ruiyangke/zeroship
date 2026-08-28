@@ -65,8 +65,8 @@
 //!   migration: `pending = set - completed`) or a bogus checksum (wedging the
 //!   apply on `ChecksumDrift`). All journal / inflight I/O is therefore done by
 //!   the **executor as the admin role** - the migrator gets neither `USAGE` on
-//!   the meta schema nor any grant on `schema_migrations` /
-//!   `schema_migrations_inflight`. The journal is unforgeable by deny-by-absence.
+//!   the meta schema nor any grant on `__zeroship_schema_migrations` /
+//!   `__zeroship_schema_migrations_inflight`. The journal is unforgeable by deny-by-absence.
 //! - `search_path` set to the project schema **first**, then the extension
 //!   schema(s) (default `public`), via `ALTER ROLE`. The project schema is the
 //!   sole writable resolution target; the extension schema(s) ride at the end

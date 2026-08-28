@@ -138,7 +138,7 @@ impl RecordingSession {
 
     /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
     /// read (`journal_sql::applied`, recognisable by its `union_all` CTE + the
-    /// `schema_migrations_inflight` UNION leg - a shape no other query has) gets
+    /// `__zeroship_schema_migrations_inflight` UNION leg - a shape no other query has) gets
     /// the canned (version, checksum, mig_kind, event_seq, phase) journal rows; every other
     /// read (catalog introspection in `snapshot_schema`, the `superseded_versions`
     /// squash read whose only column is `v`, drift probes) gets an EMPTY result,
@@ -150,11 +150,12 @@ impl RecordingSession {
                 vec!["server_version_num".into()],
                 vec![Value::Text(self.server_version_num.to_string())],
             )]
-        } else if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
+        } else if sql.contains("union_all") && sql.contains("__zeroship_schema_migrations_inflight")
+        {
             self.canned_journal.borrow().clone()
         } else if sql.contains("AS table_exists")
             && sql.contains("pg_catalog.pg_class")
-            && sql.contains("schema_backfills")
+            && sql.contains("__zeroship_schema_backfills")
         {
             vec![Row::new(
                 vec!["table_exists".into()],
@@ -168,7 +169,7 @@ impl RecordingSession {
                     Value::Bool(self.progress_checksum_exists),
                 ],
             )]
-        } else if sql.contains("schema_backfills")
+        } else if sql.contains("__zeroship_schema_backfills")
             && sql.contains("backfill_id, checksum, complete")
         {
             self.canned_progress.borrow().clone()

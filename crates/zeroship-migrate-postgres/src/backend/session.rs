@@ -812,7 +812,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     if let Err(e) = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations
+                "INSERT INTO {meta}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind, down)
                  VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6, $7)",
                 applied = journal::EventKind::Applied.as_str()
@@ -972,7 +972,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     if let Err(e) = conn
         .exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations
+                "INSERT INTO {meta}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
                  VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', 'apply')",
                 applied = journal::EventKind::Applied.as_str()
@@ -1023,7 +1023,7 @@ async fn insert_supersedes_edges<D: SqlSession>(
     for sup in supersedes {
         conn.exec(
             &format!(
-                "INSERT INTO {meta}.schema_migrations_supersedes
+                "INSERT INTO {meta}.__zeroship_schema_migrations_supersedes
                      (squash_version, superseded_version)
                  VALUES ($1, $2)"
             ),
@@ -1547,7 +1547,7 @@ async fn append_rolled_back<D: SqlSession>(
     )?;
     conn.exec(
         &format!(
-            "INSERT INTO {meta}.schema_migrations
+            "INSERT INTO {meta}.__zeroship_schema_migrations
                  (event_kind, version, name, checksum, \"by\", exec_ms)
              VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
             rolled_back = journal::EventKind::RolledBack.as_str()

@@ -191,7 +191,7 @@ test("a backfill killed mid-flight resumes without losing or repeating a row", a
     // A partial with no journal event for the backfill: the shape a failed
     // statement never produces.
     const { rows: journal } = await client.query(
-      `SELECT name FROM "${schema}_migrations".schema_migrations
+      `SELECT name FROM "${schema}_migrations".__zeroship_schema_migrations
         WHERE event_kind = 'applied'`,
     );
     assert.equal(journal.length, 1, "only the create is journaled at this point");

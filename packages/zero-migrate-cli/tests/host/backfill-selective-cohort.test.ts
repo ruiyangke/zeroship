@@ -196,7 +196,7 @@ test("a backfill transforms every selected row and leaves every other row alone"
     // cohort. Without this the two assertions above are equally satisfied by a
     // backfill that did nothing at all and a seed that never set `val`.
     const { rows: progress } = await client.query(
-      `SELECT rows_done FROM "${meta}".schema_backfills`,
+      `SELECT rows_done FROM "${meta}".__zeroship_schema_backfills`,
     );
     assert.equal(progress.length, 1, "exactly one backfill was recorded");
     assert.equal(
@@ -281,7 +281,7 @@ test("a backfill whose predicate matches nothing completes and records nothing",
     assert.equal(rows[0].n, 0, "an empty cohort must transform no row at all");
 
     const { rows: progress } = await client.query(
-      `SELECT rows_done FROM "${meta}".schema_backfills`,
+      `SELECT rows_done FROM "${meta}".__zeroship_schema_backfills`,
     );
     assert.equal(progress.length, 1, "the backfill is still recorded");
     assert.equal(

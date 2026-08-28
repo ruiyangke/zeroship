@@ -40,7 +40,7 @@ pub enum ConnectError {}
 ///
 /// | field                  | PostgreSQL | MySQL | SQLite |
 /// |------------------------|-----------|-------|--------|
-/// | `meta_schema`          | yes (`<meta>.schema_migrations`) | yes (same journal SQL) | no (its journal is an attached `_mig` database) |
+/// | `meta_schema`          | yes (`<meta>.__zeroship_schema_migrations`) | yes (`<meta>.schema_migrations`) | no (its journal is an attached `_mig` database) |
 /// | `statement_timeout`    | yes (`SET statement_timeout`) | yes (`max_execution_time`) | no |
 /// | `lock_timeout`         | yes (`SET lock_timeout`) | yes (`innodb_lock_wait_timeout`) | no |
 /// | `project_lock_timeout` | **no** (`pg_advisory_lock` takes no timeout) | yes (`GET_LOCK`) | yes (application-file lock) |
@@ -56,13 +56,19 @@ pub enum ConnectError {}
 /// only the inputs.
 #[derive(Debug, Clone)]
 pub struct ConfinementConfig {
-    /// The per-project **meta schema** that holds the append-only
-    /// `schema_migrations` journal. Separate from the project
-    /// schema so a creator migration can't touch its own history.
+    /// The per-project **meta schema** that holds the append-only migration
+    /// journal. Separate from the project schema so a creator migration can't
+    /// touch its own history.
     ///
-    /// Read by the PostgreSQL journal and by MySQL's, which spell the same
-    /// `<meta>.schema_migrations` namespace. SQLite does not read it: its
-    /// journal lives in a separately attached `_mig` database file.
+    /// Read by the PostgreSQL journal and by MySQL's; both spell it
+    /// `<meta>.<journal table>`, but the table names DIFFER. PostgreSQL fences
+    /// every journal/meta table behind the platform `__zeroship_` prefix
+    /// (`<meta>.__zeroship_schema_migrations`) because those tables may share a
+    /// schema with creator-declared tables and `CREATE TABLE IF NOT EXISTS`
+    /// would otherwise ADOPT a creator table of the same name as the journal.
+    /// MySQL keeps the unprefixed `<meta>.schema_migrations`. SQLite does not
+    /// read this field at all: its journal lives in a separately attached
+    /// `_mig` database file.
     pub meta_schema: String,
     /// Mandatory per-statement timeout. Bounds how long a statement may
     /// **run**; a runaway DDL/DML is cancelled after this. This is the

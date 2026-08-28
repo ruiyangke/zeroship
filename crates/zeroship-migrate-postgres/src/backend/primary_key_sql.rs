@@ -199,7 +199,7 @@ async fn apply_inside_transaction<D: SqlSession>(
     let inserted = conn
         .exec(
             &format!(
-                "INSERT INTO {meta_q}.schema_migrations
+                "INSERT INTO {meta_q}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
                  VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', 'apply')",
                 applied = journal::EventKind::Applied.as_str()
@@ -746,7 +746,7 @@ mod tests {
         }
 
         fn rows_for(&self, sql: &str) -> Vec<Row> {
-            if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
+            if sql.contains("union_all") && sql.contains("__zeroship_schema_migrations_inflight") {
                 Vec::new()
             } else if sql.contains("con.contype = 'p'") {
                 vec![Row::new(
@@ -1144,7 +1144,9 @@ mod tests {
             .unwrap();
         let journal = log
             .iter()
-            .position(|entry| entry.contains("INSERT INTO \"app_migrations\".schema_migrations"))
+            .position(|entry| {
+                entry.contains("INSERT INTO \"app_migrations\".__zeroship_schema_migrations")
+            })
             .unwrap();
         let commit = log
             .iter()

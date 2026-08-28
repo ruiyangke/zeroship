@@ -114,7 +114,8 @@ function runCli(
 }
 
 /** The immutability trigger function the bootstrap installs, named after the meta schema. */
-const triggerFunctionOf = (meta: string): string => `${meta}_schema_migrations_immutable`;
+const triggerFunctionOf = (meta: string): string =>
+  `${meta}___zeroship_schema_migrations_immutable`;
 
 test("re-bootstrapping an existing journal rewrites no catalog row", async (ctx) => {
   const client = await connectLivePg();

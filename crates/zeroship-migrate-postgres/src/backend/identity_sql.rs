@@ -212,7 +212,7 @@ async fn apply_inside_transaction<D: SqlSession>(
     let inserted = conn
         .exec(
             &format!(
-                "INSERT INTO {meta_q}.schema_migrations
+                "INSERT INTO {meta_q}.__zeroship_schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
                  VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', 'apply')",
                 applied = journal::EventKind::Applied.as_str()
@@ -441,7 +441,7 @@ mod tests {
 
         async fn query(&self, sql: &str, _binds: &[Bind]) -> Result<Vec<Row>, DbError> {
             self.log.borrow_mut().push(format!("query: {sql}"));
-            if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
+            if sql.contains("union_all") && sql.contains("__zeroship_schema_migrations_inflight") {
                 Ok(Vec::new())
             } else if sql.contains("pg_get_serial_sequence") {
                 Ok(if self.owned {
@@ -595,7 +595,7 @@ mod tests {
         assert!(log.contains("LOCK TABLE \"app\".\"items\" IN SHARE ROW EXCLUSIVE MODE"));
         assert!(log.contains("SELECT MAX(\"id\")::bigint AS data_extreme"));
         assert!(log.contains("SELECT setval(($1::bigint)::oid::regclass, $2::bigint, true)"));
-        assert!(log.contains("INSERT INTO \"meta\".schema_migrations"));
+        assert!(log.contains("INSERT INTO \"meta\".__zeroship_schema_migrations"));
         assert!(log.contains("batch: COMMIT"));
     }
 
@@ -614,7 +614,7 @@ mod tests {
             .expect("journal monotonic no-op"));
         let log = session.log.borrow().join("\n");
         assert!(!log.contains("SELECT setval"));
-        assert!(log.contains("INSERT INTO \"meta\".schema_migrations"));
+        assert!(log.contains("INSERT INTO \"meta\".__zeroship_schema_migrations"));
     }
 
     #[compio::test]
