@@ -340,6 +340,181 @@ fn a_forced_transaction_cannot_be_resurrected_by_rollback_to() {
     );
 }
 
+/// **The completion of the command a force interrupted must not move the
+/// state.**
+///
+/// This interleaving became reachable when forced cleanup started CANCELLING a
+/// command-owned session instead of withdrawing it. Before that, a force landing
+/// on a command-owned session proved no goal and reached `Settled` inside the
+/// same `apply`, so the command's completion always arrived at a `Settled`
+/// reducer and guard 5 answered it. Cancelling means the cleanup waits for the
+/// cancelled statement, and its completion now arrives here, in `Cancelling`.
+///
+/// Every one of the three completion handlers would otherwise assign a state:
+/// `on_operation_completed` writes `Idle` or `Poisoned`, and both frame
+/// completions write `Idle` or `Poisoned` too. `Poisoned` is the resurrection
+/// route `a_forced_transaction_cannot_be_resurrected_by_rollback_to` covers, and
+/// `Idle` is worse - it admits data SQL directly. So a cancelled statement's own
+/// error would be the thing that walks a terminally forced transaction back onto
+/// the data path.
+///
+/// The arm drives all three completions rather than the one that is easiest to
+/// reach, because the hazard is the handler's shape and all three share it.
+///
+/// **Mutation that reddens this arm:** delete the `TxState::Cancelling` early
+/// return from any one of `on_operation_completed`,
+/// `on_open_frame_completed` or `on_close_frame_completed`. That case then
+/// reports `Idle` or `Poisoned` instead of `Cancelling`.
+#[test]
+fn a_cancelled_commands_completion_never_moves_a_forced_transaction() {
+    /// A case: how to reach a command that owns the client, and the frame it
+    /// names (if any). The `bool` says whether the completion to deliver is a
+    /// data statement's or a frame close's.
+    type InFlightCase = (&'static str, fn() -> (Harness, Option<FrameId>), bool);
+
+    let cases: [InFlightCase; 3] = [
+        (
+            "a data statement",
+            || (Harness::at(TxState::InFlight), None),
+            true,
+        ),
+        (
+            "a SAVEPOINT",
+            || {
+                let mut harness = Harness::at(TxState::Idle);
+                harness.apply(TxEvent::OpenFrame);
+                let frame = harness.reducer.frames().top().map(frames::Frame::id);
+                (harness, frame)
+            },
+            false,
+        ),
+        (
+            "a RELEASE",
+            || {
+                let (mut harness, child) = Harness::at(TxState::Idle).with_open_child();
+                harness.apply(TxEvent::CloseFrame {
+                    frame: child,
+                    close: FrameClose::Released,
+                });
+                (harness, Some(child))
+            },
+            false,
+        ),
+    ];
+
+    for (label, build, is_data_sql) in cases {
+        let (mut harness, frame) = build();
+        assert_eq!(
+            harness.state(),
+            TxState::InFlight,
+            "{label}: the command must own the client before the force"
+        );
+        let token = harness.last_token();
+
+        harness.apply(TxEvent::Cancel {
+            authority: authority(),
+        });
+        assert_eq!(
+            harness.state(),
+            TxState::Cancelling,
+            "{label}: the force claims the gate"
+        );
+
+        // The cancelled command answers. Its error is real - PostgreSQL
+        // reports 57014 - which is exactly the input that would otherwise
+        // produce `Poisoned`.
+        let before = harness.all().len();
+        let replies = if is_data_sql {
+            harness.apply(TxEvent::OperationCompleted {
+                token,
+                errored: true,
+            })
+        } else {
+            harness.apply(TxEvent::CloseFrameCompleted {
+                token,
+                frame: frame.expect("a frame case names its frame"),
+                close: FrameClose::Released,
+                ok: false,
+            })
+        };
+
+        assert_eq!(
+            harness.state(),
+            TxState::Cancelling,
+            "{label}: the completion of a cancelled command must not move a \
+             forced transaction - Idle admits data SQL and Poisoned is \
+             recoverable to Idle by rollbackTo"
+        );
+        assert_eq!(
+            replies,
+            vec![Action::Reply(Err(TxProtocolError::Cleanup(
+                CleanupCause::Cancelled
+            )))],
+            "{label}: the caller receives the latched cleanup cause"
+        );
+        assert!(
+            !harness.all()[before..]
+                .iter()
+                .any(Action::is_creator_data_sql),
+            "{label}: invariant 16 - no creator data SQL after a force"
+        );
+        // The session is handed back to the registry, because that is now
+        // true: the guard that was holding it has returned it, and the
+        // cleanup ROLLBACK is what runs next.
+        assert_eq!(
+            harness.reducer.session(),
+            SessionOwnership::Registry,
+            "{label}: a returned session is the registry's again, so cleanup \
+             can reach it"
+        );
+    }
+}
+
+/// The `OpenFrameCompleted` half of the arm above.
+///
+/// Split out rather than folded in because `OpenFrameCompleted` carries a
+/// different event shape, and a loop that special-cased it would be a loop with
+/// one arm per case wearing a table's clothes.
+///
+/// **Mutation that reddens this arm:** delete the `TxState::Cancelling` early
+/// return from `on_open_frame_completed`. The state becomes `Poisoned`.
+#[test]
+fn a_cancelled_savepoint_completion_never_moves_a_forced_transaction() {
+    let mut harness = Harness::at(TxState::Idle);
+    harness.apply(TxEvent::OpenFrame);
+    let frame = harness
+        .reducer
+        .frames()
+        .top()
+        .expect("a child was inserted")
+        .id();
+    let token = harness.last_token();
+    assert_eq!(harness.state(), TxState::InFlight);
+
+    harness.apply(TxEvent::Cancel {
+        authority: authority(),
+    });
+    assert_eq!(harness.state(), TxState::Cancelling);
+
+    let replies = harness.apply(TxEvent::OpenFrameCompleted {
+        token,
+        frame,
+        ok: false,
+    });
+    assert_eq!(
+        harness.state(),
+        TxState::Cancelling,
+        "a cancelled SAVEPOINT's failure must not park a forced transaction in \
+         Poisoned, from which rollbackTo walks it back to Idle"
+    );
+    assert_eq!(
+        replies,
+        vec![Action::Reply(Err(TxProtocolError::Cleanup(
+            CleanupCause::Cancelled
+        )))]
+    );
+}
+
 /// Invariant 16 over interleavings: `Cancelling` has no exit but `Settled`,
 /// and exactly one cleanup cause is ever latched.
 ///

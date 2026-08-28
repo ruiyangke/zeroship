@@ -971,7 +971,6 @@ impl SqliteSession {
     /// Holding one is what makes a cancellation possible at all: a dropped
     /// caller-side future is not observable by the actor, so there has to be an
     /// explicit channel.
-    #[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
     pub fn cancel_handle(&self, reservation: &Arc<Reservation>) -> SqliteCancelHandle {
         SqliteCancelHandle {
             queue: self.tx.clone(),
@@ -1065,7 +1064,6 @@ impl std::fmt::Debug for SqliteCancelHandle {
 impl SqliteCancelHandle {
     /// Record the intent and, if the actor is already running the target
     /// command, interrupt its connection. Returns what the intent decided.
-    #[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
     fn signal(&self) -> CancelIntent {
         let intent = self.reservation.request_cancel();
         if matches!(intent, CancelIntent::Interrupt(_)) {
@@ -1082,7 +1080,6 @@ impl SqliteCancelHandle {
     /// # Errors
     ///
     /// `DbError::Internal` when the actor is gone.
-    #[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
     pub async fn cancel(&self) -> Result<TerminalOutcome, DbError> {
         self.signal();
         let (reply_tx, reply_rx) = flume::bounded::<Result<TerminalOutcome, DbError>>(1);
@@ -1104,7 +1101,10 @@ impl SqliteCancelHandle {
 /// SC-2 case 4: the guard must be **disarmed before the reply is delivered**,
 /// so a drop that happens after a result was handed to the caller cannot
 /// retroactively cancel it. [`Self::disarm`] is that moment.
-#[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
+// Still dead, and for a narrower reason than before: SC-1 forced cleanup DOES
+// cancel now, but it does so explicitly through `transaction::cancel::TxCanceller`.
+// Nothing arms a guard that cancels on DROP.
+#[allow(dead_code)]
 pub struct SqliteCancelGuard {
     handle: Option<SqliteCancelHandle>,
 }
@@ -1118,7 +1118,7 @@ impl std::fmt::Debug for SqliteCancelGuard {
 }
 
 impl SqliteCancelGuard {
-    #[allow(dead_code)] // no production canceller yet
+    #[allow(dead_code)] // nothing arms this guard yet - see the type comment
     #[must_use]
     pub fn new(handle: SqliteCancelHandle) -> Self {
         Self {
@@ -1128,7 +1128,7 @@ impl SqliteCancelGuard {
 
     /// Stop this guard from cancelling. Call it before returning a delivered
     /// result to the caller.
-    #[allow(dead_code)] // no production canceller yet
+    #[allow(dead_code)] // nothing arms this guard yet - see the type comment
     pub fn disarm(mut self) {
         self.handle = None;
     }
@@ -1231,7 +1231,6 @@ impl SqliteSessionHandle {
     /// Only meaningful for a transaction handle: an autocommit reservation is
     /// minted per command, so there is nothing stable to cancel.
     #[must_use]
-    #[allow(dead_code)] // no production canceller yet
     pub fn cancel_handle(&self) -> Option<SqliteCancelHandle> {
         self.lease
             .as_ref()

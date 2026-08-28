@@ -719,6 +719,30 @@ impl TxReducer {
         self.cleanup
     }
 
+    /// The token forced cleanup is waiting on, if a force has claimed the gate.
+    ///
+    /// For a driver whose cleanup must survive an `await`: together with
+    /// [`Self::generation`] it names *which* cleanup of *which* session a
+    /// resumed future belongs to, so a cleanup that outlived its transaction
+    /// cannot act on the next one's session.
+    #[must_use]
+    pub const fn cancellation_token(&self) -> Option<CommandToken> {
+        self.cancellation_token
+    }
+
+    /// The backend generation of the session this transaction confirmed a
+    /// `BEGIN` on. `None` before `BeginCompleted`.
+    ///
+    /// Monotonic for the life of the thread and never reset
+    /// ([`crate::context::ThreadDbContext::next_backend_generation`]), which is
+    /// what makes it usable as a session identity rather than only as a
+    /// staleness counter: a later transaction can never mint a value an earlier
+    /// one already held.
+    #[must_use]
+    pub const fn generation(&self) -> Option<BackendGeneration> {
+        self.generation
+    }
+
     #[must_use]
     pub const fn outcome(&self) -> Option<TerminalOutcome> {
         self.outcome
@@ -985,6 +1009,9 @@ impl TxReducer {
         if let Some(reply) = self.check_token(token) {
             return reply;
         }
+        if self.state == TxState::Cancelling {
+            return self.command_returned_during_cleanup();
+        }
         self.active = None;
         self.session = SessionOwnership::Registry;
         let quiescing = self.state == TxState::Quiescing;
@@ -1043,6 +1070,9 @@ impl TxReducer {
     ) -> Vec<Action> {
         if let Some(reply) = self.check_token(token) {
             return reply;
+        }
+        if self.state == TxState::Cancelling {
+            return self.command_returned_during_cleanup();
         }
         self.active = None;
         self.session = SessionOwnership::Registry;
@@ -1113,6 +1143,9 @@ impl TxReducer {
     ) -> Vec<Action> {
         if let Some(reply) = self.check_token(token) {
             return reply;
+        }
+        if self.state == TxState::Cancelling {
+            return self.command_returned_during_cleanup();
         }
         self.active = None;
         self.session = SessionOwnership::Registry;
@@ -1379,6 +1412,33 @@ impl TxReducer {
         actions.push(Action::ReleaseAdmission);
         actions.push(Action::Reply(Ok(TxReply::Settled(outcome))));
         actions
+    }
+
+    /// A backend command that forced cleanup interrupted has answered.
+    ///
+    /// **Only reachable because cleanup can now CANCEL rather than withdraw.**
+    /// Before that, a force landing on a command-owned session proved no goal,
+    /// settled indeterminate and reached `Settled` inside the same
+    /// `apply` - so the command's completion always arrived at a `Settled`
+    /// reducer and guard 5 answered it. Cancelling instead means the cleanup
+    /// waits for the cancelled statement, and its completion arrives here, in
+    /// `Cancelling`.
+    ///
+    /// The state must NOT move. `on_operation_completed` would have parked it in
+    /// `Idle` or `Poisoned`, and both are states that issue creator data SQL -
+    /// `Poisoned` because invariant 13 makes it recoverable, which is the whole
+    /// reason invariant 16 forbids a force from routing through it. A cancelled
+    /// statement's own error must not be the thing that walks a terminally
+    /// forced transaction back onto the data path.
+    ///
+    /// What it DOES do is hand the session back to the registry, because that
+    /// is now true: the guard that was holding it has returned it, and the
+    /// cleanup `ROLLBACK` is what runs next.
+    fn command_returned_during_cleanup(&mut self) -> Vec<Action> {
+        self.active = None;
+        self.session = SessionOwnership::Registry;
+        let latched = self.cleanup.expect("Cancelling always carries its cause");
+        vec![Action::Reply(Err(TxProtocolError::Cleanup(latched.cause)))]
     }
 
     /// Invariant 16: once `Cancelling` is entered, no creator request is

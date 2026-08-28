@@ -293,6 +293,35 @@ pub struct ThreadDbContext {
     /// for the sessions that happened to be in the slot at the time.
     withdrawn_tx_sessions: HashSet<String>,
 
+    /// The out-of-band canceller for each app's live transaction session,
+    /// **keyed by owning `app_id`**.
+    ///
+    /// Captured when the session is installed, because the moment it is needed
+    /// is the moment the session is NOT here: a forced cleanup usually arrives
+    /// while a slow statement holds the client out of [`Self::tx_conns`], and
+    /// PostgreSQL's `CancelRequest` needs a second connection rather than that
+    /// one. See [`crate::transaction::cancel`].
+    ///
+    /// Its safety does not rest on this map's lifetime. A `CancelToken` from a
+    /// pooled borrow carries that lease, and `Pool::return_client` revokes it,
+    /// so an entry that outlived its transaction refuses rather than cancelling
+    /// the next borrower's query.
+    tx_cancellers: HashMap<String, crate::transaction::cancel::TxCanceller>,
+
+    /// Wakers parked on a transaction session RETURNING to its slot,
+    /// **keyed by owning `app_id`**.
+    ///
+    /// Distinct from [`Self::tx_waiters`], which waits for the whole
+    /// *transaction* to end. This one waits for one take/put cycle: forced
+    /// cleanup that cancelled a running statement has to wait for that
+    /// statement's holder to give the session back before it can roll it back,
+    /// and polling for it would put a sleep on the cleanup path.
+    ///
+    /// Woken by [`Self::put_tx_client_for`] (the session came back) and by
+    /// [`Self::retire_transaction`] (it never will - the waiter's transaction
+    /// is over, and it must abandon rather than sit out its grace).
+    tx_slot_waiters: HashMap<String, Vec<std::task::Waker>>,
+
     /// Per-app stack of `pending_emits` watermarks, one entry per open
     /// savepoint frame: the length of that app's queued-event buffer at
     /// the moment the savepoint opened.
@@ -454,6 +483,8 @@ impl ThreadDbContext {
             transactions: HashMap::new(),
             backend_generation: 0,
             withdrawn_tx_sessions: HashSet::new(),
+            tx_cancellers: HashMap::new(),
+            tx_slot_waiters: HashMap::new(),
             savepoint_emit_marks: HashMap::new(),
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
@@ -888,6 +919,80 @@ impl ThreadDbContext {
             return;
         }
         self.tx_conns.insert(app_id.to_string(), client);
+        // The session is back. Wake anything waiting to reclaim it - forced
+        // cleanup that cancelled the statement this guard was running is
+        // parked on exactly this moment.
+        //
+        // Deliberately NOT woken on either arm above: a destroyed session is
+        // not a reclaimable one, and waking there would hand a waiter an empty
+        // slot it has to re-check anyway. Those waiters are released by
+        // `retire_transaction` instead, which is what a destroyed session's
+        // transaction always reaches.
+        self.wake_tx_slot_waiters(app_id);
+    }
+
+    /// Wake everything parked on `app_id`'s transaction slot.
+    fn wake_tx_slot_waiters(&mut self, app_id: &str) {
+        if let Some(waiters) = self.tx_slot_waiters.remove(app_id) {
+            for waker in waiters {
+                waker.wake();
+            }
+        }
+    }
+
+    /// Park a waker on `app_id`'s transaction slot refilling.
+    ///
+    /// Deduplicated by [`std::task::Waker::will_wake`] because the waiter
+    /// re-registers on every poll and a `timeout` wrapper polls it more than
+    /// once per wake; without this the list would grow for the life of the
+    /// wait.
+    pub(crate) fn push_tx_slot_waiter(&mut self, app_id: &str, waker: &std::task::Waker) {
+        let waiters = self.tx_slot_waiters.entry(app_id.to_string()).or_default();
+        if waiters.iter().any(|parked| parked.will_wake(waker)) {
+            return;
+        }
+        waiters.push(waker.clone());
+    }
+
+    /// Record the canceller for the session just installed in `app_id`'s slot.
+    pub(crate) fn install_tx_canceller(
+        &mut self,
+        app_id: &str,
+        canceller: crate::transaction::cancel::TxCanceller,
+    ) {
+        self.tx_cancellers.insert(app_id.to_string(), canceller);
+    }
+
+    /// Clone out `app_id`'s canceller.
+    ///
+    /// Cloned rather than borrowed on purpose: cancelling is `async`, and a
+    /// `RefCell` borrow of this context must never be held across an await.
+    pub(crate) fn tx_canceller_for(
+        &self,
+        app_id: &str,
+    ) -> Option<crate::transaction::cancel::TxCanceller> {
+        self.tx_cancellers.get(app_id).cloned()
+    }
+
+    /// Drop `app_id`'s canceller.
+    ///
+    /// **This must happen BEFORE the pooled lease is returned, and that is not
+    /// tidiness - it is the difference between keeping the connection and losing
+    /// it.** `Pool::return_client` calls `pool_cancel_lease_prevents_reuse`,
+    /// which is `Arc::strong_count(lease) > 1 || lease.is_uncertain()`, and
+    /// retires the physical session when it is true. A retained `CancelToken`
+    /// holds one of those strong references, so a canceller still parked here
+    /// when the session goes back destroys exactly the connection cancellation
+    /// exists to preserve. That is the pool's documented contract - "if it is
+    /// retained, the pool retires the physical session instead of letting the
+    /// token target its next borrower" - and it is a real defence, not an
+    /// inconvenience: it is why a canceller cannot outlive its lease and reach
+    /// the next borrower's query.
+    ///
+    /// [`Self::retire_transaction`] also drops it, as a backstop for the paths
+    /// that never install a session.
+    pub(crate) fn remove_tx_canceller(&mut self, app_id: &str) {
+        self.tx_cancellers.remove(app_id);
     }
 
     // ----- SC-1 TRANSACTION REDUCER -----------------------------------
@@ -956,9 +1061,18 @@ impl ThreadDbContext {
     /// Leaving the watermarks would let the next transaction's first savepoint
     /// pop a stale mark and truncate that transaction's buffer to an unrelated
     /// length.
+    ///
+    /// It also drops the canceller and RELEASES anything parked on the slot.
+    /// The waiter is forced cleanup waiting to reclaim a cancelled statement's
+    /// session; if this transaction has been retired out from under it - which
+    /// is what the `CancellationSql` deadline does - the session it is waiting
+    /// for is never coming, and it must be woken to discover that rather than
+    /// sitting out its whole grace.
     pub(crate) fn retire_transaction(&mut self, app_id: &str) {
         self.transactions.remove(app_id);
         self.savepoint_emit_marks.remove(app_id);
+        self.tx_cancellers.remove(app_id);
+        self.wake_tx_slot_waiters(app_id);
     }
 
     /// Mint the backend generation for the next installed session.

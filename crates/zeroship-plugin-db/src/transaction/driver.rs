@@ -25,6 +25,27 @@
 //! in `tests/native_transaction.rs` is the arm that fails if the two are ever
 //! reordered.
 //!
+//! ## Forced cleanup CANCELS; it withdraws only when it cannot prove a rollback
+//!
+//! The second constraint on this file is that a force must not answer a slow
+//! statement by destroying the connection. It used to: [`cleanup`] can only roll
+//! a transaction back if it can reach the session, the session is out of the
+//! slot for the whole of any statement, and the execution deadline fires
+//! **because a statement is slow** - so the mechanism that exists to bound one
+//! responded, in its own common case, by killing the backend.
+//!
+//! [`cancel_and_reclaim`] is the answer, and it does not need the session:
+//! PostgreSQL's `CancelRequest` travels on a second connection and names the
+//! backend by process id, and SQLite's is a message to the session actor. The
+//! canceller is captured at [`install`] - the one moment we still own the client
+//! - and lives in [`crate::context::ThreadDbContext::tx_cancellers`].
+//!
+//! Withdrawal remains the fallback and is still reached, by every route that
+//! leaves the cleanup unproved: a cancellation that cannot be delivered, one the
+//! server discards because nothing was running, a statement that does not
+//! release the session within [`CANCEL_RECLAIM_GRACE`], and a `ROLLBACK` whose
+//! oracle does not read `Idle`. It is no longer the FIRST answer.
+//!
 //! ## What a withdrawal has to defeat here, specifically
 //!
 //! [`Action::WithdrawSession`] says "destroy the physical connection rather than
@@ -539,7 +560,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
             }
 
             Action::IssueCancellation { token, goal } => {
-                let ack = cleanup(app_id, goal).await;
+                let ack = cleanup(app_id, token, goal).await;
                 extend(
                     &mut queue,
                     app_id,
@@ -676,13 +697,23 @@ async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Park the session in the app's slot, and record how to cancel it.
+///
+/// **The canceller is captured HERE, not where it is used.** Forced cleanup
+/// needs it precisely when the client is unreachable - some other future is
+/// holding it out of the slot - so the one moment it can be taken is the one
+/// moment we still own the client.
 fn install(app_id: &str, client: TxConnection) {
+    let canceller = super::cancel::TxCanceller::capture(&client);
     crate::context::with_mut(|c| {
         let previous = c.install_tx_client(app_id, client);
         debug_assert!(
             previous.is_none(),
             "open_session: the tx slot was already occupied for this app"
         );
+        if let Some(canceller) = canceller {
+            c.install_tx_canceller(app_id, canceller);
+        }
     });
 }
 
@@ -794,37 +825,185 @@ fn sqlite_terminal(
     }
 }
 
+/// How long forced cleanup waits for a cancelled statement's holder to hand the
+/// session back, once the cancellation is known to have been delivered.
+///
+/// **Not "how long may cleanup take" - the reducer's `cancellation_sql` budget
+/// is that, and it is enforced by a timer in its own task.** This bounds a
+/// narrower thing: how long after the postmaster confirmed it consumed the
+/// `CancelRequest` the backend may still be running the statement. PostgreSQL
+/// raises `57014` at the next `CHECK_FOR_INTERRUPTS`, so an interruptible
+/// statement returns in about a round trip; one that does not is a session we do
+/// not want back, and withdrawal is the cheap, safe answer. Sitting out the full
+/// cancellation budget instead would hold the admission claim - and, on a pool
+/// sized like ours, a connection slot - for a session that is going to be
+/// destroyed anyway.
+///
+/// It is deliberately shorter than `TxBudgets::cancellation_sql` so that the
+/// answer a transaction settles on comes from this function rather than from the
+/// second-stage deadline racing it.
+pub(crate) const CANCEL_RECLAIM_GRACE: Duration = Duration::from_secs(1);
+
+/// Which cleanup, of which session, a resumed future belongs to.
+///
+/// **Cancellation made this necessary.** Cleanup used to be a straight line with
+/// no await between reading the slot and writing it back, so "the session in the
+/// slot" could only ever be the one being cleaned up. Now cleanup waits, and the
+/// wait can outlive the transaction: the `CancellationSql` deadline fires in its
+/// own task, settles `Indeterminate`, withdraws, and releases the admission - at
+/// which point the next transaction is admitted, clears the withdrawal tombstone
+/// and installs ITS session in this very slot. A resumed cleanup that took
+/// whatever it found there would issue `ROLLBACK` on a healthy, unrelated
+/// transaction.
+///
+/// Both halves are load-bearing. The token alone is not enough: tokens restart
+/// at 1 in every reducer, so a later transaction forced from `Preparing` mints
+/// the same value. The backend generation is monotonic for the life of the
+/// thread and never reset, so it cannot recur - it is guard order step 4's
+/// counter, reused here for the identity it already provides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CleanupIdentity {
+    token: CommandToken,
+    generation: BackendGeneration,
+}
+
+impl CleanupIdentity {
+    /// Read the identity of the cleanup `token` belongs to, or `None` if it is
+    /// not the cleanup this app's reducer is currently running.
+    fn capture(app_id: &str, token: CommandToken) -> Option<Self> {
+        crate::context::with(|c| Self::read(c, app_id, token))
+    }
+
+    /// Is this still the cleanup the app's reducer is running?
+    fn is_current(self, ctx: &crate::context::ThreadDbContext, app_id: &str) -> bool {
+        Self::read(ctx, app_id, self.token) == Some(self)
+    }
+
+    fn read(
+        ctx: &crate::context::ThreadDbContext,
+        app_id: &str,
+        token: CommandToken,
+    ) -> Option<Self> {
+        let reducer = ctx.transaction_reducer(app_id)?;
+        if reducer.state() != super::reducer::TxState::Cancelling
+            || reducer.cancellation_token() != Some(token)
+        {
+            return None;
+        }
+        Some(Self {
+            token,
+            generation: reducer.generation()?,
+        })
+    }
+}
+
+/// Wait for a cancelled command to hand the transaction session back.
+///
+/// Resolves as soon as the slot refills OR the cleanup it belongs to stops
+/// being the current one - the second is what stops a waiter sitting out its
+/// whole grace after its transaction was retired underneath it.
+struct SessionReturned<'a> {
+    app_id: &'a str,
+    identity: CleanupIdentity,
+}
+
+impl std::future::Future for SessionReturned<'_> {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let ready = crate::context::with_mut(|c| {
+            if c.has_tx_for(self.app_id) || !self.identity.is_current(c, self.app_id) {
+                return true;
+            }
+            c.push_tx_slot_waiter(self.app_id, cx.waker());
+            false
+        });
+        if ready {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
 /// Perform forced cleanup and report what the health oracle said **afterwards**.
 ///
 /// This function is the one SC-1 constrains by name. Read the module docs before
 /// touching the order of the two steps inside [`cleanup_postgres`].
-async fn cleanup(app_id: &str, goal: CleanupGoal) -> CleanupAck {
-    let backend = crate::context::with(|c| c.backend());
-    let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id));
+async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> CleanupAck {
+    if let Some(ack) = rollback_session_in_slot(app_id).await {
+        return ack;
+    }
 
-    let Some(client) = client else {
-        // An empty slot has two causes and they are NOT the same, so the answer
-        // is taken from the PROTOCOL's view of session ownership rather than
-        // from the slot being empty. Reading emptiness as proof of anything is
-        // the DBR-03 shape.
+    // An empty slot has three causes and they are NOT the same, so the answer is
+    // taken from the PROTOCOL's view of session ownership rather than from the
+    // slot being empty. Reading emptiness as proof of anything is the DBR-03
+    // shape.
+    let session = crate::context::with(|c| c.transaction_reducer(app_id).map(TxReducer::session));
+    match session {
+        // No session was ever acquired. From `Preparing` - goal `NoTransaction` -
+        // that is proved by construction with no I/O: the reducer mints the
+        // `IssueBegin` token on the transition OUT of `Preparing`, so a force
+        // that found `Preparing` interrupted a transaction whose `BEGIN` was
+        // never issued.
         //
-        // - `SessionOwnership::None` - no session was ever acquired. That is
-        //   `Preparing`, and it is also a `BEGIN` that failed before its client
-        //   was installed. Nothing can be open, so "no open transaction" is
-        //   proved by construction with no I/O.
-        // - `Registry` or `Command` - a session exists and some other future
-        //   holds it out of the slot. Cleanup could not run, backend health is
-        //   unknown, and the withdrawal that follows is caught by the slot
-        //   tombstone when the holder returns it.
-        let session =
-            crate::context::with(|c| c.transaction_reducer(app_id).map(TxReducer::session));
-        let _ = goal;
-        return if session == Some(super::reducer::SessionOwnership::None) {
+        // **From `Starting` - goal `AbortIfOpened` - it is NOT proved, and this
+        // arm answers it anyway.** `open_session` acquires the client, runs
+        // `BEGIN`, applies the per-app role and only THEN installs, so a force
+        // landing inside that window sees `SessionOwnership::None` while a
+        // transaction may already be open on the server. This is pre-existing
+        // and untouched here, and it is stated rather than papered over: an
+        // earlier version of this comment claimed "nothing can be open", which is
+        // false for exactly one of the two states that reach it.
+        //
+        // Its consequence is bounded but real. The transaction settles
+        // `Cancelled`, `open_session` then installs a live in-transaction client
+        // into a retired transaction's slot, and it is evicted by the NEXT
+        // transaction's `install_tx_client` - whose returned previous occupant
+        // drops into `Pool::return_client`, which rolls back any session it
+        // cannot prove `Idle`. Closing it properly needs `install` to consult the
+        // withdrawal tombstone and to carry a generation, which is a change to
+        // the BEGIN path rather than to cleanup.
+        //
+        // Cancellation cannot help here: the canceller is captured at `install`,
+        // and this is precisely the window before it exists.
+        Some(super::reducer::SessionOwnership::None) => {
+            let _ = goal;
             CleanupAck::NoOpenTransaction
-        } else {
-            CleanupAck::Indeterminate
-        };
-    };
+        }
+        // A session exists and some other future holds it out of the slot. This
+        // is the COMMON case, not an edge: the execution deadline fires because
+        // a statement is slow, and a slow statement is one whose future is
+        // holding the session. Cancel it rather than concluding that health is
+        // unknown - the previous answer here destroyed the connection every
+        // time the mechanism that exists to bound a slow statement fired.
+        //
+        // `Registry` and `Command` are both real here, and the difference is not
+        // one this function may act on. `Command` is a statement the reducer
+        // knows about; `Registry` is the ambient CRUD path, which takes the
+        // session with a bare `TxClientSlotGuard` and reports nothing to the
+        // state machine (see the module header's "known gap"). Today's
+        // production creator statements are the second kind.
+        Some(
+            super::reducer::SessionOwnership::Registry
+            | super::reducer::SessionOwnership::Command(_),
+        ) => cancel_and_reclaim(app_id, token).await,
+        // Already withdrawn, or no reducer at all. Nothing to prove and nothing
+        // to cancel.
+        Some(super::reducer::SessionOwnership::Withdrawn) | None => CleanupAck::Indeterminate,
+    }
+}
+
+/// Roll back whatever session is parked in the app's slot.
+///
+/// `None` means the slot was empty - which is a question about ownership, not an
+/// answer, and the caller resolves it.
+async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
+    let backend = crate::context::with(|c| c.backend());
+    let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id))?;
 
     let ack = match (&backend, &client) {
         (Some(crate::backend::BackendHandle::Postgres(_)), TxConnection::Postgres(pg)) => {
@@ -838,7 +1017,102 @@ async fn cleanup(app_id: &str, goal: CleanupGoal) -> CleanupAck {
 
     // Put it back so the reducer's session disposition can act on it.
     crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
-    ack
+    Some(ack)
+}
+
+/// Cancel the statement holding the session, reclaim it, and roll it back.
+///
+/// The three steps are in this order for a reason that is not stylistic:
+///
+/// 1. **Deliver the cancellation and wait for the server to confirm it.**
+///    `Pool::cancel_query` returns only after the postmaster closed the
+///    dedicated cancellation connection, which is the cross-connection ordering
+///    barrier. Until that returns, a `CancelRequest` is still in flight and
+///    could land on any statement this backend runs next - including the
+///    `ROLLBACK` below, or a later borrower's query.
+/// 2. **Wait for the holder to give the session back.** The cancelled statement
+///    fails with `57014`, its `await` returns, and its
+///    [`crate::context::TxClientSlotGuard`] parks the session. That put is what
+///    wakes this wait.
+/// 3. **Roll back and sample the oracle**, in that order, exactly as
+///    [`cleanup_postgres`] does for a session that was in the slot all along.
+///
+/// ## What happens when the cancel and the return race
+///
+/// The canceller and the holder run concurrently, so all three orderings must be
+/// safe, and they are - two of them by construction and one by falling back:
+///
+/// * The cancel lands while the statement runs. The intended case: `57014`, the
+///   guard returns the session, the `ROLLBACK` proves the goal, the connection
+///   is kept.
+/// * The statement finishes on its own first. Step 1 has not returned yet, so
+///   nothing here touches the session while the packet is unconfirmed. The
+///   server discards a cancel that arrives while a backend is idle waiting for a
+///   command, so the `ROLLBACK` runs normally.
+/// * The cancel is dispatched in the narrow window after the statement finished
+///   but before the backend is back at command-read. The pending cancel is
+///   consumed by the next interrupt check, which is our own `ROLLBACK`: it fails
+///   with `57014`, the oracle does not read `Idle`, the ack is `Indeterminate`
+///   and the session is withdrawn. A false withdrawal - the safe answer - and
+///   never a cancel that outlives this cleanup, because step 1's EOF proves the
+///   packet was consumed before the `ROLLBACK` was even sent.
+async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
+    let Some(identity) = CleanupIdentity::capture(app_id, token) else {
+        return CleanupAck::Indeterminate;
+    };
+    let Some(canceller) = crate::context::with(|c| c.tx_canceller_for(app_id)) else {
+        // No canceller was captured for this session. A SQLite handle with no
+        // transaction reservation is the only way to get here, and there is
+        // nothing stable to interrupt.
+        return CleanupAck::Indeterminate;
+    };
+
+    match canceller.cancel().await {
+        Ok(super::cancel::CancelDelivery::SqliteSettled(outcome)) => {
+            // SQLite's actor rolls back and retires the reservation BEFORE it
+            // acknowledges, so its answer is the cleanup result. There is
+            // nothing left to reclaim.
+            return match sqlite_terminal(&outcome).0 {
+                TerminalResult::RolledBack => CleanupAck::RolledBack,
+                TerminalResult::Committed | TerminalResult::Indeterminate => {
+                    CleanupAck::Indeterminate
+                }
+            };
+        }
+        Ok(super::cancel::CancelDelivery::Requested) => {}
+        Err(error) => {
+            tracing::warn!(
+                app_id,
+                error = %error.message_str(),
+                "sc1: forced cleanup could not deliver a cancellation request; the \
+                 session's health is unknown and it will be withdrawn"
+            );
+            return CleanupAck::Indeterminate;
+        }
+    }
+
+    let reclaimed =
+        compio::time::timeout(CANCEL_RECLAIM_GRACE, SessionReturned { app_id, identity }).await;
+    if reclaimed.is_err() {
+        tracing::warn!(
+            app_id,
+            grace = ?CANCEL_RECLAIM_GRACE,
+            "sc1: a cancelled statement did not release the transaction session \
+             within the reclaim grace; the session will be withdrawn"
+        );
+        return CleanupAck::Indeterminate;
+    }
+
+    // The wait resolves on EITHER the slot refilling or this cleanup ceasing to
+    // be the current one, so the identity has to be re-read rather than assumed.
+    // Skipping this check is what would let a cleanup whose transaction was
+    // retired underneath it roll back the NEXT transaction's session.
+    if !crate::context::with(|c| identity.is_current(c, app_id)) {
+        return CleanupAck::Indeterminate;
+    }
+    rollback_session_in_slot(app_id)
+        .await
+        .unwrap_or(CleanupAck::Indeterminate)
 }
 
 /// **Cleanup `ROLLBACK` first, health oracle second.**
@@ -900,7 +1174,17 @@ async fn cleanup_sqlite(
 /// On PostgreSQL that is a plain drop, whose `Drop` returns the lease to the
 /// pool. This is the ONLY disposition that may do that.
 fn release_session(app_id: &str) {
-    let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id));
+    let client = crate::context::with_mut(|c| {
+        // BEFORE the drop, and load-bearing. `OwnedPooledClient::drop` returns
+        // the lease, and `Pool::return_client` RETIRES any session whose cancel
+        // lease has escaped (`Arc::strong_count(lease) > 1`). A canceller still
+        // parked here holds exactly such a reference, so leaving it would
+        // destroy the connection on the ordinary success path - the opposite of
+        // what capturing it is for. See
+        // `ThreadDbContext::remove_tx_canceller`.
+        c.remove_tx_canceller(app_id);
+        c.take_tx_client_for(app_id)
+    });
     drop(client);
 }
 
@@ -917,7 +1201,15 @@ fn release_session(app_id: &str) {
 /// per-app tombstone, so a session another future is holding out of the slot is
 /// destroyed when that future returns it rather than quietly parked.
 fn destroy_session(app_id: &str) {
-    let client = crate::context::with_mut(|c| c.withdraw_tx_session(app_id));
+    let client = crate::context::with_mut(|c| {
+        // Symmetric with `release_session`, for a different reason: this
+        // connection is being destroyed either way, so the escaped-lease rule
+        // cannot bite - but a canceller for a session that no longer exists is
+        // a handle to nothing, and leaving it would make the map's contents a
+        // weaker statement than "these sessions are live and cancellable".
+        c.remove_tx_canceller(app_id);
+        c.withdraw_tx_session(app_id)
+    });
     if let Some(client) = client {
         crate::context::destroy_tx_connection(client);
     }
@@ -950,6 +1242,24 @@ fn budgets() -> TxBudgets {
 /// no session, no client, no settle future. A stale delivery is a pure
 /// diagnostic: the reducer's slot refuses any `(kind, generation)` pair it is
 /// not holding, and refusing produces no SQL, no reply and no state change.
+///
+/// ## Known cost, deliberately not paid down here
+///
+/// The task is detached and sleeps for the whole budget, so a transaction that
+/// commits in milliseconds leaves one asleep for the rest of its execution
+/// budget. The late fire is harmless - see above - but the accumulation scales
+/// with transaction RATE rather than with concurrency, which is the shape that
+/// bites a busy worker.
+///
+/// The fix is not cheap and does not belong in a change about cancellation.
+/// Cancelling the sleep needs a signal, and the signal has to be owned by
+/// whoever disarms the deadline. That is
+/// [`super::reducer::deadline::DeadlineSlot`], which lives in the PURE reducer
+/// and may not own an I/O handle. So it needs a new `Action` for "cancel the
+/// timer you scheduled", a driver-side registry keyed the same way the slot is,
+/// and arms proving a cancelled timer cannot take a live `(kind, generation)`
+/// with it. That is a self-contained change with its own tests, not a rider on
+/// this one.
 fn schedule_timer(app_id: &str, scheduled: super::reducer::deadline::ScheduleTimer) {
     let app_id = app_id.to_string();
     compio::runtime::spawn(async move {

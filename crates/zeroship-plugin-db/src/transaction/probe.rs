@@ -304,6 +304,40 @@ impl HeldSession {
     }
 }
 
+/// Retire `app_id`'s reducer and release its admission claim, **leaving the
+/// session slot exactly as it is**.
+///
+/// This reproduces a *timing*, in the same spirit as [`HeldSession`]: the two
+/// calls below are the two `Action::ReleaseAdmission` makes, so nothing here is
+/// a second implementation of anything. What it reproduces is a forced cleanup
+/// being retired out from under itself - which production reaches when the
+/// `CancellationSql` deadline fires in its own task while cleanup is still
+/// waiting for a cancelled statement to hand the session back.
+///
+/// It deliberately does NOT touch the slot, which is what distinguishes it from
+/// [`reset`]: the point of the arm that uses it is that a stale cleanup finds a
+/// session in the slot and must leave it alone.
+pub fn abandon_reducer(app_id: &str) {
+    crate::context::with_mut(|c| {
+        c.retire_transaction(app_id);
+        c.release_tx_claim(app_id);
+    });
+}
+
+/// How long forced cleanup waits for a cancelled statement to release the
+/// session before it gives up and withdraws.
+///
+/// Exposed so an arm can bind itself to WHICH route through cleanup it took.
+/// A cancellation the server acted on frees the session in about a round trip;
+/// one it discarded frees nothing and the cleanup sits out this whole grace. The
+/// two answers are otherwise identical at the reducer, so an arm that means to
+/// exercise the second has to measure the clock or it is not ruling on the route
+/// at all.
+#[must_use]
+pub const fn cancel_reclaim_grace() -> std::time::Duration {
+    driver::CANCEL_RECLAIM_GRACE
+}
+
 /// Clear every trace of `app_id`'s transaction, for a test tearing down.
 pub fn reset(app_id: &str) {
     let client = crate::context::with_mut(|c| {
