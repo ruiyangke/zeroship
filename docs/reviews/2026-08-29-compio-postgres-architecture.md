@@ -618,3 +618,36 @@ while the guard rots underneath it.
 **And it is precisely what line coverage cannot see**, which the controlled
 experiment in `2026-08-28-coverage-cannot-see-test-gaps.md` measured directly:
 all 27 of these live in code the suite already executes.
+
+### CORRECTION to the Drop survey: "exactly two act" was a grep result, not a reading
+
+The section above says 19 `Drop` impls exist and "exactly TWO do work beyond
+setting a flag", naming `StatementInner::drop` and `CommandRecoveryGuard::drop`.
+**The count is wrong.** It came from grepping the bodies for
+`spawn|block_on|await|shutdown()|force_close` - spelling, not behaviour.
+
+`Transaction::drop` acts, and contains none of those words:
+
+    fn drop(&mut self) {
+        if self.done { return; }
+        self.client.inner().set_dirty();
+        let name = self.savepoint.as_ref().map(|sp| sp.name.as_str());
+        self.client.__private_api_rollback(name);
+        self.portal_scope.invalidate();
+    }
+
+It sets the dirty flag, FIRES A ROLLBACK, and invalidates the portal scope -
+`pool.rs` even cites it as the model for its own fire-and-forget release
+("Fire-and-forget, exactly as `Transaction::drop` does").
+
+**What still stands, and what does not.** The two impls I actually READ are
+still correct as described - neither blocks, awaits, allocates, nor panics, and
+`Transaction::drop` does not either: `__private_api_rollback` queues on the same
+FIFO the connection already owns. What does NOT stand is the CLAIM THAT THERE
+ARE ONLY TWO. A trustworthy count needs all 19 bodies read, and I have not done
+that; a second heuristic tried here flagged 16 of 19, which discriminates
+nothing.
+
+Recorded as unmeasured rather than replaced with another unverified number. The
+useful conclusion from the two verified bodies - a destructor here must not
+block, await, allocate or panic, and those do not - is unaffected.
