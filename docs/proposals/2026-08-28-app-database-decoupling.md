@@ -240,10 +240,17 @@ prefix shape every other entity uses (`crates/zeroship-core/src/typed_id.rs`). T
 id, is what names the physical schema, the migrator role, the per-capability roles, the publication
 and the apply lock. It is the identity the whole decoupling turns on.
 
-**Why `dbs` and not `db`.** The typed-id shape is `^[a-z]{3}_[A-Za-z0-9]{22}$` - exactly three
-lowercase letters, as `app`, `crd`, `mig` and every other prefix in `typed_id.rs` are. `db` is two
-and would not parse. The physical schema is `db_<dbsid>`, which is a PostgreSQL identifier and is
-under no such constraint.
+**Why `dbs` and not `db`.** Every prefix in `typed_id.rs` is three lowercase letters - `app`, `crd`,
+`mig` - and its doc comments state the shape `^[a-z]{3}_[A-Za-z0-9]{22}$`. Pick `dbs` to match.
+
+**That shape is a convention, not a parser constraint, and an earlier draft of this paragraph
+claimed otherwise.** `parse` is `split_once('_')` followed by a base62 decode of the remainder
+(`crates/zeroship-core/src/typed_id.rs:139-145`); `parse_with_prefix` (`:190-202`) compares the
+prefix to an expected string. Neither enforces length or charset, and the regex appears only in doc
+comments. `db_<22 chars>` would parse. The choice stands on uniformity; the justification that it
+stands on the parser was a false claim about the code, which is the more durable kind of defect.
+
+The physical schema is `db_<dbsid>`, a PostgreSQL identifier under no such convention.
 
 `Datastore` is a different thing: the physical PostgreSQL database a Database is *placed on*,
 operator-owned and never named by a creator. Many Databases sit on one Datastore.
