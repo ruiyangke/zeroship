@@ -7,6 +7,9 @@ result
 *.db-shm
 *.db-wal
 target/
+# llvm-cov runs use CARGO_TARGET_DIR=target-cov; `target/` does not match it,
+# and the directory reached 990M untracked on 2026-08-29.
+target-cov/
 refs/
 test-results/
 blob-cache/
