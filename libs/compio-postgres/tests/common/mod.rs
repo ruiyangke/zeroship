@@ -428,9 +428,7 @@ pub async fn sweep_stale_replication_slots(client: &compio_postgres::Client) {
         }
         // Best effort: another sweep may have taken it first, and losing that
         // race is the correct outcome, not an error.
-        let _ = client
-            .execute("SELECT pg_drop_replication_slot($1)", &[&name])
-            .await;
+        let _ = drop_replication_slot(client, &name).await;
     }
 }
 
@@ -515,20 +513,22 @@ fn process_is_alive(_pid: u32) -> bool {
     true
 }
 
-/// Drop a replication slot, waiting for its walsender to let go first.
+/// Drop a replication slot once its walsender has actually let go.
 ///
-/// `drop(stream)` closes the connection CLIENT-side; the server retires the
-/// walsender a moment later, and until it does the slot is still `active` and
-/// `pg_drop_replication_slot` fails with 55006. Tests that ignore that error
-/// LEAK THE SLOT, and slots are a bounded server resource - a run that leaks
-/// enough of them starts failing with "max_replication_slots" on whatever
-/// happens to run next, which reads as a misconfigured server rather than as
-/// test litter.
+/// Dropping the stream closes the connection CLIENT-side; the server takes a
+/// moment longer to retire the walsender, and until it does the slot is still
+/// `active` and `pg_drop_replication_slot` fails with 55006. That window is
+/// invisible when the test runs alone and opens up under full-suite load,
+/// which is exactly the shape that produces a flake nobody can reproduce.
 ///
-/// Polls rather than sleeping a fixed amount: a sleep long enough for a loaded
-/// machine is wasted on every green run, and one tuned on an idle machine is
-/// the flake again. A slot that is already gone is success, not an error.
-pub async fn drop_replication_slot(client: &compio_postgres::Client, slot: &str) {
+/// Polls the server rather than sleeping a fixed amount: a sleep long enough
+/// to be safe on a loaded machine is wasted on every green run, and one tuned
+/// on an idle machine is the flake again. A slot that is already gone is
+/// success, not an error.
+pub async fn drop_replication_slot(
+    client: &compio_postgres::Client,
+    slot: &str,
+) -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let outcome = client
@@ -539,14 +539,11 @@ pub async fn drop_replication_slot(client: &compio_postgres::Client, slot: &str)
             )
             .await;
         let Err(error) = outcome else {
-            return;
+            return Ok(());
         };
         let still_held = error.code().is_some_and(|code| code.code() == "55006");
         if !still_held || std::time::Instant::now() >= deadline {
-            // Best effort: the caller is cleaning up, often after a failure
-            // that is more interesting than this one.
-            eprintln!("could not drop slot {slot}: {}", error_chain(&error));
-            return;
+            return Err(error_chain(&error));
         }
         compio::time::sleep(std::time::Duration::from_millis(25)).await;
     }

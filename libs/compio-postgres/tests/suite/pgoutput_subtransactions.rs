@@ -137,7 +137,10 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
             }
         }
 
-        common::drop_replication_slot(&setup, &slot).await;
+        drop(stream);
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
             .batch_execute(&format!(
                 "DROP PUBLICATION IF EXISTS {publication};
@@ -291,10 +294,12 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
              leading xid and takes the relation oid four bytes early"
         );
 
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| panic!("fixture teardown failed: {error}"));
         setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}');
-                 DROP PUBLICATION IF EXISTS {publication};
+                "DROP PUBLICATION IF EXISTS {publication};
                  DROP TABLE IF EXISTS {table};"
             ))
             .await
