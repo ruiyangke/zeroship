@@ -81,6 +81,28 @@ secret "cannot reach `Debug` or a log line"
 
 ---
 
+### Where the word "namespace" is still correct
+
+The entity is called **Database**. It was called `Namespace` until 2026-08-29, and the rename is
+deliberate: "namespace" is PostgreSQL schema jargon, and what a creator has is a database.
+
+**Do not sweep the word out of the code.** It is still the right word in two places, and a
+half-applied rename would be worse than none:
+
+- **Where it names PostgreSQL's own object.** `crates/zeroship-plugin-db/src/drop_namespace.rs`
+  sequences "the PG teardown order for deleting an app"; `replication.rs:878` scopes a cluster-wide
+  scan to "the calling app's namespace". Both mean the PostgreSQL schema, and PostgreSQL calls it a
+  namespace (`pg_namespace`). Renaming those to "database" would make them say the wrong thing,
+  because at that layer a database is the Datastore.
+- **Where it means something else entirely.** ES module namespace imports
+  (`docs/reference/vite-plugin.md`), and the runtime's `env.*` plugin namespaces - a second plugin
+  claiming the `db` namespace panics by design.
+
+The rule: **Database** is the product noun, used for the entity, the id, the config and everything
+creator-facing. **namespace** stays where it refers to the PostgreSQL object or to an unrelated
+concept. `NamespaceManager` from the archived `docs/archive/db-system-design.md` never shipped, so
+there is no live type to rename.
+
 ## Ownership: the creator owns the schema, no app does
 
 **The creator owns a database and authors its schema.** No app holds DDL authority. An app's grant
