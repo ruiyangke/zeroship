@@ -399,3 +399,49 @@ count, the soak's `max_connections` gate), and here it was already written.
 test file means gap".** It was caused by ONE structural fact - two bodies behind
 one trait, 26 identical lines - not by test-count imbalance. Ratios of test
 counts are not evidence; the duplication was.
+
+## The read framing is now one body, and what that cost
+
+Landed `bf709efa6`. `buf_stream.rs`: 87 insertions, 98 deletions, one file.
+
+`BufStream` and `BufReadHalf` now both call `fill_read_buffer`, and the shared
+free functions are `read_with_deadline`, `read_raw_from`, `fill_read_buffer`,
+`peek_u32_be_from`, `validate_length_against` and `flush_retry_interrupted`.
+Production-only census, each guard appearing exactly ONCE where it appeared
+twice before:
+
+    min_bytes > max_message_size      1
+    if n == 0                         1
+    read_scratch.is_empty()           1
+    while read_buf.len() < min_bytes  1
+    total > max_message_size          1
+
+`fill_read_buffer(` has exactly two callers - line 492 (`BufStream`) and 646
+(`BufReadHalf`).
+
+**The hot-path constraint held.** This is the driver's per-message read path, so
+the brief refused any design costing an allocation or a virtual call.
+`Box<dyn Future>` occurrences: 2 before, 2 after - both pre-existing timer
+machinery - and the diff adds and removes ZERO lines containing `Box<`, `dyn `
+or `async_trait`. `read_raw_from<R>` and `fill_read_buffer<R>` are generic, so
+monomorphised. The cost paid is a six-argument call and slightly less locality,
+which is the tradeoff the agent argued for and I agree with.
+
+**Verified at 1354 passed / 0 failed on BOTH servers**, `CARGO_EXIT=0`, 7
+targets each - the same count as before the refactor, so nothing was lost or
+skipped.
+
+**One claim NOT made.** Mutating the single accumulation loop kills a split test
+and NO `serialized_loop` test, so "one mutation now binds both paths" is true
+per-guard, not in general - `serialized_loop` does not exercise partial-read
+accumulation. What IS true is that there is now one place to fix and one place
+to bind, so the two copies can no longer drift apart unnoticed. That was the
+defect; it is gone.
+
+**A verdict this crate's mutation work needs and did not have: WEDGED.**
+Replacing the single `if n == 0` EOF guard with `if false` does not fail the
+suite, it HANGS it - `fill` spins on a stream that will never deliver more
+bytes. An untrapped run then dies on the harness timeout, which kills the
+restore before it runs and leaves the tree mutated. Wrap mutation runs in
+`timeout`, and confirm restoration with `git diff --numstat` rather than with
+the absence of an error message.
