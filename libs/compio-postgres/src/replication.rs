@@ -3000,6 +3000,50 @@ mod tests {
         (addr, startup_observed)
     }
 
+    /// A port that is free on BOTH loopback addresses the multi-address test
+    /// needs.
+    ///
+    /// Binding `127.0.0.1:0` and then reusing the kernel's ephemeral choice on
+    /// `127.0.0.2` is a race, not a guarantee: the two addresses have
+    /// independent port spaces, so a port free on one can be taken on the
+    /// other. It almost always works when the test runs alone and fails
+    /// occasionally inside the full `--lib` run, where several hundred other
+    /// tests are churning sockets. Measured 2026-08-28: the suite went red on
+    /// `bind TLS replication probe` in a 519-test run while the same test
+    /// passed 2 of 2 in isolation on both servers.
+    ///
+    /// Probe the PAIR and retry instead of asserting the first guess.
+    fn paired_loopback_port() -> u16 {
+        let mut last: Option<std::io::Error> = None;
+        for _ in 0..64 {
+            let first = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    last = Some(error);
+                    continue;
+                }
+            };
+            let port = match first.local_addr() {
+                Ok(addr) => addr.port(),
+                Err(error) => {
+                    last = Some(error);
+                    continue;
+                }
+            };
+            match std::net::TcpListener::bind(("127.0.0.2", port)) {
+                Ok(second) => {
+                    // Release both so the caller can rebind them for real. The
+                    // window is small and the loop covers losing it.
+                    drop(second);
+                    drop(first);
+                    return port;
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        panic!("no port free on both 127.0.0.1 and 127.0.0.2 after 64 attempts: {last:?}");
+    }
+
     /// Accept one PostgreSQL SSLRequest and agree to TLS. The test connector
     /// then fails its handshake, ending this address attempt immediately.
     async fn replication_tls_handshake_server_bound(
@@ -3217,8 +3261,11 @@ mod tests {
     /// through to plaintext.
     #[compio::test]
     async fn replication_tls_failure_advances_to_second_resolved_address() {
-        let (first, first_opening) =
-            replication_tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
+        let port = paired_loopback_port();
+        let (first, first_opening) = replication_tls_handshake_server_bound(
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        )
+        .await;
         let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
         let (second, second_opening) = replication_tls_handshake_server_bound(second_bind).await;
 
