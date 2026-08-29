@@ -568,3 +568,53 @@ two others for the same thing today.
 mutation survivors in the TLS split halves were real and are now tested. What
 does not survive is the claim that TLS carries the same duplication: it does
 not, and the adapters there are the right shape already.
+
+## What five mutation sweeps say about this crate, 2026-08-29
+
+Five targeted sweeps, all on the same day, against the current tree:
+
+    buf_stream split read half      7 mutations,  4 survived
+    tls_sansio / maybe_tls_stream  11 mutations,  6 survived
+    pool retirement machinery      28 mutations,  8 survived
+    codec.rs                       10 mutations,  5 survived
+    connection.rs consumption      10 mutations,  4 survived
+                                   66 total,     27 survived
+
+**Do NOT read 27/66 as a mutation score for the crate.** Every one of these
+sweeps was aimed at an area chosen BECAUSE it looked thin - a duplicated body, a
+mechanism this session had just changed, a module with no inline tests. A
+uniformly-sampled sweep would score far better; `connection.rs` already did, with
+6 of its 10 killed by tests that existed before anyone looked.
+
+**The finding is not the rate. It is that every survivor had the same cause.**
+
+    pool          `Arc::strong_count(lease) > 1 || lease.is_uncertain()`
+                  - a live CancelToken always satisfies the first term, so the
+                    flag is never the deciding one
+    pool          CommandRecoveryGuard's force_close - an independent cancel
+                  abandonment path retires the session anyway
+    connection    scan_retirement_message's `entered_copy_input ||
+                  deferred_error.is_some()` - either arm alone hides the other
+    connection    the split reader takes the deferred error BEFORE
+                  scan_retirement_message can see it, so that site only ever
+                  observes the serialized case
+    codec         five deferred_error producers all express one rule, so any
+                  one of them can be deleted while the other four keep the
+                  observable behaviour intact
+    buf_stream    the same guard written twice, once per read path, so a test
+                  bound one copy and said nothing about the other
+
+Every one is a STRONGER CONDITION STANDING IN FRONT OF A WEAKER ONE. The guards
+are individually correct - not one sweep found a bug - and individually
+invisible, because something else covers their case in every scenario the suite
+constructs.
+
+**What that means for maturity.** Correctness-by-construction in this crate is
+high: 66 deliberate mutations of suspicious code produced ZERO real defects.
+Test-binding is what was thin, and specifically at masked guards. Those are
+exactly the lines that survive a refactor unnoticed - the mask keeps working
+while the guard rots underneath it.
+
+**And it is precisely what line coverage cannot see**, which the controlled
+experiment in `2026-08-28-coverage-cannot-see-test-gaps.md` measured directly:
+all 27 of these live in code the suite already executes.
