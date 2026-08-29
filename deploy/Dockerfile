@@ -94,6 +94,30 @@ COPY packages/ packages/
 # including dev dependencies, so a curated crate closure silently couples this
 # Docker stage to future manifest changes. Keep the workspace root and its full
 # `crates/*` membership together, as the native builder stage does below.
+#
+# THIS REPLACED A CURATED NINE-CRATE LIST, and the numbers are why. Measured
+# 2026-08-29 on cold, separately-built BuildKit builders:
+#
+#   curated list (the addon's true closure):  728.17 MB of build context
+#   wholesale `COPY crates/`:                 728.51 MB   (+0.34 MB, ~0.05%)
+#
+# because THE CURATED LIST HAD GROWN TO 34 OF THE 35 CRATES. It began as nine,
+# computed from `cargo metadata` on `crates/zeroship-migrate-node`, and the
+# addon's dependency closure widened underneath it. A list that names all but one
+# member is not a minimisation; it is a coupling with a rounding error attached.
+#
+# The list was also a deliberate tripwire - its own comment said "a tenth crate
+# entering the closure fails this build loudly, which is the point" - and it DID
+# fire: `zeroship-core` entered the closure and this stage stopped building. Nobody
+# heard it, because nothing builds `--target migrate` by default; the corpus gate's
+# image arm is opt-in behind `--with-container`. A tripwire on a path no one walks
+# reports to no one, which is why that arm now runs in the gate rather than being
+# left to refuse in silence.
+#
+# One mechanical trap the old list was right about, if anyone reinstates a subset:
+# `COPY crates/zeroship-migrate* crates/` FLATTENS the matched directories into the
+# destination and produces a tree cargo cannot read. Copy the parent, or list each
+# directory on its own line.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 # `libs/` (4.6 MB of standalone driver source, no path deps, nothing here builds
