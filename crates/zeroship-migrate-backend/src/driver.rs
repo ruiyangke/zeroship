@@ -190,7 +190,7 @@ impl From<Option<String>> for Bind {
 /// (`character_maximum_length`), and `to_char` timestamps all funnel into `Text`
 /// or `Int`. `Decimal` carries a canonical string (parity with [`Bind::Decimal`]
 /// - both cover the closed IR value universe). `#[non_exhaustive]`: a driver
-/// author matches with a wildcard arm.
+///   author matches with a wildcard arm.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Value {

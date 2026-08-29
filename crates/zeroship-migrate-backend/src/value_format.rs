@@ -113,6 +113,8 @@ pub trait ValueFormatRenderer: std::fmt::Debug + Sync {
         regex: &str,
         len: usize,
     ) -> ValueFormatColumnMetadata;
+    // Exact TypeID metadata requires each independently derived storage property.
+    #[allow(clippy::too_many_arguments)]
     fn type_id_column_metadata(
         &self,
         quoted: &str,
