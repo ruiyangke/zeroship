@@ -59,9 +59,26 @@ FROM pg_roles login
 WHERE login.rolname = current_user
 "#;
 
+/// The cluster-wide WAL bound for replication slots.
+///
+/// Keep this separate from the role/schema posture query. A replication slot
+/// retains one cluster-wide WAL stream, so this is a cluster fact rather than a
+/// privilege of the database named by the worker DSN. `query_one` also makes a
+/// missing built-in setting a boot error instead of silently accepting it.
+const SLOT_WAL_RETENTION_SQL: &str = r#"
+SELECT
+  setting::bigint AS max_slot_wal_keep_size,
+  context::text AS max_slot_wal_keep_size_context
+FROM pg_settings
+WHERE name = 'max_slot_wal_keep_size'
+"#;
+
 #[derive(Debug)]
 struct DatabasePosture {
     current_user: String,
+    /// PostgreSQL reports this setting in MB. `-1` means unlimited.
+    max_slot_wal_keep_size: i64,
+    max_slot_wal_keep_size_context: String,
     superuser: bool,
     create_role: bool,
     create_db: bool,
@@ -86,6 +103,16 @@ fn validate(posture: &DatabasePosture) -> Result<(), String> {
         return Err(format!(
             "worker database login must be {WORKER_DATABASE_ROLE}, got {}",
             posture.current_user
+        ));
+    }
+    if posture.max_slot_wal_keep_size == -1 {
+        return Err(format!(
+            "max_slot_wal_keep_size has observed value {} MB (unlimited); set a sane finite \
+             value to bound WAL retained by a lagging or abandoned replication slot, \
+             preventing pg_wal from filling the cluster disk and stopping writes for every \
+             database on the cluster. max_slot_wal_keep_size has {} context, so a PostgreSQL \
+             configuration reload (SELECT pg_reload_conf()) suffices; no restart is required",
+            posture.max_slot_wal_keep_size, posture.max_slot_wal_keep_size_context
         ));
     }
     if posture.superuser || posture.create_role || posture.create_db {
@@ -162,6 +189,11 @@ pub async fn validate_database_url(db_url: &str) -> Result<(), String> {
         }
     })
     .detach();
+
+    let slot_wal_retention = client
+        .query_one(SLOT_WAL_RETENTION_SQL, &[])
+        .await
+        .map_err(|error| format!("inspect max_slot_wal_keep_size: {error}"))?;
 
     let row = client
         .query_one(
@@ -255,6 +287,8 @@ WHERE role.rolname = current_user
 
     validate(&DatabasePosture {
         current_user: row.get("current_user"),
+        max_slot_wal_keep_size: slot_wal_retention.get("max_slot_wal_keep_size"),
+        max_slot_wal_keep_size_context: slot_wal_retention.get("max_slot_wal_keep_size_context"),
         superuser: row.get("superuser"),
         create_role: row.get("create_role"),
         create_db: row.get("create_db"),
@@ -279,6 +313,9 @@ mod tests {
     fn narrow_posture() -> DatabasePosture {
         DatabasePosture {
             current_user: "zeroship_worker".to_string(),
+            // Test-only finite sentinel, not a production sizing decision.
+            max_slot_wal_keep_size: 64,
+            max_slot_wal_keep_size_context: "sighup".to_string(),
             superuser: false,
             create_role: false,
             create_db: false,
@@ -293,6 +330,94 @@ mod tests {
             required_system_reads: true,
             inheriting_memberships: 0,
             inheriting_membership_example: None,
+        }
+    }
+
+    fn assert_unlimited_slot_wal_refusal(error: &str) {
+        for required in [
+            "max_slot_wal_keep_size",
+            "observed value -1 MB (unlimited)",
+            "set a sane finite value",
+            "lagging or abandoned replication slot",
+            "WAL",
+            "pg_wal",
+            "cluster disk",
+            "stopping writes for every database",
+            "sighup",
+            "configuration reload",
+            "suffices",
+        ] {
+            assert!(
+                error.contains(required),
+                "refusal must contain {required:?}; got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_unlimited_replication_slot_wal_retention() {
+        let mut posture = narrow_posture();
+        posture.max_slot_wal_keep_size = -1;
+
+        let error = validate(&posture).expect_err("unlimited slot WAL retention must be refused");
+        assert_unlimited_slot_wal_refusal(&error);
+    }
+
+    /// Drive the public boot gate against the real cluster setting. The test
+    /// deliberately does not change the setting itself: PostgreSQL settings
+    /// are cluster-wide, so mutating one from a parallel test would make every
+    /// other database on the server race this case.
+    ///
+    /// Run this once with `max_slot_wal_keep_size = -1` and once with any
+    /// finite test value. The first arm proves an unbounded slot cannot boot;
+    /// the second proves the gate rejects only the dangerous sentinel.
+    #[cfg(feature = "live-db-tests")]
+    #[compio::test]
+    async fn worker_boot_refuses_unlimited_replication_slot_wal_retention() {
+        let admin_dsn = zeroship_core::config::test_database_url();
+        let (client, connection) = compio_postgres::connect(&admin_dsn, NoTls)
+            .await
+            .unwrap_or_else(|error| panic!("connect to {admin_dsn}: {error}"));
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+
+        let setting = client
+            .query_one(
+                "SELECT setting, context FROM pg_settings \
+                 WHERE name = 'max_slot_wal_keep_size'",
+                &[],
+            )
+            .await
+            .expect("read max_slot_wal_keep_size from pg_settings");
+        let observed: String = setting.get("setting");
+        let context: String = setting.get("context");
+        assert_eq!(
+            context, "sighup",
+            "the remediation assumes a reload suffices"
+        );
+
+        // The committed platform migration creates this narrow login with the
+        // role name as its development password. Reuse the caller's host,
+        // port, and database so this drives the same cluster row read above.
+        let mut worker_dsn = url::Url::parse(&admin_dsn)
+            .unwrap_or_else(|error| panic!("parse {admin_dsn}: {error}"));
+        worker_dsn
+            .set_username(WORKER_DATABASE_ROLE)
+            .expect("set worker database user");
+        worker_dsn
+            .set_password(Some(WORKER_DATABASE_ROLE))
+            .expect("set worker database password");
+
+        let result = validate_database_url(worker_dsn.as_str()).await;
+        if observed == "-1" {
+            let error = result.expect_err("worker boot must refuse unlimited slot WAL retention");
+            assert_unlimited_slot_wal_refusal(&error);
+        } else {
+            result.unwrap_or_else(|error| {
+                panic!("worker boot must accept finite max_slot_wal_keep_size={observed}: {error}")
+            });
         }
     }
 

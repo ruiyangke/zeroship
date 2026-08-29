@@ -12,6 +12,9 @@
 # (crates/zeroship-plugin-workflow/src/claim.rs:89-91) - PLATFORM tables, which
 # exist only after `db/migrations-ts/` has been applied. No fixture creates
 # them and none should: they are the same tables production reads.
+# `db_posture` has one full boot test behind the same feature because its role
+# posture query reads those three platform tables after checking the cluster's
+# `max_slot_wal_keep_size`.
 #
 # THE FAILURE THIS EXISTS TO END. Until 2026-08-28 those seven were ungated and
 # nothing provisioned that database, so they ran against the shared, UNMIGRATED
@@ -59,10 +62,10 @@
 #                    than assumed, and compared against the files on disk, so a
 #                    silently-skipped file cannot pass for a clean apply.
 #   live tests ran   at least WORKER_LIVE_MIN of the `workflow_advance_*` tests
-#                    reported `ok`. THE LOAD-BEARING ARM: a total-passes floor
-#                    cannot tell a gated-out live set from a shrunken one,
-#                    because a feature typo and a deleted test both just print
-#                    a smaller number.
+#                    and POSTURE_LIVE_MIN full boot tests reported `ok`. THE
+#                    LOAD-BEARING ARMS: a total-passes floor cannot tell a
+#                    gated-out live set from a shrunken one, because a feature
+#                    typo and a deleted test both just print a smaller number.
 #   no skips         nothing in the run announced that it did nothing.
 #   floor            the total pass count did not fall.
 #
@@ -276,6 +279,19 @@ if [ "$live_ran" -lt "$WORKER_LIVE_MIN" ]; then
   status=1
 fi
 
+# The full boot posture test needs the migrated platform projection above, so
+# it is feature-gated for the same reason as the workflow tests. Count its exact
+# module path separately: the broad pass floor stays green if one gated test
+# disappears, and the workflow arm cannot see a test outside its module.
+POSTURE_LIVE_MIN=1
+posture_live_ran="$(grep -cE '^test db_posture::tests::worker_boot_refuses_unlimited_replication_slot_wal_retention \.\.\. ok$' "$LOG")"
+if [ "$posture_live_ran" -lt "$POSTURE_LIVE_MIN" ]; then
+  echo "FAIL: only ${posture_live_ran} full boot-posture test(s) passed, fewer than the ${POSTURE_LIVE_MIN} this gate requires." >&2
+  echo "The max_slot_wal_keep_size regression was gated out, renamed, deleted or" >&2
+  echo "did not reach its migrated database. This is no verdict on worker boot." >&2
+  status=1
+fi
+
 # A test that skipped is not a test that passed. No allowlist: nothing in this
 # crate announces a skip today, and an entry added here would have to name a
 # backend this script deliberately does not provision.
@@ -291,21 +307,19 @@ elif [ "$census_rc" -ne 0 ]; then
 fi
 
 # The blunt instrument, kept for what the named count above cannot see: the
-# other 107 tests quietly disappearing.
+# other 108 tests quietly disappearing.
 #
-# MEASURED 2026-08-28 against a freshly migrated PostgreSQL 17: 114 passed
-# (33 lib + 81 bin + 0 doctests), 0 failed. The floor carries ~7 percent
+# MEASURED 2026-08-29 against a migrated PostgreSQL 18: 116 passed
+# (35 lib + 81 bin + 0 doctests), 0 failed. The floor carries ~9 percent
 # headroom, the same margin tests/run_auth_suite.sh and the CI test-target
 # floor use. Raise it as the crate grows; a fixed floor gets looser with every
 # test added, which is the wrong direction for a guard against coverage loss.
 #
-# IT DOES NOT COVER THE LIVE SEVEN AND MUST NOT BE READ AS DOING SO. Measured
-# the same day by misspelling the feature in the `#[cfg]` so the module was not
-# compiled: the run reported 107 passed - ABOVE this floor - and exited 0 on
-# every arm except the named one above, which reported 0 of 7 and failed. The
-# two arms are complementary, not redundant, and raising this number would not
-# make the other one optional: a live set that shrinks from seven to six loses
-# one pass, which no percentage floor can distinguish from a Tuesday.
+# IT DOES NOT COVER EITHER NAMED LIVE SET AND MUST NOT BE READ AS DOING SO.
+# Misspelling the feature in the `#[cfg]` would report 108 passed - ABOVE this
+# floor - while the two named arms report 0 of 7 and 0 of 1. The three arms are
+# complementary, not redundant. A named set that loses one pass is a change no
+# percentage floor can distinguish from a Tuesday.
 WORKER_MIN_PASSED=106
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 if [ "$passed" -lt "$WORKER_MIN_PASSED" ]; then
@@ -317,7 +331,7 @@ fi
 
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  echo "WORKER SUITE: ${passed} tests passed (floor ${WORKER_MIN_PASSED}), ${live_ran} of them live workflow-advance (floor ${WORKER_LIVE_MIN}), 0 unexpected skips"
+  echo "WORKER SUITE: ${passed} tests passed (floor ${WORKER_MIN_PASSED}), ${live_ran} live workflow-advance (floor ${WORKER_LIVE_MIN}), ${posture_live_ran} live boot-posture (floor ${POSTURE_LIVE_MIN}), 0 unexpected skips"
   echo "              against ${TEST_DB} at ${WHERE}"
 else
   echo "WORKER SUITE: FAILED"
