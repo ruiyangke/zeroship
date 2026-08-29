@@ -7216,6 +7216,99 @@ async fn statement_prepared_in_rolled_back_transaction_remains_usable() {
     assert_eq!(recovered, 50);
 }
 
+/// A `Statement` carries the session that prepared it. Passing it to another
+/// live client is a local ownership error, not `PostgreSQL`'s `26000`, and a
+/// statement whose owner is gone has a distinct diagnosis.
+#[compio::test]
+async fn foreign_statement_is_rejected_locally() {
+    let url = Box::pin(require_pg()).await;
+    let owner = connect(&url).await.unwrap();
+    let other = connect(&url).await.unwrap();
+    let statement = owner.prepare("SELECT $1::int4 + 1").await.unwrap();
+
+    let foreign = other
+        .query(&statement, &[&41_i32])
+        .await
+        .expect_err("a foreign statement reached PostgreSQL");
+    assert_eq!(
+        foreign.to_string(),
+        "prepared statement belongs to a different connection"
+    );
+    assert!(
+        foreign.as_db_error().is_none(),
+        "the ownership error came from PostgreSQL rather than the driver"
+    );
+    assert_eq!(foreign.code(), None, "a local error must have no SQLSTATE");
+
+    drop(owner);
+    let dropped = other
+        .query(&statement, &[&41_i32])
+        .await
+        .expect_err("a statement with no owner reached PostgreSQL");
+    assert_eq!(
+        dropped.to_string(),
+        "prepared statement's owning connection has been dropped"
+    );
+    assert!(
+        dropped.as_db_error().is_none(),
+        "the dropped-owner error came from PostgreSQL rather than the driver"
+    );
+    assert_eq!(dropped.code(), None, "a local error must have no SQLSTATE");
+
+    let recovered: i32 = other
+        .query_one_scalar("SELECT 42::int4", &[])
+        .await
+        .unwrap();
+    assert_eq!(recovered, 42, "a local refusal damaged the other client");
+}
+
+/// The ownership check must preserve every wrapper that uses the same
+/// `InnerClient`: direct `Client` calls, `Transaction`, and a `PooledClient`
+/// borrow.
+#[compio::test]
+async fn statement_works_on_its_owner_through_transaction_and_pool() {
+    let url = Box::pin(require_pg()).await;
+    let mut client = connect(&url).await.unwrap();
+    let statement = client.prepare("SELECT $1::int4 + 1").await.unwrap();
+
+    let direct: i32 = client
+        .query_one_scalar(&statement, &[&40_i32])
+        .await
+        .unwrap();
+    let transaction = client.transaction().await.unwrap();
+    let through_transaction: i32 = transaction
+        .query_one(&statement, &[&41_i32])
+        .await
+        .unwrap()
+        .get(0);
+    transaction.commit().await.unwrap();
+
+    let pool = single_connection_pool(&url).await;
+    let mut pooled = Box::pin(pool.get()).await.unwrap();
+    let pooled_statement = pooled.prepare("SELECT $1::int4 + 1").await.unwrap();
+    let through_pool: i32 = pooled
+        .query_one_scalar(&pooled_statement, &[&42_i32])
+        .await
+        .unwrap();
+    let pooled_transaction = pooled.transaction().await.unwrap();
+    let through_pooled_transaction: i32 = pooled_transaction
+        .query_one(&pooled_statement, &[&43_i32])
+        .await
+        .unwrap()
+        .get(0);
+    pooled_transaction.commit().await.unwrap();
+
+    assert_eq!(
+        (
+            direct,
+            through_transaction,
+            through_pool,
+            through_pooled_transaction,
+        ),
+        (41, 42, 43, 44)
+    );
+}
+
 /// SQL PREPARE and protocol Parse share one namespace. A collision must return
 /// PostgreSQL's original error without closing the statement which already
 /// owned the generated name.
