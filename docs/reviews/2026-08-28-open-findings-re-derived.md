@@ -462,3 +462,36 @@ nothing, which is precisely what was measured on 2026-08-28.
 Coverage stays useful for the opposite question - finding code NOTHING reaches.
 It is the wrong instrument for "is the code that runs actually checked", and
 that is the question this hardening effort keeps asking.
+
+### The `Error::io` arm left open above is closed, and my caveat was wrong
+
+The downgrade of `connect_raw.rs:302` said the re-detection argument covered the
+four parse-derived producers but that one arm was unmeasured:
+
+> One producer site is `deferred_error = Some(Error::io(error))`. An I/O error is
+> NOT derived from retained bytes, so the re-detection argument above does not
+> obviously cover it.
+
+**It is not an I/O error.** `codec.rs:376`:
+
+    let header = match backend::Header::parse(&stream.buf()[idx..]) {
+        Ok(Some(header)) => header,
+        Ok(None) => break,
+        Err(error) if saw_error_response => {
+            deferred_error = Some(Error::io(error));
+            break;
+        }
+        Err(error) => return Err(Error::io(error)),
+    };
+
+It is a HEADER PARSE failure over `stream.buf()` - buffered bytes - wrapped in
+`Error::io` only because `backend::Header::parse` returns `io::Error`. The
+socket is not involved. So all five producers are derived from bytes that stay
+in the read buffer, the next decode recomputes every one of them, and the
+one-round-delay conclusion holds for the whole set.
+
+**I inferred the source from the constructor's NAME.** `Error::io` reads as "the
+socket failed", and I ranked an open question on that reading without opening
+the arm. Grep answers spelling; the match arm answers behaviour. This is the
+same error the sections above catalogue in carried findings, made by me, twice
+today - once on this and once on the slot-drop teardown.
