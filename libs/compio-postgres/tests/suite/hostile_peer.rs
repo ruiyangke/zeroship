@@ -414,6 +414,299 @@ where
     }
 }
 
+#[cfg(feature = "tls")]
+const TLS_HANDSHAKE_WRITE_SENTINEL: &str = "scripted TLS handshake socket write failure";
+#[cfg(feature = "tls")]
+const TLS_HANDSHAKE_FLUSH_SENTINEL: &str = "scripted TLS handshake socket flush failure";
+
+/// A transport that accepts no reads and fails exactly one outbound handshake
+/// operation. A swallowed error therefore leaves the handshake parked rather
+/// than manufacturing a second diagnosis that could make the test pass.
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy)]
+enum TlsHandshakeIoFailure {
+    Write,
+    Flush,
+}
+
+#[cfg(feature = "tls")]
+struct FailingTlsHandshakeTransport {
+    failure: TlsHandshakeIoFailure,
+}
+
+#[cfg(feature = "tls")]
+impl compio::io::AsyncRead for FailingTlsHandshakeTransport {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, _buf: B) -> compio::BufResult<usize, B> {
+        std::future::pending().await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl compio::io::AsyncWrite for FailingTlsHandshakeTransport {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.failure {
+            TlsHandshakeIoFailure::Write => compio::BufResult(
+                Err(std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    TLS_HANDSHAKE_WRITE_SENTINEL,
+                )),
+                buf,
+            ),
+            TlsHandshakeIoFailure::Flush => {
+                let len = buf.buf_len();
+                compio::BufResult(Ok(len), buf)
+            }
+        }
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        match self.failure {
+            TlsHandshakeIoFailure::Write => Ok(()),
+            TlsHandshakeIoFailure::Flush => Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                TLS_HANDSHAKE_FLUSH_SENTINEL,
+            )),
+        }
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tls")]
+impl compio_postgres::SplitStream for FailingTlsHandshakeTransport {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Err(self)
+    }
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::future_not_send)]
+async fn tls_handshake_io_failure(failure: TlsHandshakeIoFailure) -> std::io::Error {
+    use compio_postgres::tls::{MakeTlsConnect, TlsConnect};
+
+    let config = "host=localhost sslmode=require"
+        .parse::<Config>()
+        .expect("parse direct TLS handshake config");
+    let mut make = compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("build direct rustls connector");
+    let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+        FailingTlsHandshakeTransport,
+    >>::make_tls_connect(&mut make, "localhost")
+    .expect("make direct rustls connection");
+
+    let result = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        connector.connect(FailingTlsHandshakeTransport { failure }),
+    )
+    .await
+    .expect("a swallowed TLS handshake I/O error left the handshake parked");
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("the TLS handshake succeeded after its socket operation failed"),
+    }
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_tls_handshake_socket_write_error_is_preserved() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let error = tls_handshake_io_failure(TlsHandshakeIoFailure::Write).await;
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), TLS_HANDSHAKE_WRITE_SENTINEL);
+    })
+    .await
+    .expect("TLS handshake write-error test exceeded its outer watchdog");
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_tls_handshake_socket_flush_error_is_preserved() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let error = tls_handshake_io_failure(TlsHandshakeIoFailure::Flush).await;
+        assert_eq!(error.kind(), ErrorKind::ConnectionAborted);
+        assert_eq!(error.to_string(), TLS_HANDSHAKE_FLUSH_SENTINEL);
+    })
+    .await
+    .expect("TLS handshake flush-error test exceeded its outer watchdog");
+}
+
+/// A socket wrapper whose steady-state read half returns one ciphertext byte
+/// at a time. The shared switch stays off through TLS and `PostgreSQL` startup,
+/// so a test can isolate record fragmentation from handshake progress.
+#[cfg(feature = "tls")]
+struct OneByteTlsReads<S> {
+    inner: S,
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    nonempty_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(feature = "tls")]
+impl<S> compio::io::AsyncRead for OneByteTlsReads<S>
+where
+    S: compio::io::AsyncRead + Unpin,
+{
+    async fn read<B: compio::buf::IoBufMut>(&mut self, mut buf: B) -> compio::BufResult<usize, B> {
+        use std::sync::atomic::Ordering;
+
+        if !self.armed.load(Ordering::SeqCst) {
+            return self.inner.read(buf).await;
+        }
+        if buf.buf_capacity() == 0 {
+            return compio::BufResult(Ok(0), buf);
+        }
+
+        let compio::BufResult(result, scratch) = self.inner.read(vec![0u8; 1]).await;
+        match result {
+            Ok(read) => {
+                assert!(read <= 1, "the one-byte TLS read returned {read} bytes");
+                assert!(
+                    buf.buf_len() >= read,
+                    "the TLS reader passed an uninitialized socket buffer"
+                );
+                if read != 0 {
+                    buf.as_mut_slice()[..read].copy_from_slice(&scratch[..read]);
+                    self.nonempty_reads.fetch_add(1, Ordering::SeqCst);
+                }
+                compio::BufResult(Ok(read), buf)
+            }
+            Err(error) => compio::BufResult(Err(error), buf),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<S> compio::io::AsyncWrite for OneByteTlsReads<S>
+where
+    S: compio::io::AsyncWrite + Unpin,
+{
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        self.inner.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<S> compio_postgres::SplitStream for OneByteTlsReads<S>
+where
+    S: compio_postgres::SplitStream,
+{
+    type ReadHalf = OneByteTlsReads<S::ReadHalf>;
+    type WriteHalf = S::WriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        let Self {
+            inner,
+            armed,
+            nonempty_reads,
+        } = self;
+        match inner.try_into_split() {
+            Ok((read, write)) => Ok((
+                OneByteTlsReads {
+                    inner: read,
+                    armed,
+                    nonempty_reads,
+                },
+                write,
+            )),
+            Err(inner) => Err(Self {
+                inner,
+                armed,
+                nonempty_reads,
+            }),
+        }
+    }
+}
+
+/// An unsplittable socket whose next read can be made to gather an exact
+/// ciphertext prefix. This removes TCP packet boundaries from the refused-
+/// split fixture: the TLS reader receives one known coalesced chunk, then the
+/// socket refuses to split while part of that chunk is still buffered.
+#[cfg(feature = "tls")]
+struct RefusingBufferedTlsTransport {
+    socket: compio::net::TcpStream,
+    coalesce_next: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    split_attempted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncRead for RefusingBufferedTlsTransport {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, mut buf: B) -> compio::BufResult<usize, B> {
+        use std::sync::atomic::Ordering;
+
+        let minimum = self.coalesce_next.swap(0, Ordering::AcqRel);
+        if minimum == 0 {
+            return self.socket.read(buf).await;
+        }
+        assert!(
+            minimum <= buf.buf_capacity(),
+            "the requested TLS coalescing prefix does not fit the read buffer"
+        );
+
+        let mut collected = Vec::with_capacity(minimum);
+        while collected.len() < minimum {
+            let wanted = minimum - collected.len();
+            let compio::BufResult(result, chunk) = self.socket.read(vec![0u8; wanted]).await;
+            match result {
+                Ok(0) => {
+                    return compio::BufResult(
+                        Err(std::io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            "TLS coalescing peer closed before its promised prefix",
+                        )),
+                        buf,
+                    );
+                }
+                Ok(read) => collected.extend_from_slice(&chunk[..read]),
+                Err(error) => return compio::BufResult(Err(error), buf),
+            }
+        }
+
+        let mut source = collected.as_slice();
+        compio::io::AsyncRead::read(&mut source, buf).await
+    }
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncWrite for RefusingBufferedTlsTransport {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        self.socket.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.socket.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.socket.shutdown().await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl compio_postgres::SplitStream for RefusingBufferedTlsTransport {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        self.split_attempted
+            .store(true, std::sync::atomic::Ordering::Release);
+        Err(self)
+    }
+}
+
 struct FailThirdFlushPeer {
     startup: Option<Vec<u8>>,
     response: Option<Vec<u8>>,
@@ -2992,6 +3285,410 @@ fn expect_close_notify(tls: &mut rustls::ServerConnection, socket: &mut TcpStrea
             break;
         }
     }
+}
+
+/// `Config::connect_raw` owns no descriptor-release handle. Dropping its last
+/// client therefore leaves the connection task responsible for ending TLS:
+/// the multiplexed loop sends `Terminate`, then `TlsWriteHalf::shutdown` must
+/// serialize AND flush `close_notify` before it shuts down the caller's socket.
+///
+/// The ordinary `Config::connect` close tests cannot isolate that path. Their
+/// synchronous `ConnectionRelease` sends the alert during `drop(client)`, so
+/// they remain green if the write half's own shutdown silently does nothing.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn dropping_a_caller_owned_tls_client_sends_close_notify() {
+    use compio_postgres::tls::MakeTlsConnect;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read caller-owned PostgreSQL SSLRequest");
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+                8,
+                "SSLRequest length"
+            );
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+                80_877_103,
+                "SSLRequest code"
+            );
+            socket
+                .write_all(b"S")
+                .expect("accept caller-owned TLS negotiation");
+            socket
+                .flush()
+                .expect("flush caller-owned TLS negotiation response");
+
+            let mut tls = rustls::ServerConnection::new(server_config)
+                .expect("build caller-owned TLS server session");
+            {
+                let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+                complete_startup(&mut stream, 908);
+                assert_eq!(
+                    expect_simple_query(&mut stream),
+                    b"SELECT 1\0",
+                    "caller-owned TLS control query"
+                );
+
+                let mut response = backend_frame(b'C', b"SELECT 1\0");
+                response.extend_from_slice(&backend_frame(b'Z', b"I"));
+                stream
+                    .write_all(&response)
+                    .expect("answer caller-owned TLS control query");
+                stream
+                    .flush()
+                    .expect("flush caller-owned TLS control query");
+            }
+
+            expect_close_notify(&mut tls, &mut socket);
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let config = dsn
+            .parse::<Config>()
+            .expect("parse caller-owned TLS config");
+        let mut make = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build caller-owned rustls connector");
+        let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+            compio::net::TcpStream,
+        >>::make_tls_connect(&mut make, "localhost")
+        .expect("make caller-owned rustls connection");
+        let socket = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting the caller-owned TLS socket hung")
+        .expect("connect the caller-owned TLS socket");
+        let (client, connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect_raw(socket, connector))
+                .await
+                .expect("caller-owned TLS startup hung")
+                .expect("complete caller-owned TLS startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("caller-owned TLS control query hung")
+            .expect("run caller-owned TLS control query");
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [compio_postgres::SimpleQueryMessage::CommandComplete(1)]
+            ),
+            "caller-owned TLS control query returned {messages:?}"
+        );
+
+        // There is no synchronous release guard on this entry point. Keep the
+        // connection task running after the last client goes away so its write
+        // half is the only code that can deliver the alert under test.
+        drop(client);
+        let driver_result = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+        driver_result
+            .expect("caller-owned TLS teardown left the connection task wedged")
+            .expect("caller-owned TLS connection task panicked")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "caller-owned TLS connection task failed during clean teardown: {}",
+                    common::error_chain(&error)
+                )
+            });
+    }))
+    .await
+    .expect("caller-owned TLS close-notify test exceeded its outer watchdog");
+}
+
+/// TCP may split the five-byte TLS record header at any byte. Finish startup
+/// before enabling the wrapper so this proves steady-state record reassembly,
+/// not merely that the handshake happened to tolerate a short read.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_tls_record_fragmented_below_its_header_is_reassembled() {
+    use compio_postgres::tls::MakeTlsConnect;
+    use std::sync::atomic::Ordering;
+
+    const VALUE: &str = "fragmented TLS record";
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let (release_peer, peer_released) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read fragmented-record SSLRequest");
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+                8,
+                "SSLRequest length"
+            );
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+                80_877_103,
+                "SSLRequest code"
+            );
+            socket
+                .write_all(b"S")
+                .expect("accept fragmented-record TLS negotiation");
+            socket
+                .flush()
+                .expect("flush fragmented-record TLS negotiation response");
+
+            let mut tls = rustls::ServerConnection::new(server_config)
+                .expect("build fragmented-record TLS server session");
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            complete_startup(&mut stream, 909);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 'fragmented'\0");
+
+            let mut row = 1u16.to_be_bytes().to_vec();
+            row.extend_from_slice(&u32::try_from(VALUE.len()).unwrap().to_be_bytes());
+            row.extend_from_slice(VALUE.as_bytes());
+            let mut response = backend_frame(b'T', &row_description(&["value"]));
+            response.extend_from_slice(&backend_frame(b'D', &row));
+            response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write fragmented TLS query response");
+            stream.flush().expect("flush fragmented TLS query response");
+
+            peer_released
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("client did not release the still-open TLS peer");
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let config = dsn
+            .parse::<Config>()
+            .expect("parse fragmented-record TLS config");
+        let socket = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting the fragmented-record TLS socket hung")
+        .expect("connect the fragmented-record TLS socket");
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let nonempty_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let socket = OneByteTlsReads {
+            inner: socket,
+            armed: std::sync::Arc::clone(&armed),
+            nonempty_reads: std::sync::Arc::clone(&nonempty_reads),
+        };
+        let mut make = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build fragmented-record rustls connector");
+        let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+            OneByteTlsReads<compio::net::TcpStream>,
+        >>::make_tls_connect(&mut make, "localhost")
+        .expect("make fragmented-record rustls connection");
+        let (client, connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect_raw(socket, connector))
+                .await
+                .expect("fragmented-record TLS startup hung")
+                .expect("complete fragmented-record TLS startup");
+
+        // Startup is complete and no query has been sent, so every counted
+        // read below belongs to a steady-state TLS record.
+        armed.store(true, Ordering::SeqCst);
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let outcome = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.simple_query("SELECT 'fragmented'"),
+        )
+        .await;
+
+        let _ = release_peer.send(());
+        server.finish();
+        let messages = outcome
+            .expect("fragmented TLS query response hung")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "a one-byte ciphertext fragment was treated as EOF: {}",
+                    common::error_chain(&error)
+                )
+            });
+        let value = messages.iter().find_map(|message| match message {
+            compio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        });
+        assert_eq!(value, Some(VALUE), "the fragmented TLS row was changed");
+        assert!(
+            nonempty_reads.load(Ordering::SeqCst) >= 5,
+            "the fixture did not split one TLS record header across reads"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("fragmented-record connection task did not exit");
+    }))
+    .await
+    .expect("fragmented TLS record test exceeded its outer watchdog");
+}
+
+/// A serialized connection is selected when the socket beneath rustls refuses
+/// to split. That refusal must rebuild the identical TLS stream, including
+/// ciphertext the read path already took from the socket but has not yet fed
+/// to rustls.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_refused_tls_split_preserves_ciphertext_already_read_from_socket() {
+    use compio_postgres::tls::{MakeTlsConnect, TlsConnect};
+    use futures_util::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    const CHANNEL: &str = "split_buffer";
+    const PROCESS_ID: i32 = 912;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut server_config = (*scripted_tls_server_config()).clone();
+        // Post-handshake tickets would add records before the two controlled
+        // application records and make the 4097-byte boundary ambiguous.
+        server_config.send_tls13_tickets = 0;
+        let server_config = std::sync::Arc::new(server_config);
+        let expected_payload = "x".repeat(8192);
+        let server_payload = expected_payload.clone();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut tls = rustls::ServerConnection::new(server_config)
+                .expect("build refused-split TLS server session");
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+
+            assert_eq!(
+                read_startup_protocol(&mut stream),
+                0x0003_0002,
+                "serialized TLS startup protocol"
+            );
+            stream
+                .write_all(&successful_startup_frames(
+                    PROCESS_ID,
+                    &1234i32.to_be_bytes(),
+                ))
+                .expect("write serialized TLS startup response");
+            stream.flush().expect("flush serialized TLS startup record");
+
+            stream
+                .write_all(&notification_frame(PROCESS_ID, CHANNEL, &server_payload))
+                .expect("write buffered TLS notification");
+            stream
+                .flush()
+                .expect("flush buffered TLS notification record");
+
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"SELECT 1\0",
+                "refused-split barrier query"
+            );
+            let mut response = backend_frame(b'C', b"SELECT 1\0");
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("answer refused-split barrier query");
+            stream.flush().expect("flush refused-split barrier query");
+        });
+
+        let socket = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting the refused-split TLS socket hung")
+        .expect("connect the refused-split TLS socket");
+        let coalesce_next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let split_attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let socket = RefusingBufferedTlsTransport {
+            socket,
+            coalesce_next: std::sync::Arc::clone(&coalesce_next),
+            split_attempted: std::sync::Arc::clone(&split_attempted),
+        };
+
+        let tls_config = "host=localhost sslmode=require"
+            .parse::<Config>()
+            .expect("parse direct refused-split TLS config");
+        let mut make = compio_postgres::MakeRustlsConnect::from_config(&tls_config)
+            .expect("build direct refused-split rustls connector");
+        let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+            RefusingBufferedTlsTransport,
+        >>::make_tls_connect(&mut make, "localhost")
+        .expect("make direct refused-split rustls connection");
+        let tls_stream = compio::time::timeout(OPERATION_WATCHDOG, connector.connect(socket))
+            .await
+            .expect("direct refused-split TLS handshake hung")
+            .expect("complete direct refused-split TLS handshake");
+
+        // The server flushes startup and the large notification as separate
+        // TLS records. One exact 4097-byte socket read crosses rustls' 4096-
+        // byte input window, leaving an unread ciphertext suffix at handoff.
+        coalesce_next.store(4097, Ordering::Release);
+        let startup_config = "user=scripted-user sslmode=disable"
+            .parse::<Config>()
+            .expect("parse serialized TLS startup config");
+        let (client, mut connection) = Box::pin(compio::time::timeout(
+            OPERATION_WATCHDOG,
+            startup_config.connect_raw(tls_stream, compio_postgres::NoTls),
+        ))
+        .await
+        .expect("serialized TLS startup hung")
+        .expect("complete serialized TLS startup");
+        let mut notifications = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let (query, notification) = compio::time::timeout(OPERATION_WATCHDOG, async {
+            futures_util::join!(client.simple_query("SELECT 1"), notifications.next())
+        })
+        .await
+        .expect("refused-split notification or barrier query hung");
+        assert!(
+            split_attempted.load(Ordering::Acquire),
+            "the fixture never exercised the refused TLS split"
+        );
+        let messages = query.unwrap_or_else(|error| {
+            panic!(
+                "refused TLS split corrupted the barrier query: {}",
+                common::error_chain(&error)
+            )
+        });
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [compio_postgres::SimpleQueryMessage::CommandComplete(1)]
+            ),
+            "refused-split barrier query returned {messages:?}"
+        );
+        match notification {
+            Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                assert_eq!(notification.process_id(), PROCESS_ID);
+                assert_eq!(notification.channel(), CHANNEL);
+                assert_eq!(notification.payload(), expected_payload);
+            }
+            other => panic!("the refused TLS split lost its buffered notification: {other:?}"),
+        }
+
+        drop(client);
+        server.finish();
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("refused-split connection task did not exit");
+    }))
+    .await
+    .expect("refused TLS split test exceeded its outer watchdog");
 }
 
 #[cfg(feature = "tls")]
