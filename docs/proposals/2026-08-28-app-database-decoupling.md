@@ -49,11 +49,39 @@ membership is what the check reads. **So revocation is fenced by the in-process 
 nothing else** - which is exactly the property this section opens by disclaiming ("Enforcement is
 PostgreSQL role membership, not an in-process check").
 
-This is load-bearing for the whole shared shape. Either app principals must be what connects or
-assumes - a role per app with its own membership, at the cost of the connection model - or the
-design must state plainly that a revoked co-grant is enforced in process, and price that against the
-CDC fan-out map which has the same property. The paragraph below describes the single-app case,
-where the app and the connection are the same principal.
+**AND THERE IS A FIX THAT COSTS NO CONNECTIONS. Measured on 17.11.** The failure above happens
+because the worker holds a **direct** membership in the namespace role, so revoking the *app's*
+membership severs an edge the worker never used. Interpose the app role and make it the worker's
+only path:
+
+```
+zs_worker --(WITH INHERIT FALSE)--> zs_app_<id> --> zs_ns_<n>_<cap>
+```
+
+with **no direct `zs_worker` -> `zs_ns_*` grant at all**. Then:
+
+| step | result |
+| --- | --- |
+| chain intact: worker `SET ROLE zs_ns_1_rw`, `SELECT` | `SET`, 1 row - transitive membership grants the path |
+| chain intact: worker `SET ROLE zs_app_a`, `SELECT` | `SET`, 1 row |
+| `REVOKE zs_ns_1_rw FROM zs_app_a` - the middle edge | applied |
+| worker `SET ROLE zs_ns_1_rw` | **`ERROR: permission denied to set role "zs_ns_1_rw"`** |
+| worker `SET ROLE zs_app_a`, then `SELECT` | `SET` succeeds, then **`ERROR: permission denied for schema ns_1`** |
+
+**The middle revoke bites on both paths**, so co-grant revocation is enforced by the database after
+all - no per-app login, no extra connection, no change to the pool. The single constraint is
+structural and must be stated as an invariant: **the worker may never hold a direct membership in a
+namespace role.** One such grant, added for convenience or by a provisioning path that predates this
+rule, silently restores the broken behaviour above - and nothing in PostgreSQL will complain, because
+both memberships are individually legal.
+
+That invariant is exactly what `db_posture`'s boot check is already shaped to enforce: it walks every
+membership the worker holds. It currently rules on the inherit option; it would gain an arm ruling on
+the *shape* - that every `zs_ns_*` membership is reached through an app role rather than held
+directly.
+
+This does not fence the CDC fan-out map, which uses no `SET ROLE` at all; that path still needs its
+own answer.
 
 Revoking a grant is one `REVOKE`; the next transaction on
 the same already-pooled connection fails with SQLSTATE 42501 and no eviction, restart or cache
