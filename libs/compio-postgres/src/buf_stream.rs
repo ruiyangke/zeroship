@@ -334,6 +334,71 @@ where
     }
 }
 
+async fn read_raw_from<R>(
+    reader: &mut R,
+    buf: Vec<u8>,
+    read_deadline: Option<&ReadDeadline>,
+) -> Result<(usize, Vec<u8>), Error>
+where
+    R: AsyncRead + Unpin,
+{
+    let BufResult(result, returned) = read_with_deadline(reader, buf, read_deadline).await?;
+    let n = result.map_err(Error::io)?;
+    Ok((n, returned))
+}
+
+async fn fill_read_buffer<R>(
+    reader: &mut R,
+    read_buf: &mut BytesMut,
+    read_scratch: &mut Vec<u8>,
+    read_deadline: Option<&ReadDeadline>,
+    max_message_size: usize,
+    min_bytes: usize,
+) -> Result<(), Error>
+where
+    R: AsyncRead + Unpin,
+{
+    if min_bytes > max_message_size {
+        return Err(Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("message too large: {min_bytes} bytes (max {max_message_size})"),
+        )));
+    }
+    while read_buf.len() < min_bytes {
+        if read_scratch.is_empty() {
+            *read_scratch = vec![0u8; READ_CHUNK];
+        }
+        let buf = std::mem::take(read_scratch);
+        let (n, buf) = read_raw_from(reader, buf, read_deadline).await?;
+        if n == 0 {
+            return Err(Error::io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed by server",
+            )));
+        }
+        read_buf.extend_from_slice(&buf[..n]);
+        *read_scratch = buf;
+    }
+    Ok(())
+}
+
+fn peek_u32_be_from(read_buf: &BytesMut, offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let slice = read_buf.get(offset..end)?;
+    Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn validate_length_against(length: u32, max_message_size: usize) -> Result<(), Error> {
+    let total = 1u64 + u64::from(length);
+    if total > max_message_size as u64 {
+        return Err(Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("message too large: {total} bytes (max {max_message_size})"),
+        )));
+    }
+    Ok(())
+}
+
 async fn flush_retry_interrupted<W>(writer: &mut W) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -424,31 +489,15 @@ where
     /// malformed/malicious server from OOM-ing the process with a
     /// crafted 4-byte length field (e.g., 0xFFFFFFFF = 4 GB).
     pub async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
-        if min_bytes > self.max_message_size {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {min_bytes} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        while self.read_buf.len() < min_bytes {
-            if self.read_scratch.is_empty() {
-                self.read_scratch = vec![0u8; READ_CHUNK];
-            }
-            let buf = std::mem::take(&mut self.read_scratch);
-            let (n, buf) = self.read_raw(buf).await?;
-            if n == 0 {
-                return Err(Error::io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed by server",
-                )));
-            }
-            self.read_buf.extend_from_slice(&buf[..n]);
-            self.read_scratch = buf;
-        }
-        Ok(())
+        fill_read_buffer(
+            &mut self.inner,
+            &mut self.read_buf,
+            &mut self.read_scratch,
+            self.read_deadline.as_ref(),
+            self.max_message_size,
+            min_bytes,
+        )
+        .await
     }
 
     /// Access the read buffer for `Message::parse()` to consume from.
@@ -459,9 +508,7 @@ where
     /// Peek a big-endian `u32` at `offset` in the read buffer without consuming.
     /// Returns `None` if fewer than 4 bytes are available starting at `offset`.
     pub fn peek_u32_be(&self, offset: usize) -> Option<u32> {
-        let end = offset.checked_add(4)?;
-        let slice = self.read_buf.get(offset..end)?;
-        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        peek_u32_be_from(&self.read_buf, offset)
     }
 
     /// Reject a framed message whose declared length (from the 4-byte length
@@ -470,17 +517,7 @@ where
     /// payload, so a malicious server can't coerce us to allocate up to
     /// 64 MiB per connection.
     pub fn validate_length(&self, length: u32) -> Result<(), Error> {
-        let total = 1u64 + u64::from(length);
-        if total > self.max_message_size as u64 {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {total} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        Ok(())
+        validate_length_against(length, self.max_message_size)
     }
 
     /// Append data to the write buffer (no I/O until flush).
@@ -507,14 +544,6 @@ where
             .await
             .map_err(Error::io)?;
         Ok(())
-    }
-
-    /// Low-level read into owned buffer, returning (bytes_read, buffer).
-    async fn read_raw(&mut self, buf: Vec<u8>) -> Result<(usize, Vec<u8>), Error> {
-        let BufResult(result, returned) =
-            read_with_deadline(&mut self.inner, buf, self.read_deadline.as_ref()).await?;
-        let n = result.map_err(Error::io)?;
-        Ok((n, returned))
     }
 
     /// Low-level write all bytes to the socket.
@@ -609,48 +638,20 @@ pub(crate) struct BufReadHalf<R> {
     max_message_size: usize,
 }
 
-impl<R> BufReadHalf<R>
-where
-    R: AsyncRead + Unpin,
-{
-    async fn read_raw(&mut self, buf: Vec<u8>) -> Result<(usize, Vec<u8>), Error> {
-        let BufResult(result, returned) =
-            read_with_deadline(&mut self.inner, buf, self.read_deadline.as_ref()).await?;
-        let n = result.map_err(Error::io)?;
-        Ok((n, returned))
-    }
-}
-
 impl<R> ReadFramer for BufReadHalf<R>
 where
     R: AsyncRead + Unpin,
 {
     async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
-        if min_bytes > self.max_message_size {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {min_bytes} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        while self.read_buf.len() < min_bytes {
-            if self.read_scratch.is_empty() {
-                self.read_scratch = vec![0u8; READ_CHUNK];
-            }
-            let buf = std::mem::take(&mut self.read_scratch);
-            let (n, buf) = self.read_raw(buf).await?;
-            if n == 0 {
-                return Err(Error::io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed by server",
-                )));
-            }
-            self.read_buf.extend_from_slice(&buf[..n]);
-            self.read_scratch = buf;
-        }
-        Ok(())
+        fill_read_buffer(
+            &mut self.inner,
+            &mut self.read_buf,
+            &mut self.read_scratch,
+            self.read_deadline.as_ref(),
+            self.max_message_size,
+            min_bytes,
+        )
+        .await
     }
 
     fn buf(&mut self) -> &mut BytesMut {
@@ -658,23 +659,11 @@ where
     }
 
     fn peek_u32_be(&self, offset: usize) -> Option<u32> {
-        let end = offset.checked_add(4)?;
-        let slice = self.read_buf.get(offset..end)?;
-        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        peek_u32_be_from(&self.read_buf, offset)
     }
 
     fn validate_length(&self, length: u32) -> Result<(), Error> {
-        let total = 1u64 + u64::from(length);
-        if total > self.max_message_size as u64 {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {total} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        Ok(())
+        validate_length_against(length, self.max_message_size)
     }
 }
 
