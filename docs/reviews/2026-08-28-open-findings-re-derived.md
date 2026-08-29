@@ -279,3 +279,45 @@ several oscillation periods, which is enough.
 longer, or read the trend arm alongside `delta_kib` and the rises/falls balance
 rather than as a verdict. A rule whose noise band is smaller than the signal's
 own oscillation amplitude can only be trusted over a long enough window.
+
+### Why the RSS rule misfires, from its own calibration constant
+
+`benches/soak.rs` states what the noise band was sized against:
+
+    // 64 KiB is the smallest power-of-two band above the measured benign
+    // 52 KiB allocator commit, without muting the sustained 100 KiB/sample
+    // leaks this rule's vectors exercise.
+    //
+    // At the default 37 samples over 180 seconds, this detects a steady linear
+    // leak above 256 KiB per run ...; it cannot detect one at or below that
+    // rate, and a sufficiently late leak can be diluted by the quartile mean.
+
+Two things follow.
+
+**The band is calibrated to a 52 KiB benign step. The series it runs against
+oscillates over about 280 KiB.** Measured 2026-08-29 on the dedicated container:
+RSS moved between 9704 and 9984 KiB with no leak present, `rises=8 falls=6`, and
+a final value BELOW the early peak. That amplitude is more than five times the
+figure the band was chosen above, so a 9-sample window landing on the high side
+of the oscillation instead of the low side exceeds a 576 KiB budget on placement
+alone. That is exactly what happened: 592 against 576, a 16 KiB margin on an
+88,000 KiB sum.
+
+**The documented analysis only covers false negatives.** The comment reasons
+carefully about the smallest leak the rule can SEE and about dilution, and says
+nothing about how often it fires with no leak present. The 420s run at the same
+commit reported `delta_kib=-72`, `rises=20 falls=20`, `verdict=stable` - so the
+false positive is a property of the window length, not of the tree.
+
+**`verify.sh`'s `rss-growth-rule` arm cannot catch this, by construction.** That
+arm runs `cargo test -p compio-postgres --bench soak`, which exercises the
+rule's SYNTHETIC VECTORS against a floor of 9. The vectors check the rule's
+arithmetic on constructed series; nothing there measures whether the band suits
+a real allocator's behaviour. A green arm and a false-positive live run are
+consistent, and both were observed on the same commit.
+
+Where a fix would go: scale the noise band to the measured oscillation
+amplitude of the run rather than to a fixed 64 KiB, or require the window to
+span several oscillation periods before the trend arm is allowed a verdict.
+Neither is attempted here - this is recorded so the next person to see a 180s
+soak go red does not go looking for a leak first.
