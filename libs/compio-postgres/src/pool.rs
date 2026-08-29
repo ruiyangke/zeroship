@@ -2756,6 +2756,8 @@ mod tests {
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
     use crate::connection::{Request, RequestMessages};
+    use compio::buf::{IoBuf, IoBufMut};
+    use compio::io::{AsyncRead, AsyncWrite};
     use futures_channel::mpsc;
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
@@ -2776,6 +2778,40 @@ mod tests {
             ),
             receiver,
         )
+    }
+
+    struct ResetAfterCancelWrite {
+        bytes_written: Rc<Cell<usize>>,
+    }
+
+    #[allow(clippy::future_not_send)]
+    impl AsyncRead for ResetAfterCancelWrite {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            compio::BufResult(
+                Err(std::io::Error::new(
+                    ErrorKind::ConnectionReset,
+                    "scripted post-write cancel reset",
+                )),
+                buf,
+            )
+        }
+    }
+
+    #[allow(clippy::future_not_send)]
+    impl AsyncWrite for ResetAfterCancelWrite {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            let len = buf.buf_len();
+            self.bytes_written.set(self.bytes_written.get() + len);
+            compio::BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     fn fake_postgres_server() -> (
@@ -3157,6 +3193,70 @@ mod tests {
     }
 
     #[compio::test]
+    async fn an_uncertain_cancel_retires_after_its_token_is_dropped() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(22);
+        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let inner = Arc::clone(held.inner());
+        let bytes_written = Rc::new(Cell::new(0));
+        let token = held.cancel_token();
+        let lease = Arc::downgrade(
+            token
+                .pool_lease
+                .as_ref()
+                .expect("pooled token omitted its cancellation lease"),
+        );
+
+        token
+            .cancel_query_raw(
+                ResetAfterCancelWrite {
+                    bytes_written: Rc::clone(&bytes_written),
+                },
+                NoTls,
+            )
+            .await
+            .expect_err("the scripted cancel reset unexpectedly confirmed delivery");
+        assert!(
+            bytes_written.get() > 0,
+            "the scripted reset happened before the CancelRequest write"
+        );
+        assert!(
+            !held.is_closed(),
+            "the returned raw-cancel error independently closed the pooled client"
+        );
+
+        drop(token);
+        assert_eq!(
+            lease.strong_count(),
+            1,
+            "the cancellation token did not release its lease authority"
+        );
+        assert!(
+            held.pool_cancel_lease_prevents_reuse(),
+            "the uncertain cancel was forgotten after its token was dropped"
+        );
+
+        drop(held);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0, "uncertain session became reusable");
+        assert_eq!(pool.total_count(), 0, "uncertain session kept its slot");
+        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert!(
+            inner
+                .send(RequestMessages::Single(FrontendMessage::Raw(
+                    bytes::Bytes::from_static(b"S\0\0\0\x04"),
+                )))
+                .is_err(),
+            "uncertain-session eviction did not synchronously close the client"
+        );
+    }
+
+    #[compio::test]
     async fn a_timeout_before_protocol_work_does_not_retire_an_idle_session() {
         let mut config = PoolConfig {
             max_size: 1,
@@ -3182,6 +3282,62 @@ mod tests {
         );
         assert_eq!(pool.total_count(), 1);
         assert_eq!(pool.metrics.evictions.get(), 0);
+    }
+
+    #[compio::test]
+    async fn a_missing_cancel_key_recovery_closes_the_held_session() {
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.command_timeout(Duration::from_millis(1));
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (sender, _receiver) = mpsc::unbounded();
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            25,
+            None,
+            None,
+        );
+        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let error = held
+            .command(async |client| {
+                client.__private_api_rollback(None);
+                std::future::pending::<Result<(), Error>>().await
+            })
+            .await
+            .expect_err("the unsettled operation beat its command deadline");
+        assert!(error.is_command_timeout());
+        let recovery_error = std::error::Error::source(&error)
+            .expect("command timeout omitted its recovery failure");
+        let missing_key = recovery_error
+            .source()
+            .expect("missing-key recovery error omitted its cause");
+        assert!(
+            missing_key
+                .to_string()
+                .contains("did not provide BackendKeyData"),
+            "command recovery took the wrong pre-attempt failure path: {missing_key}"
+        );
+        assert_eq!(
+            pool.active_count(),
+            1,
+            "test returned the lease before observing synchronous retirement"
+        );
+        assert!(
+            held.is_closed(),
+            "failed command recovery left the held session open"
+        );
+
+        drop(held);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -3906,6 +4062,54 @@ mod tests {
             "housekeeping claim hid remaining capacity from the next waiter"
         );
         claimed.disarm();
+    }
+
+    #[test]
+    fn failed_or_cancelled_housekeeping_refill_releases_its_permit() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
+
+        let refill = WeakPermitGuard::reserve(&pool);
+        assert_eq!(pool.total_count(), 1, "refill did not reserve capacity");
+
+        drop(refill);
+
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "failed or cancelled refill kept its reserved capacity"
+        );
+    }
+
+    #[test]
+    fn failed_or_cancelled_housekeeping_refill_wakes_fifo_head() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
+        let refill = WeakPermitGuard::reserve(&pool);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(&wake_count);
+        let mut waiter = Box::pin(Waiter::new(&pool));
+
+        assert_eq!(pool.total_count(), 1, "refill did not reserve capacity");
+        assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
+        assert_eq!(pool.pending_count(), 1);
+        assert_eq!(wake_count.load(Ordering::Relaxed), 0);
+
+        drop(refill);
+
+        assert_eq!(
+            wake_count.load(Ordering::Relaxed),
+            1,
+            "failed or cancelled refill did not wake the FIFO head"
+        );
     }
 
     #[test]

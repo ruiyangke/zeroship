@@ -79,6 +79,12 @@ impl PoolCancelLease {
         // Recheck after taking the reference which makes the attempt visible
         // to pool return. If return won the race, do not send. If it happens
         // after this load, the retained Arc makes return retire the session.
+        //
+        // This second load is deliberately not bound by a deterministic test.
+        // There is no await or yield between the first check, Arc::clone, and
+        // this check on compio's single-threaded runtime. Only another OS
+        // thread can revoke during that window, and reaching it on demand
+        // would require a production test hook here.
         lease.ensure_active()?;
         Ok(PoolCancelAttempt {
             lease,
