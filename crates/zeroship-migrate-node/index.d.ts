@@ -1084,6 +1084,26 @@ export interface RuntimeOptionsDto {
 }
 
 /**
+ * Turn engine diagnostics on or off, and report what was decided.
+ *
+ * The addon does NOT read the process environment to find this out - see the header of
+ * [`crate::runtime`] for why. A host that wants the old `ZERO_MIGRATE_LOG` behaviour
+ * forwards the variable it already has:
+ *
+ * ```js
+ * setEngineDiagnostics(process.env.ZERO_MIGRATE_LOG ?? null)
+ * ```
+ *
+ * The RAW string crosses rather than a boolean, so the truthiness rule (unset, empty,
+ * `0`, `false`, `no` are off; anything else is on) is stated once, in Rust, under test -
+ * not restated by every host that calls this.
+ *
+ * Off until called. Diagnostics go to STDERR, never stdout, because `lint`/`plan`/
+ * `status`/`history` each write one JSON document to stdout that callers parse.
+ */
+export declare function setEngineDiagnostics(value?: string | undefined | null): boolean
+
+/**
  * `status` - the generic `ops::status::status` over the host driver.
  * Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
  * typed [`StatusReply`](crate::wire::StatusReply).
