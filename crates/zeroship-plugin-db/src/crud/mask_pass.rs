@@ -442,10 +442,13 @@ fn mask_date_decade(plaintext: &str) -> String {
 ///
 /// One row shape, two sources of it:
 ///
-/// - a **SELECT** projects only logical names, so `row[col]` already holds the
-///   masked string and no raw key is present;
-/// - a **`RETURNING *`** write returns every physical column, so the row also
-///   carries `__zs_raw__<col>` with the real value.
+/// - a **SELECT or RETURNING** projects only logical names, so `row[col]`
+///   already holds the masked string and no raw key is present. That was true
+///   of SELECT alone until the write builders stopped starring: a
+///   `RETURNING *` write returned every physical column, so the row also
+///   carried `__zs_raw__<col>` with the real value;
+/// - the **WAL consumer**, which decodes pgoutput with no schema in reach and
+///   no projection to apply, and therefore still produces the second shape.
 ///
 /// Both are handled by the same two steps: re-apply the mask transform to
 /// `row[col]`, and remove the raw key if it is there.
@@ -523,7 +526,8 @@ pub(crate) fn wrap_row_on_read(
         let masked_value: Option<String> =
             obj.get(col).and_then(|v| v.as_str()).map(|s| apply_mask_kind(kind, s));
 
-        // The raw column rides out of every `RETURNING *`. Strip it here -
+        // The raw column rides out of a WAL-decoded row (and out of every
+        // `RETURNING *`, back when the write builders starred). Strip it here -
         // `read_pipeline`'s surface stage would too, but this pass runs first
         // and the sentinel it writes must not sit beside the value it hides.
         let raw_key = crate::query::raw_column_name(col);
@@ -1037,10 +1041,17 @@ mod tests {
     }
 
     #[test]
-    fn wrap_row_on_read_strips_the_raw_column_from_a_returning_star_row() {
-        // `RETURNING *` yields every physical column, so the row carries the
-        // mask under `ssn` AND the real value under the raw column. The wrap
-        // must return the mask and remove the raw key.
+    fn wrap_row_on_read_strips_the_raw_column_from_a_physical_row() {
+        // A row carrying every physical column: the mask under `ssn` AND the
+        // real value under the raw column. The wrap must return the mask and
+        // remove the raw key.
+        //
+        // Named for the SHAPE, not for a producer. It was
+        // `..._from_a_returning_star_row` while the write builders starred;
+        // they project now, and the surviving producer of this shape is the WAL
+        // consumer. The fixture is hand-built either way, so what the test
+        // exercises never depended on which producer made the row - only the
+        // name did.
         let schema = json!({
             "ssn": {
                 "type": "string",

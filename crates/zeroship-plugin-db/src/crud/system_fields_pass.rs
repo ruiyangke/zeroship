@@ -29,7 +29,7 @@
 //! Rust-side minting (rather than SDK-side) is the design choice so
 //! non-SDK deploys (raw `default = { fetch }` apps that call
 //! `zeroship.db.*` directly) also receive auto-mint. The SDK reads the
-//! minted id back from the INSERT's `RETURNING *` row.
+//! minted id back from the INSERT's `RETURNING` row.
 
 use serde_json::{Map, Value};
 use zeroship_runtime::state::SharedState;
