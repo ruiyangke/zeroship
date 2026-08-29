@@ -919,10 +919,10 @@ pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
 }
 
 fn schema_declares_readable_field(schema_hint: &Value, name: &str) -> bool {
-    schema_hint
-        .as_object()
-        .map(|obj| obj.contains_key(name) && !is_schema_metadata_key(name))
-        .unwrap_or(false)
+    if is_schema_metadata_key(name) {
+        return false;
+    }
+    schema_hint.get(name).is_some_and(field_is_readable)
 }
 
 /// **L24** — the read-identifier allowlist.
@@ -3054,7 +3054,7 @@ pub fn build_conflict_probe_with_dialect(
 /// Generated SQL example (PG):
 /// ```sql
 /// -- baseline (schema=None or no masked columns):
-/// SELECT * FROM users WHERE id = $1
+/// SELECT "id", "created_at", ... FROM users WHERE id = $1
 ///
 /// -- schema declares ssn + email masked:
 /// SELECT "id", "ssn_masked" AS "ssn", "email_masked" AS "email", "name"
@@ -3393,7 +3393,7 @@ fn build_masked_aware_select_expr_with_unmask(
                     )
                 })?;
                 validate_read_identifier(name, schema_hint)?;
-                cols.push(project_read_field(name, None));
+                cols.push(project_read_field(name, schema_hint, None));
             }
             return Ok(cols.join(", "));
         }
@@ -3409,20 +3409,58 @@ fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
     }
 }
 
-/// Project one field.
+/// Is `field` on the creator-facing read surface, per the descriptor?
 ///
-/// There is no per-column decision left to make: after the storage flip the
-/// column with the field's own name is the one a read may serve, for masked and
-/// unmasked fields alike. A SELECT never names the raw column - not for an
-/// unmask hint either, because the unmask path re-fetches the value under its
-/// own authorization check and audit row (`crud::unmask`), which is the whole
-/// point of having one reader.
-fn project_read_field(
-    field: &str,
-    table_alias: Option<&str>,
-) -> String {
+/// The v2 descriptor stamps `readable` on every field it emits
+/// (`crates/zeroship-migrate-core/src/render/gen_types.rs`, `stamp_physical_storage`),
+/// and until the write projection landed nothing in Rust read it: the flag was
+/// emitted, shipped, cached and ignored, so "the version tag means less than it
+/// looks" was literally true of this key.
+///
+/// **An absent flag means readable.** `readable` narrows a declared field OUT of
+/// the surface; it is not what puts it in. A field map that predates the stamp -
+/// every hand-written test schema, and the `t.<field>()` maps `registerModel`
+/// receives from a dev-tier build that did not go through the fold - carries no
+/// flag at all, and refusing those would take the projection to zero columns
+/// rather than to a narrower set.
+fn field_is_readable(def: &Value) -> bool {
+    def.get("readable").and_then(Value::as_bool).unwrap_or(true)
+}
+
+/// The physical column that carries `field`'s creator-visible value.
+///
+/// Read from the descriptor's `storage.valueColumn` rather than formatted from
+/// the field name. The two agree on every artifact the fold emits today
+/// (`gen_artifacts_byte_identical.rs` asserts `valueColumn == name`), so this
+/// buys nothing observable now and everything later: a physical rename that
+/// keeps the logical name is then a producer change, where a `format!` here
+/// would name a column the table does not have.
+///
+/// It is deliberately NOT where the raw column is excluded. `storage.rawColumn`
+/// is a sibling key of `valueColumn`, so a projection that reads `valueColumn`
+/// cannot reach the raw column by any input - there is no branch to get wrong.
+fn value_column_for_field(field: &str, schema_hint: &Value) -> String {
+    schema_hint
+        .get(field)
+        .and_then(|def| def.get("storage"))
+        .and_then(|storage| storage.get("valueColumn"))
+        .and_then(Value::as_str)
+        .unwrap_or(field)
+        .to_string()
+}
+
+/// Project one field: its physical value column, under its logical name.
+///
+/// There is no per-column masking decision left to make: after the storage flip
+/// the column with the field's own name is the one a read may serve, for masked
+/// and unmasked fields alike. Neither a SELECT nor a RETURNING names the raw
+/// column - not for an unmask hint either, because the unmask path re-fetches
+/// the value under its own authorization check and audit row (`crud::unmask`),
+/// which is the whole point of having one reader.
+fn project_read_field(field: &str, schema_hint: &Value, table_alias: Option<&str>) -> String {
     let logical = quote_ident(field);
-    let source = qualified_read_field(table_alias, field);
+    let physical = value_column_for_field(field, schema_hint);
+    let source = qualified_read_field(table_alias, &physical);
     if table_alias.is_some() || source != logical {
         format!("{source} AS {logical}")
     } else {
@@ -3438,6 +3476,13 @@ fn project_read_field(
 /// the caller holds, and a non-object one is an error rather than a fallback,
 /// so there is no input to this function that produces an unrestricted
 /// projection.
+///
+/// The seven system fields are projected unconditionally, ahead of any
+/// `readable` test. They are not the creator's to withdraw: `id` is the row
+/// identity every later stage routes by (the decrypt pass reads it for the AAD,
+/// the mask pass stamps it into `_meta.row_pk`), and a descriptor that said
+/// `readable: false` on it would produce rows no consumer in the pipeline can
+/// use rather than a narrower read surface.
 fn implicit_read_projection_parts(
     schema_hint: &Value,
     table_alias: Option<&str>,
@@ -3450,15 +3495,47 @@ fn implicit_read_projection_parts(
     })?;
     let mut parts = Vec::with_capacity(SYSTEM_FIELD_NAMES.len() + schema_obj.len());
     for field in SYSTEM_FIELD_NAMES {
-        parts.push(project_read_field(field, table_alias));
+        parts.push(project_read_field(field, schema_hint, table_alias));
     }
-    for field in schema_obj.keys() {
-        if is_schema_metadata_key(field) || SYSTEM_FIELD_NAMES.contains(&field.as_str()) {
+    for (field, def) in schema_obj {
+        if is_schema_metadata_key(field)
+            || SYSTEM_FIELD_NAMES.contains(&field.as_str())
+            || !field_is_readable(def)
+        {
             continue;
         }
-        parts.push(project_read_field(field, table_alias));
+        parts.push(project_read_field(field, schema_hint, table_alias));
     }
     Ok(parts)
+}
+
+/// The `RETURNING` column list every write builder emits.
+///
+/// # Why the write path needs one at all
+///
+/// `RETURNING *` and `SELECT *` are refused outright for a role that holds
+/// COLUMN-level grants: `*` expands to columns the role cannot read, so
+/// PostgreSQL rejects the whole statement rather than the columns
+/// (`ERROR: permission denied for table t`, measured on 17.11 for INSERT,
+/// UPDATE and SELECT alike). A per-app role narrowed to the columns its app
+/// declares therefore cannot execute a single write verb while the star is
+/// there. Naming the columns is what makes column grants expressible.
+///
+/// # What it does NOT replace
+///
+/// `crud::read_pipeline::restrict_rows_to_surface` still runs, and must. This
+/// narrows the rows one SQL statement returns; that stage narrows every row that
+/// reaches a creator, including the ones no statement here produced - the WAL
+/// consumer decodes pgoutput with no schema in reach and no projection to apply.
+/// The two overlap on the write path on purpose: the projection is the boundary
+/// the database enforces, the predicate is the boundary the runtime enforces,
+/// and the second is the only one that covers logical decoding.
+///
+/// Returns the bare comma-joined list, without the `RETURNING` keyword, because
+/// `build_find_or_create` appends a computed column after it
+/// (`(xmax = 0) AS __created`).
+pub fn build_returning_expr(schema_hint: &Value) -> Result<String, QueryError> {
+    Ok(implicit_read_projection_parts(schema_hint, None)?.join(", "))
 }
 
 /// The closed set of synthetic result columns the read builders emit.
@@ -3474,7 +3551,9 @@ pub const SYNTHETIC_RESULT_COLUMNS: &[&str] = &[
     "_distance",
     // `build_spatial_near` (`ST_Distance(...) AS _distance_m`).
     "_distance_m",
-    // `build_upsert_with_dialect` (`RETURNING *, (xmax = 0) AS __created`).
+    // `build_find_or_create` (`RETURNING <cols>, (xmax = 0) AS __created`).
+    // NOT `build_upsert_with_dialect`, which this comment named until 2026-08-28
+    // and which has never emitted the column.
     "__created",
 ];
 
@@ -3485,22 +3564,35 @@ pub const SYNTHETIC_RESULT_COLUMNS: &[&str] = &[
 /// raw column, an auxiliary shadow-table key - is not on this surface and is
 /// removed before the row is serialised.
 ///
-/// # Why a row predicate rather than a `RETURNING` column list
+/// # A row predicate AS WELL AS a `RETURNING` column list
 ///
-/// The twelve `RETURNING *` sites in this file are not the only way a physical
-/// column reaches a creator, and narrowing them would not close the hole it
-/// appears to close: the same rows feed the change broker, and on a deployed
-/// Postgres app the authoritative event source is the WAL consumer, which zips
-/// every physical column out of pgoutput with no schema in sight. A predicate
-/// over key names applies to both. `BuiltQuery` is also `{ sql, params }` with
-/// no constructor - nineteen sites hand-roll the struct literal - so a
-/// projection list threaded through it is nineteen edits now and one more per
-/// future builder.
+/// This paragraph used to read "rather than", and argued that narrowing the
+/// twelve `RETURNING *` sites "would not close the hole it appears to close".
+/// That argument was sound about EXPOSURE and is why this predicate still runs:
+/// the same rows feed the change broker, and on a deployed Postgres app the
+/// authoritative event source is the WAL consumer, which zips every physical
+/// column out of pgoutput with no schema in sight. A predicate over key names
+/// applies to both; a projection applies only to statements this file emits.
+///
+/// It was answering the wrong question. The projection is not a second attempt
+/// at the same containment - it is what makes the statements EXECUTABLE for a
+/// role holding column-level grants, because `*` expands to columns the role
+/// cannot read and PostgreSQL then refuses the whole statement. See
+/// [`build_returning_expr`]. Both now exist, and neither is redundant: the
+/// projection is the boundary the database enforces, this predicate is the
+/// boundary the runtime enforces, and only the second covers logical decoding.
 ///
 /// The union of system fields and declared fields is not a choice between the
 /// two: `id` is minted SDK-side and read back out of the `RETURNING` row,
 /// `version` and `updated_at` are auto-bumped in SQL, `deleted_at` is what
 /// soft-delete writes, and none of the seven is necessarily a descriptor key.
+///
+/// Note this set is deliberately WIDER than what [`build_returning_expr`]
+/// projects: it admits every declared key, including one the descriptor marks
+/// `readable: false`. A predicate that drops keys is the wrong place to enforce
+/// a read surface the projection has already refused to produce - if an
+/// unreadable column ever appears in a row here it arrived from logical
+/// decoding, where narrowing it silently would hide the fact.
 #[must_use]
 pub fn read_surface_columns(schema_hint: &Value) -> std::collections::BTreeSet<String> {
     let mut out: std::collections::BTreeSet<String> = SYSTEM_FIELD_NAMES
@@ -3616,7 +3708,8 @@ pub fn build_count_with_soft_delete(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Build an INSERT query: `INSERT INTO "app_id"."collection" (...) VALUES (...) RETURNING *`
+/// Build an INSERT query:
+/// `INSERT INTO "app_id"."collection" (...) VALUES (...) RETURNING "id", ...`
 ///
 /// PG-flavour wrapper around [`build_insert_with_dialect`]. Every
 /// existing CRUD call site stays on this signature — the orchestrator's
@@ -3624,9 +3717,10 @@ pub fn build_count_with_soft_delete(
 pub fn build_insert(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     doc: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_insert_with_dialect(app_id, collection, doc, SqlDialect::Postgres)
+    build_insert_with_dialect(app_id, collection, schema_hint, doc, SqlDialect::Postgres)
 }
 
 /// Dialect-aware INSERT builder.
@@ -3639,11 +3733,13 @@ pub fn build_insert(
 pub fn build_insert_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     doc: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let obj = doc
         .as_object()
@@ -3702,7 +3798,7 @@ pub fn build_insert_with_dialect(
     }
 
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES ({}) RETURNING *",
+        "INSERT INTO {schema}.{table} ({}) VALUES ({}) RETURNING {returning}",
         columns.join(", "),
         placeholders.join(", ")
     );
@@ -4052,16 +4148,25 @@ pub fn build_set_clauses_with_system_fields(
     Ok(set_clauses)
 }
 
-/// Build an UPDATE query: `UPDATE "app_id"."collection" SET ... WHERE ctid = (...) RETURNING *`
+/// Build an UPDATE query:
+/// `UPDATE "app_id"."collection" SET ... WHERE ctid = (...) RETURNING "id", ...`
 ///
 /// PG-flavour wrapper — every existing call site goes through Postgres.
 pub fn build_update_one(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     update: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_update_one_with_dialect(app_id, collection, filter, update, SqlDialect::Postgres)
+    build_update_one_with_dialect(
+        app_id,
+        collection,
+        schema_hint,
+        filter,
+        update,
+        SqlDialect::Postgres,
+    )
 }
 
 /// Dialect-aware `updateOne` builder. Encrypted-column
@@ -4073,6 +4178,7 @@ pub fn build_update_one(
 pub fn build_update_one_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
@@ -4080,6 +4186,7 @@ pub fn build_update_one_with_dialect(
     build_update_one_with_system_fields(
         app_id,
         collection,
+        schema_hint,
         filter,
         update,
         dialect,
@@ -4095,6 +4202,7 @@ pub fn build_update_one_with_dialect(
 pub fn build_update_one_with_system_fields(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
@@ -4102,6 +4210,7 @@ pub fn build_update_one_with_system_fields(
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4123,7 +4232,7 @@ pub fn build_update_one_with_system_fields(
         SqlDialect::Mysql => "id",
     };
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -4131,7 +4240,7 @@ pub fn build_update_one_with_system_fields(
 }
 
 /// Build an INSERT query for multiple documents:
-/// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING *`
+/// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING "id", ...`
 ///
 /// Column names are unioned across documents; a missing or explicit null value
 /// is emitted as a SQL `NULL` literal and consumes no bind parameter.
@@ -4140,20 +4249,23 @@ pub fn build_update_one_with_system_fields(
 pub fn build_insert_many(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     docs: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_insert_many_with_dialect(app_id, collection, docs, SqlDialect::Postgres)
+    build_insert_many_with_dialect(app_id, collection, schema_hint, docs, SqlDialect::Postgres)
 }
 
 /// Dialect-aware `insertMany` builder.
 pub fn build_insert_many_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     docs: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let arr = docs.as_array().ok_or_else(|| {
         QueryError::InvalidFilter("insertMany: docs must be an array".to_string())
@@ -4275,7 +4387,7 @@ pub fn build_insert_many_with_dialect(
     }
 
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES {} RETURNING *",
+        "INSERT INTO {schema}.{table} ({}) VALUES {} RETURNING {returning}",
         columns.join(", "),
         value_groups.join(", ")
     );
@@ -4284,16 +4396,24 @@ pub fn build_insert_many_with_dialect(
 }
 
 /// Build an UPDATE query for multiple rows (no LIMIT 1):
-/// `UPDATE "app_id"."collection" SET ... WHERE ... RETURNING *`
+/// `UPDATE "app_id"."collection" SET ... WHERE ... RETURNING "id", ...`
 ///
 /// PG-flavour wrapper around [`build_update_many_with_dialect`].
 pub fn build_update_many(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     update: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_update_many_with_dialect(app_id, collection, filter, update, SqlDialect::Postgres)
+    build_update_many_with_dialect(
+        app_id,
+        collection,
+        schema_hint,
+        filter,
+        update,
+        SqlDialect::Postgres,
+    )
 }
 
 /// Dialect-aware `updateMany` builder. Encrypted-column
@@ -4302,6 +4422,7 @@ pub fn build_update_many(
 pub fn build_update_many_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
@@ -4309,6 +4430,7 @@ pub fn build_update_many_with_dialect(
     build_update_many_with_system_fields(
         app_id,
         collection,
+        schema_hint,
         filter,
         update,
         dialect,
@@ -4324,6 +4446,7 @@ pub fn build_update_many_with_dialect(
 pub fn build_update_many_with_system_fields(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
@@ -4331,6 +4454,7 @@ pub fn build_update_many_with_system_fields(
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4346,20 +4470,23 @@ pub fn build_update_many_with_system_fields(
         sql.push_str(" WHERE ");
         sql.push_str(&where_clause);
     }
-    sql.push_str(" RETURNING *");
+    sql.push_str(" RETURNING ");
+    sql.push_str(&returning);
 
     Ok(BuiltQuery { sql, params })
 }
 
 /// Build a DELETE query for multiple rows (no LIMIT 1):
-/// `DELETE FROM "app_id"."collection" WHERE ... RETURNING *`
+/// `DELETE FROM "app_id"."collection" WHERE ... RETURNING "id", ...`
 pub fn build_delete_many(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4372,29 +4499,34 @@ pub fn build_delete_many(
         sql.push_str(" WHERE ");
         sql.push_str(&where_clause);
     }
-    sql.push_str(" RETURNING *");
+    sql.push_str(" RETURNING ");
+    sql.push_str(&returning);
 
     Ok(BuiltQuery { sql, params })
 }
 
-/// Build a DELETE query: `DELETE FROM "app_id"."collection" WHERE ... RETURNING *`
+/// Build a DELETE query:
+/// `DELETE FROM "app_id"."collection" WHERE ... RETURNING "id", ...`
 pub fn build_delete_one(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_delete_one_with_dialect(app_id, collection, filter, SqlDialect::Postgres)
+    build_delete_one_with_dialect(app_id, collection, schema_hint, filter, SqlDialect::Postgres)
 }
 
 /// Dialect-aware single-row DELETE builder.
 pub fn build_delete_one_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4408,7 +4540,7 @@ pub fn build_delete_one_with_dialect(
         SqlDialect::Mysql => "id",
     };
     let sql = format!(
-        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1) RETURNING *",
+        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1) RETURNING {returning}",
         if where_clause.is_empty() {
             String::new()
         } else {
@@ -4521,7 +4653,7 @@ fn build_restore_set_clauses(
 /// WHERE ctid = (
 ///   SELECT ctid FROM "app1"."posts" WHERE "id" = $1 AND "deleted_at" IS NULL LIMIT 1
 /// )
-/// RETURNING *
+/// RETURNING "id", "created_at", ...
 /// ```
 ///
 /// The `AND deleted_at IS NULL` in the inner SELECT keeps the call
@@ -4531,12 +4663,14 @@ fn build_restore_set_clauses(
 pub fn build_soft_delete_one_with_system_fields(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4563,7 +4697,7 @@ pub fn build_soft_delete_one_with_system_fields(
         SqlDialect::Mysql => "id",
     };
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -4580,12 +4714,14 @@ pub fn build_soft_delete_one_with_system_fields(
 pub fn build_soft_delete_many_with_system_fields(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4601,7 +4737,7 @@ pub fn build_soft_delete_many_with_system_fields(
     };
 
     let sql = format!(
-        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING *",
+        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -4617,12 +4753,14 @@ pub fn build_soft_delete_many_with_system_fields(
 pub fn build_restore_one_with_system_fields(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4643,7 +4781,7 @@ pub fn build_restore_one_with_system_fields(
         SqlDialect::Mysql => "id",
     };
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -4654,12 +4792,14 @@ pub fn build_restore_one_with_system_fields(
 pub fn build_restore_many_with_system_fields(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4675,7 +4815,7 @@ pub fn build_restore_many_with_system_fields(
     };
 
     let sql = format!(
-        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING *",
+        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -5076,7 +5216,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
 /// Emits the canonical pgvector shape (plan §3.1):
 ///
 /// ```sql
-/// SELECT *, "<col>" <op> $1::vector AS _distance
+/// SELECT "id", "created_at", ..., "<col>" <op> $1::vector AS _distance
 ///   FROM "<app>"."<coll>"
 ///  [WHERE <filter-lowered>]
 ///  ORDER BY "<col>" <op> $1::vector
@@ -5171,7 +5311,7 @@ pub fn build_vector_search(
 ///
 /// Shape:
 /// ```sql
-/// SELECT *, ST_Distance("col", ST_MakePoint($1, $2)::geography) AS _distance_m
+/// SELECT "id", "created_at", ..., ST_Distance("col", ST_MakePoint($1, $2)::geography) AS _distance_m
 /// FROM "<app>"."<coll>"
 /// WHERE ST_DWithin("col", ST_MakePoint($1, $2)::geography, $3) AND <filter>
 /// ORDER BY _distance_m
@@ -5938,7 +6078,7 @@ pub fn value_to_param(value: &Value) -> String {
 /// ```sql
 /// INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2)
 /// ON CONFLICT ("conflict_col") DO UPDATE SET "col2" = EXCLUDED."col2"
-/// RETURNING *
+/// RETURNING "id", "created_at", ...
 /// ```
 ///
 /// `doc` is the full document to insert (as a JSON object).
@@ -5947,12 +6087,14 @@ pub fn value_to_param(value: &Value) -> String {
 pub fn build_upsert(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_upsert_with_dialect(
         app_id,
         collection,
+        schema_hint,
         doc,
         conflict_fields,
         SqlDialect::Postgres,
@@ -5963,12 +6105,14 @@ pub fn build_upsert(
 pub fn build_upsert_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let obj = doc
         .as_object()
@@ -6058,7 +6202,22 @@ pub fn build_upsert_with_dialect(
         .collect();
 
     if !doc_has_version {
-        update_clauses.push(r#""version" = COALESCE("version", 0) + 1"#.to_string());
+        // The READ of `version` must name its relation. Inside `ON CONFLICT DO
+        // UPDATE SET`, both the target row and the proposed row (`excluded`)
+        // are in scope, so an unqualified column reference in the SET
+        // EXPRESSION is ambiguous - PostgreSQL refuses the whole statement with
+        // `42702 column reference "version" is ambiguous`. The assignment
+        // TARGET on the left is unambiguous by position and stays bare, which
+        // is why this reads lopsided.
+        //
+        // Every PG upsert took this branch: the insert-side system-fields pass
+        // deliberately leaves `version` to the DDL default, so `doc_has_version`
+        // is false on the dispatch path. Nothing caught it because the upsert
+        // tests that EXECUTE run on SQLite, where the same reference is legal,
+        // and the PG upsert tests only compare strings.
+        update_clauses.push(format!(
+            r#""version" = COALESCE({schema}.{table}."version", 0) + 1"#
+        ));
     }
     if !doc_has_updated_at {
         update_clauses.push(format!(r#""updated_at" = {}"#, now_expr(dialect)));
@@ -6074,7 +6233,7 @@ pub fn build_upsert_with_dialect(
     }
 
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING *",
+        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {returning}",
         columns.join(", "),
         placeholders.join(", "),
         conflict_cols.join(", "),
@@ -6092,11 +6251,13 @@ pub fn build_upsert_with_dialect(
 pub fn build_find_or_create(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let returning = build_returning_expr(schema_hint)?;
 
     let obj = doc.as_object().ok_or_else(|| {
         QueryError::InvalidFilter("findOrCreate document must be an object".to_string())
@@ -6157,7 +6318,7 @@ pub fn build_find_or_create(
     );
 
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING *, (xmax = 0) AS __created",
+        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {returning}, (xmax = 0) AS __created",
         columns.join(", "),
         placeholders.join(", "),
         conflict_cols.join(", "),
@@ -6208,6 +6369,32 @@ mod tests {
             "title":      { "type": "string" },
             "views":      { "type": "number" },
         })
+    }
+
+    /// The SET clause of an UPDATE, i.e. everything between `SET ` and the
+    /// first ` WHERE `.
+    ///
+    /// The no-actor tests below assert that `updated_by` is ABSENT, and
+    /// `updated_by` is a system field that every RETURNING projection names.
+    /// Asserting over the whole statement passed only while that clause was
+    /// `*`; it is the clause, not the statement, that the property is about.
+    fn set_clause_of(sql: &str) -> &str {
+        let body = sql.split_once(" SET ").expect("an UPDATE has a SET clause").1;
+        body.split_once(" WHERE ").map_or(body, |(set, _)| set)
+    }
+
+    /// The projection [`tschema`] produces, as it appears in every write's
+    /// `RETURNING` clause.
+    ///
+    /// The write-side twin of [`tselect`]. Both are derived from
+    /// [`implicit_read_projection_parts`] rather than spelled out, so a test
+    /// using either cannot pass by agreeing with a hand-copied list that has
+    /// drifted from what the builder emits.
+    fn treturning() -> String {
+        format!(
+            "RETURNING {}",
+            build_returning_expr(&tschema()).expect("tschema is an object")
+        )
     }
 
     /// The projection [`tschema`] produces, as it appears in every SELECT built
@@ -6439,9 +6626,9 @@ mod tests {
     #[test]
     fn test_insert() {
         let doc = json!({"name": "alice", "age": 30});
-        let q = build_insert("app1", "users", &doc).unwrap();
+        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
         assert!(q.sql.contains("INSERT INTO"));
-        assert!(q.sql.contains("RETURNING *"));
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params.len(), 2);
     }
 
@@ -6515,7 +6702,7 @@ mod tests {
     fn test_update_inc() {
         let filter = json!({"id": 1});
         let update = json!({"views": {"$inc": 1}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""views" = "views" + $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "1");
     }
@@ -6524,7 +6711,7 @@ mod tests {
     fn test_update_dec() {
         let filter = json!({"id": 1});
         let update = json!({"stock": {"$dec": 1}});
-        let q = build_update_one("app1", "items", &filter, &update).unwrap();
+        let q = build_update_one("app1", "items", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""stock" = "stock" - $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "1");
     }
@@ -6533,7 +6720,7 @@ mod tests {
     fn test_update_mul() {
         let filter = json!({"id": 1});
         let update = json!({"price": {"$mul": 1.1}});
-        let q = build_update_one("app1", "items", &filter, &update).unwrap();
+        let q = build_update_one("app1", "items", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""price" = "price" * $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "1.1");
     }
@@ -6542,7 +6729,7 @@ mod tests {
     fn test_update_push() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$push": "new"}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         // Appends the JSON-encoded value to the jsonb array. The `::jsonb`
         // cast (not `to_jsonb(::text)`) keeps numbers, booleans, and objects
         // as their real JSON types — the old shape stringified everything.
@@ -6560,7 +6747,7 @@ mod tests {
     fn test_update_pull() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$pull": "old"}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         // Removes array elements by value. An earlier implementation used
         // `"tags" - $1`, but that's the jsonb "remove key" operator and
         // would mutate objects, not filter array elements.
@@ -6576,7 +6763,7 @@ mod tests {
     fn test_update_add_to_set() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$addToSet": "unique"}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         // Appends only if the array doesn't already contain the value
         // (jsonb @> containment check). Both sides use ::jsonb so type is
         // preserved — same rationale as $push.
@@ -6592,7 +6779,7 @@ mod tests {
     fn test_update_mixed_operators() {
         let filter = json!({"id": 1});
         let update = json!({"name": "New", "views": {"$inc": 1}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         // Both plain set and $inc should appear
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""views" = "views" + $"#) && q.sql.contains("::numeric"), "sql: {}", q.sql);
@@ -6606,10 +6793,10 @@ mod tests {
             {"name": "alice", "age": 30},
             {"name": "bob",   "age": 25}
         ]);
-        let q = build_insert_many("app1", "users", &docs).unwrap();
+        let q = build_insert_many("app1", "users", &tschema(), &docs).unwrap();
         assert!(q.sql.starts_with(r#"INSERT INTO "app1"."users""#), "sql: {}", q.sql);
         assert!(q.sql.contains("VALUES"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         // Two docs × two columns = 4 params
         assert_eq!(q.params.len(), 4, "params: {:?}", q.params);
         assert!(q.sql.contains("($1, $2)"), "sql: {}", q.sql);
@@ -6622,13 +6809,13 @@ mod tests {
         // builder BEFORE allocating the multi-row SQL + param vec. A batch at
         // the cap is accepted.
         let over: Vec<Value> = (0..=MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
-        let err = build_insert_many("app1", "users", &Value::Array(over)).unwrap_err();
+        let err = build_insert_many("app1", "users", &tschema(), &Value::Array(over)).unwrap_err();
         match err {
             QueryError::InvalidFilter(m) => assert!(m.contains("exceeds the maximum"), "{m}"),
             other => panic!("expected InvalidFilter, got {other:?}"),
         }
         let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
-        assert!(build_insert_many("app1", "users", &Value::Array(at_cap)).is_ok());
+        assert!(build_insert_many("app1", "users", &tschema(), &Value::Array(at_cap)).is_ok());
     }
 
     fn full_non_null_insert_many_batch(column_count: usize) -> Value {
@@ -6671,6 +6858,7 @@ mod tests {
         let accepted = build_insert_many(
             "app1",
             "users",
+            &tschema(),
             &full_non_null_insert_many_batch(largest_full_width),
         )
         .expect("a full document batch below the PostgreSQL bind limit must build");
@@ -6683,6 +6871,7 @@ mod tests {
         let rejected = build_insert_many(
             "app1",
             "users",
+            &tschema(),
             &full_non_null_insert_many_batch(first_rejected_width),
         );
         match rejected {
@@ -6709,12 +6898,12 @@ mod tests {
             Some(MAX_INSERT_MANY_BATCH),
             "the exact-boundary batch must exercise the documented document cap"
         );
-        let accepted = build_insert_many("app1", "users", &accepted_docs)
+        let accepted = build_insert_many("app1", "users", &tschema(), &accepted_docs)
             .expect("exactly the PostgreSQL non-null field-value limit must build");
         assert_eq!(accepted.params.len(), protocol_limit);
 
         let rejected_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit + 1);
-        let rejected = build_insert_many("app1", "users", &rejected_docs);
+        let rejected = build_insert_many("app1", "users", &tschema(), &rejected_docs);
         match rejected {
             Err(QueryError::InvalidFilter(message)) => {
                 assert!(message.contains("65536"), "{message}");
@@ -6738,6 +6927,7 @@ mod tests {
         let accepted = build_insert_many_with_dialect(
             "app1",
             "users",
+            &tschema(),
             &full_non_null_insert_many_batch(largest_full_width),
             SqlDialect::Sqlite,
         )
@@ -6751,6 +6941,7 @@ mod tests {
         let rejected = build_insert_many_with_dialect(
             "app1",
             "users",
+            &tschema(),
             &full_non_null_insert_many_batch(first_rejected_width),
             SqlDialect::Sqlite,
         );
@@ -6780,7 +6971,7 @@ mod tests {
     #[test]
     fn test_insert_many_empty() {
         let docs = json!([]);
-        let result = build_insert_many("app1", "users", &docs);
+        let result = build_insert_many("app1", "users", &tschema(), &docs);
         assert!(result.is_err(), "expected error for empty array");
     }
 
@@ -6788,9 +6979,9 @@ mod tests {
     fn test_update_many() {
         let filter = json!({"active": true});
         let update = json!({"status": "verified"});
-        let q = build_update_many("app1", "users", &filter, &update).unwrap();
+        let q = build_update_many("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.starts_with(r#"UPDATE "app1"."users" SET"#), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         // Must NOT contain ctid subquery (that's updateOne's approach)
         assert!(!q.sql.contains("ctid"), "sql should not contain ctid: {}", q.sql);
     }
@@ -6798,9 +6989,9 @@ mod tests {
     #[test]
     fn test_delete_many() {
         let filter = json!({"active": false});
-        let q = build_delete_many("app1", "users", &filter).unwrap();
+        let q = build_delete_many("app1", "users", &tschema(), &filter).unwrap();
         assert!(q.sql.starts_with(r#"DELETE FROM "app1"."users""#), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert!(!q.sql.contains("ctid"), "sql should not contain ctid: {}", q.sql);
         assert_eq!(q.params, vec!["false"]);
     }
@@ -6808,9 +6999,9 @@ mod tests {
     #[test]
     fn test_delete_many_no_filter() {
         let filter = json!({});
-        let q = build_delete_many("app1", "users", &filter).unwrap();
+        let q = build_delete_many("app1", "users", &tschema(), &filter).unwrap();
         assert!(!q.sql.contains("WHERE"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert!(q.params.is_empty());
     }
 
@@ -7065,12 +7256,12 @@ mod tests {
     fn test_update_one_plain() {
         let filter = json!({"id": 1});
         let update = json!({"name": "bob"});
-        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         // Plain field: value → SET "name" = $1
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         // ctid subquery for LIMIT 1
         assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params[0], "bob");
     }
 
@@ -7078,20 +7269,20 @@ mod tests {
     fn test_update_one_set_operator() {
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "carol"}});
-        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params[0], "carol");
     }
 
     #[test]
     fn test_delete_one() {
         let filter = json!({});
-        let q = build_delete_one("app1", "users", &filter).unwrap();
+        let q = build_delete_one("app1", "users", &tschema(), &filter).unwrap();
         // ctid subquery for LIMIT 1
         assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         // No WHERE in the outer DELETE (empty filter → no inner WHERE either)
         assert!(
             q.sql.contains("DELETE FROM"),
@@ -7103,11 +7294,11 @@ mod tests {
     #[test]
     fn test_delete_one_with_filter() {
         let filter = json!({"role": "guest"});
-        let q = build_delete_one("app1", "users", &filter).unwrap();
+        let q = build_delete_one("app1", "users", &tschema(), &filter).unwrap();
         assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
         // Filter should appear in the subquery
         assert!(q.sql.contains(r#""role" = $1"#), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["guest"]);
     }
 
@@ -7332,14 +7523,14 @@ mod tests {
     #[test]
     fn test_insert_with_boolean() {
         let doc = json!({"active": true});
-        let q = build_insert("app1", "users", &doc).unwrap();
+        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
         assert_eq!(q.params, vec!["true"]);
     }
 
     #[test]
     fn test_insert_with_null_field() {
         let doc = json!({"name": "alice", "bio": null});
-        let q = build_insert("app1", "users", &doc).unwrap();
+        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
         // null is inlined as a SQL `NULL` literal — not bound as a
         // text-format parameter (the wire protocol can't represent
         // NULL as a parameter; empty string would fail enum / NOT
@@ -7352,14 +7543,14 @@ mod tests {
     #[test]
     fn test_insert_with_number() {
         let doc = json!({"age": 30});
-        let q = build_insert("app1", "users", &doc).unwrap();
+        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
         assert_eq!(q.params, vec!["30"]);
     }
 
     #[test]
     fn test_insert_with_nested_json() {
         let doc = json!({"settings": {"theme": "dark"}});
-        let q = build_insert("app1", "users", &doc).unwrap();
+        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
         // Nested object is serialized as JSON text
         assert_eq!(q.params.len(), 1);
         let param = &q.params[0];
@@ -7432,7 +7623,7 @@ mod tests {
     fn test_unsupported_update_operator() {
         let filter = json!({});
         let update = json!({"name": {"$unset": true}});
-        let result = build_update_one("app1", "users", &filter, &update);
+        let result = build_update_one("app1", "users", &tschema(), &filter, &update);
         assert!(result.is_err(), "unsupported update operator should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("unsupported"), "msg: {msg}");
@@ -7441,7 +7632,7 @@ mod tests {
     #[test]
     fn test_insert_empty_doc() {
         let doc = json!({});
-        let result = build_insert("app1", "users", &doc);
+        let result = build_insert("app1", "users", &tschema(), &doc);
         assert!(result.is_err(), "empty document should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("empty") || msg.contains("cannot"), "msg: {msg}");
@@ -7450,7 +7641,7 @@ mod tests {
     #[test]
     fn test_insert_non_object() {
         let doc = json!("just a string");
-        let result = build_insert("app1", "users", &doc);
+        let result = build_insert("app1", "users", &tschema(), &doc);
         assert!(result.is_err(), "non-object document should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("object"), "msg: {msg}");
@@ -7460,7 +7651,7 @@ mod tests {
     fn test_update_empty_fields() {
         let filter = json!({});
         let update = json!({});
-        let result = build_update_one("app1", "users", &filter, &update);
+        let result = build_update_one("app1", "users", &tschema(), &filter, &update);
         assert!(result.is_err(), "empty update should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("empty") || msg.contains("cannot"), "msg: {msg}");
@@ -7577,11 +7768,11 @@ mod tests {
     fn test_upsert_basic() {
         let doc = json!({"name": "alice", "age": 30});
         let conflict = json!(["name"]);
-        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains("ON CONFLICT"), "sql: {}", q.sql);
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""name""#), "sql: {}", q.sql);
         // age is not a conflict field, so it should appear in DO UPDATE SET
         assert!(q.sql.contains(r#""age" = EXCLUDED."age""#), "sql: {}", q.sql);
@@ -7592,7 +7783,7 @@ mod tests {
     fn test_upsert_multiple_conflict_fields() {
         let doc = json!({"email": "a@b.com", "name": "alice", "age": 30});
         let conflict = json!(["email", "name"]);
-        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains(r#"ON CONFLICT ("email", "name")"#), "sql: {}", q.sql);
         // Only age should be in DO UPDATE SET
         assert!(q.sql.contains(r#""age" = EXCLUDED."age""#), "sql: {}", q.sql);
@@ -7606,9 +7797,9 @@ mod tests {
         // When all columns are conflict columns, we still produce a valid DO UPDATE SET
         let doc = json!({"email": "a@b.com"});
         let conflict = json!(["email"]);
-        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
     }
 
     #[test]
@@ -7622,7 +7813,7 @@ mod tests {
             "name": "alice"
         });
         let conflict = json!(["email"]);
-        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
         assert!(
             !q.sql.contains(r#""id" = EXCLUDED."id""#),
             "upsert must not overwrite id on conflict: {}",
@@ -7645,14 +7836,20 @@ mod tests {
         );
     }
 
+    /// This asserted the UNqualified `COALESCE("version", 0) + 1` and was green
+    /// for as long as that string was emitted - against SQLite, where it is
+    /// legal. PostgreSQL refuses it (`42702`), so the assertion pinned a
+    /// statement the production dialect cannot run. See
+    /// [`the_upserts_version_bump_qualifies_the_column_it_reads`].
     #[test]
     fn test_upsert_autobumps_version_and_updated_at_when_omitted() {
         let doc = json!({"email": "a@b.com", "name": "alice"});
         let conflict = json!(["email"]);
-        let q = build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Sqlite)
+        let q = build_upsert_with_dialect("app1", "users", &tschema(), &doc, &conflict, SqlDialect::Sqlite)
             .unwrap();
         assert!(
-            q.sql.contains(r#""version" = COALESCE("version", 0) + 1"#),
+            q.sql
+                .contains(r#""version" = COALESCE("app1"."users"."version", 0) + 1"#),
             "upsert must auto-bump version on conflict when omitted: {}",
             q.sql
         );
@@ -7673,7 +7870,7 @@ mod tests {
         });
         let conflict = json!(["email"]);
         let q =
-            build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Postgres)
+            build_upsert_with_dialect("app1", "users", &tschema(), &doc, &conflict, SqlDialect::Postgres)
                 .unwrap();
         assert!(
             !q.sql.contains(r#""version" = COALESCE("version", 0) + 1"#),
@@ -7705,7 +7902,7 @@ mod tests {
             "__zsbin__ssn": true,
         });
         let conflict = json!(["email"]);
-        let q = build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Sqlite)
+        let q = build_upsert_with_dialect("app1", "users", &tschema(), &doc, &conflict, SqlDialect::Sqlite)
             .unwrap();
         assert!(
             !q.sql.contains("__zsbin__"),
@@ -7730,7 +7927,7 @@ mod tests {
     fn test_upsert_empty_doc_error() {
         let doc = json!({});
         let conflict = json!(["name"]);
-        let result = build_upsert("app1", "users", &doc, &conflict);
+        let result = build_upsert("app1", "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -7738,7 +7935,7 @@ mod tests {
     fn test_upsert_empty_conflict_fields_error() {
         let doc = json!({"name": "alice"});
         let conflict = json!([]);
-        let result = build_upsert("app1", "users", &doc, &conflict);
+        let result = build_upsert("app1", "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -7746,7 +7943,7 @@ mod tests {
     fn test_upsert_invalid_collection_error() {
         let doc = json!({"name": "alice"});
         let conflict = json!(["name"]);
-        let result = build_upsert("app1", "users; DROP TABLE", &doc, &conflict);
+        let result = build_upsert("app1", "users; DROP TABLE", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -7754,7 +7951,7 @@ mod tests {
     fn test_find_or_create_emits_xmax_returning() {
         let doc = json!({"email": "a@b.com", "name": "alice"});
         let conflict = json!(["email"]);
-        let q = build_find_or_create("app1", "users", &doc, &conflict).unwrap();
+        let q = build_find_or_create("app1", "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"ON CONFLICT ("email")"#), "sql: {}", q.sql);
         // No-op self-assignment on the conflict column so RETURNING
@@ -7768,7 +7965,7 @@ mod tests {
             q.sql.contains("(xmax = 0) AS __created"),
             "sql: {}", q.sql,
         );
-        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params.len(), 2);
     }
 
@@ -7776,14 +7973,14 @@ mod tests {
     fn test_find_or_create_rejects_empty_conflict() {
         let doc = json!({"email": "a@b.com"});
         let conflict = json!([]);
-        assert!(build_find_or_create("app1", "users", &doc, &conflict).is_err());
+        assert!(build_find_or_create("app1", "users", &tschema(), &doc, &conflict).is_err());
     }
 
     #[test]
     fn test_find_or_create_rejects_empty_doc() {
         let doc = json!({});
         let conflict = json!(["email"]);
-        assert!(build_find_or_create("app1", "users", &doc, &conflict).is_err());
+        assert!(build_find_or_create("app1", "users", &tschema(), &doc, &conflict).is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -7801,7 +7998,7 @@ mod tests {
         // serialized as JSON, so `42` stays a JSON number.
         let filter = json!({"id": 1});
         let update = json!({"scores": {"$push": 42}});
-        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""scores" = "scores" || $1::jsonb"#),
             "sql: {}",
@@ -7816,7 +8013,7 @@ mod tests {
     fn test_update_push_bool_preserves_type() {
         let filter = json!({"id": 1});
         let update = json!({"flags": {"$push": true}});
-        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""flags" = "flags" || $1::jsonb"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "true");
     }
@@ -7825,7 +8022,7 @@ mod tests {
     fn test_update_push_object_preserves_type() {
         let filter = json!({"id": 1});
         let update = json!({"entries": {"$push": {"k": "v", "n": 3}}});
-        let q = build_update_one("app1", "log", &filter, &update).unwrap();
+        let q = build_update_one("app1", "log", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""entries" = "entries" || $1::jsonb"#), "sql: {}", q.sql);
         // Object → compact JSON text. Keys serialized in serde_json::Value
         // order (preserves insertion via the default feature? -- we don't
@@ -7841,7 +8038,7 @@ mod tests {
         // correctly removes array elements equal to the value.
         let filter = json!({"id": 1});
         let update = json!({"scores": {"$pull": 100}});
-        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#"FROM jsonb_array_elements("scores") elem WHERE elem != $1::jsonb"#),
             "sql: {}",
@@ -7854,7 +8051,7 @@ mod tests {
     fn test_update_add_to_set_number() {
         let filter = json!({"id": 1});
         let update = json!({"ids": {"$addToSet": 7}});
-        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""ids" = CASE WHEN "ids" @> $1::jsonb THEN "ids" ELSE "ids" || $1::jsonb END"#),
             "sql: {}",
@@ -7872,7 +8069,7 @@ mod tests {
         // explicitly set it. This is part of the platform contract.
         let filter = json!({"id": 1});
         let update = json!({"name": "bob"});
-        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
     }
 
@@ -7883,7 +8080,7 @@ mod tests {
         let filter = json!({"id": 1});
         let explicit_ts = "2026-01-01T00:00:00Z";
         let update = json!({"name": "bob", "updated_at": explicit_ts});
-        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(
             !q.sql.contains("NOW()"),
             "sql should not contain NOW() when updated_at is explicit: {}",
@@ -7899,7 +8096,7 @@ mod tests {
         // $set into the top level, so both `name` and `age` must appear.
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "alice"}, "age": 30});
-        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
         assert!(q.params.contains(&"alice".to_string()));
@@ -7912,7 +8109,7 @@ mod tests {
         // produce SET clauses and share the same params vector.
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "alice"}, "views": {"$inc": 5}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
         assert!(q.params.contains(&"alice".to_string()));
@@ -7926,7 +8123,7 @@ mod tests {
         // accepts it without a client-side conversion.
         let filter = json!({"id": 1});
         let update = json!({"balance": {"$inc": 1.5}});
-        let q = build_update_one("app1", "accounts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "accounts", &tschema(), &filter, &update).unwrap();
         assert_eq!(q.params[0], "1.5");
     }
 
@@ -7937,7 +8134,7 @@ mod tests {
         // minus sign on the numeric literal fine.
         let filter = json!({"id": 1});
         let update = json!({"stock": {"$inc": -3}});
-        let q = build_update_one("app1", "items", &filter, &update).unwrap();
+        let q = build_update_one("app1", "items", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""stock" = "stock" + $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "-3");
     }
@@ -7948,7 +8145,7 @@ mod tests {
         // placeholders must be contiguous across both halves.
         let filter = json!({"status": "active"});
         let update = json!({"name": "alice", "views": {"$inc": 1}});
-        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
         // Two SET params: name ($1), inc ($2); one WHERE param: status ($3).
         assert_eq!(q.params.len(), 3, "params: {:?}", q.params);
         assert!(q.sql.contains("$3"), "sql: {}", q.sql);
@@ -7962,7 +8159,7 @@ mod tests {
         // which would silently bump timestamps without user intent.
         let filter = json!({"id": 1});
         let update = json!({});
-        let err = build_update_one("app1", "users", &filter, &update).unwrap_err();
+        let err = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap_err();
         // Variant is QueryError::InvalidFilter — compare Display form so
         // this doesn't need to import the enum.
         assert!(
@@ -7975,7 +8172,7 @@ mod tests {
     fn test_update_unknown_operator_rejected() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$weirdOp": "val"}});
-        let err = build_update_one("app1", "posts", &filter, &update).unwrap_err();
+        let err = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap_err();
         assert!(
             format!("{err}").contains("$weirdOp"),
             "error should name the unsupported op, got: {err}"
@@ -7988,7 +8185,7 @@ mod tests {
         // auto-timestamp behaviour must hold there too.
         let filter = json!({"status": "draft"});
         let update = json!({"status": "published"});
-        let q = build_update_many("app1", "posts", &filter, &update).unwrap();
+        let q = build_update_many("app1", "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
         // updateMany must NOT wrap the WHERE in a ctid LIMIT 1 subquery —
         // that would only touch one row.
@@ -8000,7 +8197,7 @@ mod tests {
         // Pure $set with no siblings — flattening must still work.
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "alice", "age": 30}});
-        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
     }
@@ -8011,7 +8208,7 @@ mod tests {
         // silently treated as a scalar $set on a column named "$set".
         let filter = json!({"id": 1});
         let update = json!({"$set": "not an object"});
-        let err = build_update_one("app1", "users", &filter, &update).unwrap_err();
+        let err = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap_err();
         assert!(
             format!("{err}").contains("$set"),
             "error should mention $set, got: {err}"
@@ -8024,7 +8221,7 @@ mod tests {
         // reserved word as its name still works.
         let filter = json!({"id": 1});
         let update = json!({"user": "alice"}); // "user" is a reserved word
-        let q = build_update_one("app1", "accounts", &filter, &update).unwrap();
+        let q = build_update_one("app1", "accounts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""user" = $"#), "sql: {}", q.sql);
     }
 
@@ -8051,6 +8248,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8075,6 +8273,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -8100,6 +8299,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8125,6 +8325,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -8150,6 +8351,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8181,6 +8383,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8188,7 +8391,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !q.sql.contains(r#""updated_by""#),
+            !set_clause_of(&q.sql).contains(r#""updated_by""#),
             "no actor → no updated_by SET clause: {}",
             q.sql,
         );
@@ -8208,6 +8411,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8242,6 +8446,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8274,6 +8479,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8315,6 +8521,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8355,6 +8562,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8380,6 +8588,7 @@ mod tests {
         let q = build_update_one_with_dialect(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -8413,6 +8622,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8454,6 +8664,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8496,6 +8707,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -8537,6 +8749,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
@@ -10747,7 +10960,7 @@ mod tests {
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
             "__zsbin__ssn": true,
         });
-        let bq = build_insert("app1", "users", &doc).expect("build_insert ok");
+        let bq = build_insert("app1", "users", &tschema(), &doc).expect("build_insert ok");
         assert!(
             bq.sql.contains("decode($"),
             "PG path must wrap encrypted-column placeholder with decode(...)::bytea: {}",
@@ -10786,7 +10999,7 @@ mod tests {
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
             "__zsbin__ssn": true,
         });
-        let bq = build_insert_with_dialect("app1", "users", &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect("app1", "users", &tschema(), &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect ok");
         assert!(
             !bq.sql.contains("decode("),
@@ -10828,6 +11041,7 @@ mod tests {
         let bq = build_update_one_with_dialect(
             "app1",
             "users",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -10852,7 +11066,7 @@ mod tests {
             { "id": "row1", "ssn": "Y2lwaGVydGV4dF9ibG9i", "__zsbin__ssn": true },
             { "id": "row2", "ssn": "YW5vdGhlcl9jaXBoZXI=", "__zsbin__ssn": true },
         ]);
-        let bq = build_insert_many_with_dialect("app1", "users", &docs, SqlDialect::Sqlite)
+        let bq = build_insert_many_with_dialect("app1", "users", &tschema(), &docs, SqlDialect::Sqlite)
             .expect("build_insert_many_with_dialect ok");
         assert!(!bq.sql.contains("decode("), "no PG cast: {}", bq.sql);
         let tagged = bq
@@ -11346,7 +11560,7 @@ mod tests {
             "ssn": "123-45-6789",
             "ssn_masked": "***-**-6789"
         });
-        let bq = build_insert("app1", "users", &doc).expect("build_insert ok");
+        let bq = build_insert("app1", "users", &tschema(), &doc).expect("build_insert ok");
         assert!(bq.sql.contains("\"ssn\""), "parent column in SQL: {}", bq.sql);
         assert!(
             bq.sql.contains("\"ssn_masked\""),
@@ -12050,6 +12264,7 @@ mod tests {
         let q = build_soft_delete_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Postgres,
             &autobump,
@@ -12078,6 +12293,7 @@ mod tests {
         let q = build_soft_delete_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Sqlite,
             &autobump,
@@ -12101,6 +12317,7 @@ mod tests {
         let q = build_soft_delete_many_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Postgres,
             &autobump,
@@ -12112,7 +12329,7 @@ mod tests {
             q.sql
         );
         assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
-        assert!(q.sql.ends_with("RETURNING *"));
+        assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
     }
 
     #[test]
@@ -12122,13 +12339,14 @@ mod tests {
         let q = build_soft_delete_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Postgres,
             &autobump,
         )
         .unwrap();
         assert!(
-            !q.sql.contains("\"updated_by\""),
+            !set_clause_of(&q.sql).contains("\"updated_by\""),
             "no actor → no updated_by SET clause: {}",
             q.sql
         );
@@ -12145,6 +12363,7 @@ mod tests {
         let q = build_restore_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Postgres,
             &autobump,
@@ -12167,6 +12386,7 @@ mod tests {
         let q = build_restore_many_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Postgres,
             &autobump,
@@ -12174,7 +12394,7 @@ mod tests {
         .unwrap();
         assert!(!q.sql.contains("WHERE ctid ="));
         assert!(q.sql.contains("AND \"deleted_at\" IS NOT NULL"));
-        assert!(q.sql.ends_with("RETURNING *"));
+        assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
     }
 
     #[test]
@@ -12265,6 +12485,7 @@ mod tests {
         let q = build_update_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -12278,7 +12499,7 @@ mod tests {
     #[test]
     fn build_delete_one_sqlite_uses_rowid_narrowing() {
         let filter = serde_json::json!({ "id": "post_1" });
-        let q = build_delete_one_with_dialect("app1", "posts", &filter, SqlDialect::Sqlite)
+        let q = build_delete_one_with_dialect("app1", "posts", &tschema(), &filter, SqlDialect::Sqlite)
             .unwrap();
         assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
         assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
@@ -12290,6 +12511,7 @@ mod tests {
         let q = build_soft_delete_one_with_system_fields(
             "app1",
             "posts",
+            &tschema(),
             &filter,
             SqlDialect::Sqlite,
             &SystemFieldAutoBump::default(),
@@ -12481,5 +12703,346 @@ mod tests {
         );
         // Still fully unqualified.
         assert!(!sql.contains(r#""app_demo"."#), "must stay unqualified: {sql}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The write-side projection: `RETURNING` names columns, never `*`
+    // -----------------------------------------------------------------------
+
+    /// Every write builder in this file, built over one schema, with the verb
+    /// each entry is named for.
+    ///
+    /// A `Vec` rather than twelve separate tests because the property is about
+    /// the SET: the defect this guards is one builder being missed, and a test
+    /// per builder cannot fail for a builder nobody wrote a test for. The arm
+    /// count is asserted by the callers against
+    /// [`WRITE_BUILDERS_EMITTING_RETURNING`].
+    fn every_write_query(schema: &Value) -> Vec<(&'static str, BuiltQuery)> {
+        let doc = serde_json::json!({ "ssn": "123-45-6789" });
+        let docs = serde_json::json!([{ "ssn": "1" }, { "ssn": "2" }]);
+        let filter = serde_json::json!({ "id": "usr_1" });
+        let update = serde_json::json!({ "ssn": "9" });
+        let conflict = serde_json::json!(["id"]);
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let d = SqlDialect::Postgres;
+        vec![
+            (
+                "insert",
+                build_insert_with_dialect("app1", "users", schema, &doc, d).unwrap(),
+            ),
+            (
+                "insertMany",
+                build_insert_many_with_dialect("app1", "users", schema, &docs, d).unwrap(),
+            ),
+            (
+                "updateOne",
+                build_update_one_with_system_fields(
+                    "app1", "users", schema, &filter, &update, d, &autobump,
+                )
+                .unwrap(),
+            ),
+            (
+                "updateMany",
+                build_update_many_with_system_fields(
+                    "app1", "users", schema, &filter, &update, d, &autobump,
+                )
+                .unwrap(),
+            ),
+            (
+                "deleteOne",
+                build_delete_one_with_dialect("app1", "users", schema, &filter, d).unwrap(),
+            ),
+            (
+                "deleteMany",
+                build_delete_many("app1", "users", schema, &filter).unwrap(),
+            ),
+            (
+                "softDeleteOne",
+                build_soft_delete_one_with_system_fields(
+                    "app1", "users", schema, &filter, d, &autobump,
+                )
+                .unwrap(),
+            ),
+            (
+                "softDeleteMany",
+                build_soft_delete_many_with_system_fields(
+                    "app1", "users", schema, &filter, d, &autobump,
+                )
+                .unwrap(),
+            ),
+            (
+                "restoreOne",
+                build_restore_one_with_system_fields(
+                    "app1", "users", schema, &filter, d, &autobump,
+                )
+                .unwrap(),
+            ),
+            (
+                "restoreMany",
+                build_restore_many_with_system_fields(
+                    "app1", "users", schema, &filter, d, &autobump,
+                )
+                .unwrap(),
+            ),
+            (
+                "upsert",
+                build_upsert_with_dialect("app1", "users", schema, &doc, &conflict, d).unwrap(),
+            ),
+            (
+                "findOrCreate",
+                build_find_or_create("app1", "users", schema, &doc, &conflict).unwrap(),
+            ),
+        ]
+    }
+
+    /// The arm floor for [`every_write_query`]. Twelve, counted from the
+    /// `RETURNING`-emitting `format!`/`push_str` sites in this file - NOT from
+    /// the twelve doc comments that also spell the word, and not from the
+    /// `//`-comment at [`SYNTHETIC_RESULT_COLUMNS`].
+    const WRITE_BUILDERS_EMITTING_RETURNING: usize = 12;
+
+    /// A schema whose masked field makes the raw column REACHABLE by `*`.
+    ///
+    /// `ssn` is masked, so the physical table has `ssn` (the mask) AND
+    /// `__zs_raw__ssn` (the real value). `RETURNING *` expands to both. This is
+    /// the fixture that can tell a projection from a star; a schema with no
+    /// masked field cannot, because there every physical column is also a
+    /// logical one.
+    fn write_projection_schema() -> Value {
+        l26_masked_schema()
+    }
+
+    #[test]
+    fn every_write_builder_projects_named_columns_and_never_a_star() {
+        let schema = write_projection_schema();
+        let queries = every_write_query(&schema);
+        assert_eq!(
+            queries.len(),
+            WRITE_BUILDERS_EMITTING_RETURNING,
+            "this test must rule on every RETURNING-emitting builder in the file",
+        );
+        for (verb, q) in &queries {
+            assert!(
+                !q.sql.contains("RETURNING *"),
+                "{verb} must not expand its RETURNING to `*`: {}",
+                q.sql,
+            );
+            assert!(
+                q.sql.contains(r#"RETURNING "id""#),
+                "{verb} must open its RETURNING with the named id column: {}",
+                q.sql,
+            );
+            for field in SYSTEM_FIELD_NAMES {
+                assert!(
+                    q.sql.contains(&quote_ident(field)),
+                    "{verb} must name the system field {field}: {}",
+                    q.sql,
+                );
+            }
+            assert!(
+                q.sql.contains(r#""ssn""#),
+                "{verb} must name the declared field: {}",
+                q.sql,
+            );
+        }
+    }
+
+    /// The point of the change, and the half a `SELECT` already had.
+    ///
+    /// The raw column is not "excluded" by a rule that names it - it is absent
+    /// because the projection is built from the descriptor's field keys and the
+    /// raw column is not one. It lives inside `storage.rawColumn`, which
+    /// nothing in the projection path reads.
+    #[test]
+    fn no_write_builder_names_a_masked_fields_raw_column() {
+        let schema = write_projection_schema();
+        let raw = schema["ssn"]["storage"]["rawColumn"]
+            .as_str()
+            .expect("fixture declares the raw column");
+        let queries = every_write_query(&schema);
+        assert_eq!(queries.len(), WRITE_BUILDERS_EMITTING_RETURNING);
+        for (verb, q) in &queries {
+            assert!(
+                !q.sql.contains(raw),
+                "{verb} must never name the raw column {raw}: {}",
+                q.sql,
+            );
+        }
+    }
+
+    /// `readable: false` is the descriptor's own narrowing knob, and until this
+    /// change nothing in Rust read it.
+    ///
+    /// One flag, three surfaces: it must leave the write projection, leave the
+    /// implicit read projection, and make an explicit `select` of the field a
+    /// refusal rather than a served column.
+    #[test]
+    fn an_unreadable_field_leaves_every_projection_and_is_refused_by_name() {
+        let schema = serde_json::json!({
+            "public_note": { "type": "string", "readable": true },
+            "internal_note": { "type": "string", "readable": false },
+        });
+        let queries = every_write_query(&schema);
+        assert_eq!(queries.len(), WRITE_BUILDERS_EMITTING_RETURNING);
+        for (verb, q) in &queries {
+            assert!(
+                q.sql.contains(r#""public_note""#),
+                "{verb} must project the readable field: {}",
+                q.sql,
+            );
+            assert!(
+                !q.sql.contains("internal_note"),
+                "{verb} must not project a field the descriptor marks unreadable: {}",
+                q.sql,
+            );
+        }
+        let select = build_masked_aware_select_expr(None, &schema).unwrap();
+        assert!(
+            select.contains(r#""public_note""#) && !select.contains("internal_note"),
+            "the implicit SELECT list must honour `readable` too: {select}",
+        );
+        assert!(
+            validate_read_identifier("internal_note", &schema).is_err(),
+            "an unreadable field must not be nameable in `select` / `orderBy`",
+        );
+        assert!(
+            validate_read_identifier("public_note", &schema).is_ok(),
+            "a readable field must stay nameable",
+        );
+    }
+
+    /// `findOrCreate` carries a computed column beside the row, and `upsert`
+    /// does not.
+    ///
+    /// `(xmax = 0) AS __created` is how `findOrCreate` reports
+    /// insert-vs-update; it is a PG system-column read, not a table column, so
+    /// narrowing the row projection must not take it with it.
+    ///
+    /// **One builder emits it, not two.** [`SYNTHETIC_RESULT_COLUMNS`] credited
+    /// `build_upsert_with_dialect` with it until 2026-08-28 and that builder has
+    /// never emitted it - the `upsert` arm below is the control that says so,
+    /// and it is the reason this test names both.
+    #[test]
+    fn only_find_or_create_carries_the_created_computed_column() {
+        let schema = write_projection_schema();
+        let doc = serde_json::json!({ "ssn": "1" });
+        let conflict = serde_json::json!(["id"]);
+        let upsert = build_upsert_with_dialect(
+            "app1",
+            "users",
+            &schema,
+            &doc,
+            &conflict,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        let foc = build_find_or_create("app1", "users", &schema, &doc, &conflict).unwrap();
+
+        assert!(
+            foc.sql.ends_with("(xmax = 0) AS __created"),
+            "findOrCreate must keep the computed created flag last: {}",
+            foc.sql,
+        );
+        assert!(
+            !upsert.sql.contains("__created"),
+            "upsert has never reported insert-vs-update; it must not start now: {}",
+            upsert.sql,
+        );
+        for (verb, q) in [("upsert", &upsert), ("findOrCreate", &foc)] {
+            assert!(
+                !q.sql.contains("RETURNING *"),
+                "{verb} must not keep the star beside it: {}",
+                q.sql,
+            );
+            assert!(
+                q.sql.contains(r#"RETURNING "id""#),
+                "{verb} must open its RETURNING with the named id column: {}",
+                q.sql,
+            );
+        }
+    }
+
+    /// The projection reads `storage.valueColumn`, not the field's name.
+    ///
+    /// Today the descriptor always records `valueColumn == field`, so this
+    /// cannot be observed from the shipped artifacts - which is exactly why it
+    /// is pinned here. A future physical rename that keeps the logical name
+    /// stable is a producer change; if the projection formatted the name
+    /// instead of reading the block, it would silently name a column that is
+    /// not there.
+    #[test]
+    fn the_projection_reads_the_declared_value_column_under_the_logical_name() {
+        let schema = serde_json::json!({
+            "amount": { "type": "number", "storage": { "valueColumn": "amount_v2" } },
+        });
+        let queries = every_write_query(&schema);
+        assert_eq!(queries.len(), WRITE_BUILDERS_EMITTING_RETURNING);
+        for (verb, q) in &queries {
+            assert!(
+                q.sql.contains(r#""amount_v2" AS "amount""#),
+                "{verb} must read the declared physical column under the logical name: {}",
+                q.sql,
+            );
+        }
+        let select = build_masked_aware_select_expr(None, &schema).unwrap();
+        assert!(
+            select.contains(r#""amount_v2" AS "amount""#),
+            "the SELECT list must resolve the same way: {select}",
+        );
+    }
+
+    /// The upsert's `version` bump must qualify the column it READS.
+    ///
+    /// `ON CONFLICT DO UPDATE SET "version" = COALESCE("version", 0) + 1` is
+    /// refused by PostgreSQL with `42702 column reference "version" is
+    /// ambiguous`: the target row and `excluded` are both in scope for the SET
+    /// expression. Measured on 17.11 - the unqualified form errors, the
+    /// relation-qualified form returns the row - and on SQLite 3.51.2, which
+    /// accepts both, which is why nothing caught it: the upsert tests that
+    /// EXECUTE are the SQLite ones.
+    ///
+    /// The assignment target on the left must stay UNqualified; PostgreSQL
+    /// refuses a qualified one there. Both halves are asserted.
+    #[test]
+    fn the_upserts_version_bump_qualifies_the_column_it_reads() {
+        let schema = write_projection_schema();
+        let doc = serde_json::json!({ "ssn": "1" });
+        let conflict = serde_json::json!(["id"]);
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let q =
+                build_upsert_with_dialect("app1", "users", &schema, &doc, &conflict, dialect)
+                    .unwrap();
+            assert!(
+                q.sql
+                    .contains(r#""version" = COALESCE("app1"."users"."version", 0) + 1"#),
+                "{dialect:?}: the read of `version` must name its relation: {}",
+                q.sql,
+            );
+            assert!(
+                !q.sql.contains(r#"SET "app1"."users"."version" ="#),
+                "{dialect:?}: the assignment target must stay unqualified: {}",
+                q.sql,
+            );
+        }
+    }
+
+    /// A write builder cannot be handed "no schema".
+    ///
+    /// The read builders lost their permissive arm at L24 for exactly this
+    /// reason; the write builders never had one to lose because they took no
+    /// schema at all. A non-object is a refusal, not a fallback to `*`.
+    #[test]
+    fn a_write_builder_refuses_a_non_object_schema_rather_than_starring() {
+        let doc = serde_json::json!({ "ssn": "1" });
+        let err =
+            build_insert_with_dialect("app1", "users", &Value::Null, &doc, SqlDialect::Postgres)
+                .expect_err("a schema-less write must be refused");
+        assert!(
+            matches!(err, QueryError::InvalidFilter(_)),
+            "expected the projection's own refusal, got {err:?}",
+        );
     }
 }

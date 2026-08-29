@@ -257,5 +257,17 @@ name = "mask_flip"
 path = "tests/mask_flip.rs"
 required-features = ["test-helpers"]
 
+# The write builders' `RETURNING` projection, executed by a role that holds
+# COLUMN-level grants. Its own target rather than another section of
+# `integration.rs` because it needs a fixture nothing else in the tree has: a
+# role that may WRITE a masked field's raw column and may not READ it. That
+# grant is unusable while any write verb stars, so this is the target that says
+# whether the projection is real rather than whether the SQL text changed.
+# Guarded like its siblings, and it FAILS rather than skips without a database.
+[[test]]
+name = "column_grants"
+path = "tests/column_grants.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true

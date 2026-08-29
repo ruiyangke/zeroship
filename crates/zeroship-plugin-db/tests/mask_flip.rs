@@ -108,21 +108,28 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
 }
 
 /// Insert one document through the REAL write pipeline and the REAL insert
-/// builder, and return the `RETURNING *` row.
+/// builder, and return the `RETURNING` row.
+///
+/// This asserted `RETURNING *` and said "this suite is written against it".
+/// The write path now names its columns, so the shape this suite is written
+/// against is the projection - and the projection is what the assertion pins,
+/// because a builder that quietly went back to `*` would put the raw column
+/// back in every row below.
 async fn insert_through_the_pipeline(
     pool: &Rc<Pool>,
     app: &str,
     collection: &str,
+    schema: &Value,
     doc: Value,
 ) -> Vec<Value> {
     let mut docs = json!([doc]);
     zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
-    let bq = build_insert(app, collection, &docs[0]).expect("insert builder");
+    let bq = build_insert(app, collection, schema, &docs[0]).expect("insert builder");
     assert!(
-        bq.sql.contains("RETURNING *"),
-        "the write path's shape is `RETURNING *`; this suite is written against it: {}",
+        !bq.sql.contains("RETURNING *") && bq.sql.contains(r#"RETURNING "id""#),
+        "the write path's shape is a named projection; this suite is written against it: {}",
         bq.sql,
     );
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -187,6 +194,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
         &pool,
         app,
         "people",
+        &schema,
         json!({ "id": "psn_low", "ssn": "111-11-1111", "nickname": "aaa" }),
     )
     .await;
@@ -194,6 +202,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
         &pool,
         app,
         "people",
+        &schema,
         json!({ "id": "psn_high", "ssn": "999-99-9999", "nickname": "zzz" }),
     )
     .await;
@@ -292,6 +301,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
         &pool,
         app,
         "people",
+        &schema,
         json!({ "id": "psn_1", "ssn": "123-45-6789", "nickname": "ada" }),
     )
     .await;
@@ -381,17 +391,23 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
 
 /// **Outward.** No row-returning write verb may hand back the raw column.
 ///
-/// The twelve `RETURNING *` sites in `zeroship-schema` return every physical
-/// column and never pass through the SELECT-side projection allowlist. Without
-/// the read pipeline's row-surface stage, `insert` would return the real value
-/// under a key the generated `Row<S>` type does not declare - invisible to any
-/// review written against the generated types, and doubly silent because the
-/// mask still comes back correctly beside it.
+/// The twelve write sites in `zeroship-schema` emitted `RETURNING *` - every
+/// physical column, never passing through the projection allowlist, which was
+/// SELECT-side only. Without the read pipeline's row-surface stage, `insert`
+/// returned the real value under a key the generated `Row<S>` type does not
+/// declare - invisible to any review written against the generated types, and
+/// doubly silent because the mask still came back correctly beside it.
+///
+/// **Both boundaries are asserted here, in the order a row crosses them.** The
+/// projection is first: the write's own SQL no longer names the raw column, so
+/// the value never leaves the database. The surface stage is second, and still
+/// necessary - the write is not the only producer of a row, and the second half
+/// of this test feeds it the kind of row that has no projection in front of it.
 ///
 /// The assertion is on the KEY SET, not on the absence of one name, so a
 /// differently-named raw column cannot pass it.
 #[compio::test]
-async fn a_returning_star_write_hands_back_no_column_the_descriptor_does_not_declare() {
+async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_returning";
@@ -402,19 +418,46 @@ async fn a_returning_star_write_hands_back_no_column_the_descriptor_does_not_dec
         &pool,
         app,
         "people",
+        &schema,
         json!({ "id": "psn_ret", "ssn": "123-45-6789", "nickname": "ada" }),
     )
     .await;
     assert_eq!(returned.len(), 1);
-    // The SQL really did hand back the raw column - this is what the stage has
-    // to remove, and asserting it here stops the test going green because the
-    // write stopped returning it for some unrelated reason.
+    // BOUNDARY 1, the database's. The row PostgreSQL sent back does not contain
+    // the raw column at all - not "contains it and we removed it".
+    //
+    // This assertion is the inverse of the one it replaced, which required the
+    // raw column to be present "or this test proves nothing". That was true
+    // while the write starred; the value it was guarding against is now
+    // unreachable one layer earlier.
     assert!(
-        returned[0].get(raw_column_name("ssn").as_str()).is_some(),
-        "RETURNING * must be returning the raw column, or this test proves nothing: {:?}",
+        returned[0].get(raw_column_name("ssn").as_str()).is_none(),
+        "the write's projection must not name the raw column: {:?}",
         returned[0],
     );
+    // Paired with the control that the row is a real row and not an empty one -
+    // otherwise "no raw column" is satisfied by returning nothing.
+    assert_eq!(returned[0]["id"], json!("psn_ret"));
+    assert!(
+        returned[0].get("ssn").is_some(),
+        "the masked column must still come back: {:?}",
+        returned[0],
+    );
+    // And the raw column IS in the table - so the assertion above is about the
+    // projection, not about a write that failed to store the value.
+    let stored = pool
+        .query_text_params(
+            &format!(
+                r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
+                zeroship_plugin_db::query::quote_ident(&raw_column_name("ssn")),
+            ),
+            &["psn_ret"],
+        )
+        .await
+        .expect("read the raw column directly");
+    assert_eq!(stored.len(), 1, "the row must exist");
 
+    // BOUNDARY 2, the runtime's.
     let allowed: BTreeSet<String> = read_surface_columns(&schema);
     let finalized = zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(
         app,
@@ -443,18 +486,21 @@ async fn a_returning_star_write_hands_back_no_column_the_descriptor_does_not_dec
 
     // ---- and the arm that binds the SURFACE stage specifically ----
     //
-    // The assertions above pass with the surface stage disabled, and that is
-    // worth stating rather than leaving to be rediscovered: `mask_pass` strips
-    // the raw column itself, so a MASKED field's raw column is removed twice.
-    // Defence in depth, but it means the arm above measures the mask pass.
+    // The arm above no longer exercises the surface stage AT ALL: the row it
+    // finalizes came out of a named projection, so there is nothing off-surface
+    // in it to remove. That is the point of the projection, and it is also why
+    // this arm has to build its own row.
     //
-    // What only the surface stage removes is a physical column the descriptor
-    // does not declare AT ALL - a mask sibling of a field the pipeline skipped,
-    // an auxiliary shadow-table key, a column added to the table out of band.
-    // Nothing else on the read path removes an unknown key: the only other key
-    // removal in the pipeline is the mask pass's, and it removes exactly one
-    // name it derives itself.
+    // A row with off-surface columns still reaches the pipeline from the
+    // producer no projection sits in front of: the WAL consumer decodes
+    // pgoutput with no schema in reach. This is that row's shape - the raw
+    // column carrying the real value, plus columns the descriptor does not
+    // declare at all (an auxiliary shadow-table key, a column added to the
+    // table out of band). Nothing else on the read path removes an unknown key:
+    // the only other key removal in the pipeline is the mask pass's, and it
+    // removes exactly one name it derives itself.
     let mut smuggled = returned[0].clone();
+    smuggled[raw_column_name("ssn")] = json!("123-45-6789");
     smuggled["__zs_shadow_key"] = json!("aux-42");
     smuggled["totally_undeclared"] = json!("leak-me");
     let finalized = zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(
@@ -718,6 +764,7 @@ async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
         &pool,
         app,
         "accounts",
+        &schema,
         json!({ "id": "acc_1", "score": 42.5, "tier": "gold", "plain": 7.0 }),
     )
     .await;
@@ -779,6 +826,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         &pool,
         app,
         "people",
+        &schema,
         json!({ "id": "psn_a", "ssn": "111-11-1234" }),
     )
     .await;
@@ -786,6 +834,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         &pool,
         app,
         "people",
+        &schema,
         json!({ "id": "psn_b", "ssn": "999-99-1234" }),
     )
     .await;
@@ -809,7 +858,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
-    let bq = build_insert(app, "people", &docs[0]).unwrap();
+    let bq = build_insert(app, "people", &schema, &docs[0]).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let err = pool
         .query_text_params(&bq.sql, &param_refs)

@@ -475,7 +475,7 @@ async fn insert_and_find() {
     setup(&pool).await;
 
     // Insert
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Hello", "body": "World", "category": "tech"})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Hello", "body": "World", "category": "tech"})).unwrap();
     let inserted = exec_mutation(&pool, bq).await;
     assert_eq!(inserted.len(), 1);
     assert_eq!(inserted[0]["title"], "Hello");
@@ -505,7 +505,7 @@ async fn insert_many_round_trip() {
         {"title": "B", "body": "two", "category": "food"},
         {"title": "C", "body": "three", "category": "tech"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     let inserted = exec_mutation(&pool, bq).await;
     assert_eq!(inserted.len(), 3);
 
@@ -529,17 +529,17 @@ async fn update_one_inc() {
     setup(&pool).await;
 
     // Insert
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Counter", "category": "tech", "views": 0})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Counter", "category": "tech", "views": 0})).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $inc views by 5
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Counter"}), &json!({"views": {"$inc": 5}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Counter"}), &json!({"views": {"$inc": 5}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0]["views"], 5);
 
     // $inc again
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Counter"}), &json!({"views": {"$inc": 3}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Counter"}), &json!({"views": {"$inc": 3}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated[0]["views"], 8);
     release_pg(pool).await;
@@ -555,16 +555,16 @@ async fn update_one_dec_mul() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Math", "category": "tech", "views": 10})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Math", "category": "tech", "views": 10})).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $dec
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Math"}), &json!({"views": {"$dec": 3}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Math"}), &json!({"views": {"$dec": 3}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated[0]["views"], 7);
 
     // $mul
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Math"}), &json!({"views": {"$mul": 2}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Math"}), &json!({"views": {"$mul": 2}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated[0]["views"], 14);
     release_pg(pool).await;
@@ -580,17 +580,17 @@ async fn update_one_jsonb_array_ops() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Tags", "category": "tech"})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Tags", "category": "tech"})).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $push "rust"
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Tags"}), &json!({"tags": {"$push": "rust"}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Tags"}), &json!({"tags": {"$push": "rust"}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert!(tags.contains(&json!("rust")));
 
     // $push "go"
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Tags"}), &json!({"tags": {"$push": "go"}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Tags"}), &json!({"tags": {"$push": "go"}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
@@ -598,19 +598,19 @@ async fn update_one_jsonb_array_ops() {
     assert!(tags.contains(&json!("go")));
 
     // $addToSet "rust" (duplicate — should NOT add)
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Tags"}), &json!({"tags": {"$addToSet": "rust"}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Tags"}), &json!({"tags": {"$addToSet": "rust"}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2); // still 2
 
     // $addToSet "python" (new — should add)
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Tags"}), &json!({"tags": {"$addToSet": "python"}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Tags"}), &json!({"tags": {"$addToSet": "python"}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 3);
 
     // $pull "go"
-    let bq = build_update_one(SCHEMA, "notes", &json!({"title": "Tags"}), &json!({"tags": {"$pull": "go"}})).unwrap();
+    let bq = build_update_one(SCHEMA, "notes", &notes_schema(), &json!({"title": "Tags"}), &json!({"tags": {"$pull": "go"}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
@@ -635,11 +635,11 @@ async fn update_many_round_trip() {
         {"title": "C", "category": "tech", "views": 0},
         {"title": "D", "category": "food", "views": 0}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Update all tech views +1
-    let bq = build_update_many(SCHEMA, "notes", &json!({"category": "tech"}), &json!({"views": {"$inc": 1}})).unwrap();
+    let bq = build_update_many(SCHEMA, "notes", &notes_schema(), &json!({"category": "tech"}), &json!({"views": {"$inc": 1}})).unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated.len(), 3);
 
@@ -674,11 +674,11 @@ async fn delete_operations() {
         {"title": "Del2", "category": "food"},
         {"title": "Del3", "category": "food"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Delete one food
-    let bq = build_delete_one(SCHEMA, "notes", &json!({"category": "food"})).unwrap();
+    let bq = build_delete_one(SCHEMA, "notes", &notes_schema(), &json!({"category": "food"})).unwrap();
     let deleted = exec_mutation(&pool, bq).await;
     assert_eq!(deleted.len(), 1);
 
@@ -689,7 +689,7 @@ async fn delete_operations() {
     assert_eq!(rows[0].get::<_, i64>("count"), 4);
 
     // Delete many remaining food
-    let bq = build_delete_many(SCHEMA, "notes", &json!({"category": "food"})).unwrap();
+    let bq = build_delete_many(SCHEMA, "notes", &notes_schema(), &json!({"category": "food"})).unwrap();
     let deleted = exec_mutation(&pool, bq).await;
     assert_eq!(deleted.len(), 2);
 
@@ -717,7 +717,7 @@ async fn filter_comparison_operators() {
         {"title": "C", "category": "food", "views": 30},
         {"title": "D", "category": "food", "views": 40}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $gt 25
@@ -762,7 +762,7 @@ async fn filter_logical_operators() {
         {"title": "B", "category": "tech", "views": 50},
         {"title": "C", "category": "food", "views": 10}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $and: tech AND views > 20
@@ -798,7 +798,7 @@ async fn filter_pattern_operators() {
         {"title": "hello rust", "category": "tech"},
         {"title": "Goodbye", "category": "food"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $like (case sensitive)
@@ -828,7 +828,7 @@ async fn find_with_options() {
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Order by views ASC, limit 2
@@ -856,7 +856,7 @@ async fn find_with_projection() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Proj", "body": "secret", "category": "tech"})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Proj", "body": "secret", "category": "tech"})).unwrap();
     exec_mutation(&pool, bq).await;
 
     let bq = build_find_with_schema(
@@ -896,7 +896,7 @@ async fn distinct_values() {
         {"title": "C", "category": "food"},
         {"title": "D", "category": "science"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     let bq = build_distinct(SCHEMA, "notes", "category", &json!({}), &notes_schema()).unwrap();
@@ -929,7 +929,7 @@ async fn count_with_filter() {
         {"title": "B", "category": "tech"},
         {"title": "C", "category": "food"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Count all
@@ -962,7 +962,7 @@ async fn aggregate_full() {
         {"title": "C", "category": "tech", "views": 30},
         {"title": "D", "category": "food", "views": 100}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     let pipeline = json!([
@@ -1004,7 +1004,7 @@ async fn aggregate_multi_group() {
         {"title": "C", "category": "tech", "body": "go", "views": 5},
         {"title": "D", "category": "food", "body": "pasta", "views": 50}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     let pipeline = json!([
@@ -1038,7 +1038,7 @@ async fn aggregate_having() {
         {"title": "C", "category": "tech", "views": 30},
         {"title": "D", "category": "food", "views": 5}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // HAVING with alias → resolved to aggregate expression
@@ -1070,10 +1070,10 @@ async fn null_handling() {
     setup(&pool).await;
 
     // Insert with body
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "WithBody", "body": "has content", "category": "tech"})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "WithBody", "body": "has content", "category": "tech"})).unwrap();
     exec_mutation(&pool, bq).await;
     // Insert without body (column defaults to NULL)
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "NoBody", "category": "tech"})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "NoBody", "category": "tech"})).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Find where body IS NULL
@@ -1106,12 +1106,13 @@ async fn mixed_update() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Mix", "category": "tech", "views": 10})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Mix", "category": "tech", "views": 10})).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Update: set category + inc views + push tag
     let bq = build_update_one(
         SCHEMA, "notes",
+        &notes_schema(),
         &json!({"title": "Mix"}),
         &json!({"category": "science", "views": {"$inc": 5}, "tags": {"$push": "new"}}),
     ).unwrap();
@@ -1133,7 +1134,7 @@ async fn timestamps_as_numbers() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
-    let bq = build_insert(SCHEMA, "notes", &json!({"title": "Time", "category": "tech"})).unwrap();
+    let bq = build_insert(SCHEMA, "notes", &notes_schema(), &json!({"title": "Time", "category": "tech"})).unwrap();
     let inserted = exec_mutation(&pool, bq).await;
 
     let ts = inserted[0]["created_at"].as_i64().unwrap();
@@ -1152,14 +1153,26 @@ async fn aggregate_having_postgres_docs_example() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
-    // Set up weather table
+    // Set up weather table. The seven platform system columns are here for the
+    // same reason `notes` carries them: a write's `RETURNING` is now an
+    // explicit list of the system columns plus the declared fields, so a table
+    // missing them is not a table `insertMany` can write. Omitting them makes
+    // the statement fail with `42703 column does not exist` - loudly, which is
+    // the whole point of naming columns instead of starring them.
     pool.execute(&format!("DROP TABLE IF EXISTS \"{SCHEMA}\".\"weather\""), &[]).await.unwrap();
     pool.execute(
         &format!(
             r#"CREATE TABLE "{SCHEMA}"."weather" (
+                id SERIAL PRIMARY KEY,
                 city TEXT,
                 temp_lo INTEGER,
-                temp_hi INTEGER
+                temp_hi INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_by TEXT,
+                updated_by TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                deleted_at TIMESTAMPTZ
             )"#
         ),
         &[],
@@ -1173,7 +1186,7 @@ async fn aggregate_having_postgres_docs_example() {
         {"city": "Hayward", "temp_lo": 38, "temp_hi": 52},
         {"city": "Hayward", "temp_lo": 41, "temp_hi": 55}
     ]);
-    let bq = build_insert_many(SCHEMA, "weather", &docs).unwrap();
+    let bq = build_insert_many(SCHEMA, "weather", &weather_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Equivalent of: SELECT city, count(*), max(temp_lo)
@@ -1296,13 +1309,13 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     // The silent-bug live repro: insert two rows with the same email and
     // assert the second one fails with SQLSTATE 23505.
     // -----------------------------------------------------------------------
-    let ins1 = build_insert(app, collection, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
+    let ins1 = build_insert(app, collection, &schema, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
     let p1: Vec<&str> = ins1.params.iter().map(String::as_str).collect();
     pool.query_text_params(&ins1.sql, &p1).await.unwrap();
 
     // Distinct `id` so the second insert is rejected for the DUPLICATE EMAIL
     // (the unique index under test), not an incidental duplicate PK.
-    let ins2 = build_insert(app, collection, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
+    let ins2 = build_insert(app, collection, &schema, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
     let p2: Vec<&str> = ins2.params.iter().map(String::as_str).collect();
     let err = pool.query_text_params(&ins2.sql, &p2).await.unwrap_err();
     let code = err.code().map(|c| c.code().to_string()).unwrap_or_default();
@@ -2654,9 +2667,20 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         .unwrap();
     pool.execute(
         &format!(
+            // The seven platform system columns are here because a write's
+            // RETURNING is now an explicit list of them plus the declared
+            // fields. A fixture table missing them fails with `42703 column
+            // does not exist` - loudly, which is the point of naming columns
+            // rather than starring them.
             r#"CREATE TABLE "{app}"."users" (
                 id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                name TEXT NOT NULL
+                name TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_by TEXT,
+                updated_by TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                deleted_at TIMESTAMPTZ
             )"#
         ),
         &[],
@@ -2675,6 +2699,8 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     let bq = zeroship_plugin_db::query::build_insert(
         app,
         "users",
+        // The descriptor entry for the fixture table above: one declared field.
+        &serde_json::json!({ "name": { "type": "string", "required": true } }),
         &serde_json::json!({ "name": "alice" }),
     )
     .expect("build_insert");

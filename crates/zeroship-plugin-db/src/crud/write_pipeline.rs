@@ -851,9 +851,16 @@ mod tests {
             )
             .await;
 
-            let insert_built =
-                build_insert_with_dialect(app_id, collection, &insert_doc, SqlDialect::Sqlite)
-                    .expect("build insert");
+            // `schema` was moved into `cache_schema_for_tests`; `ddl_schema` is
+            // its byte-identical twin and is still owned here.
+            let insert_built = build_insert_with_dialect(
+                app_id,
+                collection,
+                &ddl_schema,
+                &insert_doc,
+                SqlDialect::Sqlite,
+            )
+            .expect("build insert");
             let insert_params: Vec<&str> = insert_built.params.iter().map(String::as_str).collect();
             let client = backend
                 .acquire_dedicated_client(app_id)

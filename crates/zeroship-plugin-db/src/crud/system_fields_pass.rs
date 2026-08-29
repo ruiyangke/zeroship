@@ -872,23 +872,38 @@ mod tests {
         assert!(!obj.contains_key("updated_by"));
     }
 
-    /// Confirms the SQL builder integration — the INSERT statement
-    /// carries all 4 columns and uses RETURNING * so the SDK gets
-    /// every system field back (DDL DEFAULTs included).
+    /// Confirms the SQL builder integration — the INSERT statement carries all
+    /// 4 columns and NAMES every system field in its `RETURNING` clause, so the
+    /// SDK gets the DB-defaulted values back.
+    ///
+    /// This asserted `RETURNING *` until the projection landed. The star was
+    /// never the property: what the SDK relies on is that the DDL-defaulted
+    /// timestamps and `version` come back, and naming the seven system fields
+    /// says that where `*` only implied it.
     #[test]
-    fn insert_pass_followed_by_build_insert_emits_returning_star() {
-        use crate::query::build_insert;
+    fn insert_pass_followed_by_build_insert_returns_every_system_field() {
+        use crate::query::{build_insert, SYSTEM_FIELD_NAMES};
         let mut doc = json!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
-        let built = build_insert("app1", "posts", &doc).expect("build_insert");
-        // RETURNING * pulls every column back — that's the contract the
-        // SDK relies on to populate `Row<S>` with the DB-defaulted
-        // timestamps + version.
+        let built = build_insert("app1", "posts", &schema_without_id_prefix(), &doc)
+            .expect("build_insert");
+        let returning = built
+            .sql
+            .split_once(" RETURNING ")
+            .expect("the INSERT carries a RETURNING clause")
+            .1;
         assert!(
-            built.sql.contains("RETURNING *"),
-            "INSERT must use RETURNING *, got: {}",
+            !returning.contains('*'),
+            "the RETURNING clause must name columns, not star: {}",
             built.sql
         );
+        for field in SYSTEM_FIELD_NAMES {
+            assert!(
+                returning.contains(&format!("\"{field}\"")),
+                "RETURNING must name the system field {field}: {}",
+                built.sql
+            );
+        }
         // Parameter count: 4 columns (id, title, created_by, updated_by).
         assert_eq!(built.params.len(), 4, "params: {:?}", built.params);
     }
