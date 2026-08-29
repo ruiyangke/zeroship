@@ -301,6 +301,90 @@ impl DmlRenderer for PostgresDmlRenderer {
         format!("decode({}, 'base64')", dml::sql_string_literal(&encoded))
     }
 
+    fn render_mask_source(
+        &self,
+        source_value: &str,
+        wraps: zeroship_migrate_backend::mask_meta::WrappedType,
+    ) -> String {
+        use zeroship_migrate_backend::mask_meta::WrappedType;
+
+        match wraps {
+            WrappedType::String => format!("CAST(({source_value}) AS text)"),
+            // Rust's f64 Display, used by the CRUD mask pass, expands exponent
+            // notation. PostgreSQL float8 text is the same shortest decimal but
+            // may use an exponent; round-tripping that text through NUMERIC
+            // expands it without introducing the lossy float8-to-numeric cast.
+            // Preserve negative zero separately because NUMERIC canonicalizes it.
+            WrappedType::Number => format!(
+                "CASE WHEN ({source_value}) = 0 AND CAST(({source_value}) AS text) \
+                 LIKE '-%' THEN '-0' ELSE CAST(CAST(({source_value}) AS text) AS numeric)::text END"
+            ),
+            // Plain t.bytes() reaches the CRUD mask pass as canonical base64 and
+            // is decoded only afterwards. bytea::text is hex, so masking that
+            // spelling would disagree with every post-transition write.
+            WrappedType::Bytes => format!("encode(({source_value}), 'base64')"),
+        }
+    }
+
+    fn render_mask_expression(
+        &self,
+        source_text: &str,
+        kind: zeroship_migrate_backend::mask_meta::MaskKind,
+    ) -> String {
+        use zeroship_migrate_backend::mask_meta::MaskKind;
+
+        let source = format!("({source_text})");
+        let value = match kind {
+            MaskKind::Full => "'***'".to_string(),
+            MaskKind::Last4 => format!(
+                "regexp_replace({source} COLLATE \"C\", '[A-Za-z0-9](?=(?:[^A-Za-z0-9]*[A-Za-z0-9]){{4}})', '*', 'g')"
+            ),
+            MaskKind::First4 => {
+                let prefix = format!(
+                    "substring({source} COLLATE \"C\" FROM '^((?:[^A-Za-z0-9]*[A-Za-z0-9]){{4}})')"
+                );
+                format!(
+                    "CASE WHEN {prefix} IS NULL THEN {source} ELSE {prefix} || \
+                     regexp_replace(substring({source} FROM char_length({prefix}) + 1) \
+                     COLLATE \"C\", '[A-Za-z0-9]', '*', 'g') END"
+                )
+            }
+            MaskKind::Email => format!(
+                "CASE WHEN {source} = '' THEN '' WHEN strpos({source}, '@') > 1 THEN \
+                 left({source}, 1) || '***' || substring({source} FROM strpos({source}, '@')) \
+                 ELSE '***' END"
+            ),
+            MaskKind::Name => format!(
+                r#"COALESCE((SELECT string_agg(left(_zs_mask_token, 1) || CASE
+                     WHEN _zs_mask_ord = _zs_mask_last THEN '***' ELSE '.' END,
+                     ' ' ORDER BY _zs_mask_ord)
+                   FROM (SELECT _zs_mask_token, _zs_mask_ord,
+                                max(_zs_mask_ord) OVER () AS _zs_mask_last
+                           FROM regexp_split_to_table(
+                                  {source} COLLATE "C",
+                                  U&'[\0009-\000D\0020\0085\00A0\1680\2000-\200A\2028-\2029\202F\205F\3000]+'
+                                ) WITH ORDINALITY
+                                  AS _zs_mask_parts(_zs_mask_token, _zs_mask_ord)
+                          WHERE _zs_mask_token <> '') AS _zs_mask_tokens), '')"#
+            ),
+            MaskKind::DateYear => format!(
+                "CASE WHEN {source} = '' THEN '' WHEN octet_length({source}) >= 10 \
+                 AND substring({source} FROM 1 FOR 4) COLLATE \"C\" ~ '^[0-9]{{4}}$' \
+                 AND substring({source} FROM 5 FOR 1) = '-' \
+                 THEN substring({source} FROM 1 FOR 4) || '-**-**' ELSE '***' END"
+            ),
+            MaskKind::DateDecade => format!(
+                "CASE WHEN {source} = '' THEN '' WHEN octet_length({source}) >= 10 \
+                 AND substring({source} FROM 1 FOR 3) COLLATE \"C\" ~ '^[0-9]{{3}}$' \
+                 AND substring({source} FROM 4 FOR 1) COLLATE \"C\" ~ '^[0-9?]$' \
+                 AND substring({source} FROM 5 FOR 1) = '-' \
+                 THEN substring({source} FROM 1 FOR 3) || '?-**-**' ELSE '***' END"
+            ),
+            MaskKind::None => source.clone(),
+        };
+        format!("CASE WHEN {source} IS NULL THEN NULL ELSE ({value}) END")
+    }
+
     /// PostgreSQL's schema-blind DML seam takes the canonical base64 as a TEXT
     /// bind and decodes it inside the statement, so the bound spelling is the
     /// inline one with a placeholder where the literal would be.

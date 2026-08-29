@@ -424,7 +424,11 @@ TableSnapshot {
             kind: "FOREIGN KEY",
             definition: "FOREIGN KEY (author) REFERENCES authors(id)",
             comment: None,
-            cascade_columns: None,
+            cascade_columns: Some(
+                [
+                    "author",
+                ],
+            ),
         },
         ConstraintSnapshot {
             name: "articles_pkey",

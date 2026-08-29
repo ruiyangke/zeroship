@@ -545,6 +545,44 @@ impl DmlRenderer for SqliteDmlRenderer {
         format!("X'{}'", hex::encode(bytes))
     }
 
+    fn render_mask_expression(
+        &self,
+        source_text: &str,
+        kind: zeroship_migrate_backend::mask_meta::MaskKind,
+    ) -> String {
+        use zeroship_migrate_backend::mask_meta::MaskKind;
+
+        let char_walk = |last: bool| {
+            let replace_when = if last {
+                "_zs_mask_rank <= _zs_mask_total - 4"
+            } else {
+                "_zs_mask_rank > 4"
+            };
+            format!(
+                "(WITH RECURSIVE _zs_mask_src(_zs_mask_value) AS (VALUES ({source_text})), _zs_mask_chars(_zs_mask_pos, _zs_mask_char) AS (SELECT 1, substr(_zs_mask_value, 1, 1) FROM _zs_mask_src WHERE length(_zs_mask_value) > 0 UNION ALL SELECT _zs_mask_pos + 1, substr(_zs_mask_value, _zs_mask_pos + 1, 1) FROM _zs_mask_chars, _zs_mask_src WHERE _zs_mask_pos < length(_zs_mask_value)), _zs_mask_ranked AS (SELECT _zs_mask_pos, _zs_mask_char, CASE WHEN _zs_mask_char GLOB '[A-Za-z0-9]' THEN sum(CASE WHEN _zs_mask_char GLOB '[A-Za-z0-9]' THEN 1 ELSE 0 END) OVER (ORDER BY _zs_mask_pos) ELSE 0 END AS _zs_mask_rank, sum(CASE WHEN _zs_mask_char GLOB '[A-Za-z0-9]' THEN 1 ELSE 0 END) OVER () AS _zs_mask_total FROM _zs_mask_chars) SELECT coalesce(group_concat(_zs_mask_out, ''), '') FROM (SELECT CASE WHEN _zs_mask_char GLOB '[A-Za-z0-9]' AND {replace_when} THEN '*' ELSE _zs_mask_char END AS _zs_mask_out FROM _zs_mask_ranked ORDER BY _zs_mask_pos))"
+            )
+        };
+        let value = match kind {
+            MaskKind::Full => "'***'".to_string(),
+            MaskKind::Last4 => char_walk(true),
+            MaskKind::First4 => char_walk(false),
+            MaskKind::Email => format!(
+                "CASE WHEN {source_text} = '' THEN '' WHEN instr({source_text}, '@') > 1 THEN substr({source_text}, 1, 1) || '***' || substr({source_text}, instr({source_text}, '@')) ELSE '***' END"
+            ),
+            MaskKind::Name => format!(
+                "(WITH RECURSIVE _zs_name_src(_zs_name_value) AS (VALUES ({source_text})), _zs_name_chars(_zs_name_pos, _zs_name_char) AS (SELECT 1, substr(_zs_name_value, 1, 1) FROM _zs_name_src WHERE length(_zs_name_value) > 0 UNION ALL SELECT _zs_name_pos + 1, substr(_zs_name_value, _zs_name_pos + 1, 1) FROM _zs_name_chars, _zs_name_src WHERE _zs_name_pos < length(_zs_name_value)), _zs_name_starts AS (SELECT _zs_name_pos, _zs_name_char FROM _zs_name_chars WHERE instr(' ' || char(9) || char(10) || char(11) || char(12) || char(13), _zs_name_char) = 0 AND (_zs_name_pos = 1 OR EXISTS (SELECT 1 FROM _zs_name_chars AS _zs_name_prev WHERE _zs_name_prev._zs_name_pos = _zs_name_chars._zs_name_pos - 1 AND instr(' ' || char(9) || char(10) || char(11) || char(12) || char(13), _zs_name_prev._zs_name_char) > 0))) SELECT coalesce(group_concat(_zs_name_part, ' '), '') FROM (SELECT _zs_name_char || CASE WHEN _zs_name_pos = (SELECT max(_zs_name_pos) FROM _zs_name_starts) THEN '***' ELSE '.' END AS _zs_name_part FROM _zs_name_starts ORDER BY _zs_name_pos))"
+            ),
+            MaskKind::DateYear => format!(
+                "CASE WHEN {source_text} = '' THEN '' WHEN length({source_text}) >= 10 AND substr({source_text}, 1, 4) NOT GLOB '*[^0-9]*' AND substr({source_text}, 5, 1) = '-' THEN substr({source_text}, 1, 4) || '-**-**' ELSE '***' END"
+            ),
+            MaskKind::DateDecade => format!(
+                "CASE WHEN {source_text} = '' THEN '' WHEN length({source_text}) >= 10 AND substr({source_text}, 1, 3) NOT GLOB '*[^0-9]*' AND (substr({source_text}, 4, 1) GLOB '[0-9]' OR substr({source_text}, 4, 1) = '?') AND substr({source_text}, 5, 1) = '-' THEN substr({source_text}, 1, 3) || '?-**-**' ELSE '***' END"
+            ),
+            MaskKind::None => source_text.to_string(),
+        };
+        format!("CASE WHEN ({source_text}) IS NULL THEN NULL ELSE ({value}) END")
+    }
+
     /// rusqlite binds a byte vector natively, so SQLite needs NO decoder around
     /// the placeholder and NO base64 detour - the bytes stay bytes end to end.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {

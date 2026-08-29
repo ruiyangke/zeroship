@@ -396,6 +396,436 @@ async fn declarative_add_column_diff_applies() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// Adding a mask to a populated plaintext field preserves every original in the
+/// raw column, replaces the logical column with masks, and leaves the table
+/// writable. The target field deliberately carries every column-local facet the
+/// transition must relocate: NOT NULL, DEFAULT, CHECK, UNIQUE, and its backing
+/// index. Two rows make a stale UNIQUE index on the constant full mask fail.
+#[compio::test]
+async fn adding_a_mask_to_populated_plaintext_preserves_data_and_writes() {
+    use zeroship_migrate::driver::SqlSession;
+
+    let url = require_live_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
+    let author = author_for(&cfg);
+    let field = |masked: bool| FieldDescriptor {
+        name: "secret".into(),
+        ty: "string".into(),
+        required: true,
+        unique: true,
+        default: Some(serde_json::json!("fallback")),
+        enum_values: Some(vec![
+            serde_json::json!("alpha"),
+            serde_json::json!("bravo"),
+            serde_json::json!("charlie"),
+            serde_json::json!("fallback"),
+        ]),
+        mask: masked.then(|| {
+            serde_json::json!({ "kind": "full", "classification": "pii" })
+        }),
+        ..Default::default()
+    };
+    let collection = |masked: bool| CollectionDescriptor {
+        name: "accounts".into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "row_key".into(),
+                ty: "string".into(),
+                required: true,
+                unique: true,
+                ..Default::default()
+            },
+            field(masked),
+        ],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+
+    let desired_v1 = desired_snapshot(
+        &cfg.project_schema,
+        &[collection(false)],
+        &effective_policy(&cfg),
+    )
+    .expect("desired unmasked schema");
+    let live0 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot empty schema");
+    let plan1 = engine
+        .plan_declarative(
+            &desired_v1,
+            &live0,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan unmasked schema");
+    let backend = PostgresBackend::new_generic(&session);
+    engine
+        .apply_declarative(
+            &plan1,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply unmasked schema");
+
+    session
+        .exec(
+            &format!(
+                r#"INSERT INTO "{}"."accounts" ("row_key", "secret")
+                   VALUES ('row-a', 'alpha'), ('row-b', 'bravo')"#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("seed distinct plaintext rows");
+
+    let desired_v2 = desired_snapshot(
+        &cfg.project_schema,
+        &[collection(true)],
+        &effective_policy(&cfg),
+    )
+    .expect("desired masked schema");
+    let live1 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot populated unmasked schema");
+    let plan2 = engine
+        .plan_declarative(
+            &desired_v2,
+            &live1,
+            &HashMap::from([("accounts".to_string(), "app_test".to_string())]),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan mask transition");
+    let backend2 = PostgresBackend::new_generic(&session);
+    engine
+        .apply_declarative(
+            &plan2,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend2,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply mask transition");
+
+    let raw = zeroship_migrate::schema::query::raw_column_name("secret");
+    let rows = session
+        .query(
+            &format!(
+                r#"SELECT "row_key", "{raw}", "secret"
+                   FROM "{}"."accounts" ORDER BY "row_key""#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read transitioned rows");
+    let actual: Vec<(String, String, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("row_key").expect("decode row key"),
+                row.try_get(raw.as_str()).expect("decode raw secret"),
+                row.try_get("secret").expect("decode masked secret"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            ("row-a".into(), "alpha".into(), "***".into()),
+            ("row-b".into(), "bravo".into(), "***".into()),
+        ],
+        "the transition must copy originals before overwriting the logical column"
+    );
+
+    session
+        .exec(
+            &format!(
+                r#"INSERT INTO "{}"."accounts" ("row_key", "{raw}", "secret")
+                   VALUES ('row-c', 'charlie', '***')"#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("writes using the transitioned physical shape still succeed");
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// The structured SQL backfill never receives encryption keys. An existing
+/// encrypted value therefore fails during planning, before any raw column or row
+/// transition can be applied, and the error names the missing AEAD capability.
+#[compio::test]
+async fn adding_a_mask_to_an_existing_encrypted_column_names_key_material_refusal() {
+    use zeroship_migrate::driver::SqlSession;
+
+    let url = require_live_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    session
+        .batch(&format!(
+            r#"CREATE TABLE "{}"."secrets" (
+                   "row_key" TEXT NOT NULL UNIQUE,
+                   "secret" BYTEA NOT NULL
+               );
+               COMMENT ON COLUMN "{}"."secrets"."secret"
+                   IS 'zero-migrate:enc:randomised:default:string';
+               INSERT INTO "{}"."secrets" ("row_key", "secret")
+                   VALUES ('row-a', decode('AA==', 'base64'));"#,
+            cfg.project_schema, cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("create populated encrypted fixture");
+
+    let desired = desired_snapshot(
+        &cfg.project_schema,
+        &[CollectionDescriptor {
+            name: "secrets".into(),
+            owner_app: "app_test".into(),
+            fields: vec![
+                FieldDescriptor {
+                    name: "row_key".into(),
+                    ty: "string".into(),
+                    required: true,
+                    unique: true,
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "secret".into(),
+                    ty: "string".into(),
+                    required: true,
+                    encrypted: Some(serde_json::json!({
+                        "mode": "randomised",
+                        "keyId": "default",
+                        "wraps": "string"
+                    })),
+                    mask: Some(serde_json::json!({
+                        "kind": "full",
+                        "classification": "pii"
+                    })),
+                    ..Default::default()
+                },
+            ],
+            indexes: vec![],
+            runtime_options: Default::default(),
+        }],
+        &effective_policy(&cfg),
+    )
+    .expect("desired encrypted masked schema");
+    let live = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot encrypted fixture");
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
+    let error = engine
+        .plan_declarative(
+            &desired,
+            &live,
+            &HashMap::from([("secrets".to_string(), "app_test".to_string())]),
+            &author_for(&cfg),
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect_err("encrypted mask transition must be refused before apply");
+    let message = error.to_string();
+    assert!(
+        message.contains("no AEAD key material") && message.contains("cannot decrypt"),
+        "the refusal must name why BackfillSpec cannot mask ciphertext: {message}"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+/// Existing bytes and number fields must be masked from the same plaintext wire
+/// spelling as future CRUD writes: canonical base64 for bytes and Rust/JSON's
+/// expanded shortest float spelling for numbers, not PostgreSQL bytea hex or
+/// exponent-form catalog text.
+#[compio::test]
+async fn mask_backfill_uses_creator_wire_text_for_bytes_and_numbers() {
+    use zeroship_migrate::driver::SqlSession;
+
+    let url = require_live_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let collection = |name: &str, ty: &str, mask_kind: Option<&str>| CollectionDescriptor {
+        name: name.into(),
+        owner_app: "app_test".into(),
+        fields: vec![
+            FieldDescriptor {
+                name: "row_key".into(),
+                ty: "string".into(),
+                required: true,
+                unique: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "value".into(),
+                ty: ty.into(),
+                required: true,
+                mask: mask_kind.map(|kind| {
+                    serde_json::json!({ "kind": kind, "classification": "pii" })
+                }),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+    let v1 = [
+        collection("byte_values", "bytes", None),
+        collection("number_values", "number", None),
+    ];
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
+    let author = author_for(&cfg);
+    let desired_v1 = desired_snapshot(&cfg.project_schema, &v1, &effective_policy(&cfg))
+        .expect("desired unmasked scalar schemas");
+    let live0 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot empty scalar schemas");
+    let plan1 = engine
+        .plan_declarative(
+            &desired_v1,
+            &live0,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan unmasked scalar schemas");
+    engine
+        .apply_declarative(
+            &plan1,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &PostgresBackend::new_generic(&session),
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply unmasked scalar schemas");
+
+    session
+        .batch(&format!(
+            r#"INSERT INTO "{}"."byte_values" ("row_key", "value")
+                   VALUES ('bytes-a', decode('YWJjZGVm', 'base64'));
+               INSERT INTO "{}"."number_values" ("row_key", "value")
+                   VALUES ('number-a', 1e20);"#,
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("seed bytes and number values");
+
+    let v2 = [
+        collection("byte_values", "bytes", Some("last4")),
+        collection("number_values", "number", Some("first4")),
+    ];
+    let desired_v2 = desired_snapshot(&cfg.project_schema, &v2, &effective_policy(&cfg))
+        .expect("desired masked scalar schemas");
+    let live1 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot populated scalar schemas");
+    let owners = HashMap::from([
+        ("byte_values".to_string(), "app_test".to_string()),
+        ("number_values".to_string(), "app_test".to_string()),
+    ]);
+    let plan2 = engine
+        .plan_declarative(
+            &desired_v2,
+            &live1,
+            &owners,
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan scalar mask transitions");
+    engine
+        .apply_declarative(
+            &plan2,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &PostgresBackend::new_generic(&session),
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply scalar mask transitions");
+
+    let raw = zeroship_migrate::schema::query::raw_column_name("value");
+    let bytes = session
+        .query_one(
+            &format!(
+                r#"SELECT encode("{raw}", 'base64') AS raw, "value" AS masked
+                     FROM "{}"."byte_values""#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read transitioned bytes");
+    assert_eq!(
+        bytes.try_get::<_, String>("raw").expect("decode raw bytes"),
+        "YWJjZGVm"
+    );
+    assert_eq!(
+        bytes
+            .try_get::<_, String>("masked")
+            .expect("decode byte mask"),
+        "****ZGVm"
+    );
+
+    let number = session
+        .query_one(
+            &format!(
+                r#"SELECT "{raw}" = 1e20::double precision AS raw_ok,
+                          "value" AS masked
+                     FROM "{}"."number_values""#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read transitioned number");
+    assert!(number.try_get::<_, bool>("raw_ok").expect("decode raw number"));
+    assert_eq!(
+        number
+            .try_get::<_, String>("masked")
+            .expect("decode number mask"),
+        "1000*****************"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
 /// An out-of-band ALTER that changes an attribute WITHOUT changing a name must
 /// land in `altered_objects`.
 ///

@@ -382,6 +382,22 @@ impl BackfillSpec {
                 h.update(name.as_bytes());
             }
         }
+        // The progress identity binds the exact planner proof used to page the
+        // table. A changed database type or collation is not the same resumable
+        // operation even when its cursor column names are unchanged. This also
+        // lets structured-plan marker checksums cover the whole BackfillSpec by
+        // embedding this identity, rather than checksumming only its SQL clauses.
+        h.update(b"\0cursorContract/v1");
+        match &self.cursor_contract {
+            None => h.update(b"none"),
+            Some(contract) => {
+                h.update(b"some");
+                let encoded = serde_json::to_vec(contract)
+                    .expect("CursorContract serialization is infallible");
+                h.update((encoded.len() as u64).to_be_bytes());
+                h.update(encoded);
+            }
+        }
         // Keep generator-bearing identities self-delimiting from every ordinary
         // transform and from the new cursor/stability domains above.
         if !self.per_row.is_empty() {
@@ -692,6 +708,36 @@ mod tests {
         assert_ne!(v4, v7);
         assert_ne!(v7, type_id);
         assert_ne!(v4, type_id);
+    }
+
+    #[test]
+    fn cursor_contract_is_part_of_the_progress_identity() {
+        let mut spec = BackfillSpec {
+            schema: "app".into(),
+            table: "events".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: CursorStability::GuardUpdates,
+            cursor_contract: Some(CursorContract {
+                columns: vec![CursorColumnContract {
+                    name: "id".into(),
+                    scalar_type: CursorScalarType::Int64,
+                    database_type: "bigint".into(),
+                    comparison: CursorComparison::Default,
+                }],
+            }),
+            batch_size: 100,
+            set_clause: "ready = true".into(),
+            per_row: BTreeMap::new(),
+            filter: None,
+            name: "mark_ready".into(),
+        };
+        let bigint = spec.backfill_id();
+        spec.cursor_contract
+            .as_mut()
+            .expect("contract")
+            .columns[0]
+            .database_type = "integer".into();
+        assert_ne!(bigint, spec.backfill_id());
     }
 
     #[test]

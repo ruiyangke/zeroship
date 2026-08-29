@@ -57,6 +57,31 @@ pub enum DeclarativeError {
     /// `validate_type`). Nothing is generated.
     #[error("invalid descriptor: {0}")]
     Invalid(String),
+    /// A populated encrypted column cannot gain a mask through the migration
+    /// engine. The structured backfill executor has no AEAD key material and
+    /// therefore cannot decrypt the existing ciphertext before deriving a mask.
+    #[error(
+        "cannot add a mask to populated encrypted column {table}.{column}: the migration engine's BackfillSpec executor has no AEAD key material and cannot decrypt existing ciphertext; declare the mask before data is written so the trusted CRUD write path derives it per row"
+    )]
+    EncryptedMaskBackfillRefused {
+        /// The table holding the encrypted value.
+        table: String,
+        /// The encrypted column gaining a mask.
+        column: String,
+    },
+    /// A resumable backfill needs a stable, immutable candidate-key cursor. The
+    /// engine refuses instead of paging by an unstable physical row locator.
+    #[error(
+        "cannot backfill mask transition for {table}.{column}: no NOT NULL primary key or non-partial UNIQUE B-tree cursor excluding the transitioning column is available ({reason})"
+    )]
+    MaskBackfillCursorUnavailable {
+        /// The target table.
+        table: String,
+        /// The transitioning logical column.
+        column: String,
+        /// The failed candidate-key proof.
+        reason: String,
+    },
     /// The diff requires an op the differ does not generate: an in-place INDEX or
     /// FOREIGN KEY redefinition (any same-name index whose observable shape moved -
     /// uniqueness, columns, key elements, access method, predicate, INCLUDE, storage

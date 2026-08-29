@@ -91,6 +91,7 @@ fn plan_for(dialect: &DialectId, up: &str) -> DeclarativePlan {
         rebuilds: Vec::new(),
         accepted_index_aliases: Vec::new(),
         created_tables: Vec::new(),
+        mask_transitions: Vec::new(),
         dialect: dialect.clone(),
     }
 }

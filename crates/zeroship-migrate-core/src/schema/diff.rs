@@ -102,16 +102,10 @@ pub enum ChangeKind {
     AddForeignKey,
     /// `ALTER TABLE ... DROP CONSTRAINT` for a FK no longer declared.
     DropForeignKey,
-    /// Backfill the sibling `<col>_masked` column for
-    /// every row of an existing column that just gained a
-    /// `.mask({...})` declaration. The accompanying
-    /// `ALTER TABLE ... ADD COLUMN <col>_masked TEXT NULL` op is emitted
-    /// as a separate `AddColumn` immediately before this one; the
-    /// backfill itself is driven by the data plane's `run_mask_backfill`. After the
-    /// backfill is fully drained (two consecutive clean polls), the
-    /// final step is `ALTER TABLE ... ALTER COLUMN <col>_masked SET NOT
-    /// NULL`. Carries the kind + classification so the audit row
-    /// records what mask was installed.
+    /// Move every existing value into `__zs_raw__<col>` and replace the
+    /// creator-facing column with its mask. The executable declarative plan
+    /// represents this as ordered DDL and guarded `BackfillSpec` steps; this
+    /// classifier deliberately carries no ad-hoc SQL or row runner.
     MaskBackfill {
         collection: String,
         column: String,
@@ -705,11 +699,9 @@ pub fn compute_diff(
     //   - 6b: live=Some(a),      declared=Some(b) where a!=b  -> MaskRewrite
     //   - 6c: live=Some(_),      declared=None or kind=none  -> MaskRemove
     //
-    // 6a additionally emits an `AddColumn` for the sibling BEFORE the
-    // `MaskBackfill` op so the column exists when the backfill writes
-    // to it. The sibling ADD is nullable on purpose - backfill flips
-    // it to NOT NULL after the last batch (the data plane's
-    // `run_mask_backfill`).
+    // 6a is a classification record only. The declarative planner owns the
+    // ordered DDL and guarded BackfillSpec steps, including creation and
+    // finalization of `__zs_raw__<col>`.
     //
     // Brand-new columns with a mask declaration are NOT routed here -
     // `build_create_table_with_fks_for_dialect` (CreateTable op) and
@@ -733,42 +725,34 @@ pub fn compute_diff(
                 // No mask on either side - nothing to do.
                 (None, None) => {}
 
-                // 6a - a mask declaration added to an EXISTING column.
+                // 6a - a mask declaration added to an EXISTING column. The
+                // full declarative planner executes the transition with its
+                // journaled BackfillSpec executor. This small classifier still
+                // emits exactly one SQL-less destructive record so approval and
+                // audit agree with that plan.
                 //
-                // REFUSED. This is the one mask transition the storage flip
-                // made undeployable, and emitting the part of it the differ can
-                // see would be worse than refusing.
-                //
-                // Before the flip this was two additive steps: add the
-                // `<col>_masked` sibling, backfill it. The column holding the
-                // data never moved and its type and constraints never changed.
-                //
-                // After the flip the same declaration means FOUR data-touching
-                // steps, and this differ can see only the first:
-                //
-                //   1. add `__zs_raw__<col>` with the column's declared type;
-                //   2. copy every row's value into it;
-                //   3. overwrite `<col>` with the mask;
-                //   4. rewrite `<col>` to `TEXT` and drop the constraints it
-                //      carries - `NOT NULL`, `DEFAULT`, range / literal / enum
-                //      `CHECK` - because `'***'` satisfies none of them and
-                //      every subsequent write to the collection would fail.
-                //
-                // Step 4 is invisible here twice over: the column-additions
-                // branch is name-only, and the `RewriteColumnType` arm keys
-                // strictly off the `encrypted` toggle, which this transition
-                // does not move. So a differ that emitted steps 1-3 would
-                // produce a schema whose every write fails, having already
-                // rewritten the data.
-                //
-                // Refusing is not a capability we are deferring for
-                // convenience: `AGENTS.md` records that no creator app has
-                // tables in production, so the transition has no user today,
-                // and a Destructive op routes to the approval workflow rather
-                // than half-applying. Declaring `.mask()` on a NEW column is
-                // unaffected - `build_create_table_with_fks_for_dialect` and
-                // `build_add_column` both emit the flipped pair directly.
+                // Encrypted input is different: computing a mask requires AEAD
+                // plaintext, but the migration engine has neither key material
+                // nor a decrypt primitive. That arm stays refused. Up-front
+                // encrypted masks remain supported by the trusted CRUD path.
                 (None, Some(new_meta)) => {
+                    let encrypted =
+                        live_col.encryption.is_some() || def.get("encrypted").is_some();
+                    let mut details = serde_json::json!({
+                        "kind": "mask_backfill",
+                        "field": field,
+                        "mask_kind": new_meta.kind.as_sql(),
+                        "classification": new_meta.classification.as_sql(),
+                        "raw_column": crate::schema::query::raw_column_name(field),
+                        "executor": "BackfillSpec",
+                    });
+                    if encrypted {
+                        details["refused"] = serde_json::json!(
+                            "encrypted mask backfill is refused: the migration engine has no \
+                             AEAD key material and cannot decrypt existing ciphertext before \
+                             computing the mask"
+                        );
+                    }
                     ops.push(DiffOp {
                         collection: collection.to_string(),
                         change_kind: ChangeKind::MaskBackfill {
@@ -779,19 +763,7 @@ pub fn compute_diff(
                         },
                         class: ChangeClass::Destructive,
                         sql: None,
-                        details: serde_json::json!({
-                            "kind": "mask_backfill",
-                            "field": field,
-                            "mask_kind": new_meta.kind.as_sql(),
-                            "classification": new_meta.classification.as_sql(),
-                            "raw_column": crate::schema::query::raw_column_name(field),
-                            "refused": "adding .mask() to a column that already holds data \
-                                        relocates every row's value into a new column, \
-                                        replaces the original with a mask, and rewrites the \
-                                        column's type and constraint set; three of those four \
-                                        steps are invisible to the differ, so the transition is \
-                                        refused rather than half-applied",
-                        }),
+                        details,
                         field: Some(field.clone()),
                     });
                 }
@@ -1841,21 +1813,10 @@ mod tests {
         live
     }
 
-    /// Live has no mask, schema declares one on an EXISTING column -> the
-    /// whole transition is REFUSED: one `MaskBackfill` op, classified
-    /// `ChangeClass::Destructive`, no `AddColumn` op at all, and `details`
-    /// carries a `"refused"` explanation.
-    ///
-    /// Before the storage flip this was two additive steps (add the
-    /// `<col>_masked` sibling, backfill it) - the column holding the data
-    /// never moved. After the flip the same declaration means relocating the
-    /// column's data into a new raw column, overwriting the original with a
-    /// mask, and rewriting the original's type/constraints; three of those
-    /// four steps are invisible to this differ, so it refuses rather than
-    /// half-applies (see the comment above the `(None, Some(new_meta))` arm
-    /// in `compute_diff`).
+    /// A plaintext existing column gains a mask: classify the structured
+    /// BackfillSpec transition without inventing SQL in this small differ.
     #[test]
-    fn mask_backfill_on_existing_column_is_refused() {
+    fn mask_backfill_on_existing_plaintext_column_uses_structured_executor() {
         let live = live_with_column("users", "ssn", None);
         let declared = json!({
             "ssn": {
@@ -1883,31 +1844,70 @@ mod tests {
         assert_eq!(
             backfill_ops[0].details["raw_column"],
             crate::schema::query::raw_column_name("ssn"),
-            "the refusal names the raw column the (unperformed) backfill would target: {ops:?}"
+            "the transition names the raw column the backfill targets: {ops:?}"
         );
-        let refused = backfill_ops[0].details["refused"]
-            .as_str()
-            .unwrap_or_default();
         assert!(
-            refused.contains("refused"),
-            "MaskBackfill on an existing column must carry a refusal: {ops:?}"
+            backfill_ops[0].details.get("refused").is_none(),
+            "plaintext transitions must reach BackfillSpec: {ops:?}"
+        );
+        assert_eq!(backfill_ops[0].details["executor"], "BackfillSpec");
+        assert!(
+            backfill_ops[0].sql.is_none(),
+            "the small classifier must not embed an ad-hoc row loop: {ops:?}"
         );
 
-        // The transition is refused wholesale - no AddColumn op for this field
-        // at all, on either the mask (field's own) or the raw column.
+        // The executable declarative planner owns the ordered raw-column DDL.
         assert!(
             !ops.iter()
                 .any(|o| matches!(o.change_kind, ChangeKind::AddColumn)
                     && o.field.as_deref() == Some("ssn")),
-            "6a must emit no AddColumn - the whole transition is refused: {ops:?}"
+            "the classifier must not emit a partial AddColumn transition: {ops:?}"
         );
     }
 
-    /// CONTROL for the refusal above, differing in exactly one variable: the
+    #[test]
+    fn mask_backfill_on_existing_encrypted_column_names_key_material_refusal() {
+        let mut live = live_with_column("users", "ssn", None);
+        let ssn = live
+            .tables
+            .get_mut("users")
+            .and_then(|columns| columns.get_mut("ssn"))
+            .expect("ssn fixture");
+        *ssn = encrypted_bytea_col();
+        let declared = json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": "default" },
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let ops = compute_diff(
+            crate::test_fixtures::VENDORS,
+            &live,
+            "app1",
+            "users",
+            &declared,
+            "",
+            &[],
+        );
+        let backfill = ops
+            .iter()
+            .find(|op| matches!(op.change_kind, ChangeKind::MaskBackfill { .. }))
+            .expect("encrypted transition is classified");
+        assert_eq!(backfill.class, ChangeClass::Destructive);
+        assert!(backfill.sql.is_none());
+        let refused = backfill.details["refused"].as_str().unwrap_or_default();
+        assert!(
+            refused.contains("AEAD key material") && refused.contains("decrypt"),
+            "the refusal must name why BackfillSpec cannot mask ciphertext: {ops:?}"
+        );
+    }
+
+    /// CONTROL for the transition above, differing in exactly one variable: the
     /// same mask declaration on a column that does NOT yet exist live routes
     /// through the ordinary AddColumn path instead, which already emits the
     /// flipped raw+mask pair (`build_add_column`) and is classified like any
-    /// other addition. Without this arm the refusal test above would pass
+    /// other addition. Without this arm the transition test above would pass
     /// just as well on an implementation that refused every masked column,
     /// new or existing.
     #[test]
