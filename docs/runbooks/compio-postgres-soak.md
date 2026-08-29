@@ -406,6 +406,26 @@ retirement after a server ErrorResponse. A defect in any of them shows up here
 as a non-zero live count or a hang, and in neither case would the ordinary
 suite have noticed: it never restarts a server.
 
+RE-MEASURED 2026-08-29 at `aef4e2e54`, on the dedicated 16.15 container
+(`zs-soak-5470`), restart issued 40s into `phase=measure`. All three signals
+reproduced again:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+No watchdog fired - the only lines containing `watchdog` are the three
+phase-start budget declarations, which is worth stating because a grep for
+`watchdog` matches those and can be misread as a firing. No panic, no hang.
+Recovery: 63 `pool_` tests passed against the restarted server on the FIRST
+attempt (7 in `--lib`, 56 in `--test suite`); the 2026-08-27 run recorded 49,
+the difference being tests added since.
+
+This run is the check on `ae8ba17f4`, which changed when a cancel retires a
+session: a defect there surfaces here as a non-zero live count or a hang, and
+the ordinary suite would not notice because it never restarts a server.
+
 ## Chaos: freezing the server without closing anything
 
 A restart makes the server CLOSE, which surfaces as an error at once. The
