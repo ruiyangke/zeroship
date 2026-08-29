@@ -997,7 +997,15 @@ for the purpose - roles are cluster-global objects, so this must never be run ag
    **refuses** conflicting column lists for one table across publications on one decode stream
    (`cannot use different column lists for table ... in different publications`).
 8. `pg_logical_emit_message` has `proacl = NULL` on 18.4, with two four-argument overloads.
-9. `AppIncarnationId` has zero occurrences in code. Nothing is built and no code is at stake.
+9. **This item was false and is corrected.** The *string* `AppIncarnationId` has zero occurrences,
+   but the *concept* ships: `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:28`
+   defines `AuthorityIdentity` carrying `incarnation: u64` (`:35`), built by the SC-1 reducer and
+   surrounded by the crate's 679 lib tests. It is deliberately opaque - compared only for equality,
+   with `for_app` named for today's axis - so re-keying it onto a namespace or a grant is a change at
+   construction sites, not a redesign. **But "nothing is at stake" is wrong**: an identity type,
+   its comparison order and its terminal-denial semantics exist and are tested, and any change to the
+   axis must keep the classifier's identity-before-lifecycle order intact. Grepping for a name is not
+   the same as establishing that a thing is unbuilt.
 
 **Must be settled before the first line is written.**
 
