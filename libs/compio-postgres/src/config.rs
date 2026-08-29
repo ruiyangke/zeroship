@@ -1144,6 +1144,27 @@ impl Config {
     /// evicted, so generated SQL cannot grow the tracker without bound or
     /// return immediately after eviction to displace the new working set.
     ///
+    /// **A capacity below the connection's working set is SLOWER than leaving
+    /// the cache disabled**, so size this against the number of distinct SQL
+    /// texts one connection actually sees, not against a round number. Measured
+    /// 2026-08-29 on PostgreSQL 18 over loopback, one connection, 2000
+    /// executions, K distinct texts cycled uniformly, microseconds per execution:
+    ///
+    /// | K   | capacity 0 | capacity 32 | capacity 256 |
+    /// |-----|-----------|-------------|--------------|
+    /// | 32  | 581       | 265         | 267          |
+    /// | 64  | 581       | **885**     | 269          |
+    /// | 200 | 578       | **868**     | 270          |
+    ///
+    /// Once K exceeds the capacity every execution evicts and re-prepares,
+    /// paying a Parse and a Close on top of the work it would have done anyway.
+    /// Raising [`Config::statement_cache_execution_threshold`] above 1 is the
+    /// defence: at K=200 and capacity 32, a threshold of 3 returns 601 us -
+    /// parity with the cache off - because the admission history above then
+    /// stops one-shot texts from displacing the working set. The default
+    /// threshold of 1 admits every statement immediately and leaves that
+    /// protection inert.
+    ///
     /// The cache is disabled by default. Keep it disabled when connecting
     /// through a transaction-mode connection pooler: persistent named
     /// statements are scoped to a `PostgreSQL` session, while successive
