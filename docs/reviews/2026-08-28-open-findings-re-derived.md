@@ -250,3 +250,32 @@ model provider's safety filter partway through ("flagged for possible
 cybersecurity risk") after 165k tokens, because the brief was framed around
 malformed peer input. The measurement above was recovered from its log. Briefs
 in this area need neutral, correctness-shaped framing to survive.
+
+## The soak's RSS rule is under-powered at the default 180s, measured 2026-08-29
+
+Same tree, same dedicated container (port 5470), two durations:
+
+| duration | samples | window | delta_kib | rises/falls | excess vs budget | verdict |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| 180s | 37 | 9 | +36 | 8/6 | 592 vs 576 | **growing (failed)** |
+| 420s | 85 | 21 | **-72** | 20/20 | 768 vs 1344 | stable (passed) |
+
+`pool_acquires == pool_releases` EXACTLY in both runs - 35408 and 82346. The
+leak criterion never wavered; only the memory-trend arm did.
+
+**Why the short run fails.** The rule compares the sum of the final quartile
+against the preceding window, allowing `noise_band_kib=64` PER SAMPLE. But the
+observed RSS oscillates between 9704 and 9984 KiB - an amplitude of about 280
+KiB, more than four times the per-sample band. With a 9-sample window the budget
+is 576 KiB while a window that happens to sit on the high plateau instead of the
+low one can differ by far more than that. The 180s run failed by 16 KiB out of
+88,000 - 0.018% - on a series whose EARLY PEAK (9984, sample 2) was higher than
+its final value (9832).
+
+With a 21-sample window the budget is 1344 KiB and the window averages over
+several oscillation periods, which is enough.
+
+**So a 180s soak failure is not evidence of a leak.** Either run it at 420s or
+longer, or read the trend arm alongside `delta_kib` and the rises/falls balance
+rather than as a verdict. A rule whose noise band is smaller than the signal's
+own oscillation amplitude can only be trusted over a long enough window.
