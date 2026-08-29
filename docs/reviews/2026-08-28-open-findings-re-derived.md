@@ -365,3 +365,25 @@ crate is red. Do not read a green per-crate clippy as a green gate, and do not
 read the gate's silence about a target as evidence it is clean - the gate says
 so itself: "this list is the reason the run above is not evidence that they are
 clean."
+
+## A failed slot teardown leaks, and the leak is bounded at 20
+
+Measured 2026-08-29 after the pooled run. `pg_replication_slots` on the 5455
+container held:
+
+    cpg_subtxn_2398063_a8c25b21478b8119_s | active=f | active_pid=(none)
+
+An orphan from a fixture whose teardown lost the 55006 race. All three test
+servers report `max_replication_slots=20`.
+
+**This is why a teardown that SWALLOWS the drop error is the wrong repair.**
+Turning `.expect("fixture teardown failed")` into a warning makes the run green
+and the slot immortal. Twenty of those and the next suite fails at slot
+creation, in a test that has nothing to do with the one that leaked, with an
+error that points nowhere useful.
+
+The right shape is the one `drop_slot_when_released` already implements: poll
+until the walsender releases, on a deadline, and then FAIL if it never does. A
+retry converts a race into a wait; a warning converts a race into a slow leak.
+
+Anything consolidating these teardowns must keep the failure loud.
