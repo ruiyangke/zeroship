@@ -3,7 +3,7 @@
 ## The decision this needs, before anything is built
 
 **The design fork is already taken and is not what is being asked.** "Multiple apps reach one
-database" is served as **the creator owning the namespace and authoring its schema, with apps
+database" is served as **the creator owning the database and authoring its schema, with apps
 holding graded DML grants on it** (section 3). The model is a monorepo: one `zeroship.jsonc`,
 several apps, one migration source and one set of generated types per database. No app holds DDL
 authority, so there is no owner-app to transfer and no multi-writer schema ownership - which
@@ -22,8 +22,8 @@ proposal carried, because a per-app binding level was the only thing that forced
    (`sdks/bootstrap/src/install-schema.ts:1508`). With one database per app there is no binding
    level, no collision, and `env.db.users.find(...)` keeps working unchanged. This was the largest
    creator-facing break in the proposal and it is gone.
-2. ~~A namespace owner's migration can break a co-tenant's deploy.~~ **WITHDRAWN 2026-08-29** - this
-   was never a cost, and listing it as one came from modelling the namespace as owned by an app.
+2. ~~A database owner's migration can break a co-tenant's deploy.~~ **WITHDRAWN 2026-08-29** - this
+   was never a cost, and listing it as one came from modelling the database as owned by an app.
    The creator owns the schema; apps in a workspace share one migration source and one
    generated-types artifact, so a schema change means rebuild the workspace. The deploy gate stays,
    because an app built against v1 must not be served against v2, but that is correctness and the
@@ -60,16 +60,16 @@ The shape:
 
 - **`Datastore`** - one physical PostgreSQL database (or one SQLite file directory).
   Operator-owned. Creators never name one.
-- **`Namespace`** - one schema inside a Datastore, physically named `ns_<nsid>`. This is the
+- **`Database`** - one schema inside a Datastore, physically named `db_<dbsid>`. This is the
   unit that is owned, migrated, granted, published and dropped. It replaces "the app's schema"
   everywhere.
-- **`Grant`** - the edge, keyed `(app_id)` since an app binds to exactly one namespace, carrying
-  `namespace_id` and a capability, with
+- **`Grant`** - the edge, keyed `(app_id)` since an app binds to exactly one database, carrying
+  `database_id` and a capability, with
   capability `owner` | `readwrite` | `readonly`.
 
 Enforcement is PostgreSQL role membership, not an in-process check. The worker connects once as
 `zeroship_worker`, holds no inherited privilege **over app data**, and narrows per transaction with a
-single `SET LOCAL ROLE "zs_ns_<nsid>_<cap>"`.
+single `SET LOCAL ROLE "zs_db_<dbsid>_<cap>"`.
 
 **Two exceptions, both deliberate, both previously unstated here.** (1) The worker holds
 `zeroship_workflow_owner` by a plain `GRANT` with no inherit option
@@ -86,16 +86,16 @@ So the accurate claim is narrower than the one this paragraph used to make: **ro
 the SQL executor plane, and nothing else.** Anyone reading it as "the worker cannot reach another
 tenant's bytes" is wrong on two paths.
 
-**AND THE REVOCATION CLAIM BELOW IS FALSE AS SOON AS TWO APPS SHARE A NAMESPACE. Measured on
+**AND THE REVOCATION CLAIM BELOW IS FALSE AS SOON AS TWO APPS SHARE A DATABASE. Measured on
 17.11.** `SET ROLE` authorizes against the membership of the role that *connected*, and in this
 design that is always the single shared worker login - never the app. Revoking the app's grant is a
 control-plane fact with no database consequence:
 
 | step | result |
 | --- | --- |
-| worker `SET ROLE zs_ns_1_rw`, then `SELECT` | 1 row |
-| `REVOKE zs_ns_1_rw FROM zs_app_a` | applied - `pg_auth_members` for that pair drops to **0** |
-| worker `SET ROLE zs_ns_1_rw`, then `SELECT` again | **1 row - unchanged** |
+| worker `SET ROLE zs_db_1_rw`, then `SELECT` | 1 row |
+| `REVOKE zs_db_1_rw FROM zs_app_a` | applied - `pg_auth_members` for that pair drops to **0** |
+| worker `SET ROLE zs_db_1_rw`, then `SELECT` again | **1 row - unchanged** |
 
 The app's membership is genuinely gone and the worker's reach is untouched, because the worker's own
 membership is what the check reads. **So revocation is fenced by the in-process binding table and by
@@ -105,10 +105,10 @@ PostgreSQL role membership, not an in-process check").
 **AN EARLIER VERSION OF THIS SECTION CLAIMED INTERPOSING AN APP ROLE FIXES IT. THAT WAS MEASURED ON
 A ONE-APP TOPOLOGY AND IS FALSE UNDER CO-TENANCY.** Recorded because the error is instructive:
 
-| topology | after `REVOKE zs_ns_1_rw FROM zs_app_a` |
+| topology | after `REVOKE zs_db_1_rw FROM zs_app_a` |
 | --- | --- |
 | worker serves **one** app | `permission denied to set role` - appears to work |
-| worker serves **two** apps, both holding the namespace role | **1 row, unchanged** |
+| worker serves **two** apps, both holding the database role | **1 row, unchanged** |
 | control: revoke the second app's edge too, emptying the closure | `permission denied to set role` |
 
 **`SET ROLE` authorizes against the transitive closure of the LOGIN role's memberships**, which under
@@ -119,21 +119,21 @@ hops buy nothing one hop does not; transitivity is why, not a workaround for it.
 Two further measurements on 17.11 close the neighbouring doors:
 
 - **Cross-app reach is open today.** A worker serving app A (ns_1) and app B (ns_2), dispatching for
-  A, ran `SET ROLE zs_ns_2_rw; SELECT FROM ns_2.t` and got a row. PostgreSQL cannot tell which app is
+  A, ran `SET ROLE zs_db_2_rw; SELECT FROM ns_2.t` and got a row. PostgreSQL cannot tell which app is
   dispatching.
-- **Nesting does not narrow.** `SET ROLE zs_app_a` then `SET ROLE zs_ns_2_rw` succeeds - the check is
+- **Nesting does not narrow.** `SET ROLE zs_app_a` then `SET ROLE zs_db_2_rw` succeeds - the check is
   against `session_user`, not `current_user`, so `SET ROLE` is a **lateral move inside the closure**,
   never a one-way narrowing. Any design that assumes narrowing composes is wrong.
 - `SET SESSION AUTHORIZATION` as the non-superuser worker is denied, so the cheap "re-point
   `session_user` per checkout" variant does not exist.
 
-### What works: a role per GRANT, and `WITH SET FALSE` on its namespace edge
+### What works: a role per GRANT, and `WITH SET FALSE` on its database edge
 
 Reached independently by two reviewers, measured by one on 18.4 and by me on 17.11:
 
 ```
 CREATE ROLE zs_grant_<gid> NOLOGIN;
-GRANT zs_ns_<N>_<cap> TO zs_grant_<gid> WITH SET FALSE;      -- inherits, cannot be assumed directly
+GRANT zs_db_<N>_<cap> TO zs_grant_<gid> WITH SET FALSE;      -- inherits, cannot be assumed directly
 GRANT zs_grant_<gid>  TO zeroship_worker WITH INHERIT FALSE; -- assumable, never ambient
 ```
 
@@ -141,29 +141,29 @@ The data plane's setup batch issues `SET LOCAL ROLE "zs_grant_<gid>"` - same sta
 position, no extra round trip. Revocation is `REVOKE` on both edges in one control-plane
 transaction.
 
-| probe (17.11, unprivileged login, two grants on ONE namespace) | result |
+| probe (17.11, unprivileged login, two grants on ONE database) | result |
 | --- | --- |
 | bare `SELECT`, no narrowing | `permission denied for schema` - fail-closed holds |
-| worker assumes the **namespace** role directly | **`permission denied to set role`** - `SET FALSE` blocks the shortcut |
+| worker assumes the **database** role directly | **`permission denied to set role`** - `SET FALSE` blocks the shortcut |
 | narrow to `zs_grant_a`, read | 1 row |
-| `REVOKE zs_ns_1_rw FROM zs_grant_a`, read as A | **`permission denied for schema`** |
-| co-tenant `zs_grant_b`, same namespace | **1 row, unaffected** |
+| `REVOKE zs_db_1_rw FROM zs_grant_a`, read as A | **`permission denied for schema`** |
+| co-tenant `zs_grant_b`, same database | **1 row, unaffected** |
 
-**`WITH SET FALSE` is the load-bearing clause.** Without it the worker can assume the namespace role
+**`WITH SET FALSE` is the load-bearing clause.** Without it the worker can assume the database role
 directly and the chain is decorative - which is exactly why the two-hop shape above passes on one app
 and fails on two. On 18.4 the same agent measured the revoke landing on **the very next statement of
 an already-open transaction**, same backend, no reconnect, and a re-grant restoring service on that
 same warm connection.
 
-**This keeps exact confinement.** A grant role inherits exactly one namespace role, so
-per-statement confinement stays one namespace - unlike assuming an app hub, which unions all of that
-app's namespaces. Confinement and revocation stop being a trade.
+**This keeps exact confinement.** A grant role inherits exactly one database role, so
+per-statement confinement stays one database - unlike assuming an app hub, which unions all of that
+app's databases. Confinement and revocation stop being a trade.
 
-Costs, stated: role count gains `#grants` (same order as the existing `apps + 3 x namespaces`); every
+Costs, stated: role count gains `#grants` (same order as the existing `apps + 3 x databases`); every
 bind and unbind is shared-catalog DDL serialized through the control plane, which needs rate-limiting
 against grant-flapping; and the boot posture gains two catalog-checkable arms - `inherit_option =
 false` on every `zs_grant_*` membership, and `pg_has_role(login, ns_role, 'SET') = false` for every
-namespace role.
+database role.
 
 **For CDC, derive the fan-out map from `pg_auth_members`** - the same rows the executor fence reads.
 One `REVOKE` then becomes the single source of truth for both planes: the query path fails at the
@@ -179,29 +179,29 @@ surface - which is what `AGENTS.md`'s "privilege follows the PROCESS" invariant 
 logins would not change it either, since the process would then hold every tenant's credential.
 
 ```
-zs_worker --(WITH INHERIT FALSE)--> zs_app_<id> --> zs_ns_<n>_<cap>
+zs_worker --(WITH INHERIT FALSE)--> zs_app_<id> --> zs_db_<n>_<cap>
 ```
 
-with **no direct `zs_worker` -> `zs_ns_*` grant at all**. Then:
+with **no direct `zs_worker` -> `zs_db_*` grant at all**. Then:
 
 | step | result |
 | --- | --- |
-| chain intact: worker `SET ROLE zs_ns_1_rw`, `SELECT` | `SET`, 1 row - transitive membership grants the path |
+| chain intact: worker `SET ROLE zs_db_1_rw`, `SELECT` | `SET`, 1 row - transitive membership grants the path |
 | chain intact: worker `SET ROLE zs_app_a`, `SELECT` | `SET`, 1 row |
-| `REVOKE zs_ns_1_rw FROM zs_app_a` - the middle edge | applied |
-| worker `SET ROLE zs_ns_1_rw` | **`ERROR: permission denied to set role "zs_ns_1_rw"`** |
+| `REVOKE zs_db_1_rw FROM zs_app_a` - the middle edge | applied |
+| worker `SET ROLE zs_db_1_rw` | **`ERROR: permission denied to set role "zs_db_1_rw"`** |
 | worker `SET ROLE zs_app_a`, then `SELECT` | `SET` succeeds, then **`ERROR: permission denied for schema ns_1`** |
 
 **The middle revoke bites on both paths**, so co-grant revocation is enforced by the database after
 all - no per-app login, no extra connection, no change to the pool. The single constraint is
 structural and must be stated as an invariant: **the worker may never hold a direct membership in a
-namespace role.** One such grant, added for convenience or by a provisioning path that predates this
+database role.** One such grant, added for convenience or by a provisioning path that predates this
 rule, silently restores the broken behaviour above - and nothing in PostgreSQL will complain, because
 both memberships are individually legal.
 
 That invariant is exactly what `db_posture`'s boot check is already shaped to enforce: it walks every
 membership the worker holds. It currently rules on the inherit option; it would gain an arm ruling on
-the *shape* - that every `zs_ns_*` membership is reached through an app role rather than held
+the *shape* - that every `zs_db_*` membership is reached through an app role rather than held
 directly.
 
 This does not fence the CDC fan-out map, which uses no `SET ROLE` at all; that path still needs its
@@ -240,29 +240,60 @@ lives in a schema inside it named literally after the app id
 ## 1. Entities and identity
 
 ```
-ds_<base62 uuidv7>   Datastore  { engine, cluster_id, dsn_secret_ref, resource_key }
-ns_<base62 uuidv7>   Namespace  { datastore_id, owner (the CREATOR, never an app - see 4),
-                                 physical schema = "ns_<nsid>" }
-grant                PK (app_id)  -- ONE namespace per app, see below
-                     { namespace_id, capability, granted_to_principal, state }
+ds_<base62 uuidv7>    Datastore  { engine, cluster_id, dsn_secret_ref, resource_key }
+dbs_<base62 uuidv7>   Database   { datastore_id, owner (the CREATOR, never an app - see 4),
+                                   physical schema = "db_<dbsid>" }
+grant                 PK (app_id)  -- ONE database per app, see below
+                     { database_id, capability, granted_to_principal, state }
 ```
 
-**Every created database gets its own typed id** - `ns_<base62 uuidv7>`, the same UUIDv7 + base62 +
+**Every created database gets its own typed id** - `dbs_<base62 uuidv7>`, the same UUIDv7 + base62 +
 prefix shape every other entity uses (`crates/zeroship-core/src/typed_id.rs`). That id, not an app
 id, is what names the physical schema, the migrator role, the per-capability roles, the publication
 and the apply lock. It is the identity the whole decoupling turns on.
 
-**The grant key is `(app_id)`, not `(app_id, namespace_id)`.** An app binds to exactly one
-namespace (operator decision, 2026-08-29), so the app id alone identifies the row and the database
+**Why `dbs` and not `db`.** The typed-id shape is `^[a-z]{3}_[A-Za-z0-9]{22}$` - exactly three
+lowercase letters, as `app`, `crd`, `mig` and every other prefix in `typed_id.rs` are. `db` is two
+and would not parse. The physical schema is `db_<dbsid>`, which is a PostgreSQL identifier and is
+under no such constraint.
+
+**This entity was called `Namespace` until 2026-08-29.** Renamed at the operator's request:
+"namespace" is PostgreSQL schema jargon, and what a creator has is a database - especially now that
+an app sees exactly one. `Datastore` keeps its name and is a different thing: the physical
+PostgreSQL database a Database is *placed on*, operator-owned and never named by a creator. Many
+Databases sit on one Datastore.
+
+**The database id is INTERNAL and is never exposed to creators** (operator decision, 2026-08-29).
+It is an implementation identity. What a creator names, sees and types is the database's
+**workspace-local name** - the key in the `databases` map of `zeroship.jsonc` - and the control
+plane resolves `(workspace, name) -> database_id`. Nothing in the creator surface, the CLI output,
+the generated types or an error message should contain an `ns_...` string.
+
+That is a requirement with two sharp edges, both easy to violate by accident:
+
+1. **The physical schema IS named `db_<dbsid>`, so PostgreSQL will put it in error text.** A
+   constraint violation, a permission denial or a failed migration surfaces the schema name in the
+   server's own message. Anything that relays a database error to a creator has to map the physical
+   name back to the workspace-local one, or the id leaks through the one path nobody writes by
+   hand. This is the same discipline `DbResourceKey` already applies to DSN passwords - chosen as a
+   digest precisely so the secret "cannot reach `Debug` or a log line"
+   (`crates/zeroship-plugin-db/src/service.rs:46`).
+2. **A route that takes the id in its URL is an exposure.** See section 4: the apply route as
+   currently written is `POST /v1/databases/{database_id}/migrations/apply`, which a creator
+   cannot call without holding the id. Either that route is control-plane-internal and the
+   creator-facing surface addresses the database by name, or the decision above is not being kept.
+
+**The grant key is `(app_id)`, not `(app_id, database_id)`.** An app binds to exactly one
+database (operator decision, 2026-08-29), so the app id alone identifies the row and the database
 cannot be ambiguous at any call site. An earlier revision keyed on the pair and carried a
 `binding_name` with `UNIQUE (app_id, binding_name)`; both are gone, because a binding name only
 exists to disambiguate between several databases an app can see.
 
 The relationship is still many-to-many in the direction that matters: **many apps may point at one
-namespace**, which is what "multiple apps share a database" means. Only the reverse - one app,
+database**, which is what "multiple apps share a database" means. Only the reverse - one app,
 several databases - is closed.
 
-The physical schema name derives from the **namespace** id. That single change is what breaks
+The physical schema name derives from the **database** id. That single change is what breaks
 `apply.rs:257` and every `quote_ident(app_id)` site in `crates/zeroship-schema/src/query.rs`, and
 breaking them is the point. `crates/zeroship-plugin-db/src/broker.rs:78-79` states the conflation
 in its own words - "`schema` is conflated with `app_id` (every app has its own schema named after
@@ -275,7 +306,7 @@ reach `Debug` or a log line, and is already documented as "the identity of one *
 resources" (`crates/zeroship-plugin-db/src/service.rs:46`, `:187`, `:193`, `:208`). It needs no
 change. Only its cardinality is wrong, and that follows from `DbServiceConfig` holding one URL.
 
-Creators create namespaces; the control plane places them on a datastore. Bring-your-own-datastore
+Creators create databases; the control plane places them on a datastore. Bring-your-own-datastore
 is out of scope: "which physical database may an app reach" is a privileged decision, and handing
 it to the creator surface hands a DSN to the app plane.
 
@@ -307,7 +338,7 @@ into existence. This is the second thing that decision bought - the first was ke
 `env.db.users` - and it is worth stating because a security property that is absent by construction
 is stronger than one that is bounded by an argument.
 
-What remains is the ordinary requirement that the app-to-namespace mapping be server-injected and
+What remains is the ordinary requirement that the app-to-database mapping be server-injected and
 never creator-supplied, which 2.2(a) already covers.
 
 ### 2.2 The mechanism, in three parts, all required
@@ -330,34 +361,34 @@ refusal with the same shape as `collection_not_declared`
 `process.env` on collision, but this path reads the worker-internal map, which is the same reason
 metering is unforgeable.
 
-**(b) The grant is a PostgreSQL role membership, and the session narrows to exactly one namespace.**
+**(b) The grant is a PostgreSQL role membership, and the session narrows to exactly one database.**
 
 ```
-zs_ns_<nsid>_mig   owns schema ns_<nsid>                     (replaces the per-app migrator)
-zs_ns_<nsid>_rw    USAGE on ns_<nsid> + column-listed DML     (replaces app_<id>_role's grants)
-zs_ns_<nsid>_ro    USAGE on ns_<nsid> + column-listed SELECT
+zs_db_<dbsid>_mig   owns schema db_<dbsid>                     (replaces the per-app migrator)
+zs_db_<dbsid>_rw    USAGE on db_<dbsid> + column-listed DML     (replaces app_<id>_role's grants)
+zs_db_<dbsid>_ro    USAGE on db_<dbsid> + column-listed SELECT
 zs_app_<appid>     NOLOGIN, no privileges of its own; a membership hub and nothing else
 zeroship_worker    LOGIN, member of zs_app_<A> WITH INHERIT FALSE, for every A it serves
 ```
 
-- Granting: `GRANT "zs_ns_<N>_rw" TO "zs_app_<A>"`. One statement.
-- Revoking: `REVOKE "zs_ns_<N>_rw" FROM "zs_app_<A>"`. One statement.
-- The data plane issues `SET LOCAL ROLE "zs_ns_<N>_<cap>"` - **not** the app principal - resolved
+- Granting: `GRANT "zs_db_<N>_rw" TO "zs_app_<A>"`. One statement.
+- Revoking: `REVOKE "zs_db_<N>_rw" FROM "zs_app_<A>"`. One statement.
+- The data plane issues `SET LOCAL ROLE "zs_db_<N>_<cap>"` - **not** the app principal - resolved
   from the binding table. It replaces `set_local_role_sql` / `tx_session_setup_sql`
   (`crates/zeroship-plugin-db/src/auth/bootstrap.rs:162`, `:205-210`, `:227-231`) unchanged in
   shape and cost: still one statement in the same simple-query batch as the DB-1 timeout guards.
 
-Narrowing to a namespace role is free and exact. Measured on PostgreSQL 18.4, with
-`w -> zs_app_t -> {zs_ns_t_rw, zs_ns_m_rw}`:
+Narrowing to a database role is free and exact. Measured on PostgreSQL 18.4, with
+`w -> zs_app_t -> {zs_db_t_rw, zs_db_m_rw}`:
 
 | Probe | Result |
 | --- | --- |
-| `BEGIN; SET LOCAL ROLE zs_ns_m_rw; SELECT FROM ns_m.secrets` | 1 row, `current_user = zs_ns_m_rw` |
-| `BEGIN; SET LOCAL ROLE zs_ns_m_rw; SELECT FROM ns_t.secrets` | `ERROR: permission denied for schema ns_t` |
+| `BEGIN; SET LOCAL ROLE zs_db_m_rw; SELECT FROM ns_m.secrets` | 1 row, `current_user = zs_db_m_rw` |
+| `BEGIN; SET LOCAL ROLE zs_db_m_rw; SELECT FROM ns_t.secrets` | `ERROR: permission denied for schema ns_t` |
 
 `SET ROLE` resolves membership transitively, so the app principal never has to be assumed. **The
 app's privileges are therefore never unioned onto a live session**, and per-statement confinement
-is exactly one namespace at all times. No PL/pgSQL assertion, no `pg_has_role` check, no extra
+is exactly one database at all times. No PL/pgSQL assertion, no `pg_has_role` check, no extra
 round trip.
 
 **(c) The session inherits nothing. Fail-closed is a grant option, not a role attribute.**
@@ -380,7 +411,7 @@ The role attribute does nothing here. PostgreSQL 16+ records `inherit_option` pe
 grant time (`SELECT inherit_option FROM pg_auth_members` returned `f` only in the third arm), and
 the pre-existing membership stays inheriting when the attribute is flipped. **The grant must carry
 `WITH INHERIT FALSE`.** `SET LOCAL ROLE` still works under it - verified in the same cluster,
-including to a transitively-reachable namespace role.
+including to a transitively-reachable database role.
 
 `crates/zeroship-worker/src/db_posture.rs:22-59` checks superuser, createrole, createdb,
 replication, bypassrls and workflow-owner membership. It gains an arm asserting
@@ -401,7 +432,7 @@ The role fence is applied by exactly two functions:
   of them selecting the **plaintext parent column**.
 
 Today the blast radius of an unfenced statement is one app's schema. Under many-to-many it is every
-namespace in the datastore. Two changes, both mandatory:
+database in the datastore. Two changes, both mandatory:
 
 1. `WITH INHERIT FALSE` (2.2c) makes an unfenced statement fail rather than succeed.
 2. The pool handle stops being reachable from CRUD code. The role-applying wrapper becomes the only
@@ -412,8 +443,8 @@ namespace in the datastore. Two changes, both mandatory:
 `crates/zeroship-plugin-db/src/descriptor.rs:1-3` makes the creator-authored, unsigned runtime
 descriptor "the data plane's SOLE schema authority", and `:10-31` records that the live-catalog
 read was deleted because "the catalog could only ever agree with the descriptor or be stale". That
-reasoning holds exactly while one app owns the namespace exclusively. It is also already the weak
-link on a private namespace, because nothing below the descriptor objects.
+reasoning holds exactly while one app owns the database exclusively. It is also already the weak
+link on a private database, because nothing below the descriptor objects.
 
 The migration service emits column-level grants from the **owner's own IR**, withholding every
 column whose classification is not `none` and granting the column that holds the mask instead.
@@ -427,7 +458,7 @@ recorded; only read them for the semantics, not for the naming.*
 
 Measured on 18.4:
 
-| Grant state on `ns_t.patients` | `SELECT ssn` as `zs_ns_t_rw` |
+| Grant state on `ns_t.patients` | `SELECT ssn` as `zs_db_t_rw` |
 | --- | --- |
 | table-level `GRANT SELECT` **plus** `GRANT SELECT (id, name, ssn_masked)` | **plaintext returned** |
 | column list only, table-level revoked | `ERROR: 42501 permission denied for table patients` |
@@ -460,7 +491,7 @@ Three consequences, all load-bearing:
   with `WHERE ctid = (SELECT ctid FROM ... LIMIT 1)`, and `ctid` is a **system column that
   column-level `SELECT` does not cover** - measured, the same role is refused `SELECT ctid` (42501)
   while served `SELECT id`. Those four remain unusable under pure column grants. Either the narrowing
-  becomes a primary-key predicate the grant can cover, or co-granted namespaces exclude those verbs
+  becomes a primary-key predicate the grant can cover, or co-granted databases exclude those verbs
   and the exclusion is stated. A test asserts the refusal today and reddens the day it is fixed.
 
   **A shipping defect surfaced on the way, and it is worth reading as evidence about the tests rather
@@ -504,7 +535,7 @@ Measured on 18.4, one variable changed:
 | Current role | `count(*)` on an RLS table with `USING (owner = current_user)` |
 | --- | --- |
 | `w` (login, BYPASSRLS) | 1 |
-| `zs_ns_t_rw` via `SET LOCAL ROLE` from that same login | 0 |
+| `zs_db_t_rw` via `SET LOCAL ROLE` from that same login | 0 |
 
 `BYPASSRLS` does not follow through `SET ROLE`; it is an attribute of the current role. So once the
 session is narrowed, RLS is enforceable even though the worker login must hold `BYPASSRLS`
@@ -517,7 +548,7 @@ It is void on the CDC path, which is section 5.
 
 ## 3. Which sharing is permitted, and which is refused
 
-**Permitted: the CREATOR owns the namespace and authors its schema; apps hold DML grants on it.**
+**Permitted: the CREATOR owns the database and authors its schema; apps hold DML grants on it.**
 
 - `readwrite` - DML on granted columns. No DDL.
 - `readonly` - SELECT on granted columns.
@@ -525,11 +556,11 @@ It is void on the CDC path, which is section 5.
 **There is no `owner` app capability.** An earlier revision listed one ("`owner` - migrates it, sole
 author of its schema"), which contradicted section 4 once the creator became the owner. Migration
 authority is not something an app can hold: it belongs to the workspace, and the migrator role
-`zs_ns_<nsid>_mig` is named by no app. An app's grant only ever says what DML it may do.
+`zs_db_<dbsid>_mig` is named by no app. An app's grant only ever says what DML it may do.
 
 That removes a class of problem rather than solving one. With no app holding DDL authority there is
-no ownership transfer, no ping-pong between apps, and no question of what happens to a namespace
-when its owning app is deleted - the namespace outlives every app that binds to it, which is the
+no ownership transfer, no ping-pong between apps, and no question of what happens to a database
+when its owning app is deleted - the database outlives every app that binds to it, which is the
 whole point of giving it its own identity.
 
 **`readwrite` and `readonly` grants are restricted to apps under the same creator** - which the
@@ -564,7 +595,7 @@ plus two structural ones:
 2. **The apply lock is on the wrong axis and the journal has no tenant column.** The only apply-time
    lock that runs is `pg_advisory_xact_lock(hashtextextended($1, 0))` over the publication name
    (`crates/zeroship-migrate-server/src/publication.rs:86`), and the publication name is a hash of
-   the app id. Two apps in one namespace take *different* keys and their DDL interleaves with no
+   the app id. Two apps in one database take *different* keys and their DDL interleaves with no
    mutual exclusion.
 
 Within one creator, a co-grant-holder mis-declaring a mask policy is not a boundary crossing. Across
@@ -572,47 +603,63 @@ creators it is, and no role fixes it.
 
 ---
 
-## 4. Ownership and migration of a shared namespace
+## 4. Ownership and migration of a shared database
 
-- **A namespace is owned by the CREATOR, not by an app.** Operator decision, 2026-08-29:
+- **A database is owned by the CREATOR, not by an app.** Operator decision, 2026-08-29:
   *"the creator has full control of the db, even breaking changes, the creator has to take the
   risk; the db migration is not coupled with app."* The model is a monorepo - several apps in one
   workspace sharing one migration source and one set of generated types.
 
-  So there is **no `Namespace.owner_app_id`**. An earlier revision of this section made that column
+  So there is **no `Database.owner_app_id`**. An earlier revision of this section made that column
   not-null and routed migrate authority through it; that was wrong, and it contradicted the very
   next bullet, which already says the migrator role is "named by no app". Schema authority never
   passes through an app identity.
-- **New route** `POST /v1/namespaces/{namespace_id}/migrations/apply`.
-  `crates/zeroship-authz/src/resource.rs:14-16` gains `Resource::Namespace { id }` - it is `App { id }`
+- **Two routes, because the database id must not reach a creator** (see section 1). The
+  creator-facing one addresses the database by its **workspace-local name**; the id-bearing one is
+  control-plane-internal.
+
+  ```
+  creator  ->  POST /v1/projects/{project}/databases/{name}/migrations/apply
+  internal ->  POST /v1/databases/{database_id}/migrations/apply
+  ```
+
+  An earlier revision named only the second and described it as the new route, which would have
+  required every creator to hold an `ns_...` id to migrate anything - the exposure the decision
+  forbids. The control plane resolves name to id and forwards.
+
+  `crates/zeroship-authz/src/resource.rs:14-16` gains `Resource::Database { id }` - it is `App { id }`
   and `Any` today - with the policy **"principal may migrate N iff principal owns N"**, checked
-  against the creator directly with no app indirection. The control-plane forwarding hop re-verifies
-  the caller's own bearer and adds no authority, which is already the right posture; only the
-  resource type is new.
-  **Resolved 2026-08-29: one `zeroship.jsonc` for the whole workspace.** So a `Namespace` hangs off
+  against the creator directly with no app indirection. Authorization is still evaluated on the
+  resolved database, not on the name: a name is a workspace-local label and must never be the
+  thing a permission is checked against. The control-plane forwarding hop re-verifies the caller's
+  own bearer and adds no authority, which is already the right posture; only the resource type is new.
+  **Resolved 2026-08-29: one `zeroship.jsonc` for the whole workspace.** So a `Database` hangs off
   the **project/workspace** row, not off a bare creator account, and "the apps that share this
   schema" is a structural fact of the config rather than a convention several files have to agree
   on. See section 9 for what that costs the project file.
-- **The apply lock moves to the namespace**: `pg_advisory_xact_lock(hashtextextended('ns:' || <nsid>, 0))`,
+- **The apply lock moves to the database**: `pg_advisory_xact_lock(hashtextextended('db:' || <dbsid>, 0))`,
   taken on the datastore connection before any DDL.
-- **Migrator role is `zs_ns_<nsid>_mig`**, named by no app. One migrator forever, so the ownership
+- **Migrator role is `zs_db_<dbsid>_mig`**, named by no app. One migrator forever, so the ownership
   ping-pong and the silently-orphaned `ALTER DEFAULT PRIVILEGES` rules cannot occur.
 - **`ExecutorConfig::new(project_id, project_schema, policy)` stops taking the app id three times**
-  (`crates/zeroship-migrate-server/src/apply.rs:280-298`). All three become `ns_<nsid>`. The engine
+  (`crates/zeroship-migrate-server/src/apply.rs:280-298`). All three become `db_<dbsid>`. The engine
   already contemplates several apps under one project schema; the host stops collapsing the axis.
   `SchemaScope::Allowlist(Vec<String>)` already exists with a working case-insensitive `permits`
   (`crates/zeroship-migrate-ir/src/policy.rs:36`, `:64`), so multi-schema confinement is representable
   today and only the binder is scalar.
-- **Deploy gate becomes a conjunction.** `crates/zeroship-control/src/registry.rs:460-486` predicates
-  the deploy UPDATE on one `descriptor_sha256` matching the newest `applied` row. It becomes: for
-  **every** binding in the manifest, the newest applied row for `(app_id, namespace_id)` matches that
-  binding's descriptor hash. `Manifest.runtime_descriptor`
-  (`crates/zeroship-bundle/src/manifest.rs:172`) becomes a map keyed by binding name;
-  `zeroship.app_schema_applies` gains `namespace_id` and re-keys `(app_id, namespace_id, migration_id)`.
-  The *list* of namespaces comes from the control plane's grant table, never from the bundle - the
-  bundle asserts hashes, not preconditions. **A partial apply blocks the deploy**, which is stricter
-  than today and correct: the masking story rests on this ordering.
-- **Every app's deploy gate checks the namespace's applied hash**, and under the monorepo model this
+- **The deploy gate stays SCALAR.** An earlier revision made it "a conjunction over every binding in
+  the manifest", with `Manifest.runtime_descriptor`
+  (`crates/zeroship-bundle/src/manifest.rs:172`) becoming a map keyed by binding name. One database
+  per app removes all of that: `crates/zeroship-control/src/registry.rs:460-486` keeps predicating
+  the deploy UPDATE on ONE `descriptor_sha256` matching the newest `applied` row, and the manifest
+  field keeps its present shape. Only the row it matches against is re-keyed -
+  `zeroship.app_schema_applies` gains `database_id` and keys `(app_id, database_id, migration_id)`.
+
+  **The bundle carries a hash, never a database id.** That is deliberate and it is also what keeps
+  the id off the creator surface: a `.zship` is an artifact a creator builds and can open. The
+  binding comes from the control plane's grant table, never from the bundle - the bundle asserts
+  hashes, not preconditions.
+- **Every app's deploy gate checks the database's applied hash**, and under the monorepo model this
   is NOT co-tenant coupling. All apps in the workspace build against one migration source and one
   generated-types artifact, so a schema change means *rebuild the workspace* - the same mechanics as
   changing a shared library, with the creator owning the risk.
@@ -687,7 +734,7 @@ Three consequences:
    Whichever is given up must be given up explicitly.
 2. **Ordering does not save it.** Because both DDL steps are accepted, no provisioning sequence
    produces a safe combination, and no bracketing rule detects one.
-3. **This needs a refusal at the authoring boundary.** If a namespace has a classified column and
+3. **This needs a refusal at the authoring boundary.** If a database has a classified column and
    something asks for `REPLICA IDENTITY FULL` on that table, the migration service must refuse with a
    reason - PostgreSQL will not, and the creator will learn about it when their writes stop.
 
@@ -710,17 +757,17 @@ Two facts fall out, and the second is the one that decides the design:
 
 ### 5.3 The decisions
 
-- **Slot per (datastore, worker), not per namespace.** Slots replicate decode work, they do not
+- **Slot per (datastore, worker), not per database.** Slots replicate decode work, they do not
   partition it: five slots decoding the same 40,002 changes cost 1,335 ms against 309 ms for one
   (`docs/proposals/2026-08-26-runtime-db-binding-00-index.md:291-301`, with the PostgreSQL sources
   checked in REL_16 and REL_18 to confirm no output-plugin filter runs before decode). One slot,
   fanned out in-process.
-- **Publication per namespace**, membership = non-`__zeroship_` tables in `ns_<N>`.
+- **Publication per database**, membership = non-`__zeroship_` tables in `db_<N>`.
   `crates/zeroship-migrate-server/src/publication.rs:19` already filters `WHERE n.nspname = $1`; only
   the key changes. This fixes the defect where two apps in one database each
   `ALTER PUBLICATION ... SET TABLE` (`publication.rs:46`) the other's members away and the removed
   tenant's live queries silently stop updating.
-- **The published column set per table is the INTERSECTION over every grant on the namespace, and
+- **The published column set per table is the INTERSECTION over every grant on the database, and
   the plaintext parent of any column with `classification != none` is never published to anyone.**
   This follows directly from 5.2: one column set per table, and the shared stream serves the weakest
   reader.
@@ -735,7 +782,7 @@ Two facts fall out, and the second is the one that decides the design:
   publish the plaintext.
 - **The filter becomes a fan-out.** `if rel.namespace != self.app_id { return; }`
   (`crates/zeroship-plugin-db/src/wal_consumer.rs:605`) becomes a lookup of `rel.namespace` in the
-  worker's namespace-to-grant-holders map, delivering to each app holding a read grant. The broker's
+  worker's database-to-grant-holders map, delivering to each app holding a read grant. The broker's
   `(app_id, collection)` routing table is unchanged in shape.
   `crates/zeroship-plugin-db/src/wal_consumer.rs:383-384` already passes a single-element
   `publication_names`, so the wire shape does not change.
@@ -743,12 +790,12 @@ Two facts fall out, and the second is the one that decides the design:
 **The two costs, both named.**
 
 1. **The owner loses plaintext reactivity on classified columns.** A subscription never carries the
-   plaintext parent, for anybody, including the app that owns the namespace. Reads still do. This is
+   plaintext parent, for anybody, including the app that owns the database. Reads still do. This is
    the price of one shared decode stream, and it is the correct price: CDC is the one path where no
    executor-side check runs, so it must be fenced by what is *not sent* rather than by who is asking.
 2. **Revocation lags on the subscription path.** Delivery is fenced by an in-process map, so a revoked
    reader keeps receiving events for up to one binding-refresh interval, where revocation on the query
-   path is immediate at the next transaction. Making it stronger costs one slot per namespace and the
+   path is immediate at the next transaction. Making it stronger costs one slot per database and the
    measured 4.32x. The lag is taken.
 
 Separately, the epoch marker `pg_logical_emit_message` is forgeable. Verified on 18.4: two
@@ -760,8 +807,8 @@ cross-tenant trust edge rather than a single-tenant footnote (open question O4).
 
 ## 6. What fences a stale binding
 
-**Nothing app-keyed, and no incarnation token.** A handle points at a namespace, so the question
-before a query is "does this app still hold a live grant to this namespace" - authorization, not
+**Nothing app-keyed, and no incarnation token.** A handle points at a database, so the question
+before a query is "does this app still hold a live grant to this database" - authorization, not
 identity. Role membership answers it, in the database, where the worker cannot forge it.
 
 Measured on 18.4, on one held connection with the backend pid printed on both sides of the revoke:
@@ -769,10 +816,10 @@ Measured on 18.4, on one held connection with the backend pid printed on both si
 | Step | Result |
 | --- | --- |
 | `pg_backend_pid()` | 188 |
-| `BEGIN; SET LOCAL ROLE zs_ns_t_rw; SELECT ...; COMMIT` | 1 row |
-| second connection: `REVOKE zs_ns_t_rw FROM zs_app_t` | `REVOKE ROLE` |
+| `BEGIN; SET LOCAL ROLE zs_db_t_rw; SELECT ...; COMMIT` | 1 row |
+| second connection: `REVOKE zs_db_t_rw FROM zs_app_t` | `REVOKE ROLE` |
 | `pg_backend_pid()` | **188** - same backend, no reconnect |
-| `BEGIN; SET LOCAL ROLE zs_ns_t_rw` | `ERROR: 42501 permission denied to set role "zs_ns_t_rw"` |
+| `BEGIN; SET LOCAL ROLE zs_db_t_rw` | `ERROR: 42501 permission denied to set role "zs_db_t_rw"` |
 
 No cache, no isolate eviction, no version poll, no incarnation token. The grant is a database object;
 a revoked grant stops working because PostgreSQL says so. Re-granting restores access on the same
@@ -784,7 +831,7 @@ UUIDv7 and never reused (`crates/zeroship-core/src/typed_id.rs`).
 
 | Session runs as | REVOKE lands while a transaction is open | Bound |
 | --- | --- | --- |
-| the narrowed namespace role (`SET LOCAL ROLE zs_ns_t_rw`) | the in-flight transaction **continues** - the assumed role holds the schema privilege directly | one in-flight transaction |
+| the narrowed database role (`SET LOCAL ROLE zs_db_t_rw`) | the in-flight transaction **continues** - the assumed role holds the schema privilege directly | one in-flight transaction |
 | the app principal, inheriting (`SET LOCAL ROLE zs_app_t`) | the very next statement fails `42501 permission denied for schema ns_t` | one statement |
 
 This design runs as the narrowed role, so the bound is **one in-flight transaction**, capped by the
@@ -820,15 +867,15 @@ at `:297`), the root is process-wide and scoped only by `key_id`
 wire version, collection, column and pk and **nothing namespacing**
 (`crates/zeroship-plugin-db/src/encryption/aad.rs:75-98`). It fails in opposite directions on the two
 new axes: co-grant-holders derive different keys and get an AEAD failure on data they are entitled to
-read; one app across two namespaces derives one key with no namespace in the AAD, so a ciphertext for
-`(users, ssn, usr_01)` lifted from one namespace verifies in the other - the exact relocation oracle
+read; one app across two databases derives one key with no database in the AAD, so a ciphertext for
+`(users, ssn, usr_01)` lifted from one database verifies in the other - the exact relocation oracle
 `row_pk` binding exists to stop, reopened one level up.
 
-**Salt on the namespace, AAD binds the namespace, wire version `0x02`:**
+**Salt on the database, AAD binds the database, wire version `0x02`:**
 
 ```
-derive_key(root, namespace_id)
-canonical_aad(WIRE_VERSION_V2, namespace_id, collection, column, row_pk)
+derive_key(root, database_id)
+canonical_aad(WIRE_VERSION_V2, database_id, collection, column, row_pk)
 ```
 
 `aad.rs:87-93` already says the version MUST become a parameter when `0x02` ships and that binding it
@@ -889,15 +936,15 @@ per-membership inherit option does not exist.
 
 First, encryption stops fencing co-grant-holders. The `app_id` salt today means a co-tenant physically
 cannot decrypt; that is a fail-closed accident of a mechanism built for cross-tenant *replay*, and it
-fences the owner out of the co-tenant's rows symmetrically. Under a namespace salt, anyone holding a
-grant on the namespace can decrypt. **If a column must be readable by the owner only, that is a
+fences the owner out of the co-tenant's rows symmetrically. Under a database salt, anyone holding a
+grant on the database can decrypt. **If a column must be readable by the owner only, that is a
 column-level GRANT** (2.4) - and, on the subscription path, a column the publication does not carry
 (5.3). Encryption becomes purely at-rest, which is what it should have been. The remedy is stated in
 both places precisely because the CDC path does not honour the first one.
 
 Second, ordering. Changing the salt changes every derived key; changing the AAD changes every tag.
 Neither is a rename; both are re-encrypt-everything. Pre-launch there is nothing to re-encrypt, so
-**this lands in the same change that makes namespace ids exist**, not after.
+**this lands in the same change that makes database ids exist**, not after.
 
 ---
 
@@ -906,21 +953,21 @@ Neither is a rename; both are re-encrypt-everything. Pre-launch there is nothing
 **Op counts stay keyed on the app and are NOT re-keyed.** `db_reads` / `db_writes` /
 `db_rows_written` are emitted against the server-injected app id at the op boundary
 (`crates/zeroship-plugin-db/src/exec.rs:71-73`, `:84`), and the app that issued the op consumed the
-compute regardless of which namespace it landed in. A mechanical `app_id -> namespace_id` sweep would
+compute regardless of which database it landed in. A mechanical `app_id -> database_id` sweep would
 break this and must exclude these by name.
 
-**The namespace is a dimension, not a key - and the dimension has no producer today.**
+**The database is a dimension, not a key - and the dimension has no producer today.**
 `UsageEvent.dims: BTreeMap<String, String>` exists on the wire type
 (`crates/zeroship-core/src/usage_event.rs:37`) and is constructed empty at drain
 (`crates/zeroship-metering/src/meter.rs:302`). It is empty because the counter carries nothing to put
 in it: `Meter::increment(&self, app_id, metric, n)` keys `(app_id, metric)`
 (`meter.rs:144`, `:195`) and `MeterHandle::record(&self, metric, n)` takes no third axis
 (`crates/zeroship-metering/src/lib.rs:80`). Populating `dims` means re-keying `AppCounters` to carry a
-namespace. That is metering-core work, not filling in an existing field, and it must be scheduled as
-such. Folding the namespace into the metric *name* is closed: `zeroship.billing_metrics` is PK'd on
+database. That is metering-core work, not filling in an existing field, and it must be scheduled as
+such. Folding the database into the metric *name* is closed: `zeroship.billing_metrics` is PK'd on
 `metric` alone and metric names are cluster-global.
 
-The aggregate PK stays `(app_id, period, metric)`, so the namespace dimension is observable and
+The aggregate PK stays `(app_id, period, metric)`, so the database dimension is observable and
 auditable but does not reach the spend engine. That is deliberate: spend is an app-level control.
 
 **A producer that measures the resource is required, and it needs a home.** Today `db_reads` counts
@@ -929,8 +976,8 @@ any relation-size function in production code. Op counts proxy cost only while e
 app's database are the same object. Decouple them and two apps post identical `db_reads` while one
 holds 400 GB and the other 40 MB. The worker cannot fix this - it only knows its own ops.
 
-The design needs a per-namespace `db_bytes_stored` (summed `pg_total_relation_size`) and a
-per-datastore `db_wal_retained_bytes`, attributed to the namespace's **owner** app. In this tree the
+The design needs a per-database `db_bytes_stored` (summed `pg_total_relation_size`) and a
+per-datastore `db_wal_retained_bytes`, attributed to the database's **owner** app. In this tree the
 process holding the privileged replication connection *is* the worker
 (`change_stream_pg.rs:184` + `db_posture.rs:34-37`), and there is no CDC relay crate. So this producer
 is a new privileged service, not a free rider on an existing one, and it must be costed as one. It is
@@ -948,7 +995,7 @@ open question O3 and it does not block the isolation work.
   there is not one meter call in `subscription.rs`, `wal_consumer.rs` or `change_stream_pg.rs`. A
   logical slot retains WAL for the **whole database**, so an abandoned subscription pins WAL generated
   by every co-tenant with nothing billing it. Meter `db_subscription_seconds` per open subscription,
-  and bill retained WAL to the namespace owner.
+  and bill retained WAL to the database owner.
 
 **Spend enforcement stays app-keyed and request-shaped.** Throttling an app's requests does stop the
 db work it issues, because every op rides a dispatch. What it cannot do is protect a shared datastore
@@ -1022,7 +1069,7 @@ The plugin constraint that motivated the binding level is also moot: a second pl
 `db` namespace panics by design (`crates/zeroship-runtime/src/core/plugin.rs:191-193`), but one
 database per app means one plugin, one binding, no contention.
 
-`DbBinding` gains a third field, `namespace_id` (`crates/zeroship-plugin-db/src/binding.rs:14-18`). It
+`DbBinding` gains a third field, `database_id` (`crates/zeroship-plugin-db/src/binding.rs:14-18`). It
 is already `Clone + Eq + Hash`, already minted once per isolate from live state, and already the key
 for the descriptor store (`crates/zeroship-plugin-db/src/context.rs:616-623`), so threading it is
 mechanical. Deciding what goes in the field is section 2; the type change is cheap.
@@ -1055,7 +1102,7 @@ an exhaustion vector. A prepared transaction is that vector with the timeout rem
 
 Consequences, mechanical: `tx_conns` (`:188`), `tx_claims` (`:207`), `tx_waiters` (`:218`),
 `savepoint_depths` (`:236`), `savepoint_emit_marks` (`:251`) and `pending_emits` (`:271`) re-key from
-`app_id` to `(app_id, namespace_id)`. `TxRoute` carries `namespace_id` and `in_tx` stays a bool
+`app_id` to `(app_id, database_id)`. `TxRoute` carries `database_id` and `in_tx` stays a bool
 because it is now binding-scoped (`crates/zeroship-plugin-db/src/tx_route.rs:73-78`).
 
 **The continuation slot carries the composite key, and the composite key includes the app id.**
@@ -1064,7 +1111,7 @@ because it is now binding-scoped (`crates/zeroship-plugin-db/src/tx_route.rs:73-
 incidental: a co-resident app's callback plants ITS app_id in the continuation slot, so the comparison
 below fails and this app routes to its own pool connection". Binding names are unique per app, not
 globally - two co-resident apps both using `main` must not compare equal. The planted key is
-`(app_id, namespace_id)` and never the binding name. `TxRoute` has one production constructor taking
+`(app_id, database_id)` and never the binding name. `TxRoute` has one production constructor taking
 `&mut v8::PinScope`, so no dispatch site can be missed and the compiler enforces the fix.
 
 ---
@@ -1075,21 +1122,21 @@ globally - two co-resident apps both using `main` must not compare equal. The pl
 (`crates/zeroship-plugin-db/src/drop_namespace.rs:161`, `:169-174`) becomes two operations.
 
 **Delete an app:**
-1. `REVOKE "zs_ns_<N>_*" FROM "zs_app_<A>"` for every grant A holds. For a non-owner this is the
+1. `REVOKE "zs_db_<N>_*" FROM "zs_app_<A>"` for every grant A holds. For a non-owner this is the
    complete teardown - no data destroyed, instant.
 2. `DROP ROLE "zs_app_<A>"`.
-3. For each namespace A **owns**: refuse the delete with a 409 naming the holders if any other app
+3. For each database A **owns**: refuse the delete with a 409 naming the holders if any other app
    holds a live grant. **No cascade. No silent destruction of a co-tenant's data.**
 
-**Delete a namespace** (only when its grant set is empty): the existing five-step ordering survives
-verbatim per namespace (`drop_namespace.rs:25-26` and the module doc) - subscription gate, broker
-drain, consumer cancel, slot teardown, then `DROP SCHEMA ns_<N> CASCADE`, then
-`DROP ROLE zs_ns_<N>_{mig,rw,ro}`.
+**Delete a database** (only when its grant set is empty): the existing five-step ordering survives
+verbatim per database (`drop_namespace.rs:25-26` and the module doc) - subscription gate, broker
+drain, consumer cancel, slot teardown, then `DROP SCHEMA db_<N> CASCADE`, then
+`DROP ROLE zs_db_<N>_{mig,rw,ro}`.
 
 The workflow journal schema `app_<uuid>`
 (`crates/zeroship-migrate-server/src/provisioning.rs:216-217`, duplicated deliberately at
 `crates/zeroship-plugin-workflow/src/store/pg.rs:112-114`) **stays app-keyed** - a workflow run is app
-state, not namespace state. But it lives in a physical database, and under multi-namespace that stops
+state, not database state. But it lives in a physical database, and under multi-database that stops
 being a single answer. **The journal lives in the datastore of the app's binding named `main`**, which
 is required to exist. Hoisting it to a platform datastore is cleaner but makes every workflow step a
 cross-database write, and the two derivations that no compiler keeps in sync would both change anyway.
@@ -1098,11 +1145,11 @@ cross-database write, and the two derivations that no compiler keeps in sync wou
 
 ## 12. SQLite dev tier
 
-One file per namespace, `zs-ns-<nsid>.sqlite`, ATTACHed under alias `ns_<nsid>`. The existing
+One file per database, `zs-ns-<dbsid>.sqlite`, ATTACHed under alias `db_<dbsid>`. The existing
 `attach_app_file` (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:751`) already *is* a
 per-database handle under a different name - `zs-<app_id>.sqlite` attached under the app id, with an
 `app_id_cache` dedup set because SQLite errors on a duplicate alias (`:115-117`). The dedup key becomes
-the namespace id.
+the database id.
 
 Two fidelity gaps, both real and both written into `docs/reference/sqlite-divergences.md` rather than
 discovered:
@@ -1110,17 +1157,17 @@ discovered:
 - **Grants are not enforceable.** SQLite has no roles and no column ACLs. The dev tier's grant fence
   is the Rust resolution layer only; PostgreSQL's is the catalog. This is the same posture masking
   already has on both tiers.
-- **One writer per file.** Two apps sharing a namespace contend for a single writer lock that
-  PostgreSQL would not impose, so a shared namespace behaves *worse* in dev than in production - the
+- **One writer per file.** Two apps sharing a database contend for a single writer lock that
+  PostgreSQL would not impose, so a shared database behaves *worse* in dev than in production - the
   inverse of the usual direction, and the one that gets filed as a bug.
 
 The cross-app FK validator in `crates/zeroship-plugin-db/src/cross_app_fk.rs` is dead code - its own
 header says "THIS VALIDATOR HAS NO PRODUCTION CALL SITE" and its only caller is
 `cfg(any(test, feature = "test-helpers"))` (`:20-30`) - and is **deleted, not updated**. The live rule
 is `reject_cross_app_ref` in the engine plus schema-qualified REFERENCES rendering, restated as **"a
-foreign key stays inside one namespace"**. That is a different predicate on a different input, and the
+foreign key stays inside one database"**. That is a different predicate on a different input, and the
 current one is wrong in both directions: it blanket-refuses cross-schema refs that a shared datastore
-makes legal, and it permits same-app refs that cross a namespace boundary and cannot exist.
+makes legal, and it permits same-app refs that cross a database boundary and cannot exist.
 
 ---
 
@@ -1130,7 +1177,7 @@ makes legal, and it permits same-app refs that cross a namespace boundary and ca
    on the subscription path.** Bought with the 4.32x decode measurement.
 2. **Classified columns lose plaintext reactivity for everyone, including the owner.** One published
    column set per table per decode stream is a PostgreSQL constraint, not a choice.
-3. **A namespace owner's migration can break a co-tenant's deploy.** The reader's deploy gate checks
+3. **A database owner's migration can break a co-tenant's deploy.** The reader's deploy gate checks
    the owner's applied descriptor hash. The owner ships a migration; every reader's next deploy fails
    until it rebuilds. There is no way around it that does not weaken the ordering guarantee the
    masking story rests on.
@@ -1138,13 +1185,13 @@ makes legal, and it permits same-app refs that cross a namespace boundary and ca
    `examples/starter/` and `tests/golden_path.sh` change together.
 5. **Blanket table grants and prospective default privileges are deleted.** Every apply regenerates
    explicit per-column grants inside the DDL transaction. A migration that fails to regenerate them
-   leaves the namespace unreadable rather than over-readable, which is the right failure direction and
+   leaves the database unreadable rather than over-readable, which is the right failure direction and
    is still a failure.
-6. **One app with three namespaces means three applies, three journals, three publications, three
+6. **One app with three databases means three applies, three journals, three publications, three
    provisioning runs.** A migration request that is one unit today becomes N, and the deploy blocks on
    all N. Partial success has no representation in `schema_apply_store`'s two terminal states and needs
    a third.
-7. **Role count grows roughly 4x** on a shared cluster (apps x 1 + namespaces x 3, versus apps x 1
+7. **Role count grows roughly 4x** on a shared cluster (apps x 1 + databases x 3, versus apps x 1
    today). Roles are cluster-global and per-backend membership caching scales with `pg_auth_members`.
    Unmeasured; not estimated.
 8. **The `SET LOCAL ROLE` change is invisible to every existing test.** Nothing today fails if the
@@ -1158,14 +1205,14 @@ makes legal, and it permits same-app refs that cross a namespace boundary and ca
    `inherit_option` arm, and a partial pass would serve some apps and 500 others behind a security
    gate that half-ran. Refuse to boot. An availability regression traded for a boundary.
 10. **Metering-core work that looks free and is not.** `dims` is a wire field with no counter behind
-    it; adding the namespace dimension re-keys `AppCounters`.
+    it; adding the database dimension re-keys `AppCounters`.
 11. **A per-datastore admission control does not exist.** Spend limits throttle an app's requests;
     they cannot protect a shared datastore from an app under its limit. New policy surface, out of
     scope, and a real gap the moment a datastore is shared.
 
 **What sharing buys, stated honestly.** A shared datastore amortizes connections, CDC decode and
-provisioning. A shared namespace buys cross-app joins, cross-app foreign keys and shared reads.
-**Neither buys shared schema evolution.** One migrating owner per namespace means three sibling apps
+provisioning. A shared database buys cross-app joins, cross-app foreign keys and shared reads.
+**Neither buys shared schema evolution.** One migrating owner per database means three sibling apps
 that all want to add a column to a shared `users` table have one permanent schema authority and two
 permanently downstream readers; the natural workaround (a fourth schema-owner app that ships only
 migrations) is a fiction the creator maintains, and it puts three apps' deploy gate behind a fourth
@@ -1196,7 +1243,7 @@ for the whole JS callback, which is the shape that defeats both. *Blocks:* publi
 revocation-lag guarantee. Does not block the mechanism.
 
 **O3. Who runs the resource-measuring producer?**
-Per-namespace `db_bytes_stored` and per-datastore `db_wal_retained_bytes` need a privileged connection
+Per-database `db_bytes_stored` and per-datastore `db_wal_retained_bytes` need a privileged connection
 in a process that does not execute creator code. Today the process holding the replication connection
 is the worker (`change_stream_pg.rs:184`), and there is no CDC relay crate. *Blocks:* fair billing on
 a shared datastore. Does not block isolation.
@@ -1248,8 +1295,8 @@ for the purpose - roles are cluster-global objects, so this must never be run ag
 > | 9 | **False.** `AuthorityIdentity` carries an incarnation and ships. |
 
 1. `SET ROLE` resolves membership transitively, so a session narrows directly to
-   `zs_ns_<N>_<cap>` without assuming the app principal, and the narrowed role cannot reach a sibling
-   namespace (`permission denied for schema`). Per-statement confinement costs one statement.
+   `zs_db_<N>_<cap>` without assuming the app principal, and the narrowed role cannot reach a sibling
+   database (`permission denied for schema`). Per-statement confinement costs one statement.
    **QUALIFIED:** transitivity resolves against the **login** role's closure, which under co-tenancy
    is the union of every app the worker serves - so this is the mechanism that breaks item 3, not an
    independent guarantee. And `SET ROLE` is a *lateral* move within that closure, never a narrowing:
@@ -1277,7 +1324,7 @@ for the purpose - roles are cluster-global objects, so this must never be run ag
    but the *concept* ships: `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:28`
    defines `AuthorityIdentity` carrying `incarnation: u64` (`:35`), built by the SC-1 reducer and
    surrounded by the crate's 679 lib tests. It is deliberately opaque - compared only for equality,
-   with `for_app` named for today's axis - so re-keying it onto a namespace or a grant is a change at
+   with `for_app` named for today's axis - so re-keying it onto a database or a grant is a change at
    construction sites, not a redesign. **But "nothing is at stake" is wrong**: an identity type,
    its comparison order and its terminal-denial semantics exist and are tested, and any change to the
    axis must keep the classifier's identity-before-lifecycle order intact. Grepping for a name is not
@@ -1299,10 +1346,10 @@ for the purpose - roles are cluster-global objects, so this must never be run ag
   built for this: `crates/zeroship-plugin-db/src/exec.rs:301-311` runs the role and timeout guards via
   `SET LOCAL` inside an explicit transaction so they auto-revert at COMMIT and at the implicit
   ROLLBACK on drop, covering "a setup error, a query error, OR a cancellation between setup and the
-  would-be reset". That reasoning does not change when the role names a namespace instead of an app,
+  would-be reset". That reasoning does not change when the role names a database instead of an app,
   but the residue it prevents does: a leaked role today is one app's own schema, and under
   many-to-many it is a co-tenant's. Needs a test that checks out, narrows, cancels mid-flight, and
-  asserts the next checkout cannot reach the first namespace. Unverified against a narrowed role.
+  asserts the next checkout cannot reach the first database. Unverified against a narrowed role.
 - **Section 3's refusal is a decision, not a finding.** Cross-creator table sharing is out of scope
   for this design. If the operator wants it, O1 must be answered first and the answer changes what
   the migration service owns.
