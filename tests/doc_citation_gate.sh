@@ -83,41 +83,64 @@ gate_arm agents_md_paths "$agents_examined" 40 || FAILED=1
 # inside the file. A past-EOF citation is the quieter half: the path looks
 # right, so a reader who does not open it believes the claim is anchored.
 # ---------------------------------------------------------------------------
-cites_examined=0
-cites_bad=0
-for f in docs/proposals/2026-08-26-*.md; do
-  [ -f "$f" ] || continue
-  # `tsx`/`jsx` come FIRST so the longer extension wins the alternation. Listing
-  # `ts` first truncates `Foo.tsx:12` to `Foo.ts`, which then fails to match the
-  # `:line` and is silently SKIPPED - a blind spot, not a false alarm, and the
-  # quieter of the two failure modes. The same truncation in a measurement script
-  # invented 143 missing paths under sdks/ui that were never wrong.
-  for cite in $(grep -oE '(crates|libs|sdks|tests|db)/[A-Za-z0-9_./-]+\.(tsx|jsx|mjs|cjs|rs|ts|js|sh|toml):[0-9]+' "$f" \
-                | sort -u); do
-    path="${cite%%:*}"
-    line="${cite##*:}"
-    cites_examined=$((cites_examined + 1))
 
-    # A citation whose own line says DELETED is stating history on purpose.
-    if grep -F "$cite" "$f" | grep -q 'DELETED'; then
-      continue
-    fi
+# Sets `cites_examined` and `cites_bad` for the documents passed in.
+#
+# `tsx`/`jsx` come FIRST so the longer extension wins the alternation. Listing
+# `ts` first truncates `Foo.tsx:12` to `Foo.ts`, which then fails to match the
+# `:line` and is silently SKIPPED - a blind spot, not a false alarm, and the
+# quieter of the two failure modes. The same truncation in a measurement script
+# invented 143 missing paths under sdks/ui that were never wrong.
+check_citations() {
+  cites_examined=0
+  cites_bad=0
+  local f cite path line eof
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    for cite in $(grep -oE '(crates|libs|sdks|tests|db)/[A-Za-z0-9_./-]+\.(tsx|jsx|mjs|cjs|rs|ts|js|sh|toml):[0-9]+' "$f" \
+                  | sort -u); do
+      path="${cite%%:*}"
+      line="${cite##*:}"
+      cites_examined=$((cites_examined + 1))
 
-    if [ ! -f "$path" ]; then
-      echo "$f cites a file that does not exist: $cite" >&2
-      echo "  (if the file was deleted on purpose, say DELETED on that line)" >&2
-      cites_bad=$((cites_bad + 1))
-      continue
-    fi
-    eof=$(wc -l < "$path")
-    if [ "$line" -gt "$eof" ]; then
-      echo "$f cites $cite but that file has only $eof lines" >&2
-      cites_bad=$((cites_bad + 1))
-    fi
+      # A citation whose own line says DELETED is stating history on purpose.
+      if grep -F "$cite" "$f" | grep -q 'DELETED'; then
+        continue
+      fi
+
+      if [ ! -f "$path" ]; then
+        echo "$f cites a file that does not exist: $cite" >&2
+        echo "  (if the file was deleted on purpose, say DELETED on that line)" >&2
+        cites_bad=$((cites_bad + 1))
+        continue
+      fi
+      eof=$(wc -l < "$path")
+      if [ "$line" -gt "$eof" ]; then
+        echo "$f cites $cite but that file has only $eof lines" >&2
+        cites_bad=$((cites_bad + 1))
+      fi
+    done
   done
-done
+}
+
+check_citations docs/proposals/2026-08-26-*.md
 gate_arm proposal_citations "$cites_examined" 60 || FAILED=1
 [ "$cites_bad" -eq 0 ] || FAILED=1
+proposal_cites=$cites_examined
+
+# ---------------------------------------------------------------------------
+# Arm 3 - docs/reference, the stable-contract set AGENTS.md sends readers to.
+# It reached zero broken paths on 2026-08-29 and nothing was stopping it drifting
+# back; every one of its 15 citations had pointed into `third_party/zero-migrate/`
+# for as long as the engine had been in-sourced out of it. The floor is low on
+# purpose - this arm exists to catch a BROKEN citation, and a reference doc that
+# legitimately loses citations should not redden it.
+# ---------------------------------------------------------------------------
+check_citations docs/reference/*.md
+gate_arm reference_citations "$cites_examined" 5 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+reference_cites=$cites_examined
+cites_examined=$proposal_cites
 
 gate_arms_finish || FAILED=1
 
@@ -127,4 +150,4 @@ if [ "$FAILED" -ne 0 ]; then
   exit 1
 fi
 
-echo "doc citations: $agents_examined AGENTS.md paths, $cites_examined proposal citations, all resolve"
+echo "doc citations: $agents_examined AGENTS.md paths, $proposal_cites proposal citations, $reference_cites reference citations, all resolve"
