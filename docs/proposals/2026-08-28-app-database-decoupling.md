@@ -49,10 +49,46 @@ membership is what the check reads. **So revocation is fenced by the in-process 
 nothing else** - which is exactly the property this section opens by disclaiming ("Enforcement is
 PostgreSQL role membership, not an in-process check").
 
-**AND THERE IS A FIX THAT COSTS NO CONNECTIONS. Measured on 17.11.** The failure above happens
-because the worker holds a **direct** membership in the namespace role, so revoking the *app's*
-membership severs an edge the worker never used. Interpose the app role and make it the worker's
-only path:
+**AN EARLIER VERSION OF THIS SECTION CLAIMED INTERPOSING AN APP ROLE FIXES IT. THAT WAS MEASURED ON
+A ONE-APP TOPOLOGY AND IS FALSE UNDER CO-TENANCY.** Recorded because the error is instructive:
+
+| topology | after `REVOKE zs_ns_1_rw FROM zs_app_a` |
+| --- | --- |
+| worker serves **one** app | `permission denied to set role` - appears to work |
+| worker serves **two** apps, both holding the namespace role | **1 row, unchanged** |
+| control: revoke the second app's edge too, emptying the closure | `permission denied to set role` |
+
+**`SET ROLE` authorizes against the transitive closure of the LOGIN role's memberships**, which under
+co-tenancy is the union of every app hub the worker serves. Revoking one edge is invisible while a
+parallel edge exists, and the closure is only empty when *no* app on that worker holds the role. Two
+hops buy nothing one hop does not; transitivity is why, not a workaround for it.
+
+Two further measurements on 17.11 close the neighbouring doors:
+
+- **Cross-app reach is open today.** A worker serving app A (ns_1) and app B (ns_2), dispatching for
+  A, ran `SET ROLE zs_ns_2_rw; SELECT FROM ns_2.t` and got a row. PostgreSQL cannot tell which app is
+  dispatching.
+- **Nesting does not narrow.** `SET ROLE zs_app_a` then `SET ROLE zs_ns_2_rw` succeeds - the check is
+  against `session_user`, not `current_user`, so `SET ROLE` is a **lateral move inside the closure**,
+  never a one-way narrowing. Any design that assumes narrowing composes is wrong.
+- `SET SESSION AUTHORIZATION` as the non-superuser worker is denied, so the cheap "re-point
+  `session_user` per checkout" variant does not exist.
+
+**What does work: assume the app hub, not the namespace role.** Keep one login and one
+`SET LOCAL ROLE`, but issue `SET LOCAL ROLE "zs_app_<A>"` and let the hub hold the namespace
+memberships *inheriting*. The privilege the session executes under is then derived from the hub's
+memberships and nothing else, so revoking the hub's edge bites at **the very next statement** -
+measured on one held backend, same pid, including mid-transaction, with a co-tenant unaffected
+throughout. Column grants still reach through the hub by inheritance, so grants stay
+O(namespaces) rather than O(namespaces x apps).
+
+Its cost is a real inversion, not a free win: **per-statement confinement widens from one namespace
+to the app's whole namespace set.** The design as written buys exact confinement and pays revocation
+lag; this buys next-statement revocation and pays confinement breadth. The residual is the one
+section 2.2 already prices - a wrong resolution reaches another of the *same app's* namespaces.
+
+The superseded reasoning follows, kept because the shape it describes is still the one to build; only
+the claim that it fixes revocation was wrong.
 
 ```
 zs_worker --(WITH INHERIT FALSE)--> zs_app_<id> --> zs_ns_<n>_<cap>
