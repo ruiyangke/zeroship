@@ -573,8 +573,8 @@ pub fn mask_sibling_column_for_field(field: &str, def: &serde_json::Value) -> Op
 ///
 /// Reused by both backend introspectors (PG `COMMENT ON COLUMN` write
 /// + SQLite inline-comment parse on read) - keeps the wire shape
-/// consistent. The parser side lives in
-/// [`crate::mask_codec::parse_mask_sentinel`].
+///   consistent. The parser side lives in
+///   [`crate::mask_codec::parse_mask_sentinel`].
 pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind_str = mask_meta
