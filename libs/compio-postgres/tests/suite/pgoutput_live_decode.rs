@@ -156,7 +156,9 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
         // Commit run rather than four transactions.
         let messages = decoded_stream(&slot, &publication).await;
 
-        common::drop_replication_slot(&setup, &slot).await;
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
             .batch_execute(&format!(
                 "DROP PUBLICATION IF EXISTS \"{publication}\";
@@ -331,7 +333,9 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
 
         let messages = decoded_stream(&slot, &publication).await;
 
-        common::drop_replication_slot(&setup, &slot).await;
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
             .batch_execute(&format!(
                 "DROP PUBLICATION IF EXISTS \"{publication}\";
@@ -411,7 +415,9 @@ async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
 
         let messages = decoded_stream(&slot, &publication).await;
 
-        common::drop_replication_slot(&setup, &slot).await;
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
             .batch_execute(&format!(
                 "DROP PUBLICATION IF EXISTS \"{publication}\";

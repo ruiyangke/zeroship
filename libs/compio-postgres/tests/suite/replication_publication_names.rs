@@ -110,7 +110,9 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 
     let result = read_first_insert(&slot, publication).await;
 
-    common::drop_replication_slot(&setup, &slot).await;
+    common::drop_replication_slot(&setup, &slot)
+        .await
+        .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
     let _ = setup
         .batch_execute(&format!(
             "DROP PUBLICATION IF EXISTS {pub_q};

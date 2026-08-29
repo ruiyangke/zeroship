@@ -118,7 +118,9 @@ impl Fixture {
     }
 
     async fn drop_all(&self) {
-        common::drop_replication_slot(&self.setup, &self.slot).await;
+        common::drop_replication_slot(&self.setup, &self.slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {}: {error}", self.slot));
         let _ = self
             .setup
             .batch_execute(&format!(

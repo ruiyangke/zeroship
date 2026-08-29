@@ -635,7 +635,9 @@ async fn an_unreceived_lsn_is_not_reported_as_flushed() {
         // Cleanup precedes the assertion so the deliberate RED run cannot
         // consume one of the server's finite replication slots.
         drop(stream);
-        common::drop_replication_slot(&setup, &slot).await;
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
         let _ = setup
             .batch_execute(&format!("DROP PUBLICATION IF EXISTS {publication}"))
             .await;
