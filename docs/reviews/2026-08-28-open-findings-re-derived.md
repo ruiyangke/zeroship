@@ -525,3 +525,38 @@ reading the flag list.
 Same discipline as the pooler's `login attempt` delta and chaos 3's
 `max_connections` gate: prove the run reached the thing it claims to measure,
 because a run that reached somewhere else passes just as quietly.
+
+## A statement crossing a pool lease is DELIBERATE, and I nearly filed it as a gap
+
+While reviewing the `Statement` ownership check I noted that a statement
+retained across a lease boundary would pass an `Arc::ptr_eq` on `InnerClient`,
+because a returned session handed to the next borrower is the same physical
+connection - and I flagged it as "a different axis, worth noting".
+
+`pool.rs:1531` answers it directly:
+
+    // ROLLBACK, not `DISCARD ALL`. The transaction is the only thing the
+    // next borrower must not inherit; session state is something callers
+    // are entitled to hand across a release. `DISCARD ALL` would take out
+    // session-scoped advisory locks (crates/plugin-db's LockGuard holds one
+    // on a pooled client), every prepared statement (this driver's own
+    // type-info cache holds those for the life of the Client, so the next
+    // use of a cached entry would fail), and every session GUC. It also
+    // cannot run inside a transaction block at all - the server rejects it
+    // with `25001` - which is precisely the state this code addresses.
+
+So handing session state across a release is the POLICY, with three named
+reasons the alternative is worse, one of which is that the driver's own
+type-info cache would break.
+
+**This confirms the shape of the ownership check being added.** It must key on
+CONNECTION identity - `Arc::ptr_eq` on the `InnerClient` - and NOT on lease
+identity. A check that refused a statement from a previous lease would refuse
+something the pool deliberately permits, and would break the type-info cache the
+comment names.
+
+The pool DOES scope one thing to the lease: a `CancelToken`, because a stale
+token can cancel the next borrower's query
+(`a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower`). A
+statement cannot do harm that way - it names an object that really is prepared
+on that backend. Different hazard, different scoping, both deliberate.
