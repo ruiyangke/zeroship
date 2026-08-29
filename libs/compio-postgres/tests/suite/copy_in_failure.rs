@@ -15,8 +15,10 @@
 use crate::common;
 use bytes::Bytes;
 use common::{suite_tls, test_object_name, test_url};
+use compio_postgres::CopyFormat;
 use compio_postgres::{Client, CopyInSink, Error};
 use futures_util::{Sink, SinkExt};
+use std::fmt::Write as _;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::time::Duration;
@@ -451,4 +453,97 @@ async fn copy_in_waits_for_sync_before_reporting_success() {
     let _ = client
         .batch_execute(&format!("DROP TABLE IF EXISTS {child}, {parent}"))
         .await;
+}
+
+/// COPY response metadata is selected by `PostgreSQL`, independently of the
+/// bytes the caller later supplies. Binary mode makes both assertions
+/// non-vacuous: returning the text default or no column formats must fail.
+#[compio::test]
+async fn copy_in_exposes_the_server_selected_binary_formats() {
+    Box::pin(compio::time::timeout(Duration::from_secs(10), async {
+        let client = connected().await;
+        let table = test_object_name("copy_in_binary_metadata");
+        client
+            .batch_execute(&format!(
+                "CREATE TEMPORARY TABLE {table} (id int4, payload text)"
+            ))
+            .await
+            .expect("create the binary COPY metadata fixture");
+
+        let sink = client
+            .copy_in::<_, Bytes>(&format!("COPY {table} (id, payload) FROM STDIN BINARY"))
+            .await
+            .expect("PostgreSQL accepts binary COPY input");
+        assert_eq!(sink.format(), CopyFormat::Binary);
+        assert_eq!(
+            sink.column_formats(),
+            &[CopyFormat::Binary, CopyFormat::Binary]
+        );
+
+        drop(sink);
+        assert_still_usable(&client, "reading COPY IN response metadata").await;
+    }))
+    .await
+    .expect("binary COPY metadata test exceeded its 10 second deadline");
+}
+
+/// A small item stays in the sink's local buffer. A following item larger
+/// than the buffering threshold must carry that prefix exactly once, rather
+/// than lose it or leave it queued for a duplicate flush at finish.
+#[compio::test]
+async fn a_large_copy_item_preserves_one_buffered_prefix() {
+    Box::pin(compio::time::timeout(Duration::from_secs(10), async {
+        let client = connected().await;
+        let table = test_object_name("copy_in_buffered_prefix");
+        client
+            .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (value int4)"))
+            .await
+            .expect("create the buffered COPY fixture");
+
+        let sink = client
+            .copy_in::<_, Bytes>(&format!("COPY {table} (value) FROM STDIN"))
+            .await
+            .expect("start the buffered COPY");
+        futures_util::pin_mut!(sink);
+        sink.as_mut()
+            .feed(Bytes::from_static(b"-1\n"))
+            .await
+            .expect("buffer the prefix row");
+
+        let mut large_rows = String::new();
+        for value in 0..1_500 {
+            writeln!(&mut large_rows, "{value}").expect("writing to a String cannot fail");
+        }
+        assert!(
+            large_rows.len() > 4_096,
+            "the control item did not cross the sink's large-item threshold"
+        );
+        sink.as_mut()
+            .feed(Bytes::from(large_rows))
+            .await
+            .expect("send the large item after its buffered prefix");
+
+        let copied = sink.as_mut().finish().await.expect("finish the COPY");
+        assert_eq!(copied, 1_501, "COPY lost or duplicated the buffered row");
+
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT count(*)::int8, \
+                     count(*) FILTER (WHERE value = -1)::int8 \
+                     FROM {table}"
+                ),
+                &[],
+            )
+            .await
+            .expect("inspect the copied rows");
+        assert_eq!(row.get::<_, i64>(0), 1_501);
+        assert_eq!(
+            row.get::<_, i64>(1),
+            1,
+            "the buffered sentinel row was not stored exactly once"
+        );
+    }))
+    .await
+    .expect("buffered-prefix COPY test exceeded its 10 second deadline");
 }
