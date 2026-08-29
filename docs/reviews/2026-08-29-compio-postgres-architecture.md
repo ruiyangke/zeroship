@@ -504,3 +504,21 @@ Session arc, all measured rather than carried:
 
 Edges rose then fell while the cycle only shrank, which is the point made
 earlier: edge count is not the health metric, the cycle is.
+
+### The framing refactor verified across every feature shape
+
+`verify.sh` re-run after `bf709efa6`, exit 0:
+
+    default          binaries=5/5 tests=1235 ok
+    statement-cache  binaries=5/5 tests=1236 ok
+    suite-over-tls   binaries=5/5 tests=1259 ok
+    tls_live         binaries=1/1 tests=48 ok
+    rss-growth-rule  ruled_on=9 ok
+    VERIFY: all modes green
+
+This mattered and was nearly skipped. The refactor had already passed 1354/0 on
+both servers, which is ONE feature resolution. `suite-over-tls` routes every
+byte of the suite through the TLS stream instead of a plain socket, and the
+default `cargo test` does not even BUILD it. A buffered-read change is exactly
+the kind that can behave differently there. Passing the default shape twice is
+not evidence about shapes that were never compiled.
