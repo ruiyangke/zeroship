@@ -23,11 +23,20 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 # The napi entrypoints are ONLY reachable when compiled by `napi build` (which
-# defines `napi_build_metadata` / links against the Node ABI). A bare
-# `cargo test` of this crate builds the pure-Rust core + the marshal/session
-# bridge + the mock-apply integration test WITHOUT touching the Node ABI, so the
-# integration suite runs offline without a Node host. `napi` gates the actual
-# N-API entrypoints (`#[napi]` fns, ThreadsafeFunction, JsDeferred).
+# defines `napi_build_metadata` / links against the Node ABI). `napi` gates them
+# (`#[napi]` fns, ThreadsafeFunction, JsDeferred).
+#
+# **A bare `cargo test -p zeroship-migrate-node` DOES NOT WORK**, and an earlier
+# version of this comment said it did. `napi` is a DEFAULT feature, so a bare
+# `cargo test` builds the integration targets with the N-API entrypoints in and
+# fails at LINK - `undefined reference to napi_create_function`, surfacing as
+# `_napi_rs_internal_register_status`. Node ABI symbols resolve only at `.node`
+# dlopen time, so no test binary can link them.
+#
+# The offline path is `--no-default-features`: that builds the pure-Rust core,
+# the marshal/session bridge and the mock-apply integration test without the
+# Node ABI. The napi boundary itself is exercised by `npm test`, through the
+# real `.node`.
 default = ["napi"]
 napi = ["dep:napi", "dep:napi-derive"]
 
