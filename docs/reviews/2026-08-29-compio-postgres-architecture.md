@@ -119,3 +119,55 @@ Then iterate `join` to a transitive closure and take `$1==$2` for cycle
 members. Two properties matter: strip comments (rustdoc links are not
 dependencies), and stop at the first `#[cfg(test)]` (test-only imports are not
 architecture).
+
+## An independent critique, triaged against the code (2026-08-29)
+
+A read-only reviewer was given the sections above and asked for design defects
+NOT in the module graph - invariants held by convention, state machines encoded
+in booleans, the error model, parallel implementations, and cancellation/Drop.
+It returned seven findings. Each was checked against the source before being
+believed; two are less severe than they read, and the reasons are worth keeping.
+
+**1. A failed bare-client cancel can still cancel the next query. CONFIRMED,
+being fixed.** `cancel_query_raw.rs` writes the packet, THEN flushes, shuts
+down, and waits for the postmaster's EOF. If any step after `write_all` fails,
+the caller gets `Err` while the bytes are already gone. The crate documents
+exactly this hazard on `wait_for_server_close` - "a delayed cancel could arrive
+after the main session's `Sync` and cancel that backend's next query" - and
+`CancelAbandonmentGuard` states the asymmetry deliberately: the pool records the
+uncertainty "without changing the ordinary bare-client error path". The fix is
+to separate provably-unsent (DNS, connect, TLS - nothing left the process) from
+possibly-sent (anything at or after the write), and retire only the latter.
+Retiring on EVERY failed cancel would be a worse bug, so that direction needs a
+test too.
+
+**3. `notifications()` is an unbounded queue. REAL BUT ARGUABLY CORRECT.** The
+counter-argument is strong and the reviewer made it: the connection loop cannot
+await a bounded consumer without stalling unrelated protocol progress, and
+silently dropping LISTEN/NOTIFY events breaks the semantics callers rely on.
+The receiver is handed to the CALLER, so the buffer is theirs. What is missing
+is not a bound but a SENTENCE: the method's doc is long and detailed about a
+different known defect (TLS plus the serialized loop) and says nothing about the
+caller's obligation to drain.
+
+**5. `Statement` ownership is stored but never checked. REAL, LOWER SEVERITY
+THAN IT READS.** `StatementInner` holds `client: Weak<InnerClient>` and the type
+says "prepared statements can only be used with the connection that created
+them", but `into_statement` never compares. The obvious fear is a name
+collision executing the WRONG SQL - and that cannot happen here:
+`prepare.rs:81` generates names from a PROCESS-GLOBAL `static NEXT_ID:
+AtomicUsize`, so `s42` is unique across every connection in the process. A
+foreign statement therefore produces a server-side 26000, which this crate
+already handles carefully and tests
+(`statement_cache_requires_server_provenance_before_retrying_26000`). The defect
+is a remote error where a local one would be clearer, not a correctness hole.
+
+Findings 2, 4, 6 and 7 - error identity varying with response-channel
+occupancy, `connect_raw` accepting unrunnable streams, a host-local encoding
+refusal reclassified as fatal, and COPY recovery permitting illegal states -
+are recorded here as open and not yet independently verified.
+
+**The triage matters more than the list.** Two of seven changed severity once
+checked against the source, both because a fact elsewhere in the crate bounded
+the damage: a global counter in one case, existing tested 26000 handling in the
+other. Rank findings after reading what constrains them, not on first reading.
