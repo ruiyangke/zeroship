@@ -541,8 +541,10 @@ creators it is, and no role fixes it.
   against the creator directly with no app indirection. The control-plane forwarding hop re-verifies
   the caller's own bearer and adds no authority, which is already the right posture; only the
   resource type is new.
-  *Open:* whether `Namespace` hangs off a project/workspace row or off the creator account. That
-  is the monorepo config-shape question in section 9 and does not change anything else here.
+  **Resolved 2026-08-29: one `zeroship.jsonc` for the whole workspace.** So a `Namespace` hangs off
+  the **project/workspace** row, not off a bare creator account, and "the apps that share this
+  schema" is a structural fact of the config rather than a convention several files have to agree
+  on. See section 9 for what that costs the project file.
 - **The apply lock moves to the namespace**: `pg_advisory_xact_lock(hashtextextended('ns:' || <nsid>, 0))`,
   taken on the datastore connection before any DDL.
 - **Migrator role is `zs_ns_<nsid>_mig`**, named by no app. One migrator forever, so the ownership
@@ -909,14 +911,38 @@ of scope here, and named in section 12.
 
 ## 9. The creator-facing `env.db` surface
 
+**One `zeroship.jsonc` for the whole workspace** (operator decision, 2026-08-29). The databases are
+declared once, at workspace level; the apps are declared beside them and bind to them by name.
+
 ```jsonc
-// zeroship.jsonc  -- schema/project-v1.json:112-127, `migrations` becomes a map
+// zeroship.jsonc -- ONE file for the workspace
 "databases": {
   "main":      { "migrations": "./db/main",      "out": "./generated/zeroship/main" },
-  "analytics": { "migrations": "./db/analytics", "out": "./generated/zeroship/analytics",
-                 "grant": "readonly" }
+  "analytics": { "migrations": "./db/analytics", "out": "./generated/zeroship/analytics" }
+},
+"apps": {
+  "storefront": { "app": "<uuid>", "databases": { "main": "readwrite" } },
+  "admin":      { "app": "<uuid>", "databases": { "main": "readwrite",
+                                                  "analytics": "readonly" } }
 }
 ```
+
+Declaring the databases ONCE is the point: one migration source and one `out` directory per
+database, shared by every app in the workspace, structurally rather than by convention. Nothing can
+drift two apps onto different generated types from the same migrations, because there is only one
+place the pair is written.
+
+**This is a bigger change to the project file than "`migrations` becomes a map".** Today
+`schema/project-v1.json:30-34` declares `app` as a **single string** - one deploy target per file -
+so the workspace shape requires it to go plural.
+
+**And it collides with a rule that exists for a good reason.** The environments block requires
+`app` and `control` and makes them explicitly NON-inheritable, because "an environment that names a
+control and inherits the root app is exactly the silent cross-targeting this rule exists to
+prevent" (`schema/project-v1.json:66-67`). With N apps, an environment has to name a deploy target
+**per app**, and the anti-cross-targeting property has to survive that. Getting this wrong points a
+production environment at a staging app id, silently, which is precisely the failure the current
+scalar shape was written to make impossible. It is the sharpest open detail in this section.
 
 ```ts
 await env.db.main.users.find({ where: { active: true } });
