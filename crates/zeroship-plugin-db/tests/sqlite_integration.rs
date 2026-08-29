@@ -3407,7 +3407,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             .collect();
 
         let built =
-            build_insert_many_with_dialect(app_id, collection, &docs, SqlDialect::Sqlite)
+            build_insert_many_with_dialect(app_id, collection, &schema, &docs, SqlDialect::Sqlite)
                 .expect("build insertMany");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
@@ -5220,7 +5220,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 //   1. `encrypt_row_on_write` (the encryption-pass helper) against the
 //      SQLite backend -> row carries the base64 ciphertext +
 //      `__zsbin__<col>` marker.
-//   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...)` -> SQL with
+//   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...) &schema,` -> SQL with
 //      bare `$N` placeholder + sentinel-tagged param.
 //   3. `backend.pool_exec(sql, &params)` -> SQLite session strips the
 //      sentinel, base64-decodes, binds BLOB.
@@ -5313,7 +5313,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // bare `$N` placeholder (no `decode(...)::bytea`); the param
         // vector must carry the `__zsbin_blob__:` sentinel prefix on
         // the encrypted ssn value.
-        let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect("app_demo", "users", &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         assert!(
             !bq.sql.contains("decode("),
@@ -5513,7 +5513,13 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
             "ssn": "123-45-6789",
             "ssn_masked": "***-**-6789"
         });
-        let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite).unwrap();
+        // The descriptor entry for the fixture table above. It declares `ssn`
+        // only: `ssn_masked` is a PHYSICAL column the mask pass writes, never a
+        // declared field, so it is on the INSERT column list and not on the
+        // projection - which is the shape this test is about.
+        let schema = serde_json::json!({ "ssn": { "type": "string" } });
+        let bq = build_insert_with_dialect("app_demo", "users", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         assert!(
             bq.sql.contains("\"ssn\"") && bq.sql.contains("\"ssn_masked\""),
             "INSERT must reference both parent + sibling: {}",
@@ -5604,7 +5610,7 @@ fn a_select_serves_the_masked_column_sqlite() {
         doc.as_object_mut()
             .expect("doc object")
             .insert(raw_ssn.clone(), serde_json::json!("123-45-6789"));
-        let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect("app_demo", "users", &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let client = backend
@@ -6472,7 +6478,7 @@ fn unmask_with_auto_actor_returns_plaintext() {
             }
             obj.insert("ssn".to_string(), serde_json::json!("***-**-6789"));
         }
-        let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect(app_id, collection, &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let client = backend
             .acquire_dedicated_client(app_id)
@@ -6799,7 +6805,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             }
             obj.insert("email".to_string(), serde_json::json!("a****@example.com"));
         }
-        let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect(app_id, collection, &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
         let client = backend
             .acquire_dedicated_client(app_id)
@@ -7914,7 +7920,7 @@ fn drift_check_handles_encrypted_column() {
             doc.as_object_mut().unwrap().remove("__zsbin__ssn");
             doc[format!("__zsbin__{raw_col}")] = marker;
         }
-        let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect(app_id, collection, &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert");
         let client = backend
             .acquire_dedicated_client(app_id)
@@ -8650,12 +8656,12 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
             .expect("ensure_app_schema");
 
         // 1. Stand up the table with the 7 system-field columns.
+        let schema = serde_json::json!({
+            "title": {"type": "string", "required": true},
+        });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({
-                "title": {"type": "string", "required": true},
-            }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8701,7 +8707,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         // 3. Build + execute the INSERT. `RETURNING *` returns rows,
         // so route through the dedicated client's `query` path (the
         // pool's `pool_exec` rejects result-bearing statements).
-        let built = build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite)
+        let built = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
@@ -8781,13 +8787,16 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         // SQLite refuses schema-qualified REFERENCES targets, a
         // pre-existing PG-only path this test does not attempt to fix.
         let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // One binding for the table's shape and for the write's projection: the
+        // DDL emitter and the INSERT builder must not read two literals.
+        let schema = serde_json::json!({
+            "title": {"type": "string", "required": true},
+            "authorId": {"type": "ref", "refTarget": "users"},
+        });
         let posts_ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
-            &serde_json::json!({
-                "title": {"type": "string", "required": true},
-                "authorId": {"type": "ref", "refTarget": "users"},
-            }),
+            &schema,
             &FkEmission::Deferred(&empty),
             SqlDialect::Sqlite,
         )
@@ -8829,7 +8838,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             "posts",
             None,
         );
-        let built = build_insert_with_dialect("app_demo", "posts", &post_doc, SqlDialect::Sqlite)
+        let built = build_insert_with_dialect("app_demo", "posts", &schema, &post_doc, SqlDialect::Sqlite)
             .expect("build posts insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
@@ -8883,12 +8892,12 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             .await
             .expect("ensure_app_schema");
 
+        let schema = serde_json::json!({
+            "title": {"type": "string", "required": true},
+        });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({
-                "title": {"type": "string", "required": true},
-            }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8907,7 +8916,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             "title": "original",
         });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.expect("INSERT");
@@ -8923,6 +8932,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         let upd = build_update_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -8969,10 +8979,10 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
+        let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": {"type": "string"} }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8987,7 +8997,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_cas_ok", "title": "v1" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9003,6 +9013,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         let upd = build_update_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -9039,10 +9050,10 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
+        let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": {"type": "string"} }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9057,7 +9068,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_cas_stale", "title": "v1" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9073,6 +9084,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         let upd = build_update_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter,
             &update,
             SqlDialect::Sqlite,
@@ -9110,10 +9122,10 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
+        let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": {"type": "string"} }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9128,7 +9140,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_race", "title": "v0" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9144,6 +9156,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let upd1 = build_update_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter1,
             &update1,
             SqlDialect::Sqlite,
@@ -9160,6 +9173,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let upd2 = build_update_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter2,
             &update2,
             SqlDialect::Sqlite,
@@ -9196,10 +9210,10 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
+        let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": {"type": "string"} }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9214,7 +9228,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_blind", "title": "v0" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9232,6 +9246,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             let upd = build_update_many_with_system_fields(
                 "app_demo",
                 "posts",
+                &schema,
                 &filter,
                 &update,
                 SqlDialect::Sqlite,
@@ -9280,10 +9295,10 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9298,7 +9313,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_sd1", "title": "to be deleted" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9311,6 +9326,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
         let sd = build_soft_delete_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter,
             SqlDialect::Sqlite,
             &ab,
@@ -9348,10 +9364,10 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9366,7 +9382,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_idem", "title": "x" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9379,6 +9395,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
         let sd = build_soft_delete_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &filter,
             SqlDialect::Sqlite,
             &ab,
@@ -9403,10 +9420,10 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9422,7 +9439,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         for id in &["post_alive_a", "post_alive_b", "post_dead"] {
             let doc = serde_json::json!({ "id": id, "title": id });
             let ins =
-                build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+                build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
             let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
             let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
             client.query(&ins.sql, &p).await.unwrap();
@@ -9434,6 +9451,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         let sd = build_soft_delete_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "id": "post_dead" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9488,10 +9506,10 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9506,7 +9524,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_rs", "title": "x" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9518,6 +9536,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         let sd = build_soft_delete_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "id": "post_rs" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9529,6 +9548,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         let rs = build_restore_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "id": "post_rs" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9560,10 +9580,10 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9578,7 +9598,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_live", "title": "x" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9590,6 +9610,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
         let rs = build_restore_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "id": "post_live" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9620,10 +9641,10 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9638,7 +9659,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 
         let doc = serde_json::json!({ "id": "post_lc", "title": "lifecycle" });
         let ins =
-            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9666,6 +9687,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         let sd = build_soft_delete_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "id": "post_lc" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9696,6 +9718,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         let rs = build_restore_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "id": "post_lc" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9728,10 +9751,10 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
+        let schema = serde_json::json!({ "author": { "type": "string" }, "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts",
-            &serde_json::json!({ "author": { "type": "string" }, "title": { "type": "string" } }),
+            "posts", &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9753,7 +9776,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
         ] {
             let doc = serde_json::json!({ "id": id, "author": author, "title": id });
             let ins =
-                build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+                build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
             let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
             let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
             client.query(&ins.sql, &p).await.unwrap();
@@ -9773,6 +9796,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
         let sd = build_soft_delete_many_with_system_fields(
             "app_demo",
             "posts",
+            &schema,
             &serde_json::json!({ "author": "usr_a" }),
             SqlDialect::Sqlite,
             &ab,
@@ -9810,10 +9834,18 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
     use zeroship_plugin_db::query::build_delete_one;
 
-    let q = build_delete_one("app1", "posts", &serde_json::json!({ "id": "x" })).unwrap();
+    let schema = serde_json::json!({ "title": { "type": "string" } });
+    let q = build_delete_one("app1", "posts", &schema, &serde_json::json!({ "id": "x" })).unwrap();
     assert!(q.sql.starts_with("DELETE FROM"));
-    assert!(!q.sql.contains("deleted_at"));
-    assert!(q.sql.contains("RETURNING *"));
+    // A purge is a HARD delete: `deleted_at` must not appear in the SET or the
+    // WHERE. It IS a system field, so the projection names it - scope the
+    // assertion to the statement before `RETURNING`, which is what the test
+    // means and what `contains` over the whole string used to imply only
+    // because that clause was `*`.
+    let body = q.sql.split_once(" RETURNING ").expect("a RETURNING clause").0;
+    assert!(!body.contains("deleted_at"));
+    assert!(!q.sql.contains("RETURNING *"));
+    assert!(q.sql.contains(r#"RETURNING "id""#));
 }
 
 // ---------------------------------------------------------------------------

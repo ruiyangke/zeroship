@@ -806,7 +806,7 @@ pub(crate) fn dispatch_insert<'s>(
             Err(e) => return reject_op(resolver, request_id, e),
         };
         maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-        let built = query::build_insert_with_dialect(&app, &coll, &doc, current_sql_dialect());
+        let built = query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
@@ -885,7 +885,7 @@ pub(crate) fn dispatch_insert_many<'s>(
         maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
 
         let built =
-            query::build_insert_many_with_dialect(&app, &coll, &docs, current_sql_dialect());
+            query::build_insert_many_with_dialect(&app, &coll, &schema, &docs, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
@@ -1082,6 +1082,7 @@ pub(crate) fn dispatch_update_one<'s>(
         let built = query::build_update_one_with_system_fields(
             &app,
             &coll,
+            &schema,
             &sql_filter,
             &update,
             current_sql_dialect(),
@@ -1318,6 +1319,7 @@ pub(crate) fn dispatch_update_many<'s>(
                         query::build_update_one_with_system_fields(
                             &app,
                             &coll,
+                            &schema,
                             &row_filter,
                             &row_update,
                             current_sql_dialect(),
@@ -1386,6 +1388,7 @@ pub(crate) fn dispatch_update_many<'s>(
         let built = query::build_update_many_with_system_fields(
             &app,
             &coll,
+            &schema,
             &sql_filter,
             &update,
             current_sql_dialect(),
@@ -1478,6 +1481,7 @@ pub(crate) fn dispatch_delete_one<'s>(
         query::build_soft_delete_one_with_system_fields(
             &app,
             &coll,
+            &schema,
             &filter,
             current_sql_dialect(),
             &autobump,
@@ -1532,6 +1536,7 @@ pub(crate) fn dispatch_delete_many<'s>(
         query::build_soft_delete_many_with_system_fields(
             &app,
             &coll,
+            &schema,
             &filter,
             current_sql_dialect(),
             &autobump,
@@ -1570,7 +1575,7 @@ pub(crate) fn dispatch_purge_one<'s>(
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect())
+        query::build_delete_one_with_dialect(app_id, collection, &schema, &filter, current_sql_dialect())
             .map_err(DbError::from)
     });
     let coll = collection.to_string();
@@ -1615,7 +1620,7 @@ pub(crate) fn dispatch_purge_many<'s>(
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_delete_many(app_id, collection, &filter).map_err(DbError::from)
+        query::build_delete_many(app_id, collection, &schema, &filter).map_err(DbError::from)
     });
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -1661,6 +1666,7 @@ pub(crate) fn dispatch_restore_one<'s>(
         query::build_restore_one_with_system_fields(
             &app,
             &coll,
+            &schema,
             &filter,
             current_sql_dialect(),
             &autobump,
@@ -1717,6 +1723,7 @@ pub(crate) fn dispatch_restore_many<'s>(
         query::build_restore_many_with_system_fields(
             &app,
             &coll,
+            &schema,
             &filter,
             current_sql_dialect(),
             &autobump,
@@ -2024,6 +2031,7 @@ pub(crate) fn dispatch_upsert<'s>(
         let built = query::build_upsert_with_dialect(
             &app,
             &coll,
+            &schema,
             &doc,
             &conflict_fields,
             current_sql_dialect(),

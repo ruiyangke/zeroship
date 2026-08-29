@@ -172,6 +172,9 @@ fn bench_build_insert(c: &mut Criterion) {
     let app_id = "app_01HJQK2A8R000000000000000";
     let collection = "users";
     let doc = small_insert_doc();
+    // The write builder now projects its `RETURNING` list from the descriptor,
+    // so the benchmark measures the same work production does.
+    let schema = users_schema();
 
     let mut group = c.benchmark_group("build_insert");
     group.measurement_time(Duration::from_secs(3));
@@ -181,7 +184,7 @@ fn bench_build_insert(c: &mut Criterion) {
         b.iter_batched_ref(
             || doc.clone(),
             |doc| {
-                let built = build_insert(app_id, collection, doc)
+                let built = build_insert(app_id, collection, &schema, doc)
                     .expect("build_insert should succeed on benchmark fixture");
                 black_box(built);
             },
