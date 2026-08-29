@@ -1,5 +1,6 @@
 {
   "kind": "ir",
+  "descriptor_sha256": "b53e01a3d92427f49b47b40c2904ec22acc54954738340e91265f6044e15a1d0",
   "documents": [
     {
       "filename": "20260101000000_create_db_chat.ir.json",

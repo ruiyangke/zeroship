@@ -1,5 +1,6 @@
 {
   "kind": "ir",
+  "descriptor_sha256": "f3461450b396cf67e3be8c36aae5fb9a36e56d0cb373dfb4848738b21a0dc53f",
   "documents": [
     {
       "filename": "20260101000000_create_db_e2e.ir.json",

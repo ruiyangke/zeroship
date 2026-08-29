@@ -23,7 +23,7 @@
 //! The result was an artifact describing a table the database does not have: a
 //! collection whose fields are present and whose index is missing, on the very dialect
 //! whose leg declared it. Nothing else covers the map -
-//! `render_runtime_descriptor_v1` takes it as given and falls back to
+//! `render_runtime_descriptor_v2` takes it as given and falls back to
 //! `unwrap_or_default()` for a collection it lacks, so an absent entry is
 //! indistinguishable from a table that genuinely declared nothing.
 //!

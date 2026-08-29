@@ -23,7 +23,7 @@ import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   todos: defineSchema({
-    userId: t.string().required(),
+    userId: t.ref("users").required(),
     title: t.string().required(),
     priority: t.string().required().default("medium"),
     tags: t.json(),

@@ -43,13 +43,13 @@ describe("devEntry runtime descriptor install", () => {
 
     await assert.rejects(
       () => Promise.resolve(entry.rpc("ping", null, {})),
-      /invalid RuntimeSchemaDescriptor|expected v1 object/,
+      /invalid RuntimeSchemaDescriptor|expected v2 object/,
     );
   });
 
-  test("a present v1-ish descriptor rejected by installSchema hard-errors", async () => {
+  test("a present non-v2 descriptor rejected by installSchema hard-errors", async () => {
     g.__zsRuntimeDescriptor = {
-      version: 1,
+      version: 2,
       collections: {
         notes: {
           fields: {

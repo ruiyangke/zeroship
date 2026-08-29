@@ -28,8 +28,8 @@ const schema = {
     topic: t.string(),
   }).uniqueIndex("channels_slug_key", ["slug"]).index("channels_deleted_at_idx", ["deleted_at"]).index("channels_updated_at_idx", ["updated_at"]).index("channels_created_by_idx", ["created_by"]),
   messages: defineSchema({
-    channelId: t.string().required(),
-    authorId: t.string().required(),
+    channelId: t.ref("channels").required(),
+    authorId: t.ref("users").required(),
     body: t.string().required(),
     flagged: t.boolean().required().default(false),
   }).index("messages_channel_idx", ["channelId"]).index("messages_deleted_at_idx", ["deleted_at"]).index("messages_updated_at_idx", ["updated_at"]).index("messages_created_by_idx", ["created_by"]),

@@ -3,7 +3,7 @@
  *
  * The generated front-end records each `.ts` migration into an IR envelope
  * (pure-JS recorder, no CLI) and folds the envelopes through the Rust
- * `genArtifacts` verb into a valid v1 `schema.runtime.json` carrying the 7
+ * `genArtifacts` verb into a valid v2 `schema.runtime.json` carrying the 7
  * injected system fields + system indexes, off which gen-types then renders the
  * inline `const schema = { ... } as const` `env.db.ts` literal of
  * `@zeroship/db` builder calls. These tests run the LIBRARY path in-process -
@@ -58,11 +58,11 @@ async function makeFixture(
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-/** v1 RuntimeSchemaDescriptor contract (mirrors install-schema.ts:155-233). */
-function assertRuntimeDescriptorV1(descriptor: unknown): void {
+/** v2 RuntimeSchemaDescriptor contract (mirrors install-schema.ts:155-233). */
+function assertRuntimeDescriptorV2(descriptor: unknown): void {
   assert.ok(descriptor && typeof descriptor === "object", "descriptor is an object");
   const d = descriptor as Record<string, unknown>;
-  assert.equal(d.version, 1, "version === 1");
+  assert.equal(d.version, 2, "version === 2");
   assert.ok(d.collections && typeof d.collections === "object", "collections object");
   for (const [name, rawColl] of Object.entries(d.collections as Record<string, unknown>)) {
     const coll = rawColl as Record<string, unknown>;
@@ -100,7 +100,7 @@ export default {
 `;
 
 describe("generated schema source (record -> genArtifacts)", () => {
-  test("records a migration → valid v1 descriptor + all 7 system fields, no subprocess", async () => {
+  test("records a migration → valid v2 descriptor + all 7 system fields, no subprocess", async () => {
     const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });
     const outDir = join(fx.root, "generated/zeroship");
 
@@ -127,7 +127,7 @@ describe("generated schema source (record -> genArtifacts)", () => {
       assert.deepEqual([...res.files], [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE]);
 
       const json = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
-      assertRuntimeDescriptorV1(json);
+      assertRuntimeDescriptorV2(json);
       assert.ok(json.collections.hits, "hits collection present");
       for (const sys of SYSTEM_FIELDS) {
         assert.ok(json.collections.hits.fields[sys], `hits.${sys} injected`);

@@ -296,7 +296,7 @@ import "@zeroship/db/internal";
         ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
     ];
 
-    let descriptor = r#"{"version":1,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
+    let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
 
     let runtime = Runtime::builder()
         .modules(modules)
@@ -328,7 +328,7 @@ import "@zeroship/db/internal";
 #[test]
 fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     // **Migration-first cutover (P4b).** When the deploy carries a bundled
-    // `RuntimeSchemaDescriptor` (v1 `{ fields, options, indexes }` per collection), the
+    // `RuntimeSchemaDescriptor` (v2 `{ fields, options, indexes }` per collection), the
     // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`
     // and `setup_globals` exposes it as `globalThis.__zsRuntimeDescriptor`. The
     // bootstrap's `runtime-entry` must then install the schema FROM the
@@ -400,7 +400,7 @@ import "@zeroship/db/internal";
 
     // The bundled descriptor: a DIFFERENT collection (`posts`) than the
     // declared `todos`, carrying platform system fields the fold materialised.
-    let descriptor = r#"{"version":1,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"date"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
+    let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"date"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
 
     let runtime = Runtime::builder()
         .modules(modules)
@@ -526,23 +526,27 @@ fn corrupt_runtime_descriptor_json_fails_isolate_init() {
 }
 
 #[test]
-fn non_v1_runtime_descriptor_fails_isolate_init() {
+fn non_v2_runtime_descriptor_fails_isolate_init() {
     init_v8();
 
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: "export default { fetch(){ return new Response('ok'); } }".into(),
     }];
+    // A v1 descriptor is structurally valid and differs from v2 ONLY in the
+    // version tag, so this is a control for the version gate specifically: if
+    // the gate stopped discriminating, init would succeed and `expect_err`
+    // would panic.
     let runtime = Runtime::builder()
         .modules(modules)
-        .runtime_descriptor(Some(r#"{"version":2,"collections":{}}"#.to_string()))
+        .runtime_descriptor(Some(r#"{"version":1,"collections":{}}"#.to_string()))
         .build();
 
     let err = runtime
         .initialize(&EnvSnapshot::empty())
-        .expect_err("non-v1 descriptor must fail isolate init");
+        .expect_err("non-v2 descriptor must fail isolate init");
     assert!(
-        err.contains("RuntimeSchemaDescriptor v1"),
+        err.contains("RuntimeSchemaDescriptor v2"),
         "error should name the required descriptor version, got: {err}"
     );
 }

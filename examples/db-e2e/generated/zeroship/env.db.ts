@@ -23,7 +23,7 @@ import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   places: defineSchema({
-    workspaceId: t.string().required(),
+    workspaceId: t.ref("workspaces").required(),
     name: t.string().required(),
     description: t.string().required(),
     category: t.string().required(),
@@ -32,8 +32,8 @@ const schema = {
     open: t.boolean().required().default(true),
   }).index("places_workspace_category_idx", ["workspaceId","category"]).index("places_deleted_at_idx", ["deleted_at"]).index("places_updated_at_idx", ["updated_at"]).index("places_created_by_idx", ["created_by"]),
   tasks: defineSchema({
-    workspaceId: t.string().required(),
-    ownerId: t.string().required(),
+    workspaceId: t.ref("workspaces").required(),
+    ownerId: t.ref("users").required(),
     title: t.string().required(),
     description: t.string().required(),
     status: t.string().required().default("open"),
@@ -43,7 +43,7 @@ const schema = {
     tags: t.json(),
   }).index("tasks_workspace_status_idx", ["workspaceId","status"]).index("tasks_workspace_priority_idx", ["workspaceId","priority"]).index("tasks_deleted_at_idx", ["deleted_at"]).index("tasks_updated_at_idx", ["updated_at"]).index("tasks_created_by_idx", ["created_by"]),
   users: defineSchema({
-    workspaceId: t.string().required(),
+    workspaceId: t.ref("workspaces").required(),
     handle: t.string().required().unique(),
     fullName: t.string().required(),
     email: t.string().required().unique(),

@@ -1,5 +1,6 @@
 {
   "kind": "ir",
+  "descriptor_sha256": "e6cd7f21e2d7740a3368dbf92d994f7249c7bec4e7cb2b5fc753962ecf8acf58",
   "documents": [
     {
       "filename": "20260101000000_create_hr_system.ir.json",

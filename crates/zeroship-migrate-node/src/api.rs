@@ -415,8 +415,8 @@ mod tests {
         let runtime = reply.runtime_json.expect("runtime json");
         let ts = reply.env_db_ts.expect("env.db.ts");
         assert!(
-            runtime.contains("\"version\": 1"),
-            "v1 descriptor: {runtime}"
+            runtime.contains("\"version\": 2"),
+            "v2 descriptor: {runtime}"
         );
         assert!(
             runtime.contains("\"widgets\""),
@@ -523,7 +523,7 @@ mod tests {
             &[CONFINED_CHARTER_TOML],
         );
         assert!(reply.ok, "render ok: {:?}", reply.error);
-        assert!(reply.runtime_json.unwrap().contains("\"version\": 1"));
+        assert!(reply.runtime_json.unwrap().contains("\"version\": 2"));
         assert!(reply.env_db_ts.unwrap().contains("label: t.text(),"));
     }
 

@@ -116,7 +116,7 @@ describe("dev-server → in-process gen-types", () => {
       assert.ok(await waitForFile(json), "schema.runtime.json regenerated on boot");
 
       const descriptor = JSON.parse(await fs.readFile(json, "utf8"));
-      assert.equal(descriptor.version, 1, "valid v1 descriptor");
+      assert.equal(descriptor.version, 2, "valid v2 descriptor");
       assert.ok(descriptor.collections.notes, "notes collection present");
       // System fields injected.
       assert.ok(descriptor.collections.notes.fields.id, "system id injected");

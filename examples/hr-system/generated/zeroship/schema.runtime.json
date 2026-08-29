@@ -1,68 +1,180 @@
 {
-  "version": 1,
+  "version": 2,
   "collections": {
     "applicants": {
       "fields": {
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "jobPostingId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "jobPostingId"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "email": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "email"
+          }
         },
         "phone": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "phone"
+          }
         },
         "resumeUrl": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "resumeUrl"
+          }
         },
         "stage": {
           "type": "string",
           "required": true,
-          "default": "applied"
+          "default": "applied",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "stage"
+          }
         },
         "rating": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "rating"
+          }
         },
         "notes": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "notes"
+          }
         },
         "appliedDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "appliedDate"
+          }
         }
       },
       "options": {
@@ -96,53 +208,144 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "actorId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "actorId"
+          }
         },
         "action": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "action"
+          }
         },
         "entityType": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "entityType"
+          }
         },
         "entityId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "entityId"
+          }
         },
         "changesJson": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "changesJson"
+          }
         },
         "timestamp": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "timestamp"
+          }
         }
       },
       "options": {
@@ -176,51 +379,135 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "planId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "planId"
+          }
         },
         "startDate": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "startDate"
+          }
         },
         "endDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "endDate"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "active"
+          "default": "active",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         }
       },
       "options": {
@@ -254,52 +541,136 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "type": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "type"
+          }
         },
         "provider": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "provider"
+          }
         },
         "monthlyCostEmployee": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "monthlyCostEmployee"
+          }
         },
         "monthlyCostEmployer": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "monthlyCostEmployer"
+          }
         }
       },
       "options": {
@@ -333,51 +704,142 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "issuer": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "issuer"
+          }
         },
         "issueDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "issueDate"
+          }
         },
         "expiryDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "expiryDate"
+          }
         },
         "credentialUrl": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "credentialUrl"
+          }
         }
       },
       "options": {
@@ -411,53 +873,144 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "effectiveDate": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "effectiveDate"
+          }
         },
         "salary": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "salary"
+          }
         },
         "changeType": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "changeType"
+          }
         },
         "changeReason": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "changeReason"
+          }
         },
         "approvedBy": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approvedBy"
+          }
         }
       },
       "options": {
@@ -491,52 +1044,143 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "description": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         },
         "category": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
         },
         "durationHours": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "durationHours"
+          }
         },
         "isMandatory": {
           "type": "boolean",
           "required": true,
-          "default": false
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "isMandatory"
+          }
         },
         "maxParticipants": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "maxParticipants"
+          }
         }
       },
       "options": {
@@ -570,55 +1214,146 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "code": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "code"
+          }
         },
         "managerId": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "managerId"
+          }
         },
         "budget": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "budget"
+          }
         },
         "headcount": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "headcount"
+          }
         },
         "parentDepartmentId": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "parentDepartmentId"
+          }
         }
       },
       "options": {
@@ -652,53 +1387,144 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "type": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "type"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "fileUrl": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "fileUrl"
+          }
         },
         "uploadedAt": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "uploadedAt"
+          }
         },
         "expiresAt": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "expiresAt"
+          }
         }
       },
       "options": {
@@ -732,84 +1558,245 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "firstName": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "firstName"
+          }
         },
         "lastName": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "lastName"
+          }
         },
         "email": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "email"
+          }
         },
         "phone": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "phone"
+          }
         },
         "departmentId": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "departmentId"
+          }
         },
         "positionId": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "positionId"
+          }
         },
         "managerId": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "managerId"
+          }
         },
         "hireDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "hireDate"
+          }
         },
         "salary": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "salary"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "active"
+          "default": "active",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "skills": {
-          "type": "json"
+          "type": "json",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "skills"
+          }
         },
         "avatarUrl": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "avatarUrl"
+          }
         },
         "emergencyContactName": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "emergencyContactName"
+          }
         },
         "emergencyContactPhone": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "emergencyContactPhone"
+          }
         },
         "address": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "address"
+          }
         },
         "dateOfBirth": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "dateOfBirth"
+          }
         }
       },
       "options": {
@@ -843,53 +1830,144 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "courseId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "courseId"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "enrolled"
+          "default": "enrolled",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "enrolledAt": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "enrolledAt"
+          }
         },
         "completedAt": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "completedAt"
+          }
         },
         "score": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "score"
+          }
         }
       },
       "options": {
@@ -923,61 +2001,166 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "description": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         },
         "amount": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "amount"
+          }
         },
         "category": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
         },
         "receiptUrl": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "receiptUrl"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "submitted"
+          "default": "submitted",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "submittedAt": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "submittedAt"
+          }
         },
         "approvedBy": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approvedBy"
+          }
         }
       },
       "options": {
@@ -1011,52 +2194,136 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "fromEmployeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "fromEmployeeId"
+          }
         },
         "toEmployeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "toEmployeeId"
+          }
         },
         "type": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "type"
+          }
         },
         "message": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "message"
+          }
         },
         "isAnonymous": {
           "type": "boolean",
           "required": true,
-          "default": false
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "isAnonymous"
+          }
         }
       },
       "options": {
@@ -1090,60 +2357,158 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "description": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         },
         "targetDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "targetDate"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "active"
+          "default": "active",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "progress": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "progress"
+          }
         },
         "category": {
           "type": "string",
           "required": true,
-          "default": "performance"
+          "default": "performance",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
         }
       },
       "options": {
@@ -1177,44 +2542,114 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "date": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "date"
+          }
         },
         "isRecurring": {
           "type": "boolean",
           "required": true,
-          "default": false
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "isRecurring"
+          }
         }
       },
       "options": {
@@ -1248,64 +2683,169 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "applicantId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "applicantId"
+          }
         },
         "interviewerId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "interviewerId"
+          }
         },
         "scheduledAt": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "scheduledAt"
+          }
         },
         "durationMinutes": {
           "type": "number",
           "required": true,
-          "default": 60
+          "default": 60,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "durationMinutes"
+          }
         },
         "type": {
           "type": "string",
           "required": true,
-          "default": "video"
+          "default": "video",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "type"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "scheduled"
+          "default": "scheduled",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "feedback": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "feedback"
+          }
         },
         "rating": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "rating"
+          }
         }
       },
       "options": {
@@ -1339,56 +2879,154 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "positionId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "positionId"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "description": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         },
         "requirements": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "requirements"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "draft"
+          "default": "draft",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "postedDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "postedDate"
+          }
         },
         "closingDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "closingDate"
+          }
         }
       },
       "options": {
@@ -1422,69 +3060,174 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "year": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "year"
+          }
         },
         "vacationTotal": {
           "type": "number",
           "required": true,
-          "default": 20
+          "default": 20,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "vacationTotal"
+          }
         },
         "vacationUsed": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "vacationUsed"
+          }
         },
         "sickTotal": {
           "type": "number",
           "required": true,
-          "default": 10
+          "default": 10,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "sickTotal"
+          }
         },
         "sickUsed": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "sickUsed"
+          }
         },
         "personalTotal": {
           "type": "number",
           "required": true,
-          "default": 5
+          "default": 5,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "personalTotal"
+          }
         },
         "personalUsed": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "personalUsed"
+          }
         }
       },
       "options": {
@@ -1518,65 +3261,177 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "type": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "type"
+          }
         },
         "startDate": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "startDate"
+          }
         },
         "endDate": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "endDate"
+          }
         },
         "days": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "days"
+          }
         },
         "reason": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reason"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "pending"
+          "default": "pending",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "approvedBy": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approvedBy"
+          }
         },
         "approvedAt": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approvedAt"
+          }
         }
       },
       "options": {
@@ -1610,54 +3465,145 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "type": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "type"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "message": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "message"
+          }
         },
         "isRead": {
           "type": "boolean",
           "required": true,
-          "default": false
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "isRead"
+          }
         },
         "link": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "link"
+          }
         }
       },
       "options": {
@@ -1691,61 +3637,159 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "period": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "period"
+          }
         },
         "runDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "runDate"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "draft"
+          "default": "draft",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "totalGross": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "totalGross"
+          }
         },
         "totalNet": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "totalNet"
+          }
         },
         "totalDeductions": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "totalDeductions"
+          }
         },
         "processedBy": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "processedBy"
+          }
         }
       },
       "options": {
@@ -1779,77 +3823,196 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "payrollRunId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "payrollRunId"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "baseSalary": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "baseSalary"
+          }
         },
         "overtimePay": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "overtimePay"
+          }
         },
         "bonus": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "bonus"
+          }
         },
         "deductionsTax": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deductionsTax"
+          }
         },
         "deductionsBenefits": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deductionsBenefits"
+          }
         },
         "deductionsOther": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deductionsOther"
+          }
         },
         "netPay": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "netPay"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "pending"
+          "default": "pending",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         }
       },
       "options": {
@@ -1883,48 +4046,132 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "content": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "content"
+          }
         },
         "policyVersion": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "policyVersion"
+          }
         },
         "effectiveDate": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "effectiveDate"
+          }
         },
         "category": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
         }
       },
       "options": {
@@ -1958,56 +4205,154 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "departmentId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "departmentId"
+          }
         },
         "level": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "level"
+          }
         },
         "salaryMin": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "salaryMin"
+          }
         },
         "salaryMax": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "salaryMax"
+          }
         },
         "isOpen": {
           "type": "boolean",
           "required": true,
-          "default": true
+          "default": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "isOpen"
+          }
         },
         "description": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         }
       },
       "options": {
@@ -2041,65 +4386,177 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "reviewerId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reviewerId"
+          }
         },
         "period": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "period"
+          }
         },
         "cycle": {
           "type": "string",
           "required": true,
-          "default": "annual"
+          "default": "annual",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "cycle"
+          }
         },
         "rating": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "rating"
+          }
         },
         "strengths": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "strengths"
+          }
         },
         "improvements": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "improvements"
+          }
         },
         "goals": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "goals"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "draft"
+          "default": "draft",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         }
       },
       "options": {
@@ -2133,63 +4590,168 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "date": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "date"
+          }
         },
         "clockIn": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "clockIn"
+          }
         },
         "clockOut": {
-          "type": "number"
+          "type": "number",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "clockOut"
+          }
         },
         "hoursWorked": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "hoursWorked"
+          }
         },
         "overtimeHours": {
           "type": "number",
           "required": true,
-          "default": 0
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "overtimeHours"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "draft"
+          "default": "draft",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "notes": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "notes"
+          }
         }
       },
       "options": {
@@ -2223,52 +4785,136 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "employeeId": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "employeeId"
+          }
         },
         "dayOfWeek": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "dayOfWeek"
+          }
         },
         "startTime": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "startTime"
+          }
         },
         "endTime": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "endTime"
+          }
         },
         "isRemote": {
           "type": "boolean",
           "required": true,
-          "default": false
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "isRemote"
+          }
         }
       },
       "options": {

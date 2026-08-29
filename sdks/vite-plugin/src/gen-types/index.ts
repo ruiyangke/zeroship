@@ -8,7 +8,7 @@
  *  - GENERATED — {@link genTypesFromMigrations}: record `op.*` migrations →
  *    IR envelopes → `genArtifacts`.
  *
- * Both write `schema.runtime.json` (the v1 RuntimeSchemaDescriptor packed into
+ * Both write `schema.runtime.json` (the v2 RuntimeSchemaDescriptor packed into
  * the `.zship`). They differ only in `env.db.ts`:
  *  - GENERATED renders an inline `const schema = { ... } as const` literal of
  *    `@zeroship/db` builder calls from that descriptor (migrations are the

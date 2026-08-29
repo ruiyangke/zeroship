@@ -4,7 +4,7 @@
 //      shape the pure-JS recorder emits, with NO system columns) and the MANUAL
 //      source (the equivalent declared descriptor set) emit BYTE-IDENTICAL
 //      `runtimeJson` + `envDbTs`;
-//   2. the emitted `runtimeJson` parses + satisfies the v1 shape (incl. the 7 system
+//   2. the emitted `runtimeJson` parses + satisfies the v2 shape (incl. the 7 system
 //      fields the RESOLVE injects);
 //   3. the emitted `envDbTs` is a real `.ts` module of `t.*()` builder calls;
 //   4. the error arms fail soft (never throw) — both-arms + no-arm + malformed.
@@ -120,9 +120,9 @@ assert(
 );
 assert(gen.envDbTs === man.envDbTs, 'generated and manual envDbTs must be byte-identical');
 
-// (2) v1 shape.
+// (2) v2 shape.
 const desc = JSON.parse(gen.runtimeJson);
-assert(desc.version === 1, 'runtime descriptor is v1');
+assert(desc.version === 2, 'runtime descriptor is v2');
 const widgets = desc.collections.widgets;
 assert(widgets && typeof widgets === 'object', 'widgets collection present');
 const injectedColumnBlock = CONFINED_CHARTER_TOML.match(/columns = \[([\s\S]*?)\]\nindexes = \[/);
@@ -136,7 +136,7 @@ for (const s of injectedFields) {
 }
 assert(widgets.fields.label.type === 'string', 'label field type string');
 assert(widgets.fields.count.required === true, 'count field required');
-assert(widgets.options.softDelete === false && widgets.options.strictness === 'strict', 'options block v1');
+assert(widgets.options.softDelete === false && widgets.options.strictness === 'strict', 'options block v2');
 assert(Array.isArray(widgets.indexes), 'indexes is an array');
 
 // (3) env.db.ts is a passive schema map using the current authoring API.
@@ -279,4 +279,4 @@ assert(
   `the reference column renders its inline builder chain:\n${refMan.envDbTs}`,
 );
 
-console.log('PASS: genArtifacts byte-identical + v1-shape + current authoring schema + reference fields + soft-error arms (through the real .node)');
+console.log('PASS: genArtifacts byte-identical + v2-shape + current authoring schema + reference fields + soft-error arms (through the real .node)');

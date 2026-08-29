@@ -509,7 +509,7 @@ export interface GenArtifactsReply {
    */
   envDbTs?: string
   /**
-   * The `schema.runtime.json` bytes (the v1 `RuntimeSchemaDescriptor`, pretty +
+   * The `schema.runtime.json` bytes (the v2 `RuntimeSchemaDescriptor`, pretty +
    * trailing newline). `None` on failure.
    */
   runtimeJson?: string

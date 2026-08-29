@@ -323,7 +323,7 @@ pub fn read_stem(stem: &str) -> Vec<Op> {
 
 /// The wire `FieldDef` map, read back out of `schema.runtime.json`.
 ///
-/// `render_runtime_descriptor_v1` puts each table's map into `collections.<t>.fields`
+/// `render_runtime_descriptor_v2` puts each table's map into `collections.<t>.fields`
 /// verbatim, so this recovers exactly the value the SQLite rebuild would be handed -
 /// without naming the function that produced it, which is the point: this reduction is
 /// byte-identical before and after the consumer moves.
