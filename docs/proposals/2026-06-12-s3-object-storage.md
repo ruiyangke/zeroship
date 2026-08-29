@@ -4,7 +4,7 @@
 
 > **Implemented.** This proposal has shipped, including the appended
 > "v1 Streaming & Multipart — FULL SCOPE" section (streaming both directions +
-> multipart, nothing deferred). The code lives in `crates/compio-s3`
+> multipart, nothing deferred). The code lives in `libs/compio-s3`
 > (zero-tokio cyper + hand-rolled SigV4 client), `crates/bundle`
 > (`S3BlobStore`), `crates/plugin-storage` (`S3` backend + V8 streaming), and
 > the gateway/control/worker `--blob-store`/`--storage-url` wiring. Verified
@@ -100,7 +100,7 @@ other S3-compatible stores that satisfy the consistency and API contract below.
 
 ```text
             +-----------------------------+
-            |  crates/compio-s3 (new)     |  cyper + hand-rolled SigV4
+            |  libs/compio-s3 (new)     |  cyper + hand-rolled SigV4
             |  compio-native S3 client    |  GET/PUT/HEAD/DELETE/LIST
             +--------------+--------------+
                            |
@@ -113,7 +113,7 @@ other S3-compatible stores that satisfy the consistency and API contract below.
 +---------------+  +----------------+  +--------------------+
 ```
 
-### 1. `crates/compio-s3`
+### 1. `libs/compio-s3`
 
 A small bespoke client, matching the discipline of `compio-postgres` and
 `compio-redis`: explicit modules, explicit errors, bounded responses, no SDK
@@ -960,7 +960,7 @@ objects.
 
 ## Build sequence
 
-1. `crates/compio-s3`: config/parser, credentials, clock/date formatting,
+1. `libs/compio-s3`: config/parser, credentials, clock/date formatting,
    provider/checksum/SSE validation, error taxonomy, hand-rolled SigV4, XML
    list parser, request-scoped cyper lifecycle, timeout mechanics, dependency
    guard, unit tests, and MinIO smoke tests.
@@ -1133,7 +1133,7 @@ async fn get_stream(&self, coords) -> Result<Option<(ObjectMeta, impl Stream<Ite
   convenience path keeps a sane per-call cap; the streaming path has none.
 
 ### Build sequence (revised for full scope)
-1. `crates/compio-s3`: client + hand-rolled SigV4 + **multipart** + `get_stream`;
+1. `libs/compio-s3`: client + hand-rolled SigV4 + **multipart** + `get_stream`;
    unit tests (SigV4 vectors) + MinIO smoke incl. a multipart round-trip.
 2. `S3BlobStore` (streaming multipart put + content-address verify) + gateway
    refill (streaming) + `--blob-store` URL parse; control writes via the store.

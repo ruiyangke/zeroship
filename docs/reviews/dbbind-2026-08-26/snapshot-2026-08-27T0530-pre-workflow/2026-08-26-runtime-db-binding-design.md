@@ -935,7 +935,7 @@ crash rather than an attacker.
 
 **This requires a signature change, and the change is the point.**
 `apply_ir_documents` currently takes a **DSN** and opens its own session inside
-(`crates/zeroship-migrated/src/apply.rs:235-236`, connect at `:437`), so a
+(`crates/zeroship-migrate-server/src/apply.rs:235-236`, connect at `:437`), so a
 caller has nothing to take a session-scoped lease *on*. "The lease is taken in
 the caller" and "all on the same session" cannot both be true of today's shape.
 The function therefore takes an already-connected session instead of a DSN, and
@@ -1044,7 +1044,7 @@ migration DSL (`sdks/migrate/src/ops.ts`, lowered in
 `crates/zeroship-migrate-postgres/src/ddl.rs`).
 
 **The repository already knows the right predicate and uses it elsewhere.**
-`creator_table_query` in `crates/zeroship-migrated/src/publication.rs:15-23`
+`creator_table_query` in `crates/zeroship-migrate-server/src/publication.rs:15-23`
 enumerates `relkind IN ('r','p') AND NOT c.relispartition` and excludes
 `__zeroship_%` by name. Two paths in one codebase disagree about what a creator
 table *is*, and the introspection path - the one that decides whether to decrypt
@@ -1852,7 +1852,7 @@ Replacement:
   SQLite tier, where `__zeroship_admin` does not exist.
   Reuse the **shape** of the platform's existing operator-ceiling machinery -
   a versioned ceiling intersected with a creator-supplied value, as
-  `crates/zeroship-migrated/src/policy.rs` and `policies/confined.policy.toml`
+  `crates/zeroship-migrate-server/src/policy.rs` and `policies/confined.policy.toml`
   already do for migrations - but **not its store and not its staleness rule**.
   An earlier draft said simply "reuse the vocabulary"; that was too loose in two
   ways, both verified:

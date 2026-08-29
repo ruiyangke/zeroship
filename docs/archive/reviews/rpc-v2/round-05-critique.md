@@ -146,7 +146,7 @@ Composite **85**. One more reviser pass — focused on these six items — shoul
 - `/home/ruiyang/Projects/appbase/.worktrees/rpc-v2-revise/docs/proposals/rpc-v2.md` — subject of review (2,227 LOC, post round-4 reviser)
 - `/home/ruiyang/Projects/appbase/.worktrees/rpc-v2-revise/docs/reviews/round-03-critique.md` — round 3
 - `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/web/dom/abort_signal.rs` — `AbortSignal.any` reference for §3
-- `/home/ruiyang/Projects/appbase/crates/compio-redis/src/{client,cluster}.rs` — Redis driver platform invariant
+- `/home/ruiyang/Projects/appbase/libs/compio-redis/src/{client,cluster}.rs` — Redis driver platform invariant
 - `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/web/headers.rs:689` — `#[v8_method(fastcall)]` precedent for §5
 </content>
 </invoke>

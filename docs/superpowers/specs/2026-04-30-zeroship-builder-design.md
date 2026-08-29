@@ -2925,7 +2925,7 @@ Query executes against the dev schema
 
 #### A.2.3 `compio-postgres` extensions
 
-New module `crates/compio-postgres/src/branch.rs`:
+New module `libs/compio-postgres/src/branch.rs`:
 
 ```rust
 /// Identifies which branch's schema queries on a given connection are bound to.
