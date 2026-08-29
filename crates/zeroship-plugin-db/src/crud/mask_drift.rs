@@ -1,16 +1,16 @@
-//! Drift detection for masked sibling columns.
+//! Drift detection for masked columns.
 //!
-//! The dual-write CRUD pass, backfill, and rewrite
-//! jobs are responsible for keeping `<col>_masked` in lock-step
-//! with the parent column's plaintext under the column's declared
-//! `MaskKind`. Drift would let stale or wrong masked text leak into
-//! defaults reads — silently weakening the masking privacy guarantee.
+//! The write pipeline's mask + relocation stages are responsible for keeping
+//! the field's own column - which holds the MASK - in lock-step with the real
+//! value in `__zs_raw__<col>`, under the column's declared `MaskKind`. Drift
+//! would let stale or wrong masked text into every default read, silently
+//! weakening the masking privacy guarantee.
 //!
 //! This module periodically samples rows for every masked column on
 //! every collection and verifies the equation
 //!
 //! ```text
-//! <col>_masked  ==  apply_mask_kind(decrypt(<col>), kind)
+//! <col>  ==  apply_mask_kind(decrypt(__zs_raw__<col>), kind)
 //! ```
 //!
 //! holds. Mismatches are logged via `tracing::error!` AND written into
@@ -139,13 +139,26 @@ pub async fn run_drift_check_for_column(
         return Ok(DriftReport::default());
     };
 
-    // Sibling column name is the canonical `<col>_masked` shape.
-    let sibling = format!("{column}_masked");
+    // The two columns, in their post-flip roles: the REAL VALUE is in
+    // `__zs_raw__<col>` and the STORED MASK is in the field's own column. The
+    // equation this module checks is unchanged - "the stored mask equals the
+    // mask of the value" - but which physical column plays which side of it
+    // swapped, and reading them the old way round would compare
+    // `mask(mask(value))` against `value` and report every row as drifted.
+    let value_column = crate::query::raw_column_name(column);
+    let stored_mask_column = column;
 
     // Sample rows. The backend arm picks PG TABLESAMPLE or the SQLite
-    // random-modulo equivalent. Both share the same `(id, parent,
-    // sibling)` row shape so the diff loop is backend-agnostic.
-    let rows = sample_rows(app_id, collection, column, &sibling, sample_pct).await?;
+    // random-modulo equivalent. Both share the same `(id, value, stored_mask)`
+    // row shape so the diff loop is backend-agnostic.
+    let rows = sample_rows(
+        app_id,
+        collection,
+        &value_column,
+        stored_mask_column,
+        sample_pct,
+    )
+    .await?;
     let sampled = rows.len();
 
     let mut report = DriftReport {
@@ -448,7 +461,7 @@ async fn sample_rows_sqlite(
     sample_pct: f64,
 ) -> Result<Vec<SampledRow>, DbError> {
     use crate::backend::sqlite::session::TypedCell;
-    use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+    use crate::backend::DialectBuilder as _;
 
     let q_app = sq.quote_ident(app_id);
     let q_coll = sq.quote_ident(collection);
@@ -871,7 +884,7 @@ pub async fn read_drift_audit_rows_for_tests(
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        use crate::backend::DialectBuilder as _;
         let q_app = sq.quote_ident(app_id);
         let sql = format!(
             r#"SELECT collection, column_name, row_pk, stored_masked, expected_masked

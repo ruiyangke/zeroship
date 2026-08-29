@@ -4787,20 +4787,21 @@ impl IrAuthor {
                 vec![decl.lower_rename_table(table, to)]
             }
             Op::DropColumn { table, column, .. } => {
-                // A masked column is TWO physical columns: the declared one and the
-                // `<col>_masked` sibling the shared builder injects, carrying the
-                // `zero-migrate:mask` sentinel COMMENT. One authored op creates the
-                // pair - `addColumn` lowers the sibling as a second unit just above,
-                // and `createTable` reconciles it through
+                // A masked column is TWO physical columns: the declared one, which
+                // holds the mask and carries the `zero-migrate:mask` sentinel
+                // COMMENT, and the `__zs_raw__<col>` sibling holding the real
+                // value. One authored op creates the pair - `addColumn` lowers the
+                // second unit just above, and `createTable` reconciles it through
                 // `ensure_create_table_masked_siblings` - so one authored op removes
-                // it. Dropping only the named column left an orphan behind: a column
-                // with a mask sentinel on it belonging to a field that no longer
-                // exists, which nothing in this engine collects.
+                // it. Dropping only the named column left an orphan behind, and after
+                // the storage flip that orphan is the column holding the REAL VALUE of
+                // a field that no longer exists: unreadable by any query surface,
+                // uncollected by anything in this engine, and still on disk.
                 //
                 // The sibling is read from the LIVE schema rather than the op, because
                 // a drop names only the column and carries no mask facet. A column
                 // whose sibling is absent lowers exactly one unit, as before.
-                let sibling = format!("{column}_masked");
+                let sibling = zeroship_migrate_backend::schema::raw_column_name(column);
                 let masked_sibling = live_schema
                     .table_snapshots
                     .get(table)
