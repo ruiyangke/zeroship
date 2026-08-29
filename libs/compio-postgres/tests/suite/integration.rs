@@ -5664,6 +5664,64 @@ async fn statement_cache_promotes_on_the_execution_threshold() {
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 }
 
+/// Refreshing a candidate must move its one LRU entry rather than append a
+/// duplicate. Otherwise a later capacity eviction can discard the refreshed
+/// SQL's execution count and postpone its promotion indefinitely.
+#[compio::test]
+async fn statement_cache_candidate_lru_refreshes_repeated_sql() {
+    compio::time::timeout(Duration::from_secs(60), async {
+        let url = test_url();
+        let client = connect_with_statement_cache_threshold(&url, 1, 4)
+            .await
+            .unwrap();
+
+        const HOT_SQL: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+            WHERE statement = $1::text AND NOT from_sql \
+            /* cpg_cache_candidate_lru_hot */";
+
+        let first_live: i64 = client.query_one_scalar(HOT_SQL, &[&HOT_SQL]).await.unwrap();
+        assert_eq!(first_live, 0, "the first execution was unexpectedly named");
+
+        // HOT plus these 99 one-shot statements fills the bounded 100-entry
+        // admission cache without promoting any cold SQL.
+        for index in 0..99i32 {
+            let sql = format!("SELECT {index}::int4 /* cpg_cache_candidate_lru_cold_{index} */");
+            let value: i32 = client.query_one_scalar(sql.as_str(), &[]).await.unwrap();
+            assert_eq!(value, index, "cold fixture {index} returned the wrong row");
+        }
+
+        let second_live: i64 = client.query_one_scalar(HOT_SQL, &[&HOT_SQL]).await.unwrap();
+        assert_eq!(
+            second_live, 0,
+            "the second execution crossed a four-use threshold"
+        );
+
+        let newcomer: i32 = client
+            .query_one_scalar(
+                "SELECT 100::int4 /* cpg_cache_candidate_lru_newcomer */",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(newcomer, 100, "the eviction-triggering query did not run");
+
+        let third_live: i64 = client.query_one_scalar(HOT_SQL, &[&HOT_SQL]).await.unwrap();
+        assert_eq!(third_live, 0, "the third execution was unexpectedly named");
+        let fourth_live: i64 = client.query_one_scalar(HOT_SQL, &[&HOT_SQL]).await.unwrap();
+        assert_eq!(
+            fourth_live, 1,
+            "eviction forgot the refreshed candidate's prior executions"
+        );
+        assert_eq!(
+            prepared_statement_names(&client, HOT_SQL).await.len(),
+            1,
+            "the threshold execution did not remain in the statement cache"
+        );
+    })
+    .await
+    .expect("candidate-LRU refresh claim exceeded its 60 second deadline");
+}
+
 #[compio::test]
 async fn statement_cache_execution_threshold_one_promotes_immediately() {
     let url = test_url();
