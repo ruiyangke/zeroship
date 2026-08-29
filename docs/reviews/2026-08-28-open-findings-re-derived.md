@@ -676,3 +676,34 @@ survived because a disjunction masks them, which is a genuine gap.
 
 Same sweep, two survivors, opposite verdicts. Ratios do not tell you which is
 which; only reading the guarded code does.
+
+### The failed-refill permit path is unbound in both directions
+
+Two further survivors from the same sweep, in the housekeeper's refill path:
+
+    15  the armed WeakPermitGuard drop DECREMENT, after a failed or cancelled refill
+    19  the wake_one_waiter() on that same armed-drop path
+
+Both survive all four targets. Taken together they say: when a background refill
+fails, nothing in the suite notices if the pool forgets to give the permit back
+AND forgets to wake anyone waiting for it.
+
+**The consequence is worse than either alone.** A missing decrement leaves the
+pool believing a slot is in use that is not, shrinking effective capacity for
+the process lifetime. A missing wake leaves a caller parked on a permit that
+will never be signalled. A pool that slowly loses capacity while waiters hang is
+exactly the failure that gets diagnosed as "the database is slow".
+
+**The soak cannot see this, and its green does not cover it.** The soak's
+criterion is `pool_acquires == pool_releases` - measured exact at 82542 this
+session. A refill that fails is not an acquire, so its permit accounting never
+enters that equality. An exact-equality check on one counter pair is not a check
+on the whole permit lifecycle.
+
+**They must be killed INDEPENDENTLY.** One test that fails when either mutation
+is applied proves neither: it cannot distinguish "the decrement is missing" from
+"the wake is missing", so a later change could restore one and the test would go
+green with the other still broken. Two tests, or one test per assertion with
+both asserted separately.
+
+That distinction is the agent's own, reached while sweeping, and it is right.
