@@ -622,6 +622,18 @@ impl DmlRenderer for DuckDbDmlRenderer {
         out
     }
 
+    fn render_mask_expression(
+        &self,
+        source_text: &str,
+        kind: zeroship_migrate_backend::mask_meta::MaskKind,
+    ) -> String {
+        if matches!(kind, zeroship_migrate_backend::mask_meta::MaskKind::Full) {
+            "'***'".to_string()
+        } else {
+            source_text.to_string()
+        }
+    }
+
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
         push(BindValue::Bytes(bytes.to_vec()))
     }

@@ -107,17 +107,10 @@ pub enum ChangeKind {
     /// Design doc section B2 - `ALTER TABLE … DROP CONSTRAINT` for a FK
     /// no longer declared.
     DropForeignKey,
-    /// Backfill the sibling `<col>_masked` column for
-    /// every row of an existing column that just gained a
-    /// `.mask({...})` declaration. The accompanying
-    /// `ALTER TABLE … ADD COLUMN <col>_masked TEXT NULL` op is emitted
-    /// as a separate `AddColumn` immediately before this one; the
-    /// backfill itself is driven by
-    /// `zeroship_plugin_db::crud::mask_backfill::run_mask_backfill`. After the
-    /// backfill is fully drained (two consecutive clean polls), the
-    /// final step is `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT
-    /// NULL`. Carries the kind + classification so the audit row
-    /// records what mask was installed.
+    /// Move every existing value into `__zs_raw__<col>` and replace the
+    /// creator-facing column with its mask. The executable declarative plan
+    /// represents this as ordered DDL and guarded `BackfillSpec` steps; this
+    /// classifier deliberately carries no ad-hoc SQL or row runner.
     MaskBackfill {
         collection: String,
         column: String,
@@ -1175,11 +1168,9 @@ pub fn compute_diff(
     //   - live=Some(a),      declared=Some(b) where a!=b  -> MaskRewrite
     //   - live=Some(_),      declared=None or kind=none   -> MaskRemove
     //
-    // MaskBackfill additionally emits an `AddColumn` for the sibling BEFORE the
-    // `MaskBackfill` op so the column exists when the backfill writes
-    // to it. The sibling ADD is nullable on purpose -- backfill flips
-    // it to NOT NULL after the last batch (see
-    // `zeroship_plugin_db::crud::mask_backfill::run_mask_backfill`).
+    // MaskBackfill is a classification record only. The declarative planner
+    // owns the ordered DDL and guarded BackfillSpec steps, including creation
+    // and finalization of `__zs_raw__<col>`.
     //
     // Brand-new columns with a mask declaration are NOT routed here —
     // `build_create_table_with_fks` (CreateTable op) and
@@ -1203,23 +1194,33 @@ pub fn compute_diff(
                 // No mask on either side — nothing to do.
                 (None, None) => {}
 
-                // A mask declaration added to an EXISTING column. REFUSED,
-                // for the reason spelled out at the same arm of the migration
-                // engine's classifier (`zeroship-migrate-core/src/schema/diff.rs`)
-                // - and spelled out in BOTH because two classifiers that
-                // disagree about whether a transition is safe are worse than
-                // either answer.
+                // A mask declaration added to an EXISTING column. The full
+                // declarative planner executes the plaintext transition with
+                // its journaled BackfillSpec executor. This classifier emits
+                // the same one SQL-less destructive record as migrate-core.
                 //
-                // Before the storage flip this was two additive steps: add the
-                // sibling, backfill it. The column holding the data never moved
-                // and its type and constraints never changed. After the flip
-                // the same declaration means four data-touching steps - add
-                // `__zs_raw__<col>`, copy every row's value into it, overwrite
-                // `<col>` with the mask, and rewrite `<col>` to `TEXT` dropping
-                // the constraints it carries - and this differ can see only the
-                // first. Emitting steps 1-3 would leave a schema whose every
-                // write fails, having already rewritten the data.
+                // Encrypted input stays refused because the engine has no AEAD
+                // key material and cannot decrypt the ciphertext before
+                // computing the mask. Two classifiers that disagree about this
+                // boundary are worse than either answer.
                 (None, Some(new_meta)) => {
+                    let encrypted =
+                        live_col.encryption.is_some() || def.get("encrypted").is_some();
+                    let mut details = serde_json::json!({
+                        "kind": "mask_backfill",
+                        "field": field,
+                        "mask_kind": new_meta.kind.as_sql(),
+                        "classification": new_meta.classification.as_sql(),
+                        "raw_column": crate::query::raw_column_name(field),
+                        "executor": "BackfillSpec",
+                    });
+                    if encrypted {
+                        details["refused"] = serde_json::json!(
+                            "encrypted mask backfill is refused: the migration engine has no \
+                             AEAD key material and cannot decrypt existing ciphertext before \
+                             computing the mask"
+                        );
+                    }
                     ops.push(DiffOp {
                         collection: collection.to_string(),
                         change_kind: ChangeKind::MaskBackfill {
@@ -1230,19 +1231,7 @@ pub fn compute_diff(
                         },
                         class: ChangeClass::Destructive,
                         sql: None,
-                        details: serde_json::json!({
-                            "kind": "mask_backfill",
-                            "field": field,
-                            "mask_kind": new_meta.kind.as_sql(),
-                            "classification": new_meta.classification.as_sql(),
-                            "raw_column": crate::query::raw_column_name(field),
-                            "refused": "adding .mask() to a column that already holds data \
-                                        relocates every row's value into a new column, \
-                                        replaces the original with a mask, and rewrites the \
-                                        column's type and constraint set; three of those four \
-                                        steps are invisible to the differ, so the transition is \
-                                        refused rather than half-applied",
-                        }),
+                        details,
                         field: Some(field.clone()),
                     });
                 }
@@ -2115,17 +2104,10 @@ mod tests {
         live
     }
 
-    /// Live has no mask and the schema declares one: the transition is
-    /// REFUSED, with no DDL emitted.
-    ///
-    /// It used to emit an `AddColumn` for the `<col>_masked` sibling plus an
-    /// additive `MaskBackfill`, and that was correct while the column holding
-    /// the data never moved. After the storage flip the declaration means four
-    /// data-touching steps and this differ can see only the first, so emitting
-    /// what it can see would rewrite the data and leave a schema whose every
-    /// write fails.
+    /// A plaintext existing column gains a mask: classify the structured
+    /// BackfillSpec transition without inventing SQL in this small differ.
     #[test]
-    fn a_mask_added_to_an_existing_column_is_refused() {
+    fn a_mask_added_to_an_existing_plaintext_column_uses_structured_executor() {
         let live = live_with_column("users", "ssn", None);
         let declared = json!({
             "ssn": {
@@ -2137,7 +2119,7 @@ mod tests {
 
         assert!(
             !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::AddColumn)),
-            "no column may be added for a refused transition: {ops:?}",
+            "the classifier must not emit a partial AddColumn transition: {ops:?}",
         );
         let backfill_ops: Vec<&DiffOp> = ops
             .iter()
@@ -2152,14 +2134,15 @@ mod tests {
         assert_eq!(backfill_ops[0].field.as_deref(), Some("ssn"));
         assert!(
             backfill_ops[0].sql.is_none(),
-            "a refused transition carries no SQL: {:?}",
+            "the small classifier must not embed an ad-hoc row loop: {:?}",
             backfill_ops[0].sql,
         );
         assert!(
-            backfill_ops[0].details.get("refused").is_some(),
-            "the op must say why: {:?}",
+            backfill_ops[0].details.get("refused").is_none(),
+            "plaintext transitions must reach BackfillSpec: {:?}",
             backfill_ops[0].details,
         );
+        assert_eq!(backfill_ops[0].details["executor"], "BackfillSpec");
 
         // The CONTROL: declaring `.mask()` on a column that does NOT exist
         // live is unaffected - it still emits working DDL through the
@@ -2181,6 +2164,36 @@ mod tests {
         assert!(
             sql.contains(&crate::query::raw_column_name("dob")) && sql.contains("__zsmask:"),
             "a NEW masked column still gets its raw column and its sentinel: {sql}",
+        );
+    }
+
+    #[test]
+    fn a_mask_added_to_an_existing_encrypted_column_names_key_material_refusal() {
+        let mut live = live_with_column("users", "ssn", None);
+        let ssn = live
+            .tables
+            .get_mut("users")
+            .and_then(|columns| columns.get_mut("ssn"))
+            .expect("ssn fixture");
+        *ssn = encrypted_bytea_col();
+        let declared = json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": "default" },
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let backfill = ops
+            .iter()
+            .find(|op| matches!(op.change_kind, ChangeKind::MaskBackfill { .. }))
+            .expect("encrypted transition is classified");
+        assert_eq!(backfill.class, ChangeClass::Destructive);
+        assert!(backfill.sql.is_none());
+        let refused = backfill.details["refused"].as_str().unwrap_or_default();
+        assert!(
+            refused.contains("AEAD key material") && refused.contains("decrypt"),
+            "the refusal must name why BackfillSpec cannot mask ciphertext: {ops:?}"
         );
     }
 

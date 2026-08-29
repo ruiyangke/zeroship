@@ -279,6 +279,31 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// default never coerces bytes through text.
     fn inline_bytes_literal(&self, bytes: &[u8]) -> String;
 
+    /// Convert a stored primitive into the exact plaintext string the CRUD mask
+    /// pass sees before physical lowering. Text is a cast by default. Backends
+    /// override number/bytes when their catalog text spelling differs from JSON
+    /// number or canonical base64 wire spelling.
+    fn render_mask_source(
+        &self,
+        source_value: &str,
+        _wraps: crate::mask_meta::WrappedType,
+    ) -> String {
+        format!(
+            "CAST(({source_value}) AS {})",
+            self.cast_target(CastTarget::Text)
+        )
+    }
+
+    /// Render one of the platform's closed mask transforms over a SQL expression
+    /// that already yields TEXT. This is a backend spelling seam, not authored raw
+    /// SQL: the transform enum is trusted engine vocabulary and every backend must
+    /// provide equivalent semantics for a portable [`BackfillSpec`](crate::backfill::BackfillSpec).
+    fn render_mask_expression(
+        &self,
+        source_text: &str,
+        kind: crate::mask_meta::MaskKind,
+    ) -> String;
+
     /// BIND a binary value, and return the SQL fragment that reconstitutes it at
     /// the placeholder site. `push` appends ONE bind and hands back its
     /// placeholder.

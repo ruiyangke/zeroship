@@ -957,7 +957,7 @@ fn canonical_reference_catalog_type(
 /// primary key is preferred, followed by a full non-partial UNIQUE key. Every
 /// member must be non-null so SQL row-value equality cannot turn the selected
 /// identity into an unknown comparison.
-fn limited_delete_identity(snapshot: &TableSnapshot) -> Option<Vec<String>> {
+pub(crate) fn limited_delete_identity(snapshot: &TableSnapshot) -> Option<Vec<String>> {
     for kind in ["PRIMARY KEY", "UNIQUE"] {
         for constraint in snapshot
             .constraints
@@ -1067,7 +1067,7 @@ fn snapshot_has_reference_key(snapshot: &TableSnapshot, columns: &[String]) -> b
 /// can carry `None`, but an executable plan with a table snapshot must pin every
 /// tuple component's nullability, scalar codec, database type, and comparison
 /// semantics before an executor may capture `endCursor`.
-fn cursor_contract_for_snapshot(
+pub(crate) fn cursor_contract_for_snapshot(
     vendors: VendorSet,
     dialect: &DialectId,
     cursor_columns: &[String],
@@ -1152,7 +1152,10 @@ fn cursor_column_contract(
 /// by SQLite catalog snapshots. The parser accepts bare, double-quoted,
 /// backtick-quoted, and bracket-quoted identifiers, but no expressions or trailing
 /// clauses. Every result is subsequently matched to a real snapshot column.
-fn parse_constraint_identity_columns(definition: &str, kind: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_constraint_identity_columns(
+    definition: &str,
+    kind: &str,
+) -> Option<Vec<String>> {
     let definition = definition.trim();
     let prefix = definition.get(..kind.len())?;
     if !prefix.eq_ignore_ascii_case(kind) {

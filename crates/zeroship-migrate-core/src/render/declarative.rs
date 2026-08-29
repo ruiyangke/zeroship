@@ -47,6 +47,7 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
+use crate::render::step::PlanStep;
 #[cfg(test)]
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 use zeroship_migrate_backend::advisory::Advisory;
@@ -831,7 +832,13 @@ fn field_check_constraints(
     dialect: &DialectId,
 ) -> Vec<ConstraintSnapshot> {
     let mut out = Vec::new();
-    let col = zeroship_migrate_backend::snapshot::quote_constraint_definition_ident(&f.name);
+    // A mask changes the logical column into the creator-visible TEXT mask. The
+    // declared value constraints still describe the real value, so they follow it
+    // to `__zs_raw__<field>`. Keeping a CHECK on the logical column would reject
+    // masks such as `***`; keeping its cascade provenance on the logical name would
+    // also make the offline fold disagree with PostgreSQL's dependency graph.
+    let value_col = mask_raw_column_for_field(f).unwrap_or_else(|| f.name.clone());
+    let col = zeroship_migrate_backend::snapshot::quote_constraint_definition_ident(&value_col);
 
     // min/max (numeric only - matches plugin-db's `type == "number"` gate).
     if f.ty == "number" {
@@ -847,7 +854,7 @@ fn field_check_constraints(
                 kind: "CHECK".into(),
                 definition: def,
                 comment: None,
-                cascade_columns: Some(vec![f.name.clone()]),
+                cascade_columns: Some(vec![value_col.clone()]),
             });
         }
     }
@@ -864,7 +871,7 @@ fn field_check_constraints(
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} = {rendered})"),
                 comment: None,
-                cascade_columns: Some(vec![f.name.clone()]),
+                cascade_columns: Some(vec![value_col.clone()]),
             });
         }
     }
@@ -881,7 +888,7 @@ fn field_check_constraints(
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} IN ({}))", rendered.join(", ")),
                 comment: None,
-                cascade_columns: Some(vec![f.name.clone()]),
+                cascade_columns: Some(vec![value_col]),
             });
         }
     }
@@ -2251,13 +2258,27 @@ fn build_table_snapshot_impl(
             constraints.push(chk);
         }
         // A `unique: true` field becomes a unique index (A1 rule). The
-        // name mirrors plugin-db's deterministic per-field index name.
+        // name mirrors plugin-db's deterministic per-field index name. Uniqueness
+        // is a property of the real value, never of a low-cardinality mask, so a
+        // masked field moves this index to its raw column and gains a separate
+        // non-unique index for creator-visible mask queries.
         if f.unique {
+            let value_col = mask_raw_column_for_field(f).unwrap_or_else(|| f.name.clone());
             indexes.push(IndexSnapshot::btree(
                 unique_index_name(vendors, &d.name, &f.name),
                 true,
-                vec![f.name.clone()],
+                vec![value_col],
             ));
+            if mask_raw_column_for_field(f).is_some() {
+                indexes.push(IndexSnapshot::btree(
+                    crate::plan::author::cap_ident_name(
+                        vendors,
+                        &format!("{}__{}_mask_idx", d.name, f.name),
+                    ),
+                    false,
+                    vec![f.name.clone()],
+                ));
+            }
         }
         // - a vector field (`t.vector(dims, { metric })`) emits a
         // pgvector ANN index (`USING ivfflat` with the metric-appropriate
@@ -2314,7 +2335,9 @@ fn build_table_snapshot_impl(
                 // match live byte-for-byte so a policy FK re-diffs clean.
                 definition: fk_definition_for_dialect(
                     vendors,
-                    std::slice::from_ref(&f.name),
+                    std::slice::from_ref(
+                        &mask_raw_column_for_field(f).unwrap_or_else(|| f.name.clone()),
+                    ),
                     project_schema,
                     target,
                     &[target_column.to_string()],
@@ -2326,7 +2349,9 @@ fn build_table_snapshot_impl(
                     dialect,
                 ),
                 comment: None,
-                cascade_columns: None,
+                cascade_columns: Some(vec![
+                    mask_raw_column_for_field(f).unwrap_or_else(|| f.name.clone()),
+                ]),
             });
         }
     }
@@ -2335,10 +2360,31 @@ fn build_table_snapshot_impl(
         // Carry the declared columns through VERBATIM (1a) - recovering them
         // from the index name was unsound for composite / custom-named
         // indexes. `render_create_index` emits this list directly.
+        // A declared UNIQUE index protects real-value identity, so every masked
+        // member moves to raw. A declared non-unique index deliberately remains
+        // on the creator-visible mask: creator predicates cannot name raw columns,
+        // and copying that index to raw would spend write/storage cost on a lookup
+        // surface the app cannot use. The per-field `unique` path above also emits
+        // its separate non-unique mask lookup index.
+        let columns = idx
+            .columns
+            .iter()
+            .map(|column| {
+                if idx.unique {
+                    d.fields
+                        .iter()
+                        .find(|field| field.name == *column)
+                        .and_then(mask_raw_column_for_field)
+                        .unwrap_or_else(|| column.clone())
+                } else {
+                    column.clone()
+                }
+            })
+            .collect();
         indexes.push(IndexSnapshot::btree(
             idx.name.clone(),
             idx.unique,
-            idx.columns.clone(),
+            columns,
         ));
     }
 
@@ -3106,6 +3152,176 @@ pub use zeroship_migrate_backend::error::DeclarativeError;
 // The structured diff result.
 // ---------------------------------------------------------------------------
 
+/// One ordered unit in a mask-on-existing-data transition.
+///
+/// A backfill carries a marker [`Migration`] because the marker supplies the
+/// stable journal version and checksum used by [`PlanStep::Backfill`], and also
+/// keeps the data-mutating step inside preview and deploy-manifest coverage. The
+/// marker SQL is never executed; the structured [`BackfillSpec`](crate::model::backfill::BackfillSpec)
+/// is the executor input.
+#[derive(Debug, Clone)]
+pub enum MaskTransitionStep {
+    /// Structural DDL that must remain at this exact position around the row walks.
+    Ddl(Migration),
+    /// A journaled, resumable row walk.
+    Backfill {
+        /// The journal and manifest identity for the row walk.
+        marker: Migration,
+        /// The structured executor input. Boxed because a `BackfillSpec` dwarfs
+        /// the `Ddl` variant, and `Ddl` is by far the more numerous of the two.
+        spec: Box<crate::model::backfill::BackfillSpec>,
+    },
+}
+
+impl MaskTransitionStep {
+    fn migration(&self) -> &Migration {
+        match self {
+            Self::Ddl(migration) | Self::Backfill { marker: migration, .. } => migration,
+        }
+    }
+
+    pub(crate) fn plan_step(&self) -> PlanStep {
+        match self {
+            Self::Ddl(migration) => PlanStep::Ddl(migration.clone()),
+            Self::Backfill { marker, spec } => PlanStep::Backfill {
+                version: marker.version.clone(),
+                checksum: marker.checksum.clone(),
+                spec: (**spec).clone(),
+            },
+        }
+    }
+
+    fn migration_mut(&mut self) -> &mut Migration {
+        match self {
+            Self::Ddl(migration) | Self::Backfill { marker: migration, .. } => migration,
+        }
+    }
+}
+
+/// Which column a mask transition targets, and what mask it becomes.
+///
+/// Grouped rather than passed loose so the builder's snapshot arguments stay
+/// distinguishable from the four scalars that name the work.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MaskTransitionTarget<'a> {
+    /// The table whose physical storage is changing.
+    pub table: &'a str,
+    /// The logical field that becomes the creator-visible mask.
+    pub column: &'a str,
+    /// The mask shape the creator declared.
+    pub kind: crate::schema::diff::MaskKind,
+    /// The underlying type the mask wraps.
+    pub wraps: crate::schema::diff::WrappedType,
+}
+
+/// The exact interleaving needed to add a mask to one populated plaintext column.
+///
+/// This cannot be flattened into [`DeclarativePlan::migrations`]: doing so would
+/// move both backfills behind the DDL batch and destroy the copy-before-overwrite
+/// invariant.
+#[derive(Debug, Clone)]
+pub struct MaskTransitionPlan {
+    /// The table whose physical storage is changing.
+    pub table: String,
+    /// The logical field that becomes the creator-visible mask.
+    pub column: String,
+    /// Ordered DDL and structured backfill steps. Kept private so callers cannot
+    /// reorder execution independently of the dependency chain covered by the
+    /// deploy manifest.
+    steps: Vec<MaskTransitionStep>,
+}
+
+impl MaskTransitionPlan {
+    pub(crate) fn migrations(&self) -> impl Iterator<Item = &Migration> {
+        self.steps.iter().map(MaskTransitionStep::migration)
+    }
+
+    pub(crate) fn plan_steps(&self) -> impl Iterator<Item = PlanStep> + '_ {
+        self.steps.iter().map(MaskTransitionStep::plan_step)
+    }
+}
+
+fn chain_mask_transition_steps(steps: &mut [MaskTransitionStep]) {
+    let mut previous = None;
+    for step in steps {
+        let migration = step.migration_mut();
+        migration.depends_on = previous.iter().cloned().collect();
+        migration.checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: &migration.up,
+            down: migration.down.as_deref(),
+            flags: &migration.flags,
+            owner_app: &migration.owner_app,
+            depends_on: &migration.depends_on,
+            supersedes: &migration.supersedes,
+            preconditions: &migration.preconditions,
+        });
+        previous = Some(migration.version.clone());
+    }
+}
+
+fn index_references_column(index: &IndexSnapshot, column: &str) -> bool {
+    index.columns.iter().any(|name| name == column)
+        || index.include.iter().any(|name| name == column)
+        || index.elements.iter().any(|element| {
+            matches!(element, IndexElementSnapshot::Column { name, .. } if name == column)
+        })
+        || index
+            .expr_cascade_columns
+            .as_ref()
+            .is_some_and(|columns| columns.iter().any(|name| name == column))
+}
+
+fn constraint_references_column(constraint: &ConstraintSnapshot, column: &str) -> bool {
+    if constraint
+        .cascade_columns
+        .as_ref()
+        .is_some_and(|columns| columns.iter().any(|name| name == column))
+    {
+        return true;
+    }
+    ["PRIMARY KEY", "UNIQUE", "FOREIGN KEY"]
+        .into_iter()
+        .any(|kind| {
+            constraint.kind.eq_ignore_ascii_case(kind)
+                && crate::render::lower::parse_constraint_identity_columns(
+                    &constraint.definition,
+                    kind,
+                )
+                .is_some_and(|columns| columns.iter().any(|name| name == column))
+        })
+}
+
+fn constraint_owns_index(constraint: &ConstraintSnapshot) -> bool {
+    ["PRIMARY KEY", "UNIQUE", "EXCLUDE"]
+        .into_iter()
+        .any(|kind| constraint.kind.eq_ignore_ascii_case(kind))
+}
+
+fn foreign_key_targets_column(
+    constraint: &ConstraintSnapshot,
+    table: &str,
+    column: &str,
+) -> bool {
+    if !constraint.kind.eq_ignore_ascii_case("FOREIGN KEY")
+        || fk_target_table(&constraint.definition).as_deref() != Some(table)
+    {
+        return false;
+    }
+    let Some(references_at) = constraint.definition.to_ascii_uppercase().find("REFERENCES") else {
+        return false;
+    };
+    let target = &constraint.definition[references_at..];
+    let Some(open) = target.find('(') else {
+        return false;
+    };
+    let Some(close) = target[open + 1..].find(')') else {
+        return false;
+    };
+    let definition = format!("UNIQUE ({})", &target[open + 1..open + 1 + close]);
+    crate::render::lower::parse_constraint_identity_columns(&definition, "UNIQUE")
+        .is_some_and(|columns| columns.iter().any(|name| name == column))
+}
+
 /// The **structured** result of [`DeclarativeAuthor::diff`].
 ///
 /// It carries the plain (additive / destructive) migrations PLUS the online
@@ -3149,6 +3365,9 @@ pub struct DeclarativePlan {
     /// EXCLUDED from the destructive drop pass (its drop is the deferred contract)
     /// and its `<to>` is EXCLUDED from the additive add pass (the expand adds it).
     pub migrations: Vec<Migration>,
+    /// Populated plaintext columns gaining a mask. Each plan retains the exact
+    /// DDL/backfill interleaving and is never flattened into `migrations`.
+    pub mask_transitions: Vec<MaskTransitionPlan>,
     /// The online renames, each as a full [`ExpandContractPlan`] (expand migs +
     /// `BackfillSpec` + contract migs). NEVER flattened into `migrations`.
     pub renames: Vec<ExpandContractPlan>,
@@ -3202,7 +3421,10 @@ impl DeclarativePlan {
     /// no SQLite rebuilds.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.migrations.is_empty() && self.renames.is_empty() && self.rebuilds.is_empty()
+        self.migrations.is_empty()
+            && self.mask_transitions.is_empty()
+            && self.renames.is_empty()
+            && self.rebuilds.is_empty()
     }
 
     /// All migrations the plan would ultimately apply, flattened (plain set +
@@ -3215,6 +3437,9 @@ impl DeclarativePlan {
     #[must_use]
     pub fn all_migrations(&self) -> Vec<Migration> {
         let mut all = self.migrations.clone();
+        for transition in &self.mask_transitions {
+            all.extend(transition.migrations().cloned());
+        }
         for r in &self.renames {
             all.extend(r.all());
         }
@@ -3495,6 +3720,402 @@ impl DeclarativeAuthor {
         }
     }
 
+    fn mask_backfill_cursor(
+        &self,
+        table: &str,
+        column: &str,
+        raw_column: &str,
+        live: &TableSnapshot,
+    ) -> Result<(
+        Vec<String>,
+        zeroship_migrate_backend::backfill::CursorContract,
+    ), DeclarativeError> {
+        let mut candidates = Vec::new();
+        for kind in ["PRIMARY KEY", "UNIQUE"] {
+            for constraint in live
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.kind.eq_ignore_ascii_case(kind))
+            {
+                if let Some(columns) = crate::render::lower::parse_constraint_identity_columns(
+                    &constraint.definition,
+                    kind,
+                ) {
+                    candidates.push(columns);
+                }
+            }
+        }
+        let mut indexes: Vec<&IndexSnapshot> = live.indexes.iter().collect();
+        indexes.sort_by(|left, right| left.name.cmp(&right.name));
+        candidates.extend(
+            indexes
+                .into_iter()
+                .filter(|index| index.unique)
+                .map(|index| index.columns.clone()),
+        );
+
+        let mut reasons = Vec::new();
+        for candidate in candidates {
+            if candidate
+                .iter()
+                .any(|name| name == column || name == raw_column)
+            {
+                continue;
+            }
+            match crate::render::lower::cursor_contract_for_snapshot(
+                self.vendors,
+                &self.dialect,
+                &candidate,
+                live,
+            ) {
+                Ok(contract) => return Ok((candidate, contract)),
+                Err(reason) => reasons.push(reason),
+            }
+        }
+
+        Err(DeclarativeError::MaskBackfillCursorUnavailable {
+            table: table.to_string(),
+            column: column.to_string(),
+            reason: reasons
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "the table has no independent candidate key".to_string()),
+        })
+    }
+
+    fn mask_backfill_marker(
+        &self,
+        table: &str,
+        column: &str,
+        phase: &str,
+        spec: &crate::model::backfill::BackfillSpec,
+    ) -> Migration {
+        self.make(
+            &format!("mask_{phase}_{table}_{column}"),
+            format!(
+                "SELECT 1 /* structured mask {phase} backfill: {} */",
+                spec.backfill_id()
+            ),
+            None,
+            destructive_flags(),
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn build_mask_transition(
+        &self,
+        target: MaskTransitionTarget<'_>,
+        live_schema: &SchemaSnapshot,
+        live: &TableSnapshot,
+        desired: &TableSnapshot,
+    ) -> Result<MaskTransitionPlan, DeclarativeError> {
+        let MaskTransitionTarget {
+            table,
+            column,
+            kind,
+            wraps,
+        } = target;
+        let raw_column = crate::schema::query::raw_column_name(column);
+        let live_column = live
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or_else(|| {
+                DeclarativeError::Invalid(format!(
+                    "mask transition source {table}.{column} is absent from the live snapshot"
+                ))
+            })?;
+        let desired_raw = desired
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == raw_column)
+            .ok_or_else(|| {
+                DeclarativeError::Invalid(format!(
+                    "masked field {table}.{column} has no desired raw column {raw_column}"
+                ))
+            })?;
+        let desired_mask = desired
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or_else(|| {
+                DeclarativeError::Invalid(format!(
+                    "masked field {table}.{column} has no desired logical mask column"
+                ))
+            })?;
+
+        let has_encryption = |snapshot: &ColumnSnapshot| {
+            snapshot.encryption_sentinel.is_some()
+                || snapshot.comment_sentinel.as_deref().is_some_and(|sentinel| {
+                    zeroship_migrate_backend::mask_codec::parse_encryption_sentinel(sentinel)
+                        .is_ok()
+                })
+        };
+        if has_encryption(live_column) || has_encryption(desired_raw) {
+            return Err(DeclarativeError::EncryptedMaskBackfillRefused {
+                table: table.to_string(),
+                column: column.to_string(),
+            });
+        }
+        let generated = |snapshot: &ColumnSnapshot| {
+            snapshot.generated.is_some()
+                || snapshot.generated_kind.is_some_and(|kind| {
+                    kind != zeroship_migrate_backend::snapshot::GeneratedKindSnapshot::NotGenerated
+                })
+        };
+        if generated(live_column)
+            || generated(desired_raw)
+            || live_column.identity.is_some()
+            || desired_raw.identity.is_some()
+            || live_column.rowid_alias
+            || desired_raw.rowid_alias
+        {
+            return Err(DeclarativeError::UnsupportedInV1(format!(
+                "mask transition for {table}.{column}: generated, identity, and physical row-id columns cannot be relocated by a writable BackfillSpec"
+            )));
+        }
+
+        for (other_table, snapshot) in &live_schema.tables {
+            if snapshot.constraints.iter().any(|constraint| {
+                foreign_key_targets_column(constraint, table, column)
+            }) {
+                return Err(DeclarativeError::UnsupportedInV1(format!(
+                    "mask transition for {table}.{column}: foreign key from table {other_table} targets the value identity being moved to {raw_column}"
+                )));
+            }
+        }
+        if live.constraints.iter().any(|constraint| {
+            constraint.kind.eq_ignore_ascii_case("PRIMARY KEY")
+                && constraint_references_column(constraint, column)
+        }) {
+            return Err(DeclarativeError::UnsupportedInV1(format!(
+                "mask transition for {table}.{column}: a primary-key column cannot become a nullable TEXT mask"
+            )));
+        }
+        if let Some(constraint) = live.constraints.iter().find(|constraint| {
+            constraint_references_column(constraint, column)
+                && !["CHECK", "UNIQUE", "FOREIGN KEY", "PRIMARY KEY"]
+                    .iter()
+                    .any(|kind| constraint.kind.eq_ignore_ascii_case(kind))
+        }) {
+            return Err(DeclarativeError::UnsupportedInV1(format!(
+                "mask transition for {table}.{column}: constraint {} of kind {} cannot be relocated safely",
+                constraint.name, constraint.kind
+            )));
+        }
+
+        let (cursor_columns, cursor_contract) =
+            self.mask_backfill_cursor(table, column, &raw_column, live)?;
+        let raw_q = self.quote_ident(&raw_column);
+        let mask_q = self.quote_ident(column);
+        let mut steps = Vec::new();
+
+        // The raw column starts nullable and unconstrained. Adding its final NOT
+        // NULL/DEFAULT/CHECK now would either fail on a populated table or fill old
+        // rows with the default, destroying the signal that each row still needs a
+        // copy. Every real-value facet is installed only after the copy completes.
+        let mut initial_raw = desired_raw.clone();
+        initial_raw.nullable = true;
+        initial_raw.default = None;
+        initial_raw.inline_checks.clear();
+        initial_raw.comment_sentinel = None;
+        initial_raw.encryption_sentinel = None;
+        steps.push(MaskTransitionStep::Ddl(
+            self.render_add_column(table, &initial_raw),
+        ));
+
+        let copy = crate::model::backfill::BackfillSpec {
+            schema: self.project_schema.clone(),
+            table: table.to_string(),
+            cursor_columns: cursor_columns.clone(),
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+            cursor_contract: Some(cursor_contract.clone()),
+            batch_size: 1000,
+            set_clause: format!("{raw_q} = {mask_q}"),
+            per_row: BTreeMap::new(),
+            filter: Some(format!("{raw_q} IS NULL")),
+            name: format!("mask_copy_{table}_{column}_to_{raw_column}"),
+        };
+        let copy_marker = self.mask_backfill_marker(table, column, "copy", &copy);
+        steps.push(MaskTransitionStep::Backfill {
+            marker: copy_marker,
+            spec: Box::new(copy),
+        });
+
+        // Constraint policy for the storage flip:
+        // - NOT NULL and DEFAULT move from the logical column to raw;
+        // - CHECK, UNIQUE, and local FOREIGN KEY constraints are dropped here and
+        //   recreated from the desired raw-column definitions after the copy;
+        // - every index touching the old value is dropped, then only the desired
+        //   raw/value and non-unique mask indexes are recreated;
+        // - PRIMARY KEY, inbound FK, and unknown constraint kinds were refused
+        //   above because silently weakening or retargeting them is not safe.
+        // This preparation must precede the mask overwrite: CHECK can reject `***`,
+        // UNIQUE would make the second full mask collide, and a non-TEXT source
+        // cannot store a mask until it has been retyped.
+        let live_constraint_indexes: BTreeSet<&str> = live
+            .constraints
+            .iter()
+            .filter(|constraint| constraint_owns_index(constraint))
+            .map(|constraint| constraint.name.as_str())
+            .collect();
+        for index in &live.indexes {
+            if index_references_column(index, column)
+                && !is_pk_index(self.catalog_fold(), table, &index.name)
+                && !live_constraint_indexes.contains(index.name.as_str())
+            {
+                steps.push(MaskTransitionStep::Ddl(
+                    self.render_drop_index(Some(table), index),
+                ));
+            }
+        }
+        for constraint in &live.constraints {
+            if !constraint_references_column(constraint, column) {
+                continue;
+            }
+            let migration = if constraint.kind.eq_ignore_ascii_case("FOREIGN KEY") {
+                self.lower_drop_fk(table, &constraint.name).0
+            } else if constraint.kind.eq_ignore_ascii_case("PRIMARY KEY") {
+                unreachable!("primary-key mask transitions are refused above")
+            } else {
+                self.lower_drop_constraint(table, &constraint.name).0
+            };
+            steps.push(MaskTransitionStep::Ddl(migration));
+        }
+        if live_column.default.is_some() {
+            steps.push(MaskTransitionStep::Ddl(
+                self.render_drop_column_default(table, column),
+            ));
+        }
+        if !live_column.nullable {
+            steps.push(MaskTransitionStep::Ddl(
+                self.render_alter_column_nullability(table, column, true),
+            ));
+        }
+        if self.schema_renderer().canonical_type(&live_column.data_type)
+            != self.schema_renderer().canonical_type(&desired_mask.data_type)
+            || live_column.case_sensitive != desired_mask.case_sensitive
+        {
+            steps.push(MaskTransitionStep::Ddl(
+                self.render_alter_column_type(table, desired_mask),
+            ));
+        }
+
+        let dml = crate::render::backends::renderer(self.vendors, &self.dialect);
+        let source_text = dml.render_mask_source(&raw_q, wraps);
+        let masked_value = dml.render_mask_expression(&source_text, kind);
+        let mask = crate::model::backfill::BackfillSpec {
+            schema: self.project_schema.clone(),
+            table: table.to_string(),
+            cursor_columns,
+            cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
+            cursor_contract: Some(cursor_contract),
+            batch_size: 1000,
+            set_clause: format!("{mask_q} = {masked_value}"),
+            per_row: BTreeMap::new(),
+            filter: None,
+            name: format!("mask_overwrite_{table}_{column}"),
+        };
+        let mask_marker = self.mask_backfill_marker(table, column, "overwrite", &mask);
+        steps.push(MaskTransitionStep::Backfill {
+            marker: mask_marker,
+            spec: Box::new(mask),
+        });
+
+        if let Some(default) = desired_raw.default.as_deref() {
+            steps.push(MaskTransitionStep::Ddl(
+                self.render_set_column_default(table, &raw_column, default),
+            ));
+        }
+        if !desired_raw.nullable {
+            steps.push(MaskTransitionStep::Ddl(
+                self.render_alter_column_nullability(table, &raw_column, false),
+            ));
+        }
+        for constraint in &desired.constraints {
+            if !constraint_references_column(constraint, &raw_column) {
+                continue;
+            }
+            let migration = if constraint.kind.eq_ignore_ascii_case("FOREIGN KEY") {
+                self.render_add_fk(table, constraint, Vec::new())
+            } else if ["CHECK", "UNIQUE"]
+                .iter()
+                .any(|kind| constraint.kind.eq_ignore_ascii_case(kind))
+            {
+                self.lower_add_constraint(
+                    table,
+                    &constraint.name,
+                    &constraint.definition,
+                    true,
+                )
+                .0
+            } else {
+                return Err(DeclarativeError::UnsupportedInV1(format!(
+                    "mask transition for {table}.{column}: desired constraint {} of kind {} cannot be installed on {raw_column}",
+                    constraint.name, constraint.kind
+                )));
+            };
+            steps.push(MaskTransitionStep::Ddl(migration));
+        }
+        let desired_constraint_indexes: BTreeSet<&str> = desired
+            .constraints
+            .iter()
+            .filter(|constraint| constraint_owns_index(constraint))
+            .map(|constraint| constraint.name.as_str())
+            .collect();
+        for index in &desired.indexes {
+            if index_references_column(index, column)
+                || index_references_column(index, &raw_column)
+            {
+                if index.unique && index_references_column(index, column) {
+                    return Err(DeclarativeError::UnsupportedInV1(format!(
+                        "mask transition for {table}.{column}: desired unique index {} still targets the mask instead of {raw_column}",
+                        index.name
+                    )));
+                }
+                if !is_pk_index(self.catalog_fold(), table, &index.name)
+                    && !desired_constraint_indexes.contains(index.name.as_str())
+                {
+                    steps.push(MaskTransitionStep::Ddl(self.render_create_index(
+                        table,
+                        index,
+                        Vec::new(),
+                    )));
+                }
+            }
+        }
+
+        let (_, comment_statements) = self.render_add_column_with_statements(table, desired_mask);
+        let sentinel_statements: Vec<String> = comment_statements.into_iter().skip(1).collect();
+        if desired_mask.comment_sentinel.is_some() && sentinel_statements.is_empty() {
+            return Err(DeclarativeError::UnsupportedInV1(format!(
+                "mask transition for {table}.{column}: {} cannot attach a mask sentinel to an existing column without rebuilding the table",
+                self.dialect
+            )));
+        }
+        if !sentinel_statements.is_empty() {
+            steps.push(MaskTransitionStep::Ddl(self.make(
+                &format!("set_mask_sentinel_{table}_{column}"),
+                sentinel_statements.join(";\n"),
+                None,
+                MigrationFlags::default(),
+                Vec::new(),
+            )));
+        }
+
+        // The manifest canonicalizes migrations by their dependency graph, while
+        // apply executes this structured vector. Chain every marker and DDL unit so
+        // both representations certify the same copy-before-overwrite ordering.
+        chain_mask_transition_steps(&mut steps);
+
+        Ok(MaskTransitionPlan {
+            table: table.to_string(),
+            column: column.to_string(),
+            steps,
+        })
+    }
+
     /// Diff a complete desired project union against the live catalog.
     pub fn diff(
         &self,
@@ -3669,6 +4290,10 @@ impl DeclarativeAuthor {
         // Flattening would discard the BackfillSpec, so the pre-existing-row
         // mirror never runs and the contract DROP COLUMN <from> destroys data.
         let mut renames: Vec<ExpandContractPlan> = Vec::new();
+        // Mask-on-existing-data transitions retain their DDL/backfill interleaving
+        // just like renames retain expand/backfill/contract. Flattening either one
+        // would lose the row walk.
+        let mut mask_transitions: Vec<MaskTransitionPlan> = Vec::new();
         // the SQLite existing-table changes that have no native ALTER (type /
         // nullability change, column rename rebuild, ADD/DROP CONSTRAINT, FK
         // redefinition). Each is a structured 12-step rebuild, NOT a plain `up` - so
@@ -3803,9 +4428,96 @@ impl DeclarativeAuthor {
 
         // --- Existing tables: column / index additions + destructive drops. ---
         for (table, dt) in &desired.tables {
-            let Some(lt) = live.tables.get(table) else {
+            let Some(actual_lt) = live.tables.get(table) else {
                 continue; // newly created above
             };
+
+            let sdk_schema = desired_full.sdk_schemas.get(table).ok_or_else(|| {
+                DeclarativeError::Invalid(format!(
+                    "desired schema is missing the SDK field definitions for table '{table}'"
+                ))
+            })?;
+            let transition_fields: Vec<(
+                String,
+                crate::schema::diff::MaskKind,
+                crate::schema::diff::WrappedType,
+            )> = sdk_schema
+                .as_object()
+                .into_iter()
+                .flat_map(|schema| schema.iter())
+                .filter(|(field, _)| !crate::schema::query::is_schema_metadata_key(field))
+                .filter_map(|(field, definition)| {
+                    let mask = crate::schema::diff::mask_meta_from_schema_def(definition)?;
+                    let raw = crate::schema::query::raw_column_name(field);
+                    let wraps = match definition.get("type").and_then(|value| value.as_str()) {
+                        Some("number") => crate::schema::diff::WrappedType::Number,
+                        Some("bytes") => crate::schema::diff::WrappedType::Bytes,
+                        _ => crate::schema::diff::WrappedType::String,
+                    };
+                    (actual_lt.columns.iter().any(|column| column.name == *field)
+                        && !actual_lt.columns.iter().any(|column| column.name == raw))
+                    .then(|| (field.clone(), mask.kind, wraps))
+                })
+                .collect();
+            if transition_fields.len() > 1 {
+                return Err(DeclarativeError::UnsupportedInV1(format!(
+                    "table {table} adds masks to multiple populated columns in one deploy; split them so each transition can relocate composite constraints and indexes atomically"
+                )));
+            }
+
+            let mut transitioned_live = actual_lt.clone();
+            for (field, kind, wraps) in &transition_fields {
+                let transition = self.build_mask_transition(
+                    MaskTransitionTarget {
+                        table,
+                        column: field,
+                        kind: *kind,
+                        wraps: *wraps,
+                    },
+                    live,
+                    actual_lt,
+                    dt,
+                )?;
+                let raw = crate::schema::query::raw_column_name(field);
+
+                transitioned_live
+                    .columns
+                    .retain(|column| column.name != *field && column.name != raw);
+                transitioned_live.columns.extend(
+                    dt.columns
+                        .iter()
+                        .filter(|column| column.name == *field || column.name == raw)
+                        .cloned(),
+                );
+                transitioned_live.constraints.retain(|constraint| {
+                    !constraint_references_column(constraint, field)
+                        && !constraint_references_column(constraint, &raw)
+                });
+                transitioned_live.constraints.extend(
+                    dt.constraints
+                        .iter()
+                        .filter(|constraint| {
+                            constraint_references_column(constraint, field)
+                                || constraint_references_column(constraint, &raw)
+                        })
+                        .cloned(),
+                );
+                transitioned_live.indexes.retain(|index| {
+                    !index_references_column(index, field)
+                        && !index_references_column(index, &raw)
+                });
+                transitioned_live.indexes.extend(
+                    dt.indexes
+                        .iter()
+                        .filter(|index| {
+                            index_references_column(index, field)
+                                || index_references_column(index, &raw)
+                        })
+                        .cloned(),
+                );
+                mask_transitions.push(transition);
+            }
+            let lt = &transitioned_live;
 
             let live_cols: BTreeMap<&str, &ColumnSnapshot> =
                 lt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -4233,6 +4945,7 @@ impl DeclarativeAuthor {
         out.sort_by(|a, b| a.version.cmp(&b.version));
         Ok(DeclarativePlan {
             migrations: out,
+            mask_transitions,
             renames,
             rebuilds,
             accepted_index_aliases,
@@ -7207,6 +7920,7 @@ mod advisory_seam_tests {
                 plain("CREATE TABLE \"proj_acme\".\"orders\"(id bigint primary key)"),
                 plain("DROP TABLE \"proj_acme\".\"legacy\""),
             ],
+            mask_transitions: Vec::new(),
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
@@ -7238,6 +7952,7 @@ mod advisory_seam_tests {
             migrations: vec![plain(
                 "CREATE TABLE \"proj_acme\".\"orders\"(id bigint primary key, note text)",
             )],
+            mask_transitions: Vec::new(),
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
@@ -7262,6 +7977,7 @@ mod advisory_seam_tests {
                 ),
                 plain("CREATE INDEX idx_orders_user ON \"proj_acme\".\"orders\"(user_id)"),
             ],
+            mask_transitions: Vec::new(),
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
@@ -7288,6 +8004,7 @@ mod advisory_seam_tests {
                 "ALTER TABLE \"proj_acme\".\"orders\" ADD CONSTRAINT fk_user \
                  FOREIGN KEY (user_id) REFERENCES \"proj_acme\".\"users\"(id) NOT VALID",
             )],
+            mask_transitions: Vec::new(),
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),

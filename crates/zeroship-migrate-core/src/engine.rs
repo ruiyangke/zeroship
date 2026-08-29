@@ -890,8 +890,24 @@ impl MigrationEngine {
             );
         }
         let plain = self.plan(&diff.migrations, &policy_guard_cfg);
+        let transition_migrations: Vec<Migration> = diff
+            .mask_transitions
+            .iter()
+            .flat_map(crate::render::declarative::MaskTransitionPlan::migrations)
+            .cloned()
+            .collect();
+        let transition_guard = self.plan(&transition_migrations, &policy_guard_cfg);
+        if !transition_guard.denied.is_empty() {
+            return Err(crate::render::declarative::DeclarativeError::Invalid(
+                format!(
+                    "mask transition DDL was denied by the migration guard: {:?}",
+                    transition_guard.denied
+                ),
+            ));
+        }
         Ok(DeclarativeDeployPlan {
             plain,
+            mask_transitions: diff.mask_transitions,
             renames: diff.renames,
             rebuilds: diff.rebuilds,
             accepted_index_aliases: diff.accepted_index_aliases,
@@ -1147,6 +1163,9 @@ impl MigrationEngine {
         // exactly the steps its old code path drove, and the `renames` loop below is
         // reachable on PostgreSQL alone.
         let mut steps: Vec<PlanStep> = Vec::new();
+        for transition in &plan.mask_transitions {
+            steps.extend(transition.plan_steps());
+        }
         for p in &plan.plain.items {
             steps.push(PlanStep::Ddl(p.migration.clone()));
         }
@@ -4088,6 +4107,10 @@ pub struct DeclarativeDeployPlan {
     /// (denial / destructive / approval summary), ready for the gated
     /// [`apply`](MigrationEngine::apply).
     pub plain: MigrationPlan,
+    /// Ordered mask-on-existing-data transitions. They execute before unrelated
+    /// plain DDL so their live constraint/index preconditions still describe the
+    /// snapshot used to author them.
+    pub mask_transitions: Vec<crate::render::declarative::MaskTransitionPlan>,
     /// The online renames, each a full
     /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan)
     /// (expand migs + `BackfillSpec` + contract migs). Driven through
@@ -4161,6 +4184,9 @@ impl DeclarativeDeployPlan {
             .iter()
             .map(|p| p.migration.clone())
             .collect();
+        for transition in &self.mask_transitions {
+            set.extend(transition.migrations().cloned());
+        }
         for rename in &self.renames {
             set.extend(rename.all());
         }
@@ -4289,6 +4315,7 @@ mod tests {
                 requires_approval: false,
                 denied: Vec::new(),
             },
+            mask_transitions: Vec::new(),
             renames: Vec::new(),
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),

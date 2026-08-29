@@ -613,6 +613,64 @@ impl DmlRenderer for MysqlDmlRenderer {
         format!("(X'{}')", hex::encode(bytes))
     }
 
+    fn render_mask_expression(
+        &self,
+        source_text: &str,
+        kind: zeroship_migrate_backend::mask_meta::MaskKind,
+    ) -> String {
+        use zeroship_migrate_backend::mask_meta::MaskKind;
+
+        let literal = |value: &str| self.inline_string_literal(value);
+        let empty = literal("");
+        let full = literal("***");
+        let value = match kind {
+            MaskKind::Full => full.clone(),
+            MaskKind::Last4 => format!(
+                "REGEXP_REPLACE({source_text}, {}, {}, 1, 0, 'c')",
+                literal("[A-Za-z0-9](?=(?:[^A-Za-z0-9]*[A-Za-z0-9]){4}[^A-Za-z0-9]*$)"),
+                literal("*")
+            ),
+            MaskKind::First4 => format!(
+                "REVERSE(REGEXP_REPLACE(REVERSE({source_text}), {}, {}, 1, 0, 'c'))",
+                literal("[A-Za-z0-9](?=(?:[^A-Za-z0-9]*[A-Za-z0-9]){4}[^A-Za-z0-9]*$)"),
+                literal("*")
+            ),
+            MaskKind::Email => format!(
+                "CASE WHEN {source_text} = {empty} THEN {empty} WHEN LOCATE({}, {source_text}) > 1 THEN CONCAT(LEFT({source_text}, 1), {full}, SUBSTRING({source_text}, LOCATE({}, {source_text}))) ELSE {full} END",
+                literal("@"),
+                literal("@")
+            ),
+            MaskKind::Name => {
+                let normalized = format!(
+                    "REGEXP_REPLACE(TRIM({source_text}), {}, {})",
+                    literal("[[:space:]]+"),
+                    literal(" ")
+                );
+                let initials = format!(
+                    "REGEXP_REPLACE({normalized}, {}, {})",
+                    literal("(^| )([^ ])[^ ]*"),
+                    literal("\\1\\2.")
+                );
+                format!(
+                    "CASE WHEN {normalized} = {empty} THEN {empty} ELSE REGEXP_REPLACE({initials}, {}, {full}) END",
+                    literal("\\.$")
+                )
+            }
+            MaskKind::DateYear => format!(
+                "CASE WHEN {source_text} = {empty} THEN {empty} WHEN REGEXP_LIKE({source_text}, {}, 'c') THEN CONCAT(LEFT({source_text}, 4), {}) ELSE {full} END",
+                literal("^[0-9]{4}-.{5}"),
+                literal("-**-**")
+            ),
+            MaskKind::DateDecade => format!(
+                "CASE WHEN {source_text} = {empty} THEN {empty} WHEN REGEXP_LIKE({source_text}, {}, 'c') THEN CONCAT(LEFT({source_text}, 3), {}) ELSE {full} END",
+                literal("^[0-9]{3}[0-9?]-.{5}"),
+                literal("?-**-**")
+            ),
+            MaskKind::None => source_text.to_string(),
+        };
+        format!("CASE WHEN ({source_text}) IS NULL THEN NULL ELSE ({value}) END")
+    }
+
     /// mysql2 carries a raw binary bind as text and would corrupt it, so the
     /// value goes over as canonical base64 and the server decodes it. The apply
     /// backend enforces the other half of this contract: a raw binary bind that
