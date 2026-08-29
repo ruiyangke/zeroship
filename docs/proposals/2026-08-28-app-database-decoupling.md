@@ -1032,13 +1032,13 @@ await env.db.transaction(async (tx) => {                 // UNCHANGED
 
 **`env.db.users` survives, and one-database-per-app is what saves it.** `installSchema` plants
 collections directly on the target with `Object.defineProperty`
-(`sdks/bootstrap/src/install-schema.ts:1508`), alongside `transaction` (`:1515`) and `live`
-(`:1521`), so with several bindings a binding named `analytics` and a collection named `analytics`
+(`sdks/bootstrap/src/install-schema.ts:1509`), alongside `transaction` (`:1516`) and `live`
+(`:1522`), so with several bindings a binding named `analytics` and a collection named `analytics`
 would be the same key. With one database there is no binding level and no collision. The creator
 surface does not change at all: no call-site sweep, no regenerated types, no edits to
 `docs/reference/db.md`, `examples/starter/` or `tests/golden_path.sh`.
 
-`RESERVED_ENV_DB_NAMES` (`install-schema.ts:1136`) keeps its present meaning, and `transaction` and
+`RESERVED_ENV_DB_NAMES` (`install-schema.ts:1137`) keeps its present meaning, and `transaction` and
 `openSubscription` stay where they are.
 
 The plugin constraint that motivated the binding level is also moot: a second plugin claiming the
