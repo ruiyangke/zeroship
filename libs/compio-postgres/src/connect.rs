@@ -19,13 +19,14 @@
 
 use crate::client::{Addr, Client, SocketConfig};
 use crate::config::{Host, LoadBalanceHosts, SslMode, TargetSessionAttrs};
-use crate::connect_raw::connect_raw_with_target_session_attrs;
+use crate::connect_raw::{connect_raw, connect_raw_with_target_session_attrs};
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::Encryption;
 use crate::connection::Connection;
 use crate::passfile;
-use crate::tls::MakeTlsConnect;
+use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Config, Error, Socket};
+use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
 use std::borrow::Cow;
@@ -762,6 +763,75 @@ where
     });
 
     Ok((client, connection))
+}
+
+/// The public entry points, implemented beside the code they call.
+///
+/// These are inherent methods on [`Config`], which Rust permits from any
+/// module of the defining crate. They live here rather than in `config.rs` so
+/// that configuration stays a leaf: see the note at the top of that file.
+impl Config {
+    /// Opens a connection to a PostgreSQL database.
+    pub async fn connect<T>(&self, tls: T) -> Result<(Client, Connection<Socket, T::Stream>), Error>
+    where
+        T: MakeTlsConnect<Socket>,
+    {
+        connect(tls, self).await
+    }
+
+    /// Connects to a PostgreSQL database over an arbitrary stream.
+    ///
+    /// Uses the startup, authentication, timeout, statement-cache, TLS mode,
+    /// `sslsni`, and `sslcertmode` settings. A configured `requirepeer` is
+    /// refused because an arbitrary stream exposes neither its address family
+    /// nor peer credentials. Transport-address settings such as `host`,
+    /// `hostaddr`, `port`, keepalives, and `tcp_user_timeout` are ignored. The
+    /// connect timeout starts with TLS negotiation, covers startup and
+    /// authentication, and cannot cover the caller's work to open that stream.
+    /// The read timeout is installed only after startup succeeds.
+    ///
+    /// The caller owns the stream, so this entry point cannot open a second
+    /// one. `allow` and `prefer` are therefore reduced to the transport they
+    /// attempt *first* - plaintext and TLS respectively - with no reconnect if
+    /// it fails. Use [`Config::connect`] to get the fallback.
+    pub async fn connect_raw<S, T>(
+        &self,
+        stream: S,
+        tls: T,
+    ) -> Result<(Client, Connection<S, T::Stream>), Error>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        T: TlsConnect<S>,
+    {
+        if self.require_peer.is_some() {
+            // A generic stream does not expose an address family or peer
+            // credentials. Pretending this is a Unix socket would be unsafe,
+            // while ignoring the requested identity check would turn it into
+            // false assurance.
+            return Err(Error::config(
+                "requirepeer cannot be checked by Config::connect_raw; use Config::connect \
+                 with a Unix-domain host"
+                    .into(),
+            ));
+        }
+        self.validate_connection_settings()?;
+        // No release handle: the stream is the caller's, `S` is unconstrained,
+        // and a stream that is not a socket has no descriptor to shut down.
+        // Such a connection keeps the pre-existing behaviour - it is released
+        // when its connection task is next polled.
+        with_connect_timeout(
+            self.get_connect_timeout().copied(),
+            connect_raw(
+                stream,
+                tls,
+                Encryption::first_for(self.ssl_mode),
+                true,
+                self,
+                None,
+            ),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
