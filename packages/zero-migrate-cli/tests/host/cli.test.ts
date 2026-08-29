@@ -41,6 +41,14 @@ const ADDON_PATH = resolve(
   HERE,
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
+
+const ACQUIRE_PROJECT_LOCK_SQL = `SELECT pg_advisory_lock(
+    (h >> 32)::int4, ((h << 32) >> 32)::int4
+  ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`;
+const RELEASE_PROJECT_LOCK_SQL = `SELECT pg_advisory_unlock(
+    (h >> 32)::int4, ((h << 32) >> 32)::int4
+  ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`;
+
 /**
  * A charter that INJECTS NOTHING, for the arms that only need author-shaped output.
  *
@@ -1595,9 +1603,9 @@ test("CLI status and plan answer while a peer holds the project lock", async (t)
     const policyPath = join(cwd, "policy.toml");
     writeFileSync(policyPath, noInjectPolicy(schema));
 
-    // The project lock key is `hashtext(project_id)` and the CLI's project_id is the
-    // project schema, so this is the same key the reader will try to take.
-    await holder.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [schema]);
+    // The CLI project id is the schema, so this takes the same two-key extended
+    // hash the reader will try to take.
+    await holder.query(ACQUIRE_PROJECT_LOCK_SQL, [schema]);
     held = true;
     const holderPid = (await holder.query("SELECT pg_backend_pid() AS pid")).rows[0]
       .pid as number;
@@ -1656,7 +1664,7 @@ test("CLI status and plan answer while a peer holds the project lock", async (t)
     // free, still takes the lock, still reads, and still returns its real verdict --
     // exit 1 for the pending migration this directory carries. Without it, the arms
     // above would also pass if the verbs had simply stopped doing any work.
-    await holder.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema]);
+    await holder.query(RELEASE_PROJECT_LOCK_SQL, [schema]);
     held = false;
 
     const uncontended = spawnCli(["status", "--strict", ...common], options);
@@ -1672,7 +1680,7 @@ test("CLI status and plan answer while a peer holds the project lock", async (t)
   } finally {
     if (held) {
       await holder
-        .query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema])
+        .query(RELEASE_PROJECT_LOCK_SQL, [schema])
         .catch(() => {});
     }
     await holder
@@ -1713,7 +1721,7 @@ test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
     const policyPath = join(cwd, "policy.toml");
     writeFileSync(policyPath, noInjectPolicy(schema));
 
-    await holder.query("SELECT pg_advisory_lock(hashtext($1)::bigint)", [schema]);
+    await holder.query(ACQUIRE_PROJECT_LOCK_SQL, [schema]);
     held = true;
 
     const common = [
@@ -1770,7 +1778,7 @@ test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
 
     // A verb whose stdout is a machine-readable reply still emits exactly one JSON
     // document with the variable set.
-    await holder.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema]);
+    await holder.query(RELEASE_PROJECT_LOCK_SQL, [schema]);
     held = false;
     const json = spawnCli(
       [
@@ -1793,7 +1801,7 @@ test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
   } finally {
     if (held) {
       await holder
-        .query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [schema])
+        .query(RELEASE_PROJECT_LOCK_SQL, [schema])
         .catch(() => {});
     }
     await holder

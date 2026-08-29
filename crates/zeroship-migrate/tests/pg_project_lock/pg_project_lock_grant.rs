@@ -45,7 +45,9 @@ use zeroship_migrate_postgres::PostgresBackend;
 
 /// The engine's own acquisition statement, sent verbatim by the control arm so it
 /// races the identical server-side path with no compensation wrapped around it.
-const ACQUIRE_SQL: &str = "SELECT pg_advisory_lock(hashtext($1)::bigint)";
+const ACQUIRE_SQL: &str = "SELECT pg_advisory_lock( \
+        (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+   ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key";
 
 /// How long the acquirer gives the lock wait before `statement_timeout` cancels
 /// it. Small, because the whole harness is a peer release aimed at that instant.
@@ -96,17 +98,20 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
 ///
 /// Read from `pg_locks` through a session that is NOT the acquiring one, so the
 /// answer is the server's own record of the grant rather than the engine's
-/// bookkeeping about it. A single-argument `pg_advisory_lock(int8)` is recorded
-/// with `objsubid = 1` and the key split across `classid`/`objid`, so reassembling
-/// them reconstructs the exact `hashtext(project_id)` the engine locked on.
+/// bookkeeping about it. A two-argument `pg_advisory_lock(int4, int4)` is
+/// recorded with `objsubid = 2`, with its signed key halves stored as the raw
+/// 32 bits in `classid` and `objid`.
 fn sessions_holding(witness: &PgDevSession, cfg: &ExecutorConfig) -> i64 {
     futures::executor::block_on(async {
         witness
             .query_one(
                 "SELECT count(*)::int8 AS held \
                    FROM pg_locks \
-                  WHERE locktype = 'advisory' AND granted AND objsubid = 1 \
-                    AND ((classid::bigint << 32) | objid::bigint) = hashtext($1)::bigint",
+                   CROSS JOIN (SELECT hashtextextended($1, 0) AS h) AS project_lock_key \
+                  WHERE locktype = 'advisory' AND granted AND objsubid = 2 \
+                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                    AND classid = ((h >> 32)::int4)::oid \
+                    AND objid = (((h << 32) >> 32)::int4)::oid",
                 &[cfg.project_id.as_str().into()],
             )
             .await

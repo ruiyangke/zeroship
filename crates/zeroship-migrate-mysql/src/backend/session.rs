@@ -8,8 +8,8 @@
 //! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor:
 //!
 //! - **project lock** - `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
-//!   named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
-//!   is derived from the project id (bounded to MySQL's 64-char lock-name limit).
+//!   named advisory lock, replaces PostgreSQL's two-`int4` project lock. The lock
+//!   name is derived from the project id (bounded to MySQL's 64-char lock-name limit).
 //!   A read-only caller takes the same lock with a zero timeout instead, so it
 //!   never spends any of a peer deploy's wall clock, and names the holder from
 //!   `performance_schema` when the lock is taken.
@@ -130,8 +130,8 @@ pub(crate) fn project_lock_name(project_id: &str) -> String {
     // Fold to a deterministic, collision-resistant 64-char name: prefix + a
     // hex SHA-256 of the full id (64 hex chars is exactly the cap when the prefix
     // is dropped for the overflow case). Liveness-only if two ids ever collided
-    // (they serialize against each other) - never a correctness defect, exactly
-    // like the PG `hashtext` 32-bit-key limitation.
+    // (they serialize against each other) - never a correctness defect, because
+    // each apply remains confined to its own project database.
     use sha2::{Digest, Sha256};
     // Keep the historical overflow derivation stable so mixed-version deploys
     // still contend on the same project lock.

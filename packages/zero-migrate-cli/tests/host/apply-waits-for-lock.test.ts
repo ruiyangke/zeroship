@@ -19,10 +19,11 @@
 // session makes the wait deterministic, and lets the test assert that the key it
 // took really is the one apply contends on.
 //
-// The key is `hashtext(project_id)`, and the project id is the schema. That is
-// asserted rather than assumed - if it were wrong, the "apply waits" arm would
-// pass for the wrong reason, since an apply that never contended would also
-// still be running at the sample point if it were merely slow.
+// The key is the two signed halves of `hashtextextended(project_id, 0)`, and the
+// project id is the schema. That is asserted rather than assumed - if it were
+// wrong, the "apply waits" arm would pass for the wrong reason, since an apply
+// that never contended would also still be running at the sample point if it
+// were merely slow.
 //
 // WHAT IS PINNED, and it is a contract worth pinning in both halves:
 //   - apply blocks while the lock is held, and emits NOTHING while blocking
@@ -146,14 +147,22 @@ test("apply waits for a held project lock, silently, and completes when it is re
     // Bootstrap the journal, so the wait below is on the lock and not on setup.
     await start(work, schema, "status").exited;
 
-    await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);
+    await holder.query(
+      `SELECT pg_advisory_lock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+         FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+      [schema],
+    );
 
-    // The key really is hashtext(schema): without this, "apply is still running"
-    // would also be satisfied by an apply that never contended at all.
+    // The key really is the extended hash of schema: without this, "apply is
+    // still running" would also be satisfied by an apply that never contended.
     const { rows: seen } = await client.query(
-      `SELECT count(*)::int AS n FROM pg_locks
-        WHERE locktype = 'advisory' AND granted AND objsubid = 1
-          AND ((classid::bigint << 32) | objid::bigint) = hashtext($1)::bigint`,
+      `SELECT count(*)::int AS n
+         FROM pg_locks
+         CROSS JOIN (SELECT hashtextextended($1, 0) AS h) AS project_lock_key
+        WHERE locktype = 'advisory' AND granted AND objsubid = 2
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND classid = ((h >> 32)::int4)::oid
+          AND objid = (((h << 32) >> 32)::int4)::oid`,
       [schema],
     );
     assert.equal(seen[0].n, 1, "the hand-taken lock must be the project lock apply will contend on");
@@ -174,7 +183,11 @@ test("apply waits for a held project lock, silently, and completes when it is re
     );
     assert.equal(early[0].n, 0, "a waiting apply must not have touched the schema");
 
-    await holder.query(`SELECT pg_advisory_unlock(hashtext($1)::bigint)`, [schema]);
+    await holder.query(
+      `SELECT pg_advisory_unlock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+         FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+      [schema],
+    );
     await running.exited;
 
     assert.equal(running.state.code, 0, `apply must succeed once released; ${running.state.err}`);
@@ -210,7 +223,11 @@ test("--query-timeout bounds the lock wait and names the lock in the error", asy
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);
     await start(work, schema, "status").exited;
-    await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);
+    await holder.query(
+      `SELECT pg_advisory_lock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+         FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+      [schema],
+    );
 
     // The escape hatch an operator has when a deploy is queued behind another:
     // it must give up rather than hang, and say what it gave up on.

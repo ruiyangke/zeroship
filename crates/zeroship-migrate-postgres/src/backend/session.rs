@@ -11,7 +11,7 @@
 //! confinement clauses, the transactional/non-transactional/DML apply paths, the
 //! crash-recovery drop-of-INVALID-index residue, the fresh-path squash
 //! supersession-edge writes, and the transactional rollback - every one of them
-//! Postgres-flavoured (`$N` placeholders, `hashtext`, `pg_index`), so they live
+//! Postgres-flavoured (`$N` placeholders, `hashtextextended`, `pg_index`), so they live
 //! in the Postgres backend, not the shared executor.
 //!
 //! The generic orchestration (partition, drift gate, `order_pending`, the
@@ -41,29 +41,31 @@ use zeroship_migrate_ir::migration::Migration;
 /// original session value without adding another session snapshot field.
 pub(super) const AUTHOR_SQL_LITERAL_MODE: &str = "SET LOCAL standard_conforming_strings = on;";
 
-/// A stable i64 advisory-lock key from the project id, mirroring the
-/// `hashtext(project_id)` design intent: we run `pg_advisory_lock(hashtext($1))`
-/// server-side so the key is computed by Postgres exactly as the design states
-/// (`hashtext` is the canonical PG text hash; deterministic per cluster).
+/// A stable 64-bit advisory-lock key from the full project id.
+///
+/// PostgreSQL's two-argument lock form takes two signed `int4`s. We compute one
+/// `hashtextextended(project_id, 0)` on the server and split its high and low
+/// 32-bit halves with signed shifts, preserving all 64 hash bits. Hashing the
+/// full id avoids defining an arbitrary midpoint for variable-length ids, while
+/// the two-argument form keeps this protocol in PostgreSQL's two-key advisory
+/// namespace.
 ///
 /// Holding it for the whole apply serializes concurrent deploys for the same
 /// project; a second apply waits, then sees the first's
 /// committed journal and no-ops.
 ///
-/// Known limitation: `hashtext` yields a 32-bit hash, so two *unrelated*
-/// project ids can collide onto the same advisory-lock key. The consequence is
-/// liveness-only - two unrelated projects would serialize against each other
-/// (one waits for the other's apply) - never a correctness/cross-tenant defect,
-/// since each apply still operates strictly within its own meta + project
-/// schema. Acceptable for v1. Revisit at scale with a 64-bit key
-/// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
+/// The hash space is 2^64 rather than `hashtext`'s 2^32. A theoretical collision
+/// only serializes two unrelated projects using the same PostgreSQL database;
+/// each apply remains confined to its own meta and project schemas.
 pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
 ) -> Result<(), ApplyError> {
     match conn
         .exec(
-            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+            "SELECT pg_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+               ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[project_id.into()],
         )
         .await
@@ -119,8 +121,8 @@ async fn drop_grant_from_failed_acquire<D: SqlSession>(conn: &D, project_id: &st
 /// Take the project lock if it is free right now, without waiting.
 ///
 /// `pg_try_advisory_lock` is the non-waiting peer of the `pg_advisory_lock` above
-/// and takes the identical `hashtext(project_id)` key, so a reader and a deploy
-/// contend on exactly the same lock.
+/// and takes the identical pair of `hashtextextended(project_id, 0)` halves, so a
+/// reader and a deploy contend on exactly the same lock.
 ///
 /// `pg_try_advisory_lock` never waits, so it has no grant-then-cancel window of
 /// its own; what it shares with the blocking acquisition is a lock the server
@@ -137,7 +139,10 @@ pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
 ) -> Result<bool, ApplyError> {
     let row = match conn
         .query_one(
-            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
+            "SELECT pg_try_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+                ) AS got \
+               FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[project_id.into()],
         )
         .await
@@ -162,13 +167,10 @@ pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
 /// Report the sessions holding this project's advisory lock, for an operator
 /// message naming who a reader is waiting behind.
 ///
-/// Scoped to the project's own key rather than every advisory lock in the cluster:
-/// a single-argument `pg_advisory_lock(int8)` is recorded as `objsubid = 1` with
-/// the key split across `classid` (high 32 bits) and `objid` (low 32 bits), so
-/// reassembling them reconstructs the exact `hashtext(project_id)` value. The
-/// reassembly is signed-correct because `hashtext` is an `int4` that sign-extends
-/// to a negative `int8` for roughly half of all project ids, and PostgreSQL's
-/// `int8` shift wraps rather than erroring, which is what puts the sign bits back.
+/// Scoped to the project's own key rather than every advisory lock in the cluster.
+/// A two-argument `pg_advisory_lock(int4, int4)` is recorded as `objsubid = 2`,
+/// with the first key in `classid` and the second in `objid`. Casting each signed
+/// half to `oid` preserves its 32 raw bits for comparison with those columns.
 ///
 /// `query` is NULL unless the reading role may see other sessions' statement text
 /// (superuser or `pg_read_all_stats`), so it is reported as optional rather than
@@ -184,8 +186,11 @@ pub(crate) async fn project_lock_holders<D: SqlSession>(
         .query(
             "SELECT a.pid::int8 AS pid, a.application_name, a.state, a.query \
                FROM pg_locks l JOIN pg_stat_activity a USING (pid) \
-              WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 \
-                AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtext($1)::bigint \
+               CROSS JOIN (SELECT hashtextextended($1, 0) AS h) AS project_lock_key \
+              WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 2 \
+                AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                AND l.classid = ((h >> 32)::int4)::oid \
+                AND l.objid = (((h << 32) >> 32)::int4)::oid \
               ORDER BY a.pid",
             &[project_id.into()],
         )
@@ -207,7 +212,9 @@ pub(crate) async fn release_project_lock<D: SqlSession>(
     project_id: &str,
 ) -> Result<(), ApplyError> {
     conn.exec(
-        "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+        "SELECT pg_advisory_unlock( \
+                (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+           ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
         &[project_id.into()],
     )
     .await?;

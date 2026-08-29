@@ -194,7 +194,8 @@ impl ConfinementConfig {
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     /// The project id (`prj_...`) - its bytes seed the apply-serializing advisory
-    /// lock (`pg_advisory_lock(hashtext(project_id))`).
+    /// lock (on PostgreSQL, the two `int4` halves of
+    /// `hashtextextended(project_id, 0)`).
     pub project_id: String,
     /// The one schema this project's migrations own and may touch. Pinned into
     /// `search_path` for every apply, and the registered line-1

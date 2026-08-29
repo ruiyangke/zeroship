@@ -1032,11 +1032,10 @@ const PROBE_EXTENSION: &str = "pgcrypto";
 /// case is the second line, where the referent went missing because a SIBLING RUN
 /// removed it.
 ///
-/// The key is hashed by the server the way `apply::executor` hashes a project id for
-/// its own lock, so a reader who knows one knows the other. Both live in one 64-bit
-/// advisory space, and a collision between this key and some project's could only
-/// make one of them WAIT, never mis-serialize: advisory locks are re-entrant per
-/// session, so the executor's own acquire inside a claimed row is satisfied at once.
+/// The extension claim deliberately remains a one-argument `hashtext` lock.
+/// Project locks use PostgreSQL's disjoint two-argument advisory-lock namespace,
+/// so a project key cannot collide with this claim. All extension claimants still
+/// hash the same resource string into the same one-key namespace.
 ///
 /// NOT A CONSTANT OF THIS FILE any more. It is `support::extension_claim`'s key for
 /// [`PROBE_EXTENSION`], because the other binaries that install `pgcrypto` have to

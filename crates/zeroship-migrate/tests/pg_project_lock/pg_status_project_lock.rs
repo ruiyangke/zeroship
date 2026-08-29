@@ -206,7 +206,10 @@ fn backend_pid(session: &PgDevSession) -> i64 {
 async fn try_lock(session: &PgDevSession, cfg: &ExecutorConfig) -> bool {
     session
         .query_one(
-            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
+            "SELECT pg_try_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+                ) AS got \
+               FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[cfg.project_id.as_str().into()],
         )
         .await

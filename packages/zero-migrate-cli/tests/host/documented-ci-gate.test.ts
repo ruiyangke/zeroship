@@ -132,7 +132,11 @@ test("the documented CI gate passes when idle and fails while a deploy runs", as
     assert.equal(busyGatePasses(idle.out), true, "the gate must pass on an idle project");
 
     // Now a peer holds the project lock, which is what the gate exists to catch.
-    await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);
+    await holder.query(
+      `SELECT pg_advisory_lock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+         FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+      [schema],
+    );
     try {
       const busy = run(work, schema, ["status", "--strict", "--json"]);
       // Load-bearing: if contention made `--strict` exit non-zero, the recipe
@@ -155,7 +159,11 @@ test("the documented CI gate passes when idle and fails while a deploy runs", as
         "the documented gate must fail the build while a deploy is running",
       );
     } finally {
-      await holder.query(`SELECT pg_advisory_unlock(hashtext($1)::bigint)`, [schema]);
+      await holder.query(
+        `SELECT pg_advisory_unlock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+           FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+        [schema],
+      );
     }
   } finally {
     await client
