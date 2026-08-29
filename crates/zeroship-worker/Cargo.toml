@@ -43,9 +43,10 @@ tracing = { workspace = true }
 # Live-database test gate
 # ---------------------------------------------------------------------------
 # `live-db-tests` compiles `handler::workflow_live_tests` - seven tests that
-# drive `workflow_advance_unsigned` end to end. They need a PostgreSQL that is
-# MIGRATED, not merely reachable: the claim path joins `zeroship.apps`,
-# `zeroship.plans` and `zeroship.app_deploys`
+# drive `workflow_advance_unsigned` end to end - plus db_posture's full worker
+# boot test. They need a PostgreSQL that is MIGRATED, not merely reachable: the
+# claim and posture paths read `zeroship.apps`, `zeroship.plans` and
+# `zeroship.app_deploys`
 # (crates/zeroship-plugin-workflow/src/claim.rs:89-91), and those tables come
 # from the committed corpus in `db/migrations-ts/`, never from a fixture.
 #
@@ -65,10 +66,10 @@ tracing = { workspace = true }
 #
 #     cargo test -p zeroship-worker --features live-db-tests
 #
-# and then FAILS unless at least seven `workflow_advance_*` tests reported `ok`.
-# That last arm is the one that matters - a total-passes floor cannot tell a
-# gated-out live set from a shrunken one, because both just print a smaller
-# number. CI runs the script as the `worker-live-gate` job.
+# and then FAILS unless at least seven `workflow_advance_*` tests and the one
+# full boot-posture test reported `ok`. Those named arms matter - a total-passes
+# floor cannot tell a gated-out live set from a shrunken one, because both just
+# print a smaller number. CI runs the script as the `worker-live-gate` job.
 #
 # The dev-dependency below is NOT gated with it: Cargo rejects
 # `optional = true` on a dev-dependency, so `zeroship-migrate-server` is built
