@@ -542,7 +542,9 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 /// point-in-time snapshot and this function drops and recreates the tables.
 async fn prepare_side_effect_table(pg: &TestPg) {
     let app_schema = quote_ident(&pg.app_id.to_string());
-    let app_role = quote_ident(&format!("app_{}_role", pg.app_id));
+    let app_role_name = zeroship_core::database_role::per_app_role_name(&pg.app_id.to_string())
+        .expect("workflow fixture app id must produce a valid PostgreSQL role name");
+    let app_role = quote_ident(&app_role_name);
     // The seven platform system columns, verbatim from the DDL the platform
     // itself emits for a creator table
     // (crates/zeroship-schema/src/query.rs:208-219). `id` is TEXT because
@@ -568,7 +570,7 @@ async fn prepare_side_effect_table(pg: &TestPg) {
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '__zeroship_app_role_template') THEN \
                 EXECUTE 'CREATE ROLE \"__zeroship_app_role_template\" NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT'; \
             END IF; \
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_{app_id}_role') THEN \
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{app_role_name}') THEN \
                 EXECUTE 'CREATE ROLE {app_role} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"__zeroship_app_role_template\"'; \
             END IF; \
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_worker') THEN \
@@ -599,7 +601,6 @@ async fn prepare_side_effect_table(pg: &TestPg) {
          ); \
          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {app_schema} TO {app_role}; \
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {app_schema} TO {app_role};",
-        app_id = pg.app_id,
     ))
     .await
     .expect("prepare side-effect table");

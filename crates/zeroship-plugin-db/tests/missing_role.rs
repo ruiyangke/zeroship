@@ -158,7 +158,8 @@ async fn drain_pg() {
 /// hand the resulting server error to the classifier.
 async fn classify_missing_role(app_id: &str) -> DbError {
     let client = connect_test_client().await;
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_id);
+    let role = zeroship_core::database_role::per_app_role_name(app_id)
+        .expect("missing-role fixture app id must produce a valid PostgreSQL role name");
 
     // Same shape as `exec::query_postgres_pool_with_autocommit_role`: the
     // SET LOCAL runs inside an explicit transaction, so the failure is the
@@ -185,7 +186,8 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
     // A name no cluster will have. Shaped like `per_app_role_name` output
     // so the case is the production one.
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(&app_id);
+    let role = zeroship_core::database_role::per_app_role_name(&app_id)
+        .expect("missing-role fixture app id must produce a valid PostgreSQL role name");
     let classified = classify_missing_role(&app_id).await;
 
     let op = classified.to_op_error();
@@ -294,7 +296,9 @@ async fn a_real_internal_pg_failure_is_still_internal() {
 
 #[compio::test]
 async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
-    let role = format!("app_{}_role", uuid::Uuid::new_v4().simple());
+    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let role = zeroship_core::database_role::per_app_role_name(&app_id)
+        .expect("pool-reconnect fixture app id must produce a valid PostgreSQL role name");
     let (url, server) = spawn_pool_reconnect_server(&role);
 
     // A SHORT lifetime the warm entry then outlives, not `Duration::ZERO`.

@@ -22,6 +22,7 @@
 //! cheap no-op.
 
 use compio_postgres::Pool;
+use zeroship_core::database_role::per_app_role_name;
 
 use super::APP_ROLE_TEMPLATE;
 use crate::error::DbError;
@@ -122,53 +123,40 @@ fn sql_string_literal(value: &str) -> String {
 // creation; that is the entire surface. A production cluster from before
 // this lands does not exist.
 
-/// Compose the per-app PG role name from an `app_id`.
-///
-/// Convention `app_<id>_role` - pinned by the unit test
-/// `tests::per_app_role_name_uses_app_id_role_convention` in this file,
-/// which asserts the composed name for three shapes of `app_id`.
-/// (Deliberately not an intra-doc link: `tests` is `#[cfg(test)]`, so
-/// rustdoc cannot resolve it and the workspace doc-link gate would
-/// fail.) The
-/// `auth::mod` docstring on [`APP_ROLE_TEMPLATE`] DESCRIBES the same
-/// convention ("Per-app roles (`app_<id>_role`) are created downstream
-/// by the control plane during app provisioning") but cannot pin it:
-/// prose is not compiled against this function, so it can drift from
-/// the code silently. Read it for the why, not as a guarantee.
-///
-/// The platform-managed template role uses the `__zeroship_` prefix;
-/// per-app roles deliberately do NOT, so they are visually distinct
-/// from the trust anchor in `pg_roles` and `\du` output.
-///
-/// `app_id` is a non-creator-controllable UUIDv7 base62 typed_id
-/// validated to `[A-Za-z0-9_-]`. Preserve the raw identifier so two
-/// distinct app ids cannot collapse onto the same role name; every SQL
-/// call site double-quotes the result, so `-` and uppercase letters are
-/// safe here without a lossy transform.
-pub fn per_app_role_name(app_id: &str) -> String {
-    format!("app_{app_id}_role")
-}
-
 /// `SET LOCAL ROLE "app_<id>_role"` — used INSIDE a transaction so the
 /// role automatically reverts at COMMIT/ROLLBACK (no explicit `RESET`
 /// needed, and no risk of a pooled connection leaking the role to the
 /// next checkout). This is the preferred client-SQL injection point.
 ///
-/// The role name flows through [`per_app_role_name`] (validated +
-/// normalised) and is double-quoted, so this is injection-safe even
-/// though it interpolates.
+/// The role name flows through the shared, length-checked composer and is
+/// double-quoted, so this is injection-safe even though it interpolates.
+///
+/// # Errors
+///
+/// Returns a typed database error if the complete role name exceeds
+/// PostgreSQL's identifier limit.
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn set_local_role_sql(app_id: &str) -> String {
-    format!("SET LOCAL ROLE {}", crate::query::quote_ident(&per_app_role_name(app_id)))
+pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
+    let role = per_app_role_name(app_id)?;
+    Ok(format!(
+        "SET LOCAL ROLE {}",
+        crate::query::quote_ident(&role)
+    ))
 }
 
 /// `SET ROLE "app_<id>_role"` — session-level variant for the rare
 /// non-transactional client-SQL path. MUST be paired with
 /// [`reset_role_sql`] before the connection returns to the pool, or the
 /// next checkout inherits the constrained role.
+///
+/// # Errors
+///
+/// Returns a typed database error if the complete role name exceeds
+/// PostgreSQL's identifier limit.
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn set_role_sql(app_id: &str) -> String {
-    format!("SET ROLE {}", crate::query::quote_ident(&per_app_role_name(app_id)))
+pub fn set_role_sql(app_id: &str) -> Result<String, DbError> {
+    let role = per_app_role_name(app_id)?;
+    Ok(format!("SET ROLE {}", crate::query::quote_ident(&role)))
 }
 
 /// `RESET ROLE` — restore the session's original (login) role. Pairs
@@ -201,14 +189,19 @@ pub const DB_LOCK_TIMEOUT_MS: u32 = 10_000;
 /// so every value (role + timeouts) auto-reverts at COMMIT/ROLLBACK and can
 /// never leak to a later checkout of the (dedicated, but defensively reset)
 /// connection.
-pub fn tx_session_setup_sql(app_id: &str) -> String {
-    let role = crate::query::quote_ident(&per_app_role_name(app_id));
-    format!(
+///
+/// # Errors
+///
+/// Returns a typed database error if the complete role name exceeds
+/// PostgreSQL's identifier limit.
+pub fn tx_session_setup_sql(app_id: &str) -> Result<String, DbError> {
+    let role = crate::query::quote_ident(&per_app_role_name(app_id)?);
+    Ok(format!(
         "SET LOCAL ROLE {role}; \
          SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
          SET LOCAL idle_in_transaction_session_timeout = {DB_IDLE_IN_TX_TIMEOUT_MS}; \
          SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"
-    )
+    ))
 }
 
 /// Combined autocommit (pooled) client setup, run inside a short-lived
@@ -223,13 +216,18 @@ pub fn tx_session_setup_sql(app_id: &str) -> String {
 /// is opened and committed around a single statement, so it never sits
 /// idle in transaction (the per-statement `statement_timeout` already
 /// bounds the work).
-pub fn autocommit_local_session_setup_sql(app_id: &str) -> String {
-    let role = crate::query::quote_ident(&per_app_role_name(app_id));
-    format!(
+///
+/// # Errors
+///
+/// Returns a typed database error if the complete role name exceeds
+/// PostgreSQL's identifier limit.
+pub fn autocommit_local_session_setup_sql(app_id: &str) -> Result<String, DbError> {
+    let role = crate::query::quote_ident(&per_app_role_name(app_id)?);
+    Ok(format!(
         "SET LOCAL ROLE {role}; \
          SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
          SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"
-    )
+    ))
 }
 
 /// Result of [`ensure_per_app_role`] — distinguishes "created the role
@@ -272,7 +270,7 @@ pub struct PerAppRoleOutcome {
 /// Runs under the caller's pool, which in production is the platform
 /// (bootstrap) role — a superuser or CREATEROLE principal.
 pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRoleOutcome, DbError> {
-    let role = per_app_role_name(app_id);
+    let role = per_app_role_name(app_id)?;
     let schema = crate::query::quote_ident(app_id);
     let qrole = format!("\"{role}\"");
 
@@ -591,7 +589,7 @@ mod reserved_table_revoke_tests {
 /// DROP errors loudly rather than silently — surfacing the §17.5
 /// violation instead of masking it.
 pub async fn drop_per_app_role(pool: &Pool, app_id: &str) -> Result<(), DbError> {
-    let role = per_app_role_name(app_id);
+    let role = per_app_role_name(app_id)?;
     pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await
         .map_err(|e| coded_sql(&format!("DROP ROLE {role}"), e))?;
@@ -607,33 +605,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn per_app_role_name_uses_app_id_role_convention() {
-        // THIS assertion is the pin for the `app_<id>_role` convention.
-        // The `APP_ROLE_TEMPLATE` docstring describes the same rule in
-        // prose; nothing compiles prose against `per_app_role_name`, so
-        // if the two disagree it is this test that decides.
-        //
-        // What it does NOT catch: a change to the convention made here
-        // AND in the composer together. It pins the shape against a
-        // hardcoded literal, not against the docstring's text.
-        assert_eq!(per_app_role_name("app_demo"), "app_app_demo_role");
-        assert_eq!(per_app_role_name("app-abc"), "app_app-abc_role");
-        assert_eq!(per_app_role_name("App_X"), "app_App_X_role");
-    }
-
-    #[test]
-    fn per_app_role_name_does_not_collapse_distinct_app_ids() {
-        assert_ne!(
-            per_app_role_name("app-demo"),
-            per_app_role_name("app_demo"),
-            "hyphen and underscore app ids must map to distinct quoted PG roles"
-        );
-    }
-
-    #[test]
     fn set_role_sql_shapes_are_quoted_and_correct() {
-        assert_eq!(set_local_role_sql("app_demo"), r#"SET LOCAL ROLE "app_app_demo_role""#);
-        assert_eq!(set_role_sql("app_demo"), r#"SET ROLE "app_app_demo_role""#);
+        assert_eq!(
+            set_local_role_sql("app_demo").unwrap(),
+            r#"SET LOCAL ROLE "app_app_demo_role""#
+        );
+        assert_eq!(
+            set_role_sql("app_demo").unwrap(),
+            r#"SET ROLE "app_app_demo_role""#
+        );
         assert_eq!(reset_role_sql(), "RESET ROLE");
     }
 
@@ -643,8 +623,14 @@ mod tests {
         // role separation. It MUST flow through quote_ident (doubling any
         // embedded `"`), not a hand-written `"{}"` splice — even though app_id
         // is validated upstream, this boundary must not rely on that.
-        assert_eq!(set_local_role_sql(r#"a"b"#), r#"SET LOCAL ROLE "app_a""b_role""#);
-        assert_eq!(set_role_sql(r#"a"b"#), r#"SET ROLE "app_a""b_role""#);
+        assert_eq!(
+            set_local_role_sql(r#"a"b"#).unwrap(),
+            r#"SET LOCAL ROLE "app_a""b_role""#
+        );
+        assert_eq!(
+            set_role_sql(r#"a"b"#).unwrap(),
+            r#"SET ROLE "app_a""b_role""#
+        );
     }
 
     #[test]
@@ -654,7 +640,7 @@ mod tests {
         // long a statement may run — the defense against one tenant exhausting
         // the shared Postgres connection pool fleet-wide. SET LOCAL so they
         // revert at COMMIT/ROLLBACK.
-        let sql = tx_session_setup_sql("app_demo");
+        let sql = tx_session_setup_sql("app_demo").unwrap();
         assert!(sql.contains(r#"SET LOCAL ROLE "app_app_demo_role""#), "{sql}");
         assert!(sql.contains("SET LOCAL idle_in_transaction_session_timeout ="), "{sql}");
         assert!(sql.contains("SET LOCAL statement_timeout ="), "{sql}");
@@ -670,7 +656,7 @@ mod tests {
         // COMMIT/ROLLBACK (including rollback-on-drop on cancellation) and can
         // never leak to the next checkout. No idle-in-tx guard — the wrapping
         // transaction commits around a single statement and never sits idle.
-        let setup = autocommit_local_session_setup_sql("app_demo");
+        let setup = autocommit_local_session_setup_sql("app_demo").unwrap();
         assert!(setup.contains(r#"SET LOCAL ROLE "app_app_demo_role""#), "{setup}");
         assert!(setup.contains("SET LOCAL statement_timeout ="), "{setup}");
         assert!(setup.contains("SET LOCAL lock_timeout ="), "{setup}");
@@ -681,6 +667,21 @@ mod tests {
             !setup.contains("idle_in_transaction"),
             "no idle guard on autocommit: {setup}"
         );
+    }
+
+    #[test]
+    fn both_session_setup_batches_refuse_overlong_role_names() {
+        let app_id = "a".repeat(55);
+        for result in [
+            tx_session_setup_sql(&app_id),
+            autocommit_local_session_setup_sql(&app_id),
+        ] {
+            let error = result.expect_err("64-byte role names must be refused");
+            assert!(
+                error.to_string().contains("64 bytes; maximum is 63 bytes"),
+                "unexpected refusal: {error}"
+            );
+        }
     }
 
     #[test]
@@ -818,7 +819,7 @@ mod live_reserved_sweep_tests {
             ))
             .await
             .expect("seed the swept journal stand-in and a creator table");
-        per_app_role_name(app)
+        per_app_role_name(app).expect("scratch app role name")
     }
 
     /// Named-object teardown only. `__zeroship_app_role_template` is
@@ -826,7 +827,9 @@ mod live_reserved_sweep_tests {
     /// it is shared by every app on the cluster, and dropping it would break
     /// concurrent work on this server.
     async fn teardown(admin: &Client, app: &str) {
-        let role = crate::query::quote_ident(&per_app_role_name(app));
+        let role = crate::query::quote_ident(
+            &per_app_role_name(app).expect("scratch app role name"),
+        );
         let _ = admin
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -848,7 +851,9 @@ mod live_reserved_sweep_tests {
     ) -> Result<(), compio_postgres::Error> {
         admin.batch_execute("BEGIN").await?;
         let scoped = async {
-            admin.batch_execute(&tx_session_setup_sql(app)).await?;
+            admin
+                .batch_execute(&tx_session_setup_sql(app).expect("scratch app role name"))
+                .await?;
             admin.batch_execute(sql).await
         }
         .await;
@@ -909,7 +914,7 @@ mod live_reserved_sweep_tests {
         ensure_per_app_role(&pool, &app)
             .await
             .expect("provision the per-app role over the wrong-kind relation");
-        let role = per_app_role_name(&app);
+        let role = per_app_role_name(&app).expect("scratch app role name");
         let privileges = admin
             .query_text_params(
                 "SELECT privilege_type \
@@ -952,7 +957,7 @@ mod live_reserved_sweep_tests {
             .await
             .expect("pool for ensure_per_app_role");
         let outcome = ensure_per_app_role(&pool, &app).await;
-        let role = per_app_role_name(&app);
+        let role = per_app_role_name(&app).expect("scratch app role name");
         let privileges = admin
             .query_text_params(
                 "SELECT privilege_type \

@@ -15,6 +15,7 @@ pub mod types;
 pub mod auth;
 pub mod auth_provider;
 pub mod client_ip;
+pub mod database_role;
 pub mod db_url;
 pub mod device_grant;
 pub mod typed_id;

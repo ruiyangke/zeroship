@@ -4,7 +4,7 @@ use compio_postgres::{Client, GenericClient, NoTls};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use uuid::Uuid;
-use zeroship_core::typed_id;
+use zeroship_core::{database_role::per_app_role_name, typed_id};
 
 use crate::engine::{
     cap_exceeded, child_dedup_key, child_signal_type, state_cap_error, RunUpdate, StepCheckpoint,
@@ -336,10 +336,25 @@ async fn reassert_table_revokes<C>(conn: &C, tables: &WorkflowTables) -> Result<
 where
     C: GenericClient + Sync,
 {
+    let sql = reassert_table_revokes_sql(tables)?;
+    conn.batch_execute(&sql).await?;
+    Ok(())
+}
+
+fn reassert_table_revokes_sql(tables: &WorkflowTables) -> Result<String, WorkflowError> {
     let all_tables = tables.all().join(", ");
-    let app_role = format!("app_{}_role", tables.app_id.as_hyphenated());
-    let schema_role = format!("app_{}_role", tables.app_schema);
-    let sql = format!(
+    let app_id = tables.app_id.as_hyphenated().to_string();
+    let app_role = per_app_role_name(&app_id).map_err(|error| {
+        WorkflowError::Db(format!(
+            "workflow journal per-app role name refused: {error}"
+        ))
+    })?;
+    let schema_role = per_app_role_name(&tables.app_schema).map_err(|error| {
+        WorkflowError::Db(format!(
+            "workflow journal per-app role name refused: {error}"
+        ))
+    })?;
+    Ok(format!(
         "REVOKE ALL ON TABLE {all_tables} FROM PUBLIC; \
          DO $$ \
          BEGIN \
@@ -354,9 +369,7 @@ where
         role_literal = sql_string_literal(&app_role),
         schema_role_literal = sql_string_literal(&schema_role),
         escaped_tables = all_tables.replace('\'', "''"),
-    );
-    conn.batch_execute(&sql).await?;
-    Ok(())
+    ))
 }
 
 #[must_use]
@@ -1968,6 +1981,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_revokes_use_shared_role_composer() -> Result<(), Box<dyn std::error::Error>> {
+        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let sql = reassert_table_revokes_sql(&tables)?;
+        let app_id = tables.app_id.as_hyphenated().to_string();
+        let expected_roles = [
+            per_app_role_name(&app_id)?,
+            per_app_role_name(&tables.app_schema)?,
+        ];
+
+        for role in expected_roles {
+            let role_literal = sql_string_literal(&role);
+            assert!(
+                sql.contains(&role_literal),
+                "workflow journal revokes must use shared role {role}: {sql}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn worker_provisioning_uses_a_precreated_narrow_owner_role() {

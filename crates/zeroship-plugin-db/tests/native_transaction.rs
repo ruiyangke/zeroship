@@ -635,7 +635,8 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
     let app_id = format!("zs_txgrant_{suffix}");
     let login = format!("zs_txlogin_{}", &suffix[..16]);
     let password = "ZsTxGrant9";
-    let app_role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(&app_id);
+    let app_role = zeroship_core::database_role::per_app_role_name(&app_id)
+        .expect("grant-revocation app id must produce a valid PostgreSQL role name");
     let (scheme, address) = admin_url
         .split_once("://")
         .and_then(|(scheme, rest)| rest.rsplit_once('@').map(|(_, address)| (scheme, address)))
@@ -673,11 +674,11 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
+        let set_local_role_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(&app_id)
+            .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
-            .batch_execute(&zeroship_plugin_db::auth::bootstrap::set_local_role_sql(
-                &app_id,
-            ))
+            .batch_execute(&set_local_role_sql)
             .await
             .expect("membership must permit SET LOCAL ROLE before revoke");
         worker
@@ -691,9 +692,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             .expect("revoke app-role membership");
         worker.batch_execute("BEGIN").await.expect("oracle BEGIN");
         let revoked = worker
-            .batch_execute(&zeroship_plugin_db::auth::bootstrap::set_local_role_sql(
-                &app_id,
-            ))
+            .batch_execute(&set_local_role_sql)
             .await
             .expect_err("revoked membership must deny SET LOCAL ROLE");
         assert_eq!(
@@ -1848,7 +1847,8 @@ mod sc1_driver {
     /// idle entry.
     async fn provision(app_id: &str) -> Client {
         let client = admin().await;
-        let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_id);
+        let role = zeroship_core::database_role::per_app_role_name(app_id)
+            .expect("transaction fixture app id must produce a valid PostgreSQL role name");
         client
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
@@ -1874,7 +1874,8 @@ mod sc1_driver {
     async fn teardown(admin: &Client, app_id: &str) {
         probe::reset(app_id);
         zeroship_plugin_db::reset_context_for_tests();
-        let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_id);
+        let role = zeroship_core::database_role::per_app_role_name(app_id)
+            .expect("transaction fixture app id must produce a valid PostgreSQL role name");
         let _ = admin
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \

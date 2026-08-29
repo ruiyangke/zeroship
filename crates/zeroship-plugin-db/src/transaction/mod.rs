@@ -217,7 +217,8 @@ pub(crate) async fn apply_per_app_role(
     // The idle-in-tx guard is the load-bearing defense: a creator callback that
     // never resolves can no longer pin this dedicated connection forever and
     // exhaust the shared Postgres for other tenants.
-    let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id);
+    let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id)
+        .map_err(crate::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
         let mut classified =
             crate::error::DbError::classify_pg_per_app_session_setup(&e, app_id);
