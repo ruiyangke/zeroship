@@ -29,6 +29,63 @@ measurements age.
 
 ## 2026-08-29
 
+### Round 5 on the reconciled design, and the thing I got wrong in its brief
+
+Three reviewers against the rewritten pages. Five findings survived my own check and became tasks;
+two of them corrected me.
+
+**I briefed a shape that was never adopted.** My round-5 brief described a three-transaction apply
+bracket ("TX-A revokes epoch E and marks the head applying, TX-B is the DDL, TX-C mints E+1") as
+settled. It is in no document - `grep -rn "TX-A" docs/` returns nothing. I carried it forward from one
+of the design drafts and stated it as decided. One reviewer caught this in its own self-refutation and
+correctly discounted the finding that rested on it. Any round-5 finding keyed to TX-A specifically is
+conditional on a shape nobody adopted.
+
+The lesson is not "do not paraphrase". It is that a brief is an ASSERTION ABOUT THE TREE, and this one
+asserted a mechanism into existence. Everything else in that brief was measured or cited; the one
+unsourced sentence is the one that cost a reviewer's strongest finding.
+
+**"Only the producer is missing" was too narrow, and it was in AGENTS.md.** I wrote that the schema
+epoch's consumer ships and only its producer is absent. Verified against
+`crates/zeroship-plugin-db/src/transaction/reducer/mod.rs:966-972`:
+
+```rust
+if !opened {
+    return self.force(CleanupCause::BeginFailed, now).1;
+}
+```
+
+A failed BEGIN returns before `classify` runs, and `classify` runs on a synthetic observation composed
+before the session opens. So the epoch comparison at `identity.rs:313-315` cannot observe a real
+`SET LOCAL ROLE` failure - which is precisely how a role-name-borne epoch fence fires. The epoch needs
+a producer AND an adapter from the session-setup outcome into `Verdict::ReResolve`. Corrected in
+`7d786518c`.
+
+**That unified two findings filed separately.** `BeginFailed` is where classified setup errors go to
+die - it is the same seam that discards a classified `GRANT_REVOKED` into a generic `begin_failed`.
+One defect, two symptoms, one fix.
+
+**The apply cannot be one transaction, and the document said it could.** `engine.rs:2656` states the
+engine's contract - "everything ahead of it commits in its own transaction" - and the host loops it
+once per IR file. Two reviewers reached this independently by different routes. The epoch rotation IS
+atomic as one small transaction; the DDL is not and must not be inside it. Section 4 now says so, and
+names the three things that remain open: where the rotation sits relative to the DDL, what unfences an
+app if the process dies mid-apply (`apply.rs:708` passes `recovery_scope: None`), and whether the
+rotation may reuse a publication reconciler that owns its own `BEGIN`.
+
+**Measured this round, both closing gaps a reviewer named rather than assumed:**
+
+- *Publication naming decides, and the list is fixed at stream start.* One slot, one dataset, two
+  decodes differing only in which publications are named: 4 records vs 8. PostgreSQL's own warning -
+  "The publication does not exist at this point in the WAL" - shows existence is evaluated against WAL
+  position. So a per-database publication under one slot per datastore strands every later-created
+  database, and the remedy is a stream restart, which is the exact cost `cdc-service.md:39` rejected
+  the per-app shape for. Two live documents specify this incompatibly and never cite each other.
+- *A warm pooled backend sees a role minted after it connected.* Same backend pid before and after
+  (`1535`), control role minted pre-connect and case role minted post-connect both settable. So epoch
+  rotation needs no connection churn, and the unmeasured connect-time membership-cache cost is not
+  triggered by it. Had this gone the other way, an app would still fail after a correct rebuild.
+
 ### Reconciling the two re-key drafts: the epoch is enforced by PostgreSQL, not compared in Rust
 
 Two independent drafts of the identity re-key agreed on nearly everything - the key per subsystem, the
