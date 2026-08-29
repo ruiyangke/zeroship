@@ -1363,6 +1363,106 @@ async fn applied_versions(conn: &Client, app_id: &Uuid) -> Vec<Value> {
     .collect()
 }
 
+/// A failure after the engine commits creator DDL must still close the control
+/// plane's apply ledger row.
+///
+/// An existing `FOR ALL TABLES` publication makes the post-apply reconciliation
+/// issue an `ALTER PUBLICATION ... SET TABLE` that PostgreSQL refuses. The notes
+/// table therefore proves the engine commit happened before the failure; the
+/// ledger assertion proves that failure did not strand the request as submitted.
+#[ntex::test]
+async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let publication =
+        zeroship_core::replication_names::publication_name(&app_id.to_string())
+            .expect("app id is a valid publication seed");
+    conn.batch_execute(&format!(
+        "CREATE PUBLICATION {} FOR ALL TABLES",
+        quote_ident(&publication)
+    ))
+    .await
+    .expect("create the incompatible publication fixture");
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer good-token")
+        .set_json(&create_notes_request())
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    let response_status = resp.status();
+    let response_body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    let ddl_committed = table_exists(&conn, &app_id.to_string(), "notes").await;
+    let ledger = conn
+        .query(
+            "SELECT status, last_error FROM zeroship.app_schema_applies \
+              WHERE app_id = $1 ORDER BY submitted_at ASC, migration_id ASC",
+            &[&app_id],
+        )
+        .await
+        .expect("query the failed apply ledger row")
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("status"),
+                row.get::<_, Option<String>>("last_error"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // Teardown precedes assertions so the deliberate red run does not leave a
+    // global publication or per-app roles behind in the dedicated test server.
+    conn.batch_execute(&format!(
+        "DROP PUBLICATION IF EXISTS {}",
+        quote_ident(&publication)
+    ))
+    .await
+    .expect("drop the incompatible publication fixture");
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    assert_eq!(
+        response_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the publication failure must reach the API: {response_body}"
+    );
+    assert!(
+        ddl_committed,
+        "the notes table must be committed before publication reconciliation fails"
+    );
+    assert_eq!(
+        ledger.len(),
+        1,
+        "one request must create exactly one ledger row: {ledger:?}"
+    );
+    assert_eq!(
+        ledger[0].0, "failed",
+        "a surviving process must close the post-DDL failure as terminal: {ledger:?}"
+    );
+    assert!(
+        ledger[0]
+            .1
+            .as_deref()
+            .is_some_and(|error| error.contains("publication")),
+        "the terminal row must retain the post-DDL failure: {ledger:?}"
+    );
+}
+
 /// THE LEDGER ROW IS PER APPLY REQUEST, NOT PER APPLIED MIGRATION - and that is
 /// a REQUIREMENT, not an observation about where the insert happens to sit.
 ///

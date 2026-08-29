@@ -229,8 +229,12 @@ pub enum ApplyRequestError {
 /// creator runs under is what bounds them, and the engine still refuses a
 /// destructive step it was not handed an [`Approval`] for.
 ///
-/// The row in `zeroship.app_schema_applies` is opened BEFORE the engine runs and
-/// closed by exactly one of `mark_applied` / `mark_failed`.
+/// The row in `zeroship.app_schema_applies` is opened BEFORE the engine runs. A
+/// surviving request with a reachable control store closes it through exactly one
+/// terminal transition: `mark_applied` on success or `mark_failed` on error. A
+/// process death or terminal store failure can leave it `submitted`: the ledger
+/// and app schema may live on different DSNs, so no transaction spans them. No
+/// serving path reads an open row; the deploy gate reads only `applied` rows.
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
@@ -310,8 +314,6 @@ pub async fn apply_ir_documents(
     provision_audit_unmask_table(session.client(), &schema)
         .await
         .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
-    let backend = PostgresBackend::new_generic(&session);
-
     // PREFLIGHT runs before any row is written and before any DDL: it lowers every
     // document under the guard and refuses a denied plan, so a bundle the engine
     // would reject leaves neither a ledger row nor a half-built schema.
@@ -330,7 +332,79 @@ pub async fn apply_ir_documents(
         })
         .await?;
 
-    let apply_policy = policy.clone();
+    let result = run_apply(
+        &session,
+        policy_config,
+        &policy,
+        &schema,
+        dir.path(),
+        &exec_cfg,
+        &role,
+        principal_id,
+    )
+    .await;
+
+    match result {
+        Ok(outcome) => {
+            // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
+            // nothing is what an app whose descriptor bytes moved without a schema
+            // change (an engine upgrade, a codegen fix) uses to become deployable
+            // again, because the control plane compares against the NEWEST applied
+            // row. Skipping the write for an empty set would brick every such app.
+            match schema_apply_store
+                .mark_applied(*app_id, migration_id, &outcome.applied)
+                .await
+            {
+                Ok(transition) => {
+                    if transition == TerminalTransition::Lost {
+                        // The DDL is committed and cannot be taken back, but a
+                        // concurrent path failed this migration while the engine was
+                        // applying it, so the row reads `failed`. The record now
+                        // contradicts the database it describes and only an operator
+                        // can reconcile them. Erroring here would report a failure
+                        // over changes that did land, so the request continues and
+                        // the divergence is raised instead.
+                        tracing::error!(
+                            app_id = %app_id,
+                            migration_id = %migration_id,
+                            "migrate-server: apply lost the terminal transition to a concurrent \
+                             failure - schema changes are committed but the row reads failed"
+                        );
+                    }
+                    Ok(ApplyMigrationsResponse {
+                        migration_id,
+                        applied: outcome.applied,
+                        skipped: outcome.skipped,
+                        pending_contract: outcome.pending_contract,
+                    })
+                }
+                Err(err) => Err(ApplyRequestError::SchemaApplyStore(err)),
+            }
+        }
+        Err(err) => {
+            mark_apply_failed(schema_apply_store, *app_id, migration_id, &err.to_string()).await;
+            Err(err)
+        }
+    }
+}
+
+/// Run every fallible schema/apply operation after the ledger row opens and before
+/// its terminal transition.
+///
+/// The caller awaits this future without `?`, then routes its one result through
+/// the terminal ledger transition. Adding another post-submit operation here
+/// cannot create a new unclosed return path in [`apply_ir_documents`].
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
+async fn run_apply(
+    session: &CompioPgSession,
+    policy_config: &ManagedPolicyConfig,
+    apply_policy: &EffectivePolicy,
+    schema: &str,
+    ir_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    role: &str,
+    principal_id: Uuid,
+) -> Result<SealedApplyOutcome, ApplyRequestError> {
     // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so
     // the apply carries an authenticated, ceiling-stamped integrity token.
     // Pre-launch: stored seals don't matter - this seal is minted+verified in-process
@@ -338,70 +412,34 @@ pub async fn apply_ir_documents(
     // rendered-DDL guard is the fixed schema-bound no-inject confined charter.
     let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
     tracing::debug!(
-        app_id = %app_id,
+        app_id = %schema,
         ceiling_id = %sealed_policy.ceiling_id,
         ceiling_version = sealed_policy.ceiling_version,
         "migrate-server: applying IR under sealed managed migration policy"
     );
     let applied_by = format!("migrate-server:{principal_id}");
-    provision_runtime_app_role(session.client(), &schema, &role)
+    provision_runtime_app_role(session.client(), schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
+    let backend = PostgresBackend::new_generic(session);
     let outcome = apply_sealed(
-        &session,
+        session,
         &backend,
         sealed_policy.sealed,
         &sealed_policy.verifier,
-        &schema,
-        dir.path(),
-        &exec_cfg,
+        schema,
+        ir_dir,
+        exec_cfg,
         &apply_policy.policy,
         Approval::None,
         &applied_by,
     )
-    .await;
-    let outcome = match outcome {
-        Ok(outcome) => {
-            provision_runtime_app_role(session.client(), &schema, &role)
-                .await
-                .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
-            reconcile_app_publication(session.client(), &schema).await?;
-            // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
-            // nothing is what an app whose descriptor bytes moved without a schema
-            // change (an engine upgrade, a codegen fix) uses to become deployable
-            // again, because the control plane compares against the NEWEST applied
-            // row. Skipping the write for an empty set would brick every such app.
-            if schema_apply_store
-                .mark_applied(*app_id, migration_id, &outcome.applied)
-                .await?
-                == TerminalTransition::Lost
-            {
-                // The DDL is committed and cannot be taken back, but a concurrent
-                // path failed this migration while the engine was applying it, so the
-                // row reads `failed`. The record now contradicts the database it
-                // describes and only an operator can reconcile them. Erroring here
-                // would report a failure over changes that did land, so the request
-                // continues and the divergence is raised instead.
-                tracing::error!(
-                    app_id = %app_id,
-                    migration_id = %migration_id,
-                    "migrate-server: apply lost the terminal transition to a concurrent \
-                     failure - schema changes are committed but the row reads failed"
-                );
-            }
-            outcome
-        }
-        Err(err) => {
-            mark_apply_failed(schema_apply_store, *app_id, migration_id, &err.to_string()).await;
-            return Err(ApplyRequestError::Apply(err));
-        }
-    };
-    Ok(ApplyMigrationsResponse {
-        migration_id,
-        applied: outcome.applied,
-        skipped: outcome.skipped,
-        pending_contract: outcome.pending_contract,
-    })
+    .await?;
+    provision_runtime_app_role(session.client(), schema, role)
+        .await
+        .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
+    reconcile_app_publication(session.client(), schema).await?;
+    Ok(outcome)
 }
 
 /// What a sealed apply produced (the subset of the engine's per-file outcomes the
