@@ -644,3 +644,35 @@ found its mechanism correct. It is correct AND untested - removing its
 `force_close` breaks nothing in the suite. Correct-by-inspection and
 bound-by-test are different properties, and the survey could only establish the
 first.
+
+### Not every survivor is a gap: mutation 3 may be untestable by construction
+
+`begin_cancel`'s second `ensure_active()` survived. Before treating that as a
+coverage gap, look at what it guards:
+
+    self.ensure_active()?;
+    let lease = Arc::clone(self);
+    // Recheck after taking the reference which makes the attempt visible
+    // to pool return. If return won the race, do not send. If it happens
+    // after this load, the retained Arc makes return retire the session.
+    lease.ensure_active()?;
+
+The two checks bracket an `Arc::clone`, with NO await point between them. On a
+single-threaded compio runtime no other task can interleave there at all; the
+window is reachable only from another thread, and not on demand. A deterministic
+test would need a hook injected into production code between those two
+statements.
+
+So this is defensive code against a real but externally untriggerable race, and
+a surviving mutation says "no test reaches it", not "nobody bothered". The
+correct outcome for it may be NO TEST plus a note - and a test that claims to
+bind it deserves scrutiny for whether it changed production code to create the
+seam.
+
+**Contrast with mutations 4 and 6.** Those are trivially reachable: construct a
+lease whose token has been dropped and whose attempt recorded uncertainty, then
+ask `pool_cancel_lease_prevents_reuse`. Nothing about that needs a race. They
+survived because a disjunction masks them, which is a genuine gap.
+
+Same sweep, two survivors, opposite verdicts. Ratios do not tell you which is
+which; only reading the guarded code does.
