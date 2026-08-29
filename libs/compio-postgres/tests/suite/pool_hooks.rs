@@ -39,6 +39,23 @@ fn read_startup(stream: &mut std::net::TcpStream) {
     stream.read_exact(&mut startup).unwrap();
 }
 
+fn read_frontend_frame(stream: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
+    let mut tag = [0_u8; 1];
+    stream.read_exact(&mut tag).expect("read frontend tag");
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 4, "frontend frame length is below its header");
+    assert!(length <= 1024 * 1024, "frontend frame is implausibly large");
+    let mut body = vec![0_u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read frontend frame body");
+    (tag[0], body)
+}
+
 fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(body.len() + 5);
     frame.push(tag);
@@ -65,6 +82,92 @@ struct StartupFailureServer {
     finish: std::sync::mpsc::Sender<()>,
     result: std::sync::mpsc::Receiver<(usize, bool)>,
     thread: std::thread::JoinHandle<()>,
+}
+
+struct RetryBackoffServer {
+    address: std::net::SocketAddr,
+    finish: Option<std::sync::mpsc::Sender<()>>,
+    gaps: Option<futures_channel::oneshot::Receiver<Vec<Duration>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RetryBackoffServer {
+    async fn stop(mut self) -> Vec<Duration> {
+        self.finish
+            .take()
+            .expect("retry server lost its finish sender")
+            .send(())
+            .expect("retry server stopped before the test finished");
+
+        let gaps = self
+            .gaps
+            .take()
+            .expect("retry server lost its result receiver")
+            .await
+            .expect("retry server stopped without reporting attempt gaps");
+
+        self.thread
+            .take()
+            .expect("retry server lost its thread")
+            .join()
+            .expect("retry server panicked");
+
+        gaps
+    }
+}
+
+impl Drop for RetryBackoffServer {
+    fn drop(&mut self) {
+        if let Some(finish) = self.finish.take() {
+            let _ = finish.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct ValidationErrorServer {
+    address: std::net::SocketAddr,
+    finish: Option<std::sync::mpsc::Sender<()>>,
+    accepted: Option<std::sync::mpsc::Receiver<usize>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ValidationErrorServer {
+    fn stop(mut self) -> usize {
+        self.finish
+            .take()
+            .expect("validation server lost its finish sender")
+            .send(())
+            .expect("validation server stopped before the test finished");
+
+        let accepted = self
+            .accepted
+            .take()
+            .expect("validation server lost its result receiver")
+            .recv_timeout(Duration::from_secs(6))
+            .expect("validation server did not report its connection count");
+
+        self.thread
+            .take()
+            .expect("validation server lost its thread")
+            .join()
+            .expect("validation server panicked");
+
+        accepted
+    }
+}
+
+impl Drop for ValidationErrorServer {
+    fn drop(&mut self) {
+        if let Some(finish) = self.finish.take() {
+            let _ = finish.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 enum IdleServerCommand {
@@ -248,6 +351,156 @@ fn later_warmup_startup_failure_server() -> StartupFailureServer {
         finish: finish_tx,
         result: result_rx,
         thread: server,
+    }
+}
+
+fn retry_backoff_server() -> RetryBackoffServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+    let (gaps_tx, gaps_rx) = futures_channel::oneshot::channel();
+    let thread = std::thread::spawn(move || {
+        let refusal = backend_frame(b'E', b"SFATAL\0VFATAL\0C57P03\0Mscripted retry refusal\0\0");
+        let mut previous_refusal = None;
+        let mut gaps = Vec::new();
+
+        loop {
+            match finish_rx.try_recv() {
+                Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    read_startup(&mut stream);
+                    let startup_arrived = std::time::Instant::now();
+                    if let Some(refusal_sent) = previous_refusal {
+                        gaps.push(startup_arrived.duration_since(refusal_sent));
+                    }
+
+                    stream.write_all(&refusal).unwrap();
+                    stream.flush().unwrap();
+                    drop(stream);
+                    previous_refusal = Some(std::time::Instant::now());
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("retry server accept failed: {error}"),
+            }
+        }
+
+        let _ = gaps_tx.send(gaps);
+    });
+
+    RetryBackoffServer {
+        address,
+        finish: Some(finish_tx),
+        gaps: Some(gaps_rx),
+        thread: Some(thread),
+    }
+}
+
+fn validation_error_server() -> ValidationErrorServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut streams = Vec::new();
+
+        while streams.is_empty() {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    read_startup(&mut stream);
+                    write_startup_ok(&mut stream, 45);
+                    streams.push(stream);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if finish_rx.try_recv().is_ok() {
+                        let _ = accepted_tx.send(0);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("validation server accept failed: {error}"),
+            }
+        }
+
+        let (tag, body) = read_frontend_frame(&mut streams[0]);
+        assert_eq!(tag, b'Q', "first validation was not a simple Query");
+        assert_eq!(body, b"\0", "first validation query was not empty");
+        let mut accepted = backend_frame(b'I', b"");
+        accepted.extend_from_slice(&backend_frame(b'Z', b"I"));
+        streams[0].write_all(&accepted).unwrap();
+        streams[0].flush().unwrap();
+
+        let (tag, body) = read_frontend_frame(&mut streams[0]);
+        assert_eq!(tag, b'Q', "second validation was not a simple Query");
+        assert_eq!(body, b"\0", "second validation query was not empty");
+        let mut refused = backend_frame(
+            b'E',
+            b"SERROR\0VERROR\0C22012\0Mscripted validation refusal\0\0",
+        );
+        refused.extend_from_slice(&backend_frame(b'Z', b"I"));
+        streams[0].write_all(&refused).unwrap();
+        streams[0].flush().unwrap();
+
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    read_startup(&mut stream);
+                    let process_id = 45
+                        + u32::try_from(streams.len())
+                            .expect("validation server connection count exceeds u32");
+                    write_startup_ok(&mut stream, process_id);
+                    streams.push(stream);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => panic!("validation server accept failed: {error}"),
+            }
+
+            match finish_rx.try_recv() {
+                Ok(()) => {
+                    let _ = accepted_tx.send(streams.len());
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+    });
+
+    ValidationErrorServer {
+        address,
+        finish: Some(finish_tx),
+        accepted: Some(accepted_rx),
+        thread: Some(thread),
     }
 }
 
@@ -439,6 +692,144 @@ async fn later_warmup_startup_failure_preserves_sqlstate() {
         Some(&SqlState::CANNOT_CONNECT_NOW),
         "later warm-up startup failure discarded SQLSTATE 57P03: {error}"
     );
+}
+
+/// Warm-up retries must not hammer a refusing endpoint. The scripted server
+/// returns 57P03 immediately on every startup and records the time from putting
+/// one refusal into the socket to receiving the next complete startup packet.
+///
+/// Both gaps are asserted independently. That distinguishes the configured
+/// 100ms then 400ms backoff from three merely sequential connection attempts,
+/// while lower bounds mean a loaded machine cannot fail by running slowly.
+#[compio::test]
+async fn warmup_connection_retries_wait_between_attempts() {
+    Box::pin(compio::time::timeout(Duration::from_secs(5), async {
+        let server = retry_backoff_server();
+        let connection_config: Config = format!(
+            "postgres://postgres@{}/fake?sslmode=disable",
+            server.address
+        )
+        .parse()
+        .expect("parse the retry-server DSN");
+        let pool_config = config(1, 1);
+
+        let outcome = Box::pin(compio::time::timeout(
+            Duration::from_secs(3),
+            Pool::connect_with_config(connection_config, pool_config),
+        ))
+        .await;
+        let gaps = server.stop().await;
+
+        let outcome = outcome.expect("pool warm-up retry sequence exceeded its watchdog");
+        let error = outcome.expect_err("the scripted startup refusals unexpectedly built a pool");
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::CANNOT_CONNECT_NOW),
+            "warm-up retries lost the scripted 57P03 refusal: {error}"
+        );
+        assert_eq!(
+            gaps.len(),
+            2,
+            "three warm-up attempts must produce exactly two retry gaps; observed {gaps:?}"
+        );
+        assert!(
+            gaps[0] >= Duration::from_millis(75),
+            "the first warm-up retry skipped its 100ms backoff: {:?}",
+            gaps[0]
+        );
+        assert!(
+            gaps[1] >= Duration::from_millis(300),
+            "the second warm-up retry skipped its 400ms backoff: {:?}",
+            gaps[1]
+        );
+    }))
+    .await
+    .expect("warm-up retry-backoff test exceeded its watchdog");
+}
+
+/// A validation `ErrorResponse` is not proof that a recycled session is alive
+/// enough to lend out. The scripted peer keeps that socket open after returning
+/// a complete nonfatal error, so a later `is_closed` check cannot accidentally
+/// rescue the validation branch.
+///
+/// The first checkout is the control: the same PID 45 answers the same forced
+/// empty validation successfully and is reused. Only the second response
+/// changes; its error must retire PID 45 and make the borrower receive PID 46.
+#[compio::test]
+async fn a_validation_error_discards_an_otherwise_live_session() {
+    Box::pin(compio::time::timeout(Duration::from_secs(15), async {
+        let server = validation_error_server();
+        let mut pool_config = config(1, 0);
+        pool_config
+            .validation_bypass(Duration::ZERO)
+            .acquire_timeout(Duration::from_secs(4));
+
+        let observation = Box::pin(compio::time::timeout(Duration::from_secs(5), async {
+            let connection_config: Config = format!(
+                "postgres://postgres@{}/fake?sslmode=disable",
+                server.address
+            )
+            .parse()
+            .map_err(|error| format!("parse scripted connection config: {error}"))?;
+            let pool = Pool::connect_with_config(connection_config, pool_config)
+                .await
+                .map_err(|error| {
+                    format!("construct scripted pool: {}", common::error_chain(&error))
+                })?;
+
+            let first = Box::pin(pool.get()).await.map_err(|error| {
+                format!(
+                    "successful-validation control failed: {}",
+                    common::error_chain(&error)
+                )
+            })?;
+            let after_success = (
+                first.process_id(),
+                pool.metrics.connections_created.get(),
+                pool.metrics.evictions.get(),
+            );
+            drop(first);
+
+            let second = Box::pin(pool.get()).await.map_err(|error| {
+                format!(
+                    "checkout after validation refusal failed: {}",
+                    common::error_chain(&error)
+                )
+            })?;
+            let after_refusal = (
+                second.process_id(),
+                pool.metrics.connections_created.get(),
+                pool.metrics.evictions.get(),
+            );
+            drop(second);
+
+            Ok::<_, String>((after_success, after_refusal))
+        }))
+        .await;
+
+        let accepted = server.stop();
+        let (after_success, after_refusal) = observation
+            .expect("validation-refusal pool operation exceeded its watchdog")
+            .unwrap_or_else(|message| panic!("{message}"));
+
+        assert_eq!(
+            after_success,
+            (45, 1, 0),
+            "successful validation did not reuse the warm session"
+        );
+        assert_eq!(
+            after_refusal.0, 46,
+            "pool handed out the session whose validation query returned an error"
+        );
+        assert_eq!(
+            (after_refusal.1, after_refusal.2),
+            (2, 1),
+            "validation refusal did not create one replacement and record one eviction"
+        );
+        assert_eq!(accepted, 2, "pool opened the wrong physical session count");
+    }))
+    .await
+    .expect("validation-refusal regression test exceeded its watchdog");
 }
 
 #[compio::test]
