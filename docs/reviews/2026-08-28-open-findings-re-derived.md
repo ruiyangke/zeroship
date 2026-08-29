@@ -495,3 +495,33 @@ socket failed", and I ranked an open question on that reading without opening
 the arm. Grep answers spelling; the match arm answers behaviour. This is the
 same error the sections above catalogue in carried findings, made by me, twice
 today - once on this and once on the slot-drop teardown.
+
+## Proof that the two-server runs really were two servers, 2026-08-29
+
+Every gate this session reported "1354/0 on both 5455 and 5459". That claim
+rests on the runs reaching different servers, which was asserted ~15 times and
+never printed. The cross-version runbook supplies the oracle; run at
+`3464109be` with the feature set used all session
+(`tls,live-tls-tests,live-unix-socket,with-chrono-0_4,with-time-0_3`):
+
+    5455: server_version_num=160014 protocol=V3_0 backend_key_len=4  cancel_packet_len=16
+    5459: server_version_num=180004 protocol=V3_2 backend_key_len=32 cancel_packet_len=44
+
+Different servers, different WIRE PROTOCOL (3.0 against 3.2), and a cancel key
+that is 4 bytes on one and 32 on the other, changing the cancel packet from 16
+to 44 bytes. The two runs exercise genuinely different code, which is the whole
+point of running both.
+
+**Why this needed printing.** The runbook records the failure it prevents:
+`--all-features` enables `suite-over-tls`, which `#[cfg]`-REPLACES
+`common::test_url()` so the suite reads its DSN from
+`tests/data/live/tls_live.conf` and IGNORES `PG_TEST_URL` entirely. A
+cross-version run shaped that way reports `server_version_num=160015
+protocol=V3_0` for BOTH ports - perfect agreement, one server, and a published
+verdict that means nothing. The feature set above is the one that does not do
+that, and this measurement confirms it in the tree as it stands rather than by
+reading the flag list.
+
+Same discipline as the pooler's `login attempt` delta and chaos 3's
+`max_connections` gate: prove the run reached the thing it claims to measure,
+because a run that reached somewhere else passes just as quietly.
