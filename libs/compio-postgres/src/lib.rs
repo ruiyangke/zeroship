@@ -220,6 +220,7 @@ mod cancel_query_raw;
 mod cancel_token;
 pub(crate) mod client;
 mod codec;
+mod command_tag;
 pub mod config;
 mod connect;
 mod connect_raw;

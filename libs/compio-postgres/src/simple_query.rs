@@ -11,9 +11,9 @@
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
+use crate::command_tag::extract_row_affected;
 use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInReceiver;
-use crate::query::extract_row_affected;
 use crate::{Error, SimpleQueryMessage, SimpleQueryRow};
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
