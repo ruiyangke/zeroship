@@ -3,6 +3,28 @@
 # Every code path a document points at must exist, and every `path:line`
 # citation must land inside its file.
 #
+# WHAT THIS GATE DOES NOT CATCH, measured 2026-08-29. It rules on the PATH and
+# on the line being within the file, never on the line being the RIGHT one. Two
+# design reviewers independently found four citations in the db proposal set
+# that each pointed one line above their symbol - RESERVED_ENV_DB_NAMES cited
+# at :1136 when it is declared at :1137, and the same offset on three more.
+# Every one of them passed this gate green, because every one named a real file
+# and a line inside it.
+#
+# A line-accuracy arm was measured and REJECTED rather than skipped. Checking
+# that a cited line still contains its symbol needs the symbol, and only 5 of
+# the 94 path:line citations in those two documents put a backticked identifier
+# adjacent to the citation - the rest wrap across lines or name a phrase. The
+# pattern that found those 5 also found 0 in data-system.md, a file that
+# demonstrably contains such a citation, so the measurement was of the regex
+# rather than of the docs. The alternative - recording each cited line's
+# content so drift is detectable - is a census of expected values, which is the
+# thing this repo's gate discipline exists to refuse.
+#
+# So line numbers in prose are drift-prone BY CONSTRUCTION and this gate does
+# not pretend otherwise. The path is the durable claim; the line is a courtesy.
+# If a citation's line matters to an argument, quote the code instead.
+#
 # THE FAILURE THIS EXISTS FOR, measured 2026-08-28. The zeroship- crate rename
 # moved every crate to a `zeroship-` prefix and nothing re-read the prose that
 # pointed at them. 1082 of 1497 distinct code paths named under docs/ resolved
