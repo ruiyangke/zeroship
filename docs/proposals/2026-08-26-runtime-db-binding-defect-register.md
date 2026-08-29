@@ -220,7 +220,7 @@ call. The driver has `prepare_cached` (`libs/compio-postgres/src/prepare.rs`), b
 references to either name. SQLite mirrors it exactly: `backend/sqlite/session.rs`
 calls `conn.prepare` twice and `prepare_cached` zero times, recompiling every
 statement. All of it runs against `Pool::connect(&url, 8)`
-(`plugin-crates/zeroship-plugin-db/src/lib.rs:998`) - **8 connections per worker thread**, shared by the
+(`crates/zeroship-plugin-db/src/lib.rs:998`) - **8 connections per worker thread**, shared by the
 ~200 co-resident isolates that thread admits.
 
 **What is measured and what is not.** The four round trips, the unnamed statement,
@@ -231,7 +231,7 @@ no benchmark exists and no multiplier should be quoted until one is run.
 
 A smaller sibling, folded here rather than given its own entry: **deprovision opens
 a fresh pool per deleted app.** `deprovision_app_cdc` calls `Pool::connect(url, 2)`
-(`plugin-crates/zeroship-plugin-db/src/lib.rs:698`) on every deletion driven by the version poller - two
+(`crates/zeroship-plugin-db/src/lib.rs:698`) on every deletion driven by the version poller - two
 connects, two authentications and two TLS handshakes per app, discarded
 immediately, for work that could share one long-lived platform-role pool. SC-5
 names the ownership that would fix it; nothing on this branch does.
@@ -380,7 +380,7 @@ different cases sharing one code path.
 
 `mint_tx_view` needs the collection names to hang off `tx.<name>`, and gets them
 from `declared_collections` -> `cached_schemas_for_binding`
-(`plugin-crates/zeroship-plugin-db/src/context.rs:674-686`), which builds a `"{app}:{deploy}:"` prefix and
+(`crates/zeroship-plugin-db/src/context.rs:674-686`), which builds a `"{app}:{deploy}:"` prefix and
 **iterates the whole thread-global schema map** to find the handful belonging to
 this binding. The caller is `.map(|(name, _schema)| name)`
 (`v8_classes/transaction.rs:78-81`) - the underscore is the tell: the payload
@@ -610,7 +610,7 @@ pgvector+PostGIS image and `--ignored`.
 The diagnostic the sanitization rail relies on ("diagnosable only from a worker
 log", `dispatch.rs:245-246`) went to a discarded stream because no integration
 binary installed a subscriber, so `RUST_LOG` had nothing to configure.
-`support::init_test_tracing` (`plugin-crates/zeroship-plugin-db/tests/support/mod.rs:25`) now exists and is
+`support::init_test_tracing` (`crates/zeroship-plugin-db/tests/support/mod.rs:25`) now exists and is
 called by `native_transaction.rs` and `distributed_live.rs`. Installing it
 immediately surfaced the cause of four opaque failures: `permission denied for
 schema default`, from a `DROP SCHEMA ... CASCADE` in the harness that destroyed the
