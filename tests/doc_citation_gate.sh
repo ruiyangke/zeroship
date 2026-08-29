@@ -151,6 +151,34 @@ gate_arm proposal_citations "$cites_examined" 60 || FAILED=1
 proposal_cites=$cites_examined
 
 # ---------------------------------------------------------------------------
+# Arm 2b - the LIVE DESIGN SET, and the reason this arm exists is a failure of
+# exactly the kind this gate is for.
+#
+# Arm 2 globs `docs/proposals/2026-08-26-*.md`. The two documents under active
+# revision are `docs/proposals/2026-08-28-app-database-decoupling.md` and
+# `docs/architecture/data-system.md`. The date glob excludes the first and no
+# arm scanned `docs/architecture/` at all, so BOTH WERE INVISIBLE TO THIS GATE.
+#
+# Measured 2026-08-29: across a session that edited those two files repeatedly,
+# every run printed "all resolve" and none of it was about them. The counts that
+# moved belonged to the decision log, which does match the 08-26 glob - so the
+# gate looked responsive while examining none of the work. That is this gate's
+# own founding failure, one directory over: a green that is silent about the
+# thing you were changing.
+#
+# The lesson generalises past these two files. A date-prefixed glob silently
+# stops covering a document set the day someone writes tomorrow's date, and
+# nothing announces it. If a third design document appears, it must be added
+# here or it is unexamined; the floor below is the only thing that will notice
+# a file dropping OUT.
+# ---------------------------------------------------------------------------
+check_citations docs/architecture/data-system.md \
+                docs/proposals/2026-08-28-*.md
+gate_arm design_set_citations "$cites_examined" 40 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+design_cites=$cites_examined
+
+# ---------------------------------------------------------------------------
 # Arm 3 - docs/reference, the stable-contract set AGENTS.md sends readers to.
 # It reached zero broken paths on 2026-08-29 and nothing was stopping it drifting
 # back; every one of its 15 citations had pointed into `third_party/zero-migrate/`
@@ -172,4 +200,4 @@ if [ "$FAILED" -ne 0 ]; then
   exit 1
 fi
 
-echo "doc citations: $agents_examined AGENTS.md paths, $proposal_cites proposal citations, $reference_cites reference citations, all resolve"
+echo "doc citations: $agents_examined AGENTS.md paths, $proposal_cites proposal citations, $design_cites design-set citations, $reference_cites reference citations, all resolve"

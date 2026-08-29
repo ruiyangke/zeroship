@@ -18,7 +18,7 @@ author, a config parser and a binary, all of which were deleted before the fold.
 
 `zeroship-plugin-db` keeps a dev-dependency on `zeroship-migrate-server`
 (`crates/zeroship-plugin-db/Cargo.toml:135`). It is live, not vestigial:
-`tests/integration.rs:5439-5495` calls
+`crates/zeroship-plugin-db/tests/integration.rs:5325-5381` calls
 `zeroship_migrate_server::provisioning::provision_workflow_journal_schema` and
 `WORKFLOW_OWNER_ROLE` so the workflow-journal test exercises the production
 provisioning statement rather than a `CREATE SCHEMA` of its own, which would
