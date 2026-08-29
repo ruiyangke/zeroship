@@ -5,7 +5,7 @@ error: no rules expected `name`
   |                                                    ^^^^ no rules expected this token in macro call
   |
 note: while trying to match meta-variable `$name:literal`
- --> $WORKSPACE/crates/core/src/config/declared.rs
+ --> $WORKSPACE/crates/zeroship-core/src/config/declared.rs
   |
   |     ($class:ident, $name:literal, $consumer:path $(,)?) => {{
   |                    ^^^^^^^^^^^^^

@@ -153,7 +153,7 @@ fn the_platform_class_census_only_shrinks() {
     // KNOWN BLIND SPOT, stated rather than papered over:
     // `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY` is a fifteenth platform-class name.
     // It is declared inside the body of `resolve_s3_runtime!` in
-    // `crates/core/src/config/declared.rs`, and a `macro_rules!` body is tokens
+    // `crates/zeroship-core/src/config/declared.rs`, and a `macro_rules!` body is tokens
     // rather than expressions, so this source census cannot see it. It is
     // counted here in prose and not in the number.
     const CEILING: usize = 14;

@@ -414,7 +414,7 @@ fn go() {
 #[test]
 fn no_role_is_exempt_from_the_write_rule() {
     // The read rule has two exempt roles; the write rule has none, and this is
-    // the assertion that keeps them apart. `crates/core/src/config/env.rs` is
+    // the assertion that keeps them apart. `crates/zeroship-core/src/config/env.rs` is
     // the one file permitted to READ raw, and it still may not write - it has
     // no reason to, and an exemption there would be the one place a mutation
     // could hide from both halves of the gate.
