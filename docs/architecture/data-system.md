@@ -51,7 +51,11 @@ share one. Giving the database its own identity is the whole change; everything 
 
 Every entity carries a typed id - UUIDv7, base62, three-letter prefix
 (`crates/zeroship-core/src/typed_id.rs`). `ds_...` for a Datastore, `dbs_...` for a Database.
-(`dbs`, not `db`: the shape is `^[a-z]{3}_[A-Za-z0-9]{22}$` and two letters will not parse.)
+(`dbs`, not `db`, for consistency: every prefix in `typed_id.rs` is three letters and its doc
+comments state the shape `^[a-z]{3}_[A-Za-z0-9]{22}$`. Note that shape is a CONVENTION, not a
+parser constraint - `parse` is `split_once('_')` plus a base62 decode of the remainder
+(`typed_id.rs:139-145`), so `db_<22 chars>` would parse fine. Choose `dbs` because the tree is
+uniform, not because the parser refuses two letters.)
 
 **Both ids are internal. Neither is exposed to creators.**
 
@@ -220,8 +224,20 @@ one-database-per-app, and it is load-bearing in two ways:
 ## Isolation: the database enforces it, not the process
 
 Enforcement is **PostgreSQL role membership**. The worker connects once, holds no inherited
-privilege over app data, and narrows per transaction with a single
-`SET LOCAL ROLE "zs_db_<dbsid>_<cap>"`.
+privilege over app data, and narrows per transaction with a single `SET LOCAL ROLE`.
+
+**The role it narrows to is per GRANT, not per database**, and that distinction is the whole of
+revocation. A role per database - `zs_db_<dbsid>_<cap>`, with apps made members of it - is
+measured in the proposal (section 0) as **unrevocable under co-tenancy**: with two apps holding the
+database role, revoking one leaves the row unchanged and the other app's membership still serves it.
+The shape that works is a role per grant, `zs_grant_<gid>`, holding
+`GRANT zs_db_<dbsid>_<cap> TO zs_grant_<gid> WITH SET FALSE` - the `WITH SET FALSE` being what stops
+the worker assuming the database role directly and bypassing the per-grant edge. Revoking one grant
+then removes exactly one app's access.
+
+An earlier version of this section named only `SET LOCAL ROLE "zs_db_<dbsid>_<cap>"`, which is the
+graph the proposal refutes. `2026-08-28-app-database-decoupling.md` section 0 carries the
+measurement.
 
 This follows the platform invariant that **privilege follows the process, not the function**: the
 worker executes creator code, so any capability the worker holds is reachable by whatever reaches
