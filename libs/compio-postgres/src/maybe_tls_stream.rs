@@ -4,7 +4,7 @@
 // methods), so the wrapper is a plain enum; no pin_project_lite needed.
 
 use crate::buf_stream::SplitStream;
-use crate::connect_tls::Encryption;
+use crate::encryption::Encryption;
 use crate::tls::{ChannelBinding, ClientCertStatus, TlsStream};
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};

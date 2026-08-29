@@ -25,14 +25,14 @@ use crate::cancel_token::CancelKey;
 use crate::client::SocketConfig;
 use crate::config::{SslCertMode, SslMode, SslNegotiation};
 use crate::connect::{tls_server_name, with_connect_timeout};
-use crate::connect_tls;
+use crate::encryption::Encryption;
 use crate::tls::{MakeTlsConnect, TlsConnect, TlsPolicyIdentity};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
 
 pub(crate) fn validate_cancel_tls_policy<S, T>(
     tls: &T,
-    encryption: connect_tls::Encryption,
+    encryption: Encryption,
     ssl_sni: bool,
     ssl_cert_mode: SslCertMode,
     server_verification: crate::tls::ServerVerification,
@@ -41,7 +41,7 @@ pub(crate) fn validate_cancel_tls_policy<S, T>(
 where
     T: TlsConnect<S>,
 {
-    if encryption == connect_tls::Encryption::Plaintext {
+    if encryption == Encryption::Plaintext {
         return Ok(());
     }
 
@@ -291,7 +291,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Plaintext,
+            encryption: Encryption::Plaintext,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -630,7 +630,7 @@ mod tests {
             require_peer: None,
             // The only value `require` can record: `connect.rs` never offers
             // it a plaintext leg, and a server refusal is fatal there.
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -753,7 +753,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -976,7 +976,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             // What `sslmode=verify-full` plus a root cert demands.
@@ -1030,7 +1030,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni,
             ssl_cert_mode,
             server_verification: crate::tls::ServerVerification::None,
@@ -1098,7 +1098,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -1158,7 +1158,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,

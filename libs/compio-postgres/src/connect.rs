@@ -21,8 +21,8 @@ use crate::client::{Addr, Client, SocketConfig};
 use crate::config::{Host, LoadBalanceHosts, SslMode, TargetSessionAttrs};
 use crate::connect_raw::{connect_raw, connect_raw_with_target_session_attrs};
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::Encryption;
 use crate::connection::Connection;
+use crate::encryption::Encryption;
 use crate::passfile;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Config, Error, Socket};
@@ -747,7 +747,7 @@ where
         // `ServerVerification::select` REFUSES `sslmode=disable` outright
         // ("does not use TLS, so no verification policy applies") - so asking
         // it unconditionally turns every `disable` connection into a TLS error.
-        server_verification: if negotiated == crate::connect_tls::Encryption::Plaintext {
+        server_verification: if negotiated == crate::encryption::Encryption::Plaintext {
             crate::tls::ServerVerification::None
         } else {
             crate::tls::ServerVerification::demanded_by(

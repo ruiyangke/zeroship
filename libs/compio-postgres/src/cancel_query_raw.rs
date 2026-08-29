@@ -9,6 +9,7 @@ use crate::Error;
 use crate::cancel_token::CancelKey;
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect_tls;
+use crate::encryption::Encryption;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsConnect;
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -16,7 +17,7 @@ use std::io;
 
 pub async fn cancel_query_raw<S, T>(
     stream: S,
-    encryption: connect_tls::Encryption,
+    encryption: Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,
@@ -72,7 +73,7 @@ where
 
 pub(crate) async fn cancel_query_with_encryption<S, T>(
     stream: S,
-    encryption: connect_tls::Encryption,
+    encryption: Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,
@@ -102,7 +103,7 @@ where
 /// Send a cancel packet over the exact transport recorded for a live session.
 pub(crate) async fn send_cancel_request_with_exact_encryption<S, T>(
     stream: S,
-    encryption: connect_tls::Encryption,
+    encryption: Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,
@@ -131,7 +132,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn send_cancel_request<S, T>(
     stream: S,
-    encryption: connect_tls::Encryption,
+    encryption: Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,

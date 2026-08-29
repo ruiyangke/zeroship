@@ -3208,7 +3208,7 @@ mod tests {
     use super::*;
     use crate::Socket;
     use crate::connect_raw::connect_raw;
-    use crate::connect_tls::Encryption;
+    use crate::encryption::Encryption;
     use crate::socket::{SocketReadHalf, SocketWriteHalf};
     use crate::{Config, NoTls};
     use bytes::BytesMut;
