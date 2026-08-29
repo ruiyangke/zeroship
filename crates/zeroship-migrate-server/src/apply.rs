@@ -7,8 +7,8 @@ use uuid::Uuid;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    SealError, SealedPolicy,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine,
+    MigrationIr, SealError, SealedPolicy,
 };
 // PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
 // them off the facade, so this PostgreSQL host names PostgreSQL rather than
@@ -120,6 +120,13 @@ pub enum IrApplyError {
     /// Introspecting the live schema failed.
     #[error("read Postgres catalog for live facts: {0}")]
     Snapshot(#[source] zeroship_migrate::DriftError),
+    /// Acquiring or releasing the bundle-wide project lock failed.
+    #[error("{action} project advisory lock: {source}")]
+    ProjectLock {
+        action: &'static str,
+        #[source]
+        source: zeroship_migrate::ApplyError,
+    },
     /// A `.ir.json` failed the fail-closed LOAD GATE or guarded lower.
     #[error("IR load/guarded-lower ({file}): {source}")]
     Ir {
@@ -635,9 +642,9 @@ async fn postgres_ir_apply_state(
 }
 
 /// Apply all `*.ir.json` files in a directory to Postgres over the seam,
-/// holding the project advisory lock once across the whole set (via
-/// `LockMode::Acquire` on the first file, `AlreadyHeld` on the rest). The
-/// service-owned reimplementation of the engine's removed
+/// acquiring the project advisory lock once on the host's pinned session,
+/// passing `LockMode::AlreadyHeld` to every file, and releasing once after the
+/// whole set. The service-owned reimplementation of the engine's removed
 /// `apply_bundle_ir_postgres`.
 #[allow(clippy::too_many_arguments)]
 async fn apply_bundle_ir_postgres(
@@ -656,39 +663,68 @@ async fn apply_bundle_ir_postgres(
     if ir_files.is_empty() {
         return Ok(SealedApplyOutcome::default());
     }
-    let mut state = postgres_ir_apply_state(session, exec_cfg, owner_app)
-        .await
-        .map_err(IrApplyError::Snapshot)?;
 
-    let mut outcome = SealedApplyOutcome::default();
-    for (index, path) in ir_files.iter().enumerate() {
-        // The engine's `apply_plan` acquires the project advisory lock in
-        // `LockMode::Acquire`; hold it across the whole file set by acquiring on
-        // the first file and reusing it (`AlreadyHeld`) for the rest.
-        let lock_mode = if index == 0 {
-            LockMode::Acquire
-        } else {
-            LockMode::AlreadyHeld
-        };
-        let file_outcome = apply_one_ir_file_postgres(
-            backend,
-            project_schema,
-            owner_app,
-            path,
-            &mut state,
-            exec_cfg,
-            guard_cfg,
-            policy,
-            approval,
-            applied_by,
-            lock_mode,
-        )
-        .await?;
-        outcome.applied.extend(file_outcome.applied);
-        outcome.skipped.extend(file_outcome.skipped);
-        outcome.pending_contract.extend(file_outcome.pending_contract);
+    // `backend` is bound to this host's pinned `session`, so the advisory lock
+    // and every file apply run on the same raw PostgreSQL session.
+    backend
+        .acquire_project_lock(exec_cfg)
+        .await
+        .map_err(|source| IrApplyError::ProjectLock {
+            action: "acquire",
+            source,
+        })?;
+
+    let body = async {
+        let mut state = postgres_ir_apply_state(session, exec_cfg, owner_app)
+            .await
+            .map_err(IrApplyError::Snapshot)?;
+        let mut outcome = SealedApplyOutcome::default();
+        for path in &ir_files {
+            // The host owns the one outer lock bracket. Every engine plan must
+            // leave that lock alone, including the first file.
+            let file_outcome = apply_one_ir_file_postgres(
+                backend,
+                project_schema,
+                owner_app,
+                path,
+                &mut state,
+                exec_cfg,
+                guard_cfg,
+                policy,
+                approval,
+                applied_by,
+                LockMode::AlreadyHeld,
+            )
+            .await?;
+            outcome.applied.extend(file_outcome.applied);
+            outcome.skipped.extend(file_outcome.skipped);
+            outcome.pending_contract.extend(file_outcome.pending_contract);
+        }
+        Ok::<SealedApplyOutcome, IrApplyError>(outcome)
     }
-    Ok(outcome)
+    .await;
+
+    let unlock = backend
+        .release_project_lock(exec_cfg)
+        .await
+        .map_err(|source| IrApplyError::ProjectLock {
+            action: "release",
+            source,
+        });
+    match (body, unlock) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), unlock_result) => {
+            if let Err(unlock_error) = unlock_result {
+                tracing::warn!(
+                    error = %unlock_error,
+                    project = %exec_cfg.project_id,
+                    "migrate-server: failed to release project lock after PG IR apply"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Apply one PG `.ir.json` file: read → fail-closed load + guarded lower
@@ -1091,7 +1127,9 @@ fn ir_apply_error_kind(err: &IrApplyError) -> (ntex::http::StatusCode, &'static 
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_invalid",
         ),
-        IrApplyError::Read { .. } | IrApplyError::Snapshot(_) => (
+        IrApplyError::Read { .. }
+        | IrApplyError::Snapshot(_)
+        | IrApplyError::ProjectLock { .. } => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
         ),

@@ -15,10 +15,12 @@ use ntex::web::{self, test, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
+use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
 use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
 use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
+use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
@@ -462,6 +464,44 @@ fn create_notes_request() -> Value {
                 }]
             }
         }]
+    })
+}
+
+fn two_file_lock_span_request() -> Value {
+    json!({
+        "kind": "ir",
+        "descriptor_sha256": TEST_DESCRIPTOR_SHA256_NEXT,
+        "documents": [
+            {
+                "filename": "0002_create_lock_span_marker.ir.json",
+                "body": {
+                    "ir_version": 1,
+                    "name": "create_lock_span_marker",
+                    "ops": [{
+                        "op": "createTable",
+                        "name": "lock_span_marker",
+                        "columns": [
+                            {"name": "value", "type": "text", "nullable": false}
+                        ]
+                    }]
+                }
+            },
+            {
+                "filename": "0003_extend_notes.ir.json",
+                "body": {
+                    "ir_version": 1,
+                    "name": "extend_notes_after_marker",
+                    "flags": {"lock_timeout_ms": 30_000},
+                    "ops": [{
+                        "op": "addColumn",
+                        "table": "notes",
+                        "column": "lock_span_file_two",
+                        "type": "text",
+                        "nullable": true
+                    }]
+                }
+            }
+        ]
     })
 }
 
@@ -1096,6 +1136,148 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
+}
+
+/// A bundle owns one project advisory lock, not one lock per IR file.
+///
+/// The blocker holds `ACCESS SHARE` on the table file 2 alters. That permits
+/// preflight and file 1 to finish, then parks file 2 at its `AccessExclusiveLock`
+/// request. A second session probes the project advisory key at that exact point.
+#[compio::test]
+async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let tmp = tmpdir("project-lock-span");
+    let policy_config = ManagedPolicyConfig::default_confined(
+        TEST_POLICY_SEAL_KEY.to_vec(),
+        1,
+    )
+    .expect("test policy config");
+    let schema_apply_store = SchemaApplyStore::new(dsn());
+    let initial: ApplyMigrationsRequest = serde_json::from_value(create_notes_request())
+        .expect("deserialize initial apply request");
+    apply_ir_documents(
+        &dsn(),
+        &tmp,
+        &app_id,
+        &initial,
+        &policy_config,
+        &schema_apply_store,
+        owner_id,
+    )
+    .await
+    .expect("create the table file 2 will alter");
+
+    let notes = format!("{}.{}", quote_ident(&app_id.to_string()), quote_ident("notes"));
+    conn.batch_execute(&format!(
+        "BEGIN; LOCK TABLE {notes} IN ACCESS SHARE MODE;"
+    ))
+    .await
+    .expect("hold the file-2 table lock");
+
+    let apply_dsn = dsn();
+    let apply_tmp = tmp.clone();
+    let request: ApplyMigrationsRequest = serde_json::from_value(two_file_lock_span_request())
+        .expect("deserialize two-file apply request");
+    let apply_task = compio::runtime::spawn(async move {
+        let policy_config = ManagedPolicyConfig::default_confined(
+            TEST_POLICY_SEAL_KEY.to_vec(),
+            1,
+        )
+        .expect("test policy config");
+        let schema_apply_store = SchemaApplyStore::new(apply_dsn.clone());
+        apply_ir_documents(
+            &apply_dsn,
+            &apply_tmp,
+            &app_id,
+            &request,
+            &policy_config,
+            &schema_apply_store,
+            owner_id,
+        )
+        .await
+    });
+
+    let mut reached_file_two = false;
+    for _ in 0..500 {
+        reached_file_two = conn
+            .query_one(
+                "SELECT EXISTS ( \
+                     SELECT 1 FROM pg_locks \
+                      WHERE locktype = 'relation' \
+                        AND relation = to_regclass($1::text) \
+                        AND mode = 'AccessExclusiveLock' AND NOT granted \
+                 )",
+                &[&notes],
+            )
+            .await
+            .expect("observe file 2 waiting on its table lock")
+            .get(0);
+        if reached_file_two {
+            break;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let contender_acquired = if reached_file_two {
+        conn.query_one(
+            "SELECT pg_try_advisory_lock(hashtext($1)::bigint)",
+            &[&app_id.to_string()],
+        )
+        .await
+        .expect("probe the apply's project advisory lock")
+        .get::<_, bool>(0)
+    } else {
+        false
+    };
+    if contender_acquired {
+        conn.execute(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            &[&app_id.to_string()],
+        )
+        .await
+        .expect("release unexpectedly acquired project lock");
+    }
+
+    conn.batch_execute("ROLLBACK")
+        .await
+        .expect("release the file-2 table lock");
+    let apply_result = apply_task.await.expect("join the two-file apply");
+
+    let file_two_column_applied = conn
+        .query_one(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM information_schema.columns \
+                  WHERE table_schema = $1 \
+                    AND table_name = 'notes' \
+                    AND column_name = 'lock_span_file_two' \
+             )",
+            &[&app_id.to_string()],
+        )
+        .await
+        .expect("observe file 2's completed schema effect")
+        .get::<_, bool>(0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    assert!(
+        reached_file_two,
+        "the apply never reached the blocked DDL in file 2: {apply_result:?}"
+    );
+    assert!(
+        !contender_acquired,
+        "the project advisory lock was free while file 2 was executing"
+    );
+    let outcome = apply_result.expect("two-file apply succeeds after the blocker releases");
+    assert!(
+        file_two_column_applied,
+        "file 2 did not apply its column after the blocker released: {outcome:?}"
+    );
 }
 
 /// A DESTRUCTIVE migration is no longer parked for an operator who does not exist.
