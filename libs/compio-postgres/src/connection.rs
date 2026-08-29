@@ -1298,6 +1298,12 @@ fn scan_retirement_message(
             if request_complete {
                 *response_offset += 1;
             }
+            // Only serialized reads can carry a deferred error here: the
+            // split reader takes it before enqueueing its prefix. The
+            // serialized decoder retains the offending bytes, so continuing
+            // would merely rediscover the same failure synchronously on the
+            // next read. COPY input is the opposite case: PostgreSQL now
+            // waits for frontend data and may owe no further response at all.
             if entered_copy_input || deferred_error.is_some() {
                 RetirementProgress::Stop
             } else if *response_offset >= response_count {
@@ -4574,6 +4580,20 @@ mod tests {
         BackendMessages::from_test_bytes(error_response_bytes(code, message))
     }
 
+    fn scripted_awaited_response(sender: mpsc::Sender<ResponseMessages>) -> Response {
+        Response {
+            sender,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
+        }
+    }
+
     fn parameter_status_frame(name: &str, value: &str) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(name.as_bytes());
@@ -4599,6 +4619,71 @@ mod tests {
             first_ascii_server_error(&non_ascii).is_none(),
             "post-switch non-ASCII text was decoded as though it were UTF-8"
         );
+    }
+
+    #[test]
+    fn retirement_scan_stops_at_a_deferred_error_without_copy_input() {
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let terminal_server_error = Mutex::new(None);
+        let tx_status = AtomicU8::new(b'I');
+        let mut response_offset = 0;
+
+        let progress = scan_retirement_message(
+            BackendMessage::Normal {
+                messages: BackendMessages::from_test_bytes(BytesMut::from(
+                    server_error_frame("ERROR", "23505", "scripted unique violation").as_slice(),
+                )),
+                request_complete: false,
+                deferred_error: Some(Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "scripted malformed tail",
+                ))),
+            },
+            &mut response_offset,
+            responses.len(),
+            &responses,
+            &terminal_server_error,
+            &tx_status,
+        );
+
+        assert_eq!(
+            progress,
+            RetirementProgress::Stop,
+            "retirement tried to read past a known malformed tail"
+        );
+        assert_eq!(response_offset, 0);
+    }
+
+    #[test]
+    fn retirement_scan_stops_at_copy_input_without_a_deferred_error() {
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let terminal_server_error = Mutex::new(None);
+        let tx_status = AtomicU8::new(b'I');
+        let mut response_offset = 0;
+
+        let progress = scan_retirement_message(
+            BackendMessage::Normal {
+                messages: BackendMessages::from_test_bytes(BytesMut::from(
+                    copy_in_response_frame().as_slice(),
+                )),
+                request_complete: false,
+                deferred_error: None,
+            },
+            &mut response_offset,
+            responses.len(),
+            &responses,
+            &terminal_server_error,
+            &tx_status,
+        );
+
+        assert_eq!(
+            progress,
+            RetirementProgress::Stop,
+            "retirement waited for a response PostgreSQL does not owe during COPY input"
+        );
+        assert_eq!(response_offset, 0);
     }
 
     #[compio::test]
@@ -4905,6 +4990,80 @@ mod tests {
         );
     }
 
+    /// Eventual retirement is not enough: a serialized response consumer can
+    /// return a pooled lease as soon as the valid prefix wakes it. The local
+    /// tail failure therefore has to poison the status before dispatch, not on
+    /// the next decode of the malformed bytes retained in the buffer.
+    #[compio::test]
+    async fn serialized_deferred_error_poisons_before_its_prefix_wakes() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+
+        let (request_tx, request_rx) = mpsc::unbounded();
+        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::new(),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::clone(&tx_status),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+        connection
+            .responses
+            .push_back(scripted_awaited_response(response_tx));
+
+        let result = connection
+            .dispatch_decoded_message(
+                BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        server_error_frame("ERROR", "23505", "scripted unique violation")
+                            .as_slice(),
+                    )),
+                    request_complete: false,
+                    deferred_error: Some(Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "scripted malformed tail",
+                    ))),
+                },
+                false,
+            )
+            .await;
+
+        assert!(
+            recorder.observed.load(Ordering::Acquire),
+            "the valid response prefix never woke its consumer"
+        );
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the serialized prefix woke its borrower before deferred-error poison"
+        );
+        let local = result.expect_err("the deferred tail left the serialized session reusable");
+        assert_eq!(
+            local.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::InvalidData)
+        );
+        let operation = response_error(
+            response_rx
+                .try_recv()
+                .expect("the wire-earlier ErrorResponse was not delivered"),
+        );
+        assert_eq!(
+            operation.code().map(crate::error::SqlState::code),
+            Some("23505")
+        );
+        drop(request_tx);
+    }
+
     /// The split reader can discover the malformed tail before dispatch has
     /// delivered the ErrorResponse at the front of the same read. It must mark
     /// the session dead immediately, then preserve FIFO so SQLSTATE still owns
@@ -4987,6 +5146,89 @@ mod tests {
             recorder.seen.load(Ordering::Acquire),
             READ_RETIRED_STATUS,
             "the malformed tail woke its borrower before pool poison"
+        );
+        drop(request_tx);
+    }
+
+    /// A configured read clock makes the split reader acknowledge each prefix
+    /// before reading ahead. That removes the eager rediscovery which can mask
+    /// a dropped deferred error and exposes the status visible at the exact
+    /// response wake where a pooled borrower may return its lease.
+    #[compio::test]
+    async fn split_deferred_error_poisons_before_its_acknowledged_prefix_wakes() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted request",
+                ))),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the scripted request");
+
+        let mut stream = BufStream::new(ScriptedReadSplitStream {
+            chunks: VecDeque::from([error_response_before_malformed_header(
+                "23505",
+                "scripted unique violation",
+            )]),
+            eof_after: None,
+        });
+        stream.set_read_timeout(Some(Duration::from_secs(60)));
+        let read_deadline = stream.read_deadline();
+        let Ok((read_half, write_half)) = stream.try_into_split() else {
+            panic!("the acknowledged-prefix fixture did not split");
+        };
+
+        let result = compio::time::timeout(
+            Duration::from_secs(1),
+            Connection::<ScriptedReadSplitStream, ScriptedReadSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::clone(&tx_status),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
+                Cell::new(false),
+                read_deadline,
+                None,
+                crate::live::LiveConnectionGuard::new(),
+            ),
+        )
+        .await
+        .expect("the acknowledged-prefix split reader exceeded its watchdog");
+        let local = result.expect_err("the deferred tail left the split session reusable");
+        assert_eq!(
+            local.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::InvalidData)
+        );
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the acknowledged prefix woke its borrower before deferred-error poison"
+        );
+        let operation = response_error(
+            response_rx
+                .try_recv()
+                .expect("the wire-earlier ErrorResponse was not delivered"),
+        );
+        assert_eq!(
+            operation.code().map(crate::error::SqlState::code),
+            Some("23505")
         );
         drop(request_tx);
     }
