@@ -15,12 +15,18 @@ use ntex::web::{self, test, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
+use zeroship_migrate::{
+    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend,
+    ProjectLockAcquisition,
+};
+use zeroship_migrate_postgres::PostgresBackend;
 use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
 use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
 use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
 use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
+use zeroship_migrate_server::session::CompioPgSession;
 use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
@@ -1138,6 +1144,99 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     cleanup_user(&conn, &owner_id).await;
 }
 
+/// Two project ids that collide in PostgreSQL's 32-bit `hashtext` space still
+/// own independent project locks.
+///
+/// The pair is fixed output from a 200,000-row live-PostgreSQL search over
+/// `md5(generate_series)::uuid`. The fixture assertion keeps the regression
+/// honest if PostgreSQL ever changes `hashtext`; the backend calls below, not a
+/// reimplementation in the test, decide whether the two ids contend.
+#[compio::test]
+async fn hashtext_colliding_project_ids_take_independent_project_locks_pg() {
+    const FIRST: &str = "84d98912-251e-c042-018c-bc5935cf3cb4";
+    const SECOND: &str = "fb9bcb0b-0d64-0942-127a-d89c71893675";
+
+    let holder = CompioPgSession::connect(&dsn())
+        .await
+        .expect("connect the project-lock holder");
+    let contender = CompioPgSession::connect(&dsn())
+        .await
+        .expect("connect the independent project-lock contender");
+
+    let first = FIRST.to_string();
+    let second = SECOND.to_string();
+    let collision = holder
+        .client()
+        .query_one(
+            "SELECT hashtext($1) AS first_hash, hashtext($2) AS second_hash",
+            &[&first, &second],
+        )
+        .await
+        .expect("verify the fixed hashtext collision");
+    let first_hash = collision.get::<_, i32>("first_hash");
+    let second_hash = collision.get::<_, i32>("second_hash");
+    assert_ne!(FIRST, SECOND, "the fixture must contain two distinct ids");
+    assert_eq!(
+        first_hash, second_hash,
+        "the fixed fixture no longer collides under PostgreSQL hashtext"
+    );
+
+    let policy = effective_policy_from_charter_toml(
+        r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+"#,
+    )
+    .expect("compose the project-lock test policy");
+    let first_cfg = ExecutorConfig::new(FIRST, "unused_first_schema", policy.clone());
+    let second_cfg = ExecutorConfig::new(SECOND, "unused_second_schema", policy);
+    let first_backend = PostgresBackend::new_generic(&holder);
+    let second_backend = PostgresBackend::new_generic(&contender);
+
+    first_backend
+        .acquire_project_lock(&first_cfg)
+        .await
+        .expect("take FIRST's project lock");
+    let second_outcome = second_backend
+        .try_acquire_project_lock(&second_cfg)
+        .await
+        .expect("probe SECOND's project lock");
+    let second_acquired = matches!(&second_outcome, ProjectLockAcquisition::Acquired);
+    if second_acquired {
+        second_backend
+            .release_project_lock(&second_cfg)
+            .await
+            .expect("release SECOND's project lock");
+    }
+    first_backend
+        .release_project_lock(&first_cfg)
+        .await
+        .expect("release FIRST's project lock");
+
+    assert!(
+        second_acquired,
+        "distinct ids with hashtext={first_hash} contended on one project lock: {second_outcome:?}"
+    );
+}
+
 /// A bundle owns one project advisory lock, not one lock per IR file.
 ///
 /// The blocker holds `ACCESS SHARE` on the table file 2 alters. That permits
@@ -1224,7 +1323,9 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
 
     let contender_acquired = if reached_file_two {
         conn.query_one(
-            "SELECT pg_try_advisory_lock(hashtext($1)::bigint)",
+            "SELECT pg_try_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+               ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[&app_id.to_string()],
         )
         .await
@@ -1235,7 +1336,9 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
     };
     if contender_acquired {
         conn.execute(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            "SELECT pg_advisory_unlock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+               ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[&app_id.to_string()],
         )
         .await

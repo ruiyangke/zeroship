@@ -1004,7 +1004,7 @@ impl MigrationEngine {
         // (`backend.acquire/release_project_lock`) rather than the PG `*_outer`
         // free-fns. For the PG backend this is byte-identical (`PostgresBackend`
         // delegates straight to `backend::postgres::session::acquire/release_project_lock`, i.e. the
-        // same `pg_advisory_lock(hashtext(project))`); for SQLite the lock is a no-op
+        // same two-key, 64-bit project hash); for SQLite the lock is a no-op
         // (single-actor serialization is the lock). The single-acquire / single-release
         // lock discipline is unchanged.
         backend

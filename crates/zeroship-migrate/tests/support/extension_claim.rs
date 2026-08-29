@@ -40,12 +40,10 @@
 //! different keys protect nothing at all while looking exactly like protection.
 //! `extension_claim_is_exclusive.rs` pins the property.
 //!
-//! The key is hashed by the SERVER (`hashtext`) the way `apply::executor` hashes a
-//! project id for its own lock, so a reader who knows one knows the other. Both live
-//! in one 64-bit advisory space, and a collision between this key and some project's
-//! could only make one of them WAIT, never mis-serialize: advisory locks are
-//! re-entrant per session, so the executor's own acquire inside a claimed body is
-//! satisfied at once.
+//! The claim deliberately remains a one-argument `hashtext` lock. Project locks
+//! use PostgreSQL's disjoint two-argument advisory-lock namespace, so a project
+//! key cannot collide with this extension claim. Every extension claimant still
+//! hashes the same resource string into the same one-key namespace.
 //!
 //! RELEASE ON EVERY PATH. The claim is a SESSION-level advisory lock on
 //! [`PgDevSession`]'s ONE pinned connection, so the server releases it when that

@@ -24,7 +24,7 @@
 //! **dialect-coupled** lives behind the trait:
 //!
 //! - **connection / session I/O** - the project lock
-//!   (`pg_advisory_lock(hashtext($1))`), the GUC snapshot/restore
+//!   (`pg_advisory_lock(int4, int4)` over a 64-bit project-id hash), the GUC snapshot/restore
 //!   (`current_setting`/`set_config`), the unconditional `RESET ROLE`, and
 //!   transaction begin/commit/rollback;
 //! - **the per-migration confined apply** - the txn path (`BEGIN; SET LOCAL ...;

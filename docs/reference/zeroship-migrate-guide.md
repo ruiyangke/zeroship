@@ -1117,7 +1117,7 @@ All three implement `trait MigrationBackend` (`apply/backend/mod.rs:166`). The d
 | `dialect()` | `SqlDialect::Postgres` | `SqlDialect::Sqlite` | `SqlDialect::Mysql` |
 | Transport | **Native `compio-postgres::Client`** (io_uring, zero-tokio) | **In-process embedded SQLite** via a hardened `MigrationActor` | **Live MySQL over `node:net`** — a Trusted V8 isolate runs vendored, unmodified `mysql2/promise` |
 | Session (`SessionSnapshot`) | `PgSessionSnapshot { statement_timeout, lock_timeout, search_path }` | no-op (no GUCs) | `MysqlSessionSnapshot { innodb_lock_wait_timeout, sql_mode }` |
-| Project apply-lock | `pg_advisory_lock(hashtext($1))` | structural (single actor serializes) | `GET_LOCK/RELEASE_LOCK`, name capped 64 chars |
+| Project apply-lock | `pg_advisory_lock(int4, int4)` from `hashtextextended($1, 0)` | structural (single actor serializes) | `GET_LOCK/RELEASE_LOCK`, name capped 64 chars |
 | `ddl_is_transactional()` | `true` | `true` | `false` — MySQL auto-commits DDL, forcing the two-phase path for every migration |
 | Role confinement | least-priv `migrator` role, `SET LOCAL ROLE` + unconditional `RESET ROLE` | two-mode `prepare`-time **authorizer** | dedicated migrator account |
 | `shadow()` dry-run | `Some(PgShadow)` | `None` (dev applies only trusted descriptor DDL) | (see impl) |
@@ -1240,7 +1240,7 @@ A migration's identity is `MigrationId` = `mig_<base62(UUIDv7)>` (`migration.rs:
 
 ### 9.3 Advisory-lock concurrency control & `LockMode`
 
-Every apply/rollback/baseline serializes on a per-project advisory lock computed server-side as `pg_advisory_lock(hashtext($project_id)::bigint)` (`executor.rs:460-467`), held for the whole operation and released on every exit path. **Known limitation:** `hashtext` is 32-bit, so two unrelated projects can collide onto one lock key — liveness-only (they serialize), never a correctness/cross-tenant defect, because each apply operates strictly within its own schemas. A 64-bit lock key would reduce this collision risk.
+Every apply/rollback/baseline serializes on a per-project advisory lock computed server-side by splitting `hashtextextended($project_id, 0)` into the two signed `int4` arguments of `pg_advisory_lock(int4, int4)`. The lock is held for the whole operation and released on every exit path. The 64-bit hash still has a theoretical collision space, but a collision only serializes two unrelated projects on the same PostgreSQL database/datastore; it cannot mix their schema-confined work, and the probability is negligible at expected per-datastore densities. PostgreSQL's database-scoped advisory lock tags also mean the same key in two databases on one cluster does not contend.
 
 `LockMode` (`executor.rs:88-95`) handles the multi-sub-batch declarative deploy: the outer `apply_declarative` acquires the lock once and threads `LockMode::AlreadyHeld` into each inner `apply_with_lock`, so sub-batches skip the per-batch acquire/release — the lock is taken exactly once and freed exactly once, never freed between sub-batches where a second deploy could interleave. `AlreadyHeld` gates *only* the lock; per-sub-batch session hygiene still runs every time. **SQLite** achieves the same serialization structurally: a single migration connection, `BEGIN IMMEDIATE` taking the RESERVED write lock — "race-free by construction."
 

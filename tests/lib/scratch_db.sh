@@ -61,7 +61,7 @@
 # deleted with it when the platform schema moved to the `zero-migrate` CLI.
 #
 # WHAT THE CLI HAS INSTEAD, and why it is not the same thing. It brackets each
-# apply in `SELECT pg_advisory_lock(hashtext($1))` keyed on the project schema
+# apply in a two-`int4` advisory lock keyed by `hashtextextended(project schema, 0)`
 # (crates/zeroship-migrate-postgres/src/backend/session.rs:60-77). A PostgreSQL
 # advisory lock tag carries MyDatabaseId, so that lock is DATABASE-SCOPED: two
 # suites holding the same key in two scratch databases do not exclude each other

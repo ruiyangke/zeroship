@@ -542,11 +542,14 @@ test("PostgreSQL: a rollback whose project lock is held waits instead of failing
     const applied = spawnCli([...baseArgs(schema, pgUrl()), "apply", "--approve"], dir);
     assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
 
-    // The engine's own acquire, run verbatim rather than re-derived: the key is
-    // `hashtext(project_id)` (crates/zeroship-migrate-postgres/src/backend/session.rs)
-    // and the CLI passes the project SCHEMA as the project id
-    // (packages/zero-migrate-cli/src/index.ts:544).
-    await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);
+    // The engine's own acquire, run verbatim rather than re-derived: it splits
+    // `hashtextextended(project_id, 0)` into two int4 keys, and the CLI passes
+    // the project SCHEMA as the project id.
+    await holder.query(
+      `SELECT pg_advisory_lock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+         FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+      [schema],
+    );
 
     // `pg_advisory_lock` has no timeout, so this rollback never returns. The deadline
     // belongs to the TEST, not the command: awaiting it would hang the suite rather than
@@ -566,7 +569,11 @@ test("PostgreSQL: a rollback whose project lock is held waits instead of failing
 
     // Releasing lets the same command through, which is what proves the wait was the
     // lock rather than anything else about this scenario.
-    await holder.query(`SELECT pg_advisory_unlock(hashtext($1)::bigint)`, [schema]);
+    await holder.query(
+      `SELECT pg_advisory_unlock((h >> 32)::int4, ((h << 32) >> 32)::int4)
+         FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key`,
+      [schema],
+    );
     const afterRelease = spawnCli(
       [...baseArgs(schema, pgUrl()), "rollback", "--all", "--approve"],
       dir,

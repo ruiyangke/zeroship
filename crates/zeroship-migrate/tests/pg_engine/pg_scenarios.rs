@@ -2855,9 +2855,10 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
     drop_schemas(&session, &cfg).await;
 }
 
-/// The advisory lock is a real `pg_advisory_lock(hashtext(project_id))`: after an
-/// apply the session holds NO advisory lock (acquire+release balanced), and while
-/// held it appears in `pg_locks`.
+/// The advisory lock is a real two-key
+/// `pg_advisory_lock(hashtextextended(project_id, 0) halves)`: after an apply the
+/// session holds NO advisory lock (acquire+release balanced), and while held it
+/// appears in `pg_locks`.
 #[compio::test]
 async fn apply_acquires_and_releases_the_project_advisory_lock() {
     let url = require_live_pg!();
@@ -3743,7 +3744,10 @@ async fn second_session_blocks_on_the_held_project_lock() {
     // The contender uses pg_try_advisory_lock on the SAME key → must fail (held).
     let got = contender
         .query_one(
-            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
+            "SELECT pg_try_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+                ) AS got \
+               FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[cfg.project_id.as_str().into()],
         )
         .await
@@ -3759,7 +3763,10 @@ async fn second_session_blocks_on_the_held_project_lock() {
         .expect("holder releases");
     let got2 = contender
         .query_one(
-            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
+            "SELECT pg_try_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+                ) AS got \
+               FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[cfg.project_id.as_str().into()],
         )
         .await
@@ -3771,7 +3778,9 @@ async fn second_session_blocks_on_the_held_project_lock() {
     // Release the contender's lock so the session is clean.
     let _ = contender
         .exec(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            "SELECT pg_advisory_unlock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+               ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
             &[cfg.project_id.as_str().into()],
         )
         .await;

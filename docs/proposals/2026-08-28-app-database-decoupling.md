@@ -629,9 +629,10 @@ creators it is, and no role fixes it.
   `pg_advisory_xact_lock` releases at the first COMMIT, and the apply commits many times (below), so
   it cannot hold across one. The engine already takes a session lock around a whole plan and releases
   it explicitly (`crates/zeroship-migrate-postgres/src/backend/session.rs:60-77`,
-  `crates/zeroship-migrate-core/src/engine.rs:1382-1412`); the change is its KEY, from the app-as-project
-  to the database. Two separate defects live in that key and are filed apart from this: its scope, and
-  its `hashtext` width, which is int4 and collides.
+  `crates/zeroship-migrate-core/src/engine.rs:1382-1412`); the remaining change is its logical key,
+  from the app-as-project to the database. The old 32-bit `hashtext` collision defect was removed on
+  2026-08-29 by splitting `hashtextextended` into two `int4` keys. That transport-width fix does not
+  perform the app-to-database rekey proposed here.
 - **The apply advances the schema epoch. THE EPOCH ROTATION IS ATOMIC; THE APPLY AS A WHOLE IS NOT,
   AND CANNOT BE.** The rotation - write the new epoch to the system schema's one table (6.5), mint
   `zs_bind_<gid>_e<E+1>` for every live grant, drop `zs_bind_<gid>_e<E-1>` - is a small transaction and
@@ -683,11 +684,10 @@ creators it is, and no role fixes it.
   and there is no resolve step on the connection path. So the front reap is correct ONLY once the
   binding producer lands, which the epoch needs regardless.
 
-  **The advisory lock must be taken by the HOST**, not by the engine per file. Today
-  `crates/zeroship-migrate-server/src/apply.rs:626-631` asks for `Acquire` on file 0 and `AlreadyHeld`
-  after, believing the lock spans the set; `crates/zeroship-migrate-core/src/engine.rs:1600-1608`
-  releases it at the end of that first plan, so every later file runs unlocked. Both designs found this
-  independently. Hoisting it is a prerequisite here, not a cleanup.
+  **The advisory lock is taken by the HOST**, not by the engine per file. This prerequisite landed in
+  `8dcd79628` on 2026-08-29: the host acquires once on its pinned session, passes
+  `LockMode::AlreadyHeld` for every IR file, and releases after the full set. Before that change the
+  engine released the lock at the end of the first plan, so every later file ran unlocked.
 
   **The rotation MAY reuse publication reconciliation** - by taking its transactional body rather than
   its wrapper. `crates/zeroship-migrate-server/src/publication.rs:59` owns a `BEGIN`/`COMMIT`; `:79` is

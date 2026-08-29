@@ -5,7 +5,7 @@
 //! ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply), which
 //! reaches `apply_with_lock_backend` below):
 //!
-//! 1. acquires the project advisory lock `pg_advisory_lock(hashtext(project_id))`
+//! 1. acquires the project advisory lock (a two-key, 64-bit project-id hash on PostgreSQL)
 //!    (serialize all migration activity; released at end);
 //! 2. bootstraps the journal (idempotent);
 //! 3. computes `pending = set - applied`, in `UUIDv7` version order;
