@@ -13,14 +13,14 @@
 - `crates/sandbox/src/preview_share_handlers.rs` — share-token mint/list/rotate; today writes audit metadata into the in-memory registry + sealed record. Phase 2 adds a parallel pg write.
 - `crates/compio-postgres/src/lib.rs` — the existing compio-native pg driver (no tokio).
 - `crates/compio-postgres/src/pool.rs` — HikariCP-style single-threaded `Pool` + `PoolConfig` we will drop in.
-- `crates/control/src/main.rs` — control plane already reads `DATABASE_URL` and uses `compio-postgres`; this design follows the same surface.
-- `crates/core/src/typed_id.rs` — module-level free function `pub fn parse(s: &str) -> Result<(&str, uuid::Uuid), String>` (note: there is NO `TypedId` struct; round-1 fix). § 19 prerequisites a new `parse_with_prefix(s, expected_prefix)` helper that all `Database::*` methods consume.
+- `crates/zeroship-control/src/main.rs` — control plane already reads `DATABASE_URL` and uses `compio-postgres`; this design follows the same surface.
+- `crates/zeroship-core/src/typed_id.rs` — module-level free function `pub fn parse(s: &str) -> Result<(&str, uuid::Uuid), String>` (note: there is NO `TypedId` struct; round-1 fix). § 19 prerequisites a new `parse_with_prefix(s, expected_prefix)` helper that all `Database::*` methods consume.
 - `AGENTS.md` — invariants: "PostgreSQL — One database, separate schemas (control, auth, per-app)" and "Zero tokio in the stack". Both are LOAD-BEARING for this design.
 
 **Unblocks:**
 - Multi-controller HA for the sandbox tier (controller process can die without losing the sandbox state). Today's file-only persistence cannot survive the loss of the host.
 - Operator queries: "how many sandboxes is creator X running?", "what was the share-token mint history for sandbox Y?", "which sandboxes are scheduled for GC in the next 5 minutes?". Today these require an FS walk + AEAD decrypt + serde JSON.
-- The billing / metering pipe (`crates/control/src/metering.rs`): emit-once-and-aggregate events for compute-seconds, share-token uses, preview egress. Pg `events` table is the contract surface.
+- The billing / metering pipe (`crates/zeroship-control/src/metering.rs`): emit-once-and-aggregate events for compute-seconds, share-token uses, preview egress. Pg `events` table is the contract surface.
 - GDPR data export + delete (`SELECT … WHERE user_id = $1`, `DELETE … WHERE user_id = $1`). Today this requires walking every sealed record and decoding.
 - Audit retention beyond a single sandbox lifetime (sandboxes default to 8 h max-lifetime; sealed records are ephemeral).
 - The eventual "operator UI" (sandbox console for SREs) — this design is a prerequisite, not the deliverable.
@@ -106,12 +106,12 @@ The doc-shape mirrors `docs/proposals/sandbox-preview-urls.md` deliberately. Rea
 |---|---|---|---|
 | **D-1** | **Pg is the system of record for non-secret state from day 1; sealed records hold secrets only** (round-8). New schema `sandbox` in the existing platform Postgres database (alongside `control`, `auth`). [Superseded by round-8 cut: the previous "system of record post-cutover" framing is gone — pre-launch means no cutover.] | AGENTS.md "One database, separate schemas"; pre-launch state means no dual-write transition is needed. One backup story, one connection-pool budget, one TLS cert. | § 5, § 9 |
 | **D-2** | Pg is **non-secret only**. Sealed records remain the SOLE store for `signing_key`, `preview_secrets`. | Failure-domain split: pg compromise ≠ secret compromise. Aligns with `crates/sandbox/src/persist.rs`'s threat model. | § 5, Invariant 1 |
-| **D-3** | The pg client is **`compio-postgres`** (already in-tree, used by `crates/control/`). Phase-1 ships pool-per-call to match `crates/control/`'s pattern; per-ntex-worker thread-local pools are a Phase-2 perf optimization if measurements demand. | Zero-tokio invariant; matches existing platform pattern. | AGENTS.md |
+| **D-3** | The pg client is **`compio-postgres`** (already in-tree, used by `crates/zeroship-control/`). Phase-1 ships pool-per-call to match `crates/zeroship-control/`'s pattern; per-ntex-worker thread-local pools are a Phase-2 perf optimization if measurements demand. | Zero-tokio invariant; matches existing platform pattern. | AGENTS.md |
 | **D-4** | Migrations are **hand-rolled, forward-only, applied at controller startup**, tracked via `sandbox.schema_migrations(version BIGINT PRIMARY KEY, applied_at TIMESTAMPTZ)`. **Round 6: the runner uses the designated-migrator pattern** (one process per deployment with `SANDBOX_PG_RUN_MIGRATIONS=1`); other controllers block on a schema-version check at startup. The PRIMARY KEY on `schema_migrations.version` is the race-tolerance fallback — a degenerate two-migrator race resolves via `unique_violation` on the loser's INSERT, never via session-level locking. **No advisory locks.** | sqlx pulls tokio (rejected by AGENTS.md); refinery has a tokio-free path but adds dep weight; hand-rolled is ~140 lines (round 6) and matches the project's bias toward minimal deps. | § 7 |
 | **D-5** | Each controller has a **`SANDBOX_HOST_ID` (UUIDv7)**; `sandboxes.host_id` is the per-row owner; `sandboxes.generation BIGINT` is the per-row CAS counter (round 6); restart-restore queries `WHERE host_id = $self AND status = 'running'`; ownership-relevant UPDATEs CAS on `(host_id, generation)`. | Multi-controller HA prerequisite. The v1 sticky-host model lets us ship without auto-takeover; v2's lease-based takeover (D-14, D-Z) layers on without changing the row shape. | § 5, § 10, § 11 |
 | **D-6** | Pg writes on the live request path are **best-effort, like `Persistence::seal`**. A pg failure logs + meters but does NOT fail the user request. | Liveness > durability for the live path; the reconciler closes the gap (§ 9). | § 8, § 9 |
 | **D-7** | `events` is **append-only, partitioned monthly by `ts`**. Old partitions roll off to cold storage (S3) after 90 days. | Volume scales with sandbox-lifetime activity; partitioning keeps hot-path indexes lean. | § 6 |
-| **D-8** | `sandboxes`, `shares`, `events` use **TEXT columns for typed-ids** (not native UUID). | Typed-ids are base62 strings (`sbx_…`, `usr_…`, `tok_…`) — `crates/core/src/typed_id.rs` — not raw UUIDs. We could add a domain-over-TEXT for visible type-safety; v1 keeps plain TEXT + a `CHECK` regex. | § 6 |
+| **D-8** | `sandboxes`, `shares`, `events` use **TEXT columns for typed-ids** (not native UUID). | Typed-ids are base62 strings (`sbx_…`, `usr_…`, `tok_…`) — `crates/zeroship-core/src/typed_id.rs` — not raw UUIDs. We could add a domain-over-TEXT for visible type-safety; v1 keeps plain TEXT + a `CHECK` regex. | § 6 |
 | **D-9** | **No FK from `events` to `sandboxes`**. Events are write-and-forget; an FK would deadlock with the in-flight INSERT path on `sandboxes` and break the "events are append-only / never block hot path" invariant. Other FKs (e.g., `shares.sandbox_id` → `sandboxes.sandboxes.sandbox_id`) ARE present. Round-2 strengthens with a non-blocking RAISE NOTICE TRIGGER (§ 13.11) for tenant-cross-contamination defense. [Superseded by round-8 cut: the prior "explicit reconciler covers the loose-end case" rationale is replaced — there is no periodic reconciler post-round-8; the events pipe simply tolerates a missing parent because the parent INSERT and the child INSERT are sequenced in the same handler.] | Consistency > FK-rigidity for the hot pipe. | § 6 |
 | **D-10** | **Reconciler runs once at boot, no periodic schedule** (round-8 cut). Forward: sealed records without pg row → unlink (cancelled-create orphan). Reverse: pg rows without sealed → status='lost'. [Superseded by round-8 cut: prior "periodic every 5 min" was needed to catch drift from best-effort dual-write; round-8 makes pg-write synchronous so steady-state has no drift source.] | Single writer per category; no dual-write means no drift to converge. | § 9 |
 | **D-11** | **Pg unavailable on boot is fatal** (controller refuses to start) UNLESS `SANDBOX_PG_OPTIONAL=1` (dev-only escape hatch — sets prevents prod from falling back to file-only by accident). | Production safety: a controller that boots without pg silently degrades observability + billing. The escape hatch covers `cargo test` / local-dev. | § 12 |
@@ -122,7 +122,7 @@ The doc-shape mirrors `docs/proposals/sandbox-preview-urls.md` deliberately. Rea
 | **D-15** | **Schema name is `sandbox` (singular)** to match AGENTS.md "separate schemas (control, auth, per-app)". A namespace prefix (e.g. `zsbx_sandbox`) is rejected — the schema name IS the namespace. Runtime-configurable via `SANDBOX_PG_SCHEMA` (round-1 fix), validated against `^[a-z_][a-z0-9_]{0,62}$` once at boot. | Convention. | Q-6 |
 | **D-16** | **Soft-delete via `deleted_at TIMESTAMPTZ` on `sandboxes` and `shares`**; `events` is hard-only (append-only, retention by partition drop). | GDPR delete needs a tombstone for in-flight queries; partition-drop on `events` is faster + cheaper than per-row DELETE. | § 13, Q-1 |
 | **D-17** | **Connection-pool config: `max_size = 16, min_idle = 2` per controller** (default; was 32 / 4 in v1, revised in round-1 after pool-sizing math was tightened). Pg writes are off-path + average ~1 ms; expected in-flight is < 1 connection at steady state, 16 covers tail-latency + admin-endpoint bursts comfortably. | § 14 capacity math; tuneable via `SANDBOX_PG_POOL_MAX`. | § 14 |
-| **D-18** | **`sandbox.events` is the billing/audit pipe.** Schema is `(event_id, sandbox_id, user_id, kind, ts, data jsonb)`; the consumer (`crates/control/src/metering.rs`) reads via a streaming SQL cursor against the partition for the current billing period. | One wire format, one schema; no parallel events pipeline. | § 6, § 19 |
+| **D-18** | **`sandbox.events` is the billing/audit pipe.** Schema is `(event_id, sandbox_id, user_id, kind, ts, data jsonb)`; the consumer (`crates/zeroship-control/src/metering.rs`) reads via a streaming SQL cursor against the partition for the current billing period. | One wire format, one schema; no parallel events pipeline. | § 6, § 19 |
 
 ---
 
@@ -135,7 +135,7 @@ This is **insufficient** for:
 1. **HA.** A controller process holds its sandboxes in-memory + on-its-local-disk. Loss of the host = total loss of that controller's sandbox set. The user has to re-create. (Sealed records on a network-mounted FS would help marginally; even then, two controllers can't safely take over the same set without coordination.)
 2. **Operator queries.** "How many sandboxes is creator X running?" is FS walk + AEAD decrypt + JSON parse for every record. "Which sandboxes were minted in the last 24 h?" — same. "Show me all share-token mints for sandbox Y" — same. No index, no aggregation.
 3. **Audit retention beyond a sandbox's lifetime.** Sealed records are deleted when a sandbox stops (`Persistence::delete`). Audit / billing facts (creator-id, mint times, share-token usage history) are gone with them. Default `SANDBOX_MAX_LIFETIME_SECS = 28800` (8 h) caps the recoverable window.
-4. **Billing pipe.** `crates/control/src/metering.rs` already counts bytes-out / Stripe meters at the worker tier. Sandbox tier today emits nothing structured the metering pipe can consume. We need an event log per sandbox (compute-seconds, share-token uses, preview egress) that survives sandbox stop.
+4. **Billing pipe.** `crates/zeroship-control/src/metering.rs` already counts bytes-out / Stripe meters at the worker tier. Sandbox tier today emits nothing structured the metering pipe can consume. We need an event log per sandbox (compute-seconds, share-token uses, preview egress) that survives sandbox stop.
 5. **Regional failover prep.** A future "controller in region B takes over a sandbox after region A's controller dies" story needs a coordination point. Pg's `host_id` + heartbeat is the cheapest one (§ 11).
 6. **Disaster recovery.** Pg has PITR; the platform's existing backup story covers it. The sealed-record dir is per-host scratch; losing it is "expected" (sandboxes are ephemeral). Pg row says "this sandbox existed, here's its metadata" so post-DR we can email the creator instead of silently orphaning their work.
 7. **GDPR data-export + delete.** No structured query to answer "what does the platform store about user X's sandbox usage?". Walk-everything-and-decrypt is operationally untenable past 1000 sandboxes.
@@ -151,7 +151,7 @@ File-only IS sufficient for **secret material** — signing keys, preview-secret
 1. **HA-capable durable state for sandboxes / shares / events.** Pg is the system of record post-cutover; controller process loss is recoverable as long as pg is up.
 2. **Query-able audit log.** `events` table answers operator + billing + GDPR queries without walking the FS.
 3. **GDPR data-export + delete.** `SELECT * FROM sandbox.* WHERE user_id = $1` returns everything; `DELETE FROM sandbox.* WHERE user_id = $1` removes everything (modulo sealed-record unlink).
-4. **Billing-event feed.** `sandbox.events` is the structured pipe `crates/control/src/metering.rs` reads.
+4. **Billing-event feed.** `sandbox.events` is the structured pipe `crates/zeroship-control/src/metering.rs` reads.
 5. **Restart-restore via pg.** The boot path queries `WHERE host_id = $self AND status = 'running'` + unseals each row's secrets.
 6. **Aligned with AGENTS.md invariants.** Zero tokio (use `compio-postgres`); one database with separate schemas (use the platform pg + `sandbox` schema).
 7. **Best-effort writes on the live path.** Pg unavailability degrades observability but never fails a creator's request.
@@ -663,7 +663,7 @@ Index justification (round-4 revised):
 
 **Why no FK from `events` to `sandboxes`** (D-9): events are write-once + write-fast; an FK forces pg to look up the parent row on every INSERT, which (a) doubles the lock surface, (b) deadlocks if the parent's INSERT and the child's INSERT race, and (c) breaks our "events are best-effort and never block hot path" model — a parent INSERT failure would abort the event. The `(user_id, sandbox_id)` invariant is enforced by the writer (caller passes both, sourced from `SandboxRegistry`). Reconciler sweeps ensure orphaned events are visible to operators.
 
-**Open enum on `kind`** (D-7 / Q-2): event kinds in v1 include `created`, `started`, `stopped`, `idle_gc`, `share.minted`, `share.used`, `share.rotated`, `share.revoked`, `proxy.http`, `proxy.ws.upgrade`, `proxy.ws.close`, `proxy.body.too_large`, `audit.dropped`. New kinds add a TEXT value; consumers ignore unknown kinds (`crates/control/src/metering.rs` filters by `WHERE kind IN ('compute_seconds', 'share.used', 'preview_egress')` — anything else is invisible to the metering pipe).
+**Open enum on `kind`** (D-7 / Q-2): event kinds in v1 include `created`, `started`, `stopped`, `idle_gc`, `share.minted`, `share.used`, `share.rotated`, `share.revoked`, `proxy.http`, `proxy.ws.upgrade`, `proxy.ws.close`, `proxy.body.too_large`, `audit.dropped`. New kinds add a TEXT value; consumers ignore unknown kinds (`crates/zeroship-control/src/metering.rs` filters by `WHERE kind IN ('compute_seconds', 'share.used', 'preview_egress')` — anything else is invisible to the metering pipe).
 
 **Type choices recap:**
 - **TEXT for typed-ids.** Typed-ids are `prefix_<base62>`; pg's UUID type doesn't fit. We could add a domain (`CREATE DOMAIN sandbox_id AS TEXT CHECK (...)`), but the per-table CHECK gives us the same correctness with one fewer abstraction layer. Phase 1 ships with CHECKs; if the operator survey wants domain types, we add them in Phase 2.
@@ -1049,7 +1049,7 @@ Phase 4 (HA):
 
 Phase 5 (operator API):
 
-- New file `crates/sandbox/src/admin_handlers.rs` — `GET /admin/sandboxes`, `GET /admin/users/{user_id}/export`, `DELETE /admin/users/{user_id}`, `GET /admin/hosts`. Auth: platform-admin role (token in shared secret table; surface mirrors `crates/control/src/auth_handlers.rs`).
+- New file `crates/sandbox/src/admin_handlers.rs` — `GET /admin/sandboxes`, `GET /admin/users/{user_id}/export`, `DELETE /admin/users/{user_id}`, `GET /admin/hosts`. Auth: platform-admin role (token in shared secret table; surface mirrors `crates/zeroship-control/src/auth_handlers.rs`).
 
 ---
 
@@ -1384,7 +1384,7 @@ const ALLOWED_SANDBOX_METADATA_KEYS: &[&str] = &[
 - `events` partitions retain hot for 90 days. After 90 days, the partition is detached and copied to S3 (`s3://zeroship-audit/sandbox-events/YYYY-MM/`), then dropped from pg.
 - Each S3 object is keyed by `(year, month, user_id_prefix)` with one NDJSON file per `(month, user_id)` pair. This shape makes per-user delete cheap (round-1 fix, addresses I13).
 - **S3 server-side encryption (round-2 fix, addresses SEC-I9):** SSE-KMS with platform-owned KMS key (`alias/zeroship-audit`); bucket policy denies non-SSE PUTs; bucket has Object Lock in `GOVERNANCE` mode for 90-day audit immutability after the row leaves pg. Lifecycle policy moves objects to Glacier Deep Archive after 1 year.
-- The 90-day window aligns with the platform's existing audit retention (`crates/control/src/audit.rs`).
+- The 90-day window aligns with the platform's existing audit retention (`crates/zeroship-control/src/audit.rs`).
 - Operator can extend retention per-tenant via an `audit_retention_days` field on the `auth.users` table (out-of-scope for this design — tracked as a follow-up).
 
 **GDPR delete reaches S3 (round-1 fix, addresses I13).** § 13.7's TX deletes from pg only; events older than 90 days live in S3. The admin DELETE endpoint runs a follow-up pass:
@@ -2055,7 +2055,7 @@ Round-8 collapse: this single phase subsumes the original Phase 1 (dual-write sa
 - **Restart-restore (`crates/sandbox/src/restore.rs`).** Replace the `unseal_dir` walk with `database.list_running_sandboxes_for_host(host_id)`. For each row, load the sealed record by sandbox_id, merge pg-row fields with sealed-record secret material to reconstruct `SandboxInfo + SandboxAuth`. Probe agent at `agent_url` from the pg row; verify `pubkey_fingerprint` matches `key_fp` from the pg row.
 - **Boot-time reconciler.** One pass at startup, no periodic schedule. Forward: sealed records with no pg row → unlink (cancelled-create orphan). Reverse: pg rows with no sealed record → status='lost'.
 - **Database write methods** (sketches in § 8): `insert_sandbox`, `update_sandbox_status` (returns new generation; CAS-tracked even though Phase-2 HA hasn't shipped — future-proofs the lease-takeover write), `list_running_sandboxes_for_host`, `insert_share`, `list_shares_for_sandbox`, `rotate_share_secret`, `insert_event`, `delete_sandbox` (moves row to `deleted_sandboxes` tombstone).
-- **Pool topology.** Match `crates/control/`'s pool-per-call pattern. Per-ntex-worker thread-local pools are a Phase-2 perf optimization if measurements show pool churn matters.
+- **Pool topology.** Match `crates/zeroship-control/`'s pool-per-call pattern. Per-ntex-worker thread-local pools are a Phase-2 perf optimization if measurements show pool churn matters.
 
 **Test plan:**
 - Unit: SealedAuth v2 reader → v3 deserialize, dropped fields ignored; v3 round-trip preserves only secret material.
@@ -2132,13 +2132,13 @@ Round-5 estimate-bump rationale: scope grew from "single-bearer admin endpoints"
 | **R-11** | **Sealed-record orphan never cleaned.** Reconciler marks `orphan`; nobody DELETEs. The pg table grows. | Low | A daily background job purges `orphan` rows older than 30 days (after operator review window). |
 | **R-12** | **Heartbeat task blocked = controller marked dead by peer.** A long GC pause or stuck blocking IO blocks the heartbeat task; another controller claims our sandboxes (Phase 4 only). | Medium (Phase 4) | Heartbeat runs on its own compio task; alerts at `sandbox_host_heartbeat_seconds > 30`. Phase-4 claim threshold is 60 s — buffer is 2× heartbeat interval × 3 missed beats. Soak test under load. |
 | **R-13** | **Schema name typo / collision.** Someone names a column `key`, breaking the no-secrets lint or shadowing a SQL keyword. | Low | CI lint on column names (no SQL keywords without quoting). Schema reviewer process. |
-| **R-14** | **PITR replay loses recent events.** Pg PITR replays WAL up to a target time; the last unarchived WAL segment is the loss bound. Default platform pg config: `archive_timeout = 60s`, so worst-case WAL loss is 60 s of writes; typical loss is sub-second when the segment fills naturally before timeout. (Round-1 fix, addresses I10: prior draft said "5 min" without source.) | Medium | For billing, `crates/control/src/metering.rs` rolls up at 1 h granularity, so 60-s PITR loss is below noise. For audit, the 60-s gap is documented. Operators can tighten via `archive_timeout = 30s` if the regulator requires it. |
+| **R-14** | **PITR replay loses recent events.** Pg PITR replays WAL up to a target time; the last unarchived WAL segment is the loss bound. Default platform pg config: `archive_timeout = 60s`, so worst-case WAL loss is 60 s of writes; typical loss is sub-second when the segment fills naturally before timeout. (Round-1 fix, addresses I10: prior draft said "5 min" without source.) | Medium | For billing, `crates/zeroship-control/src/metering.rs` rolls up at 1 h granularity, so 60-s PITR loss is below noise. For audit, the 60-s gap is documented. Operators can tighten via `archive_timeout = 30s` if the regulator requires it. |
 | **R-15** | **JSONB `data` field abuse.** A future caller stores PII in `events.data`. | Medium | `data` is reviewed via the same no-secrets lint at the call-site level; PRs introducing new event kinds require a security review noting the JSON shape. |
 | **R-16** | **Pg becomes a single point of failure for the entire sandbox tier.** | High | `SANDBOX_PG_OPTIONAL` is the dev escape hatch, NOT a prod fallback. Production runs pg with replication + PITR; if pg is down, the sandbox tier accepts new sandboxes (best-effort, sealed-only) but operator visibility + billing pause. The platform-wide availability is bounded by pg's uptime. |
 | **R-17** | **Re-seal pass on schema-version bump (Phase 6) takes hours.** A fleet with 50k sealed records × 1 ms each = ~1 minute; under realistic load, more like 10 min. | Low | Re-seal is a background task; controller is live during re-seal; only writes in the re-seal pass touch sealed records. |
 | **R-18** | **Forward reconciler imports a stale sealed record after sandbox was DELETEd via `/admin`.** A race where DELETE removes pg row but sealed unlink is best-effort and races. | Medium | DELETE order: pg DELETE first (in TX), then sealed unlink. If sealed unlink fails, the next reconciler forward pass would re-INSERT; defense: a tombstone table `sandbox.deleted_sandboxes(sandbox_id, deleted_at)` retained for 24 h that the reconciler consults. |
 | **R-19** | **Audit-log tampering by the controller process.** The controller could DELETE its own `events` rows to cover misuse. (Round-2 addition — TM-7.) | High | `sandbox_audit` role is INSERT-only on `events`; `sandbox_app` is read-only on `events`. The controller cannot DELETE except through the explicitly-gated `sandbox_gdpr` role on a per-request connection. After 90 days, S3 archival with Object Lock GOVERNANCE makes archived events immutable for the lock window. |
-| **R-20** | **Adversarial billing-event suppression.** A creator triggers ops during pg outage to avoid metering. (Round-2 addition — TM-8 / SEC-M3.) | Medium | When pg writes fail, the controller spools an `audit.dropped` event to a local on-disk ring buffer (next to sealed records); the next successful pg write flushes the spool. `crates/control/src/metering.rs` consumes the dropped events as known-gaps and counts conservatively. Phase 1+ deliverable. |
+| **R-20** | **Adversarial billing-event suppression.** A creator triggers ops during pg outage to avoid metering. (Round-2 addition — TM-8 / SEC-M3.) | Medium | When pg writes fail, the controller spools an `audit.dropped` event to a local on-disk ring buffer (next to sealed records); the next successful pg write flushes the spool. `crates/zeroship-control/src/metering.rs` consumes the dropped events as known-gaps and counts conservatively. Phase 1+ deliverable. |
 | **R-21** | **MITM on pg connection (SSL stripping).** Attacker between controller and pg gets the password file's contents. (Round-2 addition — TM-1 / SEC-I1.) | Critical | `sslmode=verify-full` in production, `sslrootcert` mandatory; controller refuses to start without it. Local-dev with `sslmode=disable` allowed but emits WARN. |
 | **R-22** | **Connection-string injection (SSRF-style).** Env override points the controller at hostile pg. (Round-2 addition — TM-9 / SEC-M4.) | High | `SANDBOX_PG_HOST_ALLOWLIST` validates the parsed DSN host at boot; refuse on mismatch. |
 | **R-23** | **Compromised admin token enumerates user data.** Single-bearer admin model would allow exfiltration. (Round-2 addition — TM-3 / SEC-C2.) | High | Per-admin JWTs (15-min TTL), per-endpoint scopes, per-admin rate limits, 2FA step-up on destructive ops, anomaly alarms (§ 13.8). |
@@ -2200,7 +2200,7 @@ Strongly-consistent KV used as a coordinator in many platforms.
 
 ### Conclusion
 
-Pg, in the existing platform DB. Aligns with AGENTS.md "One database, separate schemas". Aligns with the existing control-plane pattern (`crates/control/src/main.rs:37` already uses `compio_postgres` against `DATABASE_URL`). One backup story, one connection pool, one TLS cert, one set of operator skills.
+Pg, in the existing platform DB. Aligns with AGENTS.md "One database, separate schemas". Aligns with the existing control-plane pattern (`crates/zeroship-control/src/main.rs:37` already uses `compio_postgres` against `DATABASE_URL`). One backup story, one connection pool, one TLS cert, one set of operator skills.
 
 ---
 
@@ -2229,18 +2229,18 @@ Round-5 disposition pass (addresses CLR-I9): every Q has been re-tagged.
 
 ## 19. Cross-cutting follow-ups
 
-### `crates/control/`
-- **Shared connection-pool concerns.** The control plane already opens a `compio_postgres::Pool` (`crates/control/src/main.rs:37`). The sandbox controller opens a separate pool to the same database. Pg-side concern: `max_connections` allocation. Phase-0 deliverable includes documenting the shared budget; recommend control + sandbox split the pg connection budget 60/40 (control is the more chatty path).
+### `crates/zeroship-control/`
+- **Shared connection-pool concerns.** The control plane already opens a `compio_postgres::Pool` (`crates/zeroship-control/src/main.rs:37`). The sandbox controller opens a separate pool to the same database. Pg-side concern: `max_connections` allocation. Phase-0 deliverable includes documenting the shared budget; recommend control + sandbox split the pg connection budget 60/40 (control is the more chatty path).
 - **Schema discovery.** Operator queries that span sandbox + control (e.g. "show me everything for creator X" — apps, deploys, sandboxes, share tokens) need a join across schemas. Pg supports it natively (`FROM sandbox.sandboxes s JOIN control.app_records a ON s.user_id = a.owner_id`). v1 doesn't ship a unified-export endpoint; tracked as a control-plane follow-up.
 
-### `crates/gateway/`
+### `crates/zeroship-gateway/`
 - **Does the gateway need read access to `sandbox.shares` for the public-edge cookie validation?** Tracking back through the preview design (`docs/proposals/sandbox-preview-urls.md`): the cookie-conversion handler (`__zsbx_share`) lives inside the controller, not the gateway. The gateway never sees the raw share token; it sees the cookie set by the controller. Verdict: gateway does NOT need pg access for shares. Document explicitly to forestall an "obviously the gateway should validate at the edge" suggestion in code review.
 - **CHWBL routing implications.** When a sandbox is bound to controller-1 (sticky-host, v1), the gateway needs to route preview traffic to controller-1. Today's gateway uses CHWBL for app traffic; the preview path goes via `controller.zeroship.dev` regionally. Phase 4 (HA rebind) means a sandbox can change hosts; gateway must learn the new host. v1: the controller's preview public-route is a single ingress; the gateway forwards by `Host` header to the controller pool, and the controller's internal lookup figures out the right backing host. Document.
 
-### `crates/control/src/metering.rs`
+### `crates/zeroship-control/src/metering.rs`
 - **`sandbox.events` is the consumer contract.** The metering pipe filters by `WHERE kind IN ('compute_seconds', 'share.used', 'preview_egress')`. Document the schema of `data` for each kind in `crates/sandbox/src/db.rs::events_kinds.md`. Add an integration test that mints + uses a share token, asserts the metering pipe sees the event, asserts the Stripe meter is incremented.
 
-### `crates/core/src/typed_id.rs`
+### `crates/zeroship-core/src/typed_id.rs`
 - **Add a `TypedId::parse_with_prefix(s, expected_prefix)` helper.** Saves boilerplate at every `Database::*` method. Out-of-scope here, but a small ergonomic win that this design highlights.
 
 ### `docs/runbooks/sandbox-pg.md`
@@ -2257,7 +2257,7 @@ Round-5 disposition pass (addresses CLR-I9): every Q has been re-tagged.
 ## 20. Glossary
 
 - **Sealed record.** AEAD-encrypted file on the controller's local FS holding per-sandbox secret material. Codec defined in `crates/sandbox/src/persist.rs`.
-- **Typed-id.** `prefix_<base62>` string; `crates/core/src/typed_id.rs`. `sbx_…` (sandbox), `usr_…` (user), `prj_…` (project), `tok_…` (share token), `evt_…` (event), `hst_…` (host).
+- **Typed-id.** `prefix_<base62>` string; `crates/zeroship-core/src/typed_id.rs`. `sbx_…` (sandbox), `usr_…` (user), `prj_…` (project), `tok_…` (share token), `evt_…` (event), `hst_…` (host).
 - **Host.** A controller process; identified by `host_id`. Multiple hosts can share a database; each owns its slice via `sandboxes.host_id`.
 - **Reconciler.** Background task that detects + resolves drift between the sealed-records FS and the pg `sandboxes` table.
 - **Forward reconcile.** sealed-record-side authoritative; pg back-filled.
@@ -2283,7 +2283,7 @@ Round-5 disposition pass (addresses CLR-I9): every Q has been re-tagged.
   - **§ 5.2 sequence** "dual-write happy path" → "single-write happy path"; § 5.3 (pg-down) updated to reflect sync writes; § 5.4 retitled "restart-restore" (no "post-cutover" qualifier).
   - **§ 6.7 drift table** updated for v3 schema (legacy fields gone from sealed).
   - **§ 15 phase plan collapsed**: original Phases 1+2+3+6 → single Phase 1 ("pg is system of record from day 1"); Phase 4 → Phase 2; Phase 5 → Phase 3.
-  - **D-1, D-3, D-9, D-10** updated: D-3 documents Phase-1 pool-per-call (matches `crates/control/`); D-9/D-10 marked "[superseded by round-8 cut]" with a short historical note.
+  - **D-1, D-3, D-9, D-10** updated: D-3 documents Phase-1 pool-per-call (matches `crates/zeroship-control/`); D-9/D-10 marked "[superseded by round-8 cut]" with a short historical note.
   - **Q-1, Q-7** settled: Q-1 — Phase 1 hard-deletes via tombstone (soft-delete returns in Phase 3). Q-7 — boot-only, no interval.
 
 - **v8 (2026-05-04, round-7 consistency polish)** — small-scope polish, no scope expansion:

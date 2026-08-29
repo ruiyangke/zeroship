@@ -86,7 +86,7 @@ Done criteria:
 Why: the dual-shape design from spec §4.8.3.2 is half-shipped. "Your AI PM checks in daily" is the line that takes the multi-agent story from "fancy chat" to "your project has a team". The chat-mode SubAgents are already done; only the trigger is missing.
 
 Done criteria:
-- `crates/control/src/scheduler.rs` ticks every minute, reads `apps.scheduled_jobs`, POSTs to the builder's `/_zs/v1/pm.digest` and `/_zs/v1/sre.monitor` procs.
+- `crates/zeroship-control/src/scheduler.rs` ticks every minute, reads `apps.scheduled_jobs`, POSTs to the builder's `/_zs/v1/pm.digest` and `/_zs/v1/sre.monitor` procs.
 - `agent_digests` table stores results; chat thread has an out-of-band write path for `data-pm-recommendation` / `data-sre-finding`.
 - "Run digest now" button on PlanCanvas; "Scan health now" on HealthCanvas — both bypass the cron for ad-hoc use.
 - Per-project opt-out + cadence editor in SettingsCanvas.

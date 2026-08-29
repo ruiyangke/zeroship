@@ -3,7 +3,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-webc
 # Native W3C Web Cryptography API design
 
 **Date:** 2026-05-02
-**Status:** **Shipped** — `crates/runtime/src/web/crypto/` (~8,200 LOC: aes, ec, rsa, okp, hmac, digest, derive, jwk, subtle, …). Document retained as the canonical design spec; ~19 active code-comment back-references anchor design rationale to D-N decisions in this file.
+**Status:** **Shipped** — `crates/zeroship-runtime/src/web/crypto/` (~8,200 LOC: aes, ec, rsa, okp, hmac, digest, derive, jwk, subtle, …). Document retained as the canonical design spec; ~19 active code-comment back-references anchor design rationale to D-N decisions in this file.
 **Spec:** W3C Web Cryptography API Level 2 (Living Standard) — https://w3c.github.io/webcrypto/
 **Spec source:** https://github.com/w3c/webcrypto/blob/main/spec/Overview.html
 **Algorithm registry:** https://w3c.github.io/webcrypto/#algorithm-registry
@@ -24,7 +24,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-webc
 - RFC 4648 — base64 / base64url
 - RFC 4122 — UUID v4 (already implemented in `randomUUID`)
 **WebIDL:** https://webidl.spec.whatwg.org/ (BufferSource, [EnforceRange], dictionaries, USVString, DOMException)
-**aws-lc-rs:** https://docs.rs/aws-lc-rs/ (workspace dep, see `crates/runtime/Cargo.toml:16`)
+**aws-lc-rs:** https://docs.rs/aws-lc-rs/ (workspace dep, see `crates/zeroship-runtime/Cargo.toml:16`)
 **Tests:** WPT `WebCryptoAPI/` — https://github.com/web-platform-tests/wpt/tree/master/WebCryptoAPI
 
 **Depends on:**
@@ -37,11 +37,11 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-webc
 - AI-builder reliability: every JOSE / JWE / JWT library (`jose` on npm, `panva/jose`, `node-jose`) leans on `subtle.importKey("jwk", ...)` / `subtle.exportKey("jwk", ...)` for key bootstrapping. The polyfill rejects JWK wholesale; ~90% of npm-published JWE/JWT packages don't work today on zeroship.
 - Stripe Connect / OAuth 2.0 / OIDC: every JWT-issuing identity flow uses RS256 / ES256 / EdDSA which require `verify` to interop with Chrome/Firefox-issued signatures. The current ECDSA wire format is ASN.1/DER (workerd-incompat, Chrome-incompat); fixing this is the single most-impactful WPT change in this design.
 - WPT regression for `WebCryptoAPI/`: currently we run **zero** of those files because the polyfill is too far from spec to be worth harness work.
-- Deletion of `crates/runtime/src/embed/crypto.js` (313 LOC) and replacement of `crates/runtime/src/web/crypto/sync_helpers.rs` (1308 LOC) with a `crates/runtime/src/crypto/` module of native `#[v8_class]` types backed by aws-lc-rs.
+- Deletion of `crates/zeroship-runtime/src/embed/crypto.js` (313 LOC) and replacement of `crates/zeroship-runtime/src/web/crypto/sync_helpers.rs` (1308 LOC) with a `crates/zeroship-runtime/src/crypto/` module of native `#[v8_class]` types backed by aws-lc-rs.
 
 ## Revision history
 
-- **v1 (2026-05-02)** — Initial design, critic-driven from `/tmp/zeroship-reviews/crypto-review.md` (45 findings, overall 38/100). Replaces the JS polyfill at `crates/runtime/src/embed/crypto.js` (313 LOC) and the Rust ops shim at `crates/runtime/src/web/crypto/sync_helpers.rs` (1308 LOC) — total 1621 LOC removed. The native design ships ~3700 Rust LOC + ~150 JS LOC (a thin algorithm-registry index, deletable when v8_class macro grows compile-time registry support). Targets the entire spec surface in one tier — no v1/v2 algorithm split. Designed pure-native on V8 + Rust + aws-lc-rs.
+- **v1 (2026-05-02)** — Initial design, critic-driven from `/tmp/zeroship-reviews/crypto-review.md` (45 findings, overall 38/100). Replaces the JS polyfill at `crates/zeroship-runtime/src/embed/crypto.js` (313 LOC) and the Rust ops shim at `crates/zeroship-runtime/src/web/crypto/sync_helpers.rs` (1308 LOC) — total 1621 LOC removed. The native design ships ~3700 Rust LOC + ~150 JS LOC (a thin algorithm-registry index, deletable when v8_class macro grows compile-time registry support). Targets the entire spec surface in one tier — no v1/v2 algorithm split. Designed pure-native on V8 + Rust + aws-lc-rs.
 
   Decisions D-1 through D-30 cover: native classes for Crypto / SubtleCrypto / CryptoKey (D-1, D-2); aws-lc-rs as the single provider (D-3); spec-correct ECDSA wire format (D-4); JWK round-trip across all algorithms (D-5); typed DOMException variants (D-6); key-usage validation (D-7); spec-faithful algorithm normalization (D-8); CryptoKey `[SameObject]` caching (D-9); `[[handle]]`-as-internal-field brand check (D-10); AES-CTR/AES-KW completion (D-11, D-12); ECDH derive (D-13); P-521 (D-14); RSA key generation (D-15); RSA-PSS variable salt length (D-16); AES-GCM variable IV / variable tag (D-17, D-18); HMAC default block-size (D-19); PBKDF2 [EnforceRange] (D-20); spec-correct getRandomValues type filter and quota (D-21); SecureContext as no-op (D-22); the JS-shim phase-out cadence (D-23); spec algorithm naming in Rust (D-24); the JOSE/JWE deferral (D-25); X25519/Ed25519 inclusion (D-26); FIPS / hardware key as out-forever (D-27); structuredClone deferral (D-28); thread-pool offload deferral (D-29); the macro extension list (D-30).
 
@@ -50,7 +50,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-webc
 ### Goals
 
 1. **Full WebCrypto Level 2 compliance.** Every interface in https://w3c.github.io/webcrypto/ at parity with the spec — no "v1 subset" or "Tier 1 only" cut. The algorithm registry (§18 / per-algorithm sections 20-34) ships in its entirety, including JWK across every algorithm. Pass the entire WPT `WebCryptoAPI/` suite minus the explicitly deferred items in Non-Goals.
-2. **Replace `embed/crypto.js` + the Rust ops shim.** Delete the 313-LOC JS shim and the 1308-LOC `crypto.rs` ops file; replace with a `crates/runtime/src/crypto/` module of `#[v8_class]` types. The runtime ships one WebCrypto implementation, in Rust, with per-isolate native classes installed during `setup_globals`.
+2. **Replace `embed/crypto.js` + the Rust ops shim.** Delete the 313-LOC JS shim and the 1308-LOC `crypto.rs` ops file; replace with a `crates/zeroship-runtime/src/crypto/` module of `#[v8_class]` types. The runtime ships one WebCrypto implementation, in Rust, with per-isolate native classes installed during `setup_globals`.
 3. **Spec-correct cryptographic wire formats.** Every byte the implementation emits or accepts conforms to the spec's normative algorithm steps. The most acute fix: ECDSA produces and verifies fixed-length r∥s signatures, NOT ASN.1/DER (critic finding #1; today's impl is unusable cross-stack against Chrome / Firefox / Node WebCrypto). Other wire-format fixes: AES-GCM variable-length IV (#8), AES-GCM variable-length tag truncation (#9), RSA-PSS variable salt length (#21), AES-KW per RFC 3394 (#4).
 4. **Spec-correct error types.** Every DOMException type the spec mandates flows from Rust to JS as a real `DOMException` instance with the `name` property the spec demands. Today's impl conflates everything to `TypeError` / generic `Error` (critic finding #6); 14 of the 45 critic findings reduce to "wrong error type." Native `DOMException` is in flight via `feature/fetch-js-delete`; this design depends on it landing.
 5. **Spec-correct `CryptoKey` semantics.** `type` and `extractable` are immutable own properties; `algorithm` and `usages` return the same JS object on every access (`[SameObject]`); the brand check is unspoofable (V8 internal field, not `instanceof`); `Symbol.toStringTag` is `"CryptoKey"`. (Critic findings #13, #14, #42.)
@@ -70,7 +70,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-webc
 - **SHA-3 (`SHA3-256`, `SHA3-384`, `SHA3-512`).** Not in WebCrypto Level 2 normative algorithms. Deno ships them as an extension. Out of v1.
 - **`crypto.subtle.getPublicKey()`.** Tentative addition (`getPublicKey.tentative.https.any.js` in WPT). Defer to v2; trivial follow-up (extract public key from a private key handle).
 - **Wider browser-only attributes (`SecureContext` enforcement, the global-only Crypto installation).** D-22 makes `[SecureContext]` a no-op (server-side runtime, no insecure context concept). Tracked under "open questions" but the design's answer is settled: no-op. Crypto IS installed unconditionally on the global. Document.
-- **The synchronous `node:crypto` polyfill helpers (`__cryptoHashSync`, `__cryptoHmacSync`).** These currently live at `crypto.rs:1227-1308`. They're consumed by `embed/node-globals.js`'s `node:crypto` shim, NOT by WebCrypto. They stay (this design touches `embed/crypto.js` and replaces the WebCrypto ops, not the node-shim helpers). v2 may move them into a `crates/runtime/src/node_crypto.rs` companion file for clarity.
+- **The synchronous `node:crypto` polyfill helpers (`__cryptoHashSync`, `__cryptoHmacSync`).** These currently live at `crypto.rs:1227-1308`. They're consumed by `embed/node-globals.js`'s `node:crypto` shim, NOT by WebCrypto. They stay (this design touches `embed/crypto.js` and replaces the WebCrypto ops, not the node-shim helpers). v2 may move them into a `crates/zeroship-runtime/src/node_crypto.rs` companion file for clarity.
 
 ### Status
 
@@ -84,7 +84,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/`. The Decisi
 |---|----------|-----------|---------|
 | **D-1** | Pure native: `Crypto` (the global), `SubtleCrypto`, `CryptoKey` are `#[v8_class]` Rust types installed on every realm during `setup_globals`. No JS polyfill fallback once shipped. The current `embed/crypto.js` shim is deleted in landing 3 (D-23). | Single source of truth; eliminates the JSON-stringify per-call overhead the polyfill carries (#39); brings brand checks under a V8 internal field (D-10). | §I |
 | **D-2** | Internal-slot storage: `CryptoKey` carries a `Box<CryptoKeyState>` in V8 internal field 0; `[SameObject]` cached results for `algorithm` and `usages` getters live in V8 private symbols on the JS wrapper (`__cachedAlgorithm`, `__cachedUsages`). The `[[type]]` and `[[extractable]]` slots are stored in the box and exposed via getter-only properties (no mutation path); `[[algorithm]]` and `[[usages]]` parameters are stored in the box too, but the getter returns the cached frozen V8 object. | Spec §13 mandates readonly attributes plus `[SameObject]` semantics: same JS object identity on every access. The cache-on-first-access pattern matches workerd's `JSG_LAZY_READONLY_INSTANCE_PROPERTY`. | §V |
-| **D-3** | Single underlying provider: **aws-lc-rs** for every Tier 1 algorithm. No openssl-sys fallback, no ring fallback, no boringssl-direct. Where an algorithm is not directly exposed by aws-lc-rs's high-level API (variable-tag-length AES-GCM truncation, variable-salt-length RSA-PSS, RFC 3394 AES-KW), the implementation drops to aws-lc-rs's lower-level FFI surface (`aws_lc_sys::*` re-exports) — see §IV per-algorithm cells for which arms use which API. | aws-lc-rs is already a workspace dep (`crates/runtime/Cargo.toml:16`); it's FIPS-validated at the underlying AWS-LC level (relevant for some creator apps); it's the same crate `rustls = { features = ["aws-lc-rs"] }` already pulls in. Avoiding a second crypto crate keeps the runtime's wasm-blessing surface manageable and avoids two-provider divergence. | §IV |
+| **D-3** | Single underlying provider: **aws-lc-rs** for every Tier 1 algorithm. No openssl-sys fallback, no ring fallback, no boringssl-direct. Where an algorithm is not directly exposed by aws-lc-rs's high-level API (variable-tag-length AES-GCM truncation, variable-salt-length RSA-PSS, RFC 3394 AES-KW), the implementation drops to aws-lc-rs's lower-level FFI surface (`aws_lc_sys::*` re-exports) — see §IV per-algorithm cells for which arms use which API. | aws-lc-rs is already a workspace dep (`crates/zeroship-runtime/Cargo.toml:16`); it's FIPS-validated at the underlying AWS-LC level (relevant for some creator apps); it's the same crate `rustls = { features = ["aws-lc-rs"] }` already pulls in. Avoiding a second crypto crate keeps the runtime's wasm-blessing surface manageable and avoids two-provider divergence. | §IV |
 | **D-4** | ECDSA wire format: spec-mandated **fixed-length r∥s** (per §23.7). Implementation uses `ECDSA_P256_SHA256_FIXED_SIGNING` / `_FIXED` (verify) and the matching P-384 / P-521 constants. The current impl uses `_ASN1_SIGNING` / `_ASN1` which produces ASN.1/DER signatures — wire-incompatible with Chrome / Firefox / Node WebCrypto / workerd / every other conformant impl. (Critic #1, the single most-impactful correctness fix.) | Spec §23.7.1 step "Convert r to a byte sequence of length n, where n is the byte length in octets of the order of the curve identified by the namedCurve attribute". Verify is symmetric: §23.7.2 splits the bytes 50/50. aws-lc-rs exposes the FIXED constants natively. | §IV.5 |
 | **D-5** | JWK is normative and in scope for v1. Every algorithm (HMAC, AES-*, RSA-*, ECDSA, ECDH, Ed25519, X25519) implements `importKey("jwk", ...)` and `exportKey("jwk", ...)`. JWK parsing happens at the WebIDL boundary in Rust: a `JsonWebKey` struct with optional fields, parsed via a hand-rolled walker over the `v8::Local<v8::Object>` (NOT serde_json — preserves V8 string fidelity and avoids a JSON parse-emit round trip). Per-algorithm JWK validators check the spec-mandated `kty`/`crv`/`alg`/`use`/`key_ops`/`ext` fields against the import params. | Critic #5 — JWK is THE largest single missing feature (~1 KLOC across seven algorithm families). Rejecting JWK kills every JOSE/JWE/JWT workflow on the platform. workerd's `jwk.c++` (`refs/workerd/src/workerd/api/crypto/jwk.c++`, 303 LOC) is the model. | §VI |
 | **D-6** | Error types: every spec-mandated DOMException flows from Rust to JS as a real `DOMException` instance via a new `OpErrorKind::DomException(name: &'static str)` variant. The macro's `gen_throw_error` (`runtime-macros/src/lib.rs:629-639`) gains a fourth match arm that constructs a `v8::Object` instance of the global `DOMException` class and sets its name property. *(Depends on:* native `DOMException` from `feature/fetch-js-delete`. *Fallback:* if that slips, a string-sentinel scheme — `OpErrorKind::Error` + `message: "DOMException(OperationError): <real msg>"` parsed in a tiny JS post-processor — unblocks shipping; replace with the real path mechanically once DOMException lands. We commit to the real path; the sentinel exists only as a build-system insurance.) | Critic #6 (14 spec-violation findings reduce to wrong error type). WPT `WebCryptoAPI/` makes heavy use of `assert_throws_dom("OperationError", ...)` style assertions; without typed DOMExceptions, ~30% of WPT subtests fail mechanically. | §III |
@@ -105,7 +105,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/`. The Decisi
 | **D-21** | `getRandomValues` type filter: per spec §10.1.1 step 1, the argument MUST be one of `Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | BigInt64Array | BigUint64Array` — explicitly NOT `Float32Array` / `Float64Array` / `DataView`. Current impl accepts the float types and DataView, passes the bytes through (critic #25 — security concern). Implementation: V8's `Local::is_float32_array()` / `is_float64_array()` / `is_data_view()` for the filter; throw `TypeMismatchError` (DOMException) on rejection. The 65 KB quota throws `QuotaExceededError` (DOMException), not generic `Error` (critic #26). | Critic #25 / #26 + spec §10.1.1. WPT `getRandomValues.any.js` checks both. Float-typed array NaN normalization could erase entropy — known-bad pattern. | §II.4 |
 | **D-22** | `[SecureContext]` is a no-op. The spec gates `crypto.subtle` and `crypto.randomUUID` behind `[SecureContext]` so browsers can hide them on `http://` pages. The runtime is server-side; there is no insecure context concept. Crypto installs unconditionally; document explicitly. Matches workerd. | Spec §10.1 / §13. The runtime IS effectively secure-context-only (server-side TLS termination at the gateway). Critic #38. | §II.1 |
 | **D-23** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_crypto` (env var `ZEROSHIP_NATIVE_CRYPTO=1`), polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill entirely. Same pattern as streams-native D-19 / fetch-native D-23 / headers-native polyfill removal. | Risk control. Three separate PRs over (industry estimate) 3 weeks; (agent-pace) ~3-4 hours of focused work. | §XII |
-| **D-24** | Spec algorithm naming in Rust: every named spec algorithm (`normalize an algorithm`, `Sign` / `Verify` / `Encrypt` / `Decrypt`, per-algorithm `Generate Key` / `Import Key` / `Export Key`) gets a Rust function with the same name in `snake_case`. Lives in `crates/runtime/src/crypto/algorithms.rs` for cross-algorithm operations and in the per-algorithm file for class-local ops. Same rule as streams-native D-20 / fetch-native D-20. | Reduces cognitive load when cross-referencing the spec. Critic #21 / #22 etc. all stem from drifted naming masking the spec gap. | §IV–§VII |
+| **D-24** | Spec algorithm naming in Rust: every named spec algorithm (`normalize an algorithm`, `Sign` / `Verify` / `Encrypt` / `Decrypt`, per-algorithm `Generate Key` / `Import Key` / `Export Key`) gets a Rust function with the same name in `snake_case`. Lives in `crates/zeroship-runtime/src/crypto/algorithms.rs` for cross-algorithm operations and in the per-algorithm file for class-local ops. Same rule as streams-native D-20 / fetch-native D-20. | Reduces cognitive load when cross-referencing the spec. Critic #21 / #22 etc. all stem from drifted naming masking the spec gap. | §IV–§VII |
 | **D-25** | JOSE / JWE / JWT extensions: out of this design's scope. WebCrypto provides the primitives; a future `@zeroship/jose` npm package wraps them. No `subtle.encryptJWE` etc. native ops. (Spec contains no such ops; they exist as extensions in some libraries.) | Native primitives are forever; library-shaped APIs belong in npm. AGENTS.md "When to add a native primitive vs npm package" decision tree. | (Non-Goals) |
 | **D-26** | X25519 / Ed25519: in scope for v1. Both are spec-normative (§25 Ed25519, §26 X25519). aws-lc-rs has Ed25519 (`signature::Ed25519KeyPair`, `signature::ED25519`); X25519 via `agreement::X25519`. Already partially implemented for Ed25519; this design completes the surface and adds X25519. | Spec §25 / §26. Modern JOSE workflows use EdDSA (Ed25519) signatures and ECDH-ES X25519 key agreement. | §IV.6 |
 | **D-27** | Hardware key support: out forever. The CryptoKey internal slot stores in-memory bytes; an HSM-backed key would need `enum KeyMaterial { Local(Vec<u8>), Hsm(HsmHandle) }`. Creator apps that need HSM-backed keys make HTTP calls to the HSM provider. | Embedded V8 runtime; no FFI to PKCS#11. Critic note (#37 next_key_id). | (Non-Goals) |
@@ -119,7 +119,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/`. The Decisi
 
 The native WebCrypto implementation is split into two layers:
 
-1. **Public IDL surface** — V8 classes installed on the global object: `Crypto` (the constructor for `globalThis.crypto`), `SubtleCrypto`, `CryptoKey`. Each class carries an internal-field 0 holding `Box<{Class}State>` per the existing `#[v8_class]` pattern (see `crates/runtime/src/web/headers.rs` for the canonical example, `crates/runtime/src/web/dom/abort_signal.rs` for the inheritance-shaped example).
+1. **Public IDL surface** — V8 classes installed on the global object: `Crypto` (the constructor for `globalThis.crypto`), `SubtleCrypto`, `CryptoKey`. Each class carries an internal-field 0 holding `Box<{Class}State>` per the existing `#[v8_class]` pattern (see `crates/zeroship-runtime/src/web/headers.rs` for the canonical example, `crates/zeroship-runtime/src/web/dom/abort_signal.rs` for the inheritance-shaped example).
 
 2. **Internal crypto engine** — a Rust-side cryptographic implementation that runs the spec algorithms (`normalize an algorithm`, per-algorithm `Sign` / `Verify` / `Encrypt` / `Decrypt` / `Generate Key` / `Import Key` / `Export Key` / `Derive Bits` / `Wrap Key` / `Unwrap Key`) over aws-lc-rs primitives. The engine never calls into JS during the cryptographic phase; it operates entirely on Rust-side state and resolves a `v8::PromiseResolver` (D-29: synchronously in v1) once the operation completes.
 
@@ -136,7 +136,7 @@ The implication for AI-builder workflows: a creator app that wants to digest a l
 ### I.3. File layout
 
 ```
-crates/runtime/src/crypto/
+crates/zeroship-runtime/src/crypto/
 ├── mod.rs                       (new) module root, public exports
 ├── crypto_class.rs              (new) Crypto (the global) class + getRandomValues + randomUUID
 ├── subtle_class.rs              (new) SubtleCrypto class — every op method
@@ -160,23 +160,23 @@ crates/runtime/src/crypto/
 │                                      (§VI.4 — replaces "trust user-supplied namedCurve")
 └── enforce_range.rs             (new) EnforceRangeU32 newtype (companion to EnforceRangeU64)
 
-crates/runtime/src/lib.rs        (modified) +pub mod crypto;
-crates/runtime/src/core/init.rs       (modified) install Crypto / SubtleCrypto / CryptoKey
+crates/zeroship-runtime/src/lib.rs        (modified) +pub mod crypto;
+crates/zeroship-runtime/src/core/init.rs       (modified) install Crypto / SubtleCrypto / CryptoKey
                                             classes per-realm (replaces current
                                             ad-hoc op installs at lines 1408-1474)
-crates/runtime/src/core/state.rs      (modified) DELETE key_store + next_key_id fields
+crates/zeroship-runtime/src/core/state.rs      (modified) DELETE key_store + next_key_id fields
                                             (D-2 makes them obsolete — keys live on
                                             JS wrappers via internal field)
                                             ADD OpErrorKind::DomException variant
                                             (D-30 macro extension #2)
 
-crates/runtime/src/embed/crypto.js
+crates/zeroship-runtime/src/embed/crypto.js
                                   (deleted in D-23 step 3)
 
-crates/runtime-macros/src/v8_class.rs  (modified) §VIII
-crates/runtime-macros/src/lib.rs       (modified) §VIII
+crates/zeroship-runtime-macros/src/v8_class.rs  (modified) §VIII
+crates/zeroship-runtime-macros/src/lib.rs       (modified) §VIII
 
-crates/runtime/tests/
+crates/zeroship-runtime/tests/
 ├── crypto_native.rs              (new) hand-written smoke + corner tests
 ├── crypto_jwk.rs                 (new) JWK round-trip per algorithm
 ├── crypto_errors.rs              (new) DOMException name assertions
@@ -1318,7 +1318,7 @@ For every algorithm + format combination, `import("jwk", export("jwk", k)) === k
 ### VII.1. Compile-time registry
 
 ```rust
-// crates/runtime/src/crypto/registry.rs
+// crates/zeroship-runtime/src/crypto/registry.rs
 
 pub enum ParamShape {
     /// Algorithm name only — no params dictionary.
@@ -1461,7 +1461,7 @@ Four small additions to `runtime-macros`:
 Companion to the existing `EnforceRangeU64` (`runtime-macros/src/lib.rs:231-233`, `enforce_range.rs`). Used by `Pbkdf2Params.iterations`, `deriveBits.length`, `RsaKeyGenParams.modulusLength`, `AesGcmParams.tagLength` (after octet truncation), and the AesCtrParams.length.
 
 ```rust
-// crates/runtime/src/crypto/enforce_range.rs (new file or adjacent to existing
+// crates/zeroship-runtime/src/crypto/enforce_range.rs (new file or adjacent to existing
 // enforce_range.rs)
 pub struct EnforceRangeU32(pub u32);
 
@@ -1492,7 +1492,7 @@ Macro extension: `is_enforce_range_u32(ty)` predicate (mirrors `is_enforce_range
 ### VIII.2. `OpErrorKind::DomException(name)` variant
 
 ```rust
-// crates/runtime/src/core/state.rs
+// crates/zeroship-runtime/src/core/state.rs
 pub enum OpErrorKind {
     TypeError,
     RangeError,
@@ -1568,7 +1568,7 @@ Updated D-30 list (final):
 4. ~~Recursive WebIDL dictionary parsing — handled in normalize_an_algorithm helper, NOT a macro feature~~
 5. `[SameObject]` cache — explicit getter helper pattern, NOT a macro feature
 
-**Final macro extension cost:** ~50 LOC across `runtime-macros/src/lib.rs` and `crates/runtime/src/core/state.rs`. The other "extensions" listed in D-30 above are not macro changes — they're library-level patterns the design uses (cache via private symbol, normalize via library function, etc.).
+**Final macro extension cost:** ~50 LOC across `runtime-macros/src/lib.rs` and `crates/zeroship-runtime/src/core/state.rs`. The other "extensions" listed in D-30 above are not macro changes — they're library-level patterns the design uses (cache via private symbol, normalize via library function, etc.).
 
 ## IX. Async / threading model (D-29)
 
@@ -1610,7 +1610,7 @@ v2 is deferred to a follow-up ADR; v1 ships sync. Critic #12 acknowledged this; 
 
 ### X.1. Hand-written tests
 
-Lives in `crates/runtime/tests/`. Mirrors WPT but exercises corners the WPT suite doesn't:
+Lives in `crates/zeroship-runtime/tests/`. Mirrors WPT but exercises corners the WPT suite doesn't:
 
 - `crypto_native.rs`:
   - Smoke: each algorithm round-trip (generateKey → sign → verify; generateKey → encrypt → decrypt; deriveBits length validation).
@@ -1770,9 +1770,9 @@ WPT `WebCryptoAPI/` directory tree (per https://github.com/web-platform-tests/wp
 
 ### X.3. WPT runner
 
-Pattern from streams-native + fetch-native: `crates/runtime/tests/wpt_webcrypto.rs` boots a runtime, vendors WPT `WebCryptoAPI/` tests via the cargo-included `wpt/` directory, runs each via the existing `testharness.js` polyfill (already shipped for streams + fetch). Tracking via `tests/wpt-webcrypto.expectations` (analogous to streams-native's expected WPT result file).
+Pattern from streams-native + fetch-native: `crates/zeroship-runtime/tests/wpt_webcrypto.rs` boots a runtime, vendors WPT `WebCryptoAPI/` tests via the cargo-included `wpt/` directory, runs each via the existing `testharness.js` polyfill (already shipped for streams + fetch). Tracking via `tests/wpt-webcrypto.expectations` (analogous to streams-native's expected WPT result file).
 
-Update `crates/runtime/tests/setup-wpt.sh`: add `/WebCryptoAPI/` to the sparse-checkout list. Adds ~3-4 MB to the working tree.
+Update `crates/zeroship-runtime/tests/setup-wpt.sh`: add `/WebCryptoAPI/` to the sparse-checkout list. Adds ~3-4 MB to the working tree.
 
 ## XI. Comparison with reference implementations
 
@@ -1801,7 +1801,7 @@ Three landings, mirroring streams-native D-19 / fetch-native D-23:
 
 Realised as the env-var gate `ZEROSHIP_NATIVE_CRYPTO=1` (matches `ZEROSHIP_NATIVE_STREAMS` / `ZEROSHIP_NATIVE_FETCH` / `ZEROSHIP_NATIVE_HEADERS`):
 
-- `crates/runtime/src/crypto/` module fully implemented.
+- `crates/zeroship-runtime/src/crypto/` module fully implemented.
 - `init.rs` install ordering: when `ZEROSHIP_NATIVE_CRYPTO` is set, install `Crypto` / `SubtleCrypto` / `CryptoKey` classes and skip the JS polyfill load; when unset, the polyfill (`embed/crypto.js`) loads as default.
 - WPT runners (`wpt_webcrypto.rs`) set the env var inside their harness.
 - Smoke tests at `tests/crypto_native_install.rs` confirm `globalThis.crypto.subtle` is the native callback under the flag.
@@ -1827,7 +1827,7 @@ This is the same cadence as streams-native / fetch-native. Done in three separat
 ### XIII.1. Order
 
 1. **Macro extensions** (~50 LOC): `EnforceRangeU32` newtype + extraction (`runtime-macros/src/lib.rs`). `OpErrorKind::DomException` variant + `gen_throw_error` arm (`state.rs` + `runtime-macros/src/lib.rs`).
-2. **Crypto + SubtleCrypto + CryptoKey class skeletons** in `crates/runtime/src/crypto/`. Box layout (BrandedBox, CryptoKeyState, KeyAlgorithm enum, KeyMaterial enum, KeyType / KeyUsage / NamedCurve / HashAlgo enums).
+2. **Crypto + SubtleCrypto + CryptoKey class skeletons** in `crates/zeroship-runtime/src/crypto/`. Box layout (BrandedBox, CryptoKeyState, KeyAlgorithm enum, KeyMaterial enum, KeyType / KeyUsage / NamedCurve / HashAlgo enums).
 3. **getRandomValues + randomUUID** native (currently Rust ops; just rewire as Crypto methods + apply D-21 type filter + D-21 quota DOMException).
 4. **digest** (simplest — no key). Migration of existing `crypto_digest` to a SubtleCrypto method.
 5. **Algorithm registry** (`crypto/registry.rs`, ~250 LOC of phf table + per-shape parsers).
@@ -2060,7 +2060,7 @@ Tier 1 = WebCrypto Level 2 normative algorithms in scope for v1.
 - RFC 4648 — base64 / base64url — https://www.rfc-editor.org/rfc/rfc4648
 - RFC 4122 — UUID v4 — https://www.rfc-editor.org/rfc/rfc4122
 - RFC 8439 — ChaCha20-Poly1305 (deferred) — https://www.rfc-editor.org/rfc/rfc8439
-- aws-lc-rs — https://docs.rs/aws-lc-rs/ (workspace dep, `crates/runtime/Cargo.toml:16`)
+- aws-lc-rs — https://docs.rs/aws-lc-rs/ (workspace dep, `crates/zeroship-runtime/Cargo.toml:16`)
 - aws-lc — https://github.com/aws/aws-lc (underlying C library)
 - Reference impls (vendored at `refs/`):
   - workerd: `refs/workerd/src/workerd/api/crypto/{aes,ec,rsa,jwk,impl,keys,digest,hkdf,pbkdf2,...}.{c++,h}`
@@ -2070,10 +2070,10 @@ Tier 1 = WebCrypto Level 2 normative algorithms in scope for v1.
   - `docs/proposals/fetch-native.md`
   - `docs/proposals/headers-native.md`
 - Project AGENTS.md — `/home/ruiyang/Projects/appbase/AGENTS.md`
-- Existing polyfill: `crates/runtime/src/embed/crypto.js` (313 LOC)
-- Existing ops shim: `crates/runtime/src/web/crypto/sync_helpers.rs` (1308 LOC)
+- Existing polyfill: `crates/zeroship-runtime/src/embed/crypto.js` (313 LOC)
+- Existing ops shim: `crates/zeroship-runtime/src/web/crypto/sync_helpers.rs` (1308 LOC)
 - Critic review: `/tmp/zeroship-reviews/crypto-review.md` (45 findings, overall 38/100)
-- Macro internals: `crates/runtime-macros/src/v8_class.rs`, `crates/runtime-macros/src/lib.rs`
+- Macro internals: `crates/zeroship-runtime-macros/src/v8_class.rs`, `crates/zeroship-runtime-macros/src/lib.rs`
 
 ---
 

@@ -49,7 +49,7 @@ mint an aud=control token. **LOCKED DECISIONS:** (1) SSE-over-fetch sufficient �
 blocker; (2) SHARED worker pool, NO dedicated trusted tier — safety rests on no-ambient-authority (control_key never JS,
 identity re-derived server-side); platform-privileged flag only permits declaring reserved scopes; (3) console on enterprise
 plan (no CPU/wall cap); (4) internal services reached via allowlisted PUBLIC hostnames, no SSRF carve-out. BLOCKER to clear (Phase 2):
-multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin into `crates/worker/src/cache.rs create_plugins()`
+multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin into `crates/zeroship-worker/src/cache.rs create_plugins()`
 (the console imports @zeroship/kv).
 
 ### Console build progress (R4→kernel→R5)

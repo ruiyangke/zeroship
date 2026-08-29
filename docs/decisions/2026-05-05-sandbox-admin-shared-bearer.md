@@ -19,7 +19,7 @@ Ship Phase 3 with the shared-bearer + `admin_id = "operator"` shape. Defer per-o
 ## Consequences
 
 **Pros**
-- Phase 3 is unblocked. The JWT verifier lives in `crates/control/`; coupling the sandbox crate to it before that contract is finalized is premature, and the rest of Phase 3 (read endpoints, exports, GDPR cascade SQL, role split) is independently shippable.
+- Phase 3 is unblocked. The JWT verifier lives in `crates/zeroship-control/`; coupling the sandbox crate to it before that contract is finalized is premature, and the rest of Phase 3 (read endpoints, exports, GDPR cascade SQL, role split) is independently shippable.
 - The bearer-from-file shape mirrors `SANDBOX_TOKEN`'s wire format. Operators already understand it.
 - Nothing in the Phase-3 wire format blocks the JWT shape. Every handler still takes `&HttpRequest`; the auth path can evolve from "match bearer" to "verify JWT + check scope" without touching SQL or response shapes.
 

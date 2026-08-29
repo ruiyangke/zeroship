@@ -13,7 +13,7 @@
 - 15+: publication-row filters (C1 — optional optimisation; falls back to per-table publication for 14)
 - 16+: `synchronized_standby_slots` for failover (HA section)
 The CI test matrix pins **16 (LTS), 17 (current stable)**. Postgres 18 testing is opportunistic until stable release.
-**Reference review:** the gap analysis at the top of this doc came out of reading the current source — `sdks/db/src/{db,types,schema,validate,collection,query,model}.ts` and `crates/plugin-db/src/{query,callbacks}.rs` — and verifying Convex claims against [docs.convex.dev](https://docs.convex.dev/) via context7.
+**Reference review:** the gap analysis at the top of this doc came out of reading the current source — `sdks/db/src/{db,types,schema,validate,collection,query,model}.ts` and `crates/zeroship-plugin-db/src/{query,callbacks}.rs` — and verifying Convex claims against [docs.convex.dev](https://docs.convex.dev/) via context7.
 
 <!-- Round 1 revision: addressed factual errors in Convex citations, added INVALID-index recovery, reversed ON DELETE default, downgraded reactive-query mechanism to WAL-based, addressed typed_id invariant, expanded operational surface. -->
 
@@ -25,7 +25,7 @@ The CI test matrix pins **16 (LTS), 17 (current stable)**. Postgres 18 testing i
 
 But a code-level review surfaced **three classes of silent gaps** that ship to production today:
 
-1. **Schema markers that don't materialize.** `t.string().index()` sets `FieldDef.index = true` in the SDK but `crates/plugin-db/src/query.rs` has no `CREATE INDEX` codepath. Every AI-generated app that thinks it has an indexed email column actually doesn't. `.unique()` may set a column-level constraint but never a unique index. Silent correctness bug across every shipped app.
+1. **Schema markers that don't materialize.** `t.string().index()` sets `FieldDef.index = true` in the SDK but `crates/zeroship-plugin-db/src/query.rs` has no `CREATE INDEX` codepath. Every AI-generated app that thinks it has an indexed email column actually doesn't. `.unique()` may set a column-level constraint but never a unique index. Silent correctness bug across every shipped app.
 2. **No deploy-time data validation.** `registerModel` does additive DDL (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN IF NOT EXISTS`) but never checks existing rows against the new schema. Type changes, new required fields, and new unique constraints can leave invalid data behind that surfaces as runtime errors much later.
 3. **No migration log (ISS-24).** Schema changes happen invisibly. DataCanvas's Migrations tab is a stub.
 
@@ -74,8 +74,8 @@ Field-level `.unique()` and `.index()` produce single-column indexes named by co
 
 **Implementation.**
 
-- `crates/plugin-db/src/query.rs` — new `build_create_indexes(app_id, collection, schema)` returning a `Vec<String>` of `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...` statements
-- `crates/plugin-db/src/callbacks.rs::exec_register_model` runs these after the `CREATE TABLE` / `ALTER TABLE ADD COLUMN` cascade <!-- superseded; `callbacks.rs` was deleted in Stage 8b — see `crates/plugin-db/src/register_model/{bootstrap,plan,validate,apply}.rs` for the shipped four-phase pipeline. -->
+- `crates/zeroship-plugin-db/src/query.rs` — new `build_create_indexes(app_id, collection, schema)` returning a `Vec<String>` of `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...` statements
+- `crates/zeroship-plugin-db/src/callbacks.rs::exec_register_model` runs these after the `CREATE TABLE` / `ALTER TABLE ADD COLUMN` cascade <!-- superseded; `callbacks.rs` was deleted in Stage 8b — see `crates/zeroship-plugin-db/src/register_model/{bootstrap,plan,validate,apply}.rs` for the shipped four-phase pipeline. -->
 - `CONCURRENTLY` is critical — never block writes on index creation; tradeoff is can't run inside a transaction, so this is a separate phase after DDL
 - Index naming via a deterministic helper so re-runs are idempotent
 - Identifier length: Postgres truncates names beyond 63 bytes. Naming helper produces `<table>_<col>_idx`; if the result exceeds 60 bytes, the suffix is replaced by an 8-char base32 hash of the full name (Atlas's strategy in `migrate/sqltool`). Hash is deterministic so re-runs hit the same name.
@@ -193,9 +193,9 @@ CLI prints the failing PK samples (`zeroship deploy` exits non-zero with the hum
 
 **Implementation.**
 
-- New module `crates/plugin-db/src/diff.rs` — schema introspection (`pg_class` + `pg_attribute` + `pg_constraint` + `pg_index` + `pg_proc` for default-expr volatility) and diff classification
+- New module `crates/zeroship-plugin-db/src/diff.rs` — schema introspection (`pg_class` + `pg_attribute` + `pg_constraint` + `pg_index` + `pg_proc` for default-expr volatility) and diff classification
 - DDL ordering: the emitter topologically sorts `CREATE TABLE` statements by FK dependency (Kahn's algorithm); FK additions on existing tables are ordered after their target tables; cyclic FKs use `DEFERRABLE INITIALLY DEFERRED` to permit any insert order (B2).
-- `callbacks.rs::exec_register_model` becomes the orchestrator <!-- superseded; `callbacks.rs` was deleted in Stage 8b — see `crates/plugin-db/src/register_model/{bootstrap,plan,validate,apply}.rs` for the shipped four-phase pipeline. -->
+- `callbacks.rs::exec_register_model` becomes the orchestrator <!-- superseded; `callbacks.rs` was deleted in Stage 8b — see `crates/zeroship-plugin-db/src/register_model/{bootstrap,plan,validate,apply}.rs` for the shipped four-phase pipeline. -->
 - Returns a structured response: `{ applied: [...], pending_destructive: [...], pending_validation: [...], errors: [...] }`
 - SDK side: `createDb` awaits the response; if `errors.length > 0` AND strictness=`strict`, throws at module-init time so the app fails fast in dev. If `pending_destructive`, surfaces a deploy-pipeline gate.
 - Idempotency: every `registerModel` call carries a `deploy_id` (issued by the control plane). A duplicate call with the same `deploy_id` short-circuits to the cached result. Prevents two concurrent worker cold-starts racing the diff engine — the second waits on the first via the same two-key advisory lock used in the *Concurrent-deploy semantics* section below: `pg_advisory_xact_lock(hashtext('zs_reg:<app_id>')::int4, hashtext(<deploy_id>)::int4)`.
@@ -432,7 +432,7 @@ END $$;
 
 Loop runs `max(len(a), len(b))` iterations regardless of where bytes differ; OR-accumulator keeps execution time independent of content. The verify function uses `__zeroship_const_eq(p_signature, computed_hmac)` instead of `=`.
 
-**Cost note.** A plpgsql byte-loop is interpreter-bound — measurably slower than a C-level comparator. For a 32-byte HMAC the cost is bounded (~32 interpreter iterations + the surrounding function-call overhead). Connection-acquisition is the hot path (one verify per checkout, not per request), so the absolute latency is acceptable. If benchmark `crates/runtime/benches/db_connect_init.rs` shows this dominates, a follow-up adds a C extension `zeroship_crypto.const_eq` to the platform's pgcrypto-style extension footprint.
+**Cost note.** A plpgsql byte-loop is interpreter-bound — measurably slower than a C-level comparator. For a 32-byte HMAC the cost is bounded (~32 interpreter iterations + the surrounding function-call overhead). Connection-acquisition is the hot path (one verify per checkout, not per request), so the absolute latency is acceptable. If benchmark `crates/zeroship-runtime/benches/db_connect_init.rs` shows this dominates, a follow-up adds a C extension `zeroship_crypto.const_eq` to the platform's pgcrypto-style extension footprint.
 
 **Sign function (called by the control plane only, never by app code):**
 ```sql
@@ -487,7 +487,7 @@ GRANT EXECUTE ON FUNCTION __zeroship_log_dead_letter TO app_<id>_role;
 
 Compromise of the app role alone is insufficient to forge a session context — the attacker would also need the HMAC key (which lives outside the app's reach in `__zeroship_session_keys`).
 
-**Latency.** `__zeroship_init_session` adds one round-trip at connection acquire. For the worker, this is a fixed per-checkout cost — measured cost will be added to the benchmark in `crates/runtime/benches/db_connect_init.rs`. If the latency dominates, the worker can amortise via long-lived connections (per the AGENTS.md invariant that V8 is per-thread, the worker's PG connections are already long-lived; init runs once per connection lifetime, not per request).
+**Latency.** `__zeroship_init_session` adds one round-trip at connection acquire. For the worker, this is a fixed per-checkout cost — measured cost will be added to the benchmark in `crates/zeroship-runtime/benches/db_connect_init.rs`. If the latency dominates, the worker can amortise via long-lived connections (per the AGENTS.md invariant that V8 is per-thread, the worker's PG connections are already long-lived; init runs once per connection lifetime, not per request).
 
 **PgBouncer pool-checkout safety.** PgBouncer in `transaction` mode reuses Postgres connections across clients. The PID-keyed model handles this correctly: every checkout calls `__zeroship_init_session(...)` which uses `ON CONFLICT DO UPDATE` on `pid = pg_backend_pid()`. The prior tenant's row is replaced atomically with the new tenant's. Reads inside `__zeroship_log_migration` always see the most recent init for that PID — there is no leak across checkouts.
 
@@ -763,7 +763,7 @@ db.posts.get({ authorId: p.data!.id });  // ✗ p.data.id is Id<"posts">, not Id
 - Runtime: refs stored as `BIGINT`; brand is type-side only and is erased at JSON serialisation (Postgres returns plain numbers; the SDK re-brands at the boundary using the declared schema).
 - **`ON DELETE` default: `RESTRICT`** (was CASCADE in the draft — reversed per industry convention: Postgres, MySQL, SQLite, Prisma, Drizzle, SQLAlchemy all default to RESTRICT/NO ACTION). Silent cascading deletes cause catastrophic data loss; opt-in is the safer default. Override via `t.ref("users", { onDelete: "cascade" })`. Convex's own model is explicit cascade via triggers ([stack.convex.dev/triggers](https://stack.convex.dev/triggers)) — they have no implicit cascade.
 
-**Deferred-constraint cost.** All `t.ref` FKs are emitted `DEFERRABLE INITIALLY DEFERRED` so circular references can be inserted in any order within a transaction. Cost: Postgres queues the constraint check until `COMMIT`, adding a per-row entry to the deferred-trigger queue. We have **not yet measured** this overhead against zeroship's workload; the cost will be characterised by a micro-benchmark in `crates/runtime/benches/db_deferred_fk.rs` before P4 ships, and the result will be recorded in this section. If the measured overhead exceeds the team's threshold (open question #8), the default flips to `NOT DEFERRABLE` and topological insert ordering shifts to the SDK. Users can opt-out per ref with `t.ref("users", { deferrable: false })` for hot insert paths today.
+**Deferred-constraint cost.** All `t.ref` FKs are emitted `DEFERRABLE INITIALLY DEFERRED` so circular references can be inserted in any order within a transaction. Cost: Postgres queues the constraint check until `COMMIT`, adding a per-row entry to the deferred-trigger queue. We have **not yet measured** this overhead against zeroship's workload; the cost will be characterised by a micro-benchmark in `crates/zeroship-runtime/benches/db_deferred_fk.rs` before P4 ships, and the result will be recorded in this section. If the measured overhead exceeds the team's threshold (open question #8), the default flips to `NOT DEFERRABLE` and topological insert ordering shifts to the SDK. Users can opt-out per ref with `t.ref("users", { deferrable: false })` for hot insert paths today.
 
 **Multi-hop relation queries.** `t.ref` solves the *typing* of single-column foreign keys but does not address join ergonomics. The Drizzle ecosystem's `defineRelations` API ([orm.drizzle.team/docs/relations-v2](https://orm.drizzle.team/docs/relations-v2)) extends FK declarations with named relations and offers `db.query.posts.findMany({ with: { author: true, comments: { with: { author: true }}}})` — type-safe nested loading. We **defer** the equivalent to a separate proposal:
 
@@ -1208,13 +1208,13 @@ Test surfaces, per phase:
 
 | Component | Test surface | Crate / location |
 |---|---|---|
-| Diff classifier | Table-driven unit tests with desired/live snapshot pairs → expected change list | `crates/plugin-db/src/diff.rs` (`#[cfg(test)]`) |
-| DDL emitter | Snapshot tests: golden SQL output for each (change_class, change_kind) | `crates/plugin-db/src/query.rs` |
-| INVALID-index recovery | Integration: induce CONCURRENTLY failure via a parallel `INSERT` violating a unique constraint, assert retry + DROP | `crates/plugin-db/tests/concurrent_index.rs` |
-| Validation budget | Run on 1M-row fixture, assert budget honoured + deferred path | `crates/plugin-db/tests/validation_budget.rs` |
+| Diff classifier | Table-driven unit tests with desired/live snapshot pairs → expected change list | `crates/zeroship-plugin-db/src/diff.rs` (`#[cfg(test)]`) |
+| DDL emitter | Snapshot tests: golden SQL output for each (change_class, change_kind) | `crates/zeroship-plugin-db/src/query.rs` |
+| INVALID-index recovery | Integration: induce CONCURRENTLY failure via a parallel `INSERT` violating a unique constraint, assert retry + DROP | `crates/zeroship-plugin-db/tests/concurrent_index.rs` |
+| Validation budget | Run on 1M-row fixture, assert budget honoured + deferred path | `crates/zeroship-plugin-db/tests/validation_budget.rs` |
 | Migration ownership | Spawn two workers, both call `migrations.run(name)`, assert only one runs; kill owner, assert sweeper hands off | `sdks/migrations/tests/concurrent_run.test.ts` |
 | WAL broker | Replay golden `pgoutput` byte stream, assert events match | `crates/replication/tests/decode_golden.rs` |
-| Read-set capture | Run a `query` handler, assert captured ReadSet matches expected predicates | `crates/runtime/tests/readset_capture.rs` |
+| Read-set capture | Run a `query` handler, assert captured ReadSet matches expected predicates | `crates/zeroship-runtime/tests/readset_capture.rs` |
 | End-to-end deploy refusal | E2E test: deploy schema, insert violating row, redeploy with stricter schema, assert refusal envelope | `tests/e2e_db_v2.sh` |
 
 WPT pattern: integration tests against a real Postgres in a CI matrix (**16 LTS + 17 current**; 18 opportunistic — see Postgres version pinning above).
@@ -1241,7 +1241,7 @@ The SECURITY DEFINER functions reference each other and must be installed in dep
    - GRANT EXECUTE on the app-facing functions to `app_<id>_role`
 3. Per session (run by worker on connection acquire — covered in *Per-app role provisioning* §5)
 
-The order is encoded in `crates/control/src/migrations/zeroship_admin/*.sql` (cluster-wide, run by the control plane at cluster setup) and `crates/control/src/migrations/per_app/*.sql` (templated per app, run on app create).
+The order is encoded in `crates/zeroship-control/src/migrations/zeroship_admin/*.sql` (cluster-wide, run by the control plane at cluster setup) and `crates/zeroship-control/src/migrations/per_app/*.sql` (templated per app, run on app create).
 
 ---
 
@@ -1259,7 +1259,7 @@ The Postgres role `app_<id>_role` is created by the control plane at app-provisi
    GRANT EXECUTE ON FUNCTION __zeroship_register_subject TO app_<id>_role;
    GRANT EXECUTE ON FUNCTION __zeroship_log_dead_letter TO app_<id>_role;
    ```
-2. **Credentials.** A login role `app_<id>_user LOGIN PASSWORD '<random>'` is created and `GRANT app_<id>_role TO app_<id>_user`. Password is stored in the control plane's secrets store (existing `crates/control/src/secret_store.rs`) and injected into the worker as an env-var-style connection string.
+2. **Credentials.** A login role `app_<id>_user LOGIN PASSWORD '<random>'` is created and `GRANT app_<id>_role TO app_<id>_user`. Password is stored in the control plane's secrets store (existing `crates/zeroship-control/src/secret_store.rs`) and injected into the worker as an env-var-style connection string.
 3. **Rotation.** Quarterly automated rotation: control plane generates a new password, dual-grants (old + new accepted for 24h), then revokes the old. Workers reconnect with new credentials on next pool-acquire.
 4. **Deletion.** App deletion triggers `REVOKE ALL ... FROM app_<id>_role`, `DROP ROLE app_<id>_user`, then `DROP ROLE app_<id>_role`. Schema is preserved for compliance retention; ownership transfers to `__zeroship_admin`.
 5. **Per-RPC session init.** `__zeroship_init_session` is called at the **start of every RPC handler**, not just at connection acquire. This means the actor context is bound to the RPC, not the connection — a connection used for a `procedure(...)` call carries `actor_kind='user'`; the same connection used for a GDPR-erasure path carries `actor_kind='operator'`. Per-RPC init prevents "operator-context bleeding" into general app code on a shared connection.
@@ -1323,7 +1323,7 @@ All sweepers are idempotent. Failure of a sweeper run never corrupts state; the 
 3. **typed_id for app data?** Today's split: platform entities use typed_id; per-app collection rows use BIGINT IDENTITY. Future opt-in via `defineCollection().id("typed_id", "msg")` is technically straightforward but adds a destructive-migration path for adopters. Defer or surface in V2?
 4. **Internal-fetch from `mutation`.** Should the runtime allow `fetch()` to *internal* RPC endpoints (e.g. `ctx.fetch("/api/internal/billing")`)? Decision for V2: **no** — `fetch` is an action capability only. Internal RPCs are reached via `ctx.runMutation` / `ctx.runQuery` typed bindings. Moved out of open questions; recorded here for traceability.
 5. **Schema versioning under rollback.** When code rolls back from v3 to v2, the live schema is at v3 (DDL is additive-by-default). v2 reads should still work (forward-compatible columns are nullable additions). v2 writes that depend on a v3-only column will fail. The `schema_version` column in `__zeroship_migrations` is added in A3; the control-plane gate that warns operators on rollback if the target version's schema is unreachable from the live state remains an **open design** — sketch a "compat matrix" stored alongside deploys.
-6. **DEFERRABLE INITIALLY DEFERRED measurement.** Throughput cost on a representative insert workload is unknown. Plan: micro-benchmark in `crates/runtime/benches/db_deferred_fk.rs` before P4 ships. If the cost exceeds a threshold the team accepts (TBD from measurement), switch the default to NOT DEFERRABLE.
+6. **DEFERRABLE INITIALLY DEFERRED measurement.** Throughput cost on a representative insert workload is unknown. Plan: micro-benchmark in `crates/zeroship-runtime/benches/db_deferred_fk.rs` before P4 ships. If the cost exceeds a threshold the team accepts (TBD from measurement), switch the default to NOT DEFERRABLE.
 7. **WAL fanout latency measurement.** Per-hop latency (Postgres commit → pgoutput emission → broker decode → WS push → client render) needs measurement on representative app shapes before publishing an SLO. Bench in `crates/replication/benches/fanout_latency.rs` before C1 ships.
 8. **PgBouncer compatibility.** Session-level advisory locks (B1) require a non-pooled connection. If the deployment topology uses PgBouncer in `transaction` mode, migrations need a bypass path. Open: do we ship our own connection management for migrations, or document the PgBouncer constraint and require operators to provide a direct connection string?
 9. **Multi-region brokers (C1).** Co-locate broker with primary in V2; multi-region replicas with replication-lag-aware fanout is C1.1.
@@ -1380,4 +1380,4 @@ All sweepers are idempotent. Failure of a sweeper run never corrupts state; the 
 - `AGENTS.md` — typed_id invariant referenced in B2 ID-system discussion
 - `ISSUES.md` ISS-24 — migration log requirement
 - `sdks/db/src/{db,types,schema,validate,collection,query,model}.ts` — current SDK
-- `crates/plugin-db/src/{query,callbacks}.rs` — current native primitives
+- `crates/zeroship-plugin-db/src/{query,callbacks}.rs` — current native primitives

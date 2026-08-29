@@ -26,7 +26,7 @@ and faithful TDD (real path, no shims).
 
 The current meter is **per-worker, per-request**:
 
-- **Worker producer** (`crates/worker/src/handler.rs::dispatch`): starts a wall
+- **Worker producer** (`crates/zeroship-worker/src/handler.rs::dispatch`): starts a wall
   clock + samples `CLOCK_THREAD_CPUTIME_ID` around the synchronous V8 entry,
   then calls `cache::record_request(app_id, cpu_us, wall_us, egress, ingress)`
   once per dispatch — five fixed counters: `requests`, `cpu_us`, `wall_us`,
@@ -38,17 +38,17 @@ The current meter is **per-worker, per-request**:
 - **Data-primitive producers** (`plugin-db`/`plugin-kv`/`plugin-storage`):
   emit raw metrics (`db_reads`, `db_writes`, `kv_reads`, …, `storage_ops`,
   `storage_bytes`, `storage_egress_bytes`) at the op boundary, success-arm
-  only, via a per-app `MeterHandle` (`crates/metering/src/lib.rs`).
-- **Meter core** (`crates/metering/src/meter.rs`): a process-wide `Arc<Meter>`
+  only, via a per-app `MeterHandle` (`crates/zeroship-metering/src/lib.rs`).
+- **Meter core** (`crates/zeroship-metering/src/meter.rs`): a process-wide `Arc<Meter>`
   with atomic per-`(app_id,metric)` counters + a locked `custom` map for
   open-set metric names; `drain()` snapshots-and-zeroes.
-- **Flush** (`crates/metering/src/flush.rs`): one compio task per process
+- **Flush** (`crates/zeroship-metering/src/flush.rs`): one compio task per process
   drains every ~10s, builds a `UsageReport { worker_id, report_id, sequence,
   counters }`, POSTs to control `/internal/usage`; on failure `merge`s the
   snapshot back (at-least-once). `worker_id = boot_worker_id($HOSTNAME)` folds
   a per-boot nonce so the per-process `SequenceSource` (resets to 1 each boot)
   cannot collide with pre-restart `(worker_id, sequence)` rows.
-- **Ingest** (`crates/control/src/metering/mod.rs`): idempotent dedup on
+- **Ingest** (`crates/zeroship-control/src/metering/mod.rs`): idempotent dedup on
   `(worker_id, sequence)` in `zeroship.usage_reports_seen` (`0037`), then UPSERT
   `total += delta` per `(app_id, period_start, metric)` into
   `zeroship.usage_aggregates`. The five fixed counters **and** every `custom`
@@ -59,7 +59,7 @@ The current meter is **per-worker, per-request**:
   `total × units_per_op ÷ per_units`, then `× fx ÷ 10^12` to cents. **An
   unweighted metric bills $0** (no `metric_weights` row ⇒ 0 CU). A re-weight
   reprices history without touching stored usage.
-- **Gateway** (`crates/gateway/`): **owns no meter** and **does not depend on
+- **Gateway** (`crates/zeroship-gateway/`): **owns no meter** and **does not depend on
   the metering crate** (confirmed: no `metering` in `gateway/Cargo.toml`, no
   `Meter` in `gateway/src/main.rs`). It serves static assets
   (`router/static_serve.rs`), redirects, and proxies worker dispatch
@@ -272,17 +272,17 @@ trivially.
 
 ### 2.6 New code (H2)
 
-- **`crates/gateway/Cargo.toml`** — add `zeroship-metering` dependency.
-- **`crates/gateway/src/main.rs`** — build `Arc<Meter>`; compute
+- **`crates/zeroship-gateway/Cargo.toml`** — add `zeroship-metering` dependency.
+- **`crates/zeroship-gateway/src/main.rs`** — build `Arc<Meter>`; compute
   `producer_id = boot_worker_id("gate-<HOSTNAME|bind>")`; `spawn_flush_task`
   with a `FlushConfig` pointing at the same `control_url` / `control_key`.
   Store the `Arc<Meter>` in `GateState` (new field).
-- **`crates/gateway/src/router/dispatch.rs`** — in `execute_resource_tree`,
+- **`crates/zeroship-gateway/src/router/dispatch.rs`** — in `execute_resource_tree`,
   after the Static/Redirect actions produce a response, record
   `gateway_egress_bytes` against `state.meter` for the route's `app_id`. For
   the streamed-static path, thread the meter into the drain task (mirroring
   `handler.rs::stream_response`'s `on_complete`).
-- **`crates/gateway/src/router/static_serve.rs`** — the streamed-static drain
+- **`crates/zeroship-gateway/src/router/static_serve.rs`** — the streamed-static drain
   accumulates and reports bytes on finalize (a small `on_complete`-style hook,
   same shape as the worker).
 - **No control-side change** — `/internal/usage` ingest already handles any
@@ -381,12 +381,12 @@ of duration and ≤ `FLUSH_BYTES` of egress). This is strictly better than today
 
 ### 3.4 New code (H1)
 
-- **`crates/worker/src/handler.rs`** — `stream_response`'s drain loop gains the
+- **`crates/zeroship-worker/src/handler.rs`** — `stream_response`'s drain loop gains the
   incremental-flush logic (delta `egress_bytes` + `stream_wall_us` on
   interval/byte threshold; final delta on finalize). `metering_on_complete`
   becomes the *final-delta* recorder rather than the *only* recorder.
   `record_request` for the non-stream path is unchanged.
-- **`crates/metering/src/meter.rs`** — no change required: `stream_wall_us` is a
+- **`crates/zeroship-metering/src/meter.rs`** — no change required: `stream_wall_us` is a
   `custom` metric, handled by the open-set path. (If desired it can be promoted
   to a fixed atomic later; not necessary for correctness.)
 - **No gateway change for SSE** — SSE flows through the worker; the gateway just
@@ -406,7 +406,7 @@ request without a per-request CPU accumulator the kernel does not expose**
 (the handler's own comment says exactly this). Closing it faithfully requires a
 **runtime kernel change**: a per-request CPU accumulator that the pump
 charges as it runs each request's continuations — a non-trivial change to the
-V8 actor/pump (`crates/runtime/`), touching the hot path.
+V8 actor/pump (`crates/zeroship-runtime/`), touching the hot path.
 
 **Recommendation: DEFER, with the documented bound already in place.** The
 current `cpu_us` is a *faithful lower bound* (the comment is explicit and
@@ -504,7 +504,7 @@ numbering rule.
 
 ## 7. Enforcement-independence (explicit)
 
-The spend engine (`crates/control/src/spend.rs::derive_state`,
+The spend engine (`crates/zeroship-control/src/spend.rs::derive_state`,
 `cron/spend_reconcile.rs`) and the gateway enforcement (`enforce.rs::check_spend`
 / `check_account`) read **only** `usage_aggregates` totals priced through the
 weights. Adding `gateway_egress_bytes` and `stream_wall_us` rows raises the same

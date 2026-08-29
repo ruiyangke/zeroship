@@ -1,12 +1,12 @@
 # Runtime limits
 
-The worker-facing per-app limit shape is `AppRuntimeLimits` in [crates/core/src/types.rs](../../crates/core/src/types.rs):
+The worker-facing per-app limit shape is `AppRuntimeLimits` in [crates/zeroship-core/src/types.rs](../../crates/zeroship-core/src/types.rs):
 
 - `cpu_limit_ms`
 - `wall_timeout_ms`
 - `heap_limit_mb`
 
-The runtime-side shape is `RuntimeLimits` in [crates/runtime/src/core/runtime.rs](../../crates/runtime/src/core/runtime.rs):
+The runtime-side shape is `RuntimeLimits` in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs):
 
 - `cpu_limit`
 - `wall_timeout`
@@ -27,14 +27,14 @@ Idle GC is separate. It is a `RuntimeBuilder` knob, not part of `AppRuntimeLimit
 values for the Rust type. A deployed app is given its PLAN's limits, and an app
 whose plan row is missing or whose `runtime_limits_json` fails to parse falls
 back to the free tier rather than to unbounded — `FREE_TIER_RUNTIME_LIMITS` in
-[crates/core/src/types.rs](../../crates/core/src/types.rs) exists precisely so
+[crates/zeroship-core/src/types.rs](../../crates/zeroship-core/src/types.rs) exists precisely so
 "the worker therefore never gets `(None, None, None)` (unbounded) for an unpriced
 app".
 
 ## Effective limits per plan
 
 From `builtin_plans` in
-[crates/control/src/plan_catalog.rs](../../crates/control/src/plan_catalog.rs):
+[crates/zeroship-control/src/plan_catalog.rs](../../crates/zeroship-control/src/plan_catalog.rs):
 
 | Plan | `cpu_limit_ms` | `wall_timeout_ms` | `heap_limit_mb` |
 | --- | --- | --- | --- |
@@ -67,7 +67,7 @@ A request that exceeds its CPU budget is cancelled and surfaces
 
 A creator app's inbound request body is capped at **4 MiB**. It is a platform
 constant, not a per-app knob: `MAX_REQUEST_BODY_BYTES` in
-[crates/core/src/dispatch_frame.rs](../../crates/core/src/dispatch_frame.rs).
+[crates/zeroship-core/src/dispatch_frame.rs](../../crates/zeroship-core/src/dispatch_frame.rs).
 
 The gateway and the worker both enforce it, and they enforce it at two
 different sizes on purpose. The gateway applies the cap to the request body it
@@ -107,7 +107,7 @@ refused the bytes or your handler did.
 The standalone server — what `zeroship serve` runs, and therefore what `pnpm dev`
 exercises — is a separate HTTP implementation with its own, smaller cap:
 `MAX_BODY_BYTES` in
-[crates/runtime/src/core/serve.rs](../../crates/runtime/src/core/serve.rs) is
+[crates/zeroship-runtime/src/core/serve.rs](../../crates/zeroship-runtime/src/core/serve.rs) is
 **1 MiB**, and it answers `413 Content Too Large`.
 
 This is deliberate rather than an oversight — the standalone server is a
@@ -139,7 +139,7 @@ through `env.storage` regardless; the object bytes never pass through this cap.
 
 ## CPU limit
 
-CPU enforcement is implemented in [crates/runtime/src/core/cpu_timer.rs](../../crates/runtime/src/core/cpu_timer.rs).
+CPU enforcement is implemented in [crates/zeroship-runtime/src/core/cpu_timer.rs](../../crates/zeroship-runtime/src/core/cpu_timer.rs).
 
 - Linux uses a POSIX timer on `CLOCK_THREAD_CPUTIME_ID`.
 - When the timer fires, a watchdog thread calls `v8::IsolateHandle::terminate_execution()`.
@@ -149,7 +149,7 @@ The fast path is no-op when `cpu_limit` is unset.
 
 ## Wall timeout
 
-Wall timeout is stored on `RuntimeLimits` and read through `Runtime::wall_timeout()` in [crates/runtime/src/core/runtime.rs](../../crates/runtime/src/core/runtime.rs). The serve path applies it while waiting for a request to finish in [crates/runtime/src/core/serve.rs](../../crates/runtime/src/core/serve.rs).
+Wall timeout is stored on `RuntimeLimits` and read through `Runtime::wall_timeout()` in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs). The serve path applies it while waiting for a request to finish in [crates/zeroship-runtime/src/core/serve.rs](../../crates/zeroship-runtime/src/core/serve.rs).
 
 Unset means there is no runtime wall-clock cap.
 
@@ -187,27 +187,27 @@ you ship.
 
 ## Heap limit
 
-Heap caps are configured in [crates/runtime/src/core/runtime.rs](../../crates/runtime/src/core/runtime.rs):
+Heap caps are configured in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs):
 
 - `RuntimeBuilder::heap_limit_mb(mb)` converts MB to bytes
 - `RuntimeInner::new_with_plugins(...)` uses `128 * 1024 * 1024` when no cap is supplied
 - a near-heap-limit callback grows the cap modestly and terminates execution after 5 consecutive hits
 
-The regression tests live in [crates/runtime/tests/heap_limits.rs](../../crates/runtime/tests/heap_limits.rs).
+The regression tests live in [crates/zeroship-runtime/tests/heap_limits.rs](../../crates/zeroship-runtime/tests/heap_limits.rs).
 
 ## Idle GC
 
-Idle GC is builder-only in [crates/runtime/src/core/runtime.rs](../../crates/runtime/src/core/runtime.rs):
+Idle GC is builder-only in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs):
 
 - `RuntimeBuilder::idle_gc_after_ms(ms)`
 - default constant: `DEFAULT_IDLE_GC_AFTER = 30_000ms`
 - `0` disables the idle-GC ticker
 
-When the runtime stays quiet past the threshold, the ticker calls `Isolate::low_memory_notification()`. The regression tests live in [crates/runtime/tests/idle_gc.rs](../../crates/runtime/tests/idle_gc.rs).
+When the runtime stays quiet past the threshold, the ticker calls `Isolate::low_memory_notification()`. The regression tests live in [crates/zeroship-runtime/tests/idle_gc.rs](../../crates/zeroship-runtime/tests/idle_gc.rs).
 
 ## Code map
 
-- [crates/core/src/types.rs](../../crates/core/src/types.rs) — `AppRuntimeLimits`
-- [crates/runtime/src/core/runtime.rs](../../crates/runtime/src/core/runtime.rs) — `RuntimeLimits`, `RuntimeBuilder`, heap callback, idle GC
-- [crates/runtime/src/core/cpu_timer.rs](../../crates/runtime/src/core/cpu_timer.rs) — Linux CPU timer plumbing
-- [crates/runtime/src/core/serve.rs](../../crates/runtime/src/core/serve.rs) — wall-timeout enforcement in the serve path
+- [crates/zeroship-core/src/types.rs](../../crates/zeroship-core/src/types.rs) — `AppRuntimeLimits`
+- [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs) — `RuntimeLimits`, `RuntimeBuilder`, heap callback, idle GC
+- [crates/zeroship-runtime/src/core/cpu_timer.rs](../../crates/zeroship-runtime/src/core/cpu_timer.rs) — Linux CPU timer plumbing
+- [crates/zeroship-runtime/src/core/serve.rs](../../crates/zeroship-runtime/src/core/serve.rs) — wall-timeout enforcement in the serve path

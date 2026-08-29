@@ -55,8 +55,8 @@ tsconfig.include; remove the `@zeroship/db/env` + `zeroship-schema` alias from t
 preserved, now from the fold. Test: template typecheck; gen-types --check; no duplicate Env.db augmentation.
 
 **S6 — bundle/runtime/worker fallback → hard error, not silent degrade.** Files:
-`crates/bundle/src/manifest.rs`, `crates/runtime/src/core/{init,runtime,state}.rs`,
-`crates/worker/src/{sync,handler}.rs`, `sdks/vite-plugin/src/zship.ts`. Stop "falling back to default.schema";
+`crates/zeroship-bundle/src/manifest.rs`, `crates/zeroship-runtime/src/core/{init,runtime,state}.rs`,
+`crates/zeroship-worker/src/{sync,handler}.rs`, `sdks/vite-plugin/src/zship.ts`. Stop "falling back to default.schema";
 a corrupt descriptor fails app load (hard boot error), not silent degrade; no-descriptor allowed only for
 schema-less apps. Test: runtime parse-failure; worker descriptor-fetch failure; zship-with-migrations requires
 descriptor.

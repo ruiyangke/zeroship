@@ -1,6 +1,6 @@
 # WebSocket Runtime
 
-Current zeroship WebSocket behavior, as implemented in [`crates/runtime/src/web/websocket/`](../../crates/runtime/src/web/websocket/).
+Current zeroship WebSocket behavior, as implemented in [`crates/zeroship-runtime/src/web/websocket/`](../../crates/zeroship-runtime/src/web/websocket/).
 
 ## Scope
 
@@ -15,7 +15,7 @@ Two surfaces matter:
 
 ### `WebSocket`
 
-Implemented in [`mod.rs`](../../crates/runtime/src/web/websocket/mod.rs).
+Implemented in [`mod.rs`](../../crates/zeroship-runtime/src/web/websocket/mod.rs).
 
 - constructor: `new WebSocket(url, protocols?, init?)`
 - getters: `url`, `readyState`, `bufferedAmount`, `protocol`, `extensions`, `binaryType`
@@ -31,7 +31,7 @@ Current behavior:
 
 ### `WebSocketPair`
 
-Implemented in [`pair.rs`](../../crates/runtime/src/web/websocket/pair.rs).
+Implemented in [`pair.rs`](../../crates/zeroship-runtime/src/web/websocket/pair.rs).
 
 - `new WebSocketPair()` returns an object with `0` and `1` properties.
 - pair sockets start in `CONNECTING`.
@@ -43,17 +43,17 @@ Implemented in [`pair.rs`](../../crates/runtime/src/web/websocket/pair.rs).
 The HTTP upgrade handoff is:
 
 1. JS returns `new Response(null, { status: 101, webSocket: client })`.
-2. [`crates/runtime/src/transport/handler.rs`](../../crates/runtime/src/transport/handler.rs) extracts the native `ws_id`.
+2. [`crates/zeroship-runtime/src/transport/handler.rs`](../../crates/zeroship-runtime/src/transport/handler.rs) extracts the native `ws_id`.
 3. The runtime converts that to `FetchOutcome::WebSocketUpgrade`.
 4. The kernel-side server path completes the wire handshake and pumps frames.
 
-This is also the mechanism used by the bootstrap subscription fallback in [`crates/runtime/src/core/init.rs`](../../crates/runtime/src/core/init.rs).
+This is also the mechanism used by the bootstrap subscription fallback in [`crates/zeroship-runtime/src/core/init.rs`](../../crates/zeroship-runtime/src/core/init.rs).
 
 ## Transport architecture
 
 ### Client handshake
 
-[`handshake.rs`](../../crates/runtime/src/web/websocket/handshake.rs) performs the RFC 6455 client handshake directly:
+[`handshake.rs`](../../crates/zeroship-runtime/src/web/websocket/handshake.rs) performs the RFC 6455 client handshake directly:
 
 - `Sec-WebSocket-Accept` is recomputed and verified
 - echoed subprotocols must have been offered
@@ -64,7 +64,7 @@ The handshake also returns any bytes pipelined after the `101` response so the f
 
 ### Outbound WebSocket is gated by the app's egress rules
 
-An outbound `new WebSocket(url)` is a raw bidirectional byte stream the moment the upgrade completes, so it is subject to the app's egress rule set exactly as `node:net` is, and through the same evaluator ([`transport/egress.rs`](../../crates/runtime/src/transport/egress.rs)). One rule set covers both: a rule accepting `api.example.com:443` admits that destination over either transport, and an app that holds no accept rule opens no WebSocket at all.
+An outbound `new WebSocket(url)` is a raw bidirectional byte stream the moment the upgrade completes, so it is subject to the app's egress rule set exactly as `node:net` is, and through the same evaluator ([`transport/egress.rs`](../../crates/zeroship-runtime/src/transport/egress.rs)). One rule set covers both: a rule accepting `api.example.com:443` admits that destination over either transport, and an app that holds no accept rule opens no WebSocket at all.
 
 The connect task resolves the verdict before the handshake runs and hands `run_handshake` an address that is already authorized; the handshake makes no policy decision of its own. A refusal fires `error` and then `close` with code `1006`; because the `error` event carries no payload by spec, the reason on the close event names which check refused — `ERR_NET_SSRF` for the platform SSRF floor, `ERR_NET_EGRESS_DENIED` for the app's own rules. These are the same codes `node:net` reports, from the same classifier.
 
@@ -72,13 +72,13 @@ The connect task resolves the verdict before the handshake runs and hands `run_h
 
 ### Runtime event flow
 
-[`network.rs`](../../crates/runtime/src/web/websocket/network.rs) owns the per-socket state and queues `WsEvent`s. Each queued event triggers `OpResult::WebSocketEvent { ws_id }`; [`dispatch.rs`](../../crates/runtime/src/web/websocket/dispatch.rs) drains the queue on the V8 thread and dispatches native `open`, `message`, `error`, and `close` events.
+[`network.rs`](../../crates/zeroship-runtime/src/web/websocket/network.rs) owns the per-socket state and queues `WsEvent`s. Each queued event triggers `OpResult::WebSocketEvent { ws_id }`; [`dispatch.rs`](../../crates/zeroship-runtime/src/web/websocket/dispatch.rs) drains the queue on the V8 thread and dispatches native `open`, `message`, `error`, and `close` events.
 
 For `ws://`, reads and writes run as separate compio tasks on the same `TcpStream`. For `wss://`, the runtime uses a single-owner loop because `TlsStream` is not aliasable.
 
 ### Pair sockets
 
-`WebSocketPair` does not use the network stack. [`pair.rs`](../../crates/runtime/src/web/websocket/pair.rs) moves queued frames directly onto the peer's event queue and reuses the same native dispatch path.
+`WebSocketPair` does not use the network stack. [`pair.rs`](../../crates/zeroship-runtime/src/web/websocket/pair.rs) moves queued frames directly onto the peer's event queue and reuses the same native dispatch path.
 
 ## Subscription fallback
 
@@ -89,7 +89,7 @@ The bootstrap's fallback subscription transport currently uses `WebSocketPair` a
 - missing `pong` for 60 seconds closes the socket
 - streamed frames are JSON envelopes carrying `data`, `error`, or `end`
 
-See [`crates/runtime/src/core/init.rs`](../../crates/runtime/src/core/init.rs) for the exact wire behavior.
+See [`crates/zeroship-runtime/src/core/init.rs`](../../crates/zeroship-runtime/src/core/init.rs) for the exact wire behavior.
 
 ## Where sockets are served
 

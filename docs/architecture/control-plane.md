@@ -53,7 +53,7 @@ deploy.rs          re-exports `.zship` ingest limits/types from `zeroship_bundle
 
 ## `AppState`
 
-`crates/control/src/lib.rs` wires these long-lived dependencies:
+`crates/zeroship-control/src/lib.rs` wires these long-lived dependencies:
 
 - `registry: Registry`
 - `env_store: EnvStore`
@@ -168,7 +168,7 @@ End-user auth does **not** terminate in control. The gateway is the OIDC
 RP of the native auth service (`crates/auth`); control is a pure API
 resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
 `console_sessions` surface was removed in the R5 cutover
-(`crates/control/src/lib.rs`).
+(`crates/zeroship-control/src/lib.rs`).
 
 ```text
 Gateway -> 302 to auth /oauth2/authorize (no session cookie)

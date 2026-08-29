@@ -1,10 +1,10 @@
 # Control-Plane Core — Security + Correctness Review (2026-07-27)
 
-Scope: `crates/control/src/{api,registry,lib,main,token_handlers,device_handlers,
+Scope: `crates/zeroship-control/src/{api,registry,lib,main,token_handlers,device_handlers,
 oauth_handlers,oauth_grants_handlers,app_oauth_client,env_store,env_handlers,
 authz_guard,internal,rate_limit,http_util,audit,identity_bridge,account_status}.rs`
-plus the supporting `crates/authn/src/lib.rs`, `crates/authz/src/{eval,entities}.rs`,
-`crates/core/src/crypto.rs`.
+plus the supporting `crates/zeroship-authn/src/lib.rs`, `crates/zeroship-authz/src/{eval,entities}.rs`,
+`crates/zeroship-core/src/crypto.rs`.
 
 Focus per the brief: tenant isolation / IDOR, secret-store crypto, internal-API
 auth, token minting/verification, SQL injection, rate limiting. Billing/metering/
@@ -74,7 +74,7 @@ hardening and availability gaps. Production-grade for the reviewed surface.
 ## Findings (ranked)
 
 ### MEDIUM-1 — `--dev-insecure` on a non-loopback bind only warns; full auth bypass if misconfigured
-`crates/control/src/main.rs:1524-1530` · `crates/control/src/internal.rs:15-17`
+`crates/zeroship-control/src/main.rs:1524-1530` · `crates/zeroship-control/src/internal.rs:15-17`
 
 `check_auth` returns `None` (allow) unconditionally when `state.insecure_dev` is
 true (`internal.rs:16`), disabling ALL `/internal/*` auth — including
@@ -94,7 +94,7 @@ One-line fix: make it fatal — `if insecure_dev && bind_host is non-loopback {
 eprintln!(...); std::process::exit(1); }` (dev-insecure MUST be loopback-only).
 
 ### MEDIUM-2 — Deploy + device-flow endpoints have no rate limiting
-`crates/control/src/api.rs:380` (deploy) · `crates/control/src/device_handlers.rs:103,163` (`device_auth`, `device_approve`)
+`crates/zeroship-control/src/api.rs:380` (deploy) · `crates/zeroship-control/src/device_handlers.rs:103,163` (`device_auth`, `device_approve`)
 
 `api.rs` never calls `http_util::rate_limit`/`admin_rate_limit` — only
 `env_handlers` and the Stripe handlers do. So `POST /api/apps/:id/deploy`,
@@ -114,7 +114,7 @@ with the existing `http_util::rate_limit` (a dedicated `deploy`/`device`
 namespace + quota).
 
 ### MEDIUM-3 — Rate limiter fails open when the source IP cannot be resolved
-`crates/control/src/http_util.rs:56-59`
+`crates/zeroship-control/src/http_util.rs:56-59`
 
 `rate_limit` returns `None` (allowed) when `source_ip` yields `None` or the string
 fails to parse as an `IpAddr`. With `trust_proxy=false` (the default), `source_ip`
@@ -131,7 +131,7 @@ One-line fix: fail CLOSED (or fall back to a single shared bucket) when the clie
 identity can't be resolved, rather than returning `None`.
 
 ### MEDIUM-4 — Audit-log write failure is swallowed after the mutation commits
-`crates/control/src/audit.rs:170-171,196-197` · callers in `env_handlers.rs`
+`crates/zeroship-control/src/audit.rs:170-171,196-197` · callers in `env_handlers.rs`
 (`set_secret`, `delete_secret`, `set_var`, `set_expose`)
 
 `audit::log` logs a `warn!` and returns `()` on connect/insert failure; the
@@ -149,7 +149,7 @@ minimum surface a 500 so the client knows the audited write was not durably
 recorded).
 
 ### LOW-1 — Single platform master key (no per-app HKDF); master compromise leaks all apps
-`crates/core/src/crypto.rs:53-69` (`derive_key`) · `crates/control/src/env_store.rs:91,147`
+`crates/zeroship-core/src/crypto.rs:53-69` (`derive_key`) · `crates/zeroship-control/src/env_store.rs:91,147`
 
 `derive_key` is `SHA-256("zeroship-secret-key-v1" || master)` — one key for ALL
 apps. AAD prevents cross-tenant decrypt *within* the platform, but a master-key
@@ -161,7 +161,7 @@ Fix (tracked): expand per-app with HKDF mixing `app_id` into the key, bounding
 blast radius to one app on key exposure.
 
 ### LOW-2 — `merged_env_for_worker` 500s the entire env fetch on one un-decryptable secret
-`crates/control/src/env_store.rs:365,510` (`?` on `decrypt_with_keys`)
+`crates/zeroship-control/src/env_store.rs:365,510` (`?` on `decrypt_with_keys`)
 
 If a single stored ciphertext fails to decrypt (corruption, a key dropped from the
 rotation set before `rotate_app` drained it), the `?` aborts the whole
@@ -174,7 +174,7 @@ re-encrypt count so `previous_keys` is never dropped early. Low severity: only
 reachable via operator rotation error or DB corruption.
 
 ### LOW-3 — `device_approve` discards the CSRF field it accepts
-`crates/control/src/device_handlers.rs:57-61,175`
+`crates/zeroship-control/src/device_handlers.rs:57-61,175`
 
 `DeviceApproveRequest.csrf` is deserialized then bound to `_csrf` and never used;
 the comment defers CSRF/origin hardening to the auth-service browser page. This is

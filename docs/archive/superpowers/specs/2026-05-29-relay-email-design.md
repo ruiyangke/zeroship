@@ -44,7 +44,7 @@ load-bearing places. This document fixes each, grounded in the actual tree:
                                   ▼                                        ▼
                        ┌──────────────────────────┐            ┌────────────────────────────┐
                        │  POST /webhooks/relay-in  │            │  relay_forward_mailer       │
-                       │  (crates/auth/src/ui)     │──forward──►│  (its OWN Arc<dyn Mailer>,  │
+                       │  (crates/zeroship-auth/src/ui)     │──forward──►│  (its OWN Arc<dyn Mailer>,  │
                        │  verify_basic_auth        │   Email    │  §5.2 — SMTP driver, header-│
                        │  → spam gate → idempotency│            │  + envelope-capable §3)     │
                        │  → lookup → suppress/     │            └────────────────────────────┘
@@ -64,7 +64,7 @@ Key properties:
   handler. This honours the AGENTS.md "calls fetch / managed concern" classification — the relay is a
   *driver*, not a native kernel surface.
 - **One inbound provider, one signature path.** Postmark inbound authenticates with HTTP Basic auth,
-  and the tree **already has** `verify_basic_auth` (`crates/auth/src/mailer/bounce.rs:86`). No new
+  and the tree **already has** `verify_basic_auth` (`crates/zeroship-auth/src/mailer/bounce.rs:86`). No new
   signature scheme (this is why Postmark, not Mailgun-HMAC or SES-SNS-RSA — see §4.4).
 - **Zero tokio.** The handler is a `ntex` route on the auth service (same place the existing webhooks
   live, `server.rs:140-152`); outbound is the same `Mailer` trait (cyper / `spawn_blocking` lettre),
@@ -110,7 +110,7 @@ what happens to mail *sent to* that alias.
 
 When the gateway swaps the `email` claim to the relay alias, it **passes the upstream `email_verified`
 through unchanged** (`claims.email_verified` / `raw.email_verified` / `session.email_verified` across
-the `/token`, `/session`, and `do_refresh` arms in `crates/gateway/src/auth_token.rs`, mirrored in
+the `/token`, `/session`, and `do_refresh` arms in `crates/zeroship-gateway/src/auth_token.rs`, mirrored in
 `router/auth.rs`). The flag therefore describes the **underlying real address the alias forwards to**,
 not the alias string itself.
 
@@ -134,7 +134,7 @@ would for a direct login; they simply never see the underlying address.
 ## 3. Extending the outbound `Email`/`Mailer` contract (SCOPED Slice-5 work — NOT a reuse)
 
 > **B2 fix.** The round-1 claim "forward via the existing outbound path, rewriting `From:` and
-> `Reply-To:`" is **false against the code as-is**: `mailer::types::Email` (`crates/auth/src/mailer/types.rs:9`)
+> `Reply-To:`" is **false against the code as-is**: `mailer::types::Email` (`crates/zeroship-auth/src/mailer/types.rs:9`)
 > is `{ to, from, subject, text, html, headers, tags }` with **no `reply_to` and no `envelope_from`**;
 > the Resend driver (`resend.rs:51` `ResendRequest`) serializes only `{ from, to, subject, text, html,
 > tags }` and **drops `msg.headers` entirely**; the SMTP driver **explicitly ignores `headers`**
@@ -153,7 +153,7 @@ would for a direct login; they simply never see the underlying address.
 
 ### 3.1 `Email` gains `reply_to` + `envelope_from`
 
-`crates/auth/src/mailer/types.rs`:
+`crates/zeroship-auth/src/mailer/types.rs`:
 
 ```rust
 pub struct Email {
@@ -233,7 +233,7 @@ typed value implementing the `Header` trait. The `smtp.rs:117` comment already r
 `lettre::message::header::Header` for an opaque `(HeaderName, String)`:
 
 ```rust
-// crates/auth/src/mailer/smtp.rs  (NEW — the raw-header escape hatch the comment said it lacked)
+// crates/zeroship-auth/src/mailer/smtp.rs  (NEW — the raw-header escape hatch the comment said it lacked)
 use lettre::message::header::{Header, HeaderName, HeaderValue};
 
 #[derive(Clone)]
@@ -352,17 +352,17 @@ out-of-scope (§11).
 New route (registered alongside the existing webhooks in `server.rs`):
 
 ```rust
-// crates/auth/src/server.rs — next to /webhooks/postmark and /webhooks/ses-sns
+// crates/zeroship-auth/src/server.rs — next to /webhooks/postmark and /webhooks/ses-sns
 .service(web::resource("/webhooks/relay-inbound")
     .route(web::post().to(ui::webhooks::relay_inbound)));
 ```
 
-New parsed-inbound payload type (a NEW module `crates/auth/src/mailer/inbound.rs`, **not** an
+New parsed-inbound payload type (a NEW module `crates/zeroship-auth/src/mailer/inbound.rs`, **not** an
 extension of `bounce.rs`'s delivery enum). Only the fields we act on; everything else is ignored by
 serde:
 
 ```rust
-// crates/auth/src/mailer/inbound.rs  (NEW — Postmark Inbound parsed shape)
+// crates/zeroship-auth/src/mailer/inbound.rs  (NEW — Postmark Inbound parsed shape)
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct InboundMessage {
@@ -616,7 +616,7 @@ identity**, not a transparent relay:
 one:
 
 ```rust
-// crates/auth/src/mailer/mod.rs
+// crates/zeroship-auth/src/mailer/mod.rs
 #[derive(Clone)]
 pub struct RelayForwardMailer(pub Arc<dyn Mailer>);
 ```
@@ -631,7 +631,7 @@ transactional `AUTH_SMTP_*`). It rejects `resend` for the relay role (Resend can
 §3.2):
 
 ```rust
-// crates/auth/src/main.rs (next to build_mailer)
+// crates/zeroship-auth/src/main.rs (next to build_mailer)
 fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, AuthError> {
     match cfg.relay_forward_mailer.as_str() {     // AUTH_RELAY_FORWARD_MAILER, default "smtp"
         "smtp" => {
@@ -781,7 +781,7 @@ pattern `http_util.rs:109` already uses: `compio_postgres::connect(&url, NoTls)`
 connection task), giving an **owned `mut` client** that CAN open a transaction:
 
 ```rust
-// crates/control/src/oauth_grants_handlers.rs::revoke_grant
+// crates/zeroship-control/src/oauth_grants_handlers.rs::revoke_grant
 // Open a dedicated owned client for the cross-schema transaction. auth_db_url is the same
 // physical DB as auth_pg, but owned (mut) — auth_pg (Arc<Client>) can't open a txn.
 let (mut conn, connection) = compio_postgres::connect(&state.auth_db_url, NoTls).await?;
@@ -954,7 +954,7 @@ reconstruct it from a deleted app's uuid without a lookup, so the app-delete com
 **exactly the same value** as the gateway wrote and the explicit-revoke path uses. This closes the
 critique's "the 'same UPDATE' is not actually the same key" hazard: there is now **one** key,
 `app_client_id` = the `oac_` client_id, at all three sites. (Slice 4 implements the gateway-upsert
-leg in `crates/gateway/src/identities.rs`, keyed on `(app_client_id, global_user_id)`.)
+leg in `crates/zeroship-gateway/src/identities.rs`, keyed on `(app_client_id, global_user_id)`.)
 
 <!-- Added: major — pin app_user_identities.app_id to the per-app oac_ client_id; make the gateway write, explicit-revoke UPDATE, and app-delete UPDATE all key on that single deterministic value (no cross-schema join, no key mismatch); note the absence of a cross-schema FK makes the app-delete companion UPDATE the sole guard against orphaned live aliases -->
 

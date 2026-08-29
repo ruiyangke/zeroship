@@ -3,7 +3,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-fetc
 # Native WHATWG Fetch design
 
 **Date:** 2026-05-01
-**Status:** **Shipped** — `crates/runtime/src/web/fetch/` (~5,400 LOC, request.rs/response.rs/body/algorithms.rs). Document retained as the canonical design spec; no equivalent reference doc exists.
+**Status:** **Shipped** — `crates/zeroship-runtime/src/web/fetch/` (~5,400 LOC, request.rs/response.rs/body/algorithms.rs). Document retained as the canonical design spec; no equivalent reference doc exists.
 **Spec:** WHATWG Fetch Standard — https://fetch.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/fetch/blob/main/fetch.bs
 **Reference impls:**
@@ -42,7 +42,7 @@ RFC 7578 (multipart/form-data).
 
 **Unblocks:**
 - compression's `with_response_body_hook` integration.
-- the deletion of `crates/runtime/src/embed/fetch.js` (705 LOC).
+- the deletion of `crates/zeroship-runtime/src/embed/fetch.js` (705 LOC).
 - WPT regression for `fetch/api/{headers,request,response,abort}` —
   currently we run *zero* of those files because the polyfill is too far
   from spec to be worth the harness work.
@@ -55,8 +55,8 @@ RFC 7578 (multipart/form-data).
 
 - **v1 (2026-05-01)** — Initial design covering the entire WHATWG Fetch
   spec surface. Replaces the JS polyfill at
-  `crates/runtime/src/embed/fetch.js` (705 LOC) and the Rust dispatch
-  shim at `crates/runtime/src/transport/handler.rs` (386 LOC). Designed pure-native on
+  `crates/zeroship-runtime/src/embed/fetch.js` (705 LOC) and the Rust dispatch
+  shim at `crates/zeroship-runtime/src/transport/handler.rs` (386 LOC). Designed pure-native on
   V8 + Rust + cyper (compio + hyper, no tokio).
   Goes alongside the in-flight streams-native and compression-streams-native
   designs; the three together fully replace the JS-heavy fetch path.
@@ -85,7 +85,7 @@ RFC 7578 (multipart/form-data).
     iterates dependents — no inline recursion. `AbortSignal.timeout`
     now keeps a strong ref from global to signal while listeners are
     registered (DOM-mandated GC retention). EventTarget moved out of
-    `fetch/` into `crates/runtime/src/web/dom/event_target.rs` (it's a DOM
+    `fetch/` into `crates/zeroship-runtime/src/web/dom/event_target.rs` (it's a DOM
     primitive).
   - **`extract a body`.** Type-test predicates run BEFORE any
     `to_string`-style coercion. Spec dispatch order (Blob → byte
@@ -115,7 +115,7 @@ RFC 7578 (multipart/form-data).
     repudiation.
   - **Streams-native vs. fetch helpers.** `read_all_bytes` /
     `read_one_chunk` are NOT streams-native exports; they live in
-    `crates/runtime/src/fetch/body_stream.rs` as fetch-internal
+    `crates/zeroship-runtime/src/fetch/body_stream.rs` as fetch-internal
     helpers. They are layered on top of streams' public
     `getReader()` + `reader.read()` pattern, in Rust.
   - **`with_isolate_lock` removed.** Replaced with the actual runtime
@@ -153,7 +153,7 @@ RFC 7578 (multipart/form-data).
    subset". Pass the entire WPT `fetch/api/{headers,request,response,abort}`
    suite minus the deferred items called out in §I (CORS, service
    workers, navigation, multipart parsing).
-2. **Replace the JS polyfill.** Delete `crates/runtime/src/embed/fetch.js`
+2. **Replace the JS polyfill.** Delete `crates/zeroship-runtime/src/embed/fetch.js`
    in three landings: (1) ship native behind feature flag, polyfill
    remains default; (2) flip default to native, polyfill remains as
    fallback; (3) delete the polyfill. Same cadence as headers-native
@@ -169,7 +169,7 @@ RFC 7578 (multipart/form-data).
    `cyper::Client` (compio + hyper), already in the workspace per
    `Cargo.toml:33`. Zero tokio. No `Send` constraints inside the
    isolate (single-threaded per AGENTS.md "V8 per thread, one isolate
-   per app"). The in-tree `crates/runtime/src/transport/ssrf.rs` already binds
+   per app"). The in-tree `crates/zeroship-runtime/src/transport/ssrf.rs` already binds
    to cyper; the design extends rather than replaces that wiring.
 5. **Spec-faithful, byte-faithful, observable-event-faithful.**
    The polyfill diverges in ~30 observable ways (no ByteString
@@ -251,7 +251,7 @@ RFC 7578 (multipart/form-data).
 - **Service-worker-intercepted fetches.** Out (no service workers).
 - **`navigate` / `websocket` / `webtransport` request modes.** The
   runtime's WebSocket support flows through a separate path
-  (`crates/runtime/src/websocket.rs`); fetch's `mode: "websocket"`
+  (`crates/zeroship-runtime/src/websocket.rs`); fetch's `mode: "websocket"`
   is a no-op (returns network error per the spec when not in a
   navigation context). `navigate` / `webtransport` likewise.
 - **`blob:` and `data:` URL schemes.** `data:` is in scope (cheap;
@@ -346,26 +346,26 @@ contract; everything else is illustrative.
 | **D-1** | Pure native: `Request`, `Response`, `fetch()` global, `AbortController`, `AbortSignal`, `FormData`, `EventTarget`, `Event` are `#[v8_class]` Rust types. The `Body` mixin is realised as a **Rust trait** (not a V8 base class) implemented by `Request` and `Response`; there is no separate `Body` JS type and no `Object.getPrototypeOf(req) === Body.prototype` relationship — the spec says "Body" is an IDL **mixin** (no constructor, no own object) and we honour that. No JS polyfill fallback once shipped. <br> *(v2 fix: was "`Body` mixin is a `#[v8_class]` base"; spec/Process-flaw 8 says mixin = Rust trait, not V8 base class. `#[v8_inherit(EventTarget)]` for AbortSignal stays. `#[v8_inherit(Body)]` is dropped.)* | Single source of truth; eliminates the body-as-string vs body-as-stream duality the polyfill carries. | §I |
 | **D-2** | A body has `[[body]]` = `Option<BodyImpl>` where `BodyImpl = { stream: v8::Global<v8::Object>, source: BodySource, length: Option<u64> }`. The `stream` is a *native* `ReadableStream` (streams-native). The `source` is the original byte sequence / Blob handle / FormData buffer kept around for redirect-rewinding. *(v2 fix: workerd `http.h:67-99` "Buffer" cite was wrong — that range is method declarations, not the `Buffer` typedef. Pattern still mirrors workerd, but the cite is dropped; the Body source/buffer pattern is workerd-shaped, not at a specific line range.)* | Spec §3.2.1 step 13 ("Let body be a body whose stream is stream, source is source, and length is length"). The source is what enables 307/308 redirects on POST. | §III |
 | **D-3** | CORS, request-mode, credentials-mode, destination, referrer, referrer-policy, isReloadNavigation, isHistoryNavigation, keepalive, integrity: **IDL parsed, stored, defaults set**, but **none affect the network fetch**. The `mode`/`credentials`/etc. getters return the stored value; algorithms that the spec gates on them (CORS-preflight, cross-origin cookie strip, etc.) treat the runtime as if `mode === "no-cors"` and `credentials === "include"` uniformly. Matches workerd `http.h:765-773` and the WinterTC consensus. | The runtime executes server-side creator code with no browser security context. CORS-enforcing here would be wrong (it would block server-side calls between creator backend and partner APIs, which is the entire use case). | §IV |
-| **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock`. Inter-class references use `Rc<RefCell<…>>`. `cyper::Client` is `thread_local!` (see existing `crates/runtime/src/transport/ssrf.rs:316-335`); the design preserves that. | AGENTS.md "V8 per thread, one isolate per app". | §VI |
+| **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock`. Inter-class references use `Rc<RefCell<…>>`. `cyper::Client` is `thread_local!` (see existing `crates/zeroship-runtime/src/transport/ssrf.rs:316-335`); the design preserves that. | AGENTS.md "V8 per thread, one isolate per app". | §VI |
 | **D-5** | Response body bytes flow `cyper::Response::bytes_stream()` → optional codec chain (compression's `build_codec_chain`) → `ReadableStream::from_native_source(...)`. The user-visible `Response.body` is the OUTPUT of the chain; the chain is constructed before the JS Promise resolves to the Response object, so user code that calls `body.getReader()` never sees encoded bytes. Internal hand-off uses streams-native's `pipe_native_internal` (D-10 of streams) to bypass lock checks during construction. | This honours compression-streams-native.md §"From the native-fetch project" commitments 2 (decompression chain), 3 (Content-Encoding/Content-Length stripping), 4 (unknown coding → network error). | §V, §XV |
 | **D-6** | Request body upload: `BodySource::Bytes(Vec<u8>)` → `Content-Length` header set, body sent as a single hyper Body buffer. `BodySource::Stream(v8::Global<ReadableStream>)` → drained via streams-native default reader (in Rust, no JS callbacks), each chunk written to hyper's chunked-encoding writer. The latter case sends `Transfer-Encoding: chunked`, NOT `Content-Length` (per §5.5 step 9.3). | Spec compliance for streaming uploads. The polyfill silently coerced streams to strings — broken for the AI SDK, file uploads, multipart streaming. | §V.4, §VI |
 | **D-7** | `Body.text()` / `.json()` / `.arrayBuffer()` / `.bytes()` / `.blob()` / `.formData()` consume the body stream via the streams-native default reader's read-all pattern, NOT via JS callbacks. Each method: (a) checks `disturbed === false`, (b) acquires a default reader internally, (c) drains into a `Vec<u8>` accumulator on the Rust side, (d) decodes/parses, (e) resolves the returned Promise. | The polyfill ran the read loop in JS via `__readStreamToBytes`; it crossed the Rust↔V8 boundary once per chunk for what should be a single Rust-side allocation. | §III.4 |
 | **D-8** | `clone()` semantics (§5.4 / §5.5 / §6.3 "clone a body"): tee the body stream via the public streams-native `tee()` algorithm; create a new Request/Response wrapping branch[1] of the tee while the original keeps branch[0]. This means cloning DISTURBS no body (per spec) and yields two independent consumers. The `source` (D-2) is shared via Rc — cloning the source is cheap. | Spec; required to match WPT `request-clone` and `response-clone`. workerd does the same in `http.c++:348-358`. | §III.5 |
 | **D-9** | Native `AbortController` / `AbortSignal` (currently a JS polyfill in `embed/fetch.js:438-538`). New `#[v8_class]` types. The signal carries a list of pending abort callbacks and a `Cell<bool>` aborted flag plus a `RefCell<Option<v8::Global<Value>>>` reason. `fetch()` registers an abort callback that triggers fetch-controller termination. `AbortSignal.timeout(ms)` uses compio's `time::sleep` with the runtime executor; `AbortSignal.any(signals)` mirrors the polyfill semantics. | The polyfill is correct enough for the v1 stream-completion pattern but breaks for the spec-mandated `EventTarget` mixin (no real `dispatchEvent` semantics; no `once: true` listener option). Native EventTarget is shipped as part of this design. | §IX, §XII.4 |
-| **D-10** | Native `EventTarget` base class (currently absent — the AbortSignal polyfill rolls its own). New `#[v8_class]` type providing `addEventListener`, `removeEventListener`, `dispatchEvent`. Used by AbortSignal and (future) WebSocket / EventSource. <br> *(v2 fix: file path moved from `crates/runtime/src/fetch/event_target.rs` to `crates/runtime/src/web/dom/event_target.rs`. EventTarget is a DOM primitive shared by AbortSignal, future WebSocket, future EventSource — it does not belong under `fetch/`. Per MAJOR-41.)* The `#[v8_class]` macro grows `#[v8_inherit(EventTarget)]` to plumb the prototype chain (XIV.1 below). | EventTarget is the spec-mandated base for AbortSignal (DOM §3.3 / Fetch references). Without it, `signal instanceof EventTarget === false`, which breaks duck-typing in libraries like `langgraph`. | §XII, §XIV.1 |
+| **D-10** | Native `EventTarget` base class (currently absent — the AbortSignal polyfill rolls its own). New `#[v8_class]` type providing `addEventListener`, `removeEventListener`, `dispatchEvent`. Used by AbortSignal and (future) WebSocket / EventSource. <br> *(v2 fix: file path moved from `crates/zeroship-runtime/src/fetch/event_target.rs` to `crates/zeroship-runtime/src/web/dom/event_target.rs`. EventTarget is a DOM primitive shared by AbortSignal, future WebSocket, future EventSource — it does not belong under `fetch/`. Per MAJOR-41.)* The `#[v8_class]` macro grows `#[v8_inherit(EventTarget)]` to plumb the prototype chain (XIV.1 below). | EventTarget is the spec-mandated base for AbortSignal (DOM §3.3 / Fetch references). Without it, `signal instanceof EventTarget === false`, which breaks duck-typing in libraries like `langgraph`. | §XII, §XIV.1 |
 | **D-11** | Body source rewindability (§5.6 step 11): bodies created from byte sequences / Blobs / FormData / URLSearchParams ARE rewindable. Bodies created from a `ReadableStream` are NOT. On 307/308 with a non-rewindable body, the redirect chain fails with a network error per spec. workerd's `canRewindBody()` / `rewindBody()` is the model (`http.h:144-150`, `http.c++:201-224`). | The redirect rewriting (POST→GET on 301/302/303 — body becomes null; 307/308 — body retransmitted from source) is the most subtle redirect rule and the polyfill gets it wrong (always coerces to GET). | §VIII.3 |
-| **D-12** | Redirect rewriting per spec §5.6 (HTTP-redirect fetch) is performed in **Rust**, not handed to cyper. cyper 0.8 doesn't follow redirects automatically (verified `crates/runtime/src/transport/ssrf.rs:6-11`); we replace the in-tree per-request close-on-redirect with a proper redirect loop in `mainFetch` that re-issues `httpFetch` per redirect, applying method/body rewrites and the cross-origin Authorization-strip rule. Max 20 redirects per spec. <br> *(v2 fix (CRITICAL-1, MAJOR-30): cross-origin strip is **only `Authorization`** per Fetch §4.10 "CORS non-wildcard request-header name" + step 13 of §5.6. NOT 4 headers (was Authorization, Proxy-Authorization, Cookie, Host). `Cookie` and `Host` are forbidden request headers anyway — user code can't set them. Workerd's `http.c++:1880` strips only `Authorization` and quotes the spec inline. Workerd's `StripAuthorizationOnCrossOriginRedirect` compat flag is `compatEnableDate("2025-09-01")` — i.e. **default-on** for compat dates ≥ 2025-09-01; today (2026-05-01) most workers run it on. We enable unconditionally.)* | Spec §5.6 + §4.10. We own this anyway because cyper doesn't follow. | §VIII |
-| **D-13** | `Response` for null-body statuses (204, 205, 304, plus 101 for WebSocket upgrade): constructor throws TypeError if a non-null body is supplied (Fetch §5.5 step 7); this matches the existing polyfill behaviour (`embed/fetch.js:262-265`). For 101 specifically, the polyfill's `webSocket` init member (used by the gateway WebSocket path) is **preserved** as an extension (workerd's `http.h:951` does the same — `kj::Maybe<jsg::Ref<WebSocket>>`). | Compatibility with the gateway's WebSocket-upgrade flow at `crates/runtime/src/transport/handler.rs:138-194`. | §III.6 |
+| **D-12** | Redirect rewriting per spec §5.6 (HTTP-redirect fetch) is performed in **Rust**, not handed to cyper. cyper 0.8 doesn't follow redirects automatically (verified `crates/zeroship-runtime/src/transport/ssrf.rs:6-11`); we replace the in-tree per-request close-on-redirect with a proper redirect loop in `mainFetch` that re-issues `httpFetch` per redirect, applying method/body rewrites and the cross-origin Authorization-strip rule. Max 20 redirects per spec. <br> *(v2 fix (CRITICAL-1, MAJOR-30): cross-origin strip is **only `Authorization`** per Fetch §4.10 "CORS non-wildcard request-header name" + step 13 of §5.6. NOT 4 headers (was Authorization, Proxy-Authorization, Cookie, Host). `Cookie` and `Host` are forbidden request headers anyway — user code can't set them. Workerd's `http.c++:1880` strips only `Authorization` and quotes the spec inline. Workerd's `StripAuthorizationOnCrossOriginRedirect` compat flag is `compatEnableDate("2025-09-01")` — i.e. **default-on** for compat dates ≥ 2025-09-01; today (2026-05-01) most workers run it on. We enable unconditionally.)* | Spec §5.6 + §4.10. We own this anyway because cyper doesn't follow. | §VIII |
+| **D-13** | `Response` for null-body statuses (204, 205, 304, plus 101 for WebSocket upgrade): constructor throws TypeError if a non-null body is supplied (Fetch §5.5 step 7); this matches the existing polyfill behaviour (`embed/fetch.js:262-265`). For 101 specifically, the polyfill's `webSocket` init member (used by the gateway WebSocket path) is **preserved** as an extension (workerd's `http.h:951` does the same — `kj::Maybe<jsg::Ref<WebSocket>>`). | Compatibility with the gateway's WebSocket-upgrade flow at `crates/zeroship-runtime/src/transport/handler.rs:138-194`. | §III.6 |
 | **D-14** | `Request.cache` mode IDL parsed and stored; but cache-driven header rewrites in `httpNetworkOrCacheFetch` (steps 16-18) ARE applied (Pragma/Cache-Control insertion under `no-cache`/`no-store`/`reload`). No actual cache lookup happens (no cache layer in v1). `only-if-cached` returns a network error. This matches Workers' `Request::CacheMode` enum (`http.h:651-658`). | The header rewrites are user-observable on the wire even without a cache. | §V.4 |
 | **D-15** | `Accept-Encoding` is added to outbound requests by default unless user code provided one (including empty string for opt-out). The canonical value is `br, gzip, deflate` for HTTPS and `gzip, deflate` for HTTP (HTTPS-prefers-brotli per undici). <br> *(v2 fix (MAJOR-31): canonicalised single ordering — was inconsistent: D-15 said `br, gzip, deflate`, §XV row 6 said `gzip, deflate, br`. Picked `br, gzip, deflate` (HTTPS) consistently.)* | Without this, the design's decompression integration is dead code on every request, because no server sends compressed bodies absent an `Accept-Encoding`. | §V.5, §XV row 6 |
 | **D-16** | `Origin` header: appended to outbound requests when (a) method is not in `{GET, HEAD}`, OR (b) request mode is `cors`, OR (c) request mode is `websocket` / `webtransport`. Value is the origin of `request.url`, **subject to referrer policy** — under `"no-referrer"`, the value is the literal `"null"`. <br> *(v2 fix (MAJOR-22, MAJOR-23): was "method is not GET/HEAD/OPTIONS/TRACE" (4-method exclusion). Spec at §3.2.6 step 4 is GET/HEAD only (2-method exclusion). Spec also conditions Origin VALUE on referrer-policy and adds `cors` / `websocket` / `webtransport` modes to the trigger set.)* | RFC 9110 §10.2 + Fetch §3.2.6; many APIs require Origin on POST/PUT for CSRF defense. | §V.7 |
 | **D-17** | Forbidden request headers (Fetch §2.2.2): the names listed in the spec PLUS `Proxy-*` and `Sec-*` prefixes. <br> The `X-HTTP-Method` family (`X-HTTP-Method`, `X-HTTP-Method-Override`, `X-Method-Override`) is **conditionally** forbidden — only when the value parses to a forbidden method (`CONNECT` / `TRACE` / `TRACK`) per Fetch §2.2.2 step 3. *(v2 fix (MAJOR-21): was unconditionally forbidden in v1.)* <br> v1 ENFORCES these on `Request.headers.set()` / `append()` via the headers-native guard machinery. Setting a forbidden header is a silent no-op (per spec — `validate` returns false; `set`/`append` short-circuit). | Spec; required for WPT `headers/headers-no-cors.any.js`. | §II.6, §IV.6 |
 | **D-18** | `Method` validation: per Fetch §5.4 step 30, the `method` init member is normalized: `"DELETE"`/`"GET"`/`"HEAD"`/`"OPTIONS"`/`"POST"`/`"PUT"` are uppercased; `"CONNECT"`/`"TRACE"`/`"TRACK"` throw TypeError ("forbidden method"); other tokens pass through case-preserving (token validation against RFC 9110 tchar set; non-token throws TypeError). Mirrors deno's `validateAndNormalizeMethod` (deno `23_request.js:234-253`). | Spec; required for WPT `forbidden-method.any.js`. | §IV.4 |
 | **D-19** | Bad-port blocklist (Fetch §4.3 "block bad port"): the **83-port** list from the spec is enforced at HTTP-fetch entry; matching ports throw a network error. List sourced **directly from the spec** (`tcpmux:1` through `amanda:10080`, plus `0`), NOT from undici. <br> *(v2 fix (CRITICAL-4): was "78 ports from undici"; spec has 83 (counting port 0). undici's list is 82 (missing port 0). WPT `request-bad-port.any.js` checks 83 ports verbatim — sourcing from spec avoids re-introducing undici's deviation.)* | Spec; required for WPT `request-bad-port.any.js`. | §V.1 |
-| **D-20** | Spec algorithm naming in Rust: every named spec algorithm gets a Rust function with the same name in `snake_case`. Lives in `crates/runtime/src/fetch/algorithms.rs` for cross-class operations (`extract_body`, `main_fetch`, `http_fetch`, etc.) and in the relevant class file for class-local operations. Same rule as streams-native D-20. | Reduces cognitive load when cross-referencing the spec. | §III–VIII |
+| **D-20** | Spec algorithm naming in Rust: every named spec algorithm gets a Rust function with the same name in `snake_case`. Lives in `crates/zeroship-runtime/src/fetch/algorithms.rs` for cross-class operations (`extract_body`, `main_fetch`, `http_fetch`, etc.) and in the relevant class file for class-local operations. Same rule as streams-native D-20. | Reduces cognitive load when cross-referencing the spec. | §III–VIII |
 | **D-21** | `data:` URL scheme: implemented via the **`data-url` crate** (https://crates.io/crates/data-url, ~30k downloads/mo, MIT/Apache-2.0). Add as a workspace dep in `Cargo.toml` (`data-url = "0.3"`). Returns a Response with the parsed MIME type and decoded body. The fetch path branches on `currentURL.scheme` per §5.2 main-fetch step 11. <br> *(v2 fix (CRITICAL-20, Process-flaw 1): v1 said "via existing url.rs or hand-roll from undici (~150 LOC) — verify before implementation". The verification is done: the crate is NOT in the workspace; we add it now (resolves "decision-with-verification"). undici's `data-url.js` is ~270 LOC, not 150 — the hand-roll estimate was wrong. The `data-url` crate is the official Servo implementation, ~700 LOC total, well-tested.)* | Spec; cheap; real use case (inline images, JSON, signed payloads in URL form). | §V.6, §XII |
 | **D-22** | The polyfill's `__rawFetch(method, url, headersJson, body)` JSON entry point (`fetch.rs:202-302`) is **deleted** in landing 2 (D-23) — every replacement code path goes through `Request` / `Response` V8 wrappers directly, no JSON marshalling. The headers-as-JSON path was a polyfill-era kludge and a real perf hit (1KB of headers = 1KB of JSON parse per request). Native takes the spec's path: `headersList: Vec<(Vec<u8>, Vec<u8>)>`, fed straight to hyper via the `http` crate's `HeaderMap`. | Removes ~50ns per request of JSON parse and removes a class of escaping bugs (header value with `"` in it). | §V.7 |
-| **D-23** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_fetch`, polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill entirely (`embed/fetch.js`). The native cutover (step 2) ALSO deletes `crates/runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` and the JSON header marshalling helpers; the cyper integration in `crates/runtime/src/transport/ssrf.rs` is RETAINED (it has the SSRF resolver, the in-flight fetch limit, the per-thread client, and the body-streaming path) but its public callback is changed from `__rawFetch` to `fetch` itself. | Risk control. Identical pattern to headers-native D-19. | §XVI |
+| **D-23** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_fetch`, polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill entirely (`embed/fetch.js`). The native cutover (step 2) ALSO deletes `crates/zeroship-runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` and the JSON header marshalling helpers; the cyper integration in `crates/zeroship-runtime/src/transport/ssrf.rs` is RETAINED (it has the SSRF resolver, the in-flight fetch limit, the per-thread client, and the body-streaming path) but its public callback is changed from `__rawFetch` to `fetch` itself. | Risk control. Identical pattern to headers-native D-19. | §XVI |
 | **D-24** | SSRF protection (existing `is_blocked_ip` + `SsrfResolver` in `fetch.rs:36-163`) is preserved verbatim in the native path. The native fetch wraps `validate_url` before any DNS or socket work; the SSRF resolver remains a cyper resolver. Dev-mode bypass via `ZEROSHIP_DEV=1` retained. | Security; non-spec but mandatory for the platform. The polyfill never had this; the JS path called into Rust which applied it. | §V.1 |
 | **D-25** | Per-isolate concurrent-fetch cap: 64 (existing `MAX_PENDING_FETCHES` in `state.rs`). Plus per-runtime `MAX_PENDING_OPS` (1024). Excess fetches throw `RangeError` synchronously from the `fetch()` callback. Verified against `fetch.rs:230-265`. | Bounds the resolver-map memory; bounds the per-thread cyper connection pool. The number is unchanged from the polyfill path. | §VI |
 | **D-26** | Per-response body size cap: 10 MiB (existing `MAX_RESPONSE_SIZE` in `fetch.rs:25`). Preserved verbatim. Applied AFTER decompression (so the cap is on the user-visible byte count, NOT the wire bytes — matches Chrome/Firefox `network::ResourceRequestBody`). | Memory bound; matches existing polyfill behaviour. | §V.5, §VII |
@@ -458,12 +458,12 @@ stream (with optional codec adaptation in the middle).
 ### I.2. File layout
 
 ```
-crates/runtime/src/web/dom/                       <!-- v2 fix (MAJOR-41): EventTarget out of fetch/. -->
+crates/zeroship-runtime/src/web/dom/                       <!-- v2 fix (MAJOR-41): EventTarget out of fetch/. -->
 ├── mod.rs                       (new) DOM primitives shared across fetch / WS / EventSource
 ├── event_target.rs              (new) EventTarget base class (~430 LOC; matches workerd's `events.c++` shape)
 └── event.rs                     (new) Event base class (~120 LOC)
 
-crates/runtime/src/fetch/
+crates/zeroship-runtime/src/fetch/
 ├── mod.rs                       (new) module root, public exports
 ├── request.rs                   (new) Request class + extractBody integration
 ├── response.rs                  (new) Response class + with_response_body_hook hook surface
@@ -482,23 +482,23 @@ crates/runtime/src/fetch/
 ├── dictionaries.rs              (new) RequestInit / ResponseInit dictionary parsers
 └── constants.rs                 (new) forbidden methods, forbidden headers, redirect statuses, null-body statuses, safe methods, request-body-header names
 
-crates/runtime/src/transport/ssrf.rs       (split: SSRF resolver + thread-local cyper Client +
+crates/zeroship-runtime/src/transport/ssrf.rs       (split: SSRF resolver + thread-local cyper Client +
                                    in-flight counter move into fetch/network.rs;
                                    send_and_stream_response into fetch/algorithms.rs;
                                    raw_fetch_callback / spawn_body_reader / execute_fetch
                                    are removed — replaced by FetchTask + execute_fetch_native)
-crates/runtime/src/transport/handler.rs        (deleted in landing 2 — JSON-helper path retired)
-crates/runtime/src/embed/fetch.js (deleted in landing 3)
-crates/runtime/src/lib.rs         (modified) +pub mod fetch;
-crates/runtime/src/core/init.rs        (modified) install Request / Response /
+crates/zeroship-runtime/src/transport/handler.rs        (deleted in landing 2 — JSON-helper path retired)
+crates/zeroship-runtime/src/embed/fetch.js (deleted in landing 3)
+crates/zeroship-runtime/src/lib.rs         (modified) +pub mod fetch;
+crates/zeroship-runtime/src/core/init.rs        (modified) install Request / Response /
                                               FormData / AbortController /
                                               AbortSignal / EventTarget classes;
                                               install fetch global
 
-crates/runtime-macros/src/v8_class.rs  (modified) §XIV
-crates/runtime-macros/src/lib.rs       (modified) §XIV
+crates/zeroship-runtime-macros/src/v8_class.rs  (modified) §XIV
+crates/zeroship-runtime-macros/src/lib.rs       (modified) §XIV
 
-crates/runtime/tests/
+crates/zeroship-runtime/tests/
 ├── fetch_request.rs              (new) hand-written Request constructor tests
 ├── fetch_response.rs             (new) hand-written Response constructor tests
 ├── fetch_body.rs                 (new) body extract / consume / clone tests
@@ -555,11 +555,11 @@ is V8 entry/exit; native eliminates it.
 
 | Invariant | Status |
 |-----------|--------|
-| Zero tokio | OK — uses `cyper` (compio + hyper); `cyper::Client::builder()` per `crates/runtime/src/transport/ssrf.rs:327`. cyper Cargo.toml feature list (workspace `Cargo.toml` line 25, verified): `default-features = false, features = ["rustls", "json", "stream"]`. No `tokio` transitive dep. *(v2 fix CRITICAL-15/16: was wrongly cited as `["client", "http1"]` in v1.)* |
+| Zero tokio | OK — uses `cyper` (compio + hyper); `cyper::Client::builder()` per `crates/zeroship-runtime/src/transport/ssrf.rs:327`. cyper Cargo.toml feature list (workspace `Cargo.toml` line 25, verified): `default-features = false, features = ["rustls", "json", "stream"]`. No `tokio` transitive dep. *(v2 fix CRITICAL-15/16: was wrongly cited as `["client", "http1"]` in v1.)* |
 | V8 per thread, one isolate per app | OK — `thread_local! CLIENT` matches; no cross-thread state introduced. |
 | typed_id everywhere | N/A (fetch isn't a typed entity in the platform sense). |
 | Wire formats are immutable contracts | OK — Request / Response IDL is the wire format and we match the WHATWG spec exactly. The internal `FetchTask` struct in `fetch/network.rs` is a private contract between the fetch callback and the runtime pump; changes freely. *(v2 fix Process-flaw 4: was `FetchRequest` in v1 — renamed for consistency with the spec's "fetch params" terminology.)* |
-| Native primitives are the kernel | OK — `fetch` is an npm-equivalent surface (the spec global), implementation in Rust. The 6 NEW V8 globals (Request, Response, FormData, AbortController, AbortSignal, EventTarget+Event) are DOM/spec primitives, not platform-specific zeroship globals. EventTarget+Event live in `crates/runtime/src/web/dom/` (shared with future WebSocket / EventSource), the rest in `crates/runtime/src/fetch/`. *(v2 fix Process-flaw 6: justifies the kernel-surface expansion — these are platform-mandated by spec; if we don't add them, no language-spec library works.)* |
+| Native primitives are the kernel | OK — `fetch` is an npm-equivalent surface (the spec global), implementation in Rust. The 6 NEW V8 globals (Request, Response, FormData, AbortController, AbortSignal, EventTarget+Event) are DOM/spec primitives, not platform-specific zeroship globals. EventTarget+Event live in `crates/zeroship-runtime/src/web/dom/` (shared with future WebSocket / EventSource), the rest in `crates/zeroship-runtime/src/fetch/`. *(v2 fix Process-flaw 6: justifies the kernel-surface expansion — these are platform-mandated by spec; if we don't add them, no language-spec library works.)* |
 | The gateway is dumb | N/A (fetch lives in worker, not gateway). |
 
 ## II. IDL surface — exhaustive
@@ -591,7 +591,7 @@ that headers-native deferred (`request`, `request-no-cors`, `response`,
 `immutable`). The headers struct grows a `Guard` enum field; `validate`
 gets the full §2.2 algorithm; forbidden-name lists move from
 `fetch/constants.rs` into `headers.rs::guard.rs`. ~200 LOC of additions
-to the existing `crates/runtime/src/web/headers.rs`.
+to the existing `crates/zeroship-runtime/src/web/headers.rs`.
 
 ### II.2. `Body` mixin (§5.3)
 
@@ -876,7 +876,7 @@ pub struct ResponseState {
     pub internal_response: RefCell<Option<v8::Global<v8::Object>>>,
     /// WebSocket upgrade extension (D-13). Set when init.webSocket is
     /// supplied AND status == 101. Read by the gateway WebSocket dispatch
-    /// path at `crates/runtime/src/transport/handler.rs:181-194` (which lives until
+    /// path at `crates/zeroship-runtime/src/transport/handler.rs:181-194` (which lives until
     /// landing 2 of D-23, then moves into the native Response inspect).
     pub web_socket_priv: PrivSymKey,
     pub self_weak: WeakV8Ref,
@@ -915,7 +915,7 @@ is allowed; setting `X-HTTP-Method-Override: TRACE` is blocked. <!-- v2 fix MAJO
 
 **Forbidden response-header names**: `set-cookie`, `set-cookie2`.
 
-These lists live in `crates/runtime/src/fetch/constants.rs` as static
+These lists live in `crates/zeroship-runtime/src/fetch/constants.rs` as static
 arrays. The `Headers::validate` algorithm (extended in v1 per §IV.6
 to gain a `Guard` field) consults them based on the headers' guard.
 For the conditional `X-HTTP-Method*` family, `validate` parses the
@@ -1240,7 +1240,7 @@ fetch-internal helpers built on streams' public RS reader API. -->
 #### III.4.1. Fetch-internal stream helpers
 
 ```rust
-// crates/runtime/src/fetch/body_stream.rs
+// crates/zeroship-runtime/src/fetch/body_stream.rs
 //
 // Drain a ReadableStream into a single Vec<u8>. Built on streams-native's
 // public default-reader API (from_native_source has shipped in streams-
@@ -1512,8 +1512,8 @@ in `fetch/algorithms.rs`).
 When the gateway dispatch path returns a Response with status 101
 and a `webSocket` init member, native preserves both. The Response's
 priv-sym `webSocket` field stores a `v8::Global<v8::Object>` pointing
-at a `WebSocket` wrapper from `crates/runtime/src/websocket.rs`. The
-gateway's `inspect_response` code (currently `crates/runtime/src/transport/handler.rs:181-194`)
+at a `WebSocket` wrapper from `crates/zeroship-runtime/src/websocket.rs`. The
+gateway's `inspect_response` code (currently `crates/zeroship-runtime/src/transport/handler.rs:181-194`)
 reads this priv sym to detect upgrade. After landing 2 of D-23 (when
 JSON dispatch is removed), the inspect routine reads ResponseState
 directly via Box<ResponseState> from the wrapper's internal field 0
@@ -1948,7 +1948,7 @@ The connection layer. Maps spec steps to cyper:
 | Make HTTP request | `request_builder.send().await` |
 | 100-199 ignore (except 101) | cyper does this internally; we receive the final status. |
 | Wait until headers are transmitted | implicit in `.send().await` resolving with response. |
-| Body streaming | `response.bytes_stream()` from cyper (existing pattern in `crates/runtime/src/transport/ssrf.rs:548`). |
+| Body streaming | `response.bytes_stream()` from cyper (existing pattern in `crates/zeroship-runtime/src/transport/ssrf.rs:548`). |
 
 <!-- v2 fix (CRITICAL-3): hyper 1.x API. hyper::Body and Body::from /
 Body::wrap_stream do not exist in hyper 1.x — they were removed when
@@ -2091,7 +2091,7 @@ Per compression-streams-native.md §"From the native-fetch project"
 (lines 173-205), fetch must expose:
 
 ```rust
-// crates/runtime/src/fetch/response.rs
+// crates/zeroship-runtime/src/fetch/response.rs
 pub type ResponseBodyHook = Box<dyn Fn(
     &mut HookCtx,
     BodySourcePipe,
@@ -2327,7 +2327,7 @@ The fetch flow:
    read JS state (e.g. body chunks during a streaming upload), it
    yields to the pump and the pump re-enters V8 to do the read,
    then schedules the future to resume. This is the same pattern
-   the existing `crates/runtime/src/transport/ssrf.rs:spawn_body_reader`
+   the existing `crates/zeroship-runtime/src/transport/ssrf.rs:spawn_body_reader`
    uses today.
 4. When the future completes, it pushes an
    `OpResult::Fetch { op_id, inner_response }` onto the result
@@ -2401,7 +2401,7 @@ fn drive_readable_stream(
 ```
 
 `schedule_v8_work` is the existing runtime API used by the current
-`spawn_body_reader` (`crates/runtime/src/transport/ssrf.rs:415-450` in v1
+`spawn_body_reader` (`crates/zeroship-runtime/src/transport/ssrf.rs:415-450` in v1
 state) — it queues a closure that the next pump iteration will run
 inside a `v8::Scope`, posting the closure's return value back via a
 oneshot channel. NOT a lock.
@@ -2425,8 +2425,8 @@ When `signal.abort()` fires after the fetch has started:
 5. `processResponse` runs; sees the abort, rejects the user-facing
    promise with the signal's reason.
 
-The existing `crates/runtime/src/channel::CancelFlag` is reused for
-the controller.abort signal — see `crates/runtime/src/transport/ssrf.rs:271-298`
+The existing `crates/zeroship-runtime/src/channel::CancelFlag` is reused for
+the controller.abort signal — see `crates/zeroship-runtime/src/transport/ssrf.rs:271-298`
 for the existing pattern.
 
 ## VII. Streaming response body — the forward direction
@@ -2900,11 +2900,11 @@ referenced.
 
 ## X. EventTarget (DOM §2.7) — the AbortSignal base class
 
-<!-- v2 fix (MAJOR-41): EventTarget lives in crates/runtime/src/web/dom/, NOT
+<!-- v2 fix (MAJOR-41): EventTarget lives in crates/zeroship-runtime/src/web/dom/, NOT
 under fetch/. It is a DOM primitive shared with future WebSocket /
 EventSource. -->
 
-Implementation file: `crates/runtime/src/web/dom/event_target.rs`. Shared
+Implementation file: `crates/zeroship-runtime/src/web/dom/event_target.rs`. Shared
 with future WebSocket / EventSource / MessagePort implementations.
 Per spec, EventTarget is the base class for ~30 DOM types — it does
 not "belong to fetch."
@@ -3281,14 +3281,14 @@ They live in fetch/body_stream.rs and are layered on streams-native's
 public RS reader API (acquire_default_reader / reader_read), which
 HAS shipped (RS+DefaultController+DefaultReader landed). -->
 
-Helpers in `crates/runtime/src/fetch/body_stream.rs` (NOT in streams).
+Helpers in `crates/zeroship-runtime/src/fetch/body_stream.rs` (NOT in streams).
 Layered on streams-native's `acquire_default_reader` /
 `reader_read` / `release_reader` Rust-side functions, which are part
 of streams-native's already-shipped surface (RS+DefaultController+
 DefaultReader). Implementation details are in §III.4.1.
 
 ```rust
-// crates/runtime/src/fetch/body_stream.rs
+// crates/zeroship-runtime/src/fetch/body_stream.rs
 pub async fn read_all_bytes(
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,
@@ -3332,7 +3332,7 @@ sibling projects" — both directions — is honoured. Per-point audit:
 | Compression #5 (TransformStream internal-field count ≥ 2) | Streams-native deliverable. | n/a |
 | Compression #6 (Accept-Encoding default `br, gzip, deflate` HTTPS / `gzip, deflate` HTTP) | **Fetch deliverable — D-15.** Implemented in `httpNetworkOrCacheFetch` step 8.19. *(v2 fix MAJOR-31: ordering is `br, gzip, deflate` for HTTPS, consistently. Old v1 was inconsistent between D-15 and §XV row 6.)* | §V.7 |
 | Compression #7 (byte-faithful Content-Encoding parsing) | **Fetch deliverable — D-15.** Header list is `Vec<(Vec<u8>, Vec<u8>)>` per headers-native; parsing happens once in the registered hook and the Codec chain consumes the lowercase name. | §V.9 |
-| Compression `with_response_body_hook` API surface | **Fetch deliverable — implemented per the contract.** *(v2 fix CRITICAL-12: v1 unilaterally repudiated this API; that broke compression-streams-native's stated dependency. v2 re-implements the contract.)* The named API `ResponseBuilder::with_response_body_hook(hook: ResponseBodyHook)` ships in `crates/runtime/src/fetch/response.rs`. compression-streams-native registers itself as the canonical hook in its init code; fetch's `finalize_response_body` invokes the registered hook (see §V.9.0). The hook's `HookCtx` exposes the mutable header list (so the hook can strip Content-Encoding/Length per Compression #3) and the URL+status (for hook policy decisions). | §V.9, §V.9.0 |
+| Compression `with_response_body_hook` API surface | **Fetch deliverable — implemented per the contract.** *(v2 fix CRITICAL-12: v1 unilaterally repudiated this API; that broke compression-streams-native's stated dependency. v2 re-implements the contract.)* The named API `ResponseBuilder::with_response_body_hook(hook: ResponseBodyHook)` ships in `crates/zeroship-runtime/src/fetch/response.rs`. compression-streams-native registers itself as the canonical hook in its init code; fetch's `finalize_response_body` invokes the registered hook (see §V.9.0). The hook's `HookCtx` exposes the mutable header list (so the hook can strip Content-Encoding/Length per Compression #3) and the URL+status (for hook policy decisions). | §V.9, §V.9.0 |
 
 | Streams-native point (consumed by fetch) | Native fetch usage | Section |
 |------------------------------------------|--------------------| --------|
@@ -3345,7 +3345,7 @@ sibling projects" — both directions — is honoured. Per-point audit:
 
 | Headers-native point (extended by fetch) | Native fetch deliverable | Section |
 |-------------------------------------------|--------------------------|---------|
-| Guard machinery (deferred per headers-native "Out of scope for v1") | **Fetch deliverable.** This design adds the `Guard` enum field and the forbidden-name lists to `crates/runtime/src/web/headers.rs`. | §II.6, §IV.6 |
+| Guard machinery (deferred per headers-native "Out of scope for v1") | **Fetch deliverable.** This design adds the `Guard` enum field and the forbidden-name lists to `crates/zeroship-runtime/src/web/headers.rs`. | §II.6, §IV.6 |
 | `[SameObject]` aliasing | **Fetch deliverable.** `Request.headers` and `Response.headers` use the priv-sym aliasing pattern documented in headers-native "Forward compatibility" §. | §IV.8 |
 | `Headers::wrap_for_request` / `wrap_for_response` | **Fetch deliverable.** New constructors that mint a Headers wrapper sharing an Rc<RefCell<HeaderList>> with a Request/Response state. | §IV.8 |
 
@@ -3363,7 +3363,7 @@ v2 adds redirect/, body/, basic/, credentials/ to the must-pass-v1
 set so "full WHATWG compat" (Goal 1) is delivered. -->
 
 Vendored from `https://github.com/web-platform-tests/wpt` at a pinned
-commit; lives in `crates/runtime/tests/wpt/fetch/api/`. Counts based
+commit; lives in `crates/zeroship-runtime/tests/wpt/fetch/api/`. Counts based
 on the existing checkout at `tests/wpt/fetch/api/` (project root,
 NOT `refs/wpt/`). The `refs/wpt` path mentioned in v1 was a
 typo — the actual checkout is `tests/wpt/`.
@@ -3581,7 +3581,7 @@ multi-realm / service worker harness / h2-only).
 
 ### XVI.2. Hand-written tests
 
-Lives in `crates/runtime/tests/`. Mirrors WPT but exercises corners
+Lives in `crates/zeroship-runtime/tests/`. Mirrors WPT but exercises corners
 the WPT suite doesn't:
 
 - `fetch_request.rs`:
@@ -3636,7 +3636,7 @@ the WPT suite doesn't:
 ### XVI.3. WPT runner
 
 Pattern from headers-native + streams-native:
-`crates/runtime/tests/wpt_fetch.rs` boots a runtime, vendors WPT
+`crates/zeroship-runtime/tests/wpt_fetch.rs` boots a runtime, vendors WPT
 fetch tests via the cargo-included `wpt/` directory, runs each via a
 small harness that polyfills the WPT `testharness.js` async APIs,
 asserts pass count.
@@ -3660,7 +3660,7 @@ Realised as the env-var gate `ZEROSHIP_NATIVE_FETCH=1` (not a Cargo
 feature; matches streams-native's `ZEROSHIP_NATIVE_STREAMS` and
 headers-native's `ZEROSHIP_NATIVE_HEADERS` patterns):
 
-- `crates/runtime/src/web/fetch/`, `fetch_request.rs`,
+- `crates/zeroship-runtime/src/web/fetch/`, `fetch_request.rs`,
   `fetch_response.rs`, `fetch_body/`, `dom/` modules all present.
 - `init.rs::install_dom` (AbortController / AbortSignal /
   EventTarget / Event / FormData / Request / Response / native
@@ -3683,12 +3683,12 @@ flip the default in landing 2.
 
 - Default-enable `runtime_native_fetch`.
 - `init.rs` no longer loads the polyfill.
-- `crates/runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` is removed
+- `crates/zeroship-runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` is removed
   (not needed; native Request constructor is direct).
-- `crates/runtime/src/transport/handler.rs::looks_like_response` is rewritten to
+- `crates/zeroship-runtime/src/transport/handler.rs::looks_like_response` is rewritten to
   read ResponseState directly via internal field 0 (no priv-sym
   probe; the macro-emitted unwrap is the only path).
-- `crates/runtime/src/transport/handler.rs::extract_response_headers` deleted
+- `crates/zeroship-runtime/src/transport/handler.rs::extract_response_headers` deleted
   (replaced by direct HeaderList read from Response state).
 - The polyfill at `embed/fetch.js` remains as a fallback (still
   loaded in non-default-feature builds for emergency rollback).
@@ -3743,7 +3743,7 @@ this soft dep does not block fetch.
 
 The implementation order:
 
-1. **EventTarget + Event base classes** in `crates/runtime/src/web/dom/`.
+1. **EventTarget + Event base classes** in `crates/zeroship-runtime/src/web/dom/`.
    ~430 LOC + ~120 LOC. *(v2 fix MAJOR-41: location is `dom/`, not
    `fetch/`.)* Macro extension XIV.1 (`#[v8_inherit]`) lands here.
    Tests: `addEventListener` / `removeEventListener` / `dispatchEvent`
@@ -3876,8 +3876,8 @@ streams-native's public API):**
 
 | Helper | Lives in | Why fetch-internal |
 |--------|----------|--------------------|
-| `read_all_bytes(scope, stream) -> Result<Vec<u8>, ...>` | `crates/runtime/src/fetch/body_stream.rs` | Body consumer accumulator. Layered on streams' RS reader. NOT a streams-native deliverable (v2 fix CRITICAL-13). |
-| `read_one_chunk(scope, stream) -> Option<Result<Vec<u8>, ...>>` | `crates/runtime/src/fetch/body_stream.rs` | Streaming-upload chunk pump. Layered on streams' RS reader. NOT a streams-native deliverable (v2 fix CRITICAL-13). |
+| `read_all_bytes(scope, stream) -> Result<Vec<u8>, ...>` | `crates/zeroship-runtime/src/fetch/body_stream.rs` | Body consumer accumulator. Layered on streams' RS reader. NOT a streams-native deliverable (v2 fix CRITICAL-13). |
+| `read_one_chunk(scope, stream) -> Option<Result<Vec<u8>, ...>>` | `crates/zeroship-runtime/src/fetch/body_stream.rs` | Streaming-upload chunk pump. Layered on streams' RS reader. NOT a streams-native deliverable (v2 fix CRITICAL-13). |
 
 If compression-streams' design changes shape (e.g. moves from
 NativeSource chaining to TransformStream-based chaining), the
@@ -3979,10 +3979,10 @@ extension.
 ## XXI. Revision history
 
 - **v1 (2026-05-01)** — Initial design covering the full WHATWG Fetch
-  surface. Replaces the JS polyfill at `crates/runtime/src/embed/fetch.js`
+  surface. Replaces the JS polyfill at `crates/zeroship-runtime/src/embed/fetch.js`
   (705 LOC) and the JSON-marshalling shim at
-  `crates/runtime/src/transport/handler.rs` (386 LOC), preserves the in-tree cyper
-  integration at `crates/runtime/src/transport/ssrf.rs` (existing SSRF guard,
+  `crates/zeroship-runtime/src/transport/handler.rs` (386 LOC), preserves the in-tree cyper
+  integration at `crates/zeroship-runtime/src/transport/ssrf.rs` (existing SSRF guard,
   thread-local Client, fetch concurrency cap). Designed pure-native on
   V8 + Rust + cyper, zero tokio.
 
@@ -4040,7 +4040,7 @@ extension.
   - MAJOR-31 (Accept-Encoding ordering: br,gzip,deflate single canonical)
   - MAJOR-38 (streams-native partial ship; fetch parallel-development)
   - MAJOR-40 (fire abort event AFTER abort steps via EventTarget)
-  - MAJOR-41 (EventTarget moved to crates/runtime/src/web/dom/)
+  - MAJOR-41 (EventTarget moved to crates/zeroship-runtime/src/web/dom/)
 
   Process flaws fixed:
   - D-21 verification resolved (data-url crate added).
@@ -4081,14 +4081,14 @@ extension.
   - `docs/proposals/headers-native.md`
   - `docs/proposals/compression-streams-native.md`
 - Project AGENTS.md — `/home/ruiyang/Projects/appbase/AGENTS.md`
-- Existing polyfill: `crates/runtime/src/embed/fetch.js` (705 LOC)
-- Existing dispatch shim: `crates/runtime/src/transport/handler.rs` (386 LOC)
-- Existing cyper bind: `crates/runtime/src/transport/ssrf.rs` (852 LOC; the
+- Existing polyfill: `crates/zeroship-runtime/src/embed/fetch.js` (705 LOC)
+- Existing dispatch shim: `crates/zeroship-runtime/src/transport/handler.rs` (386 LOC)
+- Existing cyper bind: `crates/zeroship-runtime/src/transport/ssrf.rs` (852 LOC; the
   cyper transport, SSRF guard, fetch concurrency cap stay)
-- Native classes already shipped: `crates/runtime/src/web/headers.rs`,
-  `crates/runtime/src/web/encoding.rs`, `crates/runtime/src/web/codec.rs`
-- Macro internals: `crates/runtime-macros/src/v8_class.rs`,
-  `crates/runtime-macros/src/lib.rs`
+- Native classes already shipped: `crates/zeroship-runtime/src/web/headers.rs`,
+  `crates/zeroship-runtime/src/web/encoding.rs`, `crates/zeroship-runtime/src/web/codec.rs`
+- Macro internals: `crates/zeroship-runtime-macros/src/v8_class.rs`,
+  `crates/zeroship-runtime-macros/src/lib.rs`
 
 ---
 

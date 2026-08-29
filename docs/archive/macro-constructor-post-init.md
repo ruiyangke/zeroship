@@ -3,11 +3,11 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macr
 # MAC-02 — `#[v8_constructor(post_init = "fn")]` with `(scope, this)` signature
 
 **Date:** 2026-05-04
-**Status:** **Shipped** — `post_init` codegen lands in `crates/runtime-macros/src/v8_class/parse/marker_attr.rs` and is consumed by `runtime-macros-refactor.md` Wave 1. Document retained as design spec.
+**Status:** **Shipped** — `post_init` codegen lands in `crates/zeroship-runtime-macros/src/v8_class/parse/marker_attr.rs` and is consumed by `runtime-macros-refactor.md` Wave 1. Document retained as design spec.
 **Tracking:** Macro audit MAC-02
 **Spec:** WebIDL §3.7.1 (Interface constructors); Streams §3.4 / §3.5 / §4.4 / §5.2 (constructor algorithms); ECMA-262 `[[Construct]]` (§9.4.3 / §10.3.2)
-**Affected crate:** `crates/runtime-macros/`
-**Consumers blocked:** `crates/runtime/src/web/streams/{readable_default_reader,readable_byob_reader,writable_writer,transform}.rs`; parts of native `Request`/`Response` migration
+**Affected crate:** `crates/zeroship-runtime-macros/`
+**Consumers blocked:** `crates/zeroship-runtime/src/web/streams/{readable_default_reader,readable_byob_reader,writable_writer,transform}.rs`; parts of native `Request`/`Response` migration
 **V8 crate pin:** workspace `Cargo.toml` declares `v8 = "147"`,
 resolving to `v8 v147.1.0` per `Cargo.lock`. The crate is named `v8`
 on crates.io (modern naming; the older `rusty_v8` crate name is
@@ -29,7 +29,7 @@ both stable since syn 2.0, which the workspace already requires).
 > Round 2 — major restructure. v1's mid-doc reversal between `&Self` and
 > `(scope, this)`-only signatures resolved in favour of the latter (§5.5).
 > v1's fabricated `OpErrorKind::JsValue` variant in §4.3 corrected against
-> the actual `crates/runtime/src/core/state.rs` enum (5 variants).
+> the actual `crates/zeroship-runtime/src/core/state.rs` enum (5 variants).
 > v1's LoC estimates re-measured with `wc -l`. Worked AbortSignal example
 > added (§5.4). WebSocket-vs-streams comparison table added (§1.5).
 
@@ -59,7 +59,7 @@ Each of these has the same shape: a constructor receives a stream, allocates
 a paired `(Promise, PromiseResolver)`, stashes the resolver in Rust state, and
 writes the Promise into one or more private symbols on the wrapper.
 
-#### Reader — `crates/runtime/src/web/streams/readable_default_reader.rs` (742 LOC)
+#### Reader — `crates/zeroship-runtime/src/web/streams/readable_default_reader.rs` (742 LOC)
 
 Lines 271–299 (`set_up_default_reader`): allocate `closed_resolver`, build
 `DefaultReaderState::new(resolver_g)`, box-into-raw, set External into field
@@ -75,7 +75,7 @@ this** because the priv-sym writes don't strictly need post-install ordering
 and `acquireReader` machinery; pulling it apart on the in-body-only path
 would fork that helper. Post_init keeps the helper intact.
 
-#### BYOBReader — `crates/runtime/src/web/streams/readable_byob_reader.rs` (894 LOC)
+#### BYOBReader — `crates/zeroship-runtime/src/web/streams/readable_byob_reader.rs` (894 LOC)
 
 Lines 296–360 / 407–454. Same pattern. Plus an extra brand-tag write
 (`BYOB_READER_TAG_SLOT`) that distinguishes the BYOB box from the
@@ -83,7 +83,7 @@ default-reader box (since both have an External in field 0 — the macro's
 brand check would handle this for us once migrated, but the hand-roll
 explicitly stamps the tag).
 
-#### Writer — `crates/runtime/src/web/streams/writable_writer.rs` (795 LOC)
+#### Writer — `crates/zeroship-runtime/src/web/streams/writable_writer.rs` (795 LOC)
 
 Lines 175–223 / 250–339. **Two paired Promises** — `[[closedPromise]]` AND
 `[[readyPromise]]` — and the initialization branches by `WSState`
@@ -93,7 +93,7 @@ Lines 175–223 / 250–339. **Two paired Promises** — `[[closedPromise]]` AND
 into `WriterState`. Like Reader, the SetUp helper is shared with
 `acquireWriter`; post_init keeps the helper intact across the two callers.
 
-#### TransformStream — `crates/runtime/src/web/streams/transform.rs` (905 LOC)
+#### TransformStream — `crates/zeroship-runtime/src/web/streams/transform.rs` (905 LOC)
 
 Lines 293–391. The `TransformStream` constructor:
 1. Validates `transformer.readableType` / `writableType` are not set
@@ -117,8 +117,8 @@ back from the TS state via `with_ts_state` (which itself runs an
 
 The macro already supports a synthetic `wrapper: v8::Local<v8::Object>`
 parameter that gets bound to `args.this()` (see `is_wrapper_local` in
-`crates/runtime-macros/src/v8_class.rs:1882`; consumed today by
-`crates/runtime/src/web/websocket/mod.rs:301`). One could naively claim:
+`crates/zeroship-runtime-macros/src/v8_class.rs:1882`; consumed today by
+`crates/zeroship-runtime/src/web/websocket/mod.rs:301`). One could naively claim:
 "add the synthetic, run all the resolver/priv-sym writes inside the user
 constructor body, return `Self` — done." That works for Reader / BYOBReader /
 Writer, where the user wiring only needs `&mut PinScope` and `args.this()`
@@ -161,12 +161,12 @@ calls `Headers::new` *after* the request is fully wrapped. Migrating
 `Request` to `#[v8_class]` means giving the request constructor a place
 to call `Headers::new` and stash the result on a priv-sym (`[SameObject]`
 caching, see `gen_same_object_getter_callback` in
-`crates/runtime-macros/src/v8_class.rs:1219`). That is *exactly* what
+`crates/zeroship-runtime-macros/src/v8_class.rs:1219`). That is *exactly* what
 post-init enables.
 
 ### 1.4 What the macro can do today
 
-`crates/runtime-macros/src/v8_class.rs:1623` (`gen_constructor_callback`)
+`crates/zeroship-runtime-macros/src/v8_class.rs:1623` (`gen_constructor_callback`)
 emits:
 
 ```text
@@ -412,7 +412,7 @@ same window the hand-rolled stream constructors already use today.
 
 Post_init runs while V8's "construct" frame is still open. Single-threaded
 single-isolate (V8's invariant — the runtime never shares an isolate
-across compio threads, see `crates/worker/src/cache.rs`). All ordering
+across compio threads, see `crates/zeroship-worker/src/cache.rs`). All ordering
 arguments below are within a single thread, single isolate.
 
 JS hasn't received the wrapper yet — but **a JS callback could fire
@@ -538,7 +538,7 @@ because there's no separate visibility stage; the write is a plain store
 that the same isolate's JIT will read on the next access.
 
 rusty_v8's `Object::set_internal_field` is a thin shim
-(`crates/runtime/v8.rs` mirrors the V8 ABI). We're single-threaded,
+(`crates/zeroship-runtime/v8.rs` mirrors the V8 ABI). We're single-threaded,
 single-isolate. By the time the JIT reaches step 9, step 7's write is
 observable to any subsequent `get_internal_field`. Confirmed empirically
 by the existing `set_up_default_reader` hand-roll: it relies on the same
@@ -564,7 +564,7 @@ must not write to `_rv` either. Document this in the proc-macro doc-string.
 
 ### 4.1 Current `gen_constructor_callback`
 
-Located at `crates/runtime-macros/src/v8_class.rs:1623`. The emitted
+Located at `crates/zeroship-runtime-macros/src/v8_class.rs:1623`. The emitted
 function (with line refs from the macro source):
 
 ```text
@@ -653,7 +653,7 @@ let post_init = match extract_post_init(&c.func.attrs) {
     Err(e) => return e.to_compile_error(),
     Ok(Some(hook_ident)) => quote! {
         // Mirrors the make_instance Result arm verbatim — same five
-        // OpErrorKind variants from crates/runtime/src/core/state.rs:32
+        // OpErrorKind variants from crates/zeroship-runtime/src/core/state.rs:32
         // (TypeError, RangeError, Error, DomException(name),
         // NodeError(code)). Any addition there must be mirrored here.
         match <#class_ty>::#hook_ident(scope, __this) {
@@ -776,7 +776,7 @@ complexity now.
 
 ### 4.5 Worked example: Reader migration
 
-**Before** (`crates/runtime/src/web/streams/readable_default_reader.rs`,
+**Before** (`crates/zeroship-runtime/src/web/streams/readable_default_reader.rs`,
 lines 196–299, hand-rolled — paraphrased):
 
 ```rust
@@ -1091,7 +1091,7 @@ in the Reader; `__zs_streams_writable_writer_stream` in the Writer).
 The convention is enforced by review, not by the type system.
 
 **Recommendation for v1:** the implementing PR adds a Rust-level lint
-(in `crates/runtime-macros/tests/priv_sym_lint.rs`) that walks the
+(in `crates/zeroship-runtime-macros/tests/priv_sym_lint.rs`) that walks the
 `#[v8_class]` impl blocks via `syn` and asserts every `Private::for_api`
 call's name argument is a string literal beginning with `__zs_`.
 
@@ -1172,7 +1172,7 @@ to flag dynamic names if a real consumer surfaces.
 `walkdir` is present transitively in `Cargo.lock` (verified) but
 NOT yet declared as a direct dev-dep on `runtime-macros`. The
 implementing PR adds a one-line `walkdir = "2"` under
-`[dev-dependencies]` in `crates/runtime-macros/Cargo.toml`. (Or use
+`[dev-dependencies]` in `crates/zeroship-runtime-macros/Cargo.toml`. (Or use
 `std::fs::read_dir` recursion — ~10 extra lines, no new dep — if
 preferred. Either choice is fine; not load-bearing for the design.)
 
@@ -1202,7 +1202,7 @@ class doesn't call the base's emitted ctor either).
 
 #### Worked example: AbortSignal extends EventTarget
 
-`crates/runtime/src/web/dom/abort_signal.rs:123` declares
+`crates/zeroship-runtime/src/web/dom/abort_signal.rs:123` declares
 `#[v8_class] #[v8_inherit(super::event_target::EventTarget)]`.
 EventTarget today has `#[v8_constructor]` with no post_init needs;
 its ctor stashes `EventTargetState::default()` (no priv-syms, no
@@ -1456,7 +1456,7 @@ event loop). Two questions:
 3. **Fire-and-forget microtask rejections.** If no caller awaits the
    Promise that the microtask rejects, V8's promise-rejection callback
    (set via `set_promise_reject_callback` in
-   `crates/runtime/src/core/init.rs`) fires with `kPromiseRejectWithNoHandler`.
+   `crates/zeroship-runtime/src/core/init.rs`) fires with `kPromiseRejectWithNoHandler`.
    The runtime's existing handler logs an unhandled-rejection diagnostic —
    same surface as any other async-method-driven unhandled rejection.
    **No new behavior** introduced by post_init. *(Verification owed by
@@ -1471,7 +1471,7 @@ doc-string with a "post_init can dispatch async work" note. Test #12
 ### 5.11 Telemetry (NEW in v2)
 
 The runtime emits class-level construction metrics today (see
-`crates/runtime/src/metrics/`). post_init failures should increment
+`crates/zeroship-runtime/src/metrics/`). post_init failures should increment
 a new counter:
 
 ```
@@ -1509,10 +1509,10 @@ The implementing PR MUST update `docs/reference/plugin-system.md` with:
 ```
 - [ ] docs/reference/plugin-system.md updated with post_init section
 - [ ] CHANGELOG.md entry under runtime-macros
-- [ ] trybuild fixtures land under crates/runtime-macros/tests/compile_fail/
+- [ ] trybuild fixtures land under crates/zeroship-runtime-macros/tests/compile_fail/
 - [ ] CI grep step for un-prefixed priv-sym names (§5.3a)
-- [ ] Tests #1–12 plus #5b and #11b land in crates/runtime/tests/v8_post_init_smoke.rs (14 cases total)
-- [ ] crates/runtime/benches/v8_post_init.rs ships
+- [ ] Tests #1–12 plus #5b and #11b land in crates/zeroship-runtime/tests/v8_post_init_smoke.rs (14 cases total)
+- [ ] crates/zeroship-runtime/benches/v8_post_init.rs ships
 ```
 
 Review must block on each box being checked. The repo's PR template
@@ -1532,7 +1532,7 @@ can rename to the canonical filename — out of scope for MAC-02.
 
 ### 5.14 V8 startup-snapshot interaction (NEW in v3)
 
-The runtime uses V8 startup snapshots (`crates/runtime/src/core/init.rs`
+The runtime uses V8 startup snapshots (`crates/zeroship-runtime/src/core/init.rs`
 captures pre-installed classes' FunctionTemplates into a snapshot blob
 loaded on each isolate's startup). post_init affects the **constructor
 callback's emitted body** but NOT the FunctionTemplate's shape (the
@@ -1551,7 +1551,7 @@ re-built per binary version.
 If a future deployment scheme distributes pre-built snapshots, the
 post_init function pointer must be part of the binary-version-pin
 hash. **Documented for future awareness.** *(Verification owed by
-implementer: confirm `crates/runtime/src/core/init.rs`'s snapshot-creation
+implementer: confirm `crates/zeroship-runtime/src/core/init.rs`'s snapshot-creation
 path doesn't bake in any per-build-version assumption that would be
 incompatible with the FunctionTemplate pointer-stability invariant.)*
 
@@ -1582,14 +1582,14 @@ The error path adds a `v8::Exception::*` allocation (~50 ns) but only
 fires on failure.
 
 For an existing `zerobench` benchmark that exercises stream
-construction (closest is `crates/runtime/benches/streams.rs`'s
+construction (closest is `crates/zeroship-runtime/benches/streams.rs`'s
 `bench_pipe_through_throughput` which incidentally constructs ~10k
 Readers/sec inside the harness), 10k × 5 ns = 50 µs/sec of overhead —
 well below the 1% "don't worry about it" threshold.
 
 **Regression benchmark commitment.** The implementing PR adds a
-dedicated `crates/runtime/benches/v8_post_init.rs` microbenchmark
-(criterion-based, matching the existing `crates/runtime/benches/`
+dedicated `crates/zeroship-runtime/benches/v8_post_init.rs` microbenchmark
+(criterion-based, matching the existing `crates/zeroship-runtime/benches/`
 convention; distinct from the user-facing `zerobench` HTTP/SSE/WS
 tool) that:
 
@@ -1622,7 +1622,7 @@ The implementing PR adds two checks:
 
 ## 6. Testing strategy
 
-New test file: `crates/runtime/tests/v8_post_init_smoke.rs`. Style
+New test file: `crates/zeroship-runtime/tests/v8_post_init_smoke.rs`. Style
 matches `v8_must_new_smoke.rs` and `v8_brand_check_smoke.rs` — local
 `run_in_v8` harness, isolated test classes per module.
 
@@ -1649,7 +1649,7 @@ matches `v8_must_new_smoke.rs` and `v8_brand_check_smoke.rs` — local
 
 Use `trybuild` if it's already in the workspace; else add the dependency
 (it's a single line in `runtime-macros/Cargo.toml`'s `[dev-dependencies]`).
-Test cases live under `crates/runtime-macros/tests/compile_fail/`:
+Test cases live under `crates/zeroship-runtime-macros/tests/compile_fail/`:
 
 ```text
 post_init_missing_fn.rs       // no_such_fn doesn't exist on impl
@@ -1671,7 +1671,7 @@ After this lands and the streams classes migrate (separate PR):
   `streams/transform-streams/`. The migration changes implementation,
   not behaviour; WPT is the spec-conformance backstop.
 - Local smoke tests for each class continue to pass:
-  `crates/runtime/tests/streams.rs`, `crates/runtime/tests/streams_native.rs`.
+  `crates/zeroship-runtime/tests/streams.rs`, `crates/zeroship-runtime/tests/streams_native.rs`.
 - Memory: the existing `streams/budget` tests cover the budget guard
   drop path. Make sure `after_install` errors don't double-drop the
   guard (the guard is on `Self`; the box drops via finalizer once;
@@ -1868,7 +1868,7 @@ items are deferred to MAC-NN.)
    `[][Symbol.iterator]()` to find `%Iterator.prototype%`. Could
    move to per-instance post_init — but it's strictly slower:
    `Script::compile + run` of a literal JS expression is ~50µs on a
-   warm isolate (measured via `crates/runtime/benches/`). At 100k
+   warm isolate (measured via `crates/zeroship-runtime/benches/`). At 100k
    constructions/sec that's 5 sec/sec of pure compile/run cost —
    catastrophic. Install-time runs once per isolate (~one isolate
    per app). **No.** Keep in install.
@@ -1976,7 +1976,7 @@ items are deferred to MAC-NN.)
 - §3.4: added explicit `Foo::install` precondition statement; rewrote the brand-check argument with the no-`&Self` signature.
 - §3.5: cited V8 source path (JSObject::SetEmbedderField, WRITE_FIELD).
 - §3.6: NEW — ECMA-262 [[Construct]] return semantics.
-- §4.3: corrected the OpErrorKind variants (5, not 6 — no JsValue) by reading crates/runtime/src/core/state.rs:32.
+- §4.3: corrected the OpErrorKind variants (5, not 6 — no JsValue) by reading crates/zeroship-runtime/src/core/state.rs:32.
 - §4.4: weakened the "no leak" claim to match V8's actual GC semantics; added memory-pressure analysis.
 - §4.5: rewrote the Reader migration sketch with the no-`&Self` signature (uses `with_state` instead of `&Self` borrow); fixed the v1 "wrong direction" comment + missing `pending_stream` plumbing.
 - §4.6: split steps 4 (Box::into_raw), 6 (set_internal_field), 7 (weak finalizer) per `gen_box_and_install_finalizer` actual ordering. Updated to use the no-`&Self` signature.
@@ -2025,7 +2025,7 @@ v2 → v3 changelog
 v3 → v5 (cumulative refinements)
 - Header: V8 pin "v8 = 147" cited (resolves to v147.1.0 per Cargo.lock); MSRV declared unchanged.
 - §5.13: PR template path verified at .github/PULL_REQUEST.md (note: not the GitHub-canonical PULL_REQUEST_TEMPLATE.md name).
-- §5.16: clarified "happy-path budget includes call dispatch only, not user body work"; benchmark commitment names criterion-based crates/runtime/benches/v8_post_init.rs (distinct from zerobench).
+- §5.16: clarified "happy-path budget includes call dispatch only, not user body work"; benchmark commitment names criterion-based crates/zeroship-runtime/benches/v8_post_init.rs (distinct from zerobench).
 - §5.3a: replaced grep-based lint sketch with full syn-walker test code (~50 lines); walkdir dependency status acknowledged honestly.
 - §6.1 Test #11: split into #11 (stack shape) + #11b (paired hygiene fixtures with explicit "this proves the assertion logic itself works without false-positives" framing).
 - §6.1 test count: reconciled to 13 (#1, #2, #3, #4, #5, #5b, #6, #7, #8, #9, #10, #11, #11b, #12). Header text updated.

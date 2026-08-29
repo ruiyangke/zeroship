@@ -222,7 +222,7 @@ Control no longer runs a parallel device flow. It used to exchange an approved
 grant for a platform access token through `POST /internal/platform-token`, but
 `zeroship login` drives the OP directly, so both the flow and the mint were
 deleted; the entitlement narrowing that mint performed now happens on control's
-bearer path at request time (`crates/authn/src/lib.rs`).
+bearer path at request time (`crates/zeroship-authn/src/lib.rs`).
 
 Auth reconciles a first-party `zeroship-cli` OAuth client registration at
 startup. It may request `apps:deploy`, `apps:read`, `apps:write`,

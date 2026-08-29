@@ -524,7 +524,7 @@ These should be resolved before we start coding:
 
 1. **AutoMTLS for v1?** I lean toward shipping plain UDS (0700 socket dir) for v1 and adding AutoMTLS in v2. Confirms we ship faster; the attack surface is "an attacker with shell on the worker as root", which we already concede. Acceptable?
 2. **Proto pin policy.** Pin to the Nomad version we deploy (1.7.x at time of writing) and re-vendor on Nomad upgrade. Or pin to a known-stable proto and stay there until forced. Preference?
-3. **Shared types crate name.** `sandbox-ch-types` is what I have above. Alternative: hoist these types into `crates/core/` since `core/` already holds inter-service wire types. The latter is cleaner if you consider Nomad jobspecs an inter-service wire format, which they are.
+3. **Shared types crate name.** `sandbox-ch-types` is what I have above. Alternative: hoist these types into `crates/zeroship-core/` since `core/` already holds inter-service wire types. The latter is cleaner if you consider Nomad jobspecs an inter-service wire format, which they are.
 4. **Driver binary distribution channel.** Bake into worker AMI (slower iteration, atomic with worker version) vs. `gsutil cp` on boot (faster iteration, version drift possible). Today we do the latter for `cloud-hypervisor`; consistency suggests same for the driver. Confirm?
 5. **CI for the driver test that needs `/dev/kvm`.** GHA runners don't have kvm. Options: (a) self-hosted runner on a GCP `n2-standard-2` (kvm yes), (b) cloud-build with nested-virt VM, (c) skip in CI and rely on cluster soak. (a) is cleanest.
 6. **Naming.** `nomad-driver-ch` matches the existing volantvm repo, which could be confusing if anyone googles. Alternative: `zsbx-nomad-driver`. Preference?

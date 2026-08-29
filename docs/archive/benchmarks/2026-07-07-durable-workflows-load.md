@@ -48,6 +48,6 @@ The placeholder is deliberately below the measured result:
 - max checkpoint writes per app per second: 2 (<20% of measured journal write throughput)
 
 The code seed lives in
-`crates/control/src/workflow_limits.rs` as
+`crates/zeroship-control/src/workflow_limits.rs` as
 `operator_pending_g3_workflow_capacity`. It is documentation-only and is not
 wired as a certified GA enforcement limit.

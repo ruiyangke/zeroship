@@ -32,8 +32,8 @@ direct charges can settle to connected accounts automatically, but **the
 configured `FeePolicy` is not enforced and there is no usage billing
 pipeline.**
 
-- **No `env.meter` primitive** — apps cannot record billable units. Documented as "planned"; no `MeterPlugin` in the worker. (`crates/worker/src/cache.rs`)
-- **No usage producer** — the control plane has a `POST /internal/usage` ingest + `UsageReport` type, but **nothing on the worker/gateway ever emits one**. The billing pipe is open on the receiving end with nothing feeding it. (`crates/control/src/internal.rs:150`)
+- **No `env.meter` primitive** — apps cannot record billable units. Documented as "planned"; no `MeterPlugin` in the worker. (`crates/zeroship-worker/src/cache.rs`)
+- **No usage producer** — the control plane has a `POST /internal/usage` ingest + `UsageReport` type, but **nothing on the worker/gateway ever emits one**. The billing pipe is open on the receiving end with nothing feeding it. (`crates/zeroship-control/src/internal.rs:150`)
 - **`metering.rs` is a 1-line stub.** No usage → pricing → invoice/charge pipeline exists.
 - **The configured fee is not server-enforced** - its value is set in creator-controlled code (`sdks/payments/checkout.ts`, `applicationFeePercent`), overridable to 0 or bypassable. The webhook only records what Stripe reports; no floor and no creator-to-account binding. (filed CT-B1)
 - **Spending-limit enforcement is dead code** — a complete-looking metering/billing/enforcement engine (~2000 LOC) lives in `crates/platform/`, which is **workspace-excluded and tokio-based**, so it violates the zero-tokio invariant and can never run. It needs a from-scratch compio reimplementation, not a port.

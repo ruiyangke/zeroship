@@ -51,7 +51,7 @@ The kernel Request build is on the fast-path; the per-request cost is on the
 ## Recovery options (ranked by leverage)
 
 1. **V8 fastcall on `Headers.has` / `Headers.get` / `Headers.set`** (already in
-   `crates/runtime-macros/TODO.md` Open as the "V8 fastcall" item). Turbofan inlines the
+   `crates/zeroship-runtime-macros/TODO.md` Open as the "V8 fastcall" item). Turbofan inlines the
    `CFunction` shim, ~10-30 ns saved per call. Should recover ~50-80k req/s.
 2. **`Response.json` fastcall** (single-arg primitive wrapper case). Less typed than #1
    because the body is an arbitrary JS value; would need a slow-path fallback.
@@ -67,7 +67,7 @@ The kernel Request build is on the fast-path; the per-request cost is on the
 polyfill to spec-compliant native). Fix-forward via Option 1 (V8 fastcall) when that
 macro lands.
 
-V8 fastcall ROI table in `crates/runtime-macros/TODO.md` already lists `Headers.has`
+V8 fastcall ROI table in `crates/zeroship-runtime-macros/TODO.md` already lists `Headers.has`
 as a top candidate. This investigation promotes Headers.has + Headers.get to **Tier 1**
 fastcall priority — they have empirical evidence of being on the request-per-second
 critical path.

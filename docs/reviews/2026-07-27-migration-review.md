@@ -239,7 +239,7 @@ the `batch` verb un-parameterized on this path.
 - **Operator-only approval is enforced at the authz layer, not just intended.**
   `requires_app_owner` returns FALSE for `AppsApproveMigration` (`auth.rs:161-163`), and the
   platform authz policy DENIES the app owner `migrations:approve` on their own app while
-  granting it to platform admins (`crates/authz/tests/platform_policies_test.rs:135-209`).
+  granting it to platform admins (`crates/zeroship-authz/tests/platform_policies_test.rs:135-209`).
   So an owner (or an AI deploying as them) cannot self-approve a destructive/gated migration.
 - **Approve/apply TOCTOU is closed.** `approve()` stamps `approved_checksum = X`
   (`migration_store.rs:110-132`, guarded on `pending_approval`); the apply gate re-resolves

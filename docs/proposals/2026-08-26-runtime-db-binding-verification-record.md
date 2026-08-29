@@ -334,7 +334,7 @@ Three instances, all found 2026-08-28, all in code that had been reviewed:
 
 | the claim | the fixture | what it could not reach |
 | --- | --- | --- |
-| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`tests/sqlite_integration.rs:4191`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
+| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`crates/zeroship-plugin-db/tests/sqlite_integration.rs:4191`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
 | CDC events carry the masked value for masked columns (`broker.rs`, `cdc_event_carries_masked_value_for_masked_columns`) | parent column is `"\\x0123..."`, a BYTEA **ciphertext** literal | the leaking shape is a **mask-only** field, whose parent holds plaintext. The same assertion would fail on it; no fixture builds one |
 | SC-2 Decision 1: "WAL permits this concurrency" | unqualified `CREATE TABLE t` (`sqlite_integration.rs:9956`), and no `ATTACH` at all | the table lands in `main`, the WAL **control** database. Every app file is pinned to DELETE (`zeroship-migrate-sqlite/src/backend/actor.rs:719-729`). The mechanism was proved on the wrong database |
 

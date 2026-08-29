@@ -15,7 +15,7 @@ explicitly **deferred** — they earn their place post-launch / when Stream-2 Co
 > alternative; it closes the same six critique items with far fewer tables.
 
 The whole redesign is **13 tables** (was 11), grounded in the real query paths in
-`crates/control/src/{pricing,pricing_store,plan_catalog,spend,metering,internal}.rs` +
+`crates/zeroship-control/src/{pricing,pricing_store,plan_catalog,spend,metering,internal}.rs` +
 `cron/{billing_reconcile,metering_export,spend_reconcile}.rs` + `registry.rs`. It closes all six
 known-critique items:
 

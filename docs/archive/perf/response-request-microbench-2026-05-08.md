@@ -18,7 +18,7 @@ than guessed.
 
 32 logical cores @ Intel Xeon 2.80 GHz. Build:
 `cargo build --release` at HEAD `b08786a` + the uncommitted lazy-Request-
-Headers diff in `crates/runtime/src/web/fetch/request.rs:67-1130`. V8 ships
+Headers diff in `crates/zeroship-runtime/src/web/fetch/request.rs:67-1130`. V8 ships
 inside `target/release/zeroship` (the CLI; chosen so we can pass an
 arbitrary JS file via `zeroship serve`, which the existing `zeroship-bench-
 server` binary cannot do — it `include_str!`'s scenarios.js). No source-tree
@@ -65,8 +65,8 @@ Pure-Rust mirrors of `ResponseState`, `BodyImpl`, `Headers`, and the
 `build_kernel_headers` tail (no V8 dep — would couple to v8 crate via
 runtime). Source: `/tmp/perf-microbench/microbench/benches/response_components.rs`.
 The struct shapes match runtime source byte-for-byte (verified by
-inspection against `crates/runtime/src/web/fetch/response.rs:111-138`,
-`crates/runtime/src/web/headers.rs:73-87`, `crates/runtime/src/web/fetch/body/body.rs`).
+inspection against `crates/zeroship-runtime/src/web/fetch/response.rs:111-138`,
+`crates/zeroship-runtime/src/web/headers.rs:73-87`, `crates/zeroship-runtime/src/web/fetch/body/body.rs`).
 
 Criterion config: `[profile.bench] opt-level=3 debug=true`,
 mimalloc global allocator (matches the runtime), 5-s sample windows.
@@ -79,7 +79,7 @@ diff. JS-side vs native-side annotated explicitly.
 
 ### `Response.json(data, init?)`
 
-**Native path.** `crates/runtime/src/web/fetch/response.rs:810-928`,
+**Native path.** `crates/zeroship-runtime/src/web/fetch/response.rs:810-928`,
 `#[v8_static_method] fn json(...)`. Executes:
 
 1. Look up `globalThis.JSON` (`scope.get_current_context().global(scope)
@@ -107,9 +107,9 @@ None of it is a fastcall; every step crosses the V8 boundary.
 ### `new Response(body?, init?)`
 
 **Native, macro-emitted.** Spec §5.5 17-step constructor at
-`crates/runtime/src/web/fetch/response.rs:445-531`,
+`crates/zeroship-runtime/src/web/fetch/response.rs:445-531`,
 `#[v8_constructor] fn new(...)`. Wrapped by the
-`#[v8_class]` macro emit (`crates/runtime-macros/src/v8_class/emit/constructor.rs:252-275`),
+`#[v8_class]` macro emit (`crates/zeroship-runtime-macros/src/v8_class/emit/constructor.rs:252-275`),
 which handles boxing + finalizer registration. The constructor body:
 
 1. `ResponseState::default()` — eight `RefCell`/`Cell` fields, one
@@ -143,11 +143,11 @@ which handles boxing + finalizer registration. The constructor body:
 12. Return `Ok(state)`. The macro then emits: `Box::new(state)`,
     `Box::into_raw`, `External::new`, `set_internal_field(0, ...)`,
     `Weak::with_guaranteed_finalizer` (registers a GC callback that
-    drops the Box). `crates/runtime-macros/src/v8_class/emit/constructor.rs:252-275`.
+    drops the Box). `crates/zeroship-runtime-macros/src/v8_class/emit/constructor.rs:252-275`.
 
 ### `new Request(input, init?)`
 
-**Native, macro-emitted.** `crates/runtime/src/web/fetch/request.rs:303-691`.
+**Native, macro-emitted.** `crates/zeroship-runtime/src/web/fetch/request.rs:303-691`.
 44-step Fetch §5.4 constructor: input parse (string → ada URL parse, or
 brand-checked Request copy), `RequestInit::from_v8` (12 typed-enum members),
 method validation (`normalize_method`), body extract + GET/HEAD check,
@@ -157,7 +157,7 @@ AbortController()` + reads `.signal`). Box+finalizer per the macro.
 
 ### `request.headers` first access (the lazy mint path)
 
-`crates/runtime/src/web/fetch/request.rs:790-817`. The Request was built
+`crates/zeroship-runtime/src/web/fetch/request.rs:790-817`. The Request was built
 by `build_kernel_request` (`request.rs:1063-1152`) which deferred V8
 Headers construction by stashing the raw header list in
 `state.raw_headers`. On first access:
@@ -180,7 +180,7 @@ Headers construction by stashing the raw header list in
 
 ### `inspect_response`
 
-`crates/runtime/src/transport/handler.rs:142-209`. After the user's
+`crates/zeroship-runtime/src/transport/handler.rs:142-209`. After the user's
 handler resolves, the kernel:
 
 1. `response_val.to_object(scope)` — coerce. `handler.rs:143-146`.
@@ -636,7 +636,7 @@ Headers wrapper when the user calls iteration / `entries()` / `set()`
 **Measured cost today.** `request.headers FIRST` 9,509 ns; subsequent
 `request.headers.get` 142 ns. Criterion shows the raw-list scan is
 ~9 ns per iter for 6 headers
-(`crates/runtime/benches/results-...` — this round's prior criterion
+(`crates/zeroship-runtime/benches/results-...` — this round's prior criterion
 `read_content_type_from_raw/6h_miss` 8.7 ns).
 
 **Savings if implemented.** For paths that only read `headers.get` /
@@ -793,10 +793,10 @@ Ranked by measured savings + likelihood of clean implementation:
 - Criterion raw output: `/tmp/claude-1000/.../bhflejn2u.output`
 - Criterion parser: `/tmp/op-bench-results/parse-criterion.mjs`
 - Bench server log: `/tmp/op-bench-results/v3/server.log`
-- Sources cited (read-only): `crates/runtime/src/web/fetch/response.rs`,
-  `crates/runtime/src/web/fetch/request.rs`,
-  `crates/runtime/src/web/headers.rs`,
-  `crates/runtime/src/web/fetch/body/extract.rs`,
-  `crates/runtime/src/web/fetch/body/body.rs`,
-  `crates/runtime/src/transport/handler.rs`,
-  `crates/runtime-macros/src/v8_class/emit/constructor.rs`.
+- Sources cited (read-only): `crates/zeroship-runtime/src/web/fetch/response.rs`,
+  `crates/zeroship-runtime/src/web/fetch/request.rs`,
+  `crates/zeroship-runtime/src/web/headers.rs`,
+  `crates/zeroship-runtime/src/web/fetch/body/extract.rs`,
+  `crates/zeroship-runtime/src/web/fetch/body/body.rs`,
+  `crates/zeroship-runtime/src/transport/handler.rs`,
+  `crates/zeroship-runtime-macros/src/v8_class/emit/constructor.rs`.

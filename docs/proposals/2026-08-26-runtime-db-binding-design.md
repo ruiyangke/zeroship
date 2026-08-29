@@ -123,7 +123,8 @@ and why that argument failed - is one entry in the decision log.
 plane never reads the catalog.** The descriptor is generated from the creator's
 migration DSL, folded at build time, shipped in the artifact, and immutable for
 the isolate's life. It carries the physical layout, including the sibling
-columns of a masking storage flip should one ship. The runtime respects the
+columns of the masking storage flip, which has shipped: the field's own column
+holds the mask and `__zs_raw__<field>` holds the plaintext. The runtime respects the
 code; it does not inspect the database to discover how to behave.
 
 `crates/zeroship-plugin-db/src/descriptor.rs` is the whole surface:
@@ -198,13 +199,15 @@ they bear here:
   plane. Never to a function the worker calls.
 
 The tree contains both the proof and the counter-example.
-`crates/zeroship-plugin-db/src/audit.rs:20-42` records the full ceremony as a
+`crates/zeroship-plugin-db/src/audit.rs:20-42` (the file was DELETED by this
+design's own implementation, in `ac38fac0e`; read it there) records the full ceremony as a
 proposal - a `SECURITY DEFINER` audit writer mediated by an HMAC-signed
 PID-keyed session table - and **refuses it**, because app code has no raw SQL
 access and the worker pool is the only writer. The counter-example is DB-3: app
 JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to
 read its own PII/PHI/PCI at will, patched by `sanitize_app_actor` stripping
-reserved system kinds (`crates/zeroship-plugin-db/src/crud/unmask.rs:277`). That
+reserved system kinds (`sanitize_app_actor`,
+`crates/zeroship-plugin-db/src/crud/unmask.rs:305`). That
 is not a bug the shape happened to have; it is what the shape produces.
 
 **Consequences taken.** There is no HMAC session anchor and no `SessionMinter`.
@@ -758,7 +761,7 @@ migration awaiting approval and wrong here.
   gone. The bound is a deployment property, not a millisecond one.
 - **Deploy-pinned workflow isolates keep both old halves until evicted.** They
   are pinned by construction (`PinnedWorkflowKey { app_id, deploy_hash }`,
-  `crates/worker/src/cache.rs:28-32`) so that workflow replay sees the deploy it
+  `crates/zeroship-worker/src/cache.rs:28-32`) so that workflow replay sees the deploy it
   was recorded against. The set is bounded by `max_pinned_isolates_per_app`, so
   the exposure is bounded, and **force-eviction is the single lever** for
   immediacy - not one lever among several.
@@ -1467,7 +1470,8 @@ producer, consumer, fixture and reference doc in the same patch.
    re-provision the per-app platform tables the `CASCADE` destroyed; and re-run
    publication reconciliation, without which subscriptions silently stop
    forever. The current terminal arm - release the lock with the schema empty
-   (`crates/zeroship-plugin-db/src/backend/postgres.rs:1806-1821`) - is not
+   (`restore` at `crates/zeroship-plugin-db/src/backend/postgres.rs:803`,
+   delegating to `backup_pg::restore_impl`) - is not
    acceptable. A restore that silently replaces the unmask audit trail with an
    older one is an **audit-erasure primitive**, and the rewind is recorded as an
    operator-visible event.

@@ -9,7 +9,7 @@ None.
 ## HIGH
 
 ### H1. User deletion does not reliably clean auth session/token state
-**File:** `crates/auth/src/store/migrations.rs:41-64`, `crates/auth/src/store/migrations.rs:139-180`
+**File:** `crates/zeroship-auth/src/store/migrations.rs:41-64`, `crates/zeroship-auth/src/store/migrations.rs:139-180`
 
 **Severity rationale:** `auth.sessions.user_id` references `auth.users(id)` without `ON DELETE CASCADE`, so deleting a user is blocked by their IdP sessions instead of cleaning them up. `auth.gateway_sessions.user_id` and `auth.console_sessions.user_id` are `TEXT` with no FK, so they cannot cascade and will orphan unless every delete path manually removes them. Password reset tokens are stored in `auth.magic_links` by `email` only, so there is no user FK to clean reset/login links when an account is deleted.
 
@@ -26,7 +26,7 @@ DELETE FROM auth.users WHERE id = '00000000-0000-0000-0000-000000000001';
 **Suggested fix:** Make `auth.sessions.user_id` `REFERENCES auth.users(id) ON DELETE CASCADE`. Store gateway/console session `user_id` as UUID FKs, or add a deliberate database-enforced cleanup model. Bind password reset/login token rows to `user_id` where possible, or split reset tokens into a user-keyed table with `ON DELETE CASCADE`.
 
 ### H2. User/owner-scoped hot paths are missing supporting indexes
-**File:** `crates/auth/src/store/migrations.rs:29-51`, `crates/auth/src/store/migrations.rs:94-101`, `crates/auth/src/store/migrations.rs:139-153`, `crates/auth/src/store/migrations.rs:215-229`, `crates/control/src/token_handlers.rs:276-287`
+**File:** `crates/zeroship-auth/src/store/migrations.rs:29-51`, `crates/zeroship-auth/src/store/migrations.rs:94-101`, `crates/zeroship-auth/src/store/migrations.rs:139-153`, `crates/zeroship-auth/src/store/migrations.rs:215-229`, `crates/zeroship-control/src/token_handlers.rs:276-287`
 
 **Severity rationale:** Several tables that will exceed 1k rows are queried by `user_id` or `owner_id`, but the migrations only create primary-key, partial, or differently ordered indexes. PostgreSQL does not create indexes for FK columns. These paths become sequential scans during normal account operations and incident flows.
 
@@ -58,7 +58,7 @@ ORDER BY created_at DESC, id DESC;
 **Suggested fix:** Add indexes matching the predicates, for example `auth.identities(user_id, linked_at)`, `auth.sessions(user_id)`, `auth.gateway_sessions(user_id) WHERE revoked_at IS NULL`, `auth.email_verifications(user_id) WHERE consumed_at IS NULL`, and `control.permission_tokens(owner_id, kind, created_at DESC, id DESC)`.
 
 ### H3. One-active-token invariants are application-only and race under concurrent issue
-**File:** `crates/auth/src/store/migrations.rs:54-68`, `crates/auth/src/store/migrations.rs:94-101`
+**File:** `crates/zeroship-auth/src/store/migrations.rs:54-68`, `crates/zeroship-auth/src/store/migrations.rs:94-101`
 
 **Severity rationale:** Magic login, password reset, and email verification issuance all assume "consume old active rows, then insert new row." There is no partial unique constraint enforcing one active row. Two concurrent requests can both run the `UPDATE` before either `INSERT`, leaving multiple unconsumed valid tokens for the same email/purpose or user.
 
@@ -76,7 +76,7 @@ T2: INSERT INTO auth.magic_links (... email='a@example.com', purpose='reset', co
 **Suggested fix:** Add DB constraints for the invariants and make issuance one statement or a transaction that handles conflicts. Examples: `CREATE UNIQUE INDEX ... ON auth.magic_links(email, purpose) WHERE consumed_at IS NULL` and `CREATE UNIQUE INDEX ... ON auth.email_verifications(user_id) WHERE consumed_at IS NULL`.
 
 ### H4. Stripe relink can create multiple open history rows
-**File:** `crates/control/src/stripe_store.rs:107-135`, `crates/control/src/stripe_store.rs:391-413`, `crates/control/src/registry.rs:239-252`
+**File:** `crates/zeroship-control/src/stripe_store.rs:107-135`, `crates/zeroship-control/src/stripe_store.rs:391-413`, `crates/zeroship-control/src/registry.rs:239-252`
 
 **Severity rationale:** `link_account` checks the current live binding outside the transaction, then the transaction closes any open history row, inserts a new open history row, and upserts the live row. Concurrent relinks for the same creator can both insert an `unlinked_at IS NULL` history row because the schema has no partial unique constraint for one open history span per creator.
 
@@ -92,7 +92,7 @@ T2: BEGIN; same UPDATE now affects 0 rows; INSERT history acct_B; ...
 **Suggested fix:** Add `CREATE UNIQUE INDEX ... ON creator_account_history(creator_id) WHERE unlinked_at IS NULL`, then serialize relinks by locking the live `creator_accounts` row (`SELECT ... FOR UPDATE`) or by using one upsert/CTE that closes history and opens the new row under the same locked key.
 
 ### H5. Builder OAuth bootstrap has a multi-node check-then-insert race
-**File:** `crates/control/src/bootstrap_builder.rs:103-119`, `crates/control/src/bootstrap_builder.rs:131-168`
+**File:** `crates/zeroship-control/src/bootstrap_builder.rs:103-119`, `crates/zeroship-control/src/bootstrap_builder.rs:131-168`
 
 **Severity rationale:** On concurrent control-plane startup, two nodes can both observe the builder OAuth client as absent. Hydra creation treats HTTP 409 as success, but the local DB insert is a plain `INSERT`. The loser hits the `control.oauth_clients` primary-key violation and reports bootstrap failure even though the desired state now exists.
 
@@ -109,7 +109,7 @@ Node B: Hydra returns 409 accepted as Ok, INSERT fails duplicate key
 ## MEDIUM
 
 ### M1. Control-plane tables are created in the default schema instead of `control`
-**File:** `crates/control/src/registry.rs:97-330`, `crates/control/src/env_store.rs:158-178`, `crates/control/src/stripe_store.rs:109-184`
+**File:** `crates/zeroship-control/src/registry.rs:97-330`, `crates/zeroship-control/src/env_store.rs:158-178`, `crates/zeroship-control/src/stripe_store.rs:109-184`
 
 **Severity rationale:** `auth` migrations create `control.*` tables for OAuth/authz, but `registry.rs` creates core control-plane tables as unqualified `apps`, `usage`, `app_vars`, `app_secrets`, `creator_accounts`, `payouts`, and `app_audit`. Every query is also unqualified. That makes correctness depend on `search_path`, splits control data across schemas, and leaves room for table-name collisions or accidental reads from `public`.
 
@@ -123,7 +123,7 @@ CREATE TABLE scratch.apps (LIKE public.apps INCLUDING ALL);
 **Suggested fix:** Move these tables to `control` pre-launch and qualify all SQL as `control.apps`, `control.app_vars`, `control.creator_accounts`, etc. Avoid relying on connection-level `search_path`.
 
 ### M2. Payout ledger invariants are not enforced by CHECK constraints
-**File:** `crates/control/src/registry.rs:266-278`, `crates/control/src/stripe_store.rs:249-262`
+**File:** `crates/zeroship-control/src/registry.rs:266-278`, `crates/zeroship-control/src/stripe_store.rs:249-262`
 
 **Severity rationale:** The Rust call path validates non-negative amounts and `platform_fee <= gross_amount`, but the ledger table accepts impossible financial rows from any other DB writer, test helper, or future code path. Financial invariants should live in the database too.
 
@@ -141,7 +141,7 @@ VALUES
 **Suggested fix:** Add checks such as `gross_amount >= 0`, `platform_fee >= 0`, `net_amount >= 0`, `platform_fee <= gross_amount`, `net_amount = gross_amount - platform_fee`, and a constrained currency shape.
 
 ### M3. Creator/app ownership relationships are not database-enforced
-**File:** `crates/control/src/registry.rs:216-245`, `crates/auth/src/store/migrations.rs:206-214`
+**File:** `crates/zeroship-control/src/registry.rs:216-245`, `crates/zeroship-auth/src/store/migrations.rs:206-214`
 
 **Severity rationale:** `creator_accounts.creator_id` is documented as today's auth user ID but has no FK to `auth.users`. `creator_account_history.creator_id` has no FK to either `creator_accounts` or `auth.users`. `control.app_members.app_id` is `TEXT`, while `apps.id` is UUID and lives outside the `control` schema, so app deletion cannot cascade memberships. These gaps allow orphaned creator accounts, history rows, and app memberships.
 
@@ -159,7 +159,7 @@ VALUES ('not-an-app', '00000000-0000-0000-0000-000000000001', 'owner');
 **Suggested fix:** Decide the intended deletion semantics and encode them. If payout history must block account deletion, use explicit `ON DELETE RESTRICT` FKs. If app memberships are app-owned, make `app_id` the same type as the app primary key and reference `control.apps(id) ON DELETE CASCADE`.
 
 ### M4. Token sweep predicates are not indexed for expired/consumed cleanup
-**File:** `crates/auth/src/store/migrations.rs:54-101`, `crates/auth/src/cron/token_sweep.rs:70-87`, `crates/auth/src/cron/token_sweep.rs:92-115`
+**File:** `crates/zeroship-auth/src/store/migrations.rs:54-101`, `crates/zeroship-auth/src/cron/token_sweep.rs:70-87`, `crates/zeroship-auth/src/cron/token_sweep.rs:92-115`
 
 **Severity rationale:** The sweeper deletes old rows from `auth.magic_links`, `auth.magic_completions`, and `auth.email_verifications` by `expires_at` and `consumed_at`. `magic_completions` has a partial `expires_at` index for unconsumed rows only; `magic_links` and `email_verifications` have no expiry/consumed cleanup indexes at all. These tables are write-heavy and will grow quickly under normal login/reset traffic.
 
@@ -176,7 +176,7 @@ WHERE expires_at < NOW() - INTERVAL '7 days'
 ## LOW
 
 ### L1. Migration idempotency and post-launch ALTER safety need tightening
-**File:** `crates/auth/src/store/migrations.rs:11-17`, `crates/auth/src/store/migrations.rs:251`, `crates/control/src/registry.rs:114-130`, `crates/control/src/registry.rs:226-286`
+**File:** `crates/zeroship-auth/src/store/migrations.rs:11-17`, `crates/zeroship-auth/src/store/migrations.rs:251`, `crates/zeroship-control/src/registry.rs:114-130`, `crates/zeroship-control/src/registry.rs:226-286`
 
 **Severity rationale:** The migrations use `gen_random_uuid()` but create `uuid-ossp`, not `pgcrypto`; that is version-dependent and surprising. `ALTER TABLE control.oauth_clients ALTER COLUMN created_by DROP NOT NULL` is not guarded with `IF EXISTS` or a catalog check. Several `ALTER TABLE ... ADD COLUMN ... NOT NULL DEFAULT ...` statements are fine pre-launch but would take stronger locks on populated tables post-launch.
 

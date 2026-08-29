@@ -40,7 +40,7 @@ back-compat: rename/delete freely.
    **projects** (per-thread sandbox sessions, already KV-backed via
    `internal/persist.ts`), not deployed apps. Settings keeps project identity +
    archive/delete (KV-local); plan/billing are removed.
-5. **Seed (`crates/control/src/bootstrap_console.rs`).** Delete the service-PAT
+5. **Seed (`crates/zeroship-control/src/bootstrap_console.rs`).** Delete the service-PAT
    mint (`control.permission_tokens` insert) and the
    `ZEROSHIP_CONTROL_SERVICE_TOKEN` secret/expose injection. **Keep** the app row,
    the public PKCE client, the `.zship` ingest, and the `OPENAI_API_KEY` /

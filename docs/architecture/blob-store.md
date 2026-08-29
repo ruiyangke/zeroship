@@ -1,6 +1,6 @@
 # Blob store + edge serving
 
-The `.zship` deploy path is content-addressed. `crates/bundle/src/blob.rs` defines the storage trait; gateway, control, and worker all read from the same blob root.
+The `.zship` deploy path is content-addressed. `crates/zeroship-bundle/src/blob.rs` defines the storage trait; gateway, control, and worker all read from the same blob root.
 
 ## Trait surface
 
@@ -65,10 +65,10 @@ The upload must contain every referenced blob. The server re-checks every hash; 
 
 Gateway adds two caches on top of `BlobStore`:
 
-- `BlobCache` in [blob_cache.rs](../../crates/gateway/src/blob_cache.rs): in-memory LRU
+- `BlobCache` in [blob_cache.rs](../../crates/zeroship-gateway/src/blob_cache.rs): in-memory LRU
 - `DiskBlobCache` in the same file: on-disk LRU used for mmap and streaming
 
-Static serving lives in [static_serve.rs](../../crates/gateway/src/router/static_serve.rs):
+Static serving lives in [static_serve.rs](../../crates/zeroship-gateway/src/router/static_serve.rs):
 
 - small responses: memory LRU -> disk LRU/mmap -> blob store (`get_blob`)
 - large responses: ensure a disk copy exists, then stream in chunks from disk
@@ -88,10 +88,10 @@ The control plane is not on the hot path for asset bytes.
 
 All three services build their store from the SAME `--blob-store` grammar via `zeroship_bundle::build_blob_store` (`StoreUrl::parse` → `LocalDiskBlobStore` or `S3BlobStore`), so control's deploy ingest writes through exactly the store gateway and worker read.
 
-- [crates/control/src/main.rs](../../crates/control/src/main.rs): builds the store; the deploy ingest writes blobs + manifests through it. There is no separate per-app `BundleStore`/VFS — `purge_app` deletes the app's manifest keyspace via `delete_app_manifests`.
-- [crates/gateway/src/main.rs](../../crates/gateway/src/main.rs): builds the store plus memory/disk caches; refills the disk cache by streaming `get_blob_to_file`.
-- [crates/worker/src/main.rs](../../crates/worker/src/main.rs): builds the store.
-- [crates/worker/src/sync.rs](../../crates/worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
+- [crates/zeroship-control/src/main.rs](../../crates/zeroship-control/src/main.rs): builds the store; the deploy ingest writes blobs + manifests through it. There is no separate per-app `BundleStore`/VFS — `purge_app` deletes the app's manifest keyspace via `delete_app_manifests`.
+- [crates/zeroship-gateway/src/main.rs](../../crates/zeroship-gateway/src/main.rs): builds the store plus memory/disk caches; refills the disk cache by streaming `get_blob_to_file`.
+- [crates/zeroship-worker/src/main.rs](../../crates/zeroship-worker/src/main.rs): builds the store.
+- [crates/zeroship-worker/src/sync.rs](../../crates/zeroship-worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
 
 `s3://` credentials resolve from the standard AWS environment (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`); there is no provider chain.
 

@@ -33,28 +33,28 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 
 | If you're working on… | Start here |
 | --- | --- |
-| **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/gateway/src/router/dispatch.rs` · `crates/bundle/src/{manifest,rule}.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
-| **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
-| **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
-| **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
-| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/control/src/{api,env_handlers}.rs` |
-| **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
-| **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` · gates: `tests/run_auth_suite.sh` (live PG) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
-| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
+| **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/zeroship-gateway/src/router/dispatch.rs` · `crates/zeroship-bundle/src/{manifest,rule}.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
+| **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/zeroship-runtime/` |
+| **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/zeroship-runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
+| **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/zeroship-control/src/api.rs` · `crates/zeroship-control/src/registry.rs` |
+| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/zeroship-control/src/{api,env_handlers}.rs` |
+| **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/zeroship-bundle/` (manifest types, BlobStore, pack/unpack) |
+| **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/zeroship-auth/` · `crates/zeroship-gateway/src/oidc_rp.rs` · gates: `tests/run_auth_suite.sh` (live PG) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
+| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-plugin-db/` |
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `sdks/migrate/` · `crates/zeroship-schema/` · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `tests/platform_migration_corpus_gate.sh` (proves it still applies) · `policies/platform.policy.toml`. It is authored in **`zero-migrate`**, the engine DSL — NOT `@zeroship/migrate`, and that is not an inconsistency. The corpus is applied by the engine's own Node CLI, which drains `zero-migrate`'s recorder; a file importing any other package records into a different ambient singleton and drains empty. It spelled `@zeroship/migrate` until 2026-08-28, which worked only because a since-deleted Rust binary aliased that name onto the engine bundle inside V8 — and left the platform unable to migrate its own database for as long as the alias was gone. Creator migrations still import `@zeroship/migrate`; the vite-plugin aliases it onto `zero-migrate` before recording (`sdks/vite-plugin/src/gen-types/recorder.ts:114-117`). |
-| **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
+| **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/zeroship-plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
-| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/plugin-workflow/` · `crates/control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/worker/src/handler.rs` |
-| **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
-| **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
-| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-plugin-workflow/` · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
+| **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
+| **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
+| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/zeroship-runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
-| **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/metering/provider/` · `crates/stream/` · `crates/control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
-| **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
+| **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/zeroship-control/src/metering/provider/` · `crates/zeroship-stream/` · `crates/zeroship-control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
+| **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/zeroship-runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
-| **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/core/init.rs` |
-| **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
+| **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/zeroship-runtime/src/core/init.rs` |
+| **Benchmarks** | `crates/zeroship-runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
 | **Deploying to a remote server** (image-based, no source on the host) | `docs/runbooks/deploy-server.md` |
@@ -117,27 +117,27 @@ For the long form with sequence diagrams, see `docs/architecture/distributed.md`
 
 ```
 crates/
-├── core/             Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
-├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
+├── zeroship-core/    Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
+├── zeroship-bundle/  .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── zeroship-schema/  Shared schema authority — DDL builders, diff classifier, live introspection, sentinel codec. Leaf (no v8/runtime); reused by the migration engine (write/diff) + plugin-db's data plane (read/introspect).
 ├── zeroship-migrate-server/ Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. Its `session.rs` also carries `CompioPgSession`, the newtype bridging the `zeroship-migrate-*` engine crates to compio-postgres over their `SqlSession` seam. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this host is not, and nothing here drives its MySQL or SQLite backends.
-├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
-├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
-├── plugin-db/        env.db.* native ops
-├── plugin-kv/        env.kv.* native ops
-├── plugin-storage/   env.storage.* native ops
-├── metering/         Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
-├── stream/           Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)
+├── zeroship-runtime/ V8 + compio event loop + fetch + WebSocket + crypto + auth context
+├── zeroship-runtime-macros/ #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
+├── zeroship-plugin-db/      env.db.* native ops
+├── zeroship-plugin-kv/      env.kv.* native ops
+├── zeroship-plugin-storage/ env.storage.* native ops
+├── zeroship-metering/ Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
+├── zeroship-stream/  Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)
 │
 │ System 1 — Creator Platform
-├── control/          Control plane (app CRUD, deploy, billing, env, route registry)
+├── zeroship-control/ Control plane (app CRUD, deploy, billing, env, route registry)
 │
 │ System 2 — App Runtime
-├── gateway/          Manifest dispatch, JWT, rate-limit, CHWBL routing, asset proxy
-├── worker/           V8-per-thread, on-demand bundle loading, LRU eviction
+├── zeroship-gateway/ Manifest dispatch, JWT, rate-limit, CHWBL routing, asset proxy
+├── zeroship-worker/  V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-+-- cli/              CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
++-- zeroship-cli/     CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
 ```
 
@@ -178,8 +178,8 @@ Per-crate READMEs (where present) carry the responsibility statement and list of
 These don't change. If you're about to violate one, stop and ask.
 
 - **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`). The rule holds for code we write: no crate here declares tokio as a normal or build dependency, and every `tokio::` string in the tree is a comment saying what compio replaces. **A `[dev-dependencies]` tokio is ALLOWED, by an operator decision on 2026-08-24.** The invariant is that no tokio runtime drives our I/O in a shipped binary; a test binary is not shipped. It buys the strongest oracle a port can have - running tokio-postgres beside `compio-postgres` in one process and diffing their behaviour against the same server. The exemption is narrow and mechanically enforced: `kind == "dev"` only, declared in the member's own `[dev-dependencies]` with its own version. A normal or build dependency stays a hard red, and so does tokio in the root `[workspace.dependencies]`, which carries no kind and can be inherited into any table. Both directions are mutation-proved in `tests/zero_tokio_gate.sh`. It does NOT yet hold for the dependency graph - `cyper` pulls `hyper`, which pulls tokio, so `libtokio-*.rlib` is built (re-measured 2026-08-21 via `cargo tree -i tokio -e normal`: the third-party carriers are `cyper`, `cyper-core`, `hyper`, `hyper-util`, and nine of our crates name `cyper` directly - both sets unchanged since 2026-08-20). Removing that is the `investigate/cyper-tokio-removal` branch. **That edge is LINKED, NOT DRIVEN, and this paragraph used to omit it** - which is how a task was dispatched on 2026-08-21 to hand-roll an HTTP/1.1 client purely to avoid "adding a tokio edge" that was never a running runtime. No tokio reactor starts on our paths. `cyper` and `cyper-core` contain zero `tokio` occurrences in their own source (`grep -rc tokio ~/.cargo/registry/src/*/cyper{,-core}-*/src/*.rs`), and cyper-core supplies `CompioExecutor` (`hyper::rt::Executor` over `compio::runtime::spawn`) and `CompioTimer` (`hyper::rt::Timer` over `compio::time::sleep`), which `cyper::ClientBuilder::build` installs alongside its own `Connector` - so hyper's spawn, timer and connect hooks all land on compio and hyper-util's tokio-based `HttpConnector` is never constructed. hyper itself declares only `tokio = { features = ["sync"] }`, which needs no reactor. The `net`/`mio` features come from `hyper-util/client` naming `tokio/net` outright, NOT from hyper-util defaults (`default = []` is empty), so `default-features = false` would change nothing and the edge cannot be flagged away without dropping `hyper_util::client::legacy::Client` - which cyper uses. Empirically, a `cyper` GET returns `Ok(200)` inside a bare `#[compio::test]` runtime; a live path touching `tokio::net` or `tokio::time` would panic there instead (that exercises connect plus one request, not pool-idle timers). Read the pinned carrier sets as "compiled in", never as "a second runtime is running". The closure BEHIND those sets can shrink without either set moving, and did: `zeroship-gatekit` dropped its last `zeroship-core` dependency on 2026-08-21 (before the crate itself was deleted), taking the reachable count from 26 to 25. The gate was green either way, because gatekit reached tokio through core rather than by naming a carrier - so treat the two pinned sets as "has the accepted edge moved", never as a count of who is behind it. Do not read the exception as licence: adding a tokio-dependent crate still needs to be raised. **`tests/zero_tokio_gate.sh` now checks both halves** - it bans a non-dev tokio declaration in any manifest we own, and pins those two sets so the accepted edge cannot grow, shrink, or vanish without this paragraph changing in the same commit.
-- **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
-- **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
+- **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/zeroship-worker/src/cache.rs`).
+- **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-core/src/typed_id.rs`.
 - **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
 - **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
@@ -189,7 +189,7 @@ These don't change. If you're about to violate one, stop and ask.
 
   The system schema (`__zeroship_admin`) therefore exists for exactly one thing: **state a separate service WRITES and the worker only READS**, which the tenant must not be able to forge. The schema epoch is that shape. It is not a place to keep the worker's powers.
 
-  **The counter-example is live in the tree.** DB-3: app JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to read its own PII, PHI and PCI at will. It is patched by `sanitize_app_actor` stripping reserved system kinds (`crates/zeroship-plugin-db/src/crud/unmask.rs:265`, `:283`) - but the bug is not an accident of that implementation. It is what the shape produces, and a privileged call the worker can make will keep producing it.
+  **The counter-example is live in the tree.** DB-3: app JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to read its own PII, PHI and PCI at will. It is patched by `sanitize_app_actor`, which strips an actor claiming a reserved system kind to `None` (defined in `crates/zeroship-plugin-db/src/crud/unmask.rs`, applied at all three sites that reach `check_unmask_authorization`: `parse_args`, `parse_bulk_args`, and `crud/mod.rs`'s query-hint path) - but the bug is not an accident of that implementation. It is what the shape produces, and a privileged call the worker can make will keep producing it.
 
   Operator decision, 2026-08-27. Consequences already taken: the HMAC session anchor (`hmac_keys`, `session_ctx`, `session_nonces`, `sign_session`, `verify_signature`, `init_session`, `rotate_session_keys`) is deleted rather than completed; CDC slot and publication ownership moves to the CDC relay service rather than to a wrapper the worker calls.
 
@@ -235,7 +235,7 @@ emits the five platform counters (requests/cpu_us/wall_us/ingress/egress) per
 dispatch, and the trusted data primitives (`env.db`/`env.kv`/`env.storage`)
 emit raw usage metrics (`db_reads`, `db_writes`, `kv_reads`, `kv_writes`,
 `storage_ops`, `storage_bytes`, …) at their op boundary, in the success arm
-only. The `Meter` + flush task live in `crates/metering` (`MeterHandle` is the
+only. The `Meter` + flush task live in `crates/zeroship-metering` (`MeterHandle` is the
 per-app injection vehicle the plugins stamp from the server-injected `app_id`).
 
 ### SDK packages (`@zeroship/*` npm scope)
@@ -473,7 +473,7 @@ cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
 # ones included zeroship-migrate-adapter's `platform_migrate`, which held eleven
 # standing deny-level `clippy::await_holding_lock` errors the whole time.
 #
-# It needs `pnpm build` and setup-wpt.sh to have run (crates/runtime
+# It needs `pnpm build` and setup-wpt.sh to have run (crates/zeroship-runtime
 # `include_str!`s their output); it refuses, naming them, rather than linting a
 # smaller workspace.
 ./tests/clippy_gate.sh
@@ -481,12 +481,12 @@ cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
 
 # Web Platform Tests (WPT) — fetched on demand by setup-wpt.sh, NOT
 # tracked in git. The script shallow-clones a pinned commit into
-# crates/runtime/tests/wpt/ (gitignored). The `crates/runtime/tests/
+# crates/zeroship-runtime/tests/wpt/ (gitignored). The `crates/zeroship-runtime/tests/
 # wpt_*.rs` runners `include_str!` upstream files verbatim (test
 # files stay pristine — any shims/skips/sentinels live in the Rust
 # runner code).
 # After cloning the repo:
-./crates/runtime/tests/setup-wpt.sh                 # ~930 MB working tree at depth=1
+./crates/zeroship-runtime/tests/setup-wpt.sh                 # ~930 MB working tree at depth=1
 # Bump the pin via WPT_COMMIT env var; default is the last-known-good
 # commit baked into setup-wpt.sh. Re-run after pulling if the pin moves.
 

@@ -90,5 +90,5 @@ For SDK-facing contracts:
 
 - The runtime stack is all compio/io_uring. There is no tokio in the app-serving path.
 - The gateway's hot path is the compiled resource tree from `Manifest.resources`, not the older rule walker.
-- The shipping blob-store backend in this worktree is `LocalDiskBlobStore`; gateway-side memory and disk LRUs live in `crates/gateway/src/blob_cache.rs`.
+- The shipping blob-store backend in this worktree is `LocalDiskBlobStore`; gateway-side memory and disk LRUs live in `crates/zeroship-gateway/src/blob_cache.rs`.
 - Sandbox infrastructure is a separate service. It is not on the end-user request path.

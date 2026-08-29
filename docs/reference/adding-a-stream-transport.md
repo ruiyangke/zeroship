@@ -4,11 +4,11 @@ Usage events move through the durable stream abstraction in `crates/stream`.
 The stream registry is intentionally Kafka-family shaped: transports provide
 partition offsets, consumer groups, and partition-key ordering. A new transport
 is a self-contained adapter plus one registration entry in
-`crates/stream/src/adapters/mod.rs`.
+`crates/zeroship-stream/src/adapters/mod.rs`.
 
 ## Stream Contract
 
-Implement `StreamTransport` in `crates/stream/src/transport.rs`:
+Implement `StreamTransport` in `crates/zeroship-stream/src/transport.rs`:
 
 ```rust
 #[async_trait::async_trait(?Send)]
@@ -86,7 +86,7 @@ address should refuse to boot rather than fall back to a lossy mode.
 
 ## Registration
 
-Add the adapter file under `crates/stream/src/adapters/`, then register it:
+Add the adapter file under `crates/zeroship-stream/src/adapters/`, then register it:
 
 ```rust
 pub mod acme;
@@ -102,7 +102,7 @@ The control plane builds the selected transport from `--stream-transport` /
 ## Worked Examples
 
 `redpanda` is the production transport in
-`crates/stream/src/adapters/redpanda.rs`.
+`crates/zeroship-stream/src/adapters/redpanda.rs`.
 
 - Config: `brokers`, `topic`, `group_id`, optional `client_id`, publish and poll
   timeouts, and `auto_offset_reset`.
@@ -123,7 +123,7 @@ Example config:
 ```
 
 `memory` is the in-process transport in
-`crates/stream/src/adapters/memory.rs`.
+`crates/zeroship-stream/src/adapters/memory.rs`.
 
 - Config: `topic`, `group_id`, and `partitions`.
 - It stores topic logs and committed offsets in process memory.

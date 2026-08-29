@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-01
 **Long-form design:** [`docs/archive/headers-native.md`](../archive/headers-native.md)
-**Implementation:** [`crates/runtime/src/web/headers.rs`](../../crates/runtime/src/web/headers.rs) (~930 LOC)
+**Implementation:** [`crates/zeroship-runtime/src/web/headers.rs`](../../crates/zeroship-runtime/src/web/headers.rs) (~930 LOC)
 
 ## Context
 

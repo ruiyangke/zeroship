@@ -6,7 +6,7 @@ counters, short-lived leases, cache-aside values, session-like scratch data,
 and prefix scans. Use `@zeroship/db` for relational source-of-truth data,
 audited workflows, durable idempotency, and exact large-number accounting.
 
-The native class is registered by `crates/plugin-kv/`; the TypeScript wrapper
+The native class is registered by `crates/zeroship-plugin-kv/`; the TypeScript wrapper
 lives in `sdks/kv/src/index.ts`.
 
 ## Authoring surface

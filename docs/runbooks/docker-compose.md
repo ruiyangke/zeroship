@@ -45,7 +45,7 @@ The secret directory contains exactly seven files:
 `migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
-That is `secret_specs()` in `crates/cli/src/dev.rs` (six) plus `pairwise-salt`,
+That is `secret_specs()` in `crates/zeroship-cli/src/dev.rs` (six) plus `pairwise-salt`,
 which is written separately because its bytes must equal the `.env` scalar
 below. This list said "eight" and named six until 2026-08-21; the one it left
 out was `migrate-dsn`, the privileged DSN, which is also the file
@@ -149,12 +149,12 @@ service runs) in three stages:
 1. **`sdks` (node:22)** runs `pnpm install --frozen-lockfile && pnpm build` to
    emit `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`. The runtime crate
    `include_str!`s those files at compile time
-   (`crates/runtime/src/core/init.rs`), so they must exist before cargo touches
+   (`crates/zeroship-runtime/src/core/init.rs`), so they must exist before cargo touches
    `zeroship-runtime`. This stage also builds the console app's `.zship`, which
    the runtime stage copies to `/opt/zeroship/console/app.zship` for control's
    `--bootstrap-console` seed.
 2. **`builder` (rust)** copies `crates/`, the freshly-built `sdks/`, and the
-   `deploy/policies/` tree (`crates/authz/build.rs` parses
+   `deploy/policies/` tree (`crates/zeroship-authz/build.rs` parses
    `../../deploy/policies/*.cedar` at build time) and compiles the six binaries.
 3. The runtime stage (ubuntu:24.04) copies all six binaries plus the prebuilt
    console `.zship`.
@@ -363,7 +363,7 @@ tearing it down never touches the main stack or the billing tests.
 It stands up the minimal real OpenMeter pipeline - Kafka + ClickHouse + Redis +
 Postgres + the OpenMeter API + a sink-worker - with a single `compute_units`
 meter pre-provisioned in `deploy/ops/openmeter-config.yaml` to match exactly what
-`crates/control/src/metering/provider/adapters/openmeter.rs` emits (`eventType` /
+`crates/zeroship-control/src/metering/provider/adapters/openmeter.rs` emits (`eventType` /
 `slug` = `compute_units`, `aggregation: SUM` over `$.value`).
 
 ```bash

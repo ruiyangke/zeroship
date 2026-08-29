@@ -3,7 +3,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-01-head
 # Native `Headers` design
 
 **Date:** 2026-05-01
-**Status:** **Shipped** — `crates/runtime/src/web/headers.rs` (930 LOC). HeadersIterator migrated to `#[v8_iterable]` and `Headers.has` is fastcall (commits `d2fea29`, `5677051`). Document retained as the canonical design spec.
+**Status:** **Shipped** — `crates/zeroship-runtime/src/web/headers.rs` (930 LOC). HeadersIterator migrated to `#[v8_iterable]` and `Headers.has` is fastcall (commits `d2fea29`, `5677051`). Document retained as the canonical design spec.
 **Spec:** WHATWG Fetch §2.2 — https://fetch.spec.whatwg.org/#headers-class
 **WebIDL:** https://webidl.spec.whatwg.org/
 
@@ -235,7 +235,7 @@ that touches a name or value goes through it.
 
 <!-- Added in round 2: addressing MAJOR-12 Vec<u8> extraction inconsistency -->
 The macro currently extracts `Vec<u8>` only from ArrayBufferView (see
-`crates/runtime-macros/src/lib.rs:198-217`). For Headers, we extend
+`crates/zeroship-runtime-macros/src/lib.rs:198-217`). For Headers, we extend
 `gen_extract` with a new path: when a method parameter is declared as
 `Vec<u8>` AND the method has the attribute `#[v8_bytestring(arg_name)]`
 (or, equivalently, the macro recognises a `ByteString` newtype — see
@@ -901,7 +901,7 @@ Two prototype concerns the macro currently can't handle:
 1. **`@@toStringTag` must be `"Headers Iterator"`** (spec: interface
    name + " " + "Iterator"), NOT the Rust struct name `"HeadersIterator"`.
    The current macro auto-installs `@@toStringTag = <class_name_str>`
-   (see `crates/runtime-macros/src/v8_class.rs` lines 270–284).
+   (see `crates/zeroship-runtime-macros/src/v8_class.rs` lines 270–284).
 
 2. **`[[Prototype]]` must be `%Iterator.prototype%`** per WebIDL
    §3.7.10.2. The macro doesn't handle prototype chaining.
@@ -1021,7 +1021,7 @@ behaviour is uniquely determined by the spec wording.
 This design *owns* the macro work. None of these are deferred-and-pray:
 
 1. **`ByteString` newtype extraction**
-   - Where: `crates/runtime-macros/src/lib.rs` `gen_extract` (around
+   - Where: `crates/zeroship-runtime-macros/src/lib.rs` `gen_extract` (around
      line 198, parallel to the Vec<u8>-from-ArrayBufferView path).
    - Detection: type path matches `ByteString` (a re-exportable
      newtype defined in `runtime-core` or `runtime`).
@@ -1032,7 +1032,7 @@ This design *owns* the macro work. None of these are deferred-and-pray:
    - Estimate: ~30 lines. ~2h including tests.
 
 2. **`#[v8_name = "delete"]` attribute**
-   - Where: `crates/runtime-macros/src/v8_class.rs` `classify` reads
+   - Where: `crates/zeroship-runtime-macros/src/v8_class.rs` `classify` reads
      attributes; thread the parsed name through `ClassMethod`; in
      `gen_install` `proto_sets`, use the attribute value instead of
      `m.func.sig.ident.to_string()` for the JS-visible key.
@@ -1043,7 +1043,7 @@ This design *owns* the macro work. None of these are deferred-and-pray:
    - Estimate: ~25 lines. ~2h.
 
 3. **`Vec<Vec<u8>>` → JS Array<ByteString> emitter**
-   - Where: `crates/runtime-macros/src/lib.rs` `gen_vec_set` (around
+   - Where: `crates/zeroship-runtime-macros/src/lib.rs` `gen_vec_set` (around
      line 366), parallel to the `Vec<String>` case.
    - Codegen: `for each Vec<u8> elem, build a v8::String via
      v8::String::new_from_one_byte(scope, &elem); set_index`.
@@ -1080,14 +1080,14 @@ which was wildly optimistic — see NIT-28 fix).
 <!-- Added in round 2: addressing MISSING-9 typed_id consistency -->
 Header names are not entity identifiers; they're a wire-format token
 defined externally by RFC 9110 / IANA. `typed_id` (UUIDv7 + base62 +
-entity prefix per `crates/core/src/typed_id.rs`) is for platform-
+entity prefix per `crates/zeroship-core/src/typed_id.rs`) is for platform-
 internal entities. ByteString is the right type because it matches
 the spec.
 
 ## File layout
 
 ```
-crates/runtime/src/
+crates/zeroship-runtime/src/
 ├── headers.rs         (new) Headers + HeadersIterator + helpers
 ├── lib.rs             (modified) +pub mod headers;
 └── init.rs            (modified) install Headers on globalThis behind
@@ -1097,12 +1097,12 @@ crates/runtime-core/ (or runtime/src/)
 └── byte_string.rs     (new) `pub struct ByteString(pub Vec<u8>);` with
                        Deref/From/Into shims
 
-crates/runtime/tests/
+crates/zeroship-runtime/tests/
 ├── headers.rs                 (new) hand-written tests (~40 cases)
 ├── wpt_headers.rs             (new) WPT runner (mirrors wpt_text_encoding.rs)
 └── wpt/fetch/api/headers/     (vendored from web-platform-tests)
 
-crates/runtime-macros/
+crates/zeroship-runtime-macros/
 ├── src/v8_class.rs   (modified) +#[v8_name], +#[v8_to_string_tag]
 ├── src/lib.rs        (modified) +ByteString extract, +Vec<Vec<u8>>,
 │                     +Result<Option<Vec<u8>>>
@@ -1125,21 +1125,21 @@ crates/runtime-macros/
    default stayed on the polyfill (flag still gated on
    `ZEROSHIP_NATIVE_HEADERS=1`), but with both modes green under
    `cargo test -p zeroship-runtime`. Sites refactored:
-   - `crates/runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` — Request
+   - `crates/zeroship-runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` — Request
      build helper now uses `new Headers(arrayOfPairs)`.
-   - `crates/runtime/src/transport/handler.rs::extract_response_headers` — slow
+   - `crates/zeroship-runtime/src/transport/handler.rs::extract_response_headers` — slow
      path walks `headers[Symbol.iterator]()` instead of `_map`.
-   - `crates/runtime/src/embed/fetch.js` `Response.json` fast path —
+   - `crates/zeroship-runtime/src/embed/fetch.js` `Response.json` fast path —
      uses the constructor instead of `Object.create + _map`.
-   - `crates/runtime/src/embed/fetch.js` `fetch()` — serialises
+   - `crates/zeroship-runtime/src/embed/fetch.js` `fetch()` — serialises
      request headers via `[...request.headers]` instead of
      `request.headers._toArray()`.
 
 3. **Remove polyfill** — DONE in the commit immediately after
    `474c69dd`. Deleted the JS Headers class block (~177 lines) from
-   `crates/runtime/src/embed/fetch.js`, removed the
+   `crates/zeroship-runtime/src/embed/fetch.js`, removed the
    `ZEROSHIP_NATIVE_HEADERS` env-var gate from
-   `crates/runtime/src/core/init.rs`, renamed the install hook from
+   `crates/zeroship-runtime/src/core/init.rs`, renamed the install hook from
    `install_native_headers_post` to `install_headers`, and updated all
    doc comments. Native Headers is now the only Headers in the
    runtime. WPT remains 98/0/1.
@@ -1283,5 +1283,5 @@ tracking issue; convert to a date-prefixed ADR upon completion.)
 - Fetch PR #1346 (Set-Cookie semantics) — https://github.com/whatwg/fetch/pull/1346
 - v8::String::contains_only_one_byte — V8 API
 - v8::String::write_one_byte_v2 — V8 API (silent truncation; precheck required)
-- Project: `crates/runtime-macros/src/v8_class.rs` lines 28–34 (known gaps), 200–244 (gen_install), 270–284 (auto @@toStringTag)
-- Project: `crates/runtime-macros/src/lib.rs` lines 198–217 (Vec<u8> from ArrayBufferView path), 366–375 (gen_vec_set)
+- Project: `crates/zeroship-runtime-macros/src/v8_class.rs` lines 28–34 (known gaps), 200–244 (gen_install), 270–284 (auto @@toStringTag)
+- Project: `crates/zeroship-runtime-macros/src/lib.rs` lines 198–217 (Vec<u8> from ArrayBufferView path), 366–375 (gen_vec_set)

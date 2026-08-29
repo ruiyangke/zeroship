@@ -80,7 +80,7 @@ Counted 2026-08-12 with `grep -rn ... crates/`: 47 non-test occurrences of
 | relaxes the same-origin guard | request time |
 | skips Stripe webhook signature verification | request time |
 
-The last is not inferred. `crates/control/src/stripe_handlers.rs:1081`: when the
+The last is not inferred. `crates/zeroship-control/src/stripe_handlers.rs:1081`: when the
 webhook secret is empty, `insecure_dev` skips verification rather than returning
 500.
 
@@ -231,9 +231,9 @@ are the rejection tests themselves asserting the flag is refused. The remaining
 tree hits are historical prose in `ISSUES.md` and `docs/archive/`.
 
 All FIVE binaries carry their own parser-rejection test, not three:
-`crates/control/src/main.rs:1685`, `crates/gateway/src/main.rs:769` and `:782`,
-`crates/worker/src/main.rs:665`, `crates/auth/src/config.rs:1226` and `:1237`,
-`crates/zeroship-migrate-server/src/config.rs:152`. `crates/cli/tests/dev_init_test.rs:662` is
+`crates/zeroship-control/src/main.rs:1685`, `crates/zeroship-gateway/src/main.rs:769` and `:782`,
+`crates/zeroship-worker/src/main.rs:665`, `crates/zeroship-auth/src/config.rs:1226` and `:1237`,
+`crates/zeroship-migrate-server/src/config.rs:152`. `crates/zeroship-cli/tests/dev_init_test.rs:662` is
 the cross-crate backstop that keys on the clap DECLARATION, so a re-added flag
 fails even in a crate whose own suite was not run; it guards its own input list
 (`dev_init_test.rs:668`, `sources.len() > 50`) so it cannot pass over nothing.
@@ -241,16 +241,16 @@ The port-exposure gate
 (`crates/zeroship-gatekit/src/port_exposure.rs:193`) independently detects the
 flag reappearing in the control service's compose block.
 Its stated blind spot is a hand-rolled `std::env::var("ZEROSHIP_DEV_INSECURE")`
-that never reaches clap - which `crates/core/tests/config_env_access_gate.rs`
-closes from the other side, since `crates/core/src/config/env.rs` is the only
+that never reaches clap - which `crates/zeroship-core/tests/config_env_access_gate.rs`
+closes from the other side, since `crates/zeroship-core/src/config/env.rs` is the only
 path allowed to touch the process environment at all.
 
 **Gate 2 - NOT built.** There is no startup rejection of an unrecognised
 `ZEROSHIP_*` variable, and the reason is structural, not an oversight:
 rejecting unknown names requires enumerating the environment, and the sole
 whole-environment read in the workspace is
-`crates/core/src/config/declared.rs:515`, whose only caller is
-`crates/cli/src/main.rs:294` forwarding into a creator app's `process.env`. Its
+`crates/zeroship-core/src/config/declared.rs:515`, whose only caller is
+`crates/zeroship-cli/src/main.rs:294` forwarding into a creator app's `process.env`. Its
 own documentation (`declared.rs:503-506`) says "the platform cannot enumerate
 them and must not try". No platform binary enumerates. `bootstrap` does not
 either. Migration step 6 below still carries this, correctly.
@@ -267,7 +267,7 @@ gate claimed:
   variables it fails instead (`config_name_alignment_gate.sh:270-275`,
   `:299-302`).
 - The compiled contract (check 2) fails on a declared-but-unread source or an
-  undeclared reader (`crates/config-contract/src/contract.rs:41`, `:232`).
+  undeclared reader (`crates/zeroship-config-contract/src/contract.rs:41`, `:232`).
 
 The gap that remains is the one the gate script admits in its own header for
 check 6b (`config_name_alignment_gate.sh:36-38`) and which applies equally to
@@ -283,7 +283,7 @@ unknown-input assertions are about `--check-config-format`
 (`config_check_e2e.sh:426`, `:622`).
 
 **Gate 3 - partial.** `--check-config` exists on all five servers with a shared
-structured emitter (`crates/core/src/config/bootstrap.rs:157`) rendering text or
+structured emitter (`crates/zeroship-core/src/config/bootstrap.rs:157`) rendering text or
 JSON, and it is exercised end to end against the real compiled binaries by
 `tests/config_check_e2e.sh`, a named CI step (`.github/workflows/ci.yml:499`)
 with a minimum-passed floor of 86 so a zero-assertion run cannot read as green
@@ -294,7 +294,7 @@ What is NOT reported is the second half of the sentence above: per-secret
 supplied-versus-generated. `CheckValue::Secret` is a bare bool and prints only
 `configured` / `(unset)` (`bootstrap.rs:187-188`). The internal machinery to say
 more exists - `SourceKind` and `Secret::supplied(...)`
-(`crates/core/src/config/names.rs:155` and `:659`) - but no binary emits it, and
+(`crates/zeroship-core/src/config/names.rs:155` and `:659`) - but no binary emits it, and
 "generated" has no representation anywhere: `zeroship dev init` writes a file
 and the server sees an ordinary file source, so as written this half is not
 merely unbuilt, it is not expressible without a new signal from the generator to

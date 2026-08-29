@@ -21,22 +21,22 @@
 ## File Structure
 
 **New files:**
-- `crates/runtime/src/fetch_outcome.rs` — `FetchOutcome` enum, `RequestCtx` struct, `EnvSnapshot` struct
-- `crates/runtime/tests/call_fetch_handler.rs` — integration tests for the new primitive
+- `crates/zeroship-runtime/src/fetch_outcome.rs` — `FetchOutcome` enum, `RequestCtx` struct, `EnvSnapshot` struct
+- `crates/zeroship-runtime/tests/call_fetch_handler.rs` — integration tests for the new primitive
 
 **Modified files:**
-- `crates/runtime/src/core/runtime.rs` (2381 LOC) — add `call_fetch_handler`; later delete `dispatch_rpc` / `dispatch_start` / `dispatch_http` and the `DispatchOutcome` enum
-- `crates/runtime/src/core/init.rs` (927 LOC) — add `__zs_env` / `__zs_bind_request_ctx` / `__zs_get_request_ctx` native ops; later delete `DISPATCH_JS`, `__rpc` scaffolding, `zeroship.*` global bindings
-- `crates/runtime/src/core/state.rs` (483 LOC) — extend per-request state with a `wait_until` list
-- `crates/runtime/src/core/dispatch.rs` (380 LOC) — simplify (drop RPC-specific return-tag detection once `dispatch_rpc` is gone)
-- `crates/runtime/src/lib.rs` — export `FetchOutcome`, `RequestCtx`, `EnvSnapshot`
-- `crates/runtime/src/core/serve.rs` — switch `dispatch_rpc_by_path` / `dispatch_http` callers to `call_fetch_handler`
-- `crates/worker/src/handler.rs` (479 LOC) — collapse `http_dispatch()` + `dispatch()` into one handler that calls `call_fetch_handler`
-- `crates/runtime/tests/common/mod.rs` — add `dispatch_fetch()` helper; remove the legacy `dispatch()` / `dispatch_http_sync()` helpers
-- `crates/runtime/tests/http.rs` — rewrite to test via `call_fetch_handler`
+- `crates/zeroship-runtime/src/core/runtime.rs` (2381 LOC) — add `call_fetch_handler`; later delete `dispatch_rpc` / `dispatch_start` / `dispatch_http` and the `DispatchOutcome` enum
+- `crates/zeroship-runtime/src/core/init.rs` (927 LOC) — add `__zs_env` / `__zs_bind_request_ctx` / `__zs_get_request_ctx` native ops; later delete `DISPATCH_JS`, `__rpc` scaffolding, `zeroship.*` global bindings
+- `crates/zeroship-runtime/src/core/state.rs` (483 LOC) — extend per-request state with a `wait_until` list
+- `crates/zeroship-runtime/src/core/dispatch.rs` (380 LOC) — simplify (drop RPC-specific return-tag detection once `dispatch_rpc` is gone)
+- `crates/zeroship-runtime/src/lib.rs` — export `FetchOutcome`, `RequestCtx`, `EnvSnapshot`
+- `crates/zeroship-runtime/src/core/serve.rs` — switch `dispatch_rpc_by_path` / `dispatch_http` callers to `call_fetch_handler`
+- `crates/zeroship-worker/src/handler.rs` (479 LOC) — collapse `http_dispatch()` + `dispatch()` into one handler that calls `call_fetch_handler`
+- `crates/zeroship-runtime/tests/common/mod.rs` — add `dispatch_fetch()` helper; remove the legacy `dispatch()` / `dispatch_http_sync()` helpers
+- `crates/zeroship-runtime/tests/http.rs` — rewrite to test via `call_fetch_handler`
 
 **Deleted files:**
-- `crates/runtime/tests/rpc.rs` — RPC sugar moves to PR 2's bootstrap tests; the Rust kernel no longer knows what RPC is
+- `crates/zeroship-runtime/tests/rpc.rs` — RPC sugar moves to PR 2's bootstrap tests; the Rust kernel no longer knows what RPC is
 
 **Out of scope for PR 1** (handled in PR 2+):
 - `sdks/` — no changes
@@ -48,12 +48,12 @@
 ## Task A1: Define `FetchOutcome`, `RequestCtx`, `EnvSnapshot`
 
 **Files:**
-- Create: `crates/runtime/src/fetch_outcome.rs`
-- Modify: `crates/runtime/src/lib.rs`
+- Create: `crates/zeroship-runtime/src/fetch_outcome.rs`
+- Modify: `crates/zeroship-runtime/src/lib.rs`
 
 - [ ] **Step 1: Create the new types file**
 
-Create `crates/runtime/src/fetch_outcome.rs`:
+Create `crates/zeroship-runtime/src/fetch_outcome.rs`:
 
 ```rust
 //! Outcome of `Runtime::call_fetch_handler` — the kernel's sole dispatch
@@ -171,7 +171,7 @@ impl EnvSnapshot {
 
 - [ ] **Step 2: Register module in `lib.rs`**
 
-Edit `crates/runtime/src/lib.rs`, add the module declaration and re-export:
+Edit `crates/zeroship-runtime/src/lib.rs`, add the module declaration and re-export:
 
 ```rust
 pub mod fetch_outcome;
@@ -194,7 +194,7 @@ Expected: clean build, no warnings about unused types (Rust will warn; that's fi
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/runtime/src/fetch_outcome.rs crates/runtime/src/lib.rs
+git add crates/zeroship-runtime/src/fetch_outcome.rs crates/zeroship-runtime/src/lib.rs
 git commit -m "runtime: add FetchOutcome / RequestCtx / EnvSnapshot types
 
 New kernel dispatch primitives for the CF-Workers-mirror refactor.
@@ -206,17 +206,17 @@ No callers yet — types alone. See docs/superpowers/specs/2026-04-20-programmin
 ## Task A2: Extend `PerRequestState` with `wait_until`
 
 **Files:**
-- Modify: `crates/runtime/src/core/state.rs`
+- Modify: `crates/zeroship-runtime/src/core/state.rs`
 
 - [ ] **Step 1: Read the current `PerRequestState` / request-tracking struct**
 
-Run: `grep -n "next_direct_request_id\|executing_request_id\|pending_resolvers" crates/runtime/src/core/state.rs`
+Run: `grep -n "next_direct_request_id\|executing_request_id\|pending_resolvers" crates/zeroship-runtime/src/core/state.rs`
 
 Expected: you find the per-request tracking fields. Note the line numbers.
 
 - [ ] **Step 2: Add a `wait_until_by_request` map**
 
-Edit `crates/runtime/src/core/state.rs`. Near the other per-request fields in `RuntimeState`, add:
+Edit `crates/zeroship-runtime/src/core/state.rs`. Near the other per-request fields in `RuntimeState`, add:
 
 ```rust
 /// For each in-flight request, the list of promises registered via
@@ -264,7 +264,7 @@ Expected: clean build.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/runtime/src/core/state.rs
+git add crates/zeroship-runtime/src/core/state.rs
 git commit -m "runtime: track waitUntil promises per request
 
 Per-request map; `register_wait_until` is called from the __zs_wait_until
@@ -276,18 +276,18 @@ native op (added in Task C3). Not yet wired — state addition only."
 ## Task B1: Write failing test for `call_fetch_handler` — simple Response
 
 **Files:**
-- Create: `crates/runtime/tests/call_fetch_handler.rs`
-- Modify: `crates/runtime/tests/common/mod.rs` (add `dispatch_fetch` helper)
+- Create: `crates/zeroship-runtime/tests/call_fetch_handler.rs`
+- Modify: `crates/zeroship-runtime/tests/common/mod.rs` (add `dispatch_fetch` helper)
 
 - [ ] **Step 1: Read the current common-test helpers**
 
-Run: `cat crates/runtime/tests/common/mod.rs`
+Run: `cat crates/zeroship-runtime/tests/common/mod.rs`
 
 Expected: you see the `m()` helper (builds a single-module list), `dispatch_http_sync`, etc. Note the `init_v8()` / `Runtime::builder()` pattern.
 
 - [ ] **Step 2: Add `dispatch_fetch` helper to `common/mod.rs`**
 
-Append to `crates/runtime/tests/common/mod.rs`:
+Append to `crates/zeroship-runtime/tests/common/mod.rs`:
 
 ```rust
 use zeroship_runtime::{EnvSnapshot, FetchOutcome, RequestCtx, CancelFlag};
@@ -334,7 +334,7 @@ pub fn dispatch_fetch(modules: Vec<ModuleEntry>, req: TestRequest) -> FetchOutco
 
 - [ ] **Step 3: Create the test file**
 
-Create `crates/runtime/tests/call_fetch_handler.rs`:
+Create `crates/zeroship-runtime/tests/call_fetch_handler.rs`:
 
 ```rust
 mod common;
@@ -376,17 +376,17 @@ Skip commit; we commit once the test passes in Task B3.
 ## Task B2: Implement `Runtime::call_fetch_handler` skeleton
 
 **Files:**
-- Modify: `crates/runtime/src/core/runtime.rs`
+- Modify: `crates/zeroship-runtime/src/core/runtime.rs`
 
 - [ ] **Step 1: Find the public Runtime impl block**
 
-Run: `grep -n "^impl Runtime {" crates/runtime/src/core/runtime.rs`
+Run: `grep -n "^impl Runtime {" crates/zeroship-runtime/src/core/runtime.rs`
 
 Expected: one line around L300-ish (there's a struct `Runtime` with an impl that holds the handle; line numbers from the earlier grep: `dispatch_rpc` at L336, so the impl starts above it).
 
 - [ ] **Step 2: Add the skeleton method**
 
-In `crates/runtime/src/core/runtime.rs`, in the public `impl Runtime` block (alongside `dispatch_http`, before the `has_http_handler` method):
+In `crates/zeroship-runtime/src/core/runtime.rs`, in the public `impl Runtime` block (alongside `dispatch_http`, before the `has_http_handler` method):
 
 ```rust
 /// Kernel's sole dispatch primitive. Invokes the user's
@@ -456,13 +456,13 @@ Expected: test RUNS (method exists) but FAILS on `assert_eq!(status, 200)` — w
 ## Task B3: Implement `call_fetch_handler` for sync `Response` returns
 
 **Files:**
-- Modify: `crates/runtime/src/core/runtime.rs`
+- Modify: `crates/zeroship-runtime/src/core/runtime.rs`
 
 The implementation mirrors the existing `RuntimeInner::dispatch_http` flow but: (a) invokes `module.default.fetch(request, env, ctx)` instead of the top-level `onRequest` export; (b) passes env and ctx JS objects built from the snapshot + RequestCtx.
 
 - [ ] **Step 1: Look up the existing `dispatch_http` body**
 
-Run: `sed -n '1419,1510p' crates/runtime/src/core/runtime.rs`
+Run: `sed -n '1419,1510p' crates/zeroship-runtime/src/core/runtime.rs`
 
 Expected: you can see how `dispatch_http` uses `enter_v8!` to get a HandleScope, builds a Request object via `http_create_request_fn`, calls the `http_handler_fn` global, and dispatches on the return.
 
@@ -677,7 +677,7 @@ Note: the above references `crate::http::build_request`, `parse_json_to_value`, 
 
 - [ ] **Step 5: Add missing `http::*` helpers**
 
-In `crates/runtime/src/transport/handler.rs`, add these helpers (match the existing `build_request` style — if that helper isn't named `build_request`, find the real name via `grep -n "pub fn" crates/runtime/src/transport/handler.rs`):
+In `crates/zeroship-runtime/src/transport/handler.rs`, add these helpers (match the existing `build_request` style — if that helper isn't named `build_request`, find the real name via `grep -n "pub fn" crates/zeroship-runtime/src/transport/handler.rs`):
 
 ```rust
 /// Parse `json_str` via JSON.parse in the current isolate; returns the
@@ -723,7 +723,7 @@ The simplest wiring: when the compiled module executes (existing module-instanti
 Find the module-instantiation code. Search:
 
 ```bash
-grep -n "get_module_namespace\|module_namespace\|instantiate_module\|default" crates/runtime/src/core/modules.rs
+grep -n "get_module_namespace\|module_namespace\|instantiate_module\|default" crates/zeroship-runtime/src/core/modules.rs
 ```
 
 You'll find where module exports are bound to globals. Add a branch that, for the entry module, does:
@@ -753,7 +753,7 @@ If it fails with a resolution error ("fetch_handler_fn is None"), the Step 6 wir
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/runtime/src/core/runtime.rs crates/runtime/src/transport/handler.rs crates/runtime/src/core/modules.rs crates/runtime/tests/call_fetch_handler.rs crates/runtime/tests/common/mod.rs
+git add crates/zeroship-runtime/src/core/runtime.rs crates/zeroship-runtime/src/transport/handler.rs crates/zeroship-runtime/src/core/modules.rs crates/zeroship-runtime/tests/call_fetch_handler.rs crates/zeroship-runtime/tests/common/mod.rs
 git commit -m "runtime: call_fetch_handler — sync Response path
 
 New kernel dispatch primitive. Resolves module.default.fetch,
@@ -766,12 +766,12 @@ for sync returns. Async paths stubbed; tests added for the happy path."
 ## Task B4: Test + implement async `Promise<Response>` handler
 
 **Files:**
-- Modify: `crates/runtime/tests/call_fetch_handler.rs`
-- Modify: `crates/runtime/src/core/runtime.rs`
+- Modify: `crates/zeroship-runtime/tests/call_fetch_handler.rs`
+- Modify: `crates/zeroship-runtime/src/core/runtime.rs`
 
 - [ ] **Step 1: Add failing test**
 
-Append to `crates/runtime/tests/call_fetch_handler.rs`:
+Append to `crates/zeroship-runtime/tests/call_fetch_handler.rs`:
 
 ```rust
 use zeroship_runtime::SettledFetch;
@@ -793,7 +793,7 @@ fn async_response() {
     };
 
     // Block on the receiver using compio's runtime — existing test pattern.
-    // Match the idiom in crates/runtime/tests/http.rs for async paths.
+    // Match the idiom in crates/zeroship-runtime/tests/http.rs for async paths.
     let body = compio::runtime::Runtime::new()
         .unwrap()
         .block_on(async {
@@ -815,7 +815,7 @@ fn async_response() {
 }
 ```
 
-Note: if the existing test file doesn't use `compio::runtime::Runtime`, use whatever pattern `RuntimeInner::pump_loop` tests already use. `grep -n "block_on\|compio::runtime" crates/runtime/tests/` to find the idiom.
+Note: if the existing test file doesn't use `compio::runtime::Runtime`, use whatever pattern `RuntimeInner::pump_loop` tests already use. `grep -n "block_on\|compio::runtime" crates/zeroship-runtime/tests/` to find the idiom.
 
 - [ ] **Step 2: Run — must fail**
 
@@ -873,7 +873,7 @@ fn store_fetch_pending(
 Note: you need to add `reply_fetch: Option<ResultSender<Result<SettledFetch, DispatchError>>>` to the `PendingRequest` struct, alongside `reply_direct` and `reply_http`. Grep for the struct definition:
 
 ```bash
-grep -n "struct PendingRequest" crates/runtime/src/core/runtime.rs
+grep -n "struct PendingRequest" crates/zeroship-runtime/src/core/runtime.rs
 ```
 
 Find it, add the new field, and initialize `reply_fetch: None` at every construction site.
@@ -883,7 +883,7 @@ Find it, add the new field, and initialize `reply_fetch: None` at every construc
 Find the pump's settle branch — search:
 
 ```bash
-grep -n "SettledResult::Rpc\|SettledResult::Http" crates/runtime/src/core/runtime.rs
+grep -n "SettledResult::Rpc\|SettledResult::Http" crates/zeroship-runtime/src/core/runtime.rs
 ```
 
 The pump matches on `SettledResult::{Rpc, Http}` and delivers via `reply_direct` / `reply_http`. Add a third arm (or reuse Http) that also sends to `reply_fetch`. Since PR 1 does not yet split settlement by handler type, do the simplest thing: after the existing `reply_http.send(...)`, also check `reply_fetch` and send a translated `SettledFetch`:
@@ -935,7 +935,7 @@ Expected: PASS. Both `simple_response` and `async_response` now green.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/runtime/src/core/runtime.rs crates/runtime/tests/call_fetch_handler.rs
+git add crates/zeroship-runtime/src/core/runtime.rs crates/zeroship-runtime/tests/call_fetch_handler.rs
 git commit -m "runtime: call_fetch_handler — async Promise<Response> path
 
 Pending outcome with result receiver; pump delivers via reply_fetch
@@ -948,7 +948,7 @@ will be dropped when dispatch_http is removed (Task D3)."
 ## Task B5: Test + implement streaming (ReadableStream body)
 
 **Files:**
-- Modify: `crates/runtime/tests/call_fetch_handler.rs`
+- Modify: `crates/zeroship-runtime/tests/call_fetch_handler.rs`
 
 - [ ] **Step 1: Add failing test**
 
@@ -1000,7 +1000,7 @@ Expected: PASS if Task B3's `build_fetch_outcome` correctly routes `ResponseInfo
 - [ ] **Step 3: Commit (if green)**
 
 ```bash
-git add crates/runtime/tests/call_fetch_handler.rs
+git add crates/zeroship-runtime/tests/call_fetch_handler.rs
 git commit -m "test: call_fetch_handler — streaming response contract"
 ```
 
@@ -1009,7 +1009,7 @@ git commit -m "test: call_fetch_handler — streaming response contract"
 ## Task B6: Test + implement WebSocket upgrade
 
 **Files:**
-- Modify: `crates/runtime/tests/call_fetch_handler.rs`
+- Modify: `crates/zeroship-runtime/tests/call_fetch_handler.rs`
 
 - [ ] **Step 1: Add failing test**
 
@@ -1049,7 +1049,7 @@ Expected: PASS if `ResponseInfo::WebSocket` maps through `build_fetch_outcome`. 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/runtime/tests/call_fetch_handler.rs
+git add crates/zeroship-runtime/tests/call_fetch_handler.rs
 git commit -m "test: call_fetch_handler — WebSocket upgrade contract"
 ```
 
@@ -1058,13 +1058,13 @@ git commit -m "test: call_fetch_handler — WebSocket upgrade contract"
 ## Task C1: Native op `__zs_env`
 
 **Files:**
-- Modify: `crates/runtime/src/core/init.rs`
-- Modify: `crates/runtime/src/core/state.rs`
-- Modify: `crates/runtime/tests/call_fetch_handler.rs`
+- Modify: `crates/zeroship-runtime/src/core/init.rs`
+- Modify: `crates/zeroship-runtime/src/core/state.rs`
+- Modify: `crates/zeroship-runtime/tests/call_fetch_handler.rs`
 
 - [ ] **Step 1: Store the env JSON on the runtime state**
 
-In `RuntimeState` (`crates/runtime/src/core/state.rs`), add a field:
+In `RuntimeState` (`crates/zeroship-runtime/src/core/state.rs`), add a field:
 
 ```rust
 /// Frozen env JSON snapshot — JSON.parse-able string. Passed to JS via
@@ -1091,7 +1091,7 @@ self.state.borrow_mut().set_env_snapshot(env);
 
 - [ ] **Step 3: Register `__zs_env` global**
 
-In `crates/runtime/src/core/init.rs`, find `setup_globals`. After an existing native-op registration (any will do — grep `scope.set(global, key, ...)` for style), add:
+In `crates/zeroship-runtime/src/core/init.rs`, find `setup_globals`. After an existing native-op registration (any will do — grep `scope.set(global, key, ...)` for style), add:
 
 ```rust
 // __zs_env() — returns the frozen env JSON as a parsed JS value.
@@ -1167,7 +1167,7 @@ Expected: PASS. If it fails with "direct" but not "fromArg", the `build_ctx` / e
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/runtime/src/core/init.rs crates/runtime/src/core/state.rs crates/runtime/src/core/runtime.rs crates/runtime/tests/call_fetch_handler.rs
+git add crates/zeroship-runtime/src/core/init.rs crates/zeroship-runtime/src/core/state.rs crates/zeroship-runtime/src/core/runtime.rs crates/zeroship-runtime/tests/call_fetch_handler.rs
 git commit -m "runtime: __zs_env native op — return env snapshot
 
 JS accesses the module-singleton env via globalThis.__zs_env() or via
@@ -1179,13 +1179,13 @@ the fetch(req, env, ctx) parameter. Both return the same parsed JSON."
 ## Task C2: Native op `__zs_bind_request_ctx` + `__zs_get_request_ctx`
 
 **Files:**
-- Modify: `crates/runtime/src/core/init.rs`
-- Modify: `crates/runtime/src/core/state.rs`
-- Modify: `crates/runtime/tests/call_fetch_handler.rs`
+- Modify: `crates/zeroship-runtime/src/core/init.rs`
+- Modify: `crates/zeroship-runtime/src/core/state.rs`
+- Modify: `crates/zeroship-runtime/tests/call_fetch_handler.rs`
 
 - [ ] **Step 1: Add per-request ctx storage to state**
 
-Edit `crates/runtime/src/core/state.rs`, in `RuntimeState`:
+Edit `crates/zeroship-runtime/src/core/state.rs`, in `RuntimeState`:
 
 ```rust
 /// Per-request JS-exposed context map, keyed by request_id.
@@ -1267,7 +1267,7 @@ fn zs_get_request_ctx_callback(
 
 - [ ] **Step 3: Clear ctx on request completion**
 
-In `crates/runtime/src/core/runtime.rs`, find `clear_executing_request`. After clearing `executing_request_id`, also clear the ctx map entry:
+In `crates/zeroship-runtime/src/core/runtime.rs`, find `clear_executing_request`. After clearing `executing_request_id`, also clear the ctx map entry:
 
 ```rust
 if let Some(rid) = self.state.borrow().executing_request_id {
@@ -1316,7 +1316,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/runtime/src/core/init.rs crates/runtime/src/core/state.rs crates/runtime/src/core/runtime.rs crates/runtime/tests/call_fetch_handler.rs
+git add crates/zeroship-runtime/src/core/init.rs crates/zeroship-runtime/src/core/state.rs crates/zeroship-runtime/src/core/runtime.rs crates/zeroship-runtime/tests/call_fetch_handler.rs
 git commit -m "runtime: __zs_bind_request_ctx / __zs_get_request_ctx ops
 
 Per-request ctx storage keyed by executing_request_id. Bootstrap
@@ -1329,17 +1329,17 @@ place of JS-level AsyncLocalStorage."
 ## Task E1: Switch `worker/handler.rs` to `call_fetch_handler`
 
 **Files:**
-- Modify: `crates/worker/src/handler.rs`
+- Modify: `crates/zeroship-worker/src/handler.rs`
 
 - [ ] **Step 1: Read the current two entry points**
 
-Run: `grep -n "pub async fn" crates/worker/src/handler.rs`
+Run: `grep -n "pub async fn" crates/zeroship-worker/src/handler.rs`
 
 Expected: two public handlers — one for RPC (`/_rpc/*`), one for HTTP passthrough. They should collapse into one.
 
 - [ ] **Step 2: Collapse into one `dispatch` function**
 
-Rewrite `crates/worker/src/handler.rs`. The new shape: one `dispatch` handler that builds a `TestRequest`-like envelope, calls `call_fetch_handler`, and maps `FetchOutcome` → ntex `HttpResponse`.
+Rewrite `crates/zeroship-worker/src/handler.rs`. The new shape: one `dispatch` handler that builds a `TestRequest`-like envelope, calls `call_fetch_handler`, and maps `FetchOutcome` → ntex `HttpResponse`.
 
 Key excerpt (the full rewrite is mechanical — adapt existing error handling to the new enum):
 
@@ -1461,7 +1461,7 @@ The kernel doesn't care about `/_rpc/*` any more — the URL is forwarded verbat
 
 - [ ] **Step 3: Rewire routes in `worker/src/main.rs`**
 
-Run: `grep -n "dispatch\|http_dispatch\|/_rpc" crates/worker/src/main.rs`
+Run: `grep -n "dispatch\|http_dispatch\|/_rpc" crates/zeroship-worker/src/main.rs`
 
 Expected: you find the ntex route registrations. Collapse the two routes into one:
 
@@ -1479,7 +1479,7 @@ Expected: zeroship-worker compiles. There may still be unused-warning noise from
 
 - [ ] **Step 5: Update gateway if needed**
 
-Run: `grep -n "_rpc\|_dispatch\|dispatch_http" crates/gateway/src/ 2>&1`
+Run: `grep -n "_rpc\|_dispatch\|dispatch_http" crates/zeroship-gateway/src/ 2>&1`
 
 Expected: the gateway proxies to whatever route the worker exposes. If gateway still speaks `/_rpc`, rename to `/_dispatch` to match (find + sed; one-liner).
 
@@ -1490,7 +1490,7 @@ Expected: clean workspace build.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/worker/src/handler.rs crates/worker/src/main.rs crates/gateway/src/
+git add crates/zeroship-worker/src/handler.rs crates/zeroship-worker/src/main.rs crates/zeroship-gateway/src/
 git commit -m "worker: single dispatch entry via call_fetch_handler
 
 Collapses /_rpc and /_dispatch routes into one. Envelope parse is
@@ -1503,13 +1503,13 @@ dispatch RPC vs fetch internally based on URL."
 ## Task E2: Switch `serve.rs` to `call_fetch_handler`
 
 **Files:**
-- Modify: `crates/runtime/src/core/serve.rs`
+- Modify: `crates/zeroship-runtime/src/core/serve.rs`
 
 `serve.rs` is the `zeroship serve` single-tenant dev/production path (no gateway, no worker). It has its own RPC + HTTP split that needs the same collapse.
 
 - [ ] **Step 1: Find both dispatch paths in serve.rs**
 
-Run: `grep -n "dispatch_rpc_by_path\|dispatch_http\|DispatchOutcome" crates/runtime/src/core/serve.rs`
+Run: `grep -n "dispatch_rpc_by_path\|dispatch_http\|DispatchOutcome" crates/zeroship-runtime/src/core/serve.rs`
 
 Expected: two async fns — `dispatch_rpc_by_path` and `dispatch_http`. Collapse them.
 
@@ -1593,7 +1593,7 @@ Expected: either passes OR fails with "module does not export default.fetch" —
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/runtime/src/core/serve.rs
+git add crates/zeroship-runtime/src/core/serve.rs
 git commit -m "serve: single dispatch via call_fetch_handler
 
 Deletes dispatch_rpc_by_path + legacy dispatch_http. All routing
@@ -1605,11 +1605,11 @@ decisions now live in the bootstrap (PR 2); kernel is URL-agnostic."
 ## Task D1: Delete `DISPATCH_JS` + `__rpc` scaffolding from `init.rs`
 
 **Files:**
-- Modify: `crates/runtime/src/core/init.rs`
+- Modify: `crates/zeroship-runtime/src/core/init.rs`
 
 - [ ] **Step 1: Find and delete `DISPATCH_JS`**
 
-Run: `grep -n "DISPATCH_JS\|__rpc" crates/runtime/src/core/init.rs`
+Run: `grep -n "DISPATCH_JS\|__rpc" crates/zeroship-runtime/src/core/init.rs`
 
 Delete the entire `pub const DISPATCH_JS: &str = r#"..."#;` block.
 
@@ -1620,7 +1620,7 @@ Delete any block that populates `__rpc` / bootstraps the registry / references `
 In the same file, find the block that sets `zeroship.db`, `zeroship.auth`, `zeroship.kv`, `zeroship.storage`, `zeroship.meter`:
 
 ```bash
-grep -n "zeroship\"\|ZeroshipGlobal\|db_obj\|auth_obj" crates/runtime/src/core/init.rs
+grep -n "zeroship\"\|ZeroshipGlobal\|db_obj\|auth_obj" crates/zeroship-runtime/src/core/init.rs
 ```
 
 Delete the entire `zeroship` global construction (the object, its property sets, and the `globalThis.zeroship = obj` assignment).
@@ -1629,7 +1629,7 @@ The per-capability native ops (e.g., `__zs_db_query`) may still be needed later 
 
 - [ ] **Step 3: Delete the `embed/dispatch.js`-style embed if one exists**
 
-Run: `ls crates/runtime/src/embed/ && grep -rn "DISPATCH_JS\|__rpc" crates/runtime/src/embed/ 2>&1 | head`
+Run: `ls crates/zeroship-runtime/src/embed/ && grep -rn "DISPATCH_JS\|__rpc" crates/zeroship-runtime/src/embed/ 2>&1 | head`
 
 If any embed file holds RPC glue, delete it. The remaining embeds (`blob.js`, `fetch.js`, `streams.js`, etc.) are Web API polyfills that stay.
 
@@ -1642,7 +1642,7 @@ Expected: clean. If there's a use-of-undefined `DISPATCH_JS` / `__rpc` elsewhere
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/runtime/src/core/init.rs crates/runtime/src/embed/ crates/runtime/src/core/runtime.rs
+git add crates/zeroship-runtime/src/core/init.rs crates/zeroship-runtime/src/embed/ crates/zeroship-runtime/src/core/runtime.rs
 git commit -m "runtime: delete DISPATCH_JS + __rpc + zeroship.* globals
 
 Kernel no longer knows what RPC is. The URL-path router, method
@@ -1656,11 +1656,11 @@ paths."
 ## Task D2: Delete `dispatch_rpc` + `dispatch_start` + `dispatch_http` methods
 
 **Files:**
-- Modify: `crates/runtime/src/core/runtime.rs`
+- Modify: `crates/zeroship-runtime/src/core/runtime.rs`
 
 - [ ] **Step 1: Delete the three public methods on `impl Runtime`**
 
-Edit `crates/runtime/src/core/runtime.rs`. Remove:
+Edit `crates/zeroship-runtime/src/core/runtime.rs`. Remove:
 - `pub fn dispatch_rpc(&self, ...)` (around L336)
 - `pub fn dispatch_start(&self, ...)` (L345)
 - `pub fn dispatch_http(&self, ...)` (L357)
@@ -1692,12 +1692,12 @@ Run: `cargo check --workspace 2>&1 | tail -30`
 
 Expected: clean. Likely failures:
 - Some test file still imports `DispatchOutcome` → delete the import + the test (if it's testing a path that no longer exists)
-- `crates/runtime/tests/rpc.rs` → delete the whole file (see Task E3)
+- `crates/zeroship-runtime/tests/rpc.rs` → delete the whole file (see Task E3)
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/runtime/src/core/runtime.rs
+git add crates/zeroship-runtime/src/core/runtime.rs
 git commit -m "runtime: delete dispatch_rpc / dispatch_start / dispatch_http
 
 Single entry is call_fetch_handler. DispatchOutcome enum and its
@@ -1709,11 +1709,11 @@ Single entry is call_fetch_handler. DispatchOutcome enum and its
 ## Task D3: Simplify `dispatch.rs`
 
 **Files:**
-- Modify: `crates/runtime/src/core/dispatch.rs`
+- Modify: `crates/zeroship-runtime/src/core/dispatch.rs`
 
 - [ ] **Step 1: Find RPC-specific branches**
 
-Run: `grep -n "__rpc\|Method not found\|DISPATCH_JS" crates/runtime/src/core/dispatch.rs`
+Run: `grep -n "__rpc\|Method not found\|DISPATCH_JS" crates/zeroship-runtime/src/core/dispatch.rs`
 
 Expected: branches that inspect method registry, check for `__zsResponse` prototype tag on return values, handle `method-not-found`, etc. Many of these are still relevant for HTTP — keep the Response-prototype detection; delete the RPC-method-registry lookup.
 
@@ -1747,7 +1747,7 @@ Expected: clean. If `call_fetch_handler` referenced deleted variants, update its
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/runtime/src/core/dispatch.rs crates/runtime/src/core/runtime.rs
+git add crates/zeroship-runtime/src/core/dispatch.rs crates/zeroship-runtime/src/core/runtime.rs
 git commit -m "runtime: simplify DispatchResult — HTTP-only
 
 Drops RPC-specific Sync(String) variant and async-generator detection.
@@ -1760,19 +1760,19 @@ bootstrap (PR 2)."
 ## Task E3: Delete `tests/rpc.rs`; rewrite `tests/http.rs`
 
 **Files:**
-- Delete: `crates/runtime/tests/rpc.rs`
-- Modify: `crates/runtime/tests/http.rs`
-- Modify: `crates/runtime/tests/common/mod.rs`
+- Delete: `crates/zeroship-runtime/tests/rpc.rs`
+- Modify: `crates/zeroship-runtime/tests/http.rs`
+- Modify: `crates/zeroship-runtime/tests/common/mod.rs`
 
 - [ ] **Step 1: Delete `tests/rpc.rs`**
 
-Run: `rm crates/runtime/tests/rpc.rs`
+Run: `rm crates/zeroship-runtime/tests/rpc.rs`
 
 The test file targeted `/_rpc/*` paths with `__rpc` registry — all kernel-level, all now gone. RPC-level tests return as bootstrap JS tests in PR 2.
 
 - [ ] **Step 2: Rewrite `tests/http.rs`**
 
-Open `crates/runtime/tests/http.rs`. Every test there uses `dispatch_http_sync` or `dispatch_http`. Rewrite each to use `dispatch_fetch` + the `export default { fetch }` idiom. Example transformation:
+Open `crates/zeroship-runtime/tests/http.rs`. Every test there uses `dispatch_http_sync` or `dispatch_http`. Rewrite each to use `dispatch_fetch` + the `export default { fetch }` idiom. Example transformation:
 
 Before:
 ```rust
@@ -1818,7 +1818,7 @@ Expected test count ≈ 100-ish (down from 113 before — the RPC-file 14 tests 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/runtime/tests/
+git add crates/zeroship-runtime/tests/
 git commit -m "test: rewrite http.rs for new primitive; delete rpc.rs
 
 RPC kernel tests migrate to PR 2's bootstrap test suite. HTTP tests
@@ -1868,9 +1868,9 @@ Run: `git log --oneline main..HEAD && git diff main...HEAD --stat`
 
 Expected:
 - ~10 commits (one per task that committed)
-- `crates/runtime/*` dominates the diff
-- `crates/worker/src/handler.rs` substantially shrinks
-- `crates/runtime/src/core/runtime.rs` loses ~500+ LOC
+- `crates/zeroship-runtime/*` dominates the diff
+- `crates/zeroship-worker/src/handler.rs` substantially shrinks
+- `crates/zeroship-runtime/src/core/runtime.rs` loses ~500+ LOC
 - No `examples/*` changes (those are PR 5's job)
 
 - [ ] **Step 6: Open PR**
@@ -1936,7 +1936,7 @@ Brief:
 
 - **Do not** edit `sdks/db/src/*`, `sdks/auth/src/*` — these still reference `zeroship.*` globals which are gone. PR 2 adds the bootstrap that re-exposes them; PR 3 rewrites the SDK internals. Breaking SDKs here is expected and fine.
 - **Do not** edit `examples/*` — migration happens in PR 5.
-- **Do not** add the secrets/vars CRUD to `crates/control/` — that's PR 4.
+- **Do not** add the secrets/vars CRUD to `crates/zeroship-control/` — that's PR 4.
 - **Do not** change the vite-plugin — PR 5.
 
 Keep this PR about the kernel alone.

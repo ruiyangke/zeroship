@@ -28,7 +28,7 @@ They share the runtime primitive (`NetPolicy` + `node:net`) but **not** the trus
 
 ### 1.1 The gap in one sentence
 
-`NetPolicy` enforcement is fully built and fail-closed in `crates/runtime/src/transport/net_policy.rs`, but the **only** non-test construction site is `worker/src/cache.rs:482` under `#[cfg(test)]`. The real app-load path (`make_isolate`/`load_app`, `cache.rs:288-297`) never calls `.net_policy(...)`, so every creator isolate boots `RuntimeState::net_policy = NetPolicy::Denied` (`core/state.rs:737`) and `node:net` is unresolvable for all creator code. The runtime is a consumer of a policy nothing produces. S1 designs the producer.
+`NetPolicy` enforcement is fully built and fail-closed in `crates/zeroship-runtime/src/transport/net_policy.rs`, but the **only** non-test construction site is `worker/src/cache.rs:482` under `#[cfg(test)]`. The real app-load path (`make_isolate`/`load_app`, `cache.rs:288-297`) never calls `.net_policy(...)`, so every creator isolate boots `RuntimeState::net_policy = NetPolicy::Denied` (`core/state.rs:737`) and `node:net` is unresolvable for all creator code. The runtime is a consumer of a policy nothing produces. S1 designs the producer.
 
 The load-bearing constraint that dictates every decision: **the allowlist is operator-authored, never app-self-declared** (`net_policy.rs:9-15`). That single rule is why the grant cannot live in the manifest.
 
@@ -57,7 +57,7 @@ zeroship.app_net_grants
 
 `node:net` runs in the **worker**, so the grant rides the **worker-facing** `AppVersionInfo` (polled at `/internal/versions`), not the gateway-facing `RouteEntry`.
 
-**Wire type — `AppVersionInfo` gets a `net_policy` field** (`crates/core/src/types.rs:50`). A new owned `core` type (core must not depend on `runtime`):
+**Wire type — `AppVersionInfo` gets a `net_policy` field** (`crates/zeroship-core/src/types.rs:50`). A new owned `core` type (core must not depend on `runtime`):
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -76,7 +76,7 @@ pub net_policy: AppNetPolicy,   // default = empty allow = Denied
 
 `#[serde(default)]` keeps it forward-loadable and means "no grant row ⇒ Denied" with zero ceremony (mirrors how `SpendState`/`AccountState` default onto `RouteEntry`). **`Trusted` is intentionally NOT representable** in `AppNetPolicy` — the creator channel can express only `Denied` or reviewed `Allowlist`. `Trusted` is reserved for the operator-internal migrate vector (§2), so a compromised grant row can never escalate a creator app to host-unrestricted egress.
 
-**Producer — `control` `get_versions` joins the grant table** (`crates/control/src/registry.rs:476`, already `LEFT JOIN`s the plan catalog for `runtime_limits_json`):
+**Producer — `control` `get_versions` joins the grant table** (`crates/zeroship-control/src/registry.rs:476`, already `LEFT JOIN`s the plan catalog for `runtime_limits_json`):
 
 - A read over `zeroship.app_net_grants` keyed by `app_id` builds `allow`.
 - `max_sockets` / `egress_ceiling_bytes` come from the **plan catalog** (tier property: how *much*), not the grant table (which hosts). Free tier = low caps; paid = higher.
@@ -174,9 +174,9 @@ Both branches fork from the same merge-base `797c8742` (current `main`); a 3-way
 
 ```
 Cargo.lock
-crates/runtime/src/core/{dispatch,init,runtime,state}.rs
-crates/runtime/src/lib.rs
-crates/worker/src/cache.rs
+crates/zeroship-runtime/src/core/{dispatch,init,runtime,state}.rs
+crates/zeroship-runtime/src/lib.rs
+crates/zeroship-worker/src/cache.rs
 ```
 
 All seven are **additive, keep-both** conflicts (no rewrites of shared logic):

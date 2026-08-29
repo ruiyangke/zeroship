@@ -9,9 +9,9 @@ Accepted, 2026-05-26.
 The Builder agent edits a multi-file app inside a zeroship sandbox. The old
 dashboard-side `deployApp` helper posted a JavaScript string to
 `POST /api/apps/{id}/deploy`, but the current control-plane endpoint no longer
-accepts raw JavaScript. `crates/control/src/api.rs` requires
+accepts raw JavaScript. `crates/zeroship-control/src/api.rs` requires
 `Content-Type: application/x-zship`, streams the body into a temporary `.zship`
-file, and calls `zeroship_bundle::ingest`. `crates/bundle/src/unpack.rs`
+file, and calls `zeroship_bundle::ingest`. `crates/zeroship-bundle/src/unpack.rs`
 expects a zstd-compressed tar archive with `manifest.json` first followed by
 `blobs/<sha256>` entries, validates manifest version `1`, verifies every
 referenced blob, computes the canonical `deploy_hash`, stores blobs and the

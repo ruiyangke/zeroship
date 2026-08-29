@@ -8,7 +8,7 @@ build writes its artifact, and where the migrations live.
 It is read by exactly two readers:
 
 - the **`zeroship` CLI** (`deploy`, `migrate`, `secret`, `var`, `config`, and
-  `login` for `control` alone) - `crates/cli/src/project_config/`
+  `login` for `control` alone) - `crates/zeroship-cli/src/project_config/`
 - the **build toolchain** (`@zeroship/vite-plugin`, its `gen-types-all` script,
   and the `zeroship-dev-migrate` binary) -
   `sdks/vite-plugin/src/project-config/`
@@ -464,7 +464,7 @@ readers are generated from it:
 
 ```bash
 node schema/codegen.mjs   # -> sdks/vite-plugin/src/project-config/generated.ts
-                          # -> crates/cli/src/project_config/generated.rs
+                          # -> crates/zeroship-cli/src/project_config/generated.rs
 ```
 
 The generated modules carry the known-key sets, the required-key sets, the

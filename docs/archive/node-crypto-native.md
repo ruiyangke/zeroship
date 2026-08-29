@@ -3,7 +3,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-05-node
 # Native Node.js `node:crypto` design
 
 **Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review) · 2026-05-02 (v3 round-3 audit) · 2026-05-02 (v4 round-4 narrow audit)
-**Status:** **Shipped (synthetic module + base/crypto layer)** — registered via `crates/runtime/src/core/native_modules.rs` ("node:crypto" → `node::crypto::synthetic_module`) and the base/crypto layer (commits `6f37da0`, `abec749`, `2376b9d`, `2f69ac6`). Document retained as canonical design spec; ~23 active code-comment back-references anchor D-N decisions here.
+**Status:** **Shipped (synthetic module + base/crypto layer)** — registered via `crates/zeroship-runtime/src/core/native_modules.rs` ("node:crypto" → `node::crypto::synthetic_module`) and the base/crypto layer (commits `6f37da0`, `abec749`, `2376b9d`, `2f69ac6`). Document retained as canonical design spec; ~23 active code-comment back-references anchor D-N decisions here.
 **Spec:** Node.js `node:crypto` API reference — https://nodejs.org/api/crypto.html
 **Companion specs:**
 - Node.js `crypto.webcrypto` — https://nodejs.org/api/webcrypto.html (Node's bridge between node:crypto and WHATWG WebCrypto; instructive for our bridging design)
@@ -36,19 +36,19 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-05-node
 - RFC 5288 — AES-GCM Cipher Suites for TLS (NIST SP 800-38D — GCM)
 - NIST SP 800-38A — Block cipher modes (CBC / CFB / OFB / CTR / ECB)
 - FIPS 180-4 — Secure Hash Standard
-**aws-lc-rs / aws-lc-sys:** workspace deps (`crates/runtime/Cargo.toml:16`); already used by `crypto_native/`
+**aws-lc-rs / aws-lc-sys:** workspace deps (`crates/zeroship-runtime/Cargo.toml:16`); already used by `crypto_native/`
 **WebIDL:** N/A — node:crypto is NOT a WebIDL surface; types are documented in JSDoc-flavoured markdown at https://nodejs.org/api/crypto.html. We adopt Node's signatures verbatim; the entry-shim layer translates JS args to the shared kernel.
 **Tests:** Node's own `test/parallel/test-crypto-*.js` — https://github.com/nodejs/node/tree/main/test/parallel (vendored subset, run as smoke tests in our V8). No WPT for node:crypto.
 
 **Depends on:**
-- `crates/runtime/src/crypto_native/` (already shipped, `docs/proposals/webcrypto-native.md`) — node:crypto's `webcrypto` / `subtle` / `getRandomValues` exports re-expose the existing native classes; node:crypto's `KeyObject` shares the underlying `KeyMaterial` enum + key-store bridges (D-N4).
-- `crates/runtime/src/crypto.rs::fast_random` — the thread-local CSPRNG entropy buffer we already ship; the new `randomBytes` / `randomFill` ops call it. Stays untouched.
-- The `#[v8_class]` macro (`crates/runtime-macros/`) — node:crypto adds ~17 new v8 classes; the macro shape (Box-in-internal-field-0, brand-check, SameObject getters) is reused unmodified.
+- `crates/zeroship-runtime/src/crypto_native/` (already shipped, `docs/proposals/webcrypto-native.md`) — node:crypto's `webcrypto` / `subtle` / `getRandomValues` exports re-expose the existing native classes; node:crypto's `KeyObject` shares the underlying `KeyMaterial` enum + key-store bridges (D-N4).
+- `crates/zeroship-runtime/src/crypto.rs::fast_random` — the thread-local CSPRNG entropy buffer we already ship; the new `randomBytes` / `randomFill` ops call it. Stays untouched.
+- The `#[v8_class]` macro (`crates/zeroship-runtime-macros/`) — node:crypto adds ~17 new v8 classes; the macro shape (Box-in-internal-field-0, brand-check, SameObject getters) is reused unmodified.
 - The Node-compat module loader at `sdks/vite-plugin/src/node-compat.ts` (the JS shim we are replacing) and the `fetchModule` interception at `sdks/vite-plugin/src/environment.ts:191` — the bridge that delivers our synthetic `"node:crypto"` module specifier into V8.
 
 **Unblocks:**
 - AI-builder reliability for the next 80% of npm packages: `jsonwebtoken`, `bcrypt`, `bcryptjs`, `scrypt-js`, `crypto-js`, `tweetnacl`, `node-forge`, `pino` / `winston` (HMAC for log signing), `nanoid` / `uuid` / `cuid2` / `ulid` (random), every Postgres / MySQL / Redis driver (HMAC for SCRAM auth), `axios` / `got` / `undici` (HMAC for AWS sigv4 + OAuth1), `firebase-admin` / `googleapis` / `aws-sdk` (signing). The hash + HMAC + KDF surface alone covers ~70% of cross-package crypto calls; the design lands all of it native.
-- Deletion of the JS shim at `sdks/vite-plugin/src/node-compat.ts:67-127` (60 LOC) and elimination of the `__cryptoHashSync` / `__cryptoHmacSync` ad-hoc V8 callbacks at `crates/runtime/src/crypto.rs:128-212` (84 LOC) and their global installs at `crates/runtime/src/init.rs:1444-1453`.
+- Deletion of the JS shim at `sdks/vite-plugin/src/node-compat.ts:67-127` (60 LOC) and elimination of the `__cryptoHashSync` / `__cryptoHmacSync` ad-hoc V8 callbacks at `crates/zeroship-runtime/src/crypto.rs:128-212` (84 LOC) and their global installs at `crates/zeroship-runtime/src/init.rs:1444-1453`.
 - Spec-correct Node error semantics: every `error.code === "ERR_CRYPTO_*"` path that npm packages branch on works as on Node (today the JS shim throws plain `Error("__cryptoHashSync: unsupported algorithm")` — packages that catch `ERR_CRYPTO_HASH_FINALIZED` or check `e.code === "ERR_OSSL_*"` silently misbehave).
 - Streaming hash/HMAC. The current shim collects chunks into a JS array and decodes via `TextDecoder` on each `update()` (a bug: binary data passed as `Uint8Array` is decoded as UTF-8 then re-encoded — silently corrupts non-text bytes). Native implementations call `digest::Context::update` per-chunk over the original byte slice — zero copies, correct for binary data.
 - A `KeyObject ↔ CryptoKey` bridge (the spec-mandated `KeyObject.from(cryptoKey)` and `crypto.subtle.importKey('jwk', keyObject.export(...))`) so creator apps using JOSE libraries (Web Crypto handle) can interop with apps using `jsonwebtoken` (Node KeyObject handle).
@@ -138,7 +138,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-05-node
 
   Each fix carries a "(addresses critic CRITICAL #N)" / "(MAJOR #N)" tag inline so the next review can grep coverage. Doc grew from 3,261 to ~4,000 LOC.
 
-- **v1 (2026-05-02)** — Initial design. Replaces the JS shim at `sdks/vite-plugin/src/node-compat.ts:67-127` (60 LOC) and the two ad-hoc `__cryptoHashSync` / `__cryptoHmacSync` V8 callbacks at `crates/runtime/src/crypto.rs:121-212` (92 LOC). Adds ~5,800 native Rust LOC across `crypto_node/` (the new node:crypto surface) + `crypto_kernel/` (the shared backend extracted from `crypto_native/`'s per-algorithm files). The first-class native node:crypto surface ships in two stages: Stage 1 covers the Tier-1 calls every npm package makes (hash, HMAC, randomBytes, KDFs, KeyObject + import/export, sign/verify, cipher/decipher, webcrypto bridge); Stage 2 fills the long tail (DH groups, X.509, prime generation, FIPS controls, legacy ciphers).
+- **v1 (2026-05-02)** — Initial design. Replaces the JS shim at `sdks/vite-plugin/src/node-compat.ts:67-127` (60 LOC) and the two ad-hoc `__cryptoHashSync` / `__cryptoHmacSync` V8 callbacks at `crates/zeroship-runtime/src/crypto.rs:121-212` (92 LOC). Adds ~5,800 native Rust LOC across `crypto_node/` (the new node:crypto surface) + `crypto_kernel/` (the shared backend extracted from `crypto_native/`'s per-algorithm files). The first-class native node:crypto surface ships in two stages: Stage 1 covers the Tier-1 calls every npm package makes (hash, HMAC, randomBytes, KDFs, KeyObject + import/export, sign/verify, cipher/decipher, webcrypto bridge); Stage 2 fills the long tail (DH groups, X.509, prime generation, FIPS controls, legacy ciphers).
 
   Decisions D-N1 through D-N32 cover: dual-surface coexistence with shared kernel (D-N1, D-N2); class layout (D-N3); `KeyObject` ↔ `CryptoKey` bridge via shared `Arc<KeyMaterial>` (D-N4); sync vs async dispatch (D-N5, D-N6); buffer integration (D-N7); error mapping (D-N8); Hash / Hmac / Cipher / Decipher / Sign / Verify class shape (D-N9 through D-N14); KDF dispatch (D-N15); webcrypto bridge identity (D-N16); randomness ops (D-N17); algorithm-name canonicalisation across surfaces (D-N18); KeyObject import accept / export emit (D-N19); X.509 deferred to Stage 2 (D-N20); DH deferred policy (D-N21); legacy cipher policy (D-N22); ChaCha20-Poly1305 ship-now (D-N23); scrypt parameters + memory cap (D-N24); FIPS controls (D-N25); the synthetic ESM module install path (D-N26); module-shim cutover cadence (D-N27); algorithm registry (D-N28); the `getCipherInfo` / `getCipherInfo` static surface (D-N29); zeroize on Drop for secret material (D-N30); `timingSafeEqual` policy (D-N31); the macro-extension list (D-N32).
 
@@ -224,7 +224,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 The new layout splits crypto into three modules:
 
 ```
-crates/runtime/src/
+crates/zeroship-runtime/src/
 ├── crypto_kernel/      (NEW) shared backend. Slice-in / Vec-out. No V8.
 │   ├── mod.rs
 │   ├── digest.rs       Streaming + one-shot SHA-1/256/384/512 + BLAKE2 (Stage 2)
@@ -311,7 +311,7 @@ WebCrypto has 3 classes (`Crypto`, `SubtleCrypto`, `CryptoKey`). Node:crypto has
 - `Hkdf` — Node doesn't expose this as a class; it's the internal context behind `crypto.hkdf` / `crypto.hkdfSync`. We keep it private to the module (no JS surface).
 - `Pbkdf2` / `Scrypt` — same; private.
 
-The `#[v8_inherit]` mechanism is the existing one used by `AbortSignal extends EventTarget` (already shipped in `crypto_native/`'s sibling work — see `crates/runtime/src/dom/abort_signal.rs`). The three KeyObject subclasses use it without modification.
+The `#[v8_inherit]` mechanism is the existing one used by `AbortSignal extends EventTarget` (already shipped in `crypto_native/`'s sibling work — see `crates/zeroship-runtime/src/dom/abort_signal.rs`). The three KeyObject subclasses use it without modification.
 
 ### I.3. Sync vs async coexistence (D-N5)
 
@@ -333,7 +333,7 @@ The `#[v8_inherit]` mechanism is the existing one used by `AbortSignal extends E
 
 **Sync = run on V8 thread, return immediately, no Promise.** The existing fast-path in our runtime works fine — the V8 callback executes the work and returns. CPU-bound for the duration; user explicitly opted in.
 
-**Async with callback = dispatch through `state.spawned_ops`.** The macro's `#[v8_async_method]` (already shipped per `crates/runtime-macros/TODO.md` "Done" section) emits a callback-shape that allocates a PromiseResolver, spawns the future, returns immediately, and resolves on completion. For node:crypto's callback style (the user's callback is the LAST argument), we need a small adapter — either:
+**Async with callback = dispatch through `state.spawned_ops`.** The macro's `#[v8_async_method]` (already shipped per `crates/zeroship-runtime-macros/TODO.md` "Done" section) emits a callback-shape that allocates a PromiseResolver, spawns the future, returns immediately, and resolves on completion. For node:crypto's callback style (the user's callback is the LAST argument), we need a small adapter — either:
 - Rewrite the JS-side ergonomic so callback variants present as Promise-returning to the macro and we wrap with a `.then(callback)` in the synthetic module's TS definition (preferred — keeps one shape in Rust).
 - OR add a new `#[v8_callback_method]` macro variant. Heavier; deferred unless approach 1 fails.
 
@@ -2832,7 +2832,7 @@ pub fn emit_deprecation_warning_once(
 }
 ```
 
-This helper lives at `crates/runtime/src/node/crypto/deprecation.rs` (~40 LOC). The `state::isolate_state` / `state::isolate_runtime_flags` helpers already exist (per the existing `crates/runtime/src/state.rs`, plus the round-1 RuntimeFlags addition). The `process::emit_warning` shim is a thin wrapper over the existing unenv-backed `process` global.
+This helper lives at `crates/zeroship-runtime/src/node/crypto/deprecation.rs` (~40 LOC). The `state::isolate_state` / `state::isolate_runtime_flags` helpers already exist (per the existing `crates/zeroship-runtime/src/state.rs`, plus the round-1 RuntimeFlags addition). The `process::emit_warning` shim is a thin wrapper over the existing unenv-backed `process` global.
 
 ### VI.1. The decision matrix
 
@@ -3510,7 +3510,7 @@ impl KernelError {
 ### VII.5. The `OpErrorKind::NodeError` macro extension (D-N32)
 
 ```rust
-// crates/runtime/src/state.rs (existing file, ADD variant)
+// crates/zeroship-runtime/src/state.rs (existing file, ADD variant)
 pub enum OpErrorKind {
     TypeError,
     RangeError,
@@ -4185,10 +4185,10 @@ pub fn get_diffie_hellman<'s>(
 
 DH primes (modp14/15/16/17/18, ffdhe*) are stored as static byte arrays in the kernel. Backed by aws-lc-sys's `DH_set0_pqg` for the actual key-agreement computation.
 
-**Runtime-flag registry (addresses critic MAJOR #2; v3 m2-7 reality check):** crypto policy flags are introduced. v1 referenced them but never defined where they lived; v2 wired them into the existing `RuntimeFlags` struct. **v3 (m2-7) verifies:** at the worktree's HEAD (`main` at v2 merge), `crates/runtime/src/state.rs` does NOT YET contain a `RuntimeFlags` struct. The Stage A PR introduces it as a NEW struct alongside the existing `IsolateState`. Three flags total (post-v3, post-M2-4):
+**Runtime-flag registry (addresses critic MAJOR #2; v3 m2-7 reality check):** crypto policy flags are introduced. v1 referenced them but never defined where they lived; v2 wired them into the existing `RuntimeFlags` struct. **v3 (m2-7) verifies:** at the worktree's HEAD (`main` at v2 merge), `crates/zeroship-runtime/src/state.rs` does NOT YET contain a `RuntimeFlags` struct. The Stage A PR introduces it as a NEW struct alongside the existing `IsolateState`. Three flags total (post-v3, post-M2-4):
 
 ```rust
-// crates/runtime/src/state.rs (NEW in Stage A)
+// crates/zeroship-runtime/src/state.rs (NEW in Stage A)
 pub struct RuntimeFlags {
     pub insecure_dh_groups: bool,    // D-N22 partner: enable modp1/modp2 (768/1024-bit)
     pub legacy_crypto: bool,         // D-N22: enable DES/3DES/Blowfish/RC4/MD5-as-cipher/createCipher
@@ -4525,7 +4525,7 @@ export const Cipher = function() {
 };
 ```
 
-After Stage B lands: the JS shim's `__cryptoHashSync` / `__cryptoHmacSync` are dead code. Remove the V8 callbacks at `crates/runtime/src/crypto.rs:128-212` and the global installs at `crates/runtime/src/init.rs:1444-1453`. The shim's hash + hmac + random functions delete; only Cipher/Sign/KeyObject placeholders remain.
+After Stage B lands: the JS shim's `__cryptoHashSync` / `__cryptoHmacSync` are dead code. Remove the V8 callbacks at `crates/zeroship-runtime/src/crypto.rs:128-212` and the global installs at `crates/zeroship-runtime/src/init.rs:1444-1453`. The shim's hash + hmac + random functions delete; only Cipher/Sign/KeyObject placeholders remain.
 
 **Net (Stage B):** ~1800 LOC native added; ~150 LOC of JS shim + Rust ad-hoc callbacks deleted; ~70% of npm-package crypto calls covered.
 
@@ -4571,7 +4571,7 @@ Only ONE new macro feature:
 Companion to the existing `OpErrorKind::DomException(name)` variant from D-6 of webcrypto-native. Adds:
 
 ```rust
-// crates/runtime/src/state.rs (modified — single variant addition)
+// crates/zeroship-runtime/src/state.rs (modified — single variant addition)
 pub enum OpErrorKind {
     TypeError,
     RangeError,
@@ -4593,7 +4593,7 @@ impl OpError {
 
 Macro change in `runtime-macros/src/lib.rs::gen_throw_error` — add one match arm (~25 LOC) that constructs Error/TypeError/RangeError per a per-code routing table and sets the `.code` property. The full implementation is shown in §VII.5.
 
-**Total macro extension:** ~30 LOC across `runtime-macros/src/lib.rs` and `crates/runtime/src/state.rs`.
+**Total macro extension:** ~30 LOC across `runtime-macros/src/lib.rs` and `crates/zeroship-runtime/src/state.rs`.
 
 ### XIII.2. NOT macro extensions
 
@@ -4605,7 +4605,7 @@ Items that look like they need macro support but actually don't:
 - **The `Arc<KeyMaterial>` share between CryptoKey and KeyObject.** Plain Rust Arc; no macro work.
 - **The `#[v8_inherit(KeyObject)]` for the three subclasses.** Already supported by the existing macro (used by AbortSignal extends EventTarget).
 - **`#[v8_static_method]` for `KeyObject.from(cryptoKey)`.** Already supported.
-- **`#[v8_getter(same_object)]` for `keyObject.asymmetricKeyDetails`.** Already supported per `crates/runtime-macros/TODO.md` "Done" section.
+- **`#[v8_getter(same_object)]` for `keyObject.asymmetricKeyDetails`.** Already supported per `crates/zeroship-runtime-macros/TODO.md` "Done" section.
 
 **Final macro footprint: 1 new variant + ~25 LOC of arm logic. Same magnitude as webcrypto-native's D-30 (which started with 4 items and reduced to 2 after analysis).**
 
@@ -4613,7 +4613,7 @@ Items that look like they need macro support but actually don't:
 
 ### XIV.1. Hand-written tests
 
-Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` / `crypto_jwk.rs` / etc.
+Lives in `crates/zeroship-runtime/tests/`. Mirrors the patterns from `crypto_native.rs` / `crypto_jwk.rs` / etc.
 
 - **`crypto_node_hash.rs`:**
   - `createHash('sha256').update('hello').digest('hex')` — basic.
@@ -4699,11 +4699,11 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
 Node's `test/parallel/test-crypto-*.js` (https://github.com/nodejs/node/tree/main/test/parallel) is the comprehensive test suite. Approach:
 
 1. **Identify Tier 1 fixtures.** ~80 of the ~200 test files are relevant (the others test legacy ciphers, FIPS internals, OpenSSL-specific quirks).
-2. **Vendor a curated subset** at `crates/runtime/tests/node_crypto_fixtures/` via a NEW setup script `crates/runtime/tests/setup-node-crypto-fixtures.sh` (modeled on the existing `setup-wpt.sh`). v3 (m2-10) specifies the exact commands:
+2. **Vendor a curated subset** at `crates/zeroship-runtime/tests/node_crypto_fixtures/` via a NEW setup script `crates/zeroship-runtime/tests/setup-node-crypto-fixtures.sh` (modeled on the existing `setup-wpt.sh`). v3 (m2-10) specifies the exact commands:
 
    ```bash
    #!/usr/bin/env bash
-   # crates/runtime/tests/setup-node-crypto-fixtures.sh
+   # crates/zeroship-runtime/tests/setup-node-crypto-fixtures.sh
    # Sparse-checkout of Node's test/parallel/test-crypto-*.js subset at a pinned commit.
    set -euo pipefail
    PINNED_COMMIT="${NODE_COMMIT:-v22.13.0}"   # bump in sync with our supported Node version
@@ -4729,12 +4729,12 @@ Node's `test/parallel/test-crypto-*.js` (https://github.com/nodejs/node/tree/mai
    ```
 
    Total checkout: ~200 KB. Pinned commit bumped in sync with the platform's officially-supported Node version.
-3. **Write a runner** at `crates/runtime/tests/node_crypto_compat.rs` that boots the runtime and runs each `test-crypto-*.js` file. Most files use Node's `assert` module (which we'd need to provide via unenv as a Tier 1 dep — already supported).
-4. **Track expectations** at `crates/runtime/tests/node-crypto.expectations` (mirrors `crypto_native/`'s WPT expectations file). List which test files pass / known-failing-with-reason.
+3. **Write a runner** at `crates/zeroship-runtime/tests/node_crypto_compat.rs` that boots the runtime and runs each `test-crypto-*.js` file. Most files use Node's `assert` module (which we'd need to provide via unenv as a Tier 1 dep — already supported).
+4. **Track expectations** at `crates/zeroship-runtime/tests/node-crypto.expectations` (mirrors `crypto_native/`'s WPT expectations file). List which test files pass / known-failing-with-reason.
 
 Node's tests use `common.js` test harness — small effort to provide the `common.hasCrypto` / `common.skipIf` shims.
 
-**Randomness quality test (v3, addresses m2-2):** add to `crates/runtime/tests/crypto_node_random.rs`:
+**Randomness quality test (v3, addresses m2-2):** add to `crates/zeroship-runtime/tests/crypto_node_random.rs`:
 
 ```rust
 #[test]
@@ -4755,15 +4755,15 @@ fn test_random_bytes_quality_nist_sp_800_22() {
 }
 ```
 
-The `nist_sp_800_22_smoke` helper lives at `crates/runtime/tests/test_helpers/nist_random.rs` (~80 LOC; references the published critical values for chi-square and monobit at 99% confidence per NIST SP 800-22 §2.1 + §2.2). This test is also the regression guard for D-N17's "rejection sampling, not modulo bias" claim in `randomInt`.
+The `nist_sp_800_22_smoke` helper lives at `crates/zeroship-runtime/tests/test_helpers/nist_random.rs` (~80 LOC; references the published critical values for chi-square and monobit at 99% confidence per NIST SP 800-22 §2.1 + §2.2). This test is also the regression guard for D-N17's "rejection sampling, not modulo bias" claim in `randomInt`.
 
 **Targeted pass rates** (addresses critic minor m-10 — methodology):
-The "%" is computed against a sampled list of `test/parallel/test-crypto-*.js` files vendored at `crates/runtime/tests/wpt/node_crypto/`. Sampling rules:
+The "%" is computed against a sampled list of `test/parallel/test-crypto-*.js` files vendored at `crates/zeroship-runtime/tests/wpt/node_crypto/`. Sampling rules:
 1. Exclude tests in `test/sequential/` (require network or side-effects we don't sandbox).
 2. Exclude tests gated on `--openssl-legacy-provider` unless `--legacy-crypto` is enabled in the runner.
 3. Exclude tests asserting OpenSSL-version-specific behaviour (e.g. `crypto.getCiphers().includes('aria-*')` — ARIA is ARIA Korea-government cipher, not in aws-lc-rs).
 
-The vendored list is checked in at `crates/runtime/tests/node-crypto.expectations.txt`; ~140 of Node's ~200 test files are sampled (the others fall under exclusion 1-3).
+The vendored list is checked in at `crates/zeroship-runtime/tests/node-crypto.expectations.txt`; ~140 of Node's ~200 test files are sampled (the others fall under exclusion 1-3).
 
 Pass-rate targets:
 - Stage B end: 30% of the 140 sampled tests (hash + hmac + random + KDF — exact subset enumerated in expectations file).
@@ -4782,7 +4782,7 @@ Beyond Node's own tests, smoke-test against actual npm packages:
 - `pino` — log signing path (uses `createHmac`).
 - `firebase-admin` — JWT verification (uses `crypto.createVerify`).
 
-These tests live at `crates/runtime/tests/npm_compat/` and are gated to a separate CI job (they require `npm install` of the test packages).
+These tests live at `crates/zeroship-runtime/tests/npm_compat/` and are gated to a separate CI job (they require `npm install` of the test packages).
 
 ## XV. Comparison with reference implementations
 
@@ -5109,7 +5109,7 @@ Open questions promoted to decisions in v3 (round 3 audit):
 - RFC 7919 — Negotiated FFDHE groups — https://www.rfc-editor.org/rfc/rfc7919
 - NIST SP 800-38A / D — Block cipher modes — https://csrc.nist.gov/publications/detail/sp/800-38a/final
 - FIPS 180-4 — Secure Hash Standard — https://csrc.nist.gov/publications/detail/fips/180/4/final
-- aws-lc-rs — https://docs.rs/aws-lc-rs/ (v3 audited 2026-05-02; concrete claims about specific algorithm constants in §III.2 / §IX.1 are pinned to the docs.rs URL of the workspace's currently-pinned aws-lc-rs version — see `crates/runtime/Cargo.toml:16`. m2-3: replace `latest` with the exact pinned version when the workspace dep changes.)
+- aws-lc-rs — https://docs.rs/aws-lc-rs/ (v3 audited 2026-05-02; concrete claims about specific algorithm constants in §III.2 / §IX.1 are pinned to the docs.rs URL of the workspace's currently-pinned aws-lc-rs version — see `crates/zeroship-runtime/Cargo.toml:16`. m2-3: replace `latest` with the exact pinned version when the workspace dep changes.)
 - aws-lc-rs encoding (Pkcs8V1Der/Pkcs8V2Der; no encrypted variant) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html
 - aws-lc-rs digest (audit basis for §III.2 / §IX.1 hash algorithms) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/digest/index.html
 - aws-lc-rs aead (audit basis for AEAD modes — confirmed AES-GCM, AES-GCM-SIV, ChaCha20-Poly1305 ONLY; no OCB or CCM) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/aead/index.html
@@ -5139,6 +5139,6 @@ Open questions promoted to decisions in v3 (round 3 audit):
   - `docs/proposals/fetch-native.md`
 - Project AGENTS.md — `/home/ruiyang/Projects/appbase/AGENTS.md`
 - Existing JS shim being replaced: `sdks/vite-plugin/src/node-compat.ts:67-127`
-- Existing Rust ad-hoc callbacks being deleted: `crates/runtime/src/crypto.rs:128-212` + `crates/runtime/src/init.rs:1444-1453`
-- Existing WebCrypto module: `crates/runtime/src/crypto_native/`
-- Macro internals: `crates/runtime-macros/src/v8_class.rs`, `crates/runtime-macros/src/lib.rs`, `crates/runtime-macros/TODO.md`
+- Existing Rust ad-hoc callbacks being deleted: `crates/zeroship-runtime/src/crypto.rs:128-212` + `crates/zeroship-runtime/src/init.rs:1444-1453`
+- Existing WebCrypto module: `crates/zeroship-runtime/src/crypto_native/`
+- Macro internals: `crates/zeroship-runtime-macros/src/v8_class.rs`, `crates/zeroship-runtime-macros/src/lib.rs`, `crates/zeroship-runtime-macros/TODO.md`

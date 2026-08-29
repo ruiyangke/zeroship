@@ -114,7 +114,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
 
 ### Current architecture
 - Auth = Ory **Hydra** (OIDC kernel) + bespoke server-rendered login/consent UI in
-  `crates/auth/` (Askama, ntex/compio, zero-tokio). Password + Google/GitHub OAuth + magic
+  `crates/zeroship-auth/` (Askama, ntex/compio, zero-tokio). Password + Google/GitHub OAuth + magic
   link + verify + reset + consent + device + `/me`.
 - End-user login today = **full-page redirect only**: gateway 302 → Hydra → consent →
   `{app}.zeroship.ai/__zeroship/auth/callback` → gateway mints opaque session UUID in HTTP-only
@@ -124,7 +124,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   (`__Host-zs_console_session` / `auth.console_sessions`), auth UI itself
   (`__Host-zsidp_session` / `auth.sessions`).
 
-### Fact 1 — redirect-URI model (`crates/gateway/src/oidc_rp.rs`, `dispatch.rs:1381`, `ops/auth-clients*.toml`, `docs/reference/auth.md:139`)
+### Fact 1 — redirect-URI model (`crates/zeroship-gateway/src/oidc_rp.rs`, `dispatch.rs:1381`, `ops/auth-clients*.toml`, `docs/reference/auth.md:139`)
 - Single shared `gateway` OIDC client; per-app callback URLs **appended to its `redirect_uris`
   per deploy** via `PUT /admin/clients/gateway`. Hydra = exact-match, **no wildcards** (RFC 9700).
 - The per-app redirect-URI registration is **designed but NOT yet implemented** in the control
@@ -144,14 +144,14 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   `sector_identifier`, populated by control's route-sync push and threaded through `OidcRp`. This
   is a designed mechanism, not an open question — see §1.1 + §1.5. <!-- Added in round 1: addressing BLOCKER — client_id resolution is a wire-format change -->
 - ⚠️ **Back-channel logout (BCL) is already shipped** for the shared `gateway` client
-  (`crates/gateway/src/backchannel_logout.rs`). It verifies the `logout_token` with `aud ==
+  (`crates/zeroship-gateway/src/backchannel_logout.rs`). It verifies the `logout_token` with `aud ==
   state.oidc_rp.client_id` (the single `"gateway"` value) and revokes **all** of a subject's
   sessions via `sessions::revoke_all_for_user(sub)`. Moving to per-app clients (locked decision 6)
   means each per-app client needs its own `backchannel_logout_uri` and the handler must disambiguate
   *which app* from the `logout_token`'s `aud` (= the per-app `client_id`). This is designed in §1.2
   (signout) + §1.1 (client shape with `backchannel_logout_uri`), not left greenfield. <!-- Added in round 1: addressing MINOR — per-app BCL already exists -->
 
-### Fact 2 — gateway Bearer path (`crates/gateway/src/router/auth.rs`)
+### Fact 2 — gateway Bearer path (`crates/zeroship-gateway/src/router/auth.rs`)
 - Today gateway accepts **cookie sessions + DPoP only**; plain `Authorization: Bearer` is
   explicitly rejected (test `auth.rs:561-569`, `has_dpop_authorization_rejects_bearer`).
 - ⚠️ **This rejection is deliberate, not an omission.** The test comment reserves the Bearer
@@ -183,7 +183,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   `User`). Risk: plain Bearer has no sender-constraint (replay) — short TTL + HTTPS; DPoP-binding
   available as later hardening (the wrapper path already exists).
 
-### Fact 3 — Hydra public client + token exchange (`ops/hydra-dev.yaml`, `ops/auth-clients-dev.toml`, `crates/gateway/src/dpop_exchange.rs`)
+### Fact 3 — Hydra public client + token exchange (`ops/hydra-dev.yaml`, `ops/auth-clients-dev.toml`, `crates/zeroship-gateway/src/dpop_exchange.rs`)
 - Hydra **already** configured for public PKCE clients w/ rotating refresh tokens: PKCE enforced
   (`enforced_for_public_clients: true`, `enforced: true`), refresh TTL 720h, **global** access TTL
   1h, code TTL 60s, rotation grace 30s / reuse_count 3 (`ops/hydra-dev.yaml:49-51`). ⇒ The browser
@@ -217,9 +217,9 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
 - Hydra has **no CORS** → browser cannot call `/oauth2/token` directly.
 - ⇒ Gateway same-origin proxy `POST /__zeroship/auth/token` forwarding to Hydra `/oauth2/token`,
   mirroring the `dpop-exchange` precedent (`Cache-Control: no-store`). Caddy already proxies
-  `/oauth2/*` → hydra. Gateway CORS infra exists (`crates/gateway/src/router/cors.rs`).
+  `/oauth2/*` → hydra. Gateway CORS infra exists (`crates/zeroship-gateway/src/router/cors.rs`).
 
-### env.auth (`crates/runtime/src/auth.rs`, `core/plugin.rs`, `core/runtime.rs:1182`)
+### env.auth (`crates/zeroship-runtime/src/auth.rs`, `core/plugin.rs`, `core/runtime.rs:1182`)
 - Per-request user storage IS wired (`set_request_user` in dispatch). The
   `get_user_callback`/`require_user_callback` V8 callbacks **exist** (`auth.rs:66`, `auth.rs:94`)
   but are **orphaned** — no `env.auth` plugin is registered, so `env.auth.getUser()` is `undefined`
@@ -228,10 +228,10 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   production WORKER registers ONLY `DbPlugin`.** The round-2 grounded fact ("only db/kv/storage
   register") and the round-2 wiring instruction ("same `register_plugins` path as Kv/Storage") were
   **wrong for the multi-tenant worker**, which is the path every real end-user app runs on: <!-- Added in round 3: addressing BLOCKER — worker registers ONLY DbPlugin; pin AuthPlugin to BOTH sites; AuthPlugin is stateless -->
-  - **Worker** (`crates/worker/src/cache.rs:40-46`, `create_plugins()`): registers
+  - **Worker** (`crates/zeroship-worker/src/cache.rs:40-46`, `create_plugins()`): registers
     **`vec![DbPlugin::new(url)]`** (and an empty vec if `DB_URL` is unset). **No KvPlugin, no
     StoragePlugin, no AuthPlugin.** This is the runtime every app served through the gateway uses.
-  - **CLI / `zeroship serve`** (`crates/cli/src/main.rs:108-165`): registers db (conditional on
+  - **CLI / `zeroship serve`** (`crates/zeroship-cli/src/main.rs:108-165`): registers db (conditional on
     `DATABASE_URL`) + storage (always) + kv (redis or redb). This is the single-tenant dev path only.
   - ⇒ Following the round-2 instruction would add `AuthPlugin` to a Kv/Storage-style helper the
     worker **never calls**, so `env.auth.getUser()` would resolve under `zeroship serve` but stay
@@ -464,7 +464,7 @@ Page reload → memory cache is empty
 
 ⚠️ **Round-3 fix (BLOCKER) — the reload-recovery anchor is a SEPARATE durable credential, NOT a
 reuse of `auth.gateway_sessions`.** The live interactive session store hardcodes `IDLE_MINUTES = 30`
-and `ABSOLUTE_HOURS = 12` (`crates/gateway/src/sessions.rs:46/50`) and `validate()` (`:103`) rejects
+and `ABSOLUTE_HOURS = 12` (`crates/zeroship-gateway/src/sessions.rs:46/50`) and `validate()` (`:103`) rejects
 any row whose `idle_expires_at` **or** `abs_expires_at` is in the past, sliding only the 30-min idle
 window. A 30-day reload-recovery anchor backed by that store is a **broken contract**: the absolute
 lifetime kills it at 12h, and — worse — the 30-min idle timeout kills it after *any* 30-min gap
@@ -623,7 +623,7 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
   app's `client_id`; see §1.2 signout). Without this each per-app client would have no BCL
   registration and global signout would silently no-op. <!-- Added in round 1: addressing MINOR — per-app backchannel_logout_uri -->
 
-**Lifecycle** (control plane, `crates/control/src/`):
+**Lifecycle** (control plane, `crates/zeroship-control/src/`):
 - **On app create** (`api.rs:create_app`): create the Hydra client (`POST /admin/clients`) with
   the apex host's redirect URIs. Reuses the exact `HydraCreateClientRequest` shape already in
   `oauth_handlers.rs` / `bootstrap_builder.rs`. **Implemented (Slice 1d)** via
@@ -646,7 +646,7 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
   `AppState::delete_app_oauth_client` (idempotent — Hydra 404 ⇒ Ok), after the DB delete so a Hydra
   outage can't strand a live app with no client. Without it every deleted app would leak a live
   public PKCE client. Pairwise/relay cleanup cascades (Subsystems 4,5). **Implemented (Slice 1d).**
-- Control module `crates/control/src/app_oauth_client.rs` holds `ensure_app_client(app)`,
+- Control module `crates/zeroship-control/src/app_oauth_client.rs` holds `ensure_app_client(app)`,
   `sync_app_redirect_uris(app, hosts)`, `delete_app_client(app_id)`; wrapped by the
   `AppState::{provision,delete}_app_oauth_client` handlers. Idempotent (upsert), mirroring
   `bootstrap_builder.rs`.
@@ -676,8 +676,8 @@ from Hydra; the OAuth client identity itself (the FK target, `skip_consent`) liv
 
 ### 1.2 Gateway same-origin endpoints
 
-New module `crates/gateway/src/browser_auth.rs` (sibling to `dpop_exchange.rs`), one async ntex
-handler per endpoint, registered in `crates/gateway/src/main.rs` alongside the existing
+New module `crates/zeroship-gateway/src/browser_auth.rs` (sibling to `dpop_exchange.rs`), one async ntex
+handler per endpoint, registered in `crates/zeroship-gateway/src/main.rs` alongside the existing
 `/__zeroship/auth/dpop-exchange` resource. All reuse `state.oidc_rp` (Hydra dial URL, JWKS, introspect),
 `state.config` (insecure_dev, public_url, worker_key), and `oidc_rp::encode_user_header`.
 
@@ -878,7 +878,7 @@ access JWT** (round-3 MAJOR). In Bearer mode the browser holds the access token
 (`Session.access_token`) and the trust model (§8.5) puts arbitrary creator JS *inside* the token
 boundary — so a raw Hydra token (global UUID in `sub`) could be `base64`-decoded by app JS to
 correlate the user across apps, breaking G4 and mitigation #1. The fix **extends** the wrapper-token
-machinery that the DPoP path already ships (`crates/gateway/src/wrapper_token.rs`: `Issuer`,
+machinery that the DPoP path already ships (`crates/zeroship-gateway/src/wrapper_token.rs`: `Issuer`,
 `WrapperClaims{ sub, scope, client_id, email, … }`, the gateway ed25519 key, `Verifier`) to mint a
 browser-path wrapper. ⚠️ **Round-5 (BLOCKER) — this is NOT pure reuse; `Issuer::issue` and
 `Verifier::verify` are refactored in this patch.** The shipped `issue()` signature is
@@ -902,7 +902,7 @@ mechanism then reads: <!-- Added in round 3: browser gets a wrapper access token
   verifier gains an optional `client_id`-match (below). A wrapper minted **without** a DPoP key has
   `cnf = None`; `useDpop` sets `cnf = Some(jkt)` exactly as the DPoP exchange binds today. This reuses
   the existing `state.wrapper_issuer` / `state.wrapper_verifier` instances
-  (`crates/gateway/src/lib.rs:136/147`), built from the gateway's ed25519 signing key — the **same**
+  (`crates/zeroship-gateway/src/lib.rs:136/147`), built from the gateway's ed25519 signing key — the **same**
   key the shipped `/__zeroship/auth/dpop-exchange` path uses, so **no new key material**. If the signing key
   is absent (a misconfiguration), `/token` returns `503` exactly as `dpop-exchange` does today
   (`dpop_exchange.rs:78`), rather than silently handing back the raw Hydra token.
@@ -916,7 +916,7 @@ mechanism then reads: <!-- Added in round 3: browser gets a wrapper access token
 
 **⚠️ wrapper_token changes required (round-5 BLOCKER — in-patch wire/contract changes, not reuse).**
 The browser/G4 design above depends on `Issuer::issue` minting a `pws_`/alias/10-min/cnf-optional
-wrapper, which the shipped signature cannot do. This patch refactors `crates/gateway/src/wrapper_token.rs`:
+wrapper, which the shipped signature cannot do. This patch refactors `crates/zeroship-gateway/src/wrapper_token.rs`:
 <!-- Added in round 5: addressing BLOCKER — the wrapper path is a substantive Issuer::issue/Verifier::verify rewrite, listed as an in-patch contract change with its sole caller -->
 
 1. **`Issuer::issue` becomes a claims-builder.** Replace the introspection-derived signature with an
@@ -1226,7 +1226,7 @@ Body: { "scope": "local" | "global" }
 
 **Per-app back-channel logout.** Each per-app client registers its own
 `backchannel_logout_uri = {host}/oidc/backchannel-logout` (§1.1). The existing
-`crates/gateway/src/backchannel_logout.rs` handler is updated: instead of `aud ==
+`crates/zeroship-gateway/src/backchannel_logout.rs` handler is updated: instead of `aud ==
 state.oidc_rp.client_id` (the single `"gateway"` value) it accepts a `logout_token` whose `aud`
 matches **any registered per-app client** for the request host, resolves the `app_id` from that
 `client_id`, and revokes only **that app's** sessions for the subject —
@@ -1352,9 +1352,9 @@ Round 2 changes three things: <!-- Added in round 2: addressing MAJOR — shorte
    **Round-3 fix (MAJOR).** Round 2 said "reuse `dpop_jti_cache`/`logout_jti_cache`" and claimed
    "near-immediate" revocation — but that is unsound in the multi-node deployment (CHWBL routing,
    `--scale worker`, multiple gate nodes). The two caches are **not** equivalent: `dpop_jti_cache` is
-   a **`TieredJtiCache` with a PG tier** (`auth.dpop_jti` table, `crates/core/src/dpop.rs:980` +
+   a **`TieredJtiCache` with a PG tier** (`auth.dpop_jti` table, `crates/zeroship-core/src/dpop.rs:980` +
    `main.rs:479-483`) — genuinely **cross-node** via shared Postgres — while `logout_jti_cache` is an
-   **in-memory `Mutex<HashMap>`** (`crates/core/src/logout_token.rs:99`), per-process only. A token
+   **in-memory `Mutex<HashMap>`** (`crates/zeroship-core/src/logout_token.rs:99`), per-process only. A token
    replayed against a *different* gate node than the one that processed signout would NOT be in that
    node's in-memory set, so an in-memory denylist degrades to "same as the 10-min TTL" cross-node —
    no revocation benefit at all. Worse, **signout cannot in general enumerate the live access-token
@@ -1407,7 +1407,7 @@ missing scope; an expired Bearer on an `Anon` route serves the public page (roun
 
 ### 1.4 `env.auth` plugin (runtime)
 
-New `AuthPlugin` (namespace `"auth"`) in `crates/runtime/src/auth.rs`, wiring the existing
+New `AuthPlugin` (namespace `"auth"`) in `crates/zeroship-runtime/src/auth.rs`, wiring the existing
 orphaned callbacks:
 
 ```rust
@@ -1422,13 +1422,13 @@ impl NativePlugin for AuthPlugin {
 ```
 
 ⚠️ **Round-3 (BLOCKER) — registered at BOTH plugin-construction sites, with the WORKER as the
-primary target.** Because the worker registers only `DbPlugin` (`crates/worker/src/cache.rs:40-46`),
+primary target.** Because the worker registers only `DbPlugin` (`crates/zeroship-worker/src/cache.rs:40-46`),
 `AuthPlugin` is pushed in **two** places, in the same patch: <!-- Added in round 3: addressing BLOCKER — pin AuthPlugin to create_plugins() (worker) AND the CLI vector; e2e item 5 runs against the worker path -->
 
-1. **Worker** — `create_plugins()` in `crates/worker/src/cache.rs`: push `Arc::new(AuthPlugin)`
+1. **Worker** — `create_plugins()` in `crates/zeroship-worker/src/cache.rs`: push `Arc::new(AuthPlugin)`
    unconditionally (it is stateless), so the vec becomes `[DbPlugin?, AuthPlugin]`. This is the line
    that makes `env.auth.getUser()` work for **every production end-user app**.
-2. **CLI / `zeroship serve`** — the plugin vector in `crates/cli/src/main.rs` (alongside db/storage/kv):
+2. **CLI / `zeroship serve`** — the plugin vector in `crates/zeroship-cli/src/main.rs` (alongside db/storage/kv):
    push `Arc::new(AuthPlugin)` so the dev path matches.
 
 `AuthPlugin` takes no constructor args (the callbacks read `RuntimeState`), so neither site needs
@@ -1449,7 +1449,7 @@ consumer changes in the **same patch**, with no shim: <!-- Added in round 1: add
 2. gateway `build_worker_user_from_{jwt_claims,wrapper,introspection}` (populate `scopes`),
 3. gateway cookie-session path (read granted scopes from the **new**
    `auth.gateway_sessions.granted_scopes TEXT[]` column — see the round-5 schema note below + §8.1),
-4. worker `User` deserialization (`crates/worker/`),
+4. worker `User` deserialization (`crates/zeroship-worker/`),
 5. runtime `auth.rs` `get_user_callback`/`require_user_callback` (expose `.scopes`),
 6. RPC `ctx.user` (`rpc/ctx_holder.rs`) — `ctx.user.scopes` now present,
 7. SDK `User` type (`sdks/auth/src/types.ts`).
@@ -1465,7 +1465,7 @@ chosen over a cross-schema read for hot-path locality): <!-- Added in round 5: a
 - **New Liquibase changeset** `zeroship:auth-gateway-sessions-granted-scopes` adds
   `granted_scopes TEXT[] NOT NULL DEFAULT '{}'` to `auth.gateway_sessions` (DDL §8.1). Listed as a
   schema change there.
-- **`gateway::sessions::create`** (`crates/gateway/src/sessions.rs:58-90`) is extended: `NewSession`
+- **`gateway::sessions::create`** (`crates/zeroship-gateway/src/sessions.rs:58-90`) is extended: `NewSession`
   gains `granted_scopes: &[String]` and the `INSERT … (user_id, app_id, …, granted_scopes)` writes it.
   The value is the scopes from the consent grant resolved at session-create (the gateway already
   knows the granted scope set when it mints the cookie session after the redirect callback). The
@@ -1483,7 +1483,7 @@ chosen over a cross-schema read for hot-path locality): <!-- Added in round 5: a
 
 ### 1.5 Route-sync wire-format extension (`RouteEntry` → gateway)
 
-`RouteEntry` (`crates/core/src/types.rs:59`) and `CompiledRoute` (`crates/gateway/src/sync.rs`)
+`RouteEntry` (`crates/zeroship-core/src/types.rs:59`) and `CompiledRoute` (`crates/zeroship-gateway/src/sync.rs`)
 carry **no** OAuth identity today; the gateway holds a single hardcoded `client_id = "gateway"`.
 Resolving a per-app `client_id`/sector from the request `Host` therefore requires a **deliberate
 wire-format break** (Key Invariant: "Wire formats are explicit contracts"), landed in one patch
@@ -1505,7 +1505,7 @@ across every producer/consumer/fixture: <!-- Added in round 1: addressing BLOCKE
   `pws_` derivation) when it is `None`, so an un-provisioned app never emits a header.
 - **Control populates them** from `control.app_oauth_clients` (§8.1) on the route-sync push. ⚠️
   **Round-5 (MINOR) — name the exact producer: `Registry::get_routes` in
-  `crates/control/src/registry.rs:340-381`**, which `SELECT`s from `control.apps` and constructs each
+  `crates/zeroship-control/src/registry.rs:340-381`**, which `SELECT`s from `control.apps` and constructs each
   `RouteEntry { name, plan_id, api_key_hash, deploy_hash, manifest }` for the gateway's `RouteMap`
   pull. That query joins `control.app_oauth_clients` (LEFT JOIN — un-provisioned apps yield `NULL`)
   to populate the two new fields. The serialized `RouteEntry` is what the gateway pulls every ~5s.
@@ -1955,7 +1955,7 @@ the click handler.
 ### 5.1 Scope registry — two distinct grant namespaces
 
 ⚠️ **This is the structural fix for the consent authorization-inversion.** The existing consent
-handler's `grantor_can_grant_requested_scopes` (`crates/auth/src/ui/consent.rs:492`) is a
+handler's `grantor_can_grant_requested_scopes` (`crates/zeroship-auth/src/ui/consent.rs:492`) is a
 **platform-delegation / admin** check: it parses each scope, builds `AuthzContext{ principal_id =
 subject }`, and calls `authz::is_authorized_anywhere(db, platform_policies, ctx)`. That answers
 *"is this principal authorized **by platform policy** to delegate this scope"* — the Phase-10
@@ -2001,7 +2001,7 @@ share their own name/email with an app.)
   Hydra client `scope`. These are self-grantable end-user scopes — never platform-delegated.
 
 **Where declared — DECIDED (round-4 pilot, O8): the app MANIFEST**, `auth.scopes`
-(`crates/bundle/src/manifest.rs`). Creators declare scopes alongside their routes; the control plane
+(`crates/zeroship-bundle/src/manifest.rs`). Creators declare scopes alongside their routes; the control plane
 mirrors them on deploy. (We do **not** use a deploy-time control-plane-only field.) <!-- Added in round 4: lock O8 — scopes declared in the manifest auth.scopes, mirrored to control + Hydra allowlist atomically on deploy -->
 
 ```jsonc
@@ -2043,7 +2043,7 @@ consent classifier sound (§5.2): Hydra's allowlist can never accept a scope at 
 > validator **rejects** it (pre-fix it was accepted), and assert a non-colliding `read:billing` is
 > accepted.
 
-### 5.2 Consent UI + the self-grant path (`crates/auth/src/ui/consent.rs`)
+### 5.2 Consent UI + the self-grant path (`crates/zeroship-auth/src/ui/consent.rs`)
 
 **How the consent handler classifies scopes (the load-bearing change).** On each consent
 challenge the handler resolves the requesting client's `app_id` (from the consent `client_id`),
@@ -2166,7 +2166,7 @@ delta). So there is a single source of truth: <!-- Added in round 3: drop auth.a
 - **Gateway Bearer arm** (§1.3) checks the access token's `scope` claim against the rule/policy's
   `required_scopes`. Missing scope → **403** `{ "error": "scope_required", "scope": "read:billing" }`.
 - **Manifest rule-level scopes**: `Rule` gains an optional `required_scopes: Vec<String>`
-  (`crates/bundle/src/rule.rs`), compiled into `EffectivePolicy`. A route can demand
+  (`crates/zeroship-bundle/src/rule.rs`), compiled into `EffectivePolicy`. A route can demand
   `read:billing` independent of the app-wide `AuthLevel`. The gateway enforces it in the Bearer
   arm and (for cookie sessions) against the session's granted scopes — read from the **new**
   `auth.gateway_sessions.granted_scopes` column (added in this patch; populated at session-create from
@@ -2323,7 +2323,7 @@ The `pws_` is never non-deterministic, so the Bearer path can always derive it w
 > whole-vision picture; **the sub-spec is the source of truth** for the inbound provider, the
 > `Email`/`Mailer` contract extension, the deliverability/header plan, and the revocation cascade.
 > Where this summary and the sub-spec differ, **the sub-spec wins** (it corrected several claims here
-> against the actual `crates/auth/src/mailer` code — see the sub-spec §0). Subsystem 5 is large
+> against the actual `crates/zeroship-auth/src/mailer` code — see the sub-spec §0). Subsystem 5 is large
 > (a deliverability-sensitive inbound-mail subsystem), depends on Subsystem 4's
 > `auth.app_user_identities` mapping (the `(app, global_user) → relay_email` lookup the gateway
 > reads when projecting `ZeroShip-User.email`, §6.2/§7.1), and is the least SDK-coupled piece. It is
@@ -3075,7 +3075,7 @@ reshaping the SDK.
 mechanical wire-format + `wrapper_token` refactor lands and reviews independently of the riskier
 endpoint/DB/single-flight work, and so 1c (the Bearer wrapper arm) and 1d (per-app client) precede the
 1b-endpoints e2e. **New order: 1a → 1b-mech → 1c → 1d → 1b-endpoints → 2 → 3 → 4 → 5.** <!-- Added in round 6: addressing slice-plan ruling — split 1b into 1b-mech (refactor + wire format) and 1b-endpoints (endpoints + Liquibase + mint + Pool migration); reorder so 1c depends on 1b-mech and 1d precedes 1b-endpoints e2e -->
-- 1a. `env.auth` `AuthPlugin` registration **in BOTH `crates/worker/src/cache.rs` `create_plugins()`
+- 1a. `env.auth` `AuthPlugin` registration **in BOTH `crates/zeroship-worker/src/cache.rs` `create_plugins()`
   (the production path) AND the CLI `zeroship serve` vector** (round-3 §1.4) + a runtime regression
   test driven through the **worker** path (smallest, unblocks server SDK).
 - **1b-mech (mechanical, low-risk).** Two in-patch refactors with no new endpoints or DB:

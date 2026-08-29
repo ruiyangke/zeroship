@@ -16,7 +16,7 @@ shapes. It is committed alongside the implementing changes.
 
 ## New `core` module layout (M8 — split the god-module)
 
-`crates/core/src/config.rs` → `crates/core/src/config/` :
+`crates/zeroship-core/src/config.rs` → `crates/zeroship-core/src/config/` :
 
 - **`mod.rs`** — declares submodules + `pub use` re-exports so `zeroship_core::config::{…}` keeps
   resolving for every existing name that survives.
@@ -52,7 +52,7 @@ shapes. It is committed alongside the implementing changes.
   - `pub fn is_loopback_url(url: &str) -> bool` — **literal-only**: accepts `localhost` or an IP that
     `is_loopback()`; **no DNS resolution** (S8). Used by both auth and control Hydra-admin guards.
 
-`crates/core/src/observability.rs` gains the obs-config that was wrongly living in / imported-back-into config:
+`crates/zeroship-core/src/observability.rs` gains the obs-config that was wrongly living in / imported-back-into config:
 - `pub struct ObservabilityFlags` (clap::Args: `--log-filter`/`RUST_LOG`, `--log-format`/`ZEROSHIP_LOG_FORMAT`)
   — `log_format: Option<LogFormat>` parsed by clap (invalid value = clap parse error, fatal — S6).
 - `pub enum LogFormat { Pretty, Compact, Json, Logfmt, Bunyan }` + `FromStr` (fatal on unknown).
@@ -62,7 +62,7 @@ shapes. It is committed alongside the implementing changes.
 - `resolve_log_filter` moves here (no more backwards import from config).
 - `init_tracing_with(filter: &str, format: Option<LogFormat>)`.
 
-`crates/core/src/config/bootstrap.rs` — the de-duplicated boot dance (M8) + structured check-config (M2):
+`crates/zeroship-core/src/config/bootstrap.rs` — the de-duplicated boot dance (M8) + structured check-config (M2):
 - `pub struct Bootstrap { pub overlay: LoadedOverlay, pub log_filter: String, pub log_format: Option<LogFormat> }`
 - `pub fn bootstrap(config_path: Option<&Path>, allow_discovery: bool, obs: &ObservabilityFlags,
    default_filter: &str, binary: &str) -> Bootstrap` — loads overlay (exit-on-error here, at the binary

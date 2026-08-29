@@ -15,14 +15,14 @@
 | `backend/mod.rs` | 13 capability traits; `BackendHandle = Postgres \| Sqlite` enum | **+2 traits**: `EncryptedColumn`, `Backup`. NOT on `Backend` super-trait. NOT on `RegisterBackend`. 2 new `BackendHandle::as_encrypted_column_pg/_sqlite` + `as_backup_pg/_sqlite` accessors (mirror `as_change_stream_*` pattern). |
 | `backend/postgres.rs` | All P0–P4 impls | Append `impl EncryptedColumn for PostgresBackend` + `impl Backup for PostgresBackend`. PG impl reads/writes `BYTEA`; `Backup` shells out to `pg_basebackup`/`pg_dump`. |
 | `backend/sqlite/*.rs` | 9 sub-modules | NEW `backend/sqlite/encryption.rs` (thin glue → `crate::encryption`); NEW `backend/sqlite/backup.rs` (`VACUUM INTO`). `dialect.rs` gains `encrypted` arm. |
-| `crates/plugin-db/src/encryption/` | does NOT exist | NEW module: `mod.rs`, `aead.rs` (AES-256-GCM + deterministic-IV-via-HMAC), `keys.rs` (HKDF + KeyStore), `aad.rs`, `wire.rs`. |
+| `crates/zeroship-plugin-db/src/encryption/` | does NOT exist | NEW module: `mod.rs`, `aead.rs` (AES-256-GCM + deterministic-IV-via-HMAC), `keys.rs` (HKDF + KeyStore), `aad.rs`, `wire.rs`. |
 | `diff.rs::ColumnInfo` | 7 fields after P4 | + `encryption: Option<EncryptionMeta>`. |
 | `query.rs` | `IndexKind` enum, `build_create_indexes`, column-DDL emitter | Encrypted column DDL → `BYTEA`/`BLOB`. Deterministic mode adds `IndexKind::BTree` over ciphertext bytes. Filter lowering: belt-and-braces fence for randomised-mode (SDK should reject first). |
 | `v8_classes/collection.rs` | 16 `#[v8_method]`s | No new methods. Encryption is transparent. |
 | `crud.rs` | `dispatch_insert/update/find` | Add per-row encrypt-on-write / decrypt-on-read pass via new `crud/encryption_pass.rs`. |
 | `sdks/db/src/types.ts` | TypeBuilder, FieldDef | + `t.encrypted(opts?)` builder + `FieldDef.encrypted`. |
 | `sdks/db/src/collection.ts` | filter methods | + `validateEncryptedFieldsInFilter` pre-flight (IMPORTANT #1 fence). |
-| `crates/plugin-db/Cargo.toml` | `sha2`, `hmac` (sqlite-optional), `bytemuck` (sqlite-optional) | + `aes-gcm = "0.10"` (workspace; PG and SQLite both encrypt), + `hkdf = "0.12"` (workspace). Widen `hmac` to unconditional. |
+| `crates/zeroship-plugin-db/Cargo.toml` | `sha2`, `hmac` (sqlite-optional), `bytemuck` (sqlite-optional) | + `aes-gcm = "0.10"` (workspace; PG and SQLite both encrypt), + `hkdf = "0.12"` (workspace). Widen `hmac` to unconditional. |
 
 **No new Cargo deps beyond `aes-gcm` + `hkdf`.** No `aes-siv` crate — design §7.2 builds the deterministic mode on top of `aes-gcm` + `hmac::Hmac<Sha256>`; the original "RFC 5297 AES-SIV" framing is rejected in favour of the design's actual construction.
 
@@ -31,7 +31,7 @@
 ## 1. File structure
 
 ```
-crates/plugin-db/src/
+crates/zeroship-plugin-db/src/
   backend/
     mod.rs                              (+2 traits, +EncryptionMode, +SnapshotOpts/Handle, +PitrTarget, +4 BackendHandle accessors)
     postgres.rs                         (+2 impl blocks)
@@ -144,7 +144,7 @@ pub fn encrypt_deterministic(key: &AeadKey, plaintext: &[u8], aad: &[u8]) -> Res
 pub fn decrypt(key: &AeadKey, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError>;
 ```
 
-**AES-256** chosen over AES-128 — workspace default (`crates/core/Cargo.toml` already declares `aes-gcm = "0.10"`); ~5% CPU cost acceptable for an at-rest feature.
+**AES-256** chosen over AES-128 — workspace default (`crates/zeroship-core/Cargo.toml` already declares `aes-gcm = "0.10"`); ~5% CPU cost acceptable for an at-rest feature.
 
 ### `keys.rs`
 
@@ -281,7 +281,7 @@ pub async fn encrypt_row_on_write<B: EncryptedColumn>(
 ) -> Result<(), DbError>;
 ```
 
-**Row PK is always available** at this hook point because plugin-db mints typed_id PKs **SDK-side** (`crates/core/src/typed_id.rs::new(prefix)`) BEFORE the insert leaves the runtime — the `db.users.insert({...})` JS call populates `row.id` before RPC dispatch. The Rust crud layer receives the row with `id` already set; encryption sees the PK; single-phase INSERT works. This is the architectural property that makes P5 a Camp A design (see §13).
+**Row PK is always available** at this hook point because plugin-db mints typed_id PKs **SDK-side** (`crates/zeroship-core/src/typed_id.rs::new(prefix)`) BEFORE the insert leaves the runtime — the `db.users.insert({...})` JS call populates `row.id` before RPC dispatch. The Rust crud layer receives the row with `id` already set; encryption sees the PK; single-phase INSERT works. This is the architectural property that makes P5 a Camp A design (see §13).
 
 **AAD construction per column**:
 ```rust
@@ -351,7 +351,7 @@ default.
 
 ### PR 1 — Trait surface + crypto module + workspace deps
 - Declare `EncryptedColumn` + `Backup` traits + supporting types in `backend/mod.rs`.
-- New `crates/plugin-db/src/encryption/` module (4 files).
+- New `crates/zeroship-plugin-db/src/encryption/` module (4 files).
 - Workspace `Cargo.toml`: promote `aes-gcm = "0.10"`; add `hkdf = "0.12"`.
 - Plugin-db `Cargo.toml`: add deps unconditional; widen `hmac`.
 - `BackendHandle::as_encrypted_column_pg/_sqlite` + `as_backup_pg/_sqlite` accessors.
@@ -402,7 +402,7 @@ default.
 
 ## 10. Critical details
 
-- **AEAD**: AES-256-GCM via RustCrypto. Workspace dep `aes-gcm = "0.10"` already present in `crates/core/Cargo.toml`.
+- **AEAD**: AES-256-GCM via RustCrypto. Workspace dep `aes-gcm = "0.10"` already present in `crates/zeroship-core/Cargo.toml`.
 - **No `aes-siv` crate**: design §7.2 uses HMAC-derived synthetic nonce + AES-GCM construction, not RFC 5297 AES-SIV.
 - **HKDF**: `hkdf = "0.12"` (RustCrypto). Per-app derivation: `salt = app_id`, `info = "zsenc/aead/v1/{slot}"`.
 - **Key storage**: PG uses `__zeroship_admin.column_keys` (SECURITY DEFINER getter, hardening-gated). SQLite uses `ZEROSHIP_COLUMN_KEY_<KEYID>` env var. Both fall back to env-var sourcing in default PG builds for dev parity.
@@ -465,7 +465,7 @@ The original objection to PK-in-AAD across the industry is the chicken-and-egg o
 
 **Plugin-db doesn't have that constraint.** Per `AGENTS.md` "Key invariants":
 
-> typed_id everywhere. UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
+> typed_id everywhere. UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-core/src/typed_id.rs`.
 
 Every primary key in every plugin-db table is a typed_id minted **SDK-side** before the row reaches the wire. `db.users.insert({...})` populates `row.id` in JavaScript via `typed_id.new("usr")`; by the time the Rust crud layer sees the row, `id` is set. The encryption pass can fold those PK bytes into AAD with zero extra round-trips.
 

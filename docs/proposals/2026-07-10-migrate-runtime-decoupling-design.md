@@ -10,7 +10,7 @@
 The **default build (`default = ["js-cli"]`) is byte-for-byte behaviorally unchanged**: it still builds the JS authoring front-end, the recorder child, and the live-MySQL backend.
 
 > <!-- Added in round 2: addressing BLOCKER #1 (V8-free core unreachable) + BLOCKER-verification #9 -->
-> **Why step 2 is not optional.** With the workspace resolver v3, feature unification means a normal `cargo build` / `cargo test` unifies the feature sets of every path to `zeroship-migrate`. Both `plugin-db` (`crates/plugin-db/Cargo.toml:34`, `zeroship-migrate = { workspace = true }`) and `migrated` (`crates/zeroship-migrate-server/Cargo.toml:27`, same) currently depend on it *with default features on*. Since `default = ["js-cli"] ⊇ zsv8`, any ordinary workspace build unifies `zsv8` **on** for the whole graph — V8 is pulled back into `zeroship-migrate` for the platform binaries regardless of the `--no-default-features` invocation existing. The isolated `cargo build -p zeroship-migrate --no-default-features` proves the *core compiles* V8-free, but the product never runs it, so on its own it removes zero V8 from the platform. The removal only becomes real once `plugin-db` and `migrated` opt out of default features (they consume only the V8-free surface per §7, so this is safe). This design commits to both.
+> **Why step 2 is not optional.** With the workspace resolver v3, feature unification means a normal `cargo build` / `cargo test` unifies the feature sets of every path to `zeroship-migrate`. Both `plugin-db` (`crates/zeroship-plugin-db/Cargo.toml:34`, `zeroship-migrate = { workspace = true }`) and `migrated` (`crates/zeroship-migrate-server/Cargo.toml:27`, same) currently depend on it *with default features on*. Since `default = ["js-cli"] ⊇ zsv8`, any ordinary workspace build unifies `zsv8` **on** for the whole graph — V8 is pulled back into `zeroship-migrate` for the platform binaries regardless of the `--no-default-features` invocation existing. The isolated `cargo build -p zeroship-migrate --no-default-features` proves the *core compiles* V8-free, but the product never runs it, so on its own it removes zero V8 from the platform. The removal only becomes real once `plugin-db` and `migrated` opt out of default features (they consume only the V8-free surface per §7, so this is safe). This design commits to both.
 
 ---
 
@@ -275,7 +275,7 @@ Implementation: split `ir_apply.rs` so the `frontend`-importing functions live i
 
 <!-- Added in round 3: addressing MINOR #4 — prove the inbound-edge set is complete, not sampled. -->
 **The inbound-edge set is exhaustive, not sampled.** `grep -rn 'zeroship-migrate' crates/*/Cargo.toml` returns **exactly three** dependency edges into `zeroship-migrate` from other workspace members (all other hits are `zeroship-migrate`'s *own* `Cargo.toml` bin/feature lines):
-- `crates/plugin-db/Cargo.toml:34` — `zeroship-migrate = { workspace = true }` (production lib dep → flip to `default-features = false`)
+- `crates/zeroship-plugin-db/Cargo.toml:34` — `zeroship-migrate = { workspace = true }` (production lib dep → flip to `default-features = false`)
 - `crates/zeroship-migrate-server/Cargo.toml:27` — `zeroship-migrate = { workspace = true }` (production lib dep → flip)
 - `crates/schema-authority-e2e/Cargo.toml:18` — `zeroship-migrate = { workspace = true }` (**dev-dep-only** e2e harness — keeps default features; imports `frontend::*`)
 
@@ -287,7 +287,7 @@ Implementation: split `ir_apply.rs` so the `frontend`-importing functions live i
 Once the core compiles V8-free (steps 1–6), flip the two production library dependents to opt out of the default `zsv8`-pulling features. This is the payoff step; without it the workspace still unifies `zsv8` on and nothing changes for the platform.
 
 ```toml
-# crates/plugin-db/Cargo.toml   (currently line 34: `zeroship-migrate = { workspace = true }`)
+# crates/zeroship-plugin-db/Cargo.toml   (currently line 34: `zeroship-migrate = { workspace = true }`)
 zeroship-migrate = { workspace = true, default-features = false }
 
 # crates/zeroship-migrate-server/Cargo.toml    (currently line 27: `zeroship-migrate = { workspace = true }`)
@@ -296,7 +296,7 @@ zeroship-migrate = { workspace = true, default-features = false }
 
 Both are safe: §7 shows every symbol they use lives in a V8-free module. `plugin-db` reaches `SqliteBackend` / `MigrationEngine` / `render::declarative` / `desired_snapshot`; `migrated` reaches `apply_sealed` / `discover_ir_files` / `postgres_ir_apply_state` / `PostgresBackend` — none behind `zsv8`.
 
-**Fix the stale `plugin-db` Cargo comment in the same change.** `crates/plugin-db/Cargo.toml:32–33` currently asserts *"zeroship-migrate depends only on core + schema (no runtime/plugin-db), so no dependency cycle."* That is **already false today** — `zeroship-migrate` depends on `zeroship-runtime` unconditionally — and it is the exact misconception that hid BLOCKER #1. Under pre-launch no-back-compat discipline, correct it in this PR to read: *"zeroship-migrate pulls the V8 host (`zeroship-runtime` + `v8`) under its default features; plugin-db opts out via `default-features = false` and consumes only the V8-free apply/IR/render surface — so neither the V8 host nor a dependency cycle enters plugin-db's tree."*
+**Fix the stale `plugin-db` Cargo comment in the same change.** `crates/zeroship-plugin-db/Cargo.toml:32–33` currently asserts *"zeroship-migrate depends only on core + schema (no runtime/plugin-db), so no dependency cycle."* That is **already false today** — `zeroship-migrate` depends on `zeroship-runtime` unconditionally — and it is the exact misconception that hid BLOCKER #1. Under pre-launch no-back-compat discipline, correct it in this PR to read: *"zeroship-migrate pulls the V8 host (`zeroship-runtime` + `v8`) under its default features; plugin-db opts out via `default-features = false` and consumes only the V8-free apply/IR/render surface — so neither the V8 host nor a dependency cycle enters plugin-db's tree."*
 
 **Update the `zeroship-migrate` package `description`.** If the crate `description` advertises the "V8-backed JS authoring front-end" as core identity, amend it to note the V8 host is now **optional behind `zsv8`** and the default library surface for embedders can be built V8-free — so the manifest metadata matches the new feature reality.
 
@@ -323,7 +323,7 @@ Later, the core's DB I/O (`compio-postgres`/`rusqlite`) could itself become a se
 5. **Gate module decls** (`lib.rs:76` `mod frontend`; `backend/mod.rs:40` `mod mysql`).
 6. **Cargo.toml (this crate)**: flip `zeroship-runtime`/`v8`/`seccompiler`/`landlock`/`libc` to `optional = true`; add `zsv8` (incl. `dep:libc`); make `js-cli`/`standalone-cli` pull `zsv8`; add `required-features = ["zsv8"]` to the recorder-child `[[bin]]`; amend the crate `description` (§7.1). Turn on the V8-free build here.
 7. **Gate the V8-coupled test files per the §3F DECIDED table** — whole-gate (`#![cfg(feature = "zsv8")]`) the 2 MySQL-backend files + 20 authoring files (incl. `split_part_lint.rs`); **SPLIT** `ir_dml_pg.rs` and `ir_dml_sqlite.rs` — extract their single `recorded_fnsynth_symbol_*` test + the `record_migration_to_ir_unsandboxed` import into new gated siblings `ir_dml_pg_recorded.rs` / `ir_dml_sqlite_recorded.rs` (`#![cfg(feature = "zsv8")]`), leaving the ~13–14 pure-core DML assertions ungated. Mechanical apply of the §3F table — no fresh investigation.
-8. <!-- Added in round 2: BLOCKER #1 --> **Flip the dependents** (§7.1): set `default-features = false` on the `zeroship-migrate` edge in `crates/plugin-db/Cargo.toml:34` and `crates/zeroship-migrate-server/Cargo.toml:27`; fix the stale plugin-db Cargo comment (lines 32–33). This is the step that removes V8 from the platform tree.
+8. <!-- Added in round 2: BLOCKER #1 --> **Flip the dependents** (§7.1): set `default-features = false` on the `zeroship-migrate` edge in `crates/zeroship-plugin-db/Cargo.toml:34` and `crates/zeroship-migrate-server/Cargo.toml:27`; fix the stale plugin-db Cargo comment (lines 32–33). This is the step that removes V8 from the platform tree.
 9. <!-- Added in round 2: MINOR #6 --> **Confirm the `lib.rs:88–103` `compile_fail` doctests** still assert absence under the new feature lattice (§3B tail). No symbol they reference should become `zsv8`-gated in a way that changes what the doctest proves.
 
 Steps 1–5 keep the **default build green**; the V8-free build turns on at step 6; steps 8–9 make the removal real and prove it.

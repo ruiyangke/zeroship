@@ -4,7 +4,7 @@
 
 **Source design**: `docs/proposals/db-system-design.md` §1, §5.5, §6.2.1, §7, §8, §10.5, §11.5 (context), §17.6/§17.7, §18 Q1+Q7+Q8, §19 P1
 **Precedent shape**: `docs/proposals/p0-implementation-plan.md`
-**Working crate**: `crates/plugin-db/`
+**Working crate**: `crates/zeroship-plugin-db/`
 **Head**: `eb3c0270` on `main`
 **Per-PR budget**: builds + `cargo test -p zeroship-plugin-db` green on its own with **both** `--features pg` (default) and `--features sqlite` (P1 introduces the latter).
 
@@ -35,7 +35,7 @@
 **Recommendation**: **module folder**, not flat file. PG's `backend/postgres.rs` is 685 lines — the ceiling for a minimum-viable backend. SQLite carries more moving parts at parity (session actor, dialect, ATTACH bookkeeping, PRAGMA wiring, parser hook); design §19 P1 names three sub-files explicitly.
 
 ```
-crates/plugin-db/src/backend/sqlite/
+crates/zeroship-plugin-db/src/backend/sqlite/
 ├── mod.rs           SqliteBackend struct + all six capability impl blocks + #[cfg(test)] compile-time asserts.
 ├── session.rs       SqliteSession actor — owns rusqlite::Connection, mpsc command queue, ATTACH bookkeeping, PRAGMA bootstrap (journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON).
 ├── dialect.rs       SqliteDialect impl of DialectBuilder; ships only the P1-essential hooks.

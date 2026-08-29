@@ -385,7 +385,7 @@ SQL error about a missing function, forever.
 
 **Why no suite caught it: there is no PostgreSQL mask-policy test at all.**
 Every `dispatch_set_mask_policy` / `load_pg` / `persist_pg` exercise in the tree
-is in `tests/sqlite_integration.rs` (`:6656`, `:6740`, `:6829`, `:6845`,
+is in `crates/zeroship-plugin-db/tests/sqlite_integration.rs` (`:6656`, `:6740`, `:6829`, `:6845`,
 `:6896`, `:7686`, ...). `tests/integration.rs` - the live-PG suite - has none.
 The feature is tested only on the backend where it works and untested on the
 backend that ships, so the arm is green and the product is broken.
@@ -818,7 +818,7 @@ worker dying. A reaper existed but was reachable **only from tenant JS** via
 failure was delegated to the tenant, who has no reason to run it.
 
 **What shipped instead.** `fix(db): reap crashed worker replication slots`
-added `plugin-db/src/slot_reaper.rs` (+593) and `worker/src/slot_reaper.rs`
+added `plugin-crates/zeroship-plugin-db/src/slot_reaper.rs` (+593) and `worker/src/slot_reaper.rs`
 (+54), wired at `worker/src/main.rs:641`, and **deleted** the tenant surface -
 196 lines out of `replication.rs`, 89 out of `v8_classes/replication.rs`, and
 the `internal.d.ts` declaration. `drop_abandoned_slots` now appears **zero**
@@ -842,7 +842,7 @@ The shipped design is stronger than "call the reaper from the operator side":
   serving with cleanup silently stopped.
 
 **Evidence:** `worker/src/main.rs:15,48-66,639-641,714`;
-`worker/src/slot_reaper.rs:1-40`; `plugin-db/src/slot_reaper.rs:278-452`;
+`worker/src/slot_reaper.rs:1-40`; `plugin-crates/zeroship-plugin-db/src/slot_reaper.rs:278-452`;
 `grep -rn "dropAbandoned\|drop_abandoned" crates/ sdks/` returns nothing
 
 **How this entry went stale, which is the reusable part.** It asserted "verified

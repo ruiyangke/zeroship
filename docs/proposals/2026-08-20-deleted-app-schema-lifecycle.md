@@ -6,7 +6,7 @@ carries one question the evidence does not answer and that the operator must
 settle before section 7 can be built.
 **Scope:** the lifecycle of an app's Postgres schemas, per-app role, and
 key-value/object residue after `DELETE /api/apps/{id}`. Explicitly NOT: the
-account-erasure lifecycle in `crates/auth/src/cron/account_reaper.rs`, which is
+account-erasure lifecycle in `crates/zeroship-auth/src/cron/account_reaper.rs`, which is
 upstream of this and already has a decided shape.
 
 ---
@@ -25,8 +25,8 @@ tree at `1c36fe3c6`. Claims are labelled:
 
 ## 1. What deletion does today
 
-**VERIFIED.** `DELETE /api/apps/{id}` (`crates/control/src/api.rs:451`) calls
-`purge_app` (`crates/control/src/api.rs:431`), which does exactly two things:
+**VERIFIED.** `DELETE /api/apps/{id}` (`crates/zeroship-control/src/api.rs:451`) calls
+`purge_app` (`crates/zeroship-control/src/api.rs:431`), which does exactly two things:
 
 ```rust
 pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeError> {
@@ -46,7 +46,7 @@ pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeErr
 }
 ```
 
-Step 2 is a **hard delete with no tombstone** (`crates/control/src/registry.rs:367`):
+Step 2 is a **hard delete with no tombstone** (`crates/zeroship-control/src/registry.rs:367`):
 
 ```rust
     let tx = conn.transaction().await?;
@@ -89,24 +89,24 @@ only by code with no production caller.
 
 | Object | Verdict | Deciding code |
 | --- | --- | --- |
-| `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/plugin-db/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
+| `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/zeroship-plugin-db/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
 | `"<uuid>_migrations"` - the migration engine journal | **survives** | named by nothing; created at `third_party/zero-migrate/crates/zeroship-migrate/src/conn.rs:188` |
-| `"app_<uuid>"` - the workflow journal's 5 `__zeroship_workflow_*` tables | **survives** | named by nothing; `crates/control/src/cron/workflow_engine.rs:306-311` states it outright |
-| role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/plugin-db/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
-| `env.kv` keys | **survives** | scoped `{<app_id>}:<key>` (`crates/plugin-kv/src/backend/mod.rs:150`); the `KvBackend` trait has per-key ops only, no namespace drop |
-| `env.storage` objects | **survives** | prefix `<app_id>/<bucket>/<key>` (`crates/plugin-storage/src/backend/s3.rs:143`, `local.rs:104`); `crates/plugin-storage/src/limits.rs:145`: "there is no runtime teardown hook to sweep them" |
-| deploy blobs under `blobs/` | **survives permanently** | the `BlobStore` trait (`crates/bundle/src/blob.rs:57-163`) has no `delete_blob` and no `list_blobs`. They are structurally unreclaimable, deleted app or not |
+| `"app_<uuid>"` - the workflow journal's 5 `__zeroship_workflow_*` tables | **survives** | named by nothing; `crates/zeroship-control/src/cron/workflow_engine.rs:306-311` states it outright |
+| role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/zeroship-plugin-db/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
+| `env.kv` keys | **survives** | scoped `{<app_id>}:<key>` (`crates/zeroship-plugin-kv/src/backend/mod.rs:150`); the `KvBackend` trait has per-key ops only, no namespace drop |
+| `env.storage` objects | **survives** | prefix `<app_id>/<bucket>/<key>` (`crates/zeroship-plugin-storage/src/backend/s3.rs:143`, `local.rs:104`); `crates/zeroship-plugin-storage/src/limits.rs:145`: "there is no runtime teardown hook to sweep them" |
+| deploy blobs under `blobs/` | **survives permanently** | the `BlobStore` trait (`crates/zeroship-bundle/src/blob.rs:57-163`) has no `delete_blob` and no `list_blobs`. They are structurally unreclaimable, deleted app or not |
 | `zeroship.workflow_scheduler_timers` / `_inflight` rows | **survives** | `app_id uuid NOT NULL` with **no FK** (`db/migrations-ts/20260811000100_workflow_scheduler_store.ts:44-66`) |
 | `zeroship.app_audit` rows | **survives** | `app_id` with no FK, plus its own append-only trigger |
-| `manifests/<app_id>/` | removed | `crates/bundle/src/blob.rs:544-560` |
-| the gateway route entry | removed | `get_routes` is `FROM zeroship.apps a` (`crates/control/src/registry.rs:665`); the row is gone, so the route is |
+| `manifests/<app_id>/` | removed | `crates/zeroship-bundle/src/blob.rs:544-560` |
+| the gateway route entry | removed | `get_routes` is `FROM zeroship.apps a` (`crates/zeroship-control/src/registry.rs:665`); the row is gone, so the route is |
 | 26 `zeroship.*` tables with `ON DELETE CASCADE` to `apps` | removed | `db/migrations-ts/20260702000600_constraints_indexes_fks.ts` |
-| auth's per-app rows (`app_user_identities`, `oauth_grants`, `app_session_anchors`) | removed | they cascade off the `oauth_clients` row `delete_app` deletes explicitly (`crates/control/src/registry.rs:371-381`) |
-| CDC replication slots | removed | worker-side, on the route feed disappearing (`crates/worker/src/sync.rs:141-158`) - slots only, no schema, no role |
+| auth's per-app rows (`app_user_identities`, `oauth_grants`, `app_session_anchors`) | removed | they cascade off the `oauth_clients` row `delete_app` deletes explicitly (`crates/zeroship-control/src/registry.rs:371-381`) |
+| CDC replication slots | removed | worker-side, on the route feed disappearing (`crates/zeroship-worker/src/sync.rs:141-158`) - slots only, no schema, no role |
 
 Note the residue is not only storage. The scheduler timer rows are **live
 timers keyed to an app that no longer exists**, and the scheduler store only
-deletes by `run_id` (`crates/workflow-scheduler/src/store.rs:179`). That is a
+deletes by `run_id` (`crates/zeroship-workflow-scheduler/src/store.rs:179`). That is a
 correctness leak, not a housekeeping one, and it is not fixed by dropping a
 schema.
 
@@ -121,11 +121,11 @@ them stay forever.
 Note the second row of the dead-code column. `drop_namespace` is the only
 teardown that exists, and **it drops one of the three schemas**: step 4 is
 `DROP SCHEMA IF EXISTS {schema} CASCADE` where `schema = quote_ident(app_id)`
-(`crates/plugin-db/src/drop_namespace.rs:160-161`), the bare uuid. Wiring it as
+(`crates/zeroship-plugin-db/src/drop_namespace.rs:160-161`), the bare uuid. Wiring it as
 written would still leave `"<uuid>_migrations"` and `"app_<uuid>"` behind. This
 matters for section 7: "just call the existing teardown" is not a fix.
 
-`crates/plugin-db/src/drop_namespace.rs:44-55` says so itself:
+`crates/zeroship-plugin-db/src/drop_namespace.rs:44-55` says so itself:
 
 > Until the control plane wires the call (cross-worker fan-out + lock), the
 > orchestrator surface is unused in a default build
@@ -220,7 +220,7 @@ reproduced identically in three consecutive runs. A retry cannot restore what
 step 1 removed.
 
 **VERIFIED.** A third refusal exists and is deliberate: an ever-invoiced app is
-pre-checked and refused with a typed 409 (`crates/control/src/registry.rs:344-365`),
+pre-checked and refused with a typed 409 (`crates/zeroship-control/src/registry.rs:344-365`),
 because `invoice_lines.app_id -> apps` is `ON DELETE RESTRICT`. The comment
 names the posture - "consistent with the anonymize-don't-delete financial-history
 posture" - but the anonymize path it points at exists for `users`, not for apps.
@@ -229,8 +229,8 @@ posture" - but the anonymize path it points at exists for `users`, not for apps.
 
 ## 4. The residue is invisible to every instrument the platform has
 
-**VERIFIED.** Every fleet sweep in `crates/control/src/cron/` takes its app list
-from `journalled_apps` (`crates/control/src/cron/workflow_engine.rs:344`), which
+**VERIFIED.** Every fleet sweep in `crates/zeroship-control/src/cron/` takes its app list
+from `journalled_apps` (`crates/zeroship-control/src/cron/workflow_engine.rs:344`), which
 starts from the apps table:
 
 ```sql
@@ -273,12 +273,12 @@ The abandoned schemas hold the app's END USERS' data. Four claims in the tree ar
 inconsistent with keeping it.
 
 1. **A user-facing promise, in an email we actually send.**
-   `crates/mailer/src/templates/account_deletion_requested.txt:3-7`:
+   `crates/zeroship-mailer/src/templates/account_deletion_requested.txt:3-7`:
    "We received a request to permanently delete your zeroship account... After
    that date the deletion is irreversible." The erasure chain behind that promise
-   is `crates/auth/src/cron/account_reaper.rs` (headed "Account-erasure reaper
+   is `crates/zeroship-auth/src/cron/account_reaper.rs` (headed "Account-erasure reaper
    (ISS-12 / GDPR Art. 17)") -> the owner-less apps it leaves ->
-   `crates/control/src/cron/orphaned_app_reaper.rs` -> `purge_app`. **VERIFIED**
+   `crates/zeroship-control/src/cron/orphaned_app_reaper.rs` -> `purge_app`. **VERIFIED**
    at each hop. The chain terminates in the two-step function quoted in section 1,
    which does not name a per-app schema. An erased user's apps' data survives the
    erasure that was promised to be irreversible.
@@ -296,7 +296,7 @@ inconsistent with keeping it.
    not, so the erasure lever becomes unreachable while the data remains.
 
 4. **The auth audit sweep puts a 90-day ceiling on PII**
-   (`crates/auth/src/cron/audit_retention.rs:49-51`), and control's puts 12
+   (`crates/zeroship-auth/src/cron/audit_retention.rs:49-51`), and control's puts 12
    months on its audit trails. A per-app schema holding end-user PII with no
    horizon at all is not consistent with that posture.
 
@@ -386,7 +386,7 @@ Rationale over the alternatives filed at
   honest without making deletion possible, and deletion has to become possible.
 - **(b) `SET NULL`** keeps every audit row, keeps append-only literally true (no
   row is deleted), and matches the anonymize-don't-delete posture
-  `crates/control/src/registry.rs:344-365` already applies to billed apps. The
+  `crates/zeroship-control/src/registry.rs:344-365` already applies to billed apps. The
   audit row loses its app pointer, which is exactly what "the app is gone" means.
 
 **MUST CHECK before landing:** `billing_reconcile.rs:1357` reads
@@ -422,7 +422,7 @@ Per-app failures isolated and retried next tick, exactly like
 **The detection query must be a POSITIVE assertion about a row that exists, not
 an anti-join against absence.** This is the single most important sentence in
 this document. `orphaned_app_reaper` already learned the lesson and records it
-(`crates/control/src/cron/orphaned_app_reaper.rs:17-23`): a naive "delete
+(`crates/zeroship-control/src/cron/orphaned_app_reaper.rs:17-23`): a naive "delete
 owner-less apps" sweep would have deleted the platform's own console, and the
 guard is that the console asserts `system = true`. A reaper keyed on
 `NOT EXISTS (SELECT 1 FROM zeroship.apps ...)` over `pg_namespace` has the same
@@ -516,7 +516,7 @@ liability bounded and the accident surface manual.
 
 - **The deploy `blobs/` keyspace is a separate, larger problem this proposal does
   not solve.** `BlobStore` has no `delete_blob` and no `list_blobs`
-  (`crates/bundle/src/blob.rs:57-163`), so no deploy blob is reclaimable by any
+  (`crates/zeroship-bundle/src/blob.rs:57-163`), so no deploy blob is reclaimable by any
   code path, whether or not an app is deleted. A reaper for deleted apps cannot
   fix that; it needs a refcount or a mark-and-sweep the trait cannot express.
 - **The orphaned scheduler timers need their own fix.** `workflow_scheduler_timers`
@@ -524,7 +524,7 @@ liability bounded and the accident surface manual.
   work items. Adding the FK is the obvious answer and is a schema change with its
   own blast radius; it is not folded into 7.1.
 - **The `oauth_clients` delete is keyed on a derived value, not on a read.**
-  `crates/control/src/registry.rs:371-381` deletes
+  `crates/zeroship-control/src/registry.rs:371-381` deletes
   `WHERE client_id = client_id_for_app(id)`. Any app whose OAuth client was ever
   provisioned under a different client_id would keep that row and its
   `app_user_identities` / `oauth_grants` children. Whether such an app can exist

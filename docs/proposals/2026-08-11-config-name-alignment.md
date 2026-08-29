@@ -56,7 +56,7 @@ The initial server conformance set is `zeroship-control`, `zeroship-gate`,
 AMENDED 2026-08-12. That set is the CONVERSION order, not the scope. There are
 SIX server binaries and SEVEN targets classified `platform` in workspace
 metadata: the five above, plus `zeroship-workflow-scheduler`
-(`crates/workflow-scheduler/Cargo.toml:7-10`), plus the
+(`crates/zeroship-workflow-scheduler/Cargo.toml:7-10`), plus the
 `zeroship-platform-migrate` one-shot
 (`crates/zeroship-migrate-adapter/Cargo.toml:30-33`). Text elsewhere in this
 document, and the scope line of
@@ -72,7 +72,7 @@ without `--config` or `--check-config` and initializes tracing directly
 (`crates/zeroship-migrate-server/src/main.rs:20-119`). The same declaration and environment
 access rules apply workspace-wide to other production zeroship processes. For
 example, the standalone scheduler has its own clap/env spellings
-(`crates/workflow-scheduler/src/main.rs:13-52`), while the deployed platform
+(`crates/zeroship-workflow-scheduler/src/main.rs:13-52`), while the deployed platform
 migration one-shot still has a manual argument parser and a raw
 `DATABASE_URL` fallback
 (`deploy/compose/docker-compose.yml:110-176` and
@@ -83,7 +83,7 @@ though only long-running servers need the full `--check-config` report.
 AMENDED 2026-08-21, the one-shot's actual state. `zeroship-platform-migrate` is
 CONVERTED. Its declaration is `crates/zeroship-migrate-adapter/src/config.rs`
 (`#[zeroship_config(binary = "zeroship-platform-migrate", scope =
-"platform_migrate")]`), it links into `crates/config-contract/src/registry.rs`
+"platform_migrate")]`), it links into `crates/zeroship-config-contract/src/registry.rs`
 as the seventh entry of `DECLARING_BINARIES`, and `tests/real_registry.rs` no
 longer carries a named exemption - the manifests' `platform` set and the linked
 set are now compared for exact equality with nothing in between. The hand-rolled
@@ -92,7 +92,7 @@ parser and its `--database-url` value flag are deleted; the DSN is
 
 AMENDED 2026-08-12, the scheduler's actual state, so a later step does not
 assume it is done. Step 2 moved its clap definition out of `main.rs` into
-`crates/workflow-scheduler/src/config.rs` so the compiled checker can link it,
+`crates/zeroship-workflow-scheduler/src/config.rs` so the compiled checker can link it,
 and deliberately did NOT convert its fields. As of this amendment:
 
 - Its fields are hand-spelled `#[arg(long, env = "...")]` with the
@@ -104,7 +104,7 @@ and deliberately did NOT convert its fields. As of this amendment:
 - Its `main` is a placeholder that logs and `exit(1)`: the dispatch, ack and
   registration loop still runs in the control cron, and the standalone process
   must not run as a production scheduler until that loop moves
-  (`crates/workflow-scheduler/src/lib.rs:1-11`). Its metadata classification is
+  (`crates/zeroship-workflow-scheduler/src/lib.rs:1-11`). Its metadata classification is
   `platform` with a reason that says so.
 
 That last point is why it is in scope but not converted: it is a real workspace
@@ -146,26 +146,26 @@ rm -rf "$tmp"
 ```
 
 Raw reads are not confined to bootstrap code. Representative current reads
-occur in the worker handler (`crates/worker/src/handler.rs:1700-1701` and
-`crates/worker/src/handler.rs:3530-3532`), control HTTP utility code
-(`crates/control/src/http_util.rs:157-159`), and runtime networking
-(`crates/runtime/src/node/net/connect.rs:394-399` and
-`crates/runtime/src/node/net/connect.rs:438`). Metering further hides several
+occur in the worker handler (`crates/zeroship-worker/src/handler.rs:1700-1701` and
+`crates/zeroship-worker/src/handler.rs:3530-3532`), control HTTP utility code
+(`crates/zeroship-control/src/http_util.rs:157-159`), and runtime networking
+(`crates/zeroship-runtime/src/node/net/connect.rs:394-399` and
+`crates/zeroship-runtime/src/node/net/connect.rs:438`). Metering further hides several
 names behind a string-taking helper
-(`crates/metering/src/outbox.rs:88-103`), illustrating why a literal-only grep
+(`crates/zeroship-metering/src/outbox.rs:88-103`), illustrating why a literal-only grep
 cannot be the source of truth.
 
 The current config layer is typed and already rejects unknown TOML keys, but
 the schema is independently hand-written. `FileConfig` and its sections
-are declared in `crates/core/src/config/file.rs:40-60`; section fields are
+are declared in `crates/zeroship-core/src/config/file.rs:40-60`; section fields are
 separate Rust identifiers and secret references are plain `Option<String>`
-values (`crates/core/src/config/file.rs:111-171`). An env reference accepts any
+values (`crates/zeroship-core/src/config/file.rs:111-171`). An env reference accepts any
 non-empty text after `urn:zeroship:env:` and resolves it through a raw env read
-(`crates/core/src/config/secrets.rs:280-359`). `--check-config` deliberately
+(`crates/zeroship-core/src/config/secrets.rs:280-359`). `--check-config` deliberately
 validates only reference syntax, not whether the target has a consumer
-(`crates/core/src/config/secrets.rs:389-403`). The live-file unit test merely
+(`crates/zeroship-core/src/config/secrets.rs:389-403`). The live-file unit test merely
 parses `deploy/ops/zeroship.toml` and checks `observability.log_filter`
-(`crates/core/src/config/file.rs:342-353`).
+(`crates/zeroship-core/src/config/file.rs:342-353`).
 
 That separation has produced concrete drift:
 
@@ -175,8 +175,8 @@ That separation has produced concrete drift:
   clap field declared as `--db`/`DATABASE_URL`
   (`deploy/compose/docker-compose.yml:200-209`,
   `deploy/ops/zeroship.toml:53-74`, and
-  `crates/control/src/main.rs:50-66`). Control resolves those independent slots
-  manually (`crates/control/src/main.rs:694-720`).
+  `crates/zeroship-control/src/main.rs:50-66`). Control resolves those independent slots
+  manually (`crates/zeroship-control/src/main.rs:694-720`).
 - The same middle `ZEROSHIP_DATABASE_URL` name carries gateway and worker DSNs
   even though Compose intentionally gives them different role-specific values
   (`deploy/compose/docker-compose.yml:373-394` and
@@ -185,7 +185,7 @@ That separation has produced concrete drift:
   `POSTMARK_WEBHOOK_PASSWORD`
   (`deploy/ops/zeroship.example.toml:115-116`), while auth declares only
   `AUTH_POSTMARK_WEBHOOK_PASSWORD`
-  (`crates/auth/src/config.rs:498-514`). The environment catalogue records this
+  (`crates/zeroship-auth/src/config.rs:498-514`). The environment catalogue records this
   as a dead setting that looks live (`docs/reference/env-vars.md:297-308`).
 - Compose itself documents environment entries on control that no longer have
   a control-process consumer (`deploy/compose/docker-compose.yml:222-247`). It
@@ -197,12 +197,12 @@ That separation has produced concrete drift:
 The current secret merge API makes drift easy: `obtain_secret` accepts a
 free-form label, a clap-merged string, and an unrelated TOML string, then
 applies precedence without a shared identity
-(`crates/core/src/config/secrets.rs:451-481`). Current parser fields also still
+(`crates/zeroship-core/src/config/secrets.rs:451-481`). Current parser fields also still
 accept secret values as flags, including control's DSN and keys
-(`crates/control/src/main.rs:50-110`), gateway's DSN and keys
-(`crates/gateway/src/main.rs:41-79` and
-`crates/gateway/src/main.rs:133-159`), and worker's DSN, keys, and credentialed
-KV URL (`crates/worker/src/main.rs:42-115`). This proposal replaces those value
+(`crates/zeroship-control/src/main.rs:50-110`), gateway's DSN and keys
+(`crates/zeroship-gateway/src/main.rs:41-79` and
+`crates/zeroship-gateway/src/main.rs:133-159`), and worker's DSN, keys, and credentialed
+KV URL (`crates/zeroship-worker/src/main.rs:42-115`). This proposal replaces those value
 flags; it does not add another precedence arm.
 
 ## 1. Canonical naming rule
@@ -279,7 +279,7 @@ TOML dotted paths are normally written as tables. For example,
 same table its operational siblings live in.
 The overlay remains optional: absence continues to produce compiled defaults,
 and the fixed `/etc/zeroship/zeroship.toml` discovery behavior is unchanged
-(`crates/core/src/config/source.rs:52-104`).
+(`crates/zeroship-core/src/config/source.rs:52-104`).
 
 All in-scope server and platform-one-shot environment names use the
 `ZEROSHIP_` projection. Creator-CLI names are registered for raw-access
@@ -296,15 +296,15 @@ setting; it does not preserve the current spelling as an alias.
 
 | Canonical | Class | Target flag | Target env | Target TOML | Current evidence |
 | --- | --- | --- | --- | --- | --- |
-| `control.port` | Operational | `--port` | `ZEROSHIP_CONTROL_PORT` | `[control] port` | `--port`/`CONTROL_PORT` at `crates/control/src/main.rs:42-44` |
-| `control.database_url` | Secret | `--database-url-file` | `ZEROSHIP_CONTROL_DATABASE_URL` | `[control] database_url` | `--db`/`DATABASE_URL` at `crates/control/src/main.rs:50-66` |
-| `gateway.database_url` | Secret | `--database-url-file` | `ZEROSHIP_GATEWAY_DATABASE_URL` | `[gateway] database_url` | `--db`/`DATABASE_URL` at `crates/gateway/src/main.rs:77-79` |
-| `control_key` | Secret | `--control-key-file` | `ZEROSHIP_CONTROL_KEY` | top-level `control_key` | shared current readers are catalogued at `docs/reference/env-vars.md:228-245`; representative clap fields are `crates/control/src/main.rs:72-74` and `crates/gateway/src/main.rs:41-43` |
-| `worker.max_pinned_isolates_per_app` | Operational | `--max-pinned-isolates-per-app` | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `[worker] max_pinned_isolates_per_app` | `crates/worker/src/main.rs:70-76` |
-| `gateway.signing_key` | Secret | `--signing-key-file` | `ZEROSHIP_GATEWAY_SIGNING_KEY` | `[gateway] signing_key` | current file-path input at `crates/gateway/src/main.rs:88-94` |
-| `auth.postmark_webhook_password` | Secret | `--postmark-webhook-password-file` | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `[auth] postmark_webhook_password` | `crates/auth/src/config.rs:498-514` |
-| `auth.public_url` | Operational | `--public-url` | `ZEROSHIP_AUTH_PUBLIC_URL` | `[auth] public_url` | `crates/auth/src/config.rs:348-360` |
-| `observability.log_filter` | Operational | `--observability-log-filter` | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `[observability] log_filter` | current independent flag/env at `crates/core/src/observability.rs:70-78` and TOML field at `crates/core/src/config/file.rs:173-183` |
+| `control.port` | Operational | `--port` | `ZEROSHIP_CONTROL_PORT` | `[control] port` | `--port`/`CONTROL_PORT` at `crates/zeroship-control/src/main.rs:42-44` |
+| `control.database_url` | Secret | `--database-url-file` | `ZEROSHIP_CONTROL_DATABASE_URL` | `[control] database_url` | `--db`/`DATABASE_URL` at `crates/zeroship-control/src/main.rs:50-66` |
+| `gateway.database_url` | Secret | `--database-url-file` | `ZEROSHIP_GATEWAY_DATABASE_URL` | `[gateway] database_url` | `--db`/`DATABASE_URL` at `crates/zeroship-gateway/src/main.rs:77-79` |
+| `control_key` | Secret | `--control-key-file` | `ZEROSHIP_CONTROL_KEY` | top-level `control_key` | shared current readers are catalogued at `docs/reference/env-vars.md:228-245`; representative clap fields are `crates/zeroship-control/src/main.rs:72-74` and `crates/zeroship-gateway/src/main.rs:41-43` |
+| `worker.max_pinned_isolates_per_app` | Operational | `--max-pinned-isolates-per-app` | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `[worker] max_pinned_isolates_per_app` | `crates/zeroship-worker/src/main.rs:70-76` |
+| `gateway.signing_key` | Secret | `--signing-key-file` | `ZEROSHIP_GATEWAY_SIGNING_KEY` | `[gateway] signing_key` | current file-path input at `crates/zeroship-gateway/src/main.rs:88-94` |
+| `auth.postmark_webhook_password` | Secret | `--postmark-webhook-password-file` | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `[auth] postmark_webhook_password` | `crates/zeroship-auth/src/config.rs:498-514` |
+| `auth.public_url` | Operational | `--public-url` | `ZEROSHIP_AUTH_PUBLIC_URL` | `[auth] public_url` | `crates/zeroship-auth/src/config.rs:348-360` |
+| `observability.log_filter` | Operational | `--observability-log-filter` | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `[observability] log_filter` | current independent flag/env at `crates/zeroship-core/src/observability.rs:70-78` and TOML field at `crates/zeroship-core/src/config/file.rs:173-183` |
 | `migrate_server.provision_database_url` | Secret | `--provision-database-url-file` | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `[migrated] provision_database_url` | `crates/zeroship-migrate-server/src/main.rs:40-47` |
 
 The transformation deliberately renames `--db` to the unambiguous
@@ -322,9 +322,9 @@ from one observation: the section never enforced anything.
 
 **Secrets are declared in their component's table, not a separate one.**
 `SecretSection` is a flat struct of `Option<String>` fields
-(`crates/core/src/config/file.rs:119-131`); the reference-only rule is enforced
+(`crates/zeroship-core/src/config/file.rs:119-131`); the reference-only rule is enforced
 per VALUE by `obtain_secret` / `is_secret_ref` operating on a raw string
-(`crates/core/src/config/secrets.rs:451-470`), not by the section. Moving a
+(`crates/zeroship-core/src/config/secrets.rs:451-470`), not by the section. Moving a
 secret out of `[secrets]` therefore removes no check. It gains something the
 flat section actively destroyed: LOCATION NOW ENCODES SHARING. A secret under
 `[control]` is control's; a top-level secret is platform-global. Today
@@ -412,8 +412,8 @@ The macro derives the supply set mechanically from the wrapper:
   secret and are not recursively parsed as another reference. The deployable
   supply set is environment or file path. Vault and AWS reference syntax is
   parsed today, but startup returns `BackendUnavailable`
-  (`crates/core/src/config/secrets.rs:232-277` and
-  `crates/core/src/config/secrets.rs:335-386`); those backends do not become
+  (`crates/zeroship-core/src/config/secrets.rs:232-277` and
+  `crates/zeroship-core/src/config/secrets.rs:335-386`); those backends do not become
   valid deployment sources merely because the example TOML can spell them.
 - `BootstrapControl<T>` is for values needed before the overlay can be loaded,
   such as the overlay selector, and for safety controls that must not be
@@ -444,10 +444,10 @@ The macro derives the supply set mechanically from the wrapper:
 
 This also removes hand-maintained redaction as a separate correctness surface.
 Today control has a custom `Debug` implementation with a manual redaction list
-(`crates/control/src/main.rs:401-416`), worker has another
-(`crates/worker/src/main.rs:179-213`), and `CheckConfigReport` accepts arbitrary
+(`crates/zeroship-control/src/main.rs:401-416`), worker has another
+(`crates/zeroship-worker/src/main.rs:179-213`), and `CheckConfigReport` accepts arbitrary
 caller-selected `Plain` or `Secret` values
-(`crates/core/src/config/bootstrap.rs:96-175`). Under this proposal,
+(`crates/zeroship-core/src/config/bootstrap.rs:96-175`). Under this proposal,
 `Secret<T>` cannot format its value, and generated report rows can only expose
 presence and source kind.
 
@@ -477,9 +477,9 @@ to any other name would be the alias hop under another spelling, so parsed ops
 TOML rejects env references altogether. Operators who want file indirection put
 `urn:zeroship:file:...` at the derived
 `[<service>] database_url` path. File resolution is implemented today
-(`crates/core/src/config/secrets.rs:335-386`); the parsed but unavailable Vault
+(`crates/zeroship-core/src/config/secrets.rs:335-386`); the parsed but unavailable Vault
 and AWS forms are not part of this proposal's supply set
-(`crates/core/src/config/secrets.rs:232-277`).
+(`crates/zeroship-core/src/config/secrets.rs:232-277`).
 
 Shared secrets use the same rule. Compose assigns
 `ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:-...}` to each consumer, each
@@ -506,14 +506,14 @@ binary reads both names, and Compose never supplies both.
 
 ### 4.1 One declaration generates every spelling
 
-Add `crates/core/src/config/names.rs` for `CanonicalName`, source wrappers,
+Add `crates/zeroship-core/src/config/names.rs` for `CanonicalName`, source wrappers,
 `ConfigSpec`, transforms, overlay lookup, and the typed environment accessor.
 Add a small local proc-macro crate, `crates/config-macros`, and re-export its
 attribute from core. A local proc-macro is an implementation aid, not a new
 configuration stack: the repository already has a workspace proc-macro crate
 using `syn`, `quote`, and `proc-macro2`
-(`crates/runtime-macros/Cargo.toml:1-13`), while core already depends on clap,
-serde, and toml (`crates/core/Cargo.toml:7-12`).
+(`crates/zeroship-runtime-macros/Cargo.toml:1-13`), while core already depends on clap,
+serde, and toml (`crates/zeroship-core/Cargo.toml:7-12`).
 
 A declaration has this conceptual shape:
 
@@ -553,7 +553,7 @@ behavior, and a `&'static [ConfigSpec]`. Field declarations may still carry
 parsers, validators, conflicts, and help text, but may not carry literal
 `long`, `env`, or serde `rename` spellings. The optional overlay is parsed with
 serde/toml and walked by canonical path; unknown leaf paths fail, preserving
-the current deny-unknown posture (`crates/core/src/config/file.rs:40-60`).
+the current deny-unknown posture (`crates/zeroship-core/src/config/file.rs:40-60`).
 
 `ConfigSpec` is keyed by canonical identity and contains a consumer set. A
 shared setting is declared once and consumer fields refer to that spec, for
@@ -608,7 +608,7 @@ representable and neither detectable by any gate in Section 4:
   rules. The existing collision check skips same-name pairs, so nothing looked.
 
 The implemented form names the identity by SYMBOL and reads the canonical name,
-supply class and resolved type from a table in `crates/config-macros/src/shared.rs`:
+supply class and resolved type from a table in `crates/zeroship-config-macros/src/shared.rs`:
 
 ```rust
 #[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]
@@ -639,15 +639,15 @@ and supply set, and deliberately does not compare defaults.
 Move each command type into a library-visible config module so a checker can
 link it: new `src/config.rs` modules in control, gateway, worker, migrated, and
 workflow-scheduler, plus auth's existing exported config module
-(`crates/auth/src/lib.rs:1-6`). Each exports its
+(`crates/zeroship-auth/src/lib.rs:1-6`). Each exports its
 generated clap source type and `ConfigSpec` slice; `main.rs` only invokes that
 surface. The present parser locations are
-`crates/control/src/main.rs:38-399`,
-`crates/gateway/src/main.rs:25-204`,
-`crates/worker/src/main.rs:26-177`,
+`crates/zeroship-control/src/main.rs:38-399`,
+`crates/zeroship-gateway/src/main.rs:25-204`,
+`crates/zeroship-worker/src/main.rs:26-177`,
 `crates/zeroship-migrate-server/src/main.rs:20-114`,
-`crates/workflow-scheduler/src/main.rs:13-52`, and
-`crates/auth/src/config.rs:31-533`.
+`crates/zeroship-workflow-scheduler/src/main.rs:13-52`, and
+`crates/zeroship-auth/src/config.rs:31-533`.
 
 The platform migration one-shot also moves its manual parser into a linkable
 `crates/zeroship-migrate-adapter/src/platform_migrate_config.rs` module behind
@@ -700,7 +700,7 @@ configuration names.
 
 ### 4.2 TOML URN and consumer gate
 
-In `crates/config-contract/tests/ops_toml.rs`, load both
+In `crates/zeroship-config-contract/tests/ops_toml.rs`, load both
 `deploy/ops/zeroship.toml` and `deploy/ops/zeroship.example.toml`. Check both
 the raw text and the parsed TOML. Assert:
 
@@ -720,13 +720,13 @@ the raw text and the parsed TOML. Assert:
 The exact-key assertion catches a stale schema field even when its env target
 is read for another purpose. The exact-spec assertion catches the Postmark
 case. The current format-only validator intentionally cannot make either
-assertion (`crates/core/src/config/secrets.rs:389-403`). Include checker unit
+assertion (`crates/zeroship-core/src/config/secrets.rs:389-403`). Include checker unit
 fixtures containing an unknown key, a dead env target, a target owned by the
 wrong setting, a parsed env-to-env alias, and an unavailable backend; each must
 fail. The unavailable-backend fixture also prevents the current example's
 Vault/AWS placeholders from looking deployable while their resolvers return
 `BackendUnavailable` (`deploy/ops/zeroship.example.toml:77-114` and
-`crates/core/src/config/secrets.rs:335-386`). Generic documentation placeholders
+`crates/zeroship-core/src/config/secrets.rs:335-386`). Generic documentation placeholders
 such as `<VARNAME>` are not concrete names and are excluded from the lexical
 match.
 
@@ -793,7 +793,7 @@ being done. Sections 4.2 and 4.3 above are unedited.
 substituted by checks inside `tests/config_name_alignment_gate.sh`, which runs
 in CI as a named step with a self-test (`.github/workflows/ci.yml:488`, `:490`):
 
-- For 4.2: `crates/config-contract/tests/ops_toml.rs` does not exist. Check 7
+- For 4.2: `crates/zeroship-config-contract/tests/ops_toml.rs` does not exist. Check 7
   walks `deploy/ops/zeroship.toml` and `deploy/ops/zeroship.example.toml` with
   awk and joins each leaf against the compiled contract dump
   (`config_name_alignment_gate.sh:446`, driven at `:778-780`). Check 8, armed
@@ -806,7 +806,7 @@ in CI as a named step with a self-test (`.github/workflows/ci.yml:488`, `:490`):
 **Why finishing them as written is hard to justify.** Two of 4.2's six
 assertions - 3 and 4, the lexical `urn:zeroship:env:NAME` scan and the parsed
 env-to-env alias - are moot, because `SecretRef` now has exactly two variants,
-`Literal` and `File` (`crates/core/src/config/secrets.rs:260-265`). A spelling
+`Literal` and `File` (`crates/zeroship-core/src/config/secrets.rs:260-265`). A spelling
 the parser refuses outright needs no gate. (The count is two of six, not half;
 assertions 1, 5 and 6 remain live and are what check 7 covers.) The substitutes
 also carry the anti-vacuity guards the sections asked for: check 6 fails rather
@@ -855,24 +855,24 @@ configuration.
 Use the compiler as the primary gate. Add `clippy.toml` disallowed-method
 entries for `std::env::{var,var_os,vars,vars_os}`, set workspace
 `clippy::disallowed_methods` to `deny`, and permit local allows only in
-`crates/core/src/config/env.rs` and the sealed `libs/*` test accessors defined
+`crates/zeroship-core/src/config/env.rs` and the sealed `libs/*` test accessors defined
 below. The workspace already centralizes Clippy policy
 in `Cargo.toml:242-250` and CI runs Clippy across workspace targets at
 `.github/workflows/ci.yml:437-451`. A required fixture imports
 `std::env::var` as another name and proves the compiler-resolved lint still
 rejects the call.
 
-Add `crates/config-contract/tests/workspace_lints.rs`. It obtains every
+Add `crates/zeroship-config-contract/tests/workspace_lints.rs`. It obtains every
 first-party workspace member and feature from `cargo metadata`, parses each
 member manifest, and requires `[lints] workspace = true`. There is no per-crate
 opt-out. Its mutation fixture adds a workspace member without lint inheritance
 and proves the gate fails. This prevents a new crate from silently escaping the
 compiler rule.
 
-Add `crates/core/tests/config_env_access_gate.rs` as the second line. It
+Add `crates/zeroship-core/tests/config_env_access_gate.rs` as the second line. It
 enumerates tracked Rust files using `git ls-files`, following the repository's
 existing source-gate pattern
-(`crates/core/tests/source_is_greppable_test.rs:85-111`), and rejects any
+(`crates/zeroship-core/tests/source_is_greppable_test.rs:85-111`), and rejects any
 direct `std::env` call, import or re-export of those four methods, dynamic
 dispatch to them, `allow(clippy::disallowed_methods)` outside the central
 or sealed library-test accessors, known direct environment FFI escape paths,
@@ -954,7 +954,7 @@ Two further protections, neither of which the format rule provided:
   secret left at mode 0644 - rather than the file's syntax.
 - Redaction becomes load-bearing rather than incidental. `Secret<T>` cannot
   format its value, replacing the hand-maintained redaction lists in
-  `crates/control/src/main.rs:401-416` and `crates/worker/src/main.rs:179-213`.
+  `crates/zeroship-control/src/main.rs:401-416` and `crates/zeroship-worker/src/main.rs:179-213`.
   With literals permitted from more sources, a `Debug` that printed a raw value
   would be a live disclosure, so this part of Section 4.1 must land with the
   amendment and not after it.
@@ -974,16 +974,16 @@ name remains as an alias.
 ### Step 1: Add inert naming machinery and negative fixtures
 
 Risk: low. Add `crates/config-macros`, `crates/config-contract`, and
-`crates/core/src/config/names.rs`; give the contract crate its library and
+`crates/zeroship-core/src/config/names.rs`; give the contract crate its library and
 checker-binary targets, but export no changed runtime names yet. Add transform,
 canonical/env/flag/TOML collision, reserved-`secrets`, bad-URN,
 wrong-consumer, raw-read, and empty-extraction tests. Touch the workspace
 dependency table and core module exports; the existing config module export
 surface is centralized at
-`crates/core/src/config/mod.rs:13-34`.
+`crates/zeroship-core/src/config/mod.rs:13-34`.
 
 Blast radius: new tooling files, root `Cargo.toml`,
-`crates/core/Cargo.toml`, `crates/core/src/config/mod.rs`, and the package
+`crates/zeroship-core/Cargo.toml`, `crates/zeroship-core/src/config/mod.rs`, and the package
 manifests that classify each existing bin target for the cargo-metadata
 anti-vacuity check. No deployment caller changes.
 
@@ -995,18 +995,18 @@ shared bootstrap/report path. Preserve optional discovery and current
 precedence. Move command definitions from binary-only modules into the exported
 config modules named in Section 4.1 so the compiled checker can invoke them.
 
-Blast radius: `crates/core/src/config/{bootstrap,source,env}.rs`,
-`crates/core/src/observability.rs`, the config/parser portions of
+Blast radius: `crates/zeroship-core/src/config/{bootstrap,source,env}.rs`,
+`crates/zeroship-core/src/observability.rs`, the config/parser portions of
 `crates/{control,gateway,worker,migrated}/src/main.rs`,
 new `crates/{control,gateway,worker,migrated,workflow-scheduler}/src/config.rs`,
-their `src/lib.rs` module exports, `crates/auth/src/{config,main}.rs`, and
+their `src/lib.rs` module exports, `crates/zeroship-auth/src/{config,main}.rs`, and
 `crates/zeroship-migrate-adapter/{Cargo.toml,src/lib.rs}`, new
 `crates/zeroship-migrate-adapter/src/platform_migrate_config.rs`, its platform
 migration bin, and `tests/config_check_e2e.sh`. The current shared-bootstrap call sites are at
-`crates/control/src/main.rs:630-645`,
-`crates/gateway/src/main.rs:277-291`,
-`crates/worker/src/main.rs:307-320`, and
-`crates/auth/src/main.rs:24-51`; migrated's direct path is
+`crates/zeroship-control/src/main.rs:630-645`,
+`crates/zeroship-gateway/src/main.rs:277-291`,
+`crates/zeroship-worker/src/main.rs:307-320`, and
+`crates/zeroship-auth/src/main.rs:24-51`; migrated's direct path is
 `crates/zeroship-migrate-server/src/main.rs:116-125`.
 
 ### Step 3: Convert operational values
@@ -1016,12 +1016,12 @@ Risk: medium. Move each operational clap field and overlay lookup to
 Compose, tests, examples, and runbooks in the same patch. Add TOML sections only
 for values actually consumed; an absent section remains valid.
 
-Blast radius: parser structs in `crates/control/src/main.rs:38-399`,
-`crates/gateway/src/main.rs:25-204`,
-`crates/worker/src/main.rs:26-177`, and
-`crates/auth/src/config.rs:31-533`; migrated at
+Blast radius: parser structs in `crates/zeroship-control/src/main.rs:38-399`,
+`crates/zeroship-gateway/src/main.rs:25-204`,
+`crates/zeroship-worker/src/main.rs:26-177`, and
+`crates/zeroship-auth/src/config.rs:31-533`; migrated at
 `crates/zeroship-migrate-server/src/main.rs:20-114`; scheduler at
-`crates/workflow-scheduler/src/main.rs:13-52`; and the new exported config
+`crates/zeroship-workflow-scheduler/src/main.rs:13-52`; and the new exported config
 modules introduced in Step 2. Before editing, run
 `cargo run --quiet -p zeroship-config-contract -- inventory --format tsv` to
 emit each current flag/env/TOML spelling, consumer, declaration path, and every
@@ -1039,20 +1039,20 @@ runtime/plugin code
 where the value is zeroship startup config; do not let inner modules rediscover
 it from process-global state. Turn on the Clippy and source gates only after
 the last read is converted. The current dynamic env-reference read in
-`crates/core/src/config/secrets.rs:354-359` remains a tracked blocker until
+`crates/zeroship-core/src/config/secrets.rs:354-359` remains a tracked blocker until
 Step 5 deletes env-to-env secret references; it is not allowlisted in the final
 gate.
 
 Blast radius includes root `Cargo.toml`, new `clippy.toml`,
-`crates/core/tests/config_env_access_gate.rs`, every first-party package
+`crates/zeroship-core/tests/config_env_access_gate.rs`, every first-party package
 manifest needed to make workspace-lint inheritance mandatory, and current
 representative sites in
-`crates/worker/src/handler.rs:1700-1701`,
-`crates/control/src/http_util.rs:157-159`,
-`crates/runtime/src/node/net/connect.rs:394-438`,
-`crates/metering/src/outbox.rs:88-103`, and every other site found by the
+`crates/zeroship-worker/src/handler.rs:1700-1701`,
+`crates/zeroship-control/src/http_util.rs:157-159`,
+`crates/zeroship-runtime/src/node/net/connect.rs:394-438`,
+`crates/zeroship-metering/src/outbox.rs:88-103`, and every other site found by the
 inventory command from Step 3. The checklist also includes core's current raw
-access boundary (`crates/core/src/config/env.rs:10-20`) and creator-CLI reads as
+access boundary (`crates/zeroship-core/src/config/env.rs:10-20`) and creator-CLI reads as
 `CliEnv<...>` registrations, without adding CLI TOML support. Dynamically
 constructed reads require manual inspection
 because the documented text scan cannot see them
@@ -1070,13 +1070,13 @@ validation without opening files or fetching secrets. Delete the
 general env-to-env alias facility. Delete the parsed-but-unavailable Vault and
 AWS variants at the same time, so the type admits exactly literal input and
 file indirection. The current parser and resolver are at
-`crates/core/src/config/secrets.rs:232-386`.
+`crates/zeroship-core/src/config/secrets.rs:232-386`.
 
-Blast radius: `crates/core/src/config/{file,secrets,bootstrap}.rs`; secret
-parsers and resolution blocks at `crates/control/src/main.rs:694-820`,
-`crates/gateway/src/main.rs:306-373`,
-`crates/worker/src/main.rs:328-380`, and
-`crates/auth/src/main.rs:324-445`; migrated's DSNs/keys at
+Blast radius: `crates/zeroship-core/src/config/{file,secrets,bootstrap}.rs`; secret
+parsers and resolution blocks at `crates/zeroship-control/src/main.rs:694-820`,
+`crates/zeroship-gateway/src/main.rs:306-373`,
+`crates/zeroship-worker/src/main.rs:328-380`, and
+`crates/zeroship-auth/src/main.rs:324-445`; migrated's DSNs/keys at
 `crates/zeroship-migrate-server/src/main.rs:31-55` and `crates/zeroship-migrate-server/src/main.rs:98-105`;
 the platform migration one's manual DSN flag/read at
 `crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate.rs:73-105`;
@@ -1147,7 +1147,7 @@ Name generation and contract validation do not require a new merge framework.
 ### Make TOML required or primary
 
 Rejected. The file remains an optional overlay and the missing well-known path
-remains a normal all-default state (`crates/core/src/config/source.rs:52-104`).
+remains a normal all-default state (`crates/zeroship-core/src/config/source.rs:52-104`).
 The accepted ADR rejected a required file because existing dev/deploy flows are
 CLI-driven (`docs/decisions/2026-05-28-server-config-unification.md:64-65`).
 
@@ -1186,7 +1186,7 @@ parses the value.
 
 Rejected. The catalogue itself says concatenated names are invisible
 (`docs/reference/env-vars.md:12-19`), and metering currently passes names through
-a string-taking helper (`crates/metering/src/outbox.rs:88-103`). Grep remains a
+a string-taking helper (`crates/zeroship-metering/src/outbox.rs:88-103`). Grep remains a
 useful audit and a ban on raw access, but generated compiled metadata is the
 authority.
 
@@ -1199,7 +1199,7 @@ bootstrap fails unknown reserved-prefix names before server startup.
 ### Put secret values in TOML or retain secret value flags
 
 Rejected. Existing secret resolution already rejects TOML literals
-(`crates/core/src/config/secrets.rs:451-470`), and the target policy permits
+(`crates/zeroship-core/src/config/secrets.rs:451-470`), and the target policy permits
 only env values and file-path locators. A path flag preserves operational
 ergonomics without exposing secret material in a process command line.
 
@@ -1211,11 +1211,11 @@ than the proposed mechanism. A small test could compare every current
 compare rendered Compose keys with per-service readers, and a focused change
 could add migrated's missing `--check-config`
 (`crates/zeroship-migrate-server/src/main.rs:20-119`). The current TOML structs already
-reject unknown keys (`crates/core/src/config/file.rs:40-60`), current clap
+reject unknown keys (`crates/zeroship-core/src/config/file.rs:40-60`), current clap
 parsers already provide typed validation
-(`crates/control/src/main.rs:38-110` and
-`crates/auth/src/config.rs:31-60`), and the current overlay loader has
-clear optional/discovery semantics (`crates/core/src/config/source.rs:52-104`).
+(`crates/zeroship-control/src/main.rs:38-110` and
+`crates/zeroship-auth/src/config.rs:31-60`), and the current overlay loader has
+clear optional/discovery semantics (`crates/zeroship-core/src/config/source.rs:52-104`).
 On that view, a dotted canonical namespace, wrapper types, a proc macro, and a
 workspace contract crate are a bespoke mini-framework built to prevent a class
 of error that two or three narrow CI checks could catch.
@@ -1225,8 +1225,8 @@ TOML, Compose, tests, and docs at once. Secret delivery is the least forgiving
 part: a missed producer prevents boot, while an incorrectly converted
 redaction path can disclose a credential. The current manual redaction burden
 is visible in control and worker
-(`crates/control/src/main.rs:401-416` and
-`crates/worker/src/main.rs:179-213`); replacing it is beneficial only if the
+(`crates/zeroship-control/src/main.rs:401-416` and
+`crates/zeroship-worker/src/main.rs:179-213`); replacing it is beneficial only if the
 generated replacement is tested more rigorously than the handwritten code.
 
 Doing less would be the right call if all of the following were true:
@@ -1244,9 +1244,9 @@ Under those conditions, the narrow gates would close the known failures at far
 lower migration cost. This proposal chooses the broader mechanism because the
 current surface is already split between independently named clap fields, a
 handwritten TOML schema, free-form secret labels, deep raw reads, and deployment
-template aliases (`crates/core/src/config/file.rs:40-171`,
-`crates/core/src/config/secrets.rs:451-481`,
-`crates/runtime/src/node/net/connect.rs:394-438`, and
+template aliases (`crates/zeroship-core/src/config/file.rs:40-171`,
+`crates/zeroship-core/src/config/secrets.rs:451-481`,
+`crates/zeroship-runtime/src/node/net/connect.rs:394-438`, and
 `deploy/compose/docker-compose.yml:200-217`). That conclusion is an engineering
 judgment based on the opened evidence, not a measured proof that another drift
 would occur.

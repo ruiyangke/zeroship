@@ -39,7 +39,7 @@ contains only `[auth]` and `[observability]`. Scalar precedence is:
 `CLI flag > env > file > compiled default`
 
 The mechanism is explicit: file-overlayable CLI fields are `Option<T>` with no
-compiled clap default, then resolved in `crates/core/src/config.rs`. Shared
+compiled clap default, then resolved in `crates/zeroship-core/src/config.rs`. Shared
 helpers also live there, including overlay loading, observability resolution,
 secret-presence guards, and stash-key validation.
 

@@ -33,11 +33,11 @@ tree at `93d9e0228`. Claims are labelled:
 
 **VERIFIED.** The path is complete and, read on its own, good.
 
-A producer's counters live in `Meter` (`crates/metering/src/meter.rs`), an
+A producer's counters live in `Meter` (`crates/zeroship-metering/src/meter.rs`), an
 atomic per-`(app_id, metric)` map. `Meter::drain`
-(`crates/metering/src/meter.rs:214`) swaps every counter to zero under the write
+(`crates/zeroship-metering/src/meter.rs:214`) swaps every counter to zero under the write
 lock and returns `UsageEvent`s. The outbox task
-(`crates/metering/src/outbox.rs:741`) calls it every
+(`crates/zeroship-metering/src/outbox.rs:741`) calls it every
 `DEFAULT_OUTBOX_INTERVAL` (10s, `outbox.rs:52`) and hands the batch to
 `UsageOutbox::publish_events` (`outbox.rs:422`), which appends to a worker-local
 redb WAL first, publishes each event as one stream record keyed by app id, and
@@ -48,7 +48,7 @@ append retains the batch verbatim in memory up to
 cannot be passed where a restart-stable name belongs.
 
 **The transport is chosen in exactly one place.** `build_usage_outbox`
-(`crates/metering/src/outbox.rs:178`), and its first statement is the whole
+(`crates/zeroship-metering/src/outbox.rs:178`), and its first statement is the whole
 finding:
 
 ```rust
@@ -66,14 +66,14 @@ pub fn build_usage_outbox(
 `brokers` comes from `UsageStreamSettings::from_resolved` (`outbox.rs:119`),
 whose four arguments are the producer's four resolved `metering.*` settings.
 On the worker those are `metering_brokers` and siblings
-(`crates/worker/src/config.rs:175`), **compiled default `String::new()`**; on the
-gateway the same (`crates/gateway/src/config.rs:205`). There is no other
+(`crates/zeroship-worker/src/config.rs:175`), **compiled default `String::new()`**; on the
+gateway the same (`crates/zeroship-gateway/src/config.rs:205`). There is no other
 channel: `UsageStreamSettings::from_env` was deleted on 2026-08-20 and the crate
-now declares no env consumer at all (`crates/metering/src/lib.rs:32-37`).
+now declares no env consumer at all (`crates/zeroship-metering/src/lib.rs:32-37`).
 
 Downstream, the control plane consumes with its own selector
-(`crates/control/src/main.rs:788`), driven by `control.stream_transport`
-(`crates/control/src/config.rs:110`), **compiled default `String::new()`**, with
+(`crates/zeroship-control/src/main.rs:788`), driven by `control.stream_transport`
+(`crates/zeroship-control/src/config.rs:110`), **compiled default `String::new()`**, with
 a fallback to a `[metering] brokers` key in the file overlay.
 
 ---
@@ -86,8 +86,8 @@ by a log line.**
 ### Producers
 
 Both take the `Ok(None)` arm and spawn a drain-and-drop task. Worker
-(`crates/worker/src/main.rs:517-523`), gateway
-(`crates/gateway/src/main.rs:545-551`), both calling:
+(`crates/zeroship-worker/src/main.rs:517-523`), gateway
+(`crates/zeroship-gateway/src/main.rs:545-551`), both calling:
 
 ```rust
 pub fn spawn_disabled_drain_task(meter: Arc<Meter>, interval: Duration, reason: String) {
@@ -111,7 +111,7 @@ pub fn spawn_disabled_drain_task(meter: Arc<Meter>, interval: Duration, reason: 
     .detach();
 }
 ```
-(`crates/metering/src/outbox.rs:790-809`)
+(`crates/zeroship-metering/src/outbox.rs:790-809`)
 
 `events` is bound, counted, and dropped at the end of the loop body. **This is
 not a buffer-and-retry that I misread.** The retry machinery
@@ -122,19 +122,19 @@ WAL. There is nothing holding the events and nothing that could replay them.
 
 The process is otherwise entirely healthy. `/readyz` is unaffected; it gates on
 the control-plane version poll and blob-store reachability
-(`crates/worker/src/main.rs:457`), neither of which knows metering exists.
+(`crates/zeroship-worker/src/main.rs:457`), neither of which knows metering exists.
 
 ### Consumers
 
-Control takes the `None` arm (`crates/control/src/main.rs:896-899`) and logs
+Control takes the `None` arm (`crates/zeroship-control/src/main.rs:896-899`) and logs
 `"control: billing event stream disabled; stream forwarding and spend recompute
 are disabled"`. `AppState.billing_stream` is `None`, so:
 
 - a second warning fires at cron startup: `"billing stream transport is not
   configured; usage metering/enforcement is disabled (no old-model fallback)"`
-  (`crates/control/src/cron/mod.rs:114-118`);
+  (`crates/zeroship-control/src/cron/mod.rs:114-118`);
 - the whole `if let Some(streams) = state.billing_stream.as_ref()` block is
-  skipped (`crates/control/src/cron/mod.rs:257`), so neither the event forwarder
+  skipped (`crates/zeroship-control/src/cron/mod.rs:257`), so neither the event forwarder
   nor spend recompute is ever spawned.
 
 ### What an operator would see
@@ -147,8 +147,8 @@ metric, no `/readyz` effect, no health degradation, no alert. A log line at
 `info,zeroship_=debug` (`deploy/ops/zeroship.toml:49`) is noise, not a signal.
 
 `--check-config` does report it: `usage_stream_configured=false`
-(`crates/worker/src/main.rs:340-344`). But the report is informational -
-`report.emit(...); return Ok(());` (`crates/worker/src/main.rs:350-351`) - and
+(`crates/zeroship-worker/src/main.rs:340-344`). But the report is informational -
+`report.emit(...); return Ok(());` (`crates/zeroship-worker/src/main.rs:350-351`) - and
 the only consumer of `--check-config` reads its **exit code** and discards
 stdout:
 
@@ -231,21 +231,21 @@ only marker that said so.
 producers are the worker, the gateway, and control's own outbox.
 
 - **Worker platform counters**, five, emitted once per dispatched request via
-  `Meter::record_request` (`crates/worker/src/cache.rs:251,256`, reached from
-  five call sites in `crates/worker/src/handler.rs`): `requests`, `cpu_us`,
+  `Meter::record_request` (`crates/zeroship-worker/src/cache.rs:251,256`, reached from
+  five call sites in `crates/zeroship-worker/src/handler.rs`): `requests`, `cpu_us`,
   `wall_us`, `egress_bytes`, `ingress_bytes`.
 - **Data-primitive usage metrics**, emitted by `env.db` / `env.kv` /
   `env.storage` at their op boundary through `MeterHandle::record`
-  (`crates/metering/src/lib.rs:80`).
+  (`crates/zeroship-metering/src/lib.rs:80`).
 - **`gateway_egress_bytes`**, for the static, redirect and error bodies the
-  worker never sees (`crates/gateway/src/router/dispatch.rs:1662`,
-  `crates/gateway/src/router/streaming.rs:73`, reached from
+  worker never sees (`crates/zeroship-gateway/src/router/dispatch.rs:1662`,
+  `crates/zeroship-gateway/src/router/streaming.rs:73`, reached from
   `static_serve.rs:327,357`).
 - **`net_egress_bytes` / `net_ingress_bytes`**, the raw-socket counters the V8
   runtime emits for `node:net` traffic
-  (`crates/runtime/src/node/net/caps.rs:266,274`).
+  (`crates/zeroship-runtime/src/node/net/caps.rs:266,274`).
 - **Control's own usage outbox** (`start_control_usage_outbox`,
-  `crates/control/src/main.rs:851`) is inside the `Some(id)` transport arm and
+  `crates/zeroship-control/src/main.rs:851`) is inside the `Some(id)` transport arm and
   therefore never started either.
 
 **INFERRED, and this is the part that matters commercially.** Because
@@ -259,7 +259,7 @@ block:
    any traffic volume. The free tier is not "quota-capped by construction"; it
    is uncapped.
 3. **`GET /api/apps/{id}/usage` returns zeroes.** It reads `usage_aggregates`
-   (`crates/control/src/api.rs:1419,1437`), which no writer populates. A creator
+   (`crates/zeroship-control/src/api.rs:1419,1437`), which no writer populates. A creator
    dashboard shows a working, healthy, zero-usage app.
 
 Every one of those is indistinguishable from an app that served no traffic.
@@ -332,7 +332,7 @@ consumer group and a green-looking stream.
 reopen, restart identity, retain-and-retry, cap-and-drop-oldest), one covers
 `MeterHandle`. **None constructs a disabled producer.** The one assertion that
 default settings yield `!producer_enabled()` lives in the *worker* crate
-(`crates/worker/src/config.rs:425`) and rules on the settings struct, not on
+(`crates/zeroship-worker/src/config.rs:425`) and rules on the settings struct, not on
 what the process then does with it.
 
 ---
@@ -365,11 +365,11 @@ reads, and it costs no operator decision to land.
 - Have `deploy-remote.sh` print each server's `usage_stream_configured` from the
   `--check-config` output it already runs and currently discards. Not a refusal
   - a no-metering deployment stays supported, per
-  `crates/worker/src/main.rs:508-516` - but a roll should state which posture it
+  `crates/zeroship-worker/src/main.rs:508-516` - but a roll should state which posture it
   just rolled.
 
 **Not recommended: making the producers fatal on absent brokers.** The `Ok(None)`
-arm is load-bearing and the comment at `crates/worker/src/main.rs:508-516`
+arm is load-bearing and the comment at `crates/zeroship-worker/src/main.rs:508-516`
 argues it correctly: `zeroship dev` and every non-billing harness run a
 broker-less worker.
 

@@ -10,11 +10,11 @@
 
 ## 0. Thesis + governing principles
 
-`node:net.Socket` is the native WebSocket client **with the frame codec removed**: a long-lived compio task reads bytes off a `compio::net::TcpStream` / `compio_tls::TlsStream` and pumps them into V8 as events, with a **bounded** channel-fed writer, real backpressure, and a one-shot wakeup into the pump loop. All of that already exists and drives the WebSocket client (`crates/runtime/src/web/websocket/network.rs`, `dispatch.rs`, `handshake.rs`). We **reuse it wholesale**; raw bytes become `'data'` events instead of decoded frames.
+`node:net.Socket` is the native WebSocket client **with the frame codec removed**: a long-lived compio task reads bytes off a `compio::net::TcpStream` / `compio_tls::TlsStream` and pumps them into V8 as events, with a **bounded** channel-fed writer, real backpressure, and a one-shot wakeup into the pump loop. All of that already exists and drives the WebSocket client (`crates/zeroship-runtime/src/web/websocket/network.rs`, `dispatch.rs`, `handshake.rs`). We **reuse it wholesale**; raw bytes become `'data'` events instead of decoded frames.
 
 Three non-negotiable principles:
 
-1. **Zero tokio.** Every byte stays on compio/io_uring. No new event-loop concept, no libuv. The TLS connector, SSRF resolver, timer facility, writer channel, and backpressure poll_fn are reused verbatim from the WS/fetch path. A CI grep gate over `crates/runtime/src/node/{net,tls}` rejects any `tokio`/`libuv` reference.
+1. **Zero tokio.** Every byte stays on compio/io_uring. No new event-loop concept, no libuv. The TLS connector, SSRF resolver, timer facility, writer channel, and backpressure poll_fn are reused verbatim from the WS/fetch path. A CI grep gate over `crates/zeroship-runtime/src/node/{net,tls}` rejects any `tokio`/`libuv` reference.
 2. **Reuse existing TLS + SSRF, do not reinvent.** TLS is `compio_tls::{TlsConnector, TlsStream}` + rustls(aws_lc_rs), built by `build_tls_connector` (`handshake.rs:346`). SSRF is `transport/ssrf.rs` (`resolve_and_check_ssrf`/`is_blocked_ip`). node:net routes **every** outbound connect through the SSRF gate exactly as fetch/WebSocket do.
 3. **Minimal viable subset.** Implement the closure of what `new Client(...).connect()` touches for `pg`/`mysql2`/`ioredis` — not all of Node net/tls. Inbound servers, Unix sockets, full `stream.Duplex`/`pipe()`, ALPN, session resumption are out or deferred.
 
@@ -95,7 +95,7 @@ Deferred: `getPeerCertificate([detailed])` (only needed for cert pinning — mos
 ### File layout
 
 ```
-crates/runtime/src/node/
+crates/zeroship-runtime/src/node/
 ├── events/  mod.rs (synthetic node:events) + events.js (minimal EventEmitter)
 ├── net/     mod.rs (synthetic node:net) · socket.rs (#[v8_class] NativeSocket + factories)
 │            driver.rs (compio connect + select loop) · state.rs (NativeSocketState + SocketEvent)
@@ -180,7 +180,7 @@ Each row marks whether the control is **enforcement** (stops the attack in trust
 Rejected alternatives: **Option B (on for all, SSRF + port-restricted)** — a static port allowlist still lets every app open raw TCP to any public host (443 tunnels anything); turnkey spam/proxy/exfil channel. **Option C (trusted-only)** as the *sole* policy — forecloses the legitimate creator use case (a creator app talking to its *own* managed DB at a public host). C is correct only for the migrate authoring sandbox.
 
 ```rust
-// crates/runtime/src/transport/net_policy.rs (new)
+// crates/zeroship-runtime/src/transport/net_policy.rs (new)
 pub enum NetPolicy {
     Denied,                                       // default for every creator app: modules don't resolve
     Allowlist {                                   // creator app; SSRF still on top
@@ -328,7 +328,7 @@ Per the repo faithful-e2e rule, the binding proof is an **unmodified npm DB driv
 
 ---
 
-## Key files (all under `crates/runtime/src/`, absolute paths)
+## Key files (all under `crates/zeroship-runtime/src/`, absolute paths)
 
 - `web/websocket/network.rs` — the driver / event-bridge / backpressure / writer template
 - `web/websocket/handshake.rs` (`:64,:181,:229-272,:346-368`) — TCP+TLS connect, `build_tls_connector`, SSRF call site

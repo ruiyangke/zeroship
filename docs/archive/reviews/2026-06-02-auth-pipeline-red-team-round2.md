@@ -36,12 +36,12 @@ Final severity is set from the two verifier verdicts (REP = reproduce lens, CTL 
 #### 0.0 — F1 residual: interactive OIDC callback cookie mint skips `app_user_identities`, so its session survives a password reset
 - **Kind:** missed-sibling · **Final severity: HIGH** · **Status: Confirmed** (REP=confirmed/high, CTL=confirmed/high)
 - **Chain:** Unauthenticated HTML client → `start_oidc_redirect` → Hydra → `GET /__zeroship/auth/callback` → `handle_auth_callback` mints the signed `__Host-zeroship_app_session` cookie via `issue_interactive_session_cookie`, which derives `pws_`+signs but **never calls `identities::upsert` and writes no anchor**. The reset's `revoked_families` CTE JOINs `app_user_identities` → 0 rows → 0 `token_revocations` markers → cookie gate `is_family_revoked_since` returns NotRevoked → **cookie accepted for full ~15-min TTL after the victim's reset.**
-- **Why the claimed backstop is absent:** `credential_version` is bumped to 1 but the **gateway never reads it** — the only reference in `crates/gateway/src` (non-test) is a comment at `auth_token.rs:617`. No code backstop exists.
+- **Why the claimed backstop is absent:** `credential_version` is bumped to 1 but the **gateway never reads it** — the only reference in `crates/zeroship-gateway/src` (non-test) is a comment at `auth_token.rs:617`. No code backstop exists.
 - **Live repro:** Two seeded victims under the verbatim `complete()` CTE — SDK-path victim (with identity row + anchor) → 1 marker written, anchor revoked, cookie rejected (closure good); interactive-path victim (no identity row, no anchor) → 0 markers, cookie accepted.
 - **Scope:** This is the primary browser-login path for any creator app whose end-users log in without the JS SDK. Pass-3 patched only `mint_session_from_code` (SDK `POST /session`) and left the symmetric interactive minter unpatched — the exact gap F1 was meant to close.
 - **Severity rationale (high, not critical):** post-compromise persistence — attacker must already hold/steal the cookie; the bug defeats "reset kills all sessions" for this minter, bounded by cookie TTL. Not an instantaneous bypass or cross-tenant escalation.
 - **Fix:** have `issue_interactive_session_cookie` (or `handle_auth_callback` pre-mint) call `identities::upsert(client_id, global_user_id, pws_sub)` like the SDK path, so the reset CTE learns the `(client_id, pws_)` to revoke.
-- **Files:** `crates/gateway/src/router/dispatch.rs`, `crates/gateway/src/auth_token.rs`, `crates/auth/src/identity/password_reset.rs`, `crates/gateway/src/router/auth.rs`
+- **Files:** `crates/zeroship-gateway/src/router/dispatch.rs`, `crates/zeroship-gateway/src/auth_token.rs`, `crates/zeroship-auth/src/identity/password_reset.rs`, `crates/zeroship-gateway/src/router/auth.rs`
 
 #### 6.0 — `validCheckSum:ANY` on 0025 platform-roles is silently ignored → re-migration bricks the already-migrated stack
 - **Kind:** over-restriction (NEW, introduced by pass-3 commit `7ac21796`) · **Final severity: HIGH** · **Status: Confirmed** (REP=confirmed/high, CTL=confirmed/high)
@@ -58,7 +58,7 @@ Final severity is set from the two verifier verdicts (REP = reproduce lens, CTL 
 - **Chain:** After 5 wrong-password attempts a real account locks; the next attempt takes the ineligible arm → `Ineligible` → **403** (`"account temporarily locked"`). An absent email can never lock → always `InvalidCredentials` → **401**. A binary, single-request account-existence oracle, louder than the F7 timing delta and in the same info-disclosure class. Predates F7 (rooted in the L5/F2 lockout response design); F7 equalized timing only.
 - **Disagreement:** REP rates **medium** (deterministic single-request binary signal, doubly observable via status + body, attacker-inducible within the per-email bucket headroom). CTL rates **low/partial**: from a **single source IP** the cap-5 EIP rate-limit bucket exactly matches the threshold-5 lockout, so attempt 6 (the first 403-revealing attempt) returns 429 — the trivial single-IP attack is masked. The residual survives only with **IP diversity** (or a spoofable `X-Forwarded-For`, since the auth service honors forwarded headers) to keep the EIP bucket fresh while the cap-10 EMAIL bucket permits attempts 6–10.
 - **Final severity set to LOW:** the single-IP path (the as-described attack) is blocked by the EIP limiter; the surviving multi-IP path costs IP diversity, reveals only account existence (no credential/session/cross-tenant access), and triggers a self-inflicted lockout. Account existence enumeration via lock-state observability is partly inherent to having lockout at all. Recommended hardening: equalize the lock-state response (or return a uniform 401 with the lock signaled out-of-band).
-- **Files:** `crates/auth/src/identity/credentials.rs`
+- **Files:** `crates/zeroship-auth/src/identity/credentials.rs`
 
 #### 7.0 — `billing` platform role: reads any app individually but `/api/apps` list wrongly scoped to owned apps only
 - **Kind:** over-restriction / missed-sibling (NEW, introduced by F3 fix `69dda8a2`) · **Final severity: LOW** · **Status: Confirmed** (REP=confirmed/low, CTL=confirmed/low)
@@ -66,7 +66,7 @@ Final severity is set from the two verifier verdicts (REP = reproduce lens, CTL 
 - **Live repro:** seeded `platform_admin_roles.role='billing'` + one foreign app with no `app_members` row; `fleet_wide_reader('billing')`→FALSE, `list_apps_for_owner(billing)`→0 apps, fleet total→1. Billing's list returns `[]` for an app it is authorized to (and can) read individually.
 - **Severity rationale (low):** over-restriction / consistency defect — billing **under-reads** (sees fewer apps than authorized). No cross-tenant leak (`AppRecord.api_key` is `#[serde(skip_serializing)]`), no over-grant, no bypass. Unguarded by tests.
 - **Fix:** add `'billing'` to the `fleet_wide_reader` role set + a regression test asserting a billing staffer sees the fleet-wide list.
-- **Files:** `crates/control/src/api.rs`, `policies/platform/billing.cedar`
+- **Files:** `crates/zeroship-control/src/api.rs`, `policies/platform/billing.cedar`
 
 #### 2.0 — 0031 backfill `ON CONFLICT DO UPDATE SET role='owner'` can promote a lone editor/viewer to owner
 - **Kind:** over-grant · **Final severity: LOW** · **Status: Contested** (REP=confirmed/low, CTL=**partial**/low — mechanism reproduced, security consequence refuted)
@@ -80,7 +80,7 @@ Final severity is set from the two verifier verdicts (REP = reproduce lens, CTL 
 - **Chain:** On the 5th consecutive wrong-password attempt against a real account, `record_login_failure` issues `UPDATE…RETURNING` (round-trip 1, counter bumped at `users.rs:204`) then a **second conditional `UPDATE locked_until`** (round-trip 2, `users.rs:224`, **not** counted). Equalized/absent/locked arms always do one round-trip, so the 5th-attempt real path is one round-trip slower. The F7 test drives only one sub-threshold attempt (`real_delta==1`), so neither the counter nor the test sees it.
 - **Why low / security refuted:** the extra UPDATE fires only on the 5th+ failure against a real, unlocked, password-bearing account the attacker is already driving — within the already-identified real arm, not the real-vs-absent distinction F7 closed. The only state it signals (the lock transition) is returned **in-band** on the next request (`Ineligible`→403), and the ~2ms delta is swamped by the ~700–850ms Argon2 verify (the threshold attempt measured as the *fastest* of five). No covert secret leaks; subsumed by the 403/401 functional oracle (5.1).
 - **Fix (hardening):** fold `locked_until` into the first UPDATE via `CASE`/`RETURNING` so no arm ever does 2 round-trips, and bump the counter symmetrically; extend the test to drive the threshold.
-- **Files:** `crates/auth/src/store/users.rs`, `crates/auth/src/identity/credentials.rs`, `crates/auth/tests/account_lockout_test.rs`
+- **Files:** `crates/zeroship-auth/src/store/users.rs`, `crates/zeroship-auth/src/identity/credentials.rs`, `crates/zeroship-auth/tests/account_lockout_test.rs`
 
 #### 3.0 — Pre-existing test-fixture fragility: 7 DB-gated anchor tests FK-fail on a freshly-migrated DB (NOT F4-caused)
 - **Kind:** new-vuln (mislabeled; actually CI hygiene) · **Final severity: LOW** · **Status: Confirmed** (REP=confirmed/low, CTL=confirmed/low)
@@ -88,7 +88,7 @@ Final severity is set from the two verifier verdicts (REP = reproduce lens, CTL 
 - **Correction to the claim:** both verifiers found the 7 tests fail **in isolation too** (missing seed is order-independent), so the dominant root cause is the missing `seed_app_and_client`, not `cleanup_f1`. Failures are hard FK violations at seed time → loud RED, never a false GREEN, so **nothing security-relevant is masked**; the F4/F1 product fixes are independently verified by the self-seeding tests.
 - **Severity LOW:** CI signal erosion / fixture-completeness only. Not F4-caused (commit `5473889c` did not touch these 7 tests).
 - **Fix:** have the 7 tests call `seed_app_and_client` (or a shared per-suite seed); make `cleanup_f1` not DELETE the shared `oauth_clients` row (or use `serial_test` / per-test unique client id).
-- **Files:** `crates/gateway/tests/auth_token_anchors_test.rs`
+- **Files:** `crates/zeroship-gateway/tests/auth_token_anchors_test.rs`
 
 #### 6.1 — 0031 header comment misdescribes its own behavior (DO NOTHING vs DO UPDATE; phantom `creator_id` source)
 - **Kind:** missed-sibling (documentation) · **Final severity: LOW** · **Status: Confirmed** (REP=confirmed/low, CTL=confirmed/low)

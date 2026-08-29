@@ -168,7 +168,7 @@ This is the canonical "what's in" list. Every row is shipped code, exercised by 
 
 ## 6. Mailer surface
 
-`crates/auth/src/mailer/`:
+`crates/zeroship-auth/src/mailer/`:
 - **stdout** — dev backend, prints to logs
 - **smtp** — lettre's blocking transport, gated behind `tokio::task::spawn_blocking` (the one tokio touchpoint, by design)
 - **resend** — Resend HTTP API
@@ -182,7 +182,7 @@ Each backend implements the `Mailer` trait. Selected at boot via `--mailer-backe
 
 ## 7. Data model
 
-`auth.*` schema in shared Postgres (migrations in `crates/auth/src/store/migrations.rs`):
+`auth.*` schema in shared Postgres (migrations in `crates/zeroship-auth/src/store/migrations.rs`):
 
 | Table | Purpose |
 |---|---|
@@ -204,7 +204,7 @@ Hydra's `hydra_*` tables live in the same database (managed by `hydra migrate sq
 
 ## 8. Configuration surface (`AuthConfig`)
 
-The full flag list lives in `crates/auth/src/config.rs`. Notable:
+The full flag list lives in `crates/zeroship-auth/src/config.rs`. Notable:
 
 - **Required:** `--db-url`
 - **Hydra:** `--hydra-admin`, `--hydra-public`
@@ -223,20 +223,20 @@ The full flag list lives in `crates/auth/src/config.rs`. Notable:
 
 | Defense | Where |
 |---|---|
-| CSRF token (form+cookie, constant-time compare) | `crates/auth/src/csrf.rs` |
-| Security headers (CSP, X-Frame-Options, COOP, Permissions-Policy, HSTS) | `crates/auth/src/headers.rs` |
-| Rate limiting (token bucket, per-IP + per-account) | `crates/auth/src/ratelimit.rs` |
-| Audit logging | `crates/auth/src/audit.rs` + `store/audit.rs` |
-| Argon2id password hashing | `crates/auth/src/identity/password.rs` |
+| CSRF token (form+cookie, constant-time compare) | `crates/zeroship-auth/src/csrf.rs` |
+| Security headers (CSP, X-Frame-Options, COOP, Permissions-Policy, HSTS) | `crates/zeroship-auth/src/headers.rs` |
+| Rate limiting (token bucket, per-IP + per-account) | `crates/zeroship-auth/src/ratelimit.rs` |
+| Audit logging | `crates/zeroship-auth/src/audit.rs` + `store/audit.rs` |
+| Argon2id password hashing | `crates/zeroship-auth/src/identity/password.rs` |
 | Constant-time HMAC | `core::auth` helpers (`subtle::ConstantTimeEq`) |
-| DPoP `cnf.jkt` enforcement | `crates/gateway/src/router/auth.rs::resolve_dpop_user_header` |
+| DPoP `cnf.jkt` enforcement | `crates/zeroship-gateway/src/router/auth.rs::resolve_dpop_user_header` |
 | jti replay cache (DPoP) | `crates/core::dpop` |
-| OIDC `state` HMAC binding | `crates/gateway/src/oidc_rp.rs`, `crates/control/src/oidc_rp.rs` |
+| OIDC `state` HMAC binding | `crates/zeroship-gateway/src/oidc_rp.rs`, `crates/zeroship-control/src/oidc_rp.rs` |
 | BCL `logout_token` signature + `jti` cache | `crates/core::logout_token` |
 | RFC 9700 redirect URI exact-match | Hydra (we delegate) |
 | `__Host-` cookie prefix (production) | All session/stash cookies |
-| Email suppression on bounce/complaint | `crates/auth/src/mailer/bounce.rs` |
-| Webhook signature verification (Postmark Basic, SNS RSA-SHA1) | `crates/auth/src/ui/webhooks.rs` |
+| Email suppression on bounce/complaint | `crates/zeroship-auth/src/mailer/bounce.rs` |
+| Webhook signature verification (Postmark Basic, SNS RSA-SHA1) | `crates/zeroship-auth/src/ui/webhooks.rs` |
 
 ---
 

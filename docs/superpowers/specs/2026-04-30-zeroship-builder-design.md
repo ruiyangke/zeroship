@@ -700,14 +700,14 @@ Mitigations:
 2. **Server: lazy import** — `await import('deepagents')` only when Builder is *first invoked*, not on every server function call. Light tasks (auth, list apps, list files) don't load it.
 3. **V8 isolate cache reuse** — the worker keeps the loaded module graph in its isolate's compilation cache; second-invocation cost is much lower than first.
 4. **Pin versions** — `@langchain/core@1.x`, `@langchain/langgraph@1.x`, `deepagents@1.x`, `@ai-sdk/react@^1.x` + `ai@^4.x` (matched pair — these track different major lines) pinned to avoid surprise breaks.
-5. **Facade layers** — all deepagents/LangChain calls go through `crates/control/src/agents/` modules; the translator (§4.8.4b) is the *only* place that knows about both ecosystems. When upgrading versions, only the facade or translator changes.
+5. **Facade layers** — all deepagents/LangChain calls go through `crates/zeroship-control/src/agents/` modules; the translator (§4.8.4b) is the *only* place that knows about both ecosystems. When upgrading versions, only the facade or translator changes.
 
 #### 4.8.6 Version churn risk (LangChain + AI SDK)
 
 LangChain ships breaking changes frequently. AI SDK is more stable but moves too. Risk mitigations beyond pinning:
 
 - **Snapshot testing**: agent behavior captured as fixtures (server-side); chat UX captured via Playwright snapshots (client-side). An upgrade that breaks either flags itself.
-- **Facade layers** (above): isolate upgrade pain to the translator (`stream_translator.ts`) and the `crates/control/src/agents/` modules.
+- **Facade layers** (above): isolate upgrade pain to the translator (`stream_translator.ts`) and the `crates/zeroship-control/src/agents/` modules.
 - **CI canary jobs**: weekly tests against `@langchain/*@latest` AND `@ai-sdk/*@latest`, both run independently so a break in one doesn't hide a break in the other.
 - **Acceptance**: we treat occasional 1-day upgrade work as the cost. Worth it for the custom-code savings.
 
@@ -2232,7 +2232,7 @@ In addition to sandbox / db / kv / storage primitives, Builder has these *agent-
 
 ### 12.2 Skill registry shape
 
-Each skill is a directory under `crates/control/skills/<skill-name>/`:
+Each skill is a directory under `crates/zeroship-control/skills/<skill-name>/`:
 ```
 skill.yaml          # metadata, quality budgets, dependencies, tags
 SKILL.md            # human/LLM-facing instructions
@@ -2328,7 +2328,7 @@ SRE:
 
 ### 15.1 Themes
 
-Theme = (Tailwind config + design tokens + small CSS overrides + curated copy strings). Stored in `crates/control/themes/<name>/`.
+Theme = (Tailwind config + design tokens + small CSS overrides + curated copy strings). Stored in `crates/zeroship-control/themes/<name>/`.
 
 Apply flow:
 1. Creator clicks "Apply" on a theme card.
@@ -2350,7 +2350,7 @@ V1 themes:
 
 ### 15.2 Feature sets
 
-Feature set = a Builder-runnable recipe that adds a coherent feature to a project. Stored in `crates/control/feature-sets/<name>/`.
+Feature set = a Builder-runnable recipe that adds a coherent feature to a project. Stored in `crates/zeroship-control/feature-sets/<name>/`.
 
 Apply flow:
 1. Creator clicks "Add" on a feature-set card.
@@ -2973,7 +2973,7 @@ Affinity hint reduces redundant `SET search_path` calls for hot branches.
 
 #### A.2.4 Schema creation on branch fork
 
-`crates/control/src/branch.rs`:
+`crates/zeroship-control/src/branch.rs`:
 
 ```rust
 pub async fn create_branch(

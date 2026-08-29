@@ -24,7 +24,7 @@ gateway, migrated, or creator-app processes.
 
 ## Required Configuration
 
-Flag names match `crates/auth/src/config.rs`; every flag has an equivalent env
+Flag names match `crates/zeroship-auth/src/config.rs`; every flag has an equivalent env
 var.
 
 ### Core Native OP

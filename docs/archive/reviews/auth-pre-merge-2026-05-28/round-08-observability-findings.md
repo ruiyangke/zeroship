@@ -5,13 +5,13 @@ Total: 16 findings (2 critical, 6 high, 5 medium, 3 low).
 Scope walked: every `audit::emit` / `audit::emit_strict` / `audit::log` /
 `emit_revocation_audit` / `audit_event` call site in `crates/auth`, `crates/control`,
 `crates/gateway`, `crates/sandbox-agent`; the `auth.audit_events` and `app_audit`
-table definitions and indexes (`crates/auth/src/store/migrations.rs:122-136`,
-`crates/control/src/registry.rs:317-344`); the `control.authz_decisions` table
-writes (`crates/authz/src/eval.rs:222-255`) plus all `AuthzGuard::require`
+table definitions and indexes (`crates/zeroship-auth/src/store/migrations.rs:122-136`,
+`crates/zeroship-control/src/registry.rs:317-344`); the `control.authz_decisions` table
+writes (`crates/zeroship-authz/src/eval.rs:222-255`) plus all `AuthzGuard::require`
 call sites; every `tracing::*` macro call in the auth + control + gateway
 crates for PII / log-injection vectors; subscriber init in
-`crates/core/src/observability.rs`; rate-limit denial paths in
-`crates/auth/src/ui/*` and the gateway/control rate-limiters; health endpoints
+`crates/zeroship-core/src/observability.rs`; rate-limit denial paths in
+`crates/zeroship-auth/src/ui/*` and the gateway/control rate-limiters; health endpoints
 on control (`/health`) and gateway (`/health`); Stripe webhook + Postmark
 webhook handlers as inbound-state-change audit surfaces.
 
@@ -19,11 +19,11 @@ Inventory (69 audit::emit call sites, 0 of which populate ip/user_agent/request_
 
 | Audit pipeline | Where | Sink | Stdout fan-out | Strict variant |
 | --- | --- | --- | --- | --- |
-| `auth::audit::emit` / `emit_strict` | `crates/auth/src/audit.rs` | `auth.audit_events` (PG) | yes (`tracing target=auth.audit`) | yes |
-| `control::audit::log` (Action enum) | `crates/control/src/audit.rs` | `app_audit` (PG) | no | no |
-| `control::admin_handlers::audit_event` | `crates/control/src/admin_handlers.rs:595-628` | `auth.audit_events` (PG, raw INSERT) | no | no |
-| `control::backchannel_logout::emit_revocation_audit` | `crates/control/src/backchannel_logout.rs:185-217` | `auth.audit_events` (PG, raw INSERT) | no | no |
-| `authz::audit_decision` | `crates/authz/src/eval.rs:222-255` | `control.authz_decisions` (PG) | no | no |
+| `auth::audit::emit` / `emit_strict` | `crates/zeroship-auth/src/audit.rs` | `auth.audit_events` (PG) | yes (`tracing target=auth.audit`) | yes |
+| `control::audit::log` (Action enum) | `crates/zeroship-control/src/audit.rs` | `app_audit` (PG) | no | no |
+| `control::admin_handlers::audit_event` | `crates/zeroship-control/src/admin_handlers.rs:595-628` | `auth.audit_events` (PG, raw INSERT) | no | no |
+| `control::backchannel_logout::emit_revocation_audit` | `crates/zeroship-control/src/backchannel_logout.rs:185-217` | `auth.audit_events` (PG, raw INSERT) | no | no |
+| `authz::audit_decision` | `crates/zeroship-authz/src/eval.rs:222-255` | `control.authz_decisions` (PG) | no | no |
 | `sandbox-agent::audit::record` | `crates/sandbox-agent/src/audit.rs:67-69` | `tracing target=audit` only | yes | n/a |
 
 **Headline gap:** four parallel audit-insertion paths, no unified contract.
@@ -38,7 +38,7 @@ Zero out of 69 `audit::emit` call sites populate `ip`, `user_agent`, or
 
 ### C1. `auth.audit_events` is plain BIGSERIAL with no tamper-evidence and no GRANT/REVOKE — any actor with the auth-PG role can erase their tracks
 
-**File:** `crates/auth/src/store/migrations.rs:122-136` (table + indexes);
+**File:** `crates/zeroship-auth/src/store/migrations.rs:122-136` (table + indexes);
 no `REVOKE` / `TRIGGER` / `RULE` anywhere in the file (grep confirms zero
 hits for `REVOKE`, `GRANT`, `TRIGGER`, `RULE` across all auth migrations).
 
@@ -103,21 +103,21 @@ TRUNCATE auth.audit_events;
    CREATE TRIGGER audit_block_delete BEFORE DELETE ON auth.audit_events
      FOR EACH ROW EXECUTE FUNCTION auth.audit_block_tamper();
    ```
-2. Add a daily chain-verification cron in `crates/auth/src/cron/` that
+2. Add a daily chain-verification cron in `crates/zeroship-auth/src/cron/` that
    reads the last N rows and asserts the hash chain.
 3. Long-term: dual-write to an external append-only store (S3 with
    object-lock, or a separate PG with a non-superuser writer role).
 
-Same finding applies to `app_audit` (`crates/control/src/registry.rs:317-344`)
+Same finding applies to `app_audit` (`crates/zeroship-control/src/registry.rs:317-344`)
 and `control.authz_decisions` (`crates/authz` migrations).
 
 ---
 
 ### C2. `control::audit::log` records `actor: "admin"` as a literal string instead of the actual `AuthzGuard.principal_id`
 
-**File:** `crates/control/src/env_handlers.rs:108-117, 140-149, 197-206,
-279-288, 360-369`; `crates/control/src/stripe_handlers.rs:118-125, 189-196,
-207-216`; supporting type in `crates/control/src/audit.rs:46-83` (`actor:
+**File:** `crates/zeroship-control/src/env_handlers.rs:108-117, 140-149, 197-206,
+279-288, 360-369`; `crates/zeroship-control/src/stripe_handlers.rs:118-125, 189-196,
+207-216`; supporting type in `crates/zeroship-control/src/audit.rs:46-83` (`actor:
 &'a str`); the docstring at `audit.rs:9-10` acknowledges this gap
 ("`actor` today is always `"admin"` (we don't have multi-actor auth on
 the master key yet). When that lands, plumb the user identity in.").
@@ -127,7 +127,7 @@ link/unlink, and every payout-record action writes a row to `app_audit`
 with `actor = "admin"` regardless of which platform admin / PAT / OAuth
 token initiated the action. The `AuthzGuard` already carries
 `principal_id: Uuid` and `token_id: Option<Uuid>` (verified in
-`crates/control/src/authz_guard.rs:14-21`) — both are dropped on the
+`crates/zeroship-control/src/authz_guard.rs:14-21`) — both are dropped on the
 floor before `audit::log` is called. Concrete failure scenarios this
 hides:
 
@@ -190,23 +190,23 @@ psql -c "SELECT actor, action, resource, at FROM app_audit WHERE app_id='$APP' O
 
 ### H1. Zero of 69 `audit::emit` call sites populate `ip`, `user_agent`, or `request_id` — the columns exist but are always NULL
 
-**File:** `crates/auth/src/audit.rs:13-23` (struct), schema at
-`crates/auth/src/store/migrations.rs:129-132` (`request_id TEXT`,
+**File:** `crates/zeroship-auth/src/audit.rs:13-23` (struct), schema at
+`crates/zeroship-auth/src/store/migrations.rs:129-132` (`request_id TEXT`,
 `ip INET`, `user_agent TEXT`); confirmed by:
 ```
-$ grep -rn "ip: Some\|user_agent: Some\|request_id: Some" crates/auth/ --include="*.rs"
+$ grep -rn "ip: Some\|user_agent: Some\|request_id: Some" crates/zeroship-auth/ --include="*.rs"
 # (no output — zero occurrences)
 ```
 
 Concrete call sites that bind an IP for rate-limit purposes but never
 forward it to the audit row immediately after:
 
-- `crates/auth/src/ui/login.rs:236-246` extracts `ip` for buckets, then
+- `crates/zeroship-auth/src/ui/login.rs:236-246` extracts `ip` for buckets, then
   emits `event_type: "login_failure"` at line 251 with `..Default::default()`
-- `crates/auth/src/ui/signup.rs:129-153` (same shape, signup_throttled)
-- `crates/auth/src/ui/forgot.rs:86-89, 102-111, 166-175` (forgot)
-- `crates/auth/src/ui/magic.rs:179-180, 199, 772-773, 786` (magic)
-- `crates/auth/src/ui/link.rs:186-187, 201` (account link)
+- `crates/zeroship-auth/src/ui/signup.rs:129-153` (same shape, signup_throttled)
+- `crates/zeroship-auth/src/ui/forgot.rs:86-89, 102-111, 166-175` (forgot)
+- `crates/zeroship-auth/src/ui/magic.rs:179-180, 199, 772-773, 786` (magic)
+- `crates/zeroship-auth/src/ui/link.rs:186-187, 201` (account link)
 
 **Severity rationale:** Forensics on a credential-stuffing or
 account-takeover incident becomes guesswork. We can see "100 login
@@ -215,7 +215,7 @@ failures for `alice@…`" but cannot tell whether they came from one IP
 (distributed credential-stuffing — different mitigation). The
 `user_agent` and `request_id` columns are equally always-NULL, which
 makes correlation with downstream worker logs (which DO receive
-`X-Request-Id`, per `crates/gateway/src/proxy.rs:393`) impossible.
+`X-Request-Id`, per `crates/zeroship-gateway/src/proxy.rs:393`) impossible.
 Per proposal §15 and the schema definition itself, those columns are
 load-bearing for SIEM correlation — they shipped empty.
 
@@ -227,7 +227,7 @@ from request headers either.
 
 **Fix:**
 
-1. Add `crates/auth/src/headers.rs::RequestContext` middleware that
+1. Add `crates/zeroship-auth/src/headers.rs::RequestContext` middleware that
    extracts `(ip, user_agent, x_request_id_or_generate)` once per
    request and stows them in `HttpRequest::extensions_mut()`.
 2. Add `audit::AuditEvent::from_req(req: &HttpRequest)` builder so
@@ -246,22 +246,22 @@ from request headers either.
 
 **Files:**
 
-- `crates/control/src/token_handlers.rs:208-285` (`create_token` — PAT
+- `crates/zeroship-control/src/token_handlers.rs:208-285` (`create_token` — PAT
   mint) and `:325-365` (`delete_token` — PAT revoke). `grep -c "audit"`
   in this file: 0.
-- `crates/control/src/oauth_handlers.rs` (entire file — OAuth client
+- `crates/zeroship-control/src/oauth_handlers.rs` (entire file — OAuth client
   CRUD with platform-admin scope). `grep -c "audit\|emit"`: 0.
-- `crates/control/src/oauth_grants_handlers.rs:83-143`
+- `crates/zeroship-control/src/oauth_grants_handlers.rs:83-143`
   (`revoke_grant` — deletes `control.oauth_grants` and revokes hydra
   tokens). No audit emit.
-- `crates/control/src/console_sessions.rs:64` (`INSERT INTO
+- `crates/zeroship-control/src/console_sessions.rs:64` (`INSERT INTO
   auth.console_sessions`). No audit emit at create time. `grep -c
   "audit\|emit"`: 1 occurrence which is unrelated (a comment).
-- `crates/auth/src/ui/consent.rs:130-198` (`post_consent_accept` —
+- `crates/zeroship-auth/src/ui/consent.rs:130-198` (`post_consent_accept` —
   records the OAuth scope grant in `control.oauth_grants` and tells
   hydra to mint tokens). `grep -c "audit::emit"`: 0.
-- `crates/auth/src/ui/consent.rs:203-231` (`post_consent_deny`). Same.
-- `crates/auth/src/ui/device.rs` (entire device-flow handler).
+- `crates/zeroship-auth/src/ui/consent.rs:203-231` (`post_consent_deny`). Same.
+- `crates/zeroship-auth/src/ui/device.rs` (entire device-flow handler).
   `grep -c "audit\|emit"`: 0.
 
 **Severity rationale:** These are exactly the events proposal §15
@@ -311,7 +311,7 @@ action — but it carries the cedar action identifier (e.g.
 
 ### H3. Stripe webhook `record_payout` writes money-movement to `stripe_payouts` but emits no audit row
 
-**File:** `crates/control/src/stripe_handlers.rs:371-484` (the `webhook`
+**File:** `crates/zeroship-control/src/stripe_handlers.rs:371-484` (the `webhook`
 handler). The `Ok(rec)` arm at line 474 returns HTTP 200 with the new
 payout id; no `audit::log` call. The `Duplicate` arm and the error
 arm also emit nothing.
@@ -326,7 +326,7 @@ only the `stripe_payouts` row (mutable, no chain) and the tracing
 log line (line 440 only emits on the missing-creator-id branch).
 
 **Severity rationale (additive):** `app_audit` has a `RecordPayout`
-variant (`crates/control/src/audit.rs:28`) — the enum was authored
+variant (`crates/zeroship-control/src/audit.rs:28`) — the enum was authored
 for this case. The call site was never added.
 
 **Fix:** add an `audit::log(state.registry, AuditEntry { action:
@@ -340,12 +340,12 @@ is replaying). Include the `payload_hash` in a `detail: JSONB` column
 
 ### H4. `AuthzGuard::require` drops `request_id` on the floor — the `control.authz_decisions` row is therefore decorrelated from the rest of the request trace
 
-**File:** `crates/control/src/authz_guard.rs:64-75`. The `AuthzContext`
+**File:** `crates/zeroship-control/src/authz_guard.rs:64-75`. The `AuthzContext`
 literal sets `request_id: None` (line 74). The authz crate at
-`crates/authz/src/eval.rs:30, 222-255` plumbs the field all the way
+`crates/zeroship-authz/src/eval.rs:30, 222-255` plumbs the field all the way
 to `INSERT INTO control.authz_decisions ... request_id` (line 237),
 so the column exists, but the call site never populates it. Same
-shape at `crates/control/src/token_handlers.rs:416`
+shape at `crates/zeroship-control/src/token_handlers.rs:416`
 (`is_authorized_anywhere` call) — `request_id: None`.
 
 **Severity rationale:** A `decision=deny` row in `control.authz_decisions`
@@ -369,16 +369,16 @@ across the workspace.
 
 **Files:**
 
-- `crates/control/src/admin_handlers.rs:595-628`
+- `crates/zeroship-control/src/admin_handlers.rs:595-628`
   (`fn audit_event` — used by `grant_platform_role`,
   `revoke_platform_role`, `set_app_audit_lock`, and at least one more
   admin handler).
-- `crates/control/src/backchannel_logout.rs:185-217`
+- `crates/zeroship-control/src/backchannel_logout.rs:185-217`
   (`fn emit_revocation_audit`).
-- `crates/control/src/audit.rs:58-83` (`fn log` — writes to
+- `crates/zeroship-control/src/audit.rs:58-83` (`fn log` — writes to
   `app_audit`, not `auth.audit_events`, but also no stdout fan-out).
 
-**Severity rationale:** `crates/auth/src/audit.rs:27-58` documents the
+**Severity rationale:** `crates/zeroship-auth/src/audit.rs:27-58` documents the
 contract: "PG `auth.audit_events` (for query/retention) AND stdout JSON
 (for SIEM ingestion, per proposal §15)." The three raw INSERT paths
 write to PG but emit nothing on stdout. If a SIEM ingest pipeline
@@ -408,7 +408,7 @@ one PR.
 
 ### H6. `webhooks.rs:131` logs the bouncing email address verbatim to tracing — PII leak into pretty-mode logs / log aggregators
 
-**File:** `crates/auth/src/ui/webhooks.rs:104, 131, 142, 283, 315`.
+**File:** `crates/zeroship-auth/src/ui/webhooks.rs:104, 131, 142, 283, 315`.
 Examples:
 ```rust
 tracing::info!(email = %b.email, kind = %b.r#type, "postmark soft bounce");
@@ -421,13 +421,13 @@ Compare with the same file's audit-emit path at line 107-126: the
 email_domain only … to keep PII out of the audit stream"). The
 parallel `tracing::info!` at line 131 then emits the full address
 into the same process's stdout — defeating the same-process PII
-goal. Same pattern at `crates/auth/src/ui/magic.rs:276`:
+goal. Same pattern at `crates/zeroship-auth/src/ui/magic.rs:276`:
 ```rust
 tracing::warn!(error = %e, email = %email_norm, "magic_link email send failed");
 ```
 
 **Severity rationale:** Pretty-mode logs (default on TTY per
-`crates/core/src/observability.rs:36-42`) and any non-JSON log
+`crates/zeroship-core/src/observability.rs:36-42`) and any non-JSON log
 aggregator that mirrors stdout (e.g. journald → syslog) will retain
 the email indefinitely. The audit stream's PII discipline becomes
 moot because the log stream alongside it leaks the same field. This
@@ -448,7 +448,7 @@ link send failures, replace `email = %email_norm` with `user_id =
 
 ### M1. `auth.audit_events` schema lacks `outcome` enum constraint and `event_type` enum constraint — typos pass silently
 
-**File:** `crates/auth/src/store/migrations.rs:122-134`. Both
+**File:** `crates/zeroship-auth/src/store/migrations.rs:122-134`. Both
 `event_type TEXT` and `outcome TEXT` accept any string. Compare to
 `auth.identity_link_status` which (per proposal) is a strict enum
 elsewhere.
@@ -468,7 +468,7 @@ alert never fires.
 
 **Fix:** add `CHECK (outcome IN ('success', 'failure'))` and a Rust
 `enum EventType` with `as_str()` (mirror the
-`crates/control/src/audit.rs::Action` enum pattern). The DB-level
+`crates/zeroship-control/src/audit.rs::Action` enum pattern). The DB-level
 CHECK catches contributors who write raw INSERT (per H5). Long-term:
 move event types to a small `event_type` lookup table referenced by
 FK.
@@ -477,8 +477,8 @@ FK.
 
 ### M2. Health endpoints leak no info today, but no `/readyz` distinguishes "not ready" from "broken"
 
-**Files:** `crates/control/src/internal.rs:50-52` (control `/health`);
-`crates/gateway/src/main.rs:250-252` (gateway `/health`); both return
+**Files:** `crates/zeroship-control/src/internal.rs:50-52` (control `/health`);
+`crates/zeroship-gateway/src/main.rs:250-252` (gateway `/health`); both return
 hard-coded `{"status":"ok"}` with no DB roundtrip, no upstream
 hydra reachability check, no clock-skew check.
 
@@ -507,7 +507,7 @@ counts.
 
 ### M3. OAuth-callback failure audit details echo attacker-controlled query params verbatim into JSONB
 
-**File:** `crates/auth/src/ui/oauth_google.rs:160-176` (and the
+**File:** `crates/zeroship-auth/src/ui/oauth_google.rs:160-176` (and the
 `oauth_github.rs` mirror).
 ```rust
 detail: json!({
@@ -543,7 +543,7 @@ error code from a fixed enum.
 
 ### M4. `logout` audit row carries `user_id: None` and stuffs the subject into `detail.subject` instead of the dedicated column
 
-**File:** `crates/auth/src/ui/logout.rs:165-180`.
+**File:** `crates/zeroship-auth/src/ui/logout.rs:165-180`.
 ```rust
 audit::emit(
     db.as_ref(),
@@ -579,7 +579,7 @@ have non-null `user_id` whenever `subject` is a valid UUID.
 
 ### M5. `signup` success path emits `verification_issued` but no `signup_success` / `account_created` event
 
-**File:** `crates/auth/src/ui/signup.rs:173-269`. After
+**File:** `crates/zeroship-auth/src/ui/signup.rs:173-269`. After
 `users::create` succeeds, the only audit row emitted is
 `verification_issued` at line 254 (and only if the verification token
 issue itself succeeded — failures at line 266 emit nothing). The
@@ -606,7 +606,7 @@ without including the email — `email_hash` only, per H6.
 
 ### L1. `audit::emit_strict` swallows the stdout fan-out path's failure mode silently — its docstring promises propagation but only the PG arm propagates
 
-**File:** `crates/auth/src/audit.rs:62-89`. The "strict" docstring
+**File:** `crates/zeroship-auth/src/audit.rs:62-89`. The "strict" docstring
 says "propagates PG insert errors instead of swallowing them. Use for
 security-critical state transitions … where a missing audit row IS a
 real correctness failure." But the implementation calls
@@ -627,7 +627,7 @@ only. Mirror in `emit` too. Add a comment explaining the ordering.
 
 ### L2. `payload = %stdout_payload` Display-formats a JSON Value into pretty-mode logs — newlines inside the detail are escaped by serde_json but not visually obvious
 
-**File:** `crates/auth/src/audit.rs:40, 74`.
+**File:** `crates/zeroship-auth/src/audit.rs:40, 74`.
 `tracing::info!(target: "auth.audit", payload = %stdout_payload, ...)`
 uses `Display` (which is `serde_json::Value::to_string()`). serde_json
 correctly escapes `\n`/`\r`/`\"`/control bytes, so log-injection via
@@ -653,7 +653,7 @@ string) into audit detail or tracing fields, strip control bytes
 
 ### L3. `audit_events` `BIGSERIAL PRIMARY KEY` exposes monotonic insert volume to anyone with read access
 
-**File:** `crates/auth/src/store/migrations.rs:122-134`. `id BIGSERIAL`
+**File:** `crates/zeroship-auth/src/store/migrations.rs:122-134`. `id BIGSERIAL`
 leaks the absolute volume of audit events from the side channel of
 `MAX(id)`. Combined with `ORDER BY id DESC LIMIT 1` queries, a
 non-super-user with `SELECT` access can poll the table and observe
@@ -674,14 +674,14 @@ chain forms the integrity proof, not the id.
 - `crates/sandbox-agent/src/audit.rs` — well-designed, ships only to
   `tracing target=audit`, deliberately not PG-backed; explicitly
   documents the log-injection caveat at line 64-66.
-- `control.authz_decisions` schema (`crates/auth/tests/migrations_smoke.rs:33-105`)
+- `control.authz_decisions` schema (`crates/zeroship-auth/tests/migrations_smoke.rs:33-105`)
   — verified the table is queryable, every required column is present,
   request_id column does exist. The only gaps are the call-site
   population gaps in H4.
-- `crates/gateway/src/router/dispatch.rs:496` — request_id is correctly
+- `crates/zeroship-gateway/src/router/dispatch.rs:496` — request_id is correctly
   generated as `Uuid::new_v4()` per request and propagated as
   `X-Request-Id` to the worker upstream
-  (`crates/gateway/src/proxy.rs:393`) and back to the client
+  (`crates/zeroship-gateway/src/proxy.rs:393`) and back to the client
   (`router/dispatch.rs:1143`). Within the gateway request path the
   request_id flows through, so the only missing leg is the auth
   service surface (H1, H4).
@@ -690,10 +690,10 @@ chain forms the integrity proof, not the id.
 
 - The plugin-db and plugin-kv layers — out of scope for an
   auth/observability review. Per-app audit-table provisioning
-  (`__zeroship_audit_*`) was noted via grep (`crates/plugin-db/tests/
+  (`__zeroship_audit_*`) was noted via grep (`crates/zeroship-plugin-db/tests/
   sqlite_integration.rs:1536`) but not inspected.
 - The metering and billing-metering pipeline
-  (`crates/control/src/metering.rs`, `crates/platform/src/enforcement/
+  (`crates/zeroship-control/src/metering.rs`, `crates/platform/src/enforcement/
   quota.rs`) — only the rate-limit denial side was checked. Spend
   caps, the meter trait, and `metering` audit-coverage need a separate
   pass.
@@ -708,7 +708,7 @@ chain forms the integrity proof, not the id.
   (`logfmt`, `bunyan`, `compact`): only `json` and `pretty` were
   reasoned about. The other formats may treat `payload = %value`
   differently.
-- Cron/sweep handlers (`crates/auth/src/cron/`) for audit coverage
+- Cron/sweep handlers (`crates/zeroship-auth/src/cron/`) for audit coverage
   on the GC actions they perform (e.g., wrapper-revoked-subjects
   sweep, jwk_rotation). `jwk_rotation.rs:234` logs to tracing only;
   no audit row for "key X was retired".

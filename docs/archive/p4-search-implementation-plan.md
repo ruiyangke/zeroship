@@ -36,7 +36,7 @@
 ## 1. File structure
 
 ```
-crates/plugin-db/src/
+crates/zeroship-plugin-db/src/
   backend/
     mod.rs                          (+3 traits, +3 BackendHandle accessors)
     postgres.rs                     (+3 impl blocks)

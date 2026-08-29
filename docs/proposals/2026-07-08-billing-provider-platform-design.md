@@ -25,7 +25,7 @@
 
 <!-- v7: the new bound. Detection is up to one cadence-period behind, so overshoot is bounded by a coarse per-app throughput cap. -->
 
-**Bounding overshoot — the throughput backstop (v7).** Because detection now runs up to one cadence-period behind, a runaway app can overshoot its cap by at most `R × cadence`, where `R` = its maximum spend rate. This is bounded by a **coarse per-app hard rate/concurrency cap at the gateway** — which largely already exists (`enforce::RateLimitRegistry` / `ConcurrencyRegistry`, `crates/gateway/src/enforce.rs`). Capping `R` makes **worst-case overshoot ≤ R × cadence bounded regardless of the cadence.** The **free tier** (uncapped-by-card, so it must not overshoot catastrophically) gets a specifically tighter cap. Both the **cadence** and the **per-app throughput cap** are tunable operator knobs.
+**Bounding overshoot — the throughput backstop (v7).** Because detection now runs up to one cadence-period behind, a runaway app can overshoot its cap by at most `R × cadence`, where `R` = its maximum spend rate. This is bounded by a **coarse per-app hard rate/concurrency cap at the gateway** — which largely already exists (`enforce::RateLimitRegistry` / `ConcurrencyRegistry`, `crates/zeroship-gateway/src/enforce.rs`). Capping `R` makes **worst-case overshoot ≤ R × cadence bounded regardless of the cadence.** The **free tier** (uncapped-by-card, so it must not overshoot catastrophically) gets a specifically tighter cap. Both the **cadence** and the **per-app throughput cap** are tunable operator knobs.
 
 **Why this is a simplification, not a new layer.** v5 already deleted the LOCAL exactly-once fold — the §6.1 atomic `usage_aggregates += / spend_dirty / offset` PG transaction, the `stream_offsets` table, the `fence_epoch` monotonic-CAS, and the whole rebalance/zombie-double-fold defence (the R3/R4 CRITICAL). **v7 deletes the machinery v5/v6 ADDED to keep the guardrail sub-minute** — the shared Redis counter, the forwarder's best-effort `INCRBY`, the sub-minute evaluator, and the conservative `MAX` re-base. What remains is close to what the platform already ships: `spend.rs::evaluate_all` already prices per-app usage and writes `app_spend_state`; the gateway already pulls it (~5s) and enforces at the edge (`enforce::check_spend`). Enforcement is now that batch, sourced from the stream recompute, run once per cadence. `crates/compio-redis` leaves the enforcement path; a once-per-cadence O(apps) job is trivially tractable (no Redis-cluster counter sharding, no CHWBL-sharded sub-minute evaluator).
 
@@ -53,7 +53,7 @@ The rest of this document is unchanged in its BILLING half (the two registries, 
 
 ## 1. Context
 
-The infrastructure usage billing path shipped as an in-house pipeline: workers pre-aggregate per-app atomic counters (`crates/metering/src/meter.rs`), flush a `UsageReport` over HTTP to control (`crates/metering/src/flush.rs`), control dedups + aggregates into `usage_aggregates` (`crates/control/src/metering/mod.rs`), a spend engine enforces caps (`crates/control/src/spend.rs`), and a Stripe reconciler invoices (`crates/control/src/cron/billing_reconcile.rs`). A `MeteringProvider` trait (`crates/control/src/metering/provider/mod.rs`) was retrofitted on top so usage can *also* be exported to OpenMeter / Stripe Billing Meters, but production billing is still the in-house "Native" rail.
+The infrastructure usage billing path shipped as an in-house pipeline: workers pre-aggregate per-app atomic counters (`crates/zeroship-metering/src/meter.rs`), flush a `UsageReport` over HTTP to control (`crates/zeroship-metering/src/flush.rs`), control dedups + aggregates into `usage_aggregates` (`crates/zeroship-control/src/metering/mod.rs`), a spend engine enforces caps (`crates/zeroship-control/src/spend.rs`), and a Stripe reconciler invoices (`crates/zeroship-control/src/cron/billing_reconcile.rs`). A `MeteringProvider` trait (`crates/zeroship-control/src/metering/provider/mod.rs`) was retrofitted on top so usage can *also* be exported to OpenMeter / Stripe Billing Meters, but production billing is still the in-house "Native" rail.
 
 The platform owner has decided to **invert this at scale**. The design target is now explicitly **millions of end-users** of creator apps. The pipeline must be a purpose-built high-throughput streaming design, not "Postgres-as-event-store." Two owner decisions define the new shape:
 
@@ -82,7 +82,7 @@ zeroship is **pre-launch with an explicit no-back-compat mandate** (`AGENTS.md` 
 
 - Stripe Connect payment processing. `creator_fee_policy` / `invoice_payments` / the Connect path are orthogonal (but see section 12.4 for the customer-model collision note).
 - Building a new metering third party or a hosted rating DSL. Rating lives inside the invoicer/provider close path (the existing `charge_cents` model for Lite/`stripe_invoice`).
-- Changing the CU pricing model (`crates/control/src/pricing.rs`), the plan catalog, or the FeePolicy shapes.
+- Changing the CU pricing model (`crates/zeroship-control/src/pricing.rs`), the plan catalog, or the FeePolicy shapes.
 - An object-storage/Parquet cold archive of raw events for provider-independence. It is an **Open Question** (OQ-6), NOT built by default under "stream-to-provider only."
 
 ---
@@ -144,7 +144,7 @@ The design has **two symmetric registries** — one for **billing providers** (w
 Replace the enum + per-kind `Option` config + `build_provider` match with a **string-keyed factory registry**.
 
 ```rust
-// crates/control/src/metering/provider/registry.rs  (NEW)
+// crates/zeroship-control/src/metering/provider/registry.rs  (NEW)
 
 /// A provider factory: given the narrow construction context, build the provider
 /// or fail closed. The registry wraps the result to enforce capability↔downcast
@@ -184,7 +184,7 @@ impl ProviderRegistry {
 Config becomes **provider-agnostic**: `--metering-provider <id>` selects the factory; a single generic `--provider-config <json>` (or a `provider_config` DB row) carries an opaque JSON blob that **each adapter parses and validates itself**. Secrets are NOT plaintext in that blob — they are secret *handles* resolved through `ctx.secrets` (§Pillar 3, resolves critique #13). The hardcoded per-provider CLI flags and duplicated boot guards are DELETED.
 
 ```rust
-// crates/control/src/metering/provider/adapters/openmeter.rs  (NEW, self-contained)
+// crates/zeroship-control/src/metering/provider/adapters/openmeter.rs  (NEW, self-contained)
 #[derive(serde::Deserialize)]
 struct OpenMeterCfg { base_url: String, token: SecretHandle, event_type: String, meter_slug: String }
 
@@ -218,7 +218,7 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
 The honest claim is **"one file + a fixed 2-line delta"** (a `mod` line and a `register` line) — not "one line." The two lines live in the seam's own index (`adapters/mod.rs`), not in the pipeline, the trait, any enum, or a central config struct, so L1 ("zero edits to the core") holds. (Resolves critique #12, which flagged the v1 "one file + one line" vs "two lines" inconsistency.)
 
 ```rust
-// crates/control/src/metering/provider/adapters/mod.rs  (NEW)
+// crates/zeroship-control/src/metering/provider/adapters/mod.rs  (NEW)
 pub mod lite; pub mod openmeter; pub mod stripe_meters; pub mod stripe_invoice;
 pub mod metronome; pub mod orb; pub mod lago;
 
@@ -253,7 +253,7 @@ The durable buffer is a **pluggable stream**, introduced with a registry EXACTLY
 4. **(REMOVED in v5)** ~~A monotonic assignment `fence_epoch`~~ — deleted along with the exactly-once fold it fenced. A contract-meeting transport no longer needs to surface an assignment epoch; ordinary Kafka-family consumer-group semantics (offsets + one-consumer-per-partition + partition-key ordering) suffice.
 
 ```rust
-// crates/core/src/stream/mod.rs  (NEW — shared: worker produces, control consumes)
+// crates/zeroship-core/src/stream/mod.rs  (NEW — shared: worker produces, control consumes)
 
 #[async_trait::async_trait(?Send)]
 pub trait StreamTransport: Send + Sync {
@@ -283,7 +283,7 @@ pub struct StreamRegistry { factories: HashMap<&'static str, StreamFactory> }
 ```
 
 ```rust
-// crates/core/src/stream/adapters/mod.rs  (NEW)
+// crates/zeroship-core/src/stream/adapters/mod.rs  (NEW)
 pub mod redpanda; pub mod jetstream; // a transport that MEETS the contract = one mod + one register line
 pub fn register_builtin(r: &mut StreamRegistry) {
     r.register("redpanda",  redpanda::factory);   // default; rust-rdkafka / librdkafka (Kafka-family)
@@ -564,7 +564,7 @@ Commercial adapters never see `LiteStore` (`ctx.store == None`). The honest prop
    overshoot ≤ R × cadence, bounded by a coarse per-app throughput cap at the gateway (RateLimit/Concurrency registry)
 ```
 
-**Split the counter core from transport (bill-06).** `crates/metering` keeps the atomic-counter fast path (`meter.rs` `AppCounters`) but `drain()` now yields `Vec<UsageEvent>` (each with a freshly-minted stable `event_id`) instead of a `UsageReport`. The counter core has **no** knowledge of the stream or the wire type. `build_report` / `SequenceSource` / the `(worker_id, sequence)` machinery are **deleted**. A new `crates/metering/src/outbox.rs` owns the `StreamTransport.publish` call (+ the optional local floor).
+**Split the counter core from transport (bill-06).** `crates/metering` keeps the atomic-counter fast path (`meter.rs` `AppCounters`) but `drain()` now yields `Vec<UsageEvent>` (each with a freshly-minted stable `event_id`) instead of a `UsageReport`. The counter core has **no** knowledge of the stream or the wire type. `build_report` / `SequenceSource` / the `(worker_id, sequence)` machinery are **deleted**. A new `crates/zeroship-metering/src/outbox.rs` owns the `StreamTransport.publish` call (+ the optional local floor).
 
 **No Postgres on the per-event path (A4, v5).** The stream IS the buffer; the provider IS the canonical event store AND aggregate. The v1 `usage_events` table and `usage_reports_seen` are deleted; **v5 also deletes the exactly-once `usage_aggregates` fold and the `stream_offsets` table.** The only per-event side-effect downstream of the stream is an HTTP ingest to the provider — it does not touch Postgres. PG is written only *periodically* (the cadence spend recompute → `app_spend_state`, invoices, findings). **v7 removes the Redis `INCRBY` that was the second per-event side-effect** — enforcement no longer runs per event. See §6, §9.
 
@@ -577,11 +577,11 @@ v1–v4 tried to make a LOCAL fold exactly-once so it could serve BOTH billing (
 
 **The periodic per-app recompute (the enforcement source, run at the cadence).** At each cadence tick (default 1 hour, operator-tunable, tightenable e.g. to 15-min) a batch computes `recompute(subject, period, metric)` = the SUM of the retained stream's events for each `(subject=app, period, metric)`. This is per-**app** by construction (the stream is partition-keyed by `subject`, which carries `app_id`), so it lands at exactly the per-app grain the spend limit is set at, with **no dependence on the provider's attribution grain** and **no Redis, no per-event increment, no re-base** — the recompute IS the count. It is the **SAME batch that §6.3 uses as its billing `witness`** (§6.3): ONE recompute, two consumers — (a) enforcement prices it into `app_spend_state`, (b) §6.3 uses it as the billing provider-loss witness. It is an **idempotent batch SUM, NOT a per-event exactly-once fold** — no PG transaction, no offset fence — so the v5 concurrency win (PG off the per-event path) fully survives.
 
-**Pricing + writing `app_spend_state`.** The cadence batch rates each app's recomputed per-metric totals through the CU pricing model (`pricing::charge_cents`), resolves the effective limit, runs the existing hysteresis state machine (`spend.rs::derive_state`), and UPSERTs `app_spend_state`. This is essentially what `spend.rs::evaluate_all` already does today (it prices per-app usage and writes `app_spend_state`) — v7 just sources its per-app totals from the stream recompute and runs it at the cadence rather than reading `usage_aggregates` every tick. The gateway pulls `app_spend_state` via the existing ~5s registry pull of `RouteEntry.spend_state` (Decision D1, `spend.rs` header) and enforces instantly at the edge (`enforce::check_spend`, `crates/gateway/src/enforce.rs`). **Detection latency = the cadence; the enforcement ACTION is instant.** The batch touches **NO provider and NO Redis**.
+**Pricing + writing `app_spend_state`.** The cadence batch rates each app's recomputed per-metric totals through the CU pricing model (`pricing::charge_cents`), resolves the effective limit, runs the existing hysteresis state machine (`spend.rs::derive_state`), and UPSERTs `app_spend_state`. This is essentially what `spend.rs::evaluate_all` already does today (it prices per-app usage and writes `app_spend_state`) — v7 just sources its per-app totals from the stream recompute and runs it at the cadence rather than reading `usage_aggregates` every tick. The gateway pulls `app_spend_state` via the existing ~5s registry pull of `RouteEntry.spend_state` (Decision D1, `spend.rs` header) and enforces instantly at the edge (`enforce::check_spend`, `crates/zeroship-gateway/src/enforce.rs`). **Detection latency = the cadence; the enforcement ACTION is instant.** The batch touches **NO provider and NO Redis**.
 
 <!-- Added in round 7: the overshoot bound + the throughput backstop that makes it tunable-cadence-safe. -->
 
-**Bounding overshoot — the throughput backstop (v7).** Because detection runs up to one cadence-period behind, a runaway app can overshoot its cap by at most `R × cadence`, where `R` = its maximum spend rate. This is bounded by a **coarse per-app hard rate/concurrency cap at the gateway** — which largely already exists (`enforce::RateLimitRegistry` / `ConcurrencyRegistry`, `crates/gateway/src/enforce.rs`), the same edge that already throttles a Degraded app. Capping `R` makes **worst-case overshoot ≤ R × cadence bounded regardless of the cadence.** The **free tier** (uncapped-by-card, so it must not overshoot catastrophically) gets a specifically tighter cap. Both the **cadence** and the **per-app throughput cap** are tunable operator knobs; tightening the cadence and/or the cap shrinks the overshoot linearly.
+**Bounding overshoot — the throughput backstop (v7).** Because detection runs up to one cadence-period behind, a runaway app can overshoot its cap by at most `R × cadence`, where `R` = its maximum spend rate. This is bounded by a **coarse per-app hard rate/concurrency cap at the gateway** — which largely already exists (`enforce::RateLimitRegistry` / `ConcurrencyRegistry`, `crates/zeroship-gateway/src/enforce.rs`), the same edge that already throttles a Degraded app. Capping `R` makes **worst-case overshoot ≤ R × cadence bounded regardless of the cadence.** The **free tier** (uncapped-by-card, so it must not overshoot catastrophically) gets a specifically tighter cap. Both the **cadence** and the **per-app throughput cap** are tunable operator knobs; tightening the cadence and/or the cap shrinks the overshoot linearly.
 
 **INVARIANT (v7): a runaway app is stopped within one cadence period, having over-spent at most its capped rate × cadence.** This is stated honestly: enforcement is not instant-detection; it is bounded-detection. The bound is a product of two knobs the operator controls.
 
@@ -644,7 +644,7 @@ v1 mis-framed Lite as "a dev-only test double." It is not. **Lite is a real, sel
 - **Dead-letter for permanent rejects (resolves critique #14):** a provider `4xx` (unmapped customer, unknown subject, malformed dims) is NOT retried forever. The batch's rejected events go to a `provider_dead_letter` finding (kind `provider_reject`) with the provider's error, an operator surface, and a metric; the offset still commits so the poison event never wedges the pipeline. Reconciliation flags the resulting drift.
 - **Observability:** forwarder lag, ingest ack/dedup counts, dead-letter count, per-provider forward latency, drift findings.
 
-**Provider conformance suite (`crates/control/tests/provider_conformance.rs`).** Every adapter runs it against its per-adapter recording fake:
+**Provider conformance suite (`crates/zeroship-control/tests/provider_conformance.rs`).** Every adapter runs it against its per-adapter recording fake:
 
 1. **Ingest idempotency under retry** — same `event_id`s twice → aggregate read-back unchanged.
 2. **Watermark re-forward safety + dedup-window fidelity (resolves critique #2 / Missing-Concept #7)** — the mock advances its clock past the adapter's **declared `DedupContract.ttl`**, kills the forwarder mid-batch, and asserts (a) the un-acked tail (above the Kafka committed offset) is re-ingested and deduped, and (b) NO event at-or-below the committed offset is re-shipped. A `dedup_contract_matches_docs` assertion pins each adapter's `DedupTtl` variant + value to the provider's documented value (Stripe `Bounded(~24h)`, Orb/Lago `Unbounded`, etc.), so the one quirk that causes real double-bills is a checked contract, not an assumption.
@@ -736,7 +736,7 @@ The conformance suite's clock-advancing test (Pillar 7 #2) verifies the §6.2 wi
 
 **The local-durability-floor question (owner asked to evaluate).** librdkafka's producer queue is **in-memory** — it is not crash-durable for events queued but not yet `acks=all`-confirmed by the broker. Two options for that pre-ack window:
 
-- **(a) Thin redb WAL floor (RECOMMENDED, small).** The worker appends each drained event to a bounded local **redb** segment before `publish`, and trims it on the librdkafka **delivery-report** callback (broker-confirmed). Crash → restart → re-publish only the un-confirmed tail (same `event_id`s → idempotent). This preserves the "worker crash replays" property with a tiny, bounded footprint (seconds of events, trimmed continuously). **Honest dependency note (resolves critique #7):** `redb` is currently ONLY in `crates/plugin-kv/Cargo.toml:18` behind a feature — it is **not** a `[workspace.dependencies]` entry — so `crates/metering` would gain a **new** dependency and per-drain fsync cost. That cost is bounded (batched per drain window, not per request) and must be measured in S5, not estimated.
+- **(a) Thin redb WAL floor (RECOMMENDED, small).** The worker appends each drained event to a bounded local **redb** segment before `publish`, and trims it on the librdkafka **delivery-report** callback (broker-confirmed). Crash → restart → re-publish only the un-confirmed tail (same `event_id`s → idempotent). This preserves the "worker crash replays" property with a tiny, bounded footprint (seconds of events, trimmed continuously). **Honest dependency note (resolves critique #7):** `redb` is currently ONLY in `crates/zeroship-plugin-kv/Cargo.toml:18` behind a feature — it is **not** a `[workspace.dependencies]` entry — so `crates/metering` would gain a **new** dependency and per-drain fsync cost. That cost is bounded (batched per drain window, not per request) and must be measured in S5, not estimated.
 - **(b) No floor — accept the pre-ack window as fail-toward-underbill.** Rely solely on librdkafka's in-memory queue + `acks=all`. Simpler (no redb in `metering`), but a worker crash loses events queued-but-not-confirmed at crash time. This is the same fail-toward-underbill class the platform already tolerates, and the window is only the un-confirmed tail (typically sub-second under a healthy broker).
 
 **Default: TBD pending the S5 measurement (resolves R2 Part 7.7 — do not recommend the costly option before measuring).** Option (a) upgrades "worker crash = lose the tail" to "worker crash = replay the tail," but its per-drain fsync cost on the 200K-req/s producer is UNMEASURED, and the project rule is measure-don't-estimate. So S5 measures (a)'s fsync cost first; (a) ships only if the cost is immaterial, else (b) is the default and (a) is an opt-in for operators who value the tail over throughput. Either way the choice is **local to `outbox.rs`** behind the `StreamTransport.publish` seam — it does not touch the provider or forwarder contracts.
@@ -868,7 +868,7 @@ Connect payments are a non-goal here, but the platform-side billing Customer and
 
 ## 13. Zero-tokio compliance (A5 — "no tokio RUNTIME in-process")
 
-The invariant is precisely: **no component instantiates a tokio reactor.** Link-level tokio is a *compile-time* transitive dependency of `cyper→hyper-util` and is tolerated (and being separately removed) — `crates/metering/Cargo.toml:10-13` already documents "cyper → hyper pulls tokio into the lock file … but NO tokio runtime is ever instantiated here — the flush task runs on compio."
+The invariant is precisely: **no component instantiates a tokio reactor.** Link-level tokio is a *compile-time* transitive dependency of `cyper→hyper-util` and is tolerated (and being separately removed) — `crates/zeroship-metering/Cargo.toml:10-13` already documents "cyper → hyper pulls tokio into the lock file … but NO tokio runtime is ever instantiated here — the flush task runs on compio."
 
 Every new component upholds it:
 - **Producer / worker outbox:** the `rust-rdkafka`/librdkafka producer runs on **librdkafka's own C background threads** — a native C library, the same category as `libpg_query` in `zeroship-migrate`. No async runtime. The optional redb floor is compio file IO.
@@ -1053,4 +1053,4 @@ R3 scored v3 **64/100 — NOT converged**, with exactly TWO substantive holes (b
 
 **Updated for coherence:** §0 (rewritten enforcement half + ASCII diagram — dropped the Redis counter, INCRBY, sub-minute evaluator, MAX-re-base; enforcement = periodic recompute → `app_spend_state` → gateway; added the throughput backstop), owner-locked decisions + §1–§3 (goals/locked decisions A2/A4), §Pillar 4/5 (rewritten around periodic-cadence recompute + gateway edge + throughput backstop), §Pillar 6 (`lite` enforcement note), §Pillar 7 (forwarder = ship + commit only), §6.1/§6.2/§6.3 (cross-references to the deleted counter/re-base re-pointed to the periodic recompute), §9 (removed the Redis-counter row; enforcement = periodic recompute + `app_spend_state`; no new per-event table), §11 (deleted the Redis-loss + drift rows; new "cadence gap = up-to `R×cadence` overshoot, bounded by the throughput backstop" + "control/batch outage" rows; enforcement is a stateless cron), §12.4 (live widget reads `app_spend_state`), §13 (compio-redis no longer needed for enforcement), §14 (scorecard rows 2/4/7/8/9/10), the rollout S6 slice (shrunk dramatically — a cron + the existing gateway pull + the throughput cap; no Redis-counter/re-base/sharded-evaluator work) + S4 (forwarder no INCRBY), §15 (OQ-2/OQ-7 relaxed, enforcement SLO risk reframed).
 
-**No billing-correctness regression — re-verified against code:** the gateway already pulls `RouteEntry.spend_state` at `poll_interval_secs` and enforces at dispatch via `enforce::check_spend` (`crates/gateway/src/enforce.rs`, `router/dispatch.rs`); `spend.rs::evaluate_all` already prices per-app usage and writes `app_spend_state` (the v7 cadence batch is that, sourced from the stream recompute); the gateway already has `RateLimitRegistry`/`ConcurrencyRegistry` for the throughput backstop. The provider-side exactly-once boundary (§6.2 forward + dedup) and the correction spine (§6.3) are untouched. The design is simpler and CONVERGED.
+**No billing-correctness regression — re-verified against code:** the gateway already pulls `RouteEntry.spend_state` at `poll_interval_secs` and enforces at dispatch via `enforce::check_spend` (`crates/zeroship-gateway/src/enforce.rs`, `router/dispatch.rs`); `spend.rs::evaluate_all` already prices per-app usage and writes `app_spend_state` (the v7 cadence batch is that, sourced from the stream recompute); the gateway already has `RateLimitRegistry`/`ConcurrencyRegistry` for the throughput backstop. The provider-side exactly-once boundary (§6.2 forward + dedup) and the correction spine (§6.3) are untouched. The design is simpler and CONVERGED.

@@ -36,7 +36,7 @@ its precedence, and named `environments`.
 **Deploy is not the last step for an app that uses `env.db`.** The `.zship`
 carries the app's code and the folded runtime schema *descriptor*; it does not
 carry the migration documents, and the deploy endpoint refuses to apply them
-(`crates/control/src/api.rs`, `migration_approval_removed`). Applying them is
+(`crates/zeroship-control/src/api.rs`, `migration_approval_removed`). Applying them is
 what creates the per-app schema and the `app_<id>_role` the runtime does
 `SET LOCAL ROLE` to on every database call, and `zeroship-migrate-server`'s apply path
 is that role's only producer. Deploy without migrating and the app serves its
@@ -70,7 +70,7 @@ the only route a creator has to it (`deploy/compose/docker-compose.yml`, the
   deploy pointed at a `dist/app.zship` that was never written; `zeroship deploy`
   accepts only a `.zship` and answers by telling you to run `vite build` with a
   plugin this example does not have. Verified 2026-08-11 by reading its
-  package.json, its README, and the deploy arg handling in crates/cli/src/main.rs.
+  package.json, its README, and the deploy arg handling in crates/zeroship-cli/src/main.rs.
 - **Build:** `pnpm build` (= `vite build`); the `@zeroship/vite-plugin` discovers
   `"use server"` RPC functions, bundles the server module, and writes
   `dist/app.zship`. Applies to `examples/starter/` and the
@@ -181,7 +181,7 @@ required on PATH. The committed template also ships pre-generated
 App CRUD + deploy require a **PAT**, minted only by the platform's auth stack via
 `zeroship login` (OAuth device flow) — there is intentionally **no**
 master-key/dev shortcut, and a PAT can't be forged for a local control. For
-**local/CI** this is unblocked by `dev-provision` (`crates/control/src/bin/`):
+**local/CI** this is unblocked by `dev-provision` (`crates/zeroship-control/src/bin/`):
 a local/CI internal provisioning tool that needs direct DB+blob access and is
 not a network endpoint. It reuses the same
 `zeroship_bundle::ingest` + `Registry::set_deploy_with_manifest` path the deploy

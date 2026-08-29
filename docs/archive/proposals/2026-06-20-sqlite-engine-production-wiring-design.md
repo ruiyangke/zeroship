@@ -88,12 +88,12 @@ Evidence (all verified in the worktree):
   "`pnpm dev` runs an app with zero platform infra."
 
 - **Backend selection is purely URL-string-driven**, at runtime, in
-  `crates/plugin-db/src/lib.rs::backend_for_url` (≈630–699) →
+  `crates/zeroship-plugin-db/src/lib.rs::backend_for_url` (≈630–699) →
   `init_pool_async` (≈723–775): `postgres://`/`postgresql://` → `Postgres`;
   `sqlite:`/`sqlite://`/`file:`/`:memory:`/bare-path → `Sqlite { path }`. There is
   **no deploy-time or tenant-level toggle** — whichever URL the process is handed
   decides the backend. The prod worker is handed a Postgres DSN
-  (`crates/worker/src/main.rs:73` `--db`/`DATABASE_URL`); the dev `zeroship serve`
+  (`crates/zeroship-worker/src/main.rs:73` `--db`/`DATABASE_URL`); the dev `zeroship serve`
   child is handed the dev DB URL by the vite-plugin
   (`sdks/vite-plugin/src/dev-server.ts:95–119` `resolveDatabaseUrl`, default DB
   URL when neither shell nor `.env` sets one).
@@ -138,13 +138,13 @@ task names is, for SQLite, the dev-tier apply path** — there is no other.
 **The gap (grounded).** Backend selection is purely DSN-string-driven and has
 **no environment gate**:
 
-- `crates/plugin-db/src/lib.rs:640 backend_for_url` maps any `sqlite:`/`file:`/
+- `crates/zeroship-plugin-db/src/lib.rs:640 backend_for_url` maps any `sqlite:`/`file:`/
   `:memory:`/bare-path to `BackendUrl::Sqlite { path }` regardless of who is
   running. `init_pool_async` (`lib.rs:723`) then opens a `SqliteBackend` with no
   check on the runtime tier.
-- `crates/worker/src/cache.rs:124` pushes `DbPlugin::new(url, …)` with whatever
+- `crates/zeroship-worker/src/cache.rs:124` pushes `DbPlugin::new(url, …)` with whatever
   `DB_URL` the worker holds — unvalidated.
-- `crates/worker/src/main.rs:73` takes `--db`/`DATABASE_URL` as a free string.
+- `crates/zeroship-worker/src/main.rs:73` takes `--db`/`DATABASE_URL` as a free string.
 
 The engine's SQLite project-lock is an **honest no-op**
 (`crates/zeroship-migrate/src/backend_sqlite/mod.rs:192`
@@ -158,14 +158,14 @@ hazard, and it is a data-corruption class, not a UX wart.
 
 **The structural guard (designed).** Two complementary fail-closed checks, both
 keyed on the **same dev signal** that already gates the dev-auth provider —
-`ZEROSHIP_DEV=1` (read today only in `crates/runtime/src/core/dev_auth.rs:54`,
+`ZEROSHIP_DEV=1` (read today only in `crates/zeroship-runtime/src/core/dev_auth.rs:54`,
 `ENV_DEV`). The worker **never** sets `ZEROSHIP_DEV` (confirmed: the only
 worker-injected db-related env var is `ZEROSHIP_DEPLOY_ID`, `cache.rs:286`), so
 gating SQLite on `ZEROSHIP_DEV` is fail-closed against the prod worker **by
 construction** — no allowlist to maintain.
 
 1. **Primary guard — refuse `Sqlite` in `init_pool_async` unless `ZEROSHIP_DEV=1`.**
-   In `crates/plugin-db/src/lib.rs::init_pool_async` (`lib.rs:746`, the
+   In `crates/zeroship-plugin-db/src/lib.rs::init_pool_async` (`lib.rs:746`, the
    `BackendUrl::Sqlite { path }` arm at `lib.rs:765`), before
    `SqliteBackend::open`, check `std::env::var("ZEROSHIP_DEV").as_deref() ==
    Ok("1")`. If unset, return a typed config error
@@ -178,7 +178,7 @@ construction** — no allowlist to maintain.
    stable for the isolate's life.
 
 2. **Defense-in-depth — refuse `Sqlite` at worker startup.** In
-   `crates/worker/src/main.rs` (the DSN-parse near `:73`/the boot validation
+   `crates/zeroship-worker/src/main.rs` (the DSN-parse near `:73`/the boot validation
    block around `:234` where `--dev-insecure` is already evaluated), classify
    `--db` with the same `backend_for_url` grammar and **hard-abort the worker
    process** if it resolves to `Sqlite` (the worker is multi-replica by design;
@@ -205,9 +205,9 @@ because a non-dev process can never hold a `SqliteBackend` at all.
 The destructive-approval posture (§4.1) and the C1 guard both need the dev signal
 **inside the apply path**, which runs in plugin-db, not the runtime crate. Today:
 
-- `crates/plugin-db/src/register_model/mod.rs:138` reads only `ZEROSHIP_DEPLOY_ID`
+- `crates/zeroship-plugin-db/src/register_model/mod.rs:138` reads only `ZEROSHIP_DEPLOY_ID`
   (→ `deploy_id`, audit grouping). It does **not** read `ZEROSHIP_DEV`.
-- `ZEROSHIP_DEV` is read **only** in `crates/runtime/src/core/dev_auth.rs:54`
+- `ZEROSHIP_DEV` is read **only** in `crates/zeroship-runtime/src/core/dev_auth.rs:54`
   (`resolve_dev_user_json`, the request path) — a different crate, a different
   call site, never reached from `register_model`.
 
@@ -242,7 +242,7 @@ backend, which `ZEROSHIP_DEV` (worker never sets it) correctly enforces and
   (`sdks/bootstrap/src/runtime-entry.ts` for prod-shaped runtime;
   `sdks/bootstrap/src/dev-entry.ts` for the dev runtime — "Lazy schema install via
   `installSchema(schema, env.db)` on first request"). The native side is
-  `register_model_dispatch` (`crates/plugin-db/src/register_model/mod.rs:68`).
+  `register_model_dispatch` (`crates/zeroship-plugin-db/src/register_model/mod.rs:68`).
 
 - **When (dev):** at **runtime boot / first request** of the `zeroship serve` dev
   child — NOT a deploy step. The dev tier has **no control plane**: grep confirms
@@ -497,7 +497,7 @@ versioning/journal/drift/destructive-handling the old path lacked.
 
 Per AGENTS.md no-back-compat: the old path is deleted in the **same change**.
 
-**Deleted from `crates/plugin-db/src/register_model/`:**
+**Deleted from `crates/zeroship-plugin-db/src/register_model/`:**
 
 - `run_sqlite_pipeline` (`mod.rs:292–345`).
 - `apply_sqlite` (`mod.rs:347–520`) + `refreshes_sqlite_cdc_name_cache` helper.
@@ -531,7 +531,7 @@ Per AGENTS.md no-back-compat: the old path is deleted in the **same change**.
   `run_sqlite_pipeline` + `apply_sqlite` directly — must be rewritten to drive the
   engine path (and the CDC-cache-refresh behavior must be preserved: the new engine
   apply must still `invalidate_cdc_name_cache` after CreateTable/AddColumn, OR that
-  invalidation moves to the data-plane backend — §8 Q5). `crates/plugin-db/tests/
+  invalidation moves to the data-plane backend — §8 Q5). `crates/zeroship-plugin-db/tests/
   sqlite_integration.rs` likely exercises the auto-migrate path. The
   schema-authority-e2e capstone is **PG-only** (no SQLite e2e), so no e2e regression
   there.
@@ -588,7 +588,7 @@ their coexistence as "verify". It is now designed below.
      are true at once — traced below. -->
 
 The dev `app_id` is the **literal string `"default"`**. Traced:
-`crates/runtime/src/core/plugin.rs:225-228` resolves `app_id_for_instance` from
+`crates/zeroship-runtime/src/core/plugin.rs:225-228` resolves `app_id_for_instance` from
 `SharedState.env_vars["APP_ID"]` and `.unwrap_or_else(|| "default".to_string())`.
 In the self-contained dev runtime nothing injects `APP_ID` (the vite-plugin
 dev-server sets `DATABASE_URL` but no `APP_ID`; the worker — which *would* inject
@@ -1188,9 +1188,9 @@ engine-at-boot) and either can be flipped without re-architecting the coordinati
 **Fact 1 — "single-process" ≠ "single-isolate". A hand-run `zeroship serve` is
 multi-isolate.** Verified:
 
-- `crates/runtime/src/core/serve.rs:143` — `workers == 0` ⇒
+- `crates/zeroship-runtime/src/core/serve.rs:143` — `workers == 0` ⇒
   `std::thread::available_parallelism()`. The CLI default is `--workers=0`
-  (`crates/cli/src/main.rs:57`). So a bare `zeroship serve myapp.js` spins **N
+  (`crates/zeroship-cli/src/main.rs:57`). So a bare `zeroship serve myapp.js` spins **N
   isolates** (one per core), each a separate worker thread.
 - The SQLite data-plane backend **A** is stored in **per-isolate** context
   (`init_pool_async` → `ctx_mut(|c| c.set_sqlite_backend(…))`, `lib.rs:771`;
@@ -1214,7 +1214,7 @@ concurrent writers to 2N: N×A + N×B).
 **Fact 2 — the round-2 C1 guard, as written, BRICKS a hand-run `zeroship serve`,
 and the H3 baseline primitive does NOT exist for SQLite.**
 
-- C1 re-key: `crates/cli/src/main.rs cmd_serve` registers the DB plugin from
+- C1 re-key: `crates/zeroship-cli/src/main.rs cmd_serve` registers the DB plugin from
   `DATABASE_URL` (`:134`) and **never sets `ZEROSHIP_DEV`** — only the Vite plugin
   does (`dev-server.ts:447 [ENV_DEV]: "1"`). The round-2 "refuse SQLite unless
   `ZEROSHIP_DEV=1` in `init_pool_async`" guard (P6b-1, §1.1 guard 1) would reject a
@@ -1412,7 +1412,7 @@ round-2 C1 guard's *primary* arm).** The hazard is N isolates on one file, not j
 the prod worker. The structural fix is: **when the backend resolves to SQLite, the
 runtime must run exactly one isolate.** Concretely:
 
-- In `crates/runtime/src/core/serve.rs` (`start_server`, the `num_workers` resolution
+- In `crates/zeroship-runtime/src/core/serve.rs` (`start_server`, the `num_workers` resolution
   at `:143`), if the configured DB URL resolves to SQLite (classify via
   `plugin-db`'s `backend_for_url` grammar, or a `DATABASE_URL` scheme check), **clamp
   `num_workers` to 1** (and log a one-line notice: "SQLite dev backend → single
@@ -1426,7 +1426,7 @@ runtime must run exactly one isolate.** Concretely:
   one isolate addresses the hazard *and* keeps the hand-run working.
 
 **(2) Re-key the prod-refusal guard to the worker, not `ZEROSHIP_DEV`.** Keep the
-round-2 **defense-in-depth worker guard** (§1.1 guard 2): `crates/worker/src/main.rs`
+round-2 **defense-in-depth worker guard** (§1.1 guard 2): `crates/zeroship-worker/src/main.rs`
 hard-aborts if `--db`/`DATABASE_URL` resolves to SQLite — the worker is multi-replica
 by identity and SQLite there is always a misconfig. **Drop the `init_pool_async`
 `ZEROSHIP_DEV` gate as the primary** (it mis-keys the hand-run). The authority for

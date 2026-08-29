@@ -4,7 +4,7 @@
 
 **Goal:** Ship the email + password authentication flow end-to-end. A user can register, log in via `auth.zeroship.ai/login`, and complete a full OIDC `code+PKCE` exchange against a first-party client. The acceptance test boots PG + hydra + `crates/auth` and drives the entire flow against the real binaries — no shims.
 
-**Architecture:** All handlers live in `crates/auth/`. The login/consent UI is server-rendered HTML (askama templates, single CSS file, no SPA). The handlers consume hydra's `login_challenge` / `consent_challenge` query params, run the credential check, and call hydra's admin API to accept (`PUT /admin/oauth2/auth/requests/{login,consent}/accept`). Hydra then issues the auth code + ID token + access token + refresh token.
+**Architecture:** All handlers live in `crates/zeroship-auth/`. The login/consent UI is server-rendered HTML (askama templates, single CSS file, no SPA). The handlers consume hydra's `login_challenge` / `consent_challenge` query params, run the credential check, and call hydra's admin API to accept (`PUT /admin/oauth2/auth/requests/{login,consent}/accept`). Hydra then issues the auth code + ID token + access token + refresh token.
 
 **Tech Stack:**
 - Rust (compio runtime, ntex web framework, cyper HTTP, compio-postgres)
@@ -16,7 +16,7 @@
 **Reference docs to keep open:**
 - `docs/archive/auth-server.md` §8.1 (password flow) and §13 (threat model — ours rows)
 - `docs/superpowers/plans/2026-05-26-auth-server-phase-1-foundation.md` — Phase 1 task layout for pattern reference
-- `crates/control/src/auth_handlers.rs` — legacy login/signup pattern, for cookie + ntex idioms only (we are NOT carrying logic over; just the shape of ntex handlers)
+- `crates/zeroship-control/src/auth_handlers.rs` — legacy login/signup pattern, for cookie + ntex idioms only (we are NOT carrying logic over; just the shape of ntex handlers)
 
 **Pre-launch posture (AGENTS.md):** no back-compat shims, no `@deprecated`, no migration paths. Hydra's TTLs in `ops/hydra.yaml` (10-min ID token, 10-min access token, 60-s auth code, 30-d refresh) are the contract. We add new code only; nothing in main yet calls any of it.
 
@@ -49,15 +49,15 @@ Four small pure-logic modules. Each gets its own sub-task + commit. No HTTP, no 
 ## U1-A · Argon2id password module
 
 **Files:**
-- Modify: `crates/auth/Cargo.toml` (add deps)
-- Create: `crates/auth/src/identity/mod.rs`
-- Create: `crates/auth/src/identity/password.rs`
-- Modify: `crates/auth/src/lib.rs` (export `identity`)
-- Create: `crates/auth/tests/password_test.rs`
+- Modify: `crates/zeroship-auth/Cargo.toml` (add deps)
+- Create: `crates/zeroship-auth/src/identity/mod.rs`
+- Create: `crates/zeroship-auth/src/identity/password.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs` (export `identity`)
+- Create: `crates/zeroship-auth/tests/password_test.rs`
 
 - [ ] **Step U1-A.1: Add password-hashing deps**
 
-Open `crates/auth/Cargo.toml`. Add under `[dependencies]`:
+Open `crates/zeroship-auth/Cargo.toml`. Add under `[dependencies]`:
 
 ```toml
 argon2 = "0.5"
@@ -69,7 +69,7 @@ If these are workspace-pinned in the root `Cargo.toml`, use `argon2 = { workspac
 
 Verify with `cargo check -p zeroship-auth` after adding.
 
-- [ ] **Step U1-A.2: Create `crates/auth/src/identity/mod.rs`**
+- [ ] **Step U1-A.2: Create `crates/zeroship-auth/src/identity/mod.rs`**
 
 ```rust
 //! User identity flows. Phase 2 = password. Phase 4 adds federation
@@ -78,7 +78,7 @@ Verify with `cargo check -p zeroship-auth` after adding.
 pub mod password;
 ```
 
-- [ ] **Step U1-A.3: Create `crates/auth/src/identity/password.rs`**
+- [ ] **Step U1-A.3: Create `crates/zeroship-auth/src/identity/password.rs`**
 
 ```rust
 //! Argon2id password hashing + enumeration-resistant verification.
@@ -157,11 +157,11 @@ pub fn verify_against_dummy(password: &str) -> Result<bool> {
 
 - [ ] **Step U1-A.4: Export `identity` from `lib.rs`**
 
-Add `pub mod identity;` to `crates/auth/src/lib.rs`. Keep the existing alphabetical order.
+Add `pub mod identity;` to `crates/zeroship-auth/src/lib.rs`. Keep the existing alphabetical order.
 
 - [ ] **Step U1-A.5: Write the failing test**
 
-Create `crates/auth/tests/password_test.rs`:
+Create `crates/zeroship-auth/tests/password_test.rs`:
 
 ```rust
 //! Argon2id roundtrip + enumeration-defense timing test.
@@ -211,22 +211,22 @@ Expected: both tests PASS. If `dummy_hash_is_constant_time_within_tolerance` fla
 - [ ] **Step U1-A.7: Commit**
 
 ```bash
-git add crates/auth/Cargo.toml crates/auth/src/identity/ crates/auth/src/lib.rs crates/auth/tests/password_test.rs
+git add crates/zeroship-auth/Cargo.toml crates/zeroship-auth/src/identity/ crates/zeroship-auth/src/lib.rs crates/zeroship-auth/tests/password_test.rs
 git commit -m "auth: identity/password — Argon2id + dummy-hash enumeration defense"
 ```
 
 ## U1-B · Rate-limit token-bucket
 
 **Files:**
-- Create: `crates/auth/src/store/ratelimit.rs`
-- Create: `crates/auth/src/ratelimit.rs`
-- Modify: `crates/auth/src/store/mod.rs`
-- Modify: `crates/auth/src/lib.rs`
-- Create: `crates/auth/tests/ratelimit_test.rs`
+- Create: `crates/zeroship-auth/src/store/ratelimit.rs`
+- Create: `crates/zeroship-auth/src/ratelimit.rs`
+- Modify: `crates/zeroship-auth/src/store/mod.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
+- Create: `crates/zeroship-auth/tests/ratelimit_test.rs`
 
 The token bucket: each `bucket_key` has a max capacity, a refill rate (tokens/sec), and current state `(tokens, last_updated)`. `consume(key, cost)` deducts; if insufficient, returns `Err(RateLimited { retry_after })`. State persists in PG `auth.rate_limits`.
 
-- [ ] **Step U1-B.1: Create `crates/auth/src/store/ratelimit.rs`**
+- [ ] **Step U1-B.1: Create `crates/zeroship-auth/src/store/ratelimit.rs`**
 
 ```rust
 //! Rate-limit bucket persistence in `auth.rate_limits`.
@@ -298,9 +298,9 @@ pub async fn upsert(conn: &Client, key: &str, state: &BucketState) -> Result<()>
 }
 ```
 
-- [ ] **Step U1-B.2: Register `pub mod ratelimit;` in `crates/auth/src/store/mod.rs`**
+- [ ] **Step U1-B.2: Register `pub mod ratelimit;` in `crates/zeroship-auth/src/store/mod.rs`**
 
-- [ ] **Step U1-B.3: Create `crates/auth/src/ratelimit.rs`**
+- [ ] **Step U1-B.3: Create `crates/zeroship-auth/src/ratelimit.rs`**
 
 ```rust
 //! Leaky token bucket. Three configured profiles map to the three buckets
@@ -374,11 +374,11 @@ pub async fn consume(
 }
 ```
 
-- [ ] **Step U1-B.4: Export `pub mod ratelimit;` in `crates/auth/src/lib.rs`**
+- [ ] **Step U1-B.4: Export `pub mod ratelimit;` in `crates/zeroship-auth/src/lib.rs`**
 
 - [ ] **Step U1-B.5: Write the failing test**
 
-Create `crates/auth/tests/ratelimit_test.rs`:
+Create `crates/zeroship-auth/tests/ratelimit_test.rs`:
 
 ```rust
 //! Token-bucket rate-limit smoke test (live PG).
@@ -433,21 +433,21 @@ Skip without `AUTH_DB_URL`; if PG is up, expect PASS.
 - [ ] **Step U1-B.7: Commit**
 
 ```bash
-git add crates/auth/src/{ratelimit.rs,store/ratelimit.rs,store/mod.rs,lib.rs} crates/auth/tests/ratelimit_test.rs
+git add crates/zeroship-auth/src/{ratelimit.rs,store/ratelimit.rs,store/mod.rs,lib.rs} crates/zeroship-auth/tests/ratelimit_test.rs
 git commit -m "auth: ratelimit — PG-backed token bucket (login per-eip/email/ip)"
 ```
 
 ## U1-C · Audit event helper
 
 **Files:**
-- Create: `crates/auth/src/store/audit.rs`
-- Create: `crates/auth/src/audit.rs`
-- Modify: `crates/auth/src/store/mod.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/store/audit.rs`
+- Create: `crates/zeroship-auth/src/audit.rs`
+- Modify: `crates/zeroship-auth/src/store/mod.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
 Simple. One PG insert per emit, plus a JSON-on-stdout fan-out for SIEM ingestion.
 
-- [ ] **Step U1-C.1: Create `crates/auth/src/store/audit.rs`**
+- [ ] **Step U1-C.1: Create `crates/zeroship-auth/src/store/audit.rs`**
 
 ```rust
 //! Audit event insert into `auth.audit_events`.
@@ -492,9 +492,9 @@ pub async fn insert(
 }
 ```
 
-- [ ] **Step U1-C.2: Register `pub mod audit;` in `crates/auth/src/store/mod.rs`**
+- [ ] **Step U1-C.2: Register `pub mod audit;` in `crates/zeroship-auth/src/store/mod.rs`**
 
-- [ ] **Step U1-C.3: Create `crates/auth/src/audit.rs`**
+- [ ] **Step U1-C.3: Create `crates/zeroship-auth/src/audit.rs`**
 
 ```rust
 //! Structured audit-event emission.
@@ -588,7 +588,7 @@ pub async fn emit_strict(conn: &Client, ev: &AuditEvent<'_>) -> Result<()> {
 }
 ```
 
-- [ ] **Step U1-C.4: Export `pub mod audit;` in `crates/auth/src/lib.rs`**
+- [ ] **Step U1-C.4: Export `pub mod audit;` in `crates/zeroship-auth/src/lib.rs`**
 
 - [ ] **Step U1-C.5: Build + commit**
 
@@ -596,17 +596,17 @@ No unit test for this one — it's pure delegation. The `emit` path is covered t
 
 ```bash
 cargo check -p zeroship-auth
-git add crates/auth/src/{audit.rs,store/audit.rs,store/mod.rs,lib.rs}
+git add crates/zeroship-auth/src/{audit.rs,store/audit.rs,store/mod.rs,lib.rs}
 git commit -m "auth: audit — structured event emission (PG + stdout JSON)"
 ```
 
 ## U1-D · User CRUD store
 
 **Files:**
-- Create: `crates/auth/src/store/users.rs`
-- Modify: `crates/auth/src/store/mod.rs`
+- Create: `crates/zeroship-auth/src/store/users.rs`
+- Modify: `crates/zeroship-auth/src/store/mod.rs`
 
-- [ ] **Step U1-D.1: Create `crates/auth/src/store/users.rs`**
+- [ ] **Step U1-D.1: Create `crates/zeroship-auth/src/store/users.rs`**
 
 ```rust
 //! `auth.users` CRUD.
@@ -704,7 +704,7 @@ fn row_to_user(row: &compio_postgres::Row) -> UserRow {
 
 - [ ] **Step U1-D.2: Add `chrono` workspace dep**
 
-If `chrono` isn't already in `crates/auth/Cargo.toml`, add it:
+If `chrono` isn't already in `crates/zeroship-auth/Cargo.toml`, add it:
 
 ```toml
 chrono = { workspace = true, features = ["serde"] }
@@ -712,13 +712,13 @@ chrono = { workspace = true, features = ["serde"] }
 
 (It's likely already workspace-pinned from other crates. Check root `Cargo.toml`.)
 
-- [ ] **Step U1-D.3: Register `pub mod users;` in `crates/auth/src/store/mod.rs`**
+- [ ] **Step U1-D.3: Register `pub mod users;` in `crates/zeroship-auth/src/store/mod.rs`**
 
 - [ ] **Step U1-D.4: Build + commit**
 
 ```bash
 cargo check -p zeroship-auth
-git add crates/auth/Cargo.toml crates/auth/src/store/{users.rs,mod.rs}
+git add crates/zeroship-auth/Cargo.toml crates/zeroship-auth/src/store/{users.rs,mod.rs}
 git commit -m "auth: store/users — find_by_email + create + touch_last_login"
 ```
 
@@ -731,13 +731,13 @@ Three small modules. All run before any handler logic touches user data.
 ## U2-A · IdP session store + cookie
 
 **Files:**
-- Create: `crates/auth/src/store/sessions.rs`
-- Create: `crates/auth/src/sessions/mod.rs`
-- Create: `crates/auth/src/sessions/login.rs`
-- Modify: `crates/auth/src/store/mod.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/store/sessions.rs`
+- Create: `crates/zeroship-auth/src/sessions/mod.rs`
+- Create: `crates/zeroship-auth/src/sessions/login.rs`
+- Modify: `crates/zeroship-auth/src/store/mod.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
-- [ ] **Step U2-A.1: Create `crates/auth/src/store/sessions.rs`**
+- [ ] **Step U2-A.1: Create `crates/zeroship-auth/src/store/sessions.rs`**
 
 ```rust
 //! `auth.sessions` CRUD — the IdP login session at auth.zeroship.ai.
@@ -818,7 +818,7 @@ pub async fn revoke(conn: &Client, id: uuid::Uuid) -> Result<()> {
 
 - [ ] **Step U2-A.2: Register `pub mod sessions;` in `store/mod.rs`**
 
-- [ ] **Step U2-A.3: Create `crates/auth/src/sessions/mod.rs`**
+- [ ] **Step U2-A.3: Create `crates/zeroship-auth/src/sessions/mod.rs`**
 
 ```rust
 //! IdP session management (the cookie at auth.zeroship.ai).
@@ -831,7 +831,7 @@ pub async fn revoke(conn: &Client, id: uuid::Uuid) -> Result<()> {
 pub mod login;
 ```
 
-- [ ] **Step U2-A.4: Create `crates/auth/src/sessions/login.rs`**
+- [ ] **Step U2-A.4: Create `crates/zeroship-auth/src/sessions/login.rs`**
 
 ```rust
 //! IdP login session cookie at `auth.zeroship.ai`. Cookie name:
@@ -877,7 +877,7 @@ pub fn parse_cookie(cookie_header: &str) -> Option<uuid::Uuid> {
 
 - [ ] **Step U2-A.6: Unit-test cookie shape**
 
-Add to `crates/auth/src/sessions/login.rs` at the bottom:
+Add to `crates/zeroship-auth/src/sessions/login.rs` at the bottom:
 
 ```rust
 #[cfg(test)]
@@ -916,17 +916,17 @@ Run: `cargo test -p zeroship-auth sessions::login::tests`. Expected: 3 PASS.
 - [ ] **Step U2-A.7: Commit**
 
 ```bash
-git add crates/auth/src/{sessions/,store/sessions.rs,store/mod.rs,lib.rs}
+git add crates/zeroship-auth/src/{sessions/,store/sessions.rs,store/mod.rs,lib.rs}
 git commit -m "auth: sessions/login — __Host-zsidp_session cookie + auth.sessions store"
 ```
 
 ## U2-B · CSRF double-submit helper
 
 **File:**
-- Create: `crates/auth/src/csrf.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/csrf.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
-- [ ] **Step U2-B.1: Create `crates/auth/src/csrf.rs`**
+- [ ] **Step U2-B.1: Create `crates/zeroship-auth/src/csrf.rs`**
 
 ```rust
 //! Double-submit CSRF token. The IdP's own login/signup/consent forms
@@ -1022,17 +1022,17 @@ Run + commit:
 
 ```bash
 cargo test -p zeroship-auth csrf::tests
-git add crates/auth/src/{csrf.rs,lib.rs}
+git add crates/zeroship-auth/src/{csrf.rs,lib.rs}
 git commit -m "auth: csrf — double-submit token + constant-time compare"
 ```
 
 ## U2-C · Security headers middleware
 
 **Files:**
-- Create: `crates/auth/src/headers.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/headers.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
-- [ ] **Step U2-C.1: Create `crates/auth/src/headers.rs`**
+- [ ] **Step U2-C.1: Create `crates/zeroship-auth/src/headers.rs`**
 
 ```rust
 //! Security headers applied to every `crates/auth` response. Hydra
@@ -1089,7 +1089,7 @@ In `server.rs`, after the response is built, apply security headers. The cleanes
 
 ```bash
 cargo check -p zeroship-auth
-git add crates/auth/src/{headers.rs,lib.rs}
+git add crates/zeroship-auth/src/{headers.rs,lib.rs}
 git commit -m "auth: headers — security-header bundle (CSP + HSTS + frame-ancestors + COOP/CORP)"
 ```
 
@@ -1098,18 +1098,18 @@ git commit -m "auth: headers — security-header bundle (CSP + HSTS + frame-ance
 # Unit U3 · Askama templates + base layout
 
 **Files:**
-- Modify: `crates/auth/Cargo.toml` (add askama)
-- Create: `crates/auth/src/ui/mod.rs`
-- Create: `crates/auth/src/ui/templates/base.html`
-- Create: `crates/auth/src/ui/templates/login.html`
-- Create: `crates/auth/src/ui/templates/signup.html`
-- Create: `crates/auth/src/ui/templates/error.html`
-- Create: `crates/auth/static/style.css`
-- Modify: `crates/auth/src/lib.rs`
+- Modify: `crates/zeroship-auth/Cargo.toml` (add askama)
+- Create: `crates/zeroship-auth/src/ui/mod.rs`
+- Create: `crates/zeroship-auth/src/ui/templates/base.html`
+- Create: `crates/zeroship-auth/src/ui/templates/login.html`
+- Create: `crates/zeroship-auth/src/ui/templates/signup.html`
+- Create: `crates/zeroship-auth/src/ui/templates/error.html`
+- Create: `crates/zeroship-auth/static/style.css`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
 - [ ] **Step U3.1: Add askama dep**
 
-In `crates/auth/Cargo.toml`:
+In `crates/zeroship-auth/Cargo.toml`:
 
 ```toml
 askama = { version = "0.12", features = ["with-ntex"] }
@@ -1117,7 +1117,7 @@ askama = { version = "0.12", features = ["with-ntex"] }
 
 (Adjust feature name to whatever matches the workspace pin. The `with-ntex` integration may not exist; if so, drop features and use askama's raw `render()` method which returns `Result<String>` directly.)
 
-- [ ] **Step U3.2: Create `crates/auth/src/ui/mod.rs`**
+- [ ] **Step U3.2: Create `crates/zeroship-auth/src/ui/mod.rs`**
 
 ```rust
 //! Server-rendered HTML UI for the IdP. Templates compiled via askama.
@@ -1151,7 +1151,7 @@ pub struct ErrorPage<'a> {
 }
 ```
 
-Also create `crates/auth/src/ui/templates/mod.rs`:
+Also create `crates/zeroship-auth/src/ui/templates/mod.rs`:
 
 ```rust
 //! Compile-time-checked askama templates. Source lives under `templates/`.
@@ -1166,7 +1166,7 @@ dirs = ["src/ui/templates"]
 
 Or use the absolute `template(path = ...)` attribute; consult the askama docs version your workspace pins.
 
-- [ ] **Step U3.3: Create `crates/auth/src/ui/templates/base.html`**
+- [ ] **Step U3.3: Create `crates/zeroship-auth/src/ui/templates/base.html`**
 
 ```html
 <!DOCTYPE html>
@@ -1254,7 +1254,7 @@ Or use the absolute `template(path = ...)` attribute; consult the askama docs ve
 {% endblock %}
 ```
 
-- [ ] **Step U3.7: Create `crates/auth/static/style.css`**
+- [ ] **Step U3.7: Create `crates/zeroship-auth/static/style.css`**
 
 ```css
 :root { color-scheme: light dark; }
@@ -1283,7 +1283,7 @@ If askama errors, the error message tells you which template line failed.
 - [ ] **Step U3.10: Commit**
 
 ```bash
-git add crates/auth/Cargo.toml crates/auth/src/ui/ crates/auth/static/
+git add crates/zeroship-auth/Cargo.toml crates/zeroship-auth/src/ui/ crates/zeroship-auth/static/
 git commit -m "auth: ui — askama templates for login/signup/error + base layout + CSS"
 ```
 
@@ -1296,8 +1296,8 @@ The substantive handlers. They consume `login_challenge`, run the auth flow, acc
 ## U4-A · `/login` GET handler
 
 **Files:**
-- Create: `crates/auth/src/ui/login.rs`
-- Modify: `crates/auth/src/ui/mod.rs`
+- Create: `crates/zeroship-auth/src/ui/login.rs`
+- Modify: `crates/zeroship-auth/src/ui/mod.rs`
 
 The GET handler:
 
@@ -1306,7 +1306,7 @@ The GET handler:
 3. If `skip == true` (hydra already has a session for this subject): immediately call `admin.accept_login` with the same subject and redirect. No UI.
 4. Else: render the login form with a fresh CSRF token.
 
-- [ ] **Step U4-A.1: Create `crates/auth/src/ui/login.rs`**
+- [ ] **Step U4-A.1: Create `crates/zeroship-auth/src/ui/login.rs`**
 
 ```rust
 //! /login GET handler.
@@ -1403,7 +1403,7 @@ fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
 
 - [ ] **Step U4-A.2: Export from `ui/mod.rs`**
 
-Add `pub mod login;` at the top of `crates/auth/src/ui/mod.rs`.
+Add `pub mod login;` at the top of `crates/zeroship-auth/src/ui/mod.rs`.
 
 - [ ] **Step U4-A.3: Build**
 
@@ -1414,7 +1414,7 @@ cargo check -p zeroship-auth
 - [ ] **Step U4-A.4: Commit**
 
 ```bash
-git add crates/auth/src/ui/{login.rs,mod.rs}
+git add crates/zeroship-auth/src/ui/{login.rs,mod.rs}
 git commit -m "auth: /login GET — reads hydra challenge, handles skip path, renders form"
 ```
 
@@ -1431,11 +1431,11 @@ The POST is the substantive piece. Steps inside the POST handler:
 
 For brevity here, the implementer should follow §8.1 of the proposal closely and the U4-A pattern. The full handler is ~100 LOC.
 
-- [ ] **Step U4-B.1: Implement `crates/auth/src/ui/login.rs::post`**
+- [ ] **Step U4-B.1: Implement `crates/zeroship-auth/src/ui/login.rs::post`**
 
 (Implementer: extend the file from U4-A with a `post` function. Use `ntex::web::types::Form` for the body. Borrow shared state via `Data<...>`.)
 
-- [ ] **Step U4-B.2: Create `crates/auth/src/ui/signup.rs`** — GET renders the form, POST validates (email format, password ≥ 15 chars), creates `auth.users`, audits, then redirects back to `/login?login_challenge=...` so the user can sign in immediately. (Email-verification flow is Phase 5; for Phase 2 we just create the row and let the user sign in.)
+- [ ] **Step U4-B.2: Create `crates/zeroship-auth/src/ui/signup.rs`** — GET renders the form, POST validates (email format, password ≥ 15 chars), creates `auth.users`, audits, then redirects back to `/login?login_challenge=...` so the user can sign in immediately. (Email-verification flow is Phase 5; for Phase 2 we just create the row and let the user sign in.)
 
 - [ ] **Step U4-B.3: Add `pub mod signup;` to `ui/mod.rs`**
 
@@ -1449,7 +1449,7 @@ cargo clippy -p zeroship-auth --no-deps --tests
 - [ ] **Step U4-B.5: Commit**
 
 ```bash
-git add crates/auth/src/ui/{login.rs,signup.rs,mod.rs}
+git add crates/zeroship-auth/src/ui/{login.rs,signup.rs,mod.rs}
 git commit -m "auth: /login POST + /signup GET/POST — credential flow + accept_login"
 ```
 
@@ -1458,12 +1458,12 @@ git commit -m "auth: /login POST + /signup GET/POST — credential flow + accept
 # Unit U5 · Consent handler (skip-consent fast path)
 
 **Files:**
-- Create: `crates/auth/src/ui/consent.rs`
-- Modify: `crates/auth/src/ui/mod.rs`
+- Create: `crates/zeroship-auth/src/ui/consent.rs`
+- Modify: `crates/zeroship-auth/src/ui/mod.rs`
 
 For Phase 2 we only handle the **first-party skip-consent** path. Third-party consent UI is Phase 4+.
 
-- [ ] **Step U5.1: Create `crates/auth/src/ui/consent.rs`**
+- [ ] **Step U5.1: Create `crates/zeroship-auth/src/ui/consent.rs`**
 
 ```rust
 //! /consent GET handler. Phase 2: first-party clients (skip_consent=true).
@@ -1547,7 +1547,7 @@ fn error_response(msg: &str) -> HttpResponse {
 
 ```
 cargo check -p zeroship-auth
-git add crates/auth/src/ui/{consent.rs,mod.rs}
+git add crates/zeroship-auth/src/ui/{consent.rs,mod.rs}
 git commit -m "auth: /consent GET — first-party skip-consent fast path"
 ```
 
@@ -1556,7 +1556,7 @@ git commit -m "auth: /consent GET — first-party skip-consent fast path"
 # Unit U6 · Wire handlers into `server::configure`
 
 **File:**
-- Modify: `crates/auth/src/server.rs`
+- Modify: `crates/zeroship-auth/src/server.rs`
 
 - [ ] **Step U6.1: Wire routes + shared state**
 
@@ -1577,7 +1577,7 @@ Update `server::run(cfg: AuthConfig, admin: HydraAdmin, db: compio_postgres::Cli
 .service(healthz).service(readyz)
 ```
 
-`static_handler`: serves the single `style.css` file (mount under `/static/`). In ntex, use `ntex_files::Files::new("/static", "crates/auth/static")` if `ntex-files` is in deps, or hand-roll a tiny handler that reads the file and serves it with `Content-Type: text/css`. For Phase 2 simplicity, hand-roll:
+`static_handler`: serves the single `style.css` file (mount under `/static/`). In ntex, use `ntex_files::Files::new("/static", "crates/zeroship-auth/static")` if `ntex-files` is in deps, or hand-roll a tiny handler that reads the file and serves it with `Content-Type: text/css`. For Phase 2 simplicity, hand-roll:
 
 ```rust
 #[ntex::web::get("/static/style.css")]
@@ -1598,7 +1598,7 @@ The current main creates `HydraAdmin` for bootstrap. Re-use it for the server. P
 ```
 cargo check -p zeroship-auth
 cargo clippy -p zeroship-auth --no-deps --tests
-git add crates/auth/src/{server.rs,main.rs}
+git add crates/zeroship-auth/src/{server.rs,main.rs}
 git commit -m "auth: server — register login/signup/consent routes + static CSS + state"
 ```
 
@@ -1607,7 +1607,7 @@ git commit -m "auth: server — register login/signup/consent routes + static CS
 # Unit U7 · `e2e_password` — the acceptance test
 
 **File:**
-- Create: `crates/auth/tests/e2e_password.rs`
+- Create: `crates/zeroship-auth/tests/e2e_password.rs`
 
 This is the central proof Phase 2 is done. It:
 
@@ -1629,7 +1629,7 @@ This is the central proof Phase 2 is done. It:
 
 This is ~250 LOC. Use `cyper` for the HTTP. Use `jsonwebtoken` (already a workspace dep) for ID-token decode.
 
-The full implementation is substantial; the implementer should pattern off `crates/auth/tests/hydra_client_smoke.rs` and refer to §2.2 of the proposal for the end-user login flow sequence.
+The full implementation is substantial; the implementer should pattern off `crates/zeroship-auth/tests/hydra_client_smoke.rs` and refer to §2.2 of the proposal for the end-user login flow sequence.
 
 - [ ] **Step U7.1: Write the test scaffold (skip path)**
 
@@ -1653,7 +1653,7 @@ Expected: 1 PASS, ID token decoded with expected claims.
 - [ ] **Step U7.4: Commit**
 
 ```bash
-git add crates/auth/tests/e2e_password.rs
+git add crates/zeroship-auth/tests/e2e_password.rs
 git commit -m "auth: e2e_password — full OIDC code+PKCE flow against live hydra"
 ```
 
@@ -1662,8 +1662,8 @@ git commit -m "auth: e2e_password — full OIDC code+PKCE flow against live hydr
 # Unit U8 · `enum_defense` + threat_model parametric tests
 
 **Files:**
-- Create: `crates/auth/tests/enum_defense.rs`
-- Create: `crates/auth/tests/threat_model.rs`
+- Create: `crates/zeroship-auth/tests/enum_defense.rs`
+- Create: `crates/zeroship-auth/tests/threat_model.rs`
 
 ## enum_defense.rs
 
@@ -1685,7 +1685,7 @@ Parametric harness over proposal §13 rows tagged `[ours]`. Each row drives a `#
 
 ```bash
 cargo test -p zeroship-auth --test enum_defense --test threat_model
-git add crates/auth/tests/{enum_defense.rs,threat_model.rs}
+git add crates/zeroship-auth/tests/{enum_defense.rs,threat_model.rs}
 git commit -m "auth: tests — enum_defense (timing) + threat_model parametric §13"
 ```
 
@@ -1734,7 +1734,7 @@ git tag auth-phase-2
 
 # Future phases (separate plans)
 
-- **Phase 3** — Gateway + control plane as OIDC RPs; retire legacy `crates/control/src/auth_*.rs` and `crates/gateway/src/user_auth.rs`. End-to-end via real browser.
+- **Phase 3** — Gateway + control plane as OIDC RPs; retire legacy `crates/zeroship-control/src/auth_*.rs` and `crates/zeroship-gateway/src/user_auth.rs`. End-to-end via real browser.
 - **Phase 4** — Google + GitHub OAuth federation; third-party consent UI.
 - **Phase 5** — Magic link, email verification, password reset, mailer abstraction + lettre/resend drivers + bounce webhooks.
 - **Phase 6** — Polish: JWK rotation cron, DPoP at the gateway, audit-log retention sweeper, runbook, load test, security review.

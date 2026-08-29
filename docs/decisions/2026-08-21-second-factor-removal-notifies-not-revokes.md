@@ -2,11 +2,11 @@
 
 - **Date:** 2026-08-21
 - **Status:** Accepted
-- **References:** `crates/auth/src/ui/totp.rs`,
-  `crates/auth/tests/totp_removal_notice_test.rs`,
-  `crates/mailer/src/templates/second_factor_removed.{html,txt}`,
-  `crates/auth/src/identity/password_reset.rs`,
-  `crates/auth/src/ui/sessions.rs`
+- **References:** `crates/zeroship-auth/src/ui/totp.rs`,
+  `crates/zeroship-auth/tests/totp_removal_notice_test.rs`,
+  `crates/zeroship-mailer/src/templates/second_factor_removed.{html,txt}`,
+  `crates/zeroship-auth/src/identity/password_reset.rs`,
+  `crates/zeroship-auth/src/ui/sessions.rs`
 
 ## Context
 

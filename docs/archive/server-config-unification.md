@@ -12,7 +12,7 @@ Explicitly **out of scope** (see "What this is NOT"): `crates/sandbox` (env-only
 
 ## Problem
 
-Three of the four binaries (`control`, `gateway`, `worker`) each re-implement the same `arg_or_env` helper verbatim (`control/main.rs:24-31`, `gateway/main.rs:342-349`, `worker/main.rs:216-223`); `control` adds `env_or`/`flag_or_env` on top. `auth` already uses `clap` derive (`AuthConfig`, 40 fields, `crates/auth/src/config.rs`) — the de-facto target. The cost of three parsers is a **drift catalog**:
+Three of the four binaries (`control`, `gateway`, `worker`) each re-implement the same `arg_or_env` helper verbatim (`control/main.rs:24-31`, `gateway/main.rs:342-349`, `worker/main.rs:216-223`); `control` adds `env_or`/`flag_or_env` on top. `auth` already uses `clap` derive (`AuthConfig`, 40 fields, `crates/zeroship-auth/src/config.rs`) — the de-facto target. The cost of three parsers is a **drift catalog**:
 
 | # | Drift | Where | Resolution |
 |---|-------|-------|------------|
@@ -28,7 +28,7 @@ Three of the four binaries (`control`, `gateway`, `worker`) each re-implement th
 
 The hydra-public consolidation in D9 is the **goal**, not an already-identical state: today the three binaries each name this base differently, and gateway overloads `AUTH_PUBLIC` for an unrelated URL. (Note also that `docs/runbooks/local-dev.md:97` documents a `--jwt-secret` flag that `control` does not have — `--jwt-secret`/`JWT_SECRET` appear zero times in `crates/`; only gateway has `--auth-secret`/`AUTH_SECRET`. That is a stale doc line to delete, **not** a config-unification item.)
 
-Beyond drift, there is **no clean home for the trusted-OAuth-client whitelist** that P10-U10 needs — today a hardcoded const in `crates/control/src/trusted_clients.rs` (whose own comment already anticipates this move).
+Beyond drift, there is **no clean home for the trusted-OAuth-client whitelist** that P10-U10 needs — today a hardcoded const in `crates/zeroship-control/src/trusted_clients.rs` (whose own comment already anticipates this move).
 
 ## Research summary
 
@@ -43,7 +43,7 @@ An industry survey of how other projects do startup config — *not* codebase-gr
 
 ### Two surfaces
 
-**Surface A — per-binary `clap` derive.** Collapse the three `arg_or_env` parsers onto `auth`'s pattern. Shared sub-structs — a new `ObservabilityFlags` (today the three binaries call `observability::init_tracing(<literal>)` directly with no shared struct), plus the secret/URL groups — live in `crates/core/src/config.rs` and are `#[command(flatten)]`-ed in:
+**Surface A — per-binary `clap` derive.** Collapse the three `arg_or_env` parsers onto `auth`'s pattern. Shared sub-structs — a new `ObservabilityFlags` (today the three binaries call `observability::init_tracing(<literal>)` directly with no shared struct), plus the secret/URL groups — live in `crates/zeroship-core/src/config.rs` and are `#[command(flatten)]`-ed in:
 
 ```rust
 #[derive(Parser)]
@@ -103,7 +103,7 @@ Per field: **CLI flag > env var > file > compiled-in default.** The mechanism ma
 - List/nested values (`trusted_oauth_clients`) are effectively **file-only** — no CLI override is practical, so they resolve straight from the file (empty `Vec` default).
 
 ```rust
-// crates/core/src/config.rs
+// crates/zeroship-core/src/config.rs
 
 #[derive(Debug, Deserialize, Default)]
 pub struct FileConfig {
@@ -141,12 +141,12 @@ Missing sections get `Default::default()`, so a single-binary deployment needs n
 
 Incremental, per-binary. Each unit ships independently; no big-bang refactor.
 
-1. **U10a (foundation).** Add `crates/core/src/config.rs` with `FileConfig` + `AuthSection`/`ObsSection` and the `load`/resolve helpers; add `ops/zeroship.toml` with current values; mount it in compose (`--config`). Add a shared `validate_stash_key`/`validate_secret` module (resolves **D5**).
-2. **U10b (control).** Consume `[auth].trusted_oauth_clients` and **delete** `crates/control/src/trusted_clients.rs`'s const; ships with P10-U10 trusted-clients hardening. Read `[auth]` URLs via the resolve helper. **Delete** the `AUTH_HYDRA_ADMIN`/`--hydra-admin` alias (**D1**). Rename control's `AUTH_PUBLIC` → `hydra_public_url` (**D9** — control's `AUTH_PUBLIC` is the Hydra-public issuer base).
+1. **U10a (foundation).** Add `crates/zeroship-core/src/config.rs` with `FileConfig` + `AuthSection`/`ObsSection` and the `load`/resolve helpers; add `ops/zeroship.toml` with current values; mount it in compose (`--config`). Add a shared `validate_stash_key`/`validate_secret` module (resolves **D5**).
+2. **U10b (control).** Consume `[auth].trusted_oauth_clients` and **delete** `crates/zeroship-control/src/trusted_clients.rs`'s const; ships with P10-U10 trusted-clients hardening. Read `[auth]` URLs via the resolve helper. **Delete** the `AUTH_HYDRA_ADMIN`/`--hydra-admin` alias (**D1**). Rename control's `AUTH_PUBLIC` → `hydra_public_url` (**D9** — control's `AUTH_PUBLIC` is the Hydra-public issuer base).
 3. **U10c (gateway).** Move the `[auth]` URLs it owns to file lookup with CLI/env override retained (its other auth flags are `--gateway-public-url`, `--auth-secret`). Rename `HYDRA_PUBLIC` → `hydra_public_url` and the colliding auth-crate-UI `AUTH_PUBLIC` → `AUTH_UI_URL` (**D9**). Make `GATEWAY_OIDC_SECRET` required-non-dev (**D6**); delete the `INSECURE_DEV`/`--insecure-dev` spelling (**D4**). *Caveat:* the precise source of the gateway OIDC RP's issuer (whether it sources from `hydra_public_url` or the renamed `AUTH_UI_URL`) is settled during implementation — today gateway builds its RP from `auth_public`=:9092 (`main.rs:248`) while control builds its RP from `auth_public`=:4444/hydra, so config alone doesn't decide it.
 4. **U10d (auth-server).** Consume `[auth]`; mostly a rename — `AuthConfig` already mirrors this shape. Rename `AUTH_HYDRA_PUBLIC` → `hydra_public_url` (**D9**). Same RP-issuer-source caveat as U10c: the exact wiring is settled during implementation.
 5. **U10e (worker).** Move to `clap` derive; rename the thread-count flag off `--workers` to `--worker-threads`/`WORKER_THREADS` so `--workers` means URLs everywhere (**D2**). Typed fields hard-error on bad numerics (**D7**). No `[runtime]` section — worker has no config-driven V8 limits today.
-6. **U10f (cleanup).** Delete every bespoke `arg_or_env`/`env_or`/`flag_or_env`; adopt `BLOB_STORE` everywhere and delete `BUNDLES_DIR` (**D3**); introduce a shared `ObservabilityFlags` in `crates/core/src/config.rs` and retrofit the three `init_tracing` call sites onto it.
+6. **U10f (cleanup).** Delete every bespoke `arg_or_env`/`env_or`/`flag_or_env`; adopt `BLOB_STORE` everywhere and delete `BUNDLES_DIR` (**D3**); introduce a shared `ObservabilityFlags` in `crates/zeroship-core/src/config.rs` and retrofit the three `init_tracing` call sites onto it.
 
 ## What this is NOT
 

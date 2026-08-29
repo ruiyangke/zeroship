@@ -3,7 +3,7 @@
 **Status:** Shipped 2026-05-02
 **Long-form design:** [`docs/archive/websocket-native.md`](../archive/websocket-native.md)
 **Companion reference doc:** [`docs/reference/websocket-design.md`](../reference/websocket-design.md)
-**Implementation:** [`crates/runtime/src/web/websocket/`](../../crates/runtime/src/web/websocket/) (handshake, frame_reader, frame_writer, dispatch, pair)
+**Implementation:** [`crates/zeroship-runtime/src/web/websocket/`](../../crates/zeroship-runtime/src/web/websocket/) (handshake, frame_reader, frame_writer, dispatch, pair)
 
 ## Context
 

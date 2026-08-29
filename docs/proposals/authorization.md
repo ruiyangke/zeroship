@@ -1,6 +1,6 @@
 # zeroship authorization — proposal
 
-**Status:** partially shipped. The P9 platform-RBAC half shipped to main — `crates/authz/` (Cedar engine) wired into the control plane (commits `010476b5`, `cf3431ca`). The P12 end-user-authz half (worker/runtime Cedar, bundle `policies.cedar`, `env.authz`) is **not built**; this document remains the forward spec for P12.
+**Status:** partially shipped. The P9 platform-RBAC half shipped to main — `crates/zeroship-authz/` (Cedar engine) wired into the control plane (commits `010476b5`, `cf3431ca`). The P12 end-user-authz half (worker/runtime Cedar, bundle `policies.cedar`, `env.authz`) is **not built**; this document remains the forward spec for P12.
 **Date:** 2026-05-27
 **Branch:** `proposal/auth-server`
 **Worktree:** `.claude/worktrees/auth-server`
@@ -14,7 +14,7 @@ This file lives in a fresh worktree off main and is committed in the same PR tha
 
 > **Authorization in zeroship is one Cedar engine, three audiences, four grant paths, and a wrapper SDK that hides Cedar from anyone who doesn't want to see it.**
 
-The platform answers exactly one question per request: *"Is this principal allowed to perform this action on this resource right now?"* — for platform staff, for creators, and (in P12) for end users inside creator apps. Cedar is the single decision engine. A closed-vocabulary wrapper SDK (`crates/authz/`) hides Cedar's syntax behind a toggle-matrix UI for the 95% case; a Cedar power-user tab is available for the long tail. OAuth 2.0 (hydra) delivers the credentials; Cedar decides what to do with them.
+The platform answers exactly one question per request: *"Is this principal allowed to perform this action on this resource right now?"* — for platform staff, for creators, and (in P12) for end users inside creator apps. Cedar is the single decision engine. A closed-vocabulary wrapper SDK (`crates/zeroship-authz/`) hides Cedar's syntax behind a toggle-matrix UI for the 95% case; a Cedar power-user tab is available for the long tail. OAuth 2.0 (hydra) delivers the credentials; Cedar decides what to do with them.
 
 ---
 
@@ -173,11 +173,11 @@ Creators write Cedar directly here — it's the right level for app-internal log
 
 Three deployment surfaces share this pipeline:
 
-1. **Control plane** (`crates/control/`) — every handler that touches an app, env, deploy, billing, or member runs through `AuthzGuard`. Cedar engine is in-process.
-2. **Gateway** (`crates/gateway/`) — relevant only for platform-internal admin routes the gateway exposes (today: backchannel-logout receiver). Most user-facing gateway behavior is access enforcement (does this session exist?), which is auth, not authz; authz only kicks in on `/__zeroship/admin/*` if we add such routes.
-3. **Worker** (`crates/worker/` + `crates/plugin-authz/`, new) — Cedar engine runs inside the V8 isolate via v8class for end-user authz inside creator apps. P12 only.
+1. **Control plane** (`crates/zeroship-control/`) — every handler that touches an app, env, deploy, billing, or member runs through `AuthzGuard`. Cedar engine is in-process.
+2. **Gateway** (`crates/zeroship-gateway/`) — relevant only for platform-internal admin routes the gateway exposes (today: backchannel-logout receiver). Most user-facing gateway behavior is access enforcement (does this session exist?), which is auth, not authz; authz only kicks in on `/__zeroship/admin/*` if we add such routes.
+3. **Worker** (`crates/zeroship-worker/` + `crates/plugin-authz/`, new) — Cedar engine runs inside the V8 isolate via v8class for end-user authz inside creator apps. P12 only.
 
-The same Rust `crates/authz/` crate compiles into all three. v8class bindings live in `crates/plugin-authz/`.
+The same Rust `crates/zeroship-authz/` crate compiles into all three. v8class bindings live in `crates/plugin-authz/`.
 
 ---
 
@@ -186,7 +186,7 @@ The same Rust `crates/authz/` crate compiles into all three. v8class bindings li
 Closed enum. Adding an action is a Rust PR + UI translation update + Cedar template update; we accept that friction in exchange for "every action is enumerable, audit-decodable, and lintable".
 
 ```rust
-// crates/authz/src/action.rs
+// crates/zeroship-authz/src/action.rs
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum Action {
     // Apps
@@ -234,7 +234,7 @@ Round-trip: the variant name → Cedar's quoted action string. The wrapper's `Di
 Resources are typed entities. Cedar likes typed entities; we lean into it.
 
 ```rust
-// crates/authz/src/resource.rs
+// crates/zeroship-authz/src/resource.rs
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "PascalCase")]
 pub enum Resource {
@@ -280,7 +280,7 @@ All three are constructed in one transaction at request start, cached per reques
 Conditions are the second closed enum. They compile to Cedar `when {}` blocks; the wrapper UI exposes them as discrete toggles + parameter fields.
 
 ```rust
-// crates/authz/src/condition.rs
+// crates/zeroship-authz/src/condition.rs
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Condition {
@@ -299,7 +299,7 @@ pub enum Condition {
 }
 ```
 
-Compilation to Cedar (`crates/authz/src/lower.rs`):
+Compilation to Cedar (`crates/zeroship-authz/src/lower.rs`):
 
 | Wrapper | Cedar `when` clause |
 |---|---|
@@ -361,10 +361,10 @@ End users get authz decisions free; creators get a declarative file that ships w
 
 ---
 
-## 8 · The wrapper SDK (`crates/authz/`)
+## 8 · The wrapper SDK (`crates/zeroship-authz/`)
 
 ```
-crates/authz/
+crates/zeroship-authz/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          // re-exports
@@ -388,7 +388,7 @@ crates/authz/
 
 `crates/plugin-authz/` (P12) provides the v8class binding into the Rust crate; it doesn't fork Cedar.
 
-The wrapper's surface contract (`crates/authz/src/lib.rs`):
+The wrapper's surface contract (`crates/zeroship-authz/src/lib.rs`):
 
 ```rust
 pub fn is_authorized(
@@ -469,7 +469,7 @@ CREATE TABLE control.platform_policies (
 
 ```sql
 -- 9.2.1 Platform RBAC role assignments. The 4-role enum is hardcoded in
--- crates/authz/src/platform_role.rs; this table just records who has which.
+-- crates/zeroship-authz/src/platform_role.rs; this table just records who has which.
 CREATE TABLE platform.roles (
     user_id       UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     role          TEXT NOT NULL,                  -- 'admin' | 'support' | 'billing' | 'readonly'
@@ -519,7 +519,7 @@ policies/
     └── (creator-supplied in P12; not in repo)
 ```
 
-These compile at build time via a `crates/authz/build.rs` that runs `cedar_policy::PolicySet::from_str` and `include_str!`s the validated bodies. Build fails if Cedar is invalid — this is the lint that catches typos in the canonical policies.
+These compile at build time via a `crates/zeroship-authz/build.rs` that runs `cedar_policy::PolicySet::from_str` and `include_str!`s the validated bodies. Build fails if Cedar is invalid — this is the lint that catches typos in the canonical policies.
 
 ### 9.5 Engine cache (in-memory only)
 
@@ -562,7 +562,7 @@ Three credential types reach `AuthzGuard`. Each has a distinct lifecycle.
 ### 10.2 OAuth access token (third-party apps)
 
 - **Mint:** Authorization Code + PKCE through hydra (§12.1). The token is a hydra-issued RFC 9068 JWT (1 h access, 90 d refresh), signed by hydra's keys, audience-bound to `https://api.zeroship.ai`.
-- **Format:** hydra-issued JWT. Verified by `crates/control/src/api.rs` using hydra's JWKS (already cached by the OIDC RP layer).
+- **Format:** hydra-issued JWT. Verified by `crates/zeroship-control/src/api.rs` using hydra's JWKS (already cached by the OIDC RP layer).
 - **No PAT-style policy attached.** OAuth access tokens carry **scopes**, which translate to `Action` sets at the extractor. Scope vocabulary (P9):
   - `apps:read` `apps:write` `apps:deploy` `apps:delete`
   - `env:read` `env:write` `secrets:read` `secrets:write`
@@ -609,7 +609,7 @@ Body: { "role": "support" }
 Authorization: session cookie of usr_01H...admin...
 ```
 
-Handler in `crates/control/src/admin_handlers.rs`:
+Handler in `crates/zeroship-control/src/admin_handlers.rs`:
 
 1. `AuthzGuard` resolves the caller; checks `is_authorized(caller, Action::TeamWrite, Resource::Org::"zeroship_platform", …)` against `policies/platform/admin.cedar`. Only `'admin'` rows pass.
 2. INSERT/UPDATE `platform.roles`.
@@ -625,7 +625,7 @@ Body: { "user_id": "usr_01H...", "role": "editor" }   // OR { "email": "bob@…"
 Authorization: session cookie of the app owner
 ```
 
-Handler in `crates/control/src/api.rs`:
+Handler in `crates/zeroship-control/src/api.rs`:
 
 1. `AuthzGuard` checks `is_authorized(caller, Action::TeamWrite, Resource::App(app_id), …)`. Pass = caller is owner or has been delegated `team:write` on this app.
 2. If body has `email`, issue an invite token (1 h TTL, single-use, stored in `control.app_invites` — table omitted here for brevity, follows `auth.magic_links` shape). Email it. The recipient clicks, signs in if necessary, redirects to a "Accept invite to App X?" page.
@@ -661,7 +661,7 @@ Body: {
 Authorization: session cookie of usr_01H...
 ```
 
-Handler in `crates/control/src/token_handlers.rs` (new):
+Handler in `crates/zeroship-control/src/token_handlers.rs` (new):
 
 1. `AuthzGuard` checks `is_authorized(caller, Action::AccountWrite, Resource::Any, …)` — every authenticated user has this.
 2. **TOKEN ⊂ USER at mint** — for every `Statement` in the request, for the cross product of its `actions × resources`, call `is_authorized(caller, action, resource, context_with_no_conditions, static_bundle, entities)`. If any call denies, reject the mint with 403 listing the offending pairs. (Cross-product can be large — capped at 10K combinations per request, which is way beyond any reasonable use case.)
@@ -693,7 +693,7 @@ Handler in `crates/control/src/token_handlers.rs` (new):
 6. ACME CI exchanges code → access_token + refresh_token at /oauth2/token.
 ```
 
-The consent UI lives in `crates/auth/src/ui/consent.rs` (already shipped for first-party clients via skip-consent). P9 extends it to render the third-party form with translated scope names.
+The consent UI lives in `crates/zeroship-auth/src/ui/consent.rs` (already shipped for first-party clients via skip-consent). P9 extends it to render the third-party form with translated scope names.
 
 **`assert_grantor_authorized` analog.** The user is granting actions to a third-party app. Each scope corresponds to an `Action`. The check is: for each requested scope, is the user authorized to perform that action *anywhere*? If the answer is no for all resources (e.g., they request `apps:deploy` and the user has zero apps), the consent UI declines outright with "you don't have permission to grant this". If yes for some resources, consent is for the user's full set — narrowing happens at use time per call.
 
@@ -737,7 +737,7 @@ oauth2:
     token_polling_interval: 5s
 ```
 
-The `/device` page in `crates/auth/src/ui/device.rs` (new in P9):
+The `/device` page in `crates/zeroship-auth/src/ui/device.rs` (new in P9):
 
 ```
 1. CLI: POST /oauth2/device/authorize → returns
@@ -760,7 +760,7 @@ Existing hydra mechanism (already documented in `docs/archive/auth-server.md` §
 
 ### 13.1 `AuthzGuard` extractor
 
-ntex extractor in `crates/control/src/authz_guard.rs` (new in P9):
+ntex extractor in `crates/zeroship-control/src/authz_guard.rs` (new in P9):
 
 ```rust
 pub struct AuthzGuard {
@@ -1099,20 +1099,20 @@ Phase numbers continue the auth-server phasing (P1 — P8 already shipped). Each
 **Files touched.**
 
 ```
-NEW: crates/authz/Cargo.toml
-NEW: crates/authz/src/{lib,action,resource,condition,effect,policy,statement,lower,engine,eval,audit,entities,error,platform_role}.rs
-NEW: crates/authz/build.rs                  // compiles policies/platform/*.cedar + policies/creator/*.cedar
-NEW: crates/authz/tests/{lower_snapshot,two_call_subset,condition_eval}.rs
+NEW: crates/zeroship-authz/Cargo.toml
+NEW: crates/zeroship-authz/src/{lib,action,resource,condition,effect,policy,statement,lower,engine,eval,audit,entities,error,platform_role}.rs
+NEW: crates/zeroship-authz/build.rs                  // compiles policies/platform/*.cedar + policies/creator/*.cedar
+NEW: crates/zeroship-authz/tests/{lower_snapshot,two_call_subset,condition_eval}.rs
 NEW: policies/platform/{admin,support,billing,readonly}.cedar
 NEW: policies/creator/{app_owner,app_editor,app_viewer}.cedar
-NEW: crates/control/src/authz_guard.rs
-NEW: crates/control/src/token_handlers.rs    // POST /me/tokens, DELETE /me/tokens/<id>, GET /me/tokens
-NEW: crates/control/src/admin_handlers.rs    // POST /admin/users/<id>/role, POST /admin/platform-policies
-NEW: crates/auth/src/ui/device.rs             // RFC 8628 device-code page
-MOD: crates/control/src/api.rs                // wire AuthzGuard into every existing handler
-MOD: crates/auth/src/store/migrations.rs      // add control.{app_members,permission_tokens,platform_policies,authz_decisions} + platform.roles
+NEW: crates/zeroship-control/src/authz_guard.rs
+NEW: crates/zeroship-control/src/token_handlers.rs    // POST /me/tokens, DELETE /me/tokens/<id>, GET /me/tokens
+NEW: crates/zeroship-control/src/admin_handlers.rs    // POST /admin/users/<id>/role, POST /admin/platform-policies
+NEW: crates/zeroship-auth/src/ui/device.rs             // RFC 8628 device-code page
+MOD: crates/zeroship-control/src/api.rs                // wire AuthzGuard into every existing handler
+MOD: crates/zeroship-auth/src/store/migrations.rs      // add control.{app_members,permission_tokens,platform_policies,authz_decisions} + platform.roles
 MOD: ops/hydra.yaml                           // enable oauth2.device_authorization
-MOD: crates/cli/                              // zeroship login (device grant), zeroship policy edit
+MOD: crates/zeroship-cli/                              // zeroship login (device grant), zeroship policy edit
 ```
 
 **Exit criteria.**
@@ -1140,7 +1140,7 @@ NEW: dashboard/src/lib/policy/toggle-matrix.ts             // matrix ↔ Policy 
 NEW: dashboard/src/lib/policy/cedar-lint.ts                // wraps cedar-policy-wasm
 NEW: dashboard/src/lib/policy/conditions.ts                // condition library UI components
 NEW: dashboard/src/routes/tokens/[id]/audit/+page.svelte
-MOD: crates/control/src/token_handlers.rs                  // GET /me/tokens/<id>/audit (paginated)
+MOD: crates/zeroship-control/src/token_handlers.rs                  // GET /me/tokens/<id>/audit (paginated)
 MOD: sdks/control/src/tokens.ts                            // typed client for the above
 ```
 
@@ -1160,14 +1160,14 @@ MOD: sdks/control/src/tokens.ts                            // typed client for t
 **Files touched.**
 
 ```
-NEW: crates/control/src/orgs.rs                  // CRUD on control.orgs + control.org_members
+NEW: crates/zeroship-control/src/orgs.rs                  // CRUD on control.orgs + control.org_members
 NEW: policies/platform/incident_lock.cedar       // `forbid(principal, action, resource) when {context.incident_lock};`
-NEW: crates/authz/src/analyzer.rs                // wraps cedar-policy's Validator
+NEW: crates/zeroship-authz/src/analyzer.rs                // wraps cedar-policy's Validator
 NEW: scripts/ci-policy-lint.sh                   // CI gate on policies/**
-MOD: crates/authz/src/resource.rs                // Org variant w/ parent walks
-MOD: crates/authz/src/entities.rs                // build Org parents for Apps
-MOD: crates/control/src/admin_handlers.rs        // POST /admin/incident-lock (sets a runtime flag)
-MOD: crates/control/src/api.rs                   // every handler reads incident_lock flag into context
+MOD: crates/zeroship-authz/src/resource.rs                // Org variant w/ parent walks
+MOD: crates/zeroship-authz/src/entities.rs                // build Org parents for Apps
+MOD: crates/zeroship-control/src/admin_handlers.rs        // POST /admin/incident-lock (sets a runtime flag)
+MOD: crates/zeroship-control/src/api.rs                   // every handler reads incident_lock flag into context
 ```
 
 **Exit criteria.**
@@ -1190,8 +1190,8 @@ NEW: crates/plugin-authz/src/lib.rs              // #[v8_class] bindings for is_
 NEW: sdks/permissions/package.json
 NEW: sdks/permissions/src/{index,types,entity}.ts
 NEW: sdks/vite-plugin/src/authz.ts               // build-time policies.cedar discovery + manifest emit
-MOD: crates/bundle/src/manifest.rs               // Manifest.authz: Option<CedarSource>
-MOD: crates/runtime/src/core/init.rs             // wire plugin-authz into the v8 env
+MOD: crates/zeroship-bundle/src/manifest.rs               // Manifest.authz: Option<CedarSource>
+MOD: crates/zeroship-runtime/src/core/init.rs             // wire plugin-authz into the v8 env
 MOD: docs/reference/auth.md                     // (already covers authn; we keep this scoped)
 NEW: docs/reference/permissions.md               // the @zeroship/permissions surface
 ```

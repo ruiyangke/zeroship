@@ -1,6 +1,6 @@
 # Native Plugin System
 
-The runtime-native plugin interface is defined in [crates/runtime/src/core/plugin.rs](../../crates/runtime/src/core/plugin.rs). Built-in creator-facing namespaces currently come from [crates/plugin-db/src/lib.rs](../../crates/plugin-db/src/lib.rs), [crates/plugin-kv/src/lib.rs](../../crates/plugin-kv/src/lib.rs), and [crates/plugin-storage/src/lib.rs](../../crates/plugin-storage/src/lib.rs).
+The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/core/plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs). Built-in creator-facing namespaces currently come from [crates/zeroship-plugin-db/src/lib.rs](../../crates/zeroship-plugin-db/src/lib.rs), [crates/zeroship-plugin-kv/src/lib.rs](../../crates/zeroship-plugin-kv/src/lib.rs), and [crates/zeroship-plugin-storage/src/lib.rs](../../crates/zeroship-plugin-storage/src/lib.rs).
 
 ## Core trait
 
@@ -16,7 +16,7 @@ The runtime-native plugin interface is defined in [crates/runtime/src/core/plugi
 - `add(...)`
 - `add_setup(...)`
 
-The runtime builds `env` by merging user env vars and secrets with plugin namespaces, then shallow-freezes the resulting object. That behavior is implemented in [crates/runtime/src/core/plugin.rs](../../crates/runtime/src/core/plugin.rs).
+The runtime builds `env` by merging user env vars and secrets with plugin namespaces, then shallow-freezes the resulting object. That behavior is implemented in [crates/zeroship-runtime/src/core/plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs).
 
 ## Current plugin styles
 
@@ -25,7 +25,7 @@ There are two active patterns in the tree:
 - Instance-backed namespaces: `plugin-db` and `plugin-kv` create V8 class instances through `build_instance(...)`.
 - Flat callback namespaces: `plugin-storage` registers functions onto `env.storage`.
 
-See [crates/plugin-db/src/lib.rs](../../crates/plugin-db/src/lib.rs), [crates/plugin-kv/src/lib.rs](../../crates/plugin-kv/src/lib.rs), and [crates/plugin-storage/src/lib.rs](../../crates/plugin-storage/src/lib.rs).
+See [crates/zeroship-plugin-db/src/lib.rs](../../crates/zeroship-plugin-db/src/lib.rs), [crates/zeroship-plugin-kv/src/lib.rs](../../crates/zeroship-plugin-kv/src/lib.rs), and [crates/zeroship-plugin-storage/src/lib.rs](../../crates/zeroship-plugin-storage/src/lib.rs).
 
 ## `env.storage`: pluggable backend + streaming surface
 
@@ -39,7 +39,7 @@ dispatched through a `Backend` trait. Two backends ship:
   `compio-s3` client (hand-rolled SigV4, cyper transport, **zero tokio**).
 
 The backend is selected by a single URL grammar — the same one the deploy
-blob store uses (`crates/plugin-storage/src/config.rs`,
+blob store uses (`crates/zeroship-plugin-storage/src/config.rs`,
 `StorageBackendConfig::parse`):
 
 ```text
@@ -74,9 +74,9 @@ Streaming (no whole-object buffering — bounded memory):
 `put_stream`/`get_stream` on the `Backend` trait are the kernel ops; buffered
 `put`/`get` are conveniences built on the streaming path. The **upload** side
 consumes a V8 `ReadableStream` through the existing
-`crates/runtime/src/web/streams/response_forwarder.rs` read loop; the
+`crates/zeroship-runtime/src/web/streams/response_forwarder.rs` read loop; the
 **download** side feeds a V8 `ReadableStream` from the
-`crates/runtime/src/core/channel.rs` `StreamWriter` bridge (the same machinery
+`crates/zeroship-runtime/src/core/channel.rs` `StreamWriter` bridge (the same machinery
 the RPC/SSE streaming path uses). On the `S3` backend `put_stream` becomes an
 **S3 multipart upload** (8 MiB parts; a sub-part object is a single
 `PutObject`), so a creator can stream an unbounded object up and back with

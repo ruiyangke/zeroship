@@ -46,7 +46,7 @@ The failure is a chain (each real, in order of discovery):
 2. **Double-injection collision.** With migrations present, the gen-types emit
    ceiling already folds the seven platform system columns into
    `schema.runtime.json`, and the worker's `registerModel` re-injects them via
-   `crates/plugin-db/policies/confined.policy.toml`:
+   `crates/zeroship-plugin-db/policies/confined.policy.toml`:
    `invalid descriptor: collection 'todos' declares field 'created_at', which
    collides with an injected policy column`.
 3. **Vendored-engine API/policy skews** (the pinned `zero-migrate` moved):
@@ -72,7 +72,7 @@ migration's job.**
 
 | Path | Who applies the schema | `registerModel` |
 | --- | --- | --- |
-| **Postgres deploy** | the `migrated` service, at deploy, ahead of the worker (imperative replay of migration ops under the confined charter) | **no-op** (`crates/plugin-db/src/register_model/mod.rs`: `(Some(_pg), _) => Ok(())`) |
+| **Postgres deploy** | the `migrated` service, at deploy, ahead of the worker (imperative replay of migration ops under the confined charter) | **no-op** (`crates/zeroship-plugin-db/src/register_model/mod.rs`: `(Some(_pg), _) => Ok(())`) |
 | **SQLite dev (today)** | the worker, lazily, per-collection, via `registerModel → run_sqlite_via_engine` (declarative diff of the descriptor vs live) | **drives the apply** |
 
 Because the SQLite path derives the schema from the **descriptor** (which already
@@ -178,7 +178,7 @@ interface ApplyIrSqliteRequest {
 
 ### 2. SQLite `registerModel` → read/no-op
 
-Mirror the Postgres arm in `crates/plugin-db/src/register_model/`: on SQLite, **skip
+Mirror the Postgres arm in `crates/zeroship-plugin-db/src/register_model/`: on SQLite, **skip
 `run_sqlite_via_engine`** (no plan, no apply). Keep the metadata-readiness contract:
 
 - `mark_model_registered` (readiness gate),
@@ -292,7 +292,7 @@ authority — the same category error as A.
    (`register_model/mod.rs`).
 5. **Retirement.** With SQLite register a no-op, `run_sqlite_via_engine`,
    `build_union_descriptors`, `other_schemas`, the partial-union reconciliation, and
-   the runtime copy of `crates/plugin-db/policies/confined.policy.toml` become dead
+   the runtime copy of `crates/zeroship-plugin-db/policies/confined.policy.toml` become dead
    and can be removed in a follow-up.
 
 ---
@@ -302,9 +302,9 @@ authority — the same category error as A.
 - Addon verb: `zeroship-migrate-node` `applyIrSqlite` / `ApplyIrSqliteRequest` /
   `ApplyReply` (`third_party/zero-migrate/crates/zeroship-migrate-node/index.d.ts`).
 - Confined apply charter to mirror: `crates/zeroship-migrate-server/policies/confined.policy.toml`.
-- Postgres register no-op to mirror: `crates/plugin-db/src/register_model/mod.rs`.
+- Postgres register no-op to mirror: `crates/zeroship-plugin-db/src/register_model/mod.rs`.
 - The SQLite register-drives-engine path to retire:
-  `crates/plugin-db/src/register_model/sqlite_engine.rs`.
+  `crates/zeroship-plugin-db/src/register_model/sqlite_engine.rs`.
 - The cross-app FK union check: `validate_cross_app_fk_targets` in
   `third_party/zero-migrate/crates/zeroship-migrate/src/render/declarative.rs`.
 - Dev DB paths: `sdks/vite-plugin/src/dev-db.ts` (`.zeroship/`), worker app files
