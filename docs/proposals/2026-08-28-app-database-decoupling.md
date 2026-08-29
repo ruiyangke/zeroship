@@ -374,12 +374,29 @@ Three consequences, all load-bearing:
   | `SELECT id, pub` | 1 row |
   | `UPDATE ... RETURNING *` | `ERROR: permission denied for table t` |
 
-  So 2.4 cannot land alone. **Every `RETURNING *` and every `SELECT *` must become an explicit
-  projection over the granted set first**, or the first column grant issued turns every creator write
-  into `permission denied`. This is a prerequisite, not a follow-up, and it is the same twelve sites
-  SC-6's storage flip already had to reason about - a projection built from the descriptor's
-  `readable` set would satisfy both, which is the strongest argument yet for wiring that payload
-  through.
+  **This prerequisite is now DONE** (`a22ede156`). All twelve sites emit a projection built from the
+  descriptor's `readable` set and `storage.valueColumn`, so the v2 payload is load-bearing in Rust
+  rather than a version tag nothing reads. `SELECT *` was already gone. The decisive test mints a
+  role holding `INSERT`/`UPDATE` on the raw column and **not** `SELECT` - a grant `*` cannot express -
+  and runs seven verbs under pure column grants, with a control substituting `RETURNING *` back and
+  getting `42501` on each.
+
+  **But it is necessary, not sufficient, and the remainder bounds 2.4.** Four single-row verbs narrow
+  with `WHERE ctid = (SELECT ctid FROM ... LIMIT 1)`, and `ctid` is a **system column that
+  column-level `SELECT` does not cover** - measured, the same role is refused `SELECT ctid` (42501)
+  while served `SELECT id`. Those four remain unusable under pure column grants. Either the narrowing
+  becomes a primary-key predicate the grant can cover, or co-granted namespaces exclude those verbs
+  and the exclusion is stated. A test asserts the refusal today and reddens the day it is fixed.
+
+  **A shipping defect surfaced on the way, and it is worth reading as evidence about the tests rather
+  than about upsert.** Every PostgreSQL upsert was already broken: `DO UPDATE SET "version" =
+  COALESCE("version", 0) + 1` has target and `excluded` both in scope, so PostgreSQL refuses the
+  statement with `42702 column reference "version" is ambiguous`, and `doc_has_version` is always
+  false on the dispatch path - so every upsert took that branch. It survived because the upsert tests
+  that **execute** run on SQLite, which accepts the unqualified reference, while the PostgreSQL ones
+  only **compare strings** - and one of them asserted the broken literal, so it went red when the bug
+  was fixed. Any claim in this document that rests on a string-compared SQL test should be read with
+  that in mind.
 
 - **A table-level grant defeats a column list.** Column grants add, they never subtract. The
   blanket `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` at
