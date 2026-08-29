@@ -86,23 +86,44 @@ fn envelope(ops: Vec<Op>) -> MigrationIr {
 }
 
 #[test]
-fn declaring_no_reverse_leaves_the_checksum_byte_identical() {
-    // The digest is pinned as a literal captured from the code BEFORE the reverse
-    // fields existed. If a future change folds something unconditionally, this is
-    // the test that catches it -- and the cost of missing it is every stored
-    // journal digest going stale at once, which surfaces as a drift abort on a
-    // migration nobody touched.
-    // Captured by running `authoritative_ir_checksum` over this exact envelope in
-    // a worktree at the commit BEFORE the reverse fields existed, not by copying
-    // what the current code prints.
-    const EXPECTED: &str = "f848c0e92cd6be196d4b5af59bc361de78cd652112a556baf1e48ddc6f381738";
+fn the_of_ir_digest_is_pinned_against_unintended_drift() {
+    // A LITERAL ANCHOR OVER THE WHOLE `of_ir` DOMAIN, not just the reverse region.
+    // `authoritative_ir_checksum` folds the domain tag, the canonical op list, the
+    // effective flags, owner_app, depends_on, supersedes, preconditions and the
+    // reverse. ANY change to ANY of those moves this digest, which is the point:
+    // every already-applied migration's journaled digest depends on the fold, and
+    // a change nobody intended surfaces later as a drift abort on a migration
+    // nobody touched.
+    //
+    // IT HAS ALREADY CAUGHT ONE, which is why the name and message no longer talk
+    // only about the reverse. The original pin was captured before the reverse
+    // fields existed, and `ReverseDomain::None` provably folds nothing, so the
+    // reverse was never the thing that moved it. What moved it was `61298897b`
+    // ("remove full-text search") deleting `engine_goodie_ddl` from
+    // `MigrationFlags` - a field whose OWN doc comment said it was retained rather
+    // than deleted precisely "because it is covered by the canonical checksum
+    // image below, so removing it would invalidate every recorded migration's
+    // checksum". The removal deleted that warning along with the field, and this
+    // test was the only thing left saying so. Confirmed by restoring the field:
+    // the digest returns to the old value and this test passes.
+    //
+    // RE-PINNED 2026-08-28, deliberately. The removal stands: the field was dead
+    // (nothing in the engine ever set it), and pre-launch there are no deployed
+    // creator journals to invalidate - the platform corpus is applied to a fresh
+    // database. So the new fold is the intended one and the anchor moves with it.
+    //
+    // IF THIS TEST GOES RED, DO NOT PASTE IN WHAT THE CODE NOW PRINTS. That turns
+    // the only guard over the fold into a rubber stamp. Find WHICH folded field
+    // changed, decide whether that change was intended, and re-pin only once it
+    // is - recording the reason here, as the line above does.
+    const EXPECTED: &str = "c57c0f9d309bff844e5d6bf5ab3a210523f4887fe3d7b9808cae5fb75aa6aeb1";
     let ir = envelope(vec![insert_op()]);
     assert_eq!(
         authoritative_ir_checksum(&ir).as_str(),
         EXPECTED,
-        "an envelope declaring no reverse must hash exactly as it did before the \
-         reverse fields existed; every already-applied migration's journaled \
-         digest depends on it"
+        "the of_ir fold changed. Every already-applied migration's journaled \
+         digest depends on it, so identify which folded field moved and whether \
+         that was intended before touching this pin"
     );
 }
 
