@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -213,7 +214,7 @@ pub enum ApplyRequestError {
     #[error("migration role provision: {0}")]
     ProvisionRole(#[from] ProvisionRoleError),
     #[error("runtime app role provision: {0}")]
-    ProvisionRuntimeRole(compio_postgres::Error),
+    ProvisionRuntimeRole(ProvisionRuntimeRoleError),
     #[error("unmask audit table provision: {0}")]
     ProvisionAuditUnmask(compio_postgres::Error),
     #[error("app publication provision: {0}")]
@@ -224,6 +225,17 @@ pub enum ApplyRequestError {
     Apply(#[from] SealedApplyError),
 }
 
+/// Failure while deriving or provisioning an app's runtime PostgreSQL role.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionRuntimeRoleError {
+    /// The complete authorization-role name exceeds PostgreSQL's identifier
+    /// limit and was refused before any SQL was issued.
+    #[error(transparent)]
+    RoleName(#[from] PerAppRoleNameError),
+    /// PostgreSQL refused one of the provisioning statements.
+    #[error(transparent)]
+    Database(#[from] compio_postgres::Error),
+}
 
 /// Apply a frozen `.ir.json` bundle into the app's own schema.
 ///
@@ -1151,25 +1163,10 @@ const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 /// (`db/migrations-ts/20260818000200_worker_database_authority.ts`); this
 /// service only grants it membership in each app's runtime role.
 ///
-/// Public for the same reason [`runtime_app_role_name`] is: the end-to-end
-/// audit-write proof in `apply_api_test` reaches the audit table by the
-/// PRODUCTION identity chain (`zeroship_worker` -> `SET ROLE` the app runtime
-/// role), and a second literal there would be a test agreeing with itself.
+/// Public so end-to-end tests can reach the audit table through the production
+/// identity chain (`zeroship_worker` -> `SET ROLE` the app runtime role)
+/// without copying this login-role literal.
 pub const WORKER_ROLE: &str = "zeroship_worker";
-
-/// The name of the per-app runtime role `provision_runtime_app_role` creates and
-/// grants, derived from the app schema.
-///
-/// PUBLIC SO A TEST CAN ASK PRODUCTION FOR THE NAME instead of re-deriving it.
-/// `apply_api_test`'s end-to-end proof that a real apply leaves this role able to
-/// write the unmask audit row has to name the role; spelling `app_{id}_role` a
-/// second time there would make the assertion agree with its own copy of the
-/// rule rather than with the code, and a rename would leave it probing a role
-/// that does not exist - which reads as a privilege failure, not a stale test.
-#[must_use]
-pub fn runtime_app_role_name(app_id: &str) -> String {
-    format!("app_{app_id}_role")
-}
 
 /// Both dependents of a freshly provisioned app schema: the worker's membership
 /// in the app's runtime role, and the app's workflow journal schema.
@@ -1240,7 +1237,7 @@ pub fn runtime_app_role_name(app_id: &str) -> String {
 /// live. This statement converges the row it owns; catching a foreign inheriting
 /// row is `zeroship_worker`'s boot-time posture check, which refuses on ANY
 /// inheriting app-role membership regardless of who granted it.
-fn runtime_dependents_sql(schema: &str, runtime_role: &str) -> String {
+fn runtime_dependents_sql_for_role(schema: &str, runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
     let worker_q = quote_ident(WORKER_ROLE);
     format!(
@@ -1255,34 +1252,70 @@ fn runtime_dependents_sql(schema: &str, runtime_role: &str) -> String {
     )
 }
 
-/// PRECONDITION: `schema` and `migrator_role` must contain no single quote.
+/// The complete SQL plan used to provision one app's runtime role.
+///
+/// The role name is public so the data-plane parity test can compare it as data
+/// against its own setup and classifier outputs across the existing
+/// dev-dependency edge. The statements remain private to this module and are
+/// executed only by the production `provision_runtime_app_role` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRoleProvisioningSql {
+    role_name: String,
+    create_role: String,
+    grants: String,
+    dependents: String,
+}
+
+impl RuntimeRoleProvisioningSql {
+    /// The exact, unquoted role identifier carried by every statement.
+    #[must_use]
+    pub fn role_name(&self) -> &str {
+        &self.role_name
+    }
+
+    fn statements(&self) -> [&str; 3] {
+        [&self.create_role, &self.grants, &self.dependents]
+    }
+}
+
+/// Build the exact SQL plan used to provision an app's runtime role.
+///
+/// Public so the data-plane parity test can compare the migration service's
+/// production role identifier against its own setup and classifier data.
+///
+/// # Errors
+///
+/// Returns an error rather than allowing PostgreSQL to truncate an overlong
+/// authorization-role identifier.
+///
+/// # Preconditions
+///
+/// `schema` and `migrator_role` must contain no single quote.
 ///
 /// The `DO` block below embeds their `quote_ident` forms inside single-quoted
-/// `EXECUTE '…'` strings. `quote_ident` doubles internal double-quotes and does
+/// `EXECUTE '...'` strings. `quote_ident` doubles internal double-quotes and does
 /// nothing to single ones, so a name containing `'` would terminate the EXECUTE
 /// literal early and the remainder would be parsed as SQL.
 ///
-/// That is safe today, and only because of where the values come from: `schema`
-/// is `app_id.to_string()` (a `Uuid`, so hex and hyphens), and `role` is derived
-/// from it as `app_{schema}_role`. Neither can carry a quote. The guarantee lives
-/// about a thousand lines from here and nothing at this call site enforced it,
-/// which is the whole reason to write it down - a future caller passing a
-/// creator-supplied name would find no local objection.
+/// That is safe today only because the production caller derives `schema` from
+/// a `Uuid`, derives `migrator_role` from that schema, and derives `role_name`
+/// through [`per_app_role_name`]. None can carry a quote. The guarantee lives
+/// far from this function and nothing here enforces it, so a future caller must
+/// preserve the precondition.
 ///
 /// The durable fix is to stop pre-interpolating and let the block quote its own
-/// identifiers with `format('%I', …)`.
-async fn provision_runtime_app_role(
-    conn: &compio_postgres::Client,
+/// identifiers with `format('%I', ...)`.
+pub fn runtime_role_provisioning_sql(
     schema: &str,
     migrator_role: &str,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
     let schema_q = quote_ident(schema);
-    let role = runtime_app_role_name(schema);
-    let role_q = quote_ident(&role);
+    let role_name = per_app_role_name(schema)?;
+    let role_q = quote_ident(&role_name);
     let template_q = quote_ident(APP_ROLE_TEMPLATE);
     let migrator_q = quote_ident(migrator_role);
 
-    exec_retry(conn, &format!(
+    let create_role = format!(
         "DO $runtime_app_role$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{template_lit}') THEN
                 EXECUTE 'CREATE ROLE {template_q} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT';
@@ -1292,12 +1325,11 @@ async fn provision_runtime_app_role(
             END IF;
          END $runtime_app_role$",
         template_lit = quote_lit(APP_ROLE_TEMPLATE),
-        role_lit = quote_lit(&role),
-    ))
-    .await?;
+        role_lit = quote_lit(&role_name),
+    );
 
-    exec_retry(conn, &format!(
-        // USAGE only — the runtime role does DML, never DDL. Object creation
+    let grants = format!(
+        // USAGE only - the runtime role does DML, never DDL. Object creation
         // (tables, sequences) is the migrator role's job; plugin-db's
         // register_model is a no-op on Postgres. Granting CREATE here would let
         // app runtime code author schema objects, which it must not.
@@ -1308,12 +1340,29 @@ async fn provision_runtime_app_role(
              GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_q};
          ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
              GRANT USAGE, SELECT ON SEQUENCES TO {role_q};"
-    ))
-    .await?;
+    );
 
     // The migration identity creates no platform role here. It only delegates
     // to the narrow roles that the platform role migration precreated.
-    exec_retry(conn, &runtime_dependents_sql(schema, &role)).await
+    let dependents = runtime_dependents_sql_for_role(schema, &role_name);
+    Ok(RuntimeRoleProvisioningSql {
+        role_name,
+        create_role,
+        grants,
+        dependents,
+    })
+}
+
+async fn provision_runtime_app_role(
+    conn: &compio_postgres::Client,
+    schema: &str,
+    migrator_role: &str,
+) -> Result<(), ProvisionRuntimeRoleError> {
+    let provisioning = runtime_role_provisioning_sql(schema, migrator_role)?;
+    for statement in provisioning.statements() {
+        exec_retry(conn, statement).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1324,10 +1373,12 @@ mod tests {
 
     #[test]
     fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
-        let sql = runtime_dependents_sql(
+        let provisioning = runtime_role_provisioning_sql(
             "0191e7a2-b3c4-4d5e-8f90-123456789abc",
-            "app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role",
-        );
+            "zs_migrator_fixture",
+        )
+        .expect("test runtime role name");
+        let sql = provisioning.dependents;
         assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles"));
         // The inherit option is part of the ASSERTED string, not a suffix the
         // match tolerates. The previous form stopped at `TO "zeroship_worker"`
@@ -1349,6 +1400,18 @@ mod tests {
         assert!(!sql.contains("CREATE ROLE"));
     }
 
+    #[test]
+    fn runtime_provisioning_plan_refuses_overlong_role_names() {
+        let app_id = "a".repeat(55);
+        assert_eq!(
+            runtime_role_provisioning_sql(&app_id, "zs_migrator_fixture"),
+            Err(PerAppRoleNameError::TooLong {
+                actual_bytes: 64,
+                max_bytes: 63,
+            })
+        );
+    }
+
     /// The apply path and the exported
     /// [`provision_workflow_journal_schema`](crate::provisioning::provision_workflow_journal_schema)
     /// build the journal schema DDL from ONE generator, not two that resemble
@@ -1365,7 +1428,9 @@ mod tests {
     fn the_apply_path_and_the_exported_helper_share_one_journal_statement() {
         let app_id = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("uuid");
         let schema = app_id.to_string();
-        let sql = runtime_dependents_sql(&schema, &runtime_app_role_name(&schema));
+        let sql = runtime_role_provisioning_sql(&schema, "zs_migrator_fixture")
+            .expect("test runtime role name")
+            .dependents;
         let exported = crate::provisioning::workflow_journal_schema_sql(
             &crate::provisioning::workflow_journal_schema_name(&app_id),
         );
@@ -1564,7 +1629,7 @@ mod live_audit_unmask_provisioning {
             ))
             .await;
         for role in [
-            runtime_app_role_name(schema),
+            per_app_role_name(schema).expect("scratch runtime role name"),
             migrator_role_name(schema).unwrap_or_default(),
         ] {
             if role.is_empty() {
@@ -1714,7 +1779,7 @@ mod live_audit_unmask_provisioning {
             .expect("read table owner");
         assert_ne!(
             owner,
-            runtime_app_role_name(&schema),
+            per_app_role_name(&schema).expect("scratch runtime role name"),
             "the runtime role must NOT own its own audit log"
         );
 
@@ -1830,7 +1895,7 @@ mod live_audit_unmask_provisioning {
         let insert_priv = |schema: &str| {
             format!(
                 "SELECT has_table_privilege('{role}', '{table}', 'INSERT')",
-                role = runtime_app_role_name(schema),
+                role = per_app_role_name(schema).expect("scratch runtime role name"),
                 table = audit_table_ref(schema),
             )
         };
@@ -1838,7 +1903,7 @@ mod live_audit_unmask_provisioning {
             format!(
                 "SELECT has_sequence_privilege('{role}', \
                    pg_get_serial_sequence('{table}', 'id'), 'USAGE')",
-                role = runtime_app_role_name(schema),
+                role = per_app_role_name(schema).expect("scratch runtime role name"),
                 table = audit_table_ref(schema),
             )
         };
@@ -2078,7 +2143,7 @@ mod live_worker_role_fence {
     /// literal or the block silently no-ops and every assertion below would
     /// then be measuring the ABSENCE of a grant while reading as a fence.
     fn production_grant_for(fx: &Fixture) -> String {
-        let sql = runtime_dependents_sql(&fx.schema, &fx.app_role);
+        let sql = runtime_dependents_sql_for_role(&fx.schema, &fx.app_role);
         assert!(
             sql.matches(WORKER_ROLE).count() >= 2,
             "expected the worker role as both a quoted ident and a literal: {sql}"

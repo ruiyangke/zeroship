@@ -222,6 +222,10 @@ impl SessionSetupError {
         Self { disposition, error }
     }
 
+    pub(crate) fn failed(error: DbError) -> Self {
+        Self::new(SessionSetupDisposition::Failed, error)
+    }
+
     /// The transaction-startup outcome. This is semantic state, not a wire
     /// error code to be decoded later.
     #[must_use]
@@ -303,12 +307,11 @@ fn is_missing_per_app_session_role(
 ) -> bool {
     use compio_postgres::error::SqlState;
 
+    let Ok(expected_role) = zeroship_core::database_role::per_app_role_name(app_id) else {
+        return false;
+    };
     code == &SqlState::INVALID_PARAMETER_VALUE
-        && primary_message
-            == format!(
-                "role \"{}\" does not exist",
-                crate::auth::bootstrap::per_app_role_name(app_id)
-            )
+        && primary_message == format!("role \"{expected_role}\" does not exist")
 }
 
 impl DbError {
@@ -811,6 +814,12 @@ impl From<compio_postgres::Error> for DbError {
     }
 }
 
+impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
+    fn from(error: zeroship_core::database_role::PerAppRoleNameError) -> Self {
+        Self::internal(format!("db: {error}"))
+    }
+}
+
 // Builder-side QueryError → DbError so the dispatch helpers can
 // `?`-flow query-construction failures through the same `to_op_error()`
 // boundary. Builder errors are user-input refusals (bad filter, bad
@@ -960,6 +969,49 @@ mod tests {
     //   - A future PostgreSQL SQLSTATE change. The live test pins 22023 so a
     //     changed server fails visibly instead of silently widening this set.
     // -----------------------------------------------------------------
+
+    #[test]
+    fn per_app_role_composers_match_across_services() {
+        use compio_postgres::error::SqlState;
+
+        let app_id = "role_parity";
+        let role = zeroship_core::database_role::per_app_role_name(app_id)
+            .expect("parity fixture role name");
+        let quoted_role = crate::query::quote_ident(&role);
+
+        let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            app_id,
+            "zs_migrator_fixture",
+        )
+        .expect("migration fixture role name");
+        assert_eq!(
+            migration.role_name(),
+            role,
+            "data-plane and migration-service role composers diverged"
+        );
+
+        for setup_sql in [
+            crate::auth::bootstrap::tx_session_setup_sql(app_id)
+                .expect("transaction setup role name"),
+            crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id)
+                .expect("autocommit setup role name"),
+        ] {
+            assert!(
+                setup_sql.starts_with(&format!("SET LOCAL ROLE {quoted_role};")),
+                "data-plane setup SQL did not carry the shared role: {setup_sql}"
+            );
+        }
+
+        let server_message = format!("role \"{role}\" does not exist");
+        assert!(
+            is_missing_per_app_session_role(
+                &SqlState::INVALID_PARAMETER_VALUE,
+                &server_message,
+                app_id,
+            ),
+            "missing-role classifier did not recognize the shared role"
+        );
+    }
 
     #[test]
     fn missing_role_is_classified_from_the_measured_sqlstate() {

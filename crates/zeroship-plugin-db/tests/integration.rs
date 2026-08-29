@@ -5098,7 +5098,8 @@ async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("integration fixture app id must produce a valid PostgreSQL role name");
     let _ = pool
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
@@ -5290,8 +5291,10 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     let app_id = Uuid::new_v4();
     let app_schema = zeroship_plugin_workflow::store::pg::app_schema_for(&app_id);
     let tables = zeroship_plugin_workflow::store::pg::WorkflowTables::for_app_id(&app_id);
-    let schema_role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(&app_schema);
-    let uuid_role = format!("app_{}_role", app_id.as_hyphenated());
+    let schema_role = zeroship_core::database_role::per_app_role_name(&app_schema)
+        .expect("workflow schema must produce a valid PostgreSQL role name");
+    let uuid_role = zeroship_core::database_role::per_app_role_name(&app_id.to_string())
+        .expect("workflow app id must produce a valid PostgreSQL role name");
 
     let _ = pool
         .execute(&format!("DROP SCHEMA IF EXISTS \"{app_schema}\" CASCADE"), &[])
@@ -5496,7 +5499,8 @@ async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[])
         .await
         .unwrap();
-    let role_b = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_b);
+    let role_b = zeroship_core::database_role::per_app_role_name(app_b)
+        .expect("sibling fixture app id must produce a valid PostgreSQL role name");
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[]).await;
     pool.execute(&format!("CREATE SCHEMA \"{app_b}\""), &[]).await.unwrap();
 
@@ -5594,7 +5598,8 @@ async fn client_sql_runs_under_per_app_role() {
     .detach();
 
     client.execute("BEGIN", &[]).await.unwrap();
-    let set_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(app);
+    let set_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(app)
+        .expect("integration app id must produce valid SET LOCAL ROLE SQL");
     client.execute(&set_sql, &[]).await.unwrap();
 
     // current_user inside the tx must be the per-app role.
@@ -6360,7 +6365,8 @@ async fn schema_exists(pool: &Pool, app: &str) -> bool {
 }
 
 async fn role_exists(pool: &Pool, app: &str) -> bool {
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("role lookup app id must produce a valid PostgreSQL role name");
     let rows = pool
         .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[role.as_str()])
         .await
@@ -6493,7 +6499,8 @@ async fn drop_namespace_drops_per_app_role_last() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = "p6a_drop_role";
     c1_cleanup(&pool, app).await;
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("drop-role fixture app id must produce a valid PostgreSQL role name");
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
 
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
@@ -6541,7 +6548,8 @@ async fn drop_namespace_idempotent_steps_3_to_5() {
     }
     let app = "p6a_drop_idem";
     c1_cleanup(&pool, app).await;
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("idempotent-drop fixture app id must produce a valid PostgreSQL role name");
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     c1_create_publication(&pool, app).await;
@@ -6595,7 +6603,8 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     }
     let app = "p6a_drop_retry";
     c1_cleanup(&pool, app).await;
-    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("drop-retry fixture app id must produce a valid PostgreSQL role name");
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     c1_create_publication(&pool, app).await;

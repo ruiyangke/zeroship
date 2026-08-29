@@ -800,7 +800,8 @@ async fn create_app_publication(
 }
 
 async fn provision_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
-    let role = format!("app_{app_id}_role");
+    let role = zeroship_core::database_role::per_app_role_name(app_id)
+        .expect("distributed live app id must produce a valid PostgreSQL role name");
     pool.execute(
         &format!(
             r#"DO $distributed_live_role$ BEGIN
@@ -844,7 +845,8 @@ async fn provision_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
 }
 
 async fn drop_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
-    let role = format!("app_{app_id}_role");
+    let role = zeroship_core::database_role::per_app_role_name(app_id)
+        .expect("distributed live app id must produce a valid PostgreSQL role name");
     pool.execute(&format!(r#"DROP ROLE IF EXISTS "{role}""#), &[])
         .await
         .map_err(|error| format!("drop per-app role: {error}"))?;

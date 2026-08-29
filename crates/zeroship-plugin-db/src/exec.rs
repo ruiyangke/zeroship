@@ -318,7 +318,7 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
         err
     })?;
 
-    let setup_sql = crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id);
+    let setup_sql = crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = DbError::classify_pg_per_app_session_setup(&e, app_id);
         crate::error::prefix_message(
@@ -1589,7 +1589,8 @@ mod tests {
             let pool = Rc::new(Pool::connect(&url, 1).await.expect("pool connect"));
 
             let app_id = "p2c1leak";
-            let role = crate::auth::bootstrap::per_app_role_name(app_id);
+            let role = zeroship_core::database_role::per_app_role_name(app_id)
+                .expect("test app role name");
             let role_ident = crate::query::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership

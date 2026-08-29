@@ -3,13 +3,13 @@
 //!
 //! ## What this module ships
 //!
-//! One thing: the **per-app PG role**. `bootstrap.rs` composes the role
-//! name, creates the role `NOLOGIN NOREPLICATION` under the
-//! [`APP_ROLE_TEMPLATE`] anchor, scopes its grants to the app's own
-//! schema, and emits the `SET [LOCAL] ROLE` + timeout batch the data
-//! plane runs per transaction. Privilege is carried by the connection's
-//! role - by the PROCESS - and nothing here hands the worker a
-//! capability it can invoke.
+//! One thing: the **per-app PG role**. `zeroship-core::database_role`
+//! composes the role name. `bootstrap.rs` creates it under the
+//! [`APP_ROLE_TEMPLATE`] anchor with `NOLOGIN NOREPLICATION`, scopes its grants
+//! to the app's own schema, and emits the `SET [LOCAL] ROLE` + timeout batch the
+//! data plane runs per transaction. Privilege is carried by the connection's
+//! role - by the PROCESS - and nothing here hands the worker a capability it
+//! can invoke.
 //!
 //! ## What was deleted, and why it is not coming back
 //!

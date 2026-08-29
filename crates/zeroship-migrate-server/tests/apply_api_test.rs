@@ -210,7 +210,8 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     // holds, so the leak makes a production-shaped check slower on every run and
     // muddies any measurement of it (the `runtime_dependents_sql` docstring's
     // "540 of 540" was taken over a population this suite had been growing).
-    let runtime_role = zeroship_migrate_server::apply::runtime_app_role_name(&schema);
+    let runtime_role = zeroship_core::database_role::per_app_role_name(&schema)
+        .expect("test app role name");
     for r in [role, runtime_role] {
         let _ = conn
             .batch_execute(&format!(
@@ -901,7 +902,10 @@ async fn as_app_runtime_identity(
     sql: &str,
 ) -> Result<(), compio_postgres::Error> {
     let worker = quote_ident(zeroship_migrate_server::apply::WORKER_ROLE);
-    let runtime = quote_ident(&zeroship_migrate_server::apply::runtime_app_role_name(app_schema));
+    let runtime = quote_ident(
+        &zeroship_core::database_role::per_app_role_name(app_schema)
+            .expect("test app role name"),
+    );
     conn.batch_execute(&format!(
         "SET SESSION AUTHORIZATION {worker}; SET ROLE {runtime};"
     ))
@@ -996,7 +1000,8 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     let schema = app_id.to_string();
     let table = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
     let audit = format!("{}.{}", quote_ident(&schema), quote_ident(table));
-    let runtime_role = zeroship_migrate_server::apply::runtime_app_role_name(&schema);
+    let runtime_role = zeroship_core::database_role::per_app_role_name(&schema)
+        .expect("test app role name");
 
     // DELETION, not reordering: say which one before touching any privilege.
     assert!(
