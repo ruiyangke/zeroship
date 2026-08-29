@@ -8,7 +8,8 @@ migration DSL, and `docs/proposals/2026-08-28-app-database-decoupling.md` for th
 design in full.
 
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
-entities, and datastore placement. Everything else describes code in the tree. The distinction
+entities, datastore placement, the per-grant role graph, the schema epoch's producer, and the
+`__zeroship_admin` system schema. Everything else describes code in the tree. The distinction
 matters - a reader who cannot tell them apart will look for a `Database` row that does not exist
 yet, or rebuild something that does.
 
@@ -19,12 +20,12 @@ yet, or rebuild something that does.
 
 ```
 PostgreSQL server
-  └── Datastore    ds_...    one physical database on it       operator-owned   (designed)
-        └── Database dbs_...  one schema inside it             creator-owned    (designed)
-              └── tables, and the app's data
+  |- Datastore    ds_...     one physical database on it      operator-owned   (designed)
+     |- Database  dbs_...    one schema inside it             creator-owned    (designed)
+        |- tables, and the app's data
 
-app  --grant-->  database        one app sees exactly ONE database
-                                 many apps may share ONE database
+app  --grant--  database        one app sees exactly ONE database
+                                many apps may share ONE database
 ```
 
 Three ideas, and the whole design is the consequence of separating them:
@@ -54,7 +55,8 @@ Every entity carries a typed id - UUIDv7, base62, three-letter prefix
 (`dbs`, not `db`, for consistency: every prefix in `typed_id.rs` is three letters and its doc
 comments state the shape `^[a-z]{3}_[A-Za-z0-9]{22}$`. Note that shape is a CONVENTION, not a
 parser constraint - `parse` is `split_once('_')` plus a base62 decode of the remainder
-(`typed_id.rs:139-145`), so `db_<22 chars>` would parse fine. Choose `dbs` because the tree is
+(`crates/zeroship-core/src/typed_id.rs:139-145`), so `db_<22 chars>` would parse fine. Choose `dbs`
+because the tree is
 uniform, not because the parser refuses two letters.)
 
 **Both ids are internal. Neither is exposed to creators.**
@@ -95,10 +97,11 @@ has is a database.
 half-applied rename would be worse than none:
 
 - **Where it names PostgreSQL's own object.** `crates/zeroship-plugin-db/src/drop_namespace.rs`
-  sequences "the PG teardown order for deleting an app"; `replication.rs:878` scopes a cluster-wide
-  scan to "the calling app's namespace". Both mean the PostgreSQL schema, and PostgreSQL calls it a
-  namespace (`pg_namespace`). Renaming those to "database" would make them say the wrong thing,
-  because at that layer a database is the Datastore.
+  sequences "the PG teardown order for deleting an app";
+  `crates/zeroship-plugin-db/src/replication.rs:877-878` scopes a cluster-wide scan to "the calling
+  app's namespace". Both mean the PostgreSQL schema, and PostgreSQL calls it a namespace
+  (`pg_namespace`). Renaming those to "database" would make them say the wrong thing, because at
+  that layer a database is the Datastore.
 - **Where it means something else entirely.** ES module namespace imports
   (`docs/reference/vite-plugin.md`), and the runtime's `env.*` plugin namespaces - a second plugin
   claiming the `db` namespace panics by design.
@@ -164,16 +167,18 @@ This belongs to the decoupling rather than sitting beside it. As long as a deplo
 database, app identity and database identity are still welded together at the moment that matters
 most - the moment of creation.
 
-**The service already exists; it runs at the wrong time.**
-`crates/zeroship-migrate-server/src/provisioning.rs` already issues `CREATE SCHEMA` (`:232`,
-`:255`), `CREATE ROLE` (`:121`) and `ALTER SCHEMA ... OWNER` (`:143`, `:233`), from a service that
-already does not execute creator code - which is the boundary that matters, and the reason
-provisioning can never live in the worker.
+**The service already exists; it runs at the wrong time.** The migration service already issues
+every statement provisioning needs, from a process that already does not execute creator code -
+which is the boundary that matters, and the reason provisioning can never live in the worker:
+`CREATE ROLE` at `crates/zeroship-migrate-server/src/provisioning.rs:121`, `ALTER SCHEMA ... OWNER`
+at `:143`, and the workflow journal's own `CREATE SCHEMA ... AUTHORIZATION` at `:232`.
 
-What is wrong is the trigger. Provisioning is a **side effect of applying a migration**: `apply.rs`
-imports it and calls it on the apply path, keyed by app, literally `format!("app_{schema}")` at
-`apply.rs:1178`. That is the conflation this design removes, in executable form - **a database
-exists because an app deployed.**
+What is wrong is the trigger. Provisioning is a **side effect of applying a migration**. The apply
+path takes `let schema = app_id.to_string()`
+(`crates/zeroship-migrate-server/src/apply.rs:257`) and issues `CREATE SCHEMA IF NOT EXISTS` over it
+before any migration runs (`:268-271`); the journal schema follows from the same path, keyed
+`format!("app_{schema}")` (`:1178`). That is the conflation this design removes, in executable
+form - **a database exists because an app deployed.**
 
 So the work is inversion, not construction:
 
@@ -226,18 +231,20 @@ one-database-per-app, and it is load-bearing in two ways:
 Enforcement is **PostgreSQL role membership**. The worker connects once, holds no inherited
 privilege over app data, and narrows per transaction with a single `SET LOCAL ROLE`.
 
-**The role it narrows to is per GRANT, not per database**, and that distinction is the whole of
-revocation. A role per database - `zs_db_<dbsid>_<cap>`, with apps made members of it - is
-measured in the proposal (section 0) as **unrevocable under co-tenancy**: with two apps holding the
-database role, revoking one leaves the row unchanged and the other app's membership still serves it.
-The shape that works is a role per grant, `zs_grant_<gid>`, holding
-`GRANT zs_db_<dbsid>_<cap> TO zs_grant_<gid> WITH SET FALSE` - the `WITH SET FALSE` being what stops
-the worker assuming the database role directly and bypassing the per-grant edge. Revoking one grant
-then removes exactly one app's access.
+**The role it narrows to is per GRANT, not per database, and its name carries the schema epoch:**
+`zs_bind_<gid>_e<E>`. Two independent properties ride on that one string.
 
-An earlier version of this section named only `SET LOCAL ROLE "zs_db_<dbsid>_<cap>"`, which is the
-graph the proposal refutes. `2026-08-28-app-database-decoupling.md` section 0 carries the
-measurement.
+**Revocation** is why the role is per grant. A role per database - `zs_db_<dbsid>_<cap>`, with apps
+made members of it - is measured in the proposal, under "Why the role is per grant and not per
+database", as **unrevocable under co-tenancy**:
+`SET ROLE` authorizes against the transitive closure of the *login* role's memberships, so with two
+apps holding the database role, revoking one leaves the closure non-empty and the other app's
+membership still serves the first. The shape that works holds
+`GRANT zs_db_<dbsid>_<cap> TO zs_bind_<gid>_e<E> WITH SET FALSE` - the `WITH SET FALSE` being what
+stops the worker assuming the database role directly and bypassing the per-grant edge. Revoking one
+grant then removes exactly one app's access, at the next transaction, on the same warm connection.
+
+**The schema epoch** is why the name carries `_e<E>`. See below.
 
 This follows the platform invariant that **privilege follows the process, not the function**: the
 worker executes creator code, so any capability the worker holds is reachable by whatever reaches
@@ -247,10 +254,12 @@ what the tenant may do.
 Two exceptions exist today and are deliberate, not oversights:
 
 1. The worker holds `zeroship_workflow_owner` by a plain grant, boot *requires* that membership
-   (`crates/zeroship-worker/src/db_posture.rs`), and the fence exempts it by name.
+   (`crates/zeroship-worker/src/db_posture.rs:101-103`), and the fence exempts it by name
+   (`AMBIENT_MEMBERSHIP_EXEMPTION`, `crates/zeroship-worker/src/db_posture.rs:13`).
 2. **The replication plane is not fenced at all.** Logical decoding consults no column ACL and no
    RLS - a role denied `SELECT ssn` still receives the plaintext in the decoded stream. The boot
-   posture requires `REPLICATION` and `BYPASSRLS` on that same login.
+   posture requires `REPLICATION` and `BYPASSRLS` on that same login
+   (`crates/zeroship-worker/src/db_posture.rs:96-100`).
 
 ### Column-level grants are the masking authority
 
@@ -284,12 +293,117 @@ and `__zs_raw__<field>` holds the plaintext. Adding `.mask()` to a column that a
 a real engine backfill for unencrypted columns; the encrypted case is refused by decision, because
 the backfill is structured SQL and the engine holds no key material.
 
+### The schema epoch, and why PostgreSQL enforces it rather than Rust
+
+A descriptor is the shape an isolate was **built** against. The epoch is how the database says which
+shape it currently **has**, so an isolate holding a descriptor from before an apply is refused rather
+than served the wrong columns.
+
+**The epoch is a substring of the role name, so it is enforced by PostgreSQL.** The per-grant role
+is `zs_bind_<gid>_e<E>`; an apply that advances the epoch mints the roles for `E+1` and drops those
+for `E-1`. An isolate carrying a stale epoch therefore fails at `SET LOCAL ROLE`, which is the
+**first statement of the setup batch that already exists** (`tx_session_setup_sql` and
+`autocommit_local_session_setup_sql`, `crates/zeroship-plugin-db/src/auth/bootstrap.rs:204-212` and
+`:226-233`, issued as one simple query at `crates/zeroship-plugin-db/src/exec.rs:322`). Nothing has
+to remember to check: the batch is the only route to a usable connection, and a stale epoch never
+gets one.
+
+The steady-state cost is **zero**. The epoch rides a string the batch already sends.
+
+**The rejected alternative was to append `SELECT epoch ...` to the setup batch and compare in Rust.**
+It costs one index lookup inside an existing round trip, which is cheap, and it puts the fence in a
+statement the worker *issues* rather than a condition it *fails*. Its author nominated two objections
+that would have sunk the role-name form, and both were measured away:
+
+- **Does `CREATE ROLE` inside the apply bracket serialize applies across other databases?** Roles are
+  cluster-shared (`pg_authid` and `pg_auth_members` both carry `relisshared = t`), so this was the
+  live worry. Method: session 1 holds an uncommitted `CREATE ROLE` in one database, session 2 issues
+  `CREATE ROLE` in another database of the same cluster with `lock_timeout = '3s'` so blocking
+  surfaces as an error rather than a hang, against a control with no holder. Control and case both
+  returned `CREATE ROLE`; the case took 108 ms. No cross-database serialization.
+- **Is `SET ROLE` superlinear in `pg_auth_members`?** If it were, the role graph would tax every
+  query on the platform. Method: grow the shared catalog, then time 2000 `SET ROLE` plus 2000
+  `RESET ROLE` server-side in a plpgsql loop so client round trips are excluded and the same N runs
+  at every scale. At 3, 103, 1103 and 6103 membership rows the loop measured 6 ms throughout - about
+  1.5 us per statement, flat across a 2000x growth.
+
+So the comparison form buys nothing the name does not, and costs a statement in every setup batch
+forever.
+
+**Only the producer is missing; the consumer ships.**
+`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:313-315`
+compares the observed epoch against the expected one and returns `Verdict::ReResolve` - retryable,
+distinct from the terminal denials above it. What has no input is
+`crates/zeroship-plugin-db/src/transaction/driver.rs:106`, which mints `SchemaEpoch::new(0)` on both
+sides and says so at `:100-101`: "The wiring is real; the *input* is not yet." Building the epoch is
+supplying one input to a classifier that already ships.
+
+**Live epochs are capped at two, fail-closed.** The reaper is part of the apply, not a sweep: an
+apply that cannot drop epoch `E-1`'s roles refuses to advance to `E+1`. That bounds an otherwise
+unbounded leak into the cluster-shared catalog, and it is what gives an in-flight isolate one epoch
+of grace rather than none.
+
+**What is not measured, and must not be read as covered:** per-backend membership cache construction
+at CONNECT time. The `SET ROLE` measurement above is on an established backend; a new backend still
+pays to build its membership set. Pooling amortizes that; it does not remove it. Measure it before
+the role graph ships.
+
+### The system schema
+
+`__zeroship_admin` **does not exist.** It was deleted on 2026-08-27 - six tables and 32
+definer-rights routines - because the worker could call every one of them, and a privileged call the
+worker can make is not a boundary. `crates/zeroship-plugin-db/src/auth/bootstrap.rs:15-18` records
+that nothing replaced it, and `db/migrations-ts/` provisions no such schema. One live statement still
+names it and therefore fails on every database: the PITR placeholder at
+`crates/zeroship-plugin-db/src/backend/postgres.rs:1286`, whose own comment at `:770-776` says so.
+
+**This work creates it**, and the shape is the invariant's one permitted use - state a separate
+service writes and the worker only reads:
+
+- **An installer**, in `db/migrations-ts/`, so the schema is a provisioned platform object rather
+  than something a test helper conjures. The deleted version was `#[cfg]`-gated to tests, which is
+  why deleting it cost nothing and why recreating it is genuinely new work.
+- **Exactly one table**, holding the current schema epoch per database. The migration service writes
+  it inside the apply transaction that mints the new epoch's roles, so the recorded epoch and the
+  roles in the catalog cannot disagree. Its grant posture is write-to-the-migration-service,
+  read-only-to-everyone-else - and **the data plane still reads nothing**: the role name carries the
+  epoch precisely so no query has to. The control plane reads it to compose the binding it injects.
+  A data-plane read of this table would reintroduce the catalog dependency the descriptor decision
+  removed.
+- **Zero worker-callable functions.** No `SECURITY DEFINER`, no `EXECUTE ... TO PUBLIC`, and no
+  `GRANT USAGE ON SCHEMA` to an app or grant role - that `USAGE` was the reachability precondition
+  for every public `EXECUTE` in the deleted version, so a checklist that audits the routine grants
+  while leaving `USAGE` in place is checking the lock and not the door.
+- **No `PUBLIC` write grant on anything.** The deleted schema had exactly one, on its PITR table, and
+  a provisioner written by porting the old installer's statements would port it.
+
+The name is the drawer problem the deletion diagnosed: "admin" named a collection of platform powers,
+and a name that survives its contents is how the next reader concludes there is a drawer to put
+things in. It is reinstated for exactly one row shape and nothing else.
+
 ---
 
 ## Change streams
 
 One publication per database, membership excluding the reserved `__zeroship_` namespace so platform
 journals never enter the worker-visible WAL feed.
+
+**Publications and slots sit at different scopes, and the difference decides what has to be
+rationed.** Measured on PostgreSQL 18.4:
+
+- **A publication is DATASTORE-scoped.** `pg_publication` and `pg_publication_rel` both carry
+  `relisshared = f`, and the same publication name created in two databases of one cluster coexists,
+  each database's `pg_publication` showing only its own. One publication per database therefore
+  costs nothing cluster-wide and no name can collide across datastores.
+- **A replication slot is CLUSTER-scoped, and the stock ceiling is 10.** `max_replication_slots`
+  defaults to 10 and is `context = postmaster`, so raising it is a restart. Ten slots created in one
+  database are all visible from another database of the same cluster, and the eleventh - created
+  **from that other database** - fails `SQLSTATE 53400`, "all replication slots are in use". Slot
+  cardinality is a cluster budget shared by every datastore tenant, which is why the design takes one
+  slot per (datastore, worker) and fans out in process rather than one slot per database.
+- **`max_slot_wal_keep_size` measures as `-1`** - unbounded retention - on a stock server, so one
+  abandoned slot can grow `pg_wal` until the cluster dies. It is `context = sighup`, so bounding it
+  is a reload rather than a restart.
 
 **The publication column list is the only server-side fence on the decode path** - grants and RLS
 are executor-side and logical decoding consults neither. That fence collides with something the
@@ -354,7 +468,7 @@ never name a datastore.
 
 ## What this costs
 
-Two costs remain, and both are PostgreSQL constraints rather than choices:
+Three costs remain, and the first two are PostgreSQL constraints rather than choices:
 
 1. **Classified columns lose plaintext reactivity for everyone, including the owner.** One published
    column set per table per decode stream is a database constraint. Withhold a column from one
@@ -362,6 +476,12 @@ Two costs remain, and both are PostgreSQL constraints rather than choices:
 2. **Every apply must regenerate explicit per-column grants inside the DDL transaction.** A
    migration that fails to do so leaves the database *unreadable* rather than *over-readable* - the
    right failure direction, but a new way for a deploy to break.
+3. **Every grant and every live epoch is a row in the cluster-shared catalog.** `pg_authid` and
+   `pg_auth_members` are `relisshared = t`, so the role graph is the one resource a datastore's
+   tenants cannot be partitioned away from each other in. Two things bound it: `SET ROLE` measures
+   flat across a 2000x growth in membership rows, and the apply-time reaper caps live epochs at two.
+   What is not bounded by measurement is per-backend membership cache construction at connect time,
+   which nothing has measured.
 
 **One scope limit ships with it:** `readwrite`/`readonly` grants are restricted to apps under the
 same creator - which the workspace model satisfies by construction. Cross-creator sharing is blocked
