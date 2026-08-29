@@ -65,7 +65,7 @@ pub(crate) struct ApplyResult {
 ///
 /// Step 6 is what makes this function the write path's answer too, not just
 /// the read path's: seven of the nine row-returning write verbs already route
-/// their `RETURNING *` rows through here, so one stage covers all of them.
+/// their `RETURNING` rows through here, so one stage covers all of them.
 /// (The other five - `updateMany`, `deleteMany`, `purgeMany`, `restoreMany`
 /// and the CAS fan-out - collapse their rows to a count and hand nothing to
 /// JS.)
@@ -406,13 +406,22 @@ async fn decrypt_rows_on_read(
 
 /// Remove every key that is not on the row's declared surface.
 ///
-/// The LAST stage, and the one that closes the `RETURNING *` leak. Twelve SQL
-/// sites in `zeroship-schema` emit `RETURNING *`, which is every physical
-/// column - including a masked field's raw column - and none of them passes
-/// through the projection allowlist, which is SELECT-side only. Without this
-/// stage `await db.users.insert({ ssn })` hands the real value back under a key
-/// the generated `Row<S>` type does not declare, which is invisible to any
-/// review written against the generated types.
+/// The LAST stage. It used to be described here as "the one that closes the
+/// `RETURNING *` leak", because twelve SQL sites in `zeroship-schema` emitted
+/// `RETURNING *` - every physical column, including a masked field's raw
+/// column - and none of them passed through the projection allowlist, which was
+/// SELECT-side only. Without this stage `await db.users.insert({ ssn })` handed
+/// the real value back under a key the generated `Row<S>` type does not
+/// declare, invisible to any review written against the generated types.
+///
+/// **Those twelve sites now project explicitly**
+/// (`zeroship_schema::query::build_returning_expr`), so no statement this
+/// runtime issues produces an off-surface key any more. **This stage is still
+/// required**, and the reason has not changed: a statement is not the only
+/// producer of a row. The WAL consumer decodes pgoutput with no schema in reach
+/// and no projection to apply, and its rows arrive here with every physical
+/// column on them. A projection binds one statement; this predicate binds every
+/// row.
 ///
 /// It runs last because the stages before it need the physical columns: the
 /// decrypt stage reads ciphertext, and the mask pass strips the raw column

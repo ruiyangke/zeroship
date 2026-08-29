@@ -352,22 +352,20 @@ impl ColumnAssignment {
 ///
 /// # `RETURNING *` has no representation, and that is what this type is for
 ///
-/// Twelve production sites in `query.rs` write `RETURNING *` (`:3584`, `:4005`,
-/// `:4157`, `:4228`, `:4254`, `:4290`, `:4445`, `:4483`, `:4525`, `:4557`,
-/// `:5937`, `:6020`), and a star returns every **physical** column of the row -
-/// which is not the set the creator may see. Masked columns are the clear case:
-/// the platform stores plaintext (or ciphertext) in `<col>` and the display
-/// value in the sibling `<col>_masked`, and `RETURNING *` hands back **both**.
-/// `crud/mask_pass.rs:913-937` is a test named
-/// `wrap_row_on_read_returning_star_shape_prefers_sibling` whose fixture says so
-/// exactly - *"RETURNING star: row carries BOTH parent (ciphertext / plaintext)
-/// AND sibling"* - and the plaintext is removed afterwards by a Rust pass in the
-/// worker.
+/// **The asymmetry this paragraph described is now closed on both sides.** It
+/// used to say that twelve production sites in `query.rs` wrote `RETURNING *`,
+/// and listed their line numbers; the star is gone from all twelve (they
+/// project from the runtime descriptor, `query::build_returning_expr`) and the
+/// line-number census was already stale when the sites moved. A census of
+/// somebody else's line numbers cannot be kept true from here, so this one is
+/// not replaced.
 ///
-/// So on the read path the SQL substitutes - `"ssn_masked" AS "ssn"` - and the
-/// plaintext never leaves the database, while on the write path the plaintext
-/// leaves the database and correctness rests on a later pass remembering to
-/// replace it. This type closes that asymmetry by reusing [`Projection`], the
+/// The reason the type has no wildcard is unchanged and is not about that
+/// census. A star returns every **physical** column of the row, which is not
+/// the set the creator may see: a masked field occupies two columns, and only
+/// one of them is on the read surface. Expressing "everything" would let a
+/// rendered plan reach the other one with no node to point at, which is the
+/// property this type exists to make unstateable. It reuses [`Projection`], the
 /// same node the read family projects through, including
 /// [`crate::ProjectionSource::MaskedSibling`].
 ///
@@ -389,8 +387,9 @@ impl Returning {
     /// This is the *narrow* end of the type, not a convenience for the wide end:
     /// it returns fewer columns than any list, never more. It is right for a
     /// bulk purge, whose only result today is a row count that
-    /// `dispatch_purge_many` obtains by counting `RETURNING *` rows
-    /// (`crud/mod.rs:1586-1613`).
+    /// `dispatch_purge_many` obtains by counting the rows its `RETURNING`
+    /// clause hands back - a projected column list since 2026-08-28, and a
+    /// star before that. Either way it materialises rows to count them.
     ///
     /// **It has a consequence the caller owns.** The change-event publication
     /// correlates on `row["id"]`, so a write that returns nothing has no rows to
@@ -609,9 +608,11 @@ impl InsertBuilder {
 /// two independent places:
 ///
 /// * `build_update_many_with_system_fields` emits the `WHERE` clause only when
-///   the filter is non-empty (`query.rs:4223-4228`) and never emits a bound, so
-///   `updateMany({}, ...)` renders `UPDATE "app"."t" SET ... RETURNING *` - a
-///   whole-table rewrite that also materialises every row;
+///   the filter is non-empty and never emits a bound, so `updateMany({}, ...)`
+///   renders `UPDATE "app"."t" SET ... RETURNING <cols>` - a whole-table
+///   rewrite that also materialises every row. (The clause names its columns
+///   since 2026-08-28 and was `RETURNING *` before; the hole is the missing
+///   bound, which neither spelling closes.)
 /// * the `MAX_QUERY_LIMIT` cap that does exist is enforced by the **caller**,
 ///   and only on one of two branches. `dispatch_update_many` probes the target
 ///   ids and refuses above the cap at `crud/mod.rs:1249`, but that check sits

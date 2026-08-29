@@ -290,8 +290,10 @@ where
         // this read is allowed to decrypt it at all.
         //
         // For a MASKED encrypted field the ciphertext lives in the raw column,
-        // which only a `RETURNING *` write ever carries - a SELECT projects
-        // the field's own column, which holds the mask. Decrypting is then
+        // which no statement this runtime issues carries any more: SELECT and
+        // RETURNING both project the field's own column, which holds the mask.
+        // (A `RETURNING *` write used to carry it; a WAL-decoded row still
+        // does.) Decrypting is then
         // pointless AND unsafe: pointless because the mask pass overwrites the
         // slot with a sentinel, unsafe because the plaintext would sit in the
         // row while it happened. The query-hint unmask path does not need it
@@ -301,7 +303,8 @@ where
         // So: an unmasked encrypted field decrypts from its own column, and a
         // masked one is left alone. The old gate also decrypted whenever the
         // row happened to carry the sibling key, which is how a write's
-        // `RETURNING *` used to hand plaintext to the mask pass.
+        // `RETURNING *` used to hand plaintext to the mask pass. That producer
+        // is gone; this gate is not, because the WAL consumer is not.
         let masked = def
             .get("mask")
             .and_then(|v| v.as_object())
