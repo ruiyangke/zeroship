@@ -207,3 +207,46 @@ its read buffer."
 Second finding in this batch whose line reference points at code that no longer
 exists. A carried finding needs its citation re-resolved before its claim is
 even meaningful.
+
+## connect_raw.rs:302 DOWNGRADED by experiment, 2026-08-29
+
+The drop is real - `BackendMessage::Normal { messages, .. }` discards
+`deferred_error`, and the handshake does reach the producer that sets it. But
+the consequence is NOT a lost error.
+
+A scripted-input experiment fed an `ErrorResponse` followed by a frame whose
+header length is under 4. The handshake returned the `ErrorResponse`, and on its
+NEXT read surfaced:
+
+    MEASURED_HANDSHAKE_RESULT: error communicating with the server:
+      invalid message length: header length < 4
+
+The reason is structural: `deferred_error` is DERIVED from bytes that remain in
+the read buffer. Discarding the derived error does not discard the bytes, so the
+next decode recomputes it. The effect is a one-round delay, not a loss.
+
+Startup-reachability of the five producer sites, from the same run:
+
+| codec site | startup-reachable |
+| --- | --- |
+| malformed header | yes |
+| generic `max_message_size` | no - startup keeps the 64 MiB default and fills 16 KiB |
+| startup-tag length (`K`/`v`) | yes |
+| COPY metadata | not during startup |
+| malformed `ReadyForQuery` | yes |
+
+**Residual question, deliberately left open.** One producer site is
+`deferred_error = Some(Error::io(error))`. An I/O error is NOT derived from
+retained bytes, so the re-detection argument above does not obviously cover it -
+though a socket that failed once will generally fail again. Nobody has measured
+that arm.
+
+**Status: not worth fixing on current evidence.** A one-round delay in surfacing
+an error that does surface is not a defect worth changing a handshake for. This
+is recorded so the next reader does not re-derive it a third time.
+
+**Process note.** The job that produced this measurement was terminated by the
+model provider's safety filter partway through ("flagged for possible
+cybersecurity risk") after 165k tokens, because the brief was framed around
+malformed peer input. The measurement above was recovered from its log. Briefs
+in this area need neutral, correctness-shaped framing to survive.
