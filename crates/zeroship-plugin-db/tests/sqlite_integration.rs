@@ -7632,9 +7632,9 @@ fn drift_end_to_end_seeded_mismatch_detected() {
         backend
             .pool_exec(
                 "CREATE TABLE \"app_drift_seeded\".\"users\" (\
-                     id            TEXT PRIMARY KEY, \
-                     email         TEXT, \
-                     email_masked  TEXT NOT NULL\
+                     id              TEXT PRIMARY KEY, \
+                     __zs_raw__email TEXT, \
+                     email           TEXT NOT NULL\
                  )",
                 &[],
             )
@@ -7645,7 +7645,7 @@ fn drift_end_to_end_seeded_mismatch_detected() {
         backend
             .pool_exec(
                 "INSERT INTO \"app_drift_seeded\".\"users\" \
-                 (id, email, email_masked) VALUES \
+                 (id, __zs_raw__email, email) VALUES \
                  ('u_ok', 'alice@example.com', 'a***@example.com')",
                 &[],
             )
@@ -7657,7 +7657,7 @@ fn drift_end_to_end_seeded_mismatch_detected() {
         backend
             .pool_exec(
                 "INSERT INTO \"app_drift_seeded\".\"users\" \
-                 (id, email, email_masked) VALUES \
+                 (id, __zs_raw__email, email) VALUES \
                  ('u_drift', 'bob@example.com', '***')",
                 &[],
             )
@@ -7712,9 +7712,9 @@ fn drift_check_returns_zero_when_aligned() {
         backend
             .pool_exec(
                 "CREATE TABLE \"app_drift_aligned\".\"users\" (\
-                     id           TEXT PRIMARY KEY, \
-                     email        TEXT, \
-                     email_masked TEXT NOT NULL\
+                     id              TEXT PRIMARY KEY, \
+                     __zs_raw__email TEXT, \
+                     email           TEXT NOT NULL\
                  )",
                 &[],
             )
@@ -7727,7 +7727,7 @@ fn drift_check_returns_zero_when_aligned() {
         ] {
             let sql = format!(
                 "INSERT INTO \"app_drift_aligned\".\"users\" \
-                 (id, email, email_masked) VALUES ('{id}', '{email}', '{masked}')"
+                 (id, __zs_raw__email, email) VALUES ('{id}', '{email}', '{masked}')"
             );
             backend.pool_exec(&sql, &[]).await.expect("INSERT");
         }
@@ -7766,9 +7766,9 @@ fn drift_check_handles_null_sibling_drift() {
         backend
             .pool_exec(
                 "CREATE TABLE \"app_drift_null_sibling\".\"users\" (\
-                     id           TEXT PRIMARY KEY, \
-                     email        TEXT, \
-                     email_masked TEXT\
+                     id              TEXT PRIMARY KEY, \
+                     __zs_raw__email TEXT, \
+                     email           TEXT\
                  )",
                 &[],
             )
@@ -7777,7 +7777,7 @@ fn drift_check_handles_null_sibling_drift() {
         backend
             .pool_exec(
                 "INSERT INTO \"app_drift_null_sibling\".\"users\" \
-                 (id, email, email_masked) VALUES ('u1', 'alice@example.com', NULL)",
+                 (id, __zs_raw__email, email) VALUES ('u1', 'alice@example.com', NULL)",
                 &[],
             )
             .await
@@ -7812,9 +7812,9 @@ fn drift_check_handles_plaintext_column() {
         backend
             .pool_exec(
                 "CREATE TABLE \"app_drift_plaintext\".\"users\" (\
-                     id         TEXT PRIMARY KEY, \
-                     ssn        TEXT, \
-                     ssn_masked TEXT NOT NULL\
+                     id            TEXT PRIMARY KEY, \
+                     __zs_raw__ssn TEXT, \
+                     ssn           TEXT NOT NULL\
                  )",
                 &[],
             )
@@ -7824,7 +7824,7 @@ fn drift_check_handles_plaintext_column() {
         backend
             .pool_exec(
                 "INSERT INTO \"app_drift_plaintext\".\"users\" \
-                 (id, ssn, ssn_masked) VALUES \
+                 (id, __zs_raw__ssn, ssn) VALUES \
                  ('u_ok', '123-45-6789', '***-**-6789')",
                 &[],
             )
@@ -7833,7 +7833,7 @@ fn drift_check_handles_plaintext_column() {
         backend
             .pool_exec(
                 "INSERT INTO \"app_drift_plaintext\".\"users\" \
-                 (id, ssn, ssn_masked) VALUES \
+                 (id, __zs_raw__ssn, ssn) VALUES \
                  ('u_drift', '987-65-4321', 'wrong-mask')",
                 &[],
             )
@@ -7879,9 +7879,9 @@ fn drift_check_handles_encrypted_column() {
         backend
             .pool_exec(
                 "CREATE TABLE \"app_drift_encrypted\".\"users\" (\
-                     id         TEXT PRIMARY KEY, \
-                     ssn        BLOB, \
-                     ssn_masked TEXT NOT NULL DEFAULT '***'\
+                     id            TEXT PRIMARY KEY, \
+                     __zs_raw__ssn BLOB, \
+                     ssn           TEXT NOT NULL DEFAULT '***'\
                  )",
                 &[],
             )
@@ -7894,14 +7894,26 @@ fn drift_check_handles_encrypted_column() {
         use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
         let row_pk = "usr_drift_enc";
         let plaintext = "555-00-1234";
+        let raw_col = zeroship_plugin_db::query::raw_column_name("ssn");
         let mut doc = serde_json::json!({
-            "id":         row_pk,
-            "ssn":        plaintext,
-            "ssn_masked": "***-**-9999",  // intentionally WRONG masked
+            "id":  row_pk,
+            "ssn": plaintext,
         });
         encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
             .await
             .expect("encrypt_row_on_write");
+        // Stand in for `mask_pass::relocate_masked_columns`: move the ciphertext
+        // (and its binary-bind marker) to the raw column and put an
+        // intentionally WRONG mask in the field's own column, which is the drift
+        // this test exists to detect.
+        let ciphertext = doc["ssn"].take();
+        doc[raw_col.clone()] = ciphertext;
+        doc["ssn"] = serde_json::json!("***-**-9999");
+        if doc.get("__zsbin__ssn").is_some() {
+            let marker = doc["__zsbin__ssn"].take();
+            doc.as_object_mut().unwrap().remove("__zsbin__ssn");
+            doc[format!("__zsbin__{raw_col}")] = marker;
+        }
         let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
             .expect("build_insert");
         let client = backend
@@ -8070,11 +8082,11 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
         backend
             .pool_exec(
                 "CREATE TABLE \"app_bulk_atomic_refuse\".\"users\" (\
-                     id           TEXT PRIMARY KEY, \
-                     email        TEXT, \
-                     email_masked TEXT NOT NULL, \
-                     ssn          TEXT, \
-                     ssn_masked   TEXT NOT NULL\
+                     id              TEXT PRIMARY KEY, \
+                     __zs_raw__email TEXT, \
+                     email           TEXT NOT NULL, \
+                     __zs_raw__ssn   TEXT, \
+                     ssn             TEXT NOT NULL\
                  )",
                 &[],
             )

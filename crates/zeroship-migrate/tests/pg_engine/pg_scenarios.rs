@@ -5275,8 +5275,9 @@ async fn a_guard_denied_down_is_refused_before_it_runs() {
 
 /// Lower a masked `addColumn` through the shipped `IrAuthor` on the PostgreSQL
 /// dialect, with or without the `ifNotExists` guard. Returns the lowered units in
-/// plan order: unit 0 adds the MAIN column, unit 1 adds the `<column>_masked` sibling
-/// plus its `zero-migrate:mask` sentinel `COMMENT`. `ir_name` seeds the deterministic
+/// plan order: unit 0 adds the column holding the REAL value (`__zs_raw__<column>`,
+/// carrying the declared type), unit 1 adds the MASK column - the one with the
+/// field own name - plus its `zero-migrate:mask` sentinel `COMMENT`. `ir_name` seeds the deterministic
 /// unit versions, so two calls with different names describe the same op as two
 /// independent plans.
 fn lower_masked_add_column(cfg: &ExecutorConfig, ir_name: &str, guarded: bool) -> Vec<Migration> {
@@ -5346,7 +5347,7 @@ async fn journal_applied(
 /// test in this workspace does is read the sentinel back out of a live PostgreSQL
 /// catalog. That residue is a hole.
 #[compio::test]
-async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
+async fn a_guarded_masked_add_column_adds_the_mask_column_on_a_clean_first_apply() {
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
@@ -5362,11 +5363,12 @@ async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
             cfg.project_schema
         ),
     );
+    let raw = zeroship_migrate::schema::query::raw_column_name("ssn");
     let units = lower_masked_add_column(&cfg, "masked_add_fresh", true);
     assert_eq!(
         units.len(),
         2,
-        "a masked addColumn lowers to the main column plus the `_masked` sibling"
+        "a masked addColumn lowers to the raw column plus the mask column"
     );
 
     let mut plan = vec![base.clone()];
@@ -5376,16 +5378,16 @@ async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
         .expect("the guarded masked addColumn applies");
 
     assert!(
-        column_exists(&session, &cfg.project_schema, "accounts", "ssn").await,
-        "unit 0 added the main column"
+        column_exists(&session, &cfg.project_schema, "accounts", &raw).await,
+        "unit 0 added the column holding the real value"
     );
     assert!(
         journal_applied(&session, &cfg, &units[1].version).await,
-        "the sibling unit journaled as applied"
+        "the mask-column unit journaled as applied"
     );
     assert!(
-        column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
-        "the sibling unit journaled green, so `ssn_masked` must exist on the server"
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn").await,
+        "the mask-column unit journaled green, so `ssn` must exist on the server"
     );
 
     drop_schemas(&session, &cfg).await;
@@ -5400,7 +5402,7 @@ async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
 /// written by an EARLIER apply invocation, which is the state the `ifNotExists` guard
 /// exists to make re-runnable.
 #[compio::test]
-async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_resume() {
+async fn a_crash_between_the_masked_add_column_units_still_adds_the_mask_column_on_resume() {
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
@@ -5439,8 +5441,18 @@ async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_r
     .await
     .expect("unit 0 applies");
     assert!(
-        !column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
-        "the crash landed before unit 1, so the sibling is absent"
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "accounts",
+            &zeroship_migrate::schema::query::raw_column_name("ssn")
+        )
+        .await,
+        "unit 0 committed, so the column holding the real value is present"
+    );
+    assert!(
+        !column_exists(&session, &cfg.project_schema, "accounts", "ssn").await,
+        "the crash landed before unit 1, so the mask column is absent"
     );
     assert!(
         !journal_applied(&session, &cfg, &units[1].version).await,
@@ -5460,11 +5472,11 @@ async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_r
 
     assert!(
         journal_applied(&session, &cfg, &units[1].version).await,
-        "the resume journaled the sibling unit as applied"
+        "the resume journaled the mask-column unit as applied"
     );
     assert!(
-        column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
-        "the resume journaled the sibling unit green, so `ssn_masked` must exist"
+        column_exists(&session, &cfg.project_schema, "accounts", "ssn").await,
+        "the resume journaled the mask-column unit green, so `ssn` must exist"
     );
 
     drop_schemas(&session, &cfg).await;
@@ -5497,6 +5509,7 @@ async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_prese
             cfg.project_schema
         ),
     );
+    let raw = zeroship_migrate::schema::query::raw_column_name("ssn");
     let unguarded = lower_masked_add_column(&cfg, "masked_add_unguarded", false);
     let mut plan = vec![base.clone()];
     plan.extend(unguarded.iter().cloned());
@@ -5505,7 +5518,7 @@ async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_prese
         .expect("the unguarded masked addColumn applies");
     assert!(
         column_exists(&session, &cfg.project_schema, "accounts", "ssn").await
-            && column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+            && column_exists(&session, &cfg.project_schema, "accounts", &raw).await,
         "the unguarded plan runs both units bare and creates both columns"
     );
 
@@ -5527,7 +5540,7 @@ async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_prese
     }
     assert!(
         column_exists(&session, &cfg.project_schema, "accounts", "ssn").await
-            && column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
+            && column_exists(&session, &cfg.project_schema, "accounts", &raw).await,
         "the no-op left both columns in place"
     );
 

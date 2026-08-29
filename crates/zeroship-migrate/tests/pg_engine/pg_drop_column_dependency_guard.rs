@@ -213,26 +213,37 @@ async fn masked_drop_column_checks_the_sibling_unit_and_names_its_blocker() {
     let cfg = cfg_for(&token());
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
+    // The layout the platform emits AFTER the storage flip: the field's own
+    // column holds the mask and carries the sentinel; `__zs_raw__ssn` holds the
+    // real value. The pair is named the other way round from what this fixture
+    // used to hand-write, and the drop's two-unit shape is unchanged by that -
+    // which is the point of restating the fixture rather than leaving it
+    // describing a layout nothing produces.
+    //
+    // `sensitive_column` is the one the view blocks, so it is the one the drop
+    // must refuse on; `field_column` is the one the drop starts from.
+    let field_column = "ssn";
+    let sensitive_column = zeroship_migrate::schema::query::raw_column_name(field_column);
     session
         .batch(&format!(
-            "CREATE TABLE \"{}\".accounts ( \
-               id bigint PRIMARY KEY, ssn text, ssn_masked text \
+            "CREATE TABLE \"{schema}\".accounts ( \
+               id bigint PRIMARY KEY, {field_column} text, {sensitive_column} text \
              ); \
-             COMMENT ON COLUMN \"{}\".accounts.ssn_masked IS \
+             COMMENT ON COLUMN \"{schema}\".accounts.{field_column} IS \
                'zero-migrate:mask:kind=last4,classification=pii'; \
-             CREATE VIEW \"{}\".masked_reader AS \
-               SELECT ssn_masked FROM \"{}\".accounts",
-            cfg.project_schema, cfg.project_schema, cfg.project_schema, cfg.project_schema
+             CREATE VIEW \"{schema}\".masked_reader AS \
+               SELECT {sensitive_column} FROM \"{schema}\".accounts",
+            schema = cfg.project_schema,
         ))
         .await
-        .expect("create the masked-sibling blocker fixture");
+        .expect("create the masked-pair blocker fixture");
 
     let steps = lower_drop_steps(
         &session,
         &cfg,
         "drop_masked_ssn_with_reader",
         "accounts",
-        "ssn",
+        field_column,
     )
     .await;
     assert_eq!(
@@ -241,20 +252,20 @@ async fn masked_drop_column_checks_the_sibling_unit_and_names_its_blocker() {
             .filter(|step| matches!(step, PlanStep::Ddl(_)))
             .count(),
         2,
-        "the live masked sibling must lower as its own DDL unit"
+        "the live masked pair must lower as two DDL units"
     );
 
     let error = apply_steps(&session, &cfg, &steps)
         .await
-        .expect_err("the view reading the masked sibling must refuse its drop");
-    assert_named_precondition_refusal(error, "accounts", "ssn_masked", "masked_reader");
+        .expect_err("the view reading the raw column must refuse its drop");
+    assert_named_precondition_refusal(error, "accounts", &sensitive_column, "masked_reader");
     assert!(
-        !column_exists(&session, &cfg.project_schema, "accounts", "ssn").await,
-        "the main unit committed before the sibling unit was checked"
+        !column_exists(&session, &cfg.project_schema, "accounts", field_column).await,
+        "the first unit committed before the second unit was checked"
     );
     assert!(
-        column_exists(&session, &cfg.project_schema, "accounts", "ssn_masked").await,
-        "the sibling precondition must refuse before its own DDL runs"
+        column_exists(&session, &cfg.project_schema, "accounts", &sensitive_column).await,
+        "the blocked unit's precondition must refuse before its own DDL runs"
     );
 }
 
