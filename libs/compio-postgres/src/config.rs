@@ -4,16 +4,19 @@
 
 #![allow(clippy::doc_overindented_list_items)]
 
-use crate::Socket;
-use crate::connect::{connect, with_connect_timeout};
-use crate::connect_raw::connect_raw;
-use crate::connect_tls::Encryption;
+// This module is a LEAF: configuration data and DSN parsing, nothing else.
+//
+// `Config::connect` and `Config::connect_raw` used to live here, which put the
+// crate's most depended-upon module (17 dependents) inside a 16-module
+// dependency cycle for the sake of about 55 lines. Rust allows an inherent
+// `impl` in any module of the defining crate, so those two methods now live in
+// `connect.rs` beside the code they call. The public API is unchanged.
+//
+// Keep it that way: if a new method here needs `connect`, `Client`,
+// `Connection` or a TLS type, it belongs in `connect.rs` instead.
+use crate::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::keepalive::KeepaliveConfig;
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
-use crate::{Client, Connection, Error};
-use compio::io::{AsyncRead, AsyncWrite};
 use std::borrow::Cow;
 #[cfg(unix)]
 use std::ffi::OsStr;
@@ -2415,68 +2418,6 @@ impl Config {
         }
 
         Ok(())
-    }
-
-    /// Opens a connection to a PostgreSQL database.
-    pub async fn connect<T>(&self, tls: T) -> Result<(Client, Connection<Socket, T::Stream>), Error>
-    where
-        T: MakeTlsConnect<Socket>,
-    {
-        connect(tls, self).await
-    }
-
-    /// Connects to a PostgreSQL database over an arbitrary stream.
-    ///
-    /// Uses the startup, authentication, timeout, statement-cache, TLS mode,
-    /// `sslsni`, and `sslcertmode` settings. A configured `requirepeer` is
-    /// refused because an arbitrary stream exposes neither its address family
-    /// nor peer credentials. Transport-address settings such as `host`,
-    /// `hostaddr`, `port`, keepalives, and `tcp_user_timeout` are ignored. The
-    /// connect timeout starts with TLS negotiation, covers startup and
-    /// authentication, and cannot cover the caller's work to open that stream.
-    /// The read timeout is installed only after startup succeeds.
-    ///
-    /// The caller owns the stream, so this entry point cannot open a second
-    /// one. `allow` and `prefer` are therefore reduced to the transport they
-    /// attempt *first* - plaintext and TLS respectively - with no reconnect if
-    /// it fails. Use [`Config::connect`] to get the fallback.
-    pub async fn connect_raw<S, T>(
-        &self,
-        stream: S,
-        tls: T,
-    ) -> Result<(Client, Connection<S, T::Stream>), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
-    {
-        if self.require_peer.is_some() {
-            // A generic stream does not expose an address family or peer
-            // credentials. Pretending this is a Unix socket would be unsafe,
-            // while ignoring the requested identity check would turn it into
-            // false assurance.
-            return Err(Error::config(
-                "requirepeer cannot be checked by Config::connect_raw; use Config::connect \
-                 with a Unix-domain host"
-                    .into(),
-            ));
-        }
-        self.validate_connection_settings()?;
-        // No release handle: the stream is the caller's, `S` is unconstrained,
-        // and a stream that is not a socket has no descriptor to shut down.
-        // Such a connection keeps the pre-existing behaviour - it is released
-        // when its connection task is next polled.
-        with_connect_timeout(
-            self.get_connect_timeout().copied(),
-            connect_raw(
-                stream,
-                tls,
-                Encryption::first_for(self.ssl_mode),
-                true,
-                self,
-                None,
-            ),
-        )
-        .await
     }
 }
 
