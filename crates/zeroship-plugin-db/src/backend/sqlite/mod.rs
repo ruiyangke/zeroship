@@ -544,6 +544,14 @@ impl SqliteBackend {
         self.session.unregistered_transaction_handle_for_tests()
     }
 
+    /// **Test-only**: stall the next command *this backend's* session runs. See
+    /// [`session::SqliteSession::arm_next_command_gate_for_tests`]; the gate is
+    /// per-session, so it cannot be tripped by another backend's traffic.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn arm_next_command_gate_for_tests(&self) -> session::NextCommandGate {
+        self.session.arm_next_command_gate_for_tests()
+    }
+
     /// **Test-only**: an autocommit reservation the caller keeps, so it can be
     /// submitted more than once.
     ///

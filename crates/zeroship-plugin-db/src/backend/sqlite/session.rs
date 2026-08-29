@@ -503,6 +503,14 @@ pub struct SqliteSession {
     /// Monotonic transaction-lane ids. An app keeps its id for the session's
     /// life even if the actor evicts the connection behind it.
     next_tx_lane: Cell<u32>,
+    /// One-shot test gate, shared with **this session's actor and no other**.
+    ///
+    /// It is per-session deliberately. As a process-global it was taken by
+    /// whichever actor happened to receive the next command, so a gate armed
+    /// by one test stalled a concurrently running test's actor and satisfied
+    /// the arming test's `wait_until_blocked` with a foreign command.
+    #[cfg(any(test, feature = "test-helpers"))]
+    next_command_gate: NextCommandGateSlot,
     /// Worker `JoinHandle`. Held only so the OS thread is tracked (we never
     /// join it from the session side - cancellation is signalled via the
     /// `Shutdown` command + sender drop).
@@ -601,6 +609,11 @@ impl SqliteSession {
         let app_id_owned: Option<String> = app_id.map(str::to_string);
         let packet_tx_owned = packet_tx;
 
+        #[cfg(any(test, feature = "test-helpers"))]
+        let next_command_gate: NextCommandGateSlot = Arc::new(Mutex::new(None));
+        #[cfg(any(test, feature = "test-helpers"))]
+        let gate_for_worker = Arc::clone(&next_command_gate);
+
         let worker = std::thread::Builder::new()
             .name("sqlite-session".to_string())
             .spawn(move || {
@@ -611,6 +624,10 @@ impl SqliteSession {
                         return;
                     }
                 };
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    actor.next_command_gate = gate_for_worker;
+                }
                 let _ = startup_tx.send(Ok(Arc::clone(&actor.interrupts)));
                 actor.run(&rx);
             })
@@ -632,6 +649,8 @@ impl SqliteSession {
                 next_reservation: Cell::new(1),
                 tx_lanes: RefCell::new(HashMap::new()),
                 next_tx_lane: Cell::new(0),
+                #[cfg(any(test, feature = "test-helpers"))]
+                next_command_gate,
                 _worker: worker,
             }),
             Ok(Err(e)) => Err(e),
@@ -1325,16 +1344,9 @@ struct NextCommandGateWorker {
     release_rx: flume::Receiver<()>,
 }
 
+/// The arming slot one session shares with its own actor thread.
 #[cfg(any(test, feature = "test-helpers"))]
-static NEXT_COMMAND_GATE: Mutex<Option<NextCommandGateWorker>> = Mutex::new(None);
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn take_next_command_gate_for_worker() -> Option<NextCommandGateWorker> {
-    NEXT_COMMAND_GATE
-        .lock()
-        .expect("NEXT_COMMAND_GATE mutex poisoned")
-        .take()
-}
+type NextCommandGateSlot = Arc<Mutex<Option<NextCommandGateWorker>>>;
 
 /// Test helper: stall the next worker command before execution until the
 /// returned gate is released.
@@ -1357,22 +1369,27 @@ impl NextCommandGate {
     }
 }
 
-/// Install a one-shot worker gate for the next SQLite session command.
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn arm_next_command_gate_for_tests() -> NextCommandGate {
-    let (entered_tx, entered_rx) = flume::bounded(1);
-    let (release_tx, release_rx) = flume::bounded(1);
-    let mut slot = NEXT_COMMAND_GATE
-        .lock()
-        .expect("NEXT_COMMAND_GATE mutex poisoned");
-    assert!(slot.is_none(), "NEXT_COMMAND_GATE already armed");
-    *slot = Some(NextCommandGateWorker {
-        entered_tx,
-        release_rx,
-    });
-    NextCommandGate {
-        entered_rx,
-        release_tx,
+impl SqliteSession {
+    /// Install a one-shot gate for the next command **this session's** actor
+    /// runs. Sessions do not share the slot, so a gate armed here can only ever
+    /// be tripped by a command this session was asked to run.
+    pub fn arm_next_command_gate_for_tests(&self) -> NextCommandGate {
+        let (entered_tx, entered_rx) = flume::bounded(1);
+        let (release_tx, release_rx) = flume::bounded(1);
+        let mut slot = self
+            .next_command_gate
+            .lock()
+            .expect("next_command_gate mutex poisoned");
+        assert!(slot.is_none(), "next_command_gate already armed");
+        *slot = Some(NextCommandGateWorker {
+            entered_tx,
+            release_rx,
+        });
+        NextCommandGate {
+            entered_rx,
+            release_tx,
+        }
     }
 }
 
@@ -1430,6 +1447,9 @@ struct Actor {
     /// Monotonic command sequence. `0` is the not-running sentinel, so this
     /// starts at 1.
     seq: u64,
+    /// This actor's own gate slot, shared with the session that owns it.
+    #[cfg(any(test, feature = "test-helpers"))]
+    next_command_gate: NextCommandGateSlot,
 }
 
 const BOOT_PRAGMAS: &str = "\
@@ -1481,6 +1501,8 @@ impl Actor {
             app_id,
             packet_tx,
             seq: 0,
+            #[cfg(any(test, feature = "test-helpers"))]
+            next_command_gate: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1789,9 +1811,16 @@ impl Actor {
     fn run(&mut self, rx: &flume::Receiver<Command>) {
         while let Ok(cmd) = rx.recv() {
             #[cfg(any(test, feature = "test-helpers"))]
-            if let Some(gate) = take_next_command_gate_for_worker() {
-                let _ = gate.entered_tx.send(());
-                let _ = gate.release_rx.recv();
+            {
+                let armed = self
+                    .next_command_gate
+                    .lock()
+                    .expect("next_command_gate mutex poisoned")
+                    .take();
+                if let Some(gate) = armed {
+                    let _ = gate.entered_tx.send(());
+                    let _ = gate.release_rx.recv();
+                }
             }
             match cmd {
                 Command::Reserve {
