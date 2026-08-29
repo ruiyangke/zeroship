@@ -7,14 +7,18 @@ database" is served as **one owner app per namespace plus graded DML grants to o
 (section 3) - NOT as multi-writer schema ownership, which section 13 treats as a different
 project. Nothing below asks which of those to pick.
 
-**What is being asked is whether four costs are acceptable.** They are the whole decision:
+**What is being asked is whether these costs are acceptable.** One of the four has since been
+withdrawn (see 2 below), so it is three:
 
 1. **`env.db.users` dies** (13.4). Every creator call site, every generated type,
    `docs/reference/db.md`, `examples/starter/` and `tests/golden_path.sh` change together.
    This is the largest creator-facing break in the proposal.
-2. **A namespace owner's migration can break a co-tenant's deploy** (13.3). The reader's deploy
-   gate checks the owner's applied descriptor hash; until the reader rebuilds, its deploy fails.
-   There is no way around it that keeps the ordering guarantee the masking story rests on.
+2. ~~A namespace owner's migration can break a co-tenant's deploy.~~ **WITHDRAWN 2026-08-29** - this
+   was never a cost, and listing it as one came from modelling the namespace as owned by an app.
+   The creator owns the schema; apps in a workspace share one migration source and one
+   generated-types artifact, so a schema change means rebuild the workspace. The deploy gate stays,
+   because an app built against v1 must not be served against v2, but that is correctness and the
+   remedy is an ordinary rebuild. See section 4.
 3. **Classified columns lose plaintext reactivity for everyone, including the owner** (13.2).
    One published column set per table per decode stream is a PostgreSQL constraint, not a choice.
 4. **Blanket table grants and prospective default privileges are deleted** (13.5), so every apply
@@ -221,7 +225,8 @@ lives in a schema inside it named literally after the app id
 
 ```
 ds_<base62 uuidv7>   Datastore  { engine, cluster_id, dsn_secret_ref, resource_key }
-ns_<base62 uuidv7>   Namespace  { datastore_id, owner_app_id, physical schema = "ns_<nsid>" }
+ns_<base62 uuidv7>   Namespace  { datastore_id, owner (the CREATOR, never an app - see 4),
+                                 physical schema = "ns_<nsid>" }
 grant                PK (app_id, namespace_id), UNIQUE (app_id, binding_name)
                      { capability, granted_to_principal, state }
 ```
@@ -521,12 +526,23 @@ creators it is, and no role fixes it.
 
 ## 4. Ownership and migration of a shared namespace
 
-- **One owner app per namespace.** `Namespace.owner_app_id`, not null.
+- **A namespace is owned by the CREATOR, not by an app.** Operator decision, 2026-08-29:
+  *"the creator has full control of the db, even breaking changes, the creator has to take the
+  risk; the db migration is not coupled with app."* The model is a monorepo - several apps in one
+  workspace sharing one migration source and one set of generated types.
+
+  So there is **no `Namespace.owner_app_id`**. An earlier revision of this section made that column
+  not-null and routed migrate authority through it; that was wrong, and it contradicted the very
+  next bullet, which already says the migrator role is "named by no app". Schema authority never
+  passes through an app identity.
 - **New route** `POST /v1/namespaces/{namespace_id}/migrations/apply`.
   `crates/zeroship-authz/src/resource.rs:14-16` gains `Resource::Namespace { id }` - it is `App { id }`
-  and `Any` today - with the policy "principal may migrate N iff principal is an owner of
-  `N.owner_app_id`". The control-plane forwarding hop re-verifies the caller's own bearer and adds no
-  authority, which is already the right posture; only the resource type is new.
+  and `Any` today - with the policy **"principal may migrate N iff principal owns N"**, checked
+  against the creator directly with no app indirection. The control-plane forwarding hop re-verifies
+  the caller's own bearer and adds no authority, which is already the right posture; only the
+  resource type is new.
+  *Open:* whether `Namespace` hangs off a project/workspace row or off the creator account. That
+  is the monorepo config-shape question in section 9 and does not change anything else here.
 - **The apply lock moves to the namespace**: `pg_advisory_xact_lock(hashtextextended('ns:' || <nsid>, 0))`,
   taken on the datastore connection before any DDL.
 - **Migrator role is `zs_ns_<nsid>_mig`**, named by no app. One migrator forever, so the ownership
@@ -546,8 +562,20 @@ creators it is, and no role fixes it.
   The *list* of namespaces comes from the control plane's grant table, never from the bundle - the
   bundle asserts hashes, not preconditions. **A partial apply blocks the deploy**, which is stricter
   than today and correct: the masking story rests on this ordering.
-- **A non-owner's deploy gate checks the owner's applied hash.** A reader builds against the owner's
-  published descriptor. This is a real coupling with a real cost - section 12.
+- **Every app's deploy gate checks the namespace's applied hash**, and under the monorepo model this
+  is NOT co-tenant coupling. All apps in the workspace build against one migration source and one
+  generated-types artifact, so a schema change means *rebuild the workspace* - the same mechanics as
+  changing a shared library, with the creator owning the risk.
+
+  The gate still has to exist, for a reason worth stating plainly because an earlier revision of
+  this document gave the wrong one: an app built against schema v1 must not be SERVED against
+  schema v2, or it reads columns that have moved. That is correctness, not politics between apps.
+  The creator resolves it by rebuilding and redeploying, which is the expected workflow rather than
+  a cost to be weighed.
+
+  The residual, which is real but is the creator's to take: apps deploy independently, so there is a
+  window in which one app is rebuilt and another is not. Breaking changes are permitted; the
+  platform's job is to make the mismatch loud, not to prevent it.
 
 ---
 
