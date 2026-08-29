@@ -3,16 +3,25 @@
 ## The decision this needs, before anything is built
 
 **The design fork is already taken and is not what is being asked.** "Multiple apps reach one
-database" is served as **one owner app per namespace plus graded DML grants to others**
-(section 3) - NOT as multi-writer schema ownership, which section 13 treats as a different
-project. Nothing below asks which of those to pick.
+database" is served as **the creator owning the namespace and authoring its schema, with apps
+holding graded DML grants on it** (section 3). The model is a monorepo: one `zeroship.jsonc`,
+several apps, one migration source and one set of generated types per database. No app holds DDL
+authority, so there is no owner-app to transfer and no multi-writer schema ownership - which
+section 13 treats as a different project. Nothing below asks which of those to pick.
 
-**What is being asked is whether these costs are acceptable.** One of the four has since been
-withdrawn (see 2 below), so it is three:
+**AN APP SEES EXACTLY ONE DATABASE** (operator decision, 2026-08-29). A schema *is* the app's
+database. The "one app, many databases" half of the original ask is dropped; the "many apps, one
+database" half is what this design delivers. That single decision removes the largest cost the
+proposal carried, because a per-app binding level was the only thing that forced it.
 
-1. **`env.db.users` dies** (13.4). Every creator call site, every generated type,
-   `docs/reference/db.md`, `examples/starter/` and `tests/golden_path.sh` change together.
-   This is the largest creator-facing break in the proposal.
+**Two of the original four costs are now withdrawn, so it is two:**
+
+1. ~~`env.db.users` dies.~~ **WITHDRAWN 2026-08-29 - it survives.** The break existed only because
+   several bindings had to sit between `env.db` and a collection, and a binding named `analytics`
+   would collide with a collection named `analytics` on the same key
+   (`sdks/bootstrap/src/install-schema.ts:1508`). With one database per app there is no binding
+   level, no collision, and `env.db.users.find(...)` keeps working unchanged. This was the largest
+   creator-facing break in the proposal and it is gone.
 2. ~~A namespace owner's migration can break a co-tenant's deploy.~~ **WITHDRAWN 2026-08-29** - this
    was never a cost, and listing it as one came from modelling the namespace as owned by an app.
    The creator owns the schema; apps in a workspace share one migration source and one
@@ -23,6 +32,12 @@ withdrawn (see 2 below), so it is three:
    One published column set per table per decode stream is a PostgreSQL constraint, not a choice.
 4. **Blanket table grants and prospective default privileges are deleted** (13.5), so every apply
    must regenerate explicit per-column grants inside the DDL transaction.
+
+**Databases are PROVISIONED, never auto-created** (operator decision, 2026-08-29). A dedicated
+provisioning service owns their lifecycle, on the D1-to-Workers model: you create a database, then
+bind an app to it. Deploying an app does NOT conjure one. This is part of the decoupling, not an
+adjacent convenience - as long as `zeroship deploy` can bring a schema into existence, app identity
+and database identity are still welded together at the moment that matters most.
 
 **Scope limit that ships with it:** `readwrite` and `readonly` grants are restricted to apps under
 the same creator. Cross-creator co-grants are blocked on O1 (section 14) - the unmask policy is
@@ -48,7 +63,8 @@ The shape:
 - **`Namespace`** - one schema inside a Datastore, physically named `ns_<nsid>`. This is the
   unit that is owned, migrated, granted, published and dropped. It replaces "the app's schema"
   everywhere.
-- **`Grant`** - the many-to-many edge, `(app_id, namespace_id, binding_name, capability)`, with
+- **`Grant`** - the edge, keyed `(app_id)` since an app binds to exactly one namespace, carrying
+  `namespace_id` and a capability, with
   capability `owner` | `readwrite` | `readonly`.
 
 Enforcement is PostgreSQL role membership, not an in-process check. The worker connects once as
@@ -227,9 +243,24 @@ lives in a schema inside it named literally after the app id
 ds_<base62 uuidv7>   Datastore  { engine, cluster_id, dsn_secret_ref, resource_key }
 ns_<base62 uuidv7>   Namespace  { datastore_id, owner (the CREATOR, never an app - see 4),
                                  physical schema = "ns_<nsid>" }
-grant                PK (app_id, namespace_id), UNIQUE (app_id, binding_name)
-                     { capability, granted_to_principal, state }
+grant                PK (app_id)  -- ONE namespace per app, see below
+                     { namespace_id, capability, granted_to_principal, state }
 ```
+
+**Every created database gets its own typed id** - `ns_<base62 uuidv7>`, the same UUIDv7 + base62 +
+prefix shape every other entity uses (`crates/zeroship-core/src/typed_id.rs`). That id, not an app
+id, is what names the physical schema, the migrator role, the per-capability roles, the publication
+and the apply lock. It is the identity the whole decoupling turns on.
+
+**The grant key is `(app_id)`, not `(app_id, namespace_id)`.** An app binds to exactly one
+namespace (operator decision, 2026-08-29), so the app id alone identifies the row and the database
+cannot be ambiguous at any call site. An earlier revision keyed on the pair and carried a
+`binding_name` with `UNIQUE (app_id, binding_name)`; both are gone, because a binding name only
+exists to disambiguate between several databases an app can see.
+
+The relationship is still many-to-many in the direction that matters: **many apps may point at one
+namespace**, which is what "multiple apps share a database" means. Only the reverse - one app,
+several databases - is closed.
 
 The physical schema name derives from the **namespace** id. That single change is what breaks
 `apply.rs:257` and every `quote_ident(app_id)` site in `crates/zeroship-schema/src/query.rs`, and
@@ -266,12 +297,18 @@ the role fences is a *mismatched pair* - right role, wrong schema. A *consistent
 resolution executes cleanly. That bug class does not exist today only because resolution is the
 identity function.
 
-Decoupling makes resolution `f(app_id, binding_name)`, and `binding_name` comes from creator code
-(`env.db.analytics.users`). **That is the security delta, and it is not staleness.** It is bounded
-by 2.2(a): the binding table is per-isolate and server-injected and contains only that app's own
-grants, so a consistently-wrong resolution can only select another of the *same app's* namespaces.
-Reaching a co-tenant requires the injected table itself to be wrong, which is a control-plane
-defect, not a data-plane one.
+An earlier revision made resolution `f(app_id, binding_name)` with `binding_name` coming from
+creator code (`env.db.analytics.users`), and called that the security delta.
+
+**The single-database decision removes it.** With one database per app there is no binding name in
+creator code and nothing for the creator to select with: resolution is `f(app_id)` again, the
+identity-like function it is today, and the mismatched-pair bug class it introduced never comes
+into existence. This is the second thing that decision bought - the first was keeping
+`env.db.users` - and it is worth stating because a security property that is absent by construction
+is stronger than one that is bounded by an argument.
+
+What remains is the ordinary requirement that the app-to-namespace mapping be server-injected and
+never creator-supplied, which 2.2(a) already covers.
 
 ### 2.2 The mechanism, in three parts, all required
 
@@ -480,14 +517,25 @@ It is void on the CDC path, which is section 5.
 
 ## 3. Which sharing is permitted, and which is refused
 
-**Permitted: a namespace has exactly one owner app; other apps hold DML grants on it.**
+**Permitted: the CREATOR owns the namespace and authors its schema; apps hold DML grants on it.**
 
-- `owner` - migrates it, sole author of its schema.
 - `readwrite` - DML on granted columns. No DDL.
 - `readonly` - SELECT on granted columns.
 
-**`readwrite` and `readonly` grants are restricted to apps under the same creator.** Not because
-roles are insufficient, but because one authority is unreachable by any server-side mechanism:
+**There is no `owner` app capability.** An earlier revision listed one ("`owner` - migrates it, sole
+author of its schema"), which contradicted section 4 once the creator became the owner. Migration
+authority is not something an app can hold: it belongs to the workspace, and the migrator role
+`zs_ns_<nsid>_mig` is named by no app. An app's grant only ever says what DML it may do.
+
+That removes a class of problem rather than solving one. With no app holding DDL authority there is
+no ownership transfer, no ping-pong between apps, and no question of what happens to a namespace
+when its owning app is deleted - the namespace outlives every app that binds to it, which is the
+whole point of giving it its own identity.
+
+**`readwrite` and `readonly` grants are restricted to apps under the same creator** - which the
+workspace model satisfies by construction, since every app in one `zeroship.jsonc` has one creator.
+The restriction only bites for cross-creator sharing, and it is not because roles are insufficient
+but because one authority is unreachable by any server-side mechanism:
 
 > **The unmask authorization policy is authored by the reading app.**
 > `crates/zeroship-plugin-db/src/crud/mask_policy.rs:8-30` states it: the policy comes from "the
@@ -921,11 +969,14 @@ declared once, at workspace level; the apps are declared beside them and bind to
   "analytics": { "migrations": "./db/analytics", "out": "./generated/zeroship/analytics" }
 },
 "apps": {
-  "storefront": { "app": "<uuid>", "databases": { "main": "readwrite" } },
-  "admin":      { "app": "<uuid>", "databases": { "main": "readwrite",
-                                                  "analytics": "readonly" } }
+  "storefront": { "app": "<uuid>", "database": "main"      },  // SINGULAR - one db per app
+  "admin":      { "app": "<uuid>", "database": "main"      },  // two apps, one shared db
+  "reporting":  { "app": "<uuid>", "database": "analytics" }
 }
 ```
+
+The workspace may declare several databases; **an app binds to exactly one**. That is the whole of
+the "single schema" decision, and it is what keeps `env.db.users` alive.
 
 Declaring the databases ONCE is the point: one migration source and one `out` directory per
 database, shared by every app in the workspace, structurally rather than by convention. Nothing can
@@ -945,26 +996,31 @@ production environment at a staging app id, silently, which is precisely the fai
 scalar shape was written to make impossible. It is the sharpest open detail in this section.
 
 ```ts
-await env.db.main.users.find({ where: { active: true } });
-await env.db.analytics.events.insert({ ... });      // refused at type level when grant is readonly
+await env.db.users.find({ where: { active: true } });     // UNCHANGED
+await env.db.orders.insert({ ... });                     // refused at type level when readonly
 
-await env.db.main.transaction(async (tx) => {
+await env.db.transaction(async (tx) => {                 // UNCHANGED
   await tx.users.update(...);
   await tx.orders.insert(...);
 });
 ```
 
-**There is no `env.db.users` alias, and adding one would be a bug.** `installSchema` plants
-collections directly on the target with `Object.defineProperty`
+**`env.db.users` survives, and the single-database decision is what saves it.** An earlier revision
+of this section required `env.db.<binding>.<collection>` and called the loss of the shortcut the
+largest creator-facing break in the proposal. The reason was real but conditional: `installSchema`
+plants collections directly on the target with `Object.defineProperty`
 (`sdks/bootstrap/src/install-schema.ts:1508`), alongside `transaction` (`:1515`) and `live` (`:1521`),
-so a binding named `analytics` and a collection named `analytics` are the same key. The only
-non-colliding shape is `env.db.<binding>.<collection>` with no single-database shortcut. Pre-launch,
-so every call site and every doc example changes in one patch. `RESERVED_ENV_DB_NAMES`
-(`install-schema.ts:1136`) becomes the reserved **binding** name set; `transaction` and
-`openSubscription` move down a level onto each binding object.
+so with several bindings a binding named `analytics` and a collection named `analytics` are the
+same key. **With one database per app there is no binding level and no collision.** The creator
+surface does not change at all: no call-site sweep, no regenerated types, no edits to
+`docs/reference/db.md`, `examples/starter/` or `tests/golden_path.sh`.
 
-Three databases cannot be three plugins: a second plugin claiming the `db` namespace panics by design
-(`crates/zeroship-runtime/src/core/plugin.rs:191-193`). One plugin, N bindings.
+`RESERVED_ENV_DB_NAMES` (`install-schema.ts:1136`) keeps its present meaning, and `transaction` and
+`openSubscription` stay where they are.
+
+The plugin constraint that motivated the binding level is also moot: a second plugin claiming the
+`db` namespace panics by design (`crates/zeroship-runtime/src/core/plugin.rs:191-193`), but one
+database per app means one plugin, one binding, no contention.
 
 `DbBinding` gains a third field, `namespace_id` (`crates/zeroship-plugin-db/src/binding.rs:14-18`). It
 is already `Clone + Eq + Hash`, already minted once per isolate from live state, and already the key
