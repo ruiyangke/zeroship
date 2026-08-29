@@ -132,6 +132,11 @@ where
         }
     };
 
+    // `with_connect_timeout` fabricates its own error after dropping the timed
+    // future, so keep delivery state outside it and attach that state to
+    // whichever error emerges.
+    let delivery = cancel_query_raw::CancelDeliveryTracker::default();
+    let attempt_delivery = delivery.clone();
     with_connect_timeout(config.connect_timeout, async move {
         let encryption = config.encryption;
         let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
@@ -163,10 +168,12 @@ where
             has_hostname,
             process_id,
             secret_key,
+            &attempt_delivery,
         )
         .await
     })
     .await
+    .map_err(|error| error.with_cancel_delivery(delivery.delivery()))
 }
 
 /// Send `CancelRequest` and wait for the postmaster to consume its connection.

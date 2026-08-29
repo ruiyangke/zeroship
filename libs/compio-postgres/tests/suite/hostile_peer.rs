@@ -2399,6 +2399,176 @@ async fn startup_without_backend_key_data_is_usable_but_not_cancellable() {
 }
 
 #[compio::test]
+async fn a_post_write_cancel_confirmation_error_retires_the_bare_session() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (packet_seen_tx, packet_seen_rx) = futures_channel::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut primary = accept_bounded(&listener);
+            complete_startup(&mut primary, 924);
+
+            let mut cancel = accept_bounded(&listener);
+            let mut packet = [0u8; 16];
+            cancel
+                .read_exact(&mut packet)
+                .expect("read the complete CancelRequest");
+            assert_eq!(u32::from_be_bytes(packet[..4].try_into().unwrap()), 16);
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                80_877_102,
+                "the second connection did not carry a CancelRequest"
+            );
+            assert_eq!(i32::from_be_bytes(packet[8..12].try_into().unwrap()), 924);
+            assert_eq!(i32::from_be_bytes(packet[12..].try_into().unwrap()), 1234);
+            packet_seen_tx
+                .send(())
+                .expect("report the complete CancelRequest");
+
+            release_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("release the stalled cancel-confirmation peer");
+        });
+
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(compio_postgres::NoTls),
+        )
+        .await
+        .expect("startup for the post-write cancel test hung")
+        .expect("connect to the post-write cancel peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let token = client.cancel_token();
+        let cancel = Box::pin(token.cancel_query(compio_postgres::NoTls));
+        let packet_seen = Box::pin(packet_seen_rx);
+        let cancel = match futures_util::future::select(cancel, packet_seen).await {
+            futures_util::future::Either::Left((result, _)) => {
+                panic!("cancel returned before its packet reached the peer: {result:?}")
+            }
+            futures_util::future::Either::Right((seen, cancel)) => {
+                seen.expect("the cancel peer dropped its packet report");
+                cancel
+            }
+        };
+        let error = compio::time::timeout(OPERATION_WATCHDOG, cancel)
+            .await
+            .expect("post-write cancel confirmation exceeded its operation watchdog")
+            .expect_err("a stalled cancel confirmation unexpectedly succeeded");
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("connection timed out"),
+            "the stalled cancel returned the wrong error: {chain}"
+        );
+
+        let retired = client.is_closed();
+        let reuse_failed_without_waiting = matches!(
+            compio::time::timeout(Duration::from_millis(250), client.simple_query("SELECT 1"))
+                .await,
+            Ok(Err(_))
+        );
+
+        release_tx
+            .send(())
+            .expect("release the stalled cancel-confirmation peer");
+        drop(client);
+        server.finish();
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the retired primary connection did not stop")
+            .expect("the primary connection task panicked");
+
+        assert!(
+            retired,
+            "a possibly delivered CancelRequest left its bare session reusable"
+        );
+        assert!(
+            reuse_failed_without_waiting,
+            "work queued after the uncertain cancel did not fail immediately"
+        );
+    }))
+    .await
+    .expect("post-write cancel retirement test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_cancel_connect_error_before_write_leaves_the_bare_session_usable() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut primary = accept_bounded(&listener);
+            drop(listener);
+            complete_startup(&mut primary, 925);
+
+            assert_eq!(expect_simple_query(&mut primary), b"SELECT 1\0");
+            let mut response = backend_frame(b'C', b"SELECT 1\0");
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            primary
+                .write_all(&response)
+                .expect("answer the query after the refused cancel connection");
+            primary
+                .flush()
+                .expect("flush the query after the refused cancel connection");
+
+            release_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("release the pre-write cancel peer");
+        });
+
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(compio_postgres::NoTls),
+        )
+        .await
+        .expect("startup for the pre-write cancel test hung")
+        .expect("connect to the pre-write cancel peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.cancel_token().cancel_query(compio_postgres::NoTls),
+        )
+        .await
+        .expect("the refused cancel connection hung")
+        .expect_err("the cancel connected after the peer dropped its listener");
+        let error_kind = io_error_kind(&error);
+        let remained_open = !client.is_closed();
+        let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the query after a pre-write cancel failure hung")
+            .expect("the pre-write cancel failure poisoned the primary session");
+
+        release_tx
+            .send(())
+            .expect("release the pre-write cancel peer");
+        drop(client);
+        server.finish();
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the pre-write control connection did not stop")
+            .expect("the pre-write control connection task panicked");
+
+        assert_eq!(
+            error_kind,
+            Some(ErrorKind::ConnectionRefused),
+            "the cancel failed at an unexpected transport boundary"
+        );
+        assert!(
+            remained_open,
+            "a provably unsent CancelRequest retired its healthy bare session"
+        );
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [compio_postgres::SimpleQueryMessage::CommandComplete(1)]
+            ),
+            "the primary session returned the wrong query result: {messages:?}"
+        );
+    }))
+    .await
+    .expect("pre-write cancel usability test exceeded its outer watchdog");
+}
+
+#[compio::test]
 async fn protocol_3_0_refuses_a_variable_cancel_key_without_negotiation() {
     Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
         let response = successful_startup_frames(923, &[0x5a; 32]);

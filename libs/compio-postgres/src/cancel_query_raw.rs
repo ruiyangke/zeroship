@@ -10,10 +10,34 @@ use crate::cancel_token::CancelKey;
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect_tls;
 use crate::encryption::Encryption;
+use crate::error::CancelDelivery;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsConnect;
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Monotonic write-boundary state shared with the caller that owns the timeout.
+///
+/// The timed future can be dropped after writing and before returning an
+/// outcome, so the state must outlive that future rather than travel in it.
+#[derive(Clone, Default)]
+pub(crate) struct CancelDeliveryTracker(Arc<AtomicBool>);
+
+impl CancelDeliveryTracker {
+    fn mark_possibly_sent(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn delivery(&self) -> CancelDelivery {
+        if self.0.load(Ordering::Acquire) {
+            CancelDelivery::PossiblySent
+        } else {
+            CancelDelivery::Unsent
+        }
+    }
+}
 
 pub async fn cancel_query_raw<S, T>(
     stream: S,
@@ -71,6 +95,7 @@ where
     wait_for_server_close(stream).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cancel_query_with_encryption<S, T>(
     stream: S,
     encryption: Encryption,
@@ -80,12 +105,13 @@ pub(crate) async fn cancel_query_with_encryption<S, T>(
     has_hostname: bool,
     process_id: i32,
     secret_key: CancelKey,
+    delivery: &CancelDeliveryTracker,
 ) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    let stream = send_cancel_request_with_exact_encryption(
+    let stream = send_cancel_request(
         stream,
         encryption,
         mode,
@@ -94,6 +120,8 @@ where
         has_hostname,
         process_id,
         secret_key,
+        true,
+        delivery,
     )
     .await?;
     wait_for_server_close(stream).await
@@ -115,6 +143,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
+    let delivery = CancelDeliveryTracker::default();
     send_cancel_request(
         stream,
         encryption,
@@ -125,6 +154,7 @@ where
         process_id,
         secret_key,
         true,
+        &delivery,
     )
     .await
 }
@@ -140,6 +170,7 @@ async fn send_cancel_request<S, T>(
     process_id: i32,
     secret_key: CancelKey,
     exact_encryption: bool,
+    delivery: &CancelDeliveryTracker,
 ) -> Result<MaybeTlsStream<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -159,7 +190,9 @@ where
     packet.extend_from_slice(&process_id.to_be_bytes());
     packet.extend_from_slice(secret_key.as_bytes());
 
+    // Mark before polling write_all: an error can follow a partial write.
     // compio's write_all is owned-buffer. Throw away the buffer.
+    delivery.mark_possibly_sent();
     let compio::BufResult(res, _) = stream.write_all(packet).await;
     res.map_err(Error::io)?;
     stream.flush().await.map_err(Error::io)?;
