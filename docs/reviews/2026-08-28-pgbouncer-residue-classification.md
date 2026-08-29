@@ -228,3 +228,43 @@ Set-differenced against the 58-name core rather than compared by total:
 **A rising total after this change is not a regression.** A test that used to die
 early on 42P07 never reached the assertions that could fail for a genuine pooled
 reason; removing the collision lets it run further. Compare the SET.
+
+## The residue is version-independent except for one entry, measured 2026-08-28
+
+Every measurement above used `6548`, which fronts the PG **16.14** server on
+5455. The suite was run for the first time against `6549`, which fronts the PG
+**18.4** server on 5459 (confirmed by container IP 172.17.0.15, not by name).
+
+    pooled vs PG 16.14   58 core
+    pooled vs PG 18.4    62 failed / 622 passed
+
+Set-differenced rather than compared by total:
+
+- **57 of the 58 core members fail identically on both server versions.** The
+  category-A classification is a property of transaction pooling, not of the
+  server behind it.
+- The one core member that PASSES on 18.4,
+  `integration::released_open_transaction_is_not_inherited_by_the_next_borrower`,
+  is the entry already reclassified above as a fixture collision rather than
+  pooler semantics. It now passes on both.
+- Four `differential_tokio::*` COPY cases appear on both and are the known
+  serial-run contamination set: each passes in isolation.
+
+**One failure exists ONLY against the newer server**, and it is a new shape of
+category A:
+
+    protocol_version_live::the_negotiated_version_matches_what_the_server_can_speak
+    assertion failed: server_version_num=180004 speaks V3_2,
+    but the session settled on V3_0     left: V3_0   right: V3_2
+
+Direct against 5459 the same test passes. PgBouncer 1.25.2 is the protocol
+endpoint and speaks 3.0; the backend speaks 3.2. The test's oracle reads
+`server_version_num` from the SERVER and compares it against a version the
+driver negotiated with the POOLER. That is the same mistake as the synthetic-PID
+cases in the table above, in a new place.
+
+**It is invisible on PG 16**, where pooler and server both speak 3.0. So a
+pooled residue measured against one server version cannot be assumed complete:
+any entry whose oracle reads a server capability the pooler does not forward
+will only appear once the backend outgrows the pooler. Re-measure against the
+newest server available, not just the default fixture.
