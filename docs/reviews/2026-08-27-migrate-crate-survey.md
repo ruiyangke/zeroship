@@ -2,6 +2,15 @@
 
 Date: 2026-08-27
 
+> **THIS SURVEY'S ANSWER HAS BEEN OVERTAKEN (checked 2026-08-29).**
+> `zeroship-migrate-adapter` was DELETED in `d3a35a2cc`. It is no longer a
+> workspace member and nothing depends on it; the only trace left is a comment in
+> `crates/zeroship-config-contract/Cargo.toml` recording that its entry used to be
+> there. Every `crates/zeroship-migrate-adapter/...` citation below therefore
+> resolves against nothing, and the conclusion in the next paragraph - that both
+> crates are needed - is false as written. The survey is kept as the record of what
+> was true on its own date; do not read it as current.
+
 ## Answer
 
 `zeroship-migrate-server` and `zeroship-migrate-adapter` are both still needed today.
