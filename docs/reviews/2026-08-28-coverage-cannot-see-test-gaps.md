@@ -63,3 +63,59 @@ document is the counterexample.
 - The same class was found by accident earlier the same day: an assertion in
   `connection.rs` that read an `Arc` no production path could write through, so
   it could never fail. Removed in `b5483ba1f`.
+
+## The full sweep, for context
+
+The experiment above used the first two modules. Five were swept in total on
+2026-08-28, all with the same method:
+
+| Module | Line coverage | Mutations | Survivors |
+| --- | ---: | ---: | ---: |
+| `transaction.rs` | 87.26% | 12 | 4 |
+| `connection.rs` | 87.90% | 14 | 2 |
+| `pool.rs` | 92.97% | 12 | 2 |
+| `codec.rs` | 88.22% | 28 | 7 |
+| `copy_in.rs` | 87.97% | 20 | 4 killed, 3 skipped, 1 wedged |
+
+**86 mutations, 21 survivors.** The best-covered module still had two; the
+decoder at 88% had the most. Ordering the modules by coverage does not order
+them by survivors.
+
+Beyond the five already listed, these were also true with a green suite:
+
+- the pool could hand a borrower a session whose validation query had FAILED,
+  and could drop its warm-up retry backoff entirely;
+- the codec's `saw_error_response` could stop being sticky, so a framing error
+  would surface INSTEAD of the server's own diagnosis whenever any frame sat
+  between them;
+- the codec would accept an 11-byte `BackendKeyData` where `protocol.sgml`
+  specifies a 12-byte minimum, and an overlong `ReadyForQuery`;
+- a large COPY item could drop or duplicate its buffered prefix.
+
+### Two things that make a sweep worth running
+
+**Mutations must be plausible bugs, not obvious vandalism.** The pool backoff
+mutation deleted `sleep(delay)` while leaving `delay *= 4` intact, so any test
+asserting on the COMPUTED backoff still passed; only a test measuring elapsed
+time caught it. "Delete the function body" is killed instantly and teaches
+nothing.
+
+**Some mutations WEDGE rather than fail.** Forcing `copy_in.rs`'s disconnected
+branch hangs the suite, because `poll_disconnected_diagnosis` loops on
+`Poll::Ready(Ok(_))` until an error or `Pending`. The `copy_in` sweep recorded
+`exit 124` as a third verdict rather than a kill. A sweep without timeouts reads
+a hang as "the mutation was detected" and reports a false clean on the most
+dangerous path in the module.
+
+### Pinning a constant means checking it first
+
+Three `codec.rs` survivors were exact protocol bounds. Before accepting the new
+tests, each was checked against `/tmp/postgres-rel-18-4/doc/src/sgml/protocol.sgml`
+field by field:
+
+    BackendKeyData: Int32 length(4, incl self) + Int32 pid(4) + Byten key,
+    "minimum and maximum key length are 4 and 256 bytes"  => 12..=264
+    codec.rs enforces (12..=264)                             EXACT
+
+A test that pins the WRONG constant is worse than no test: it enshrines the bug
+and makes the eventual correction look like a regression.
