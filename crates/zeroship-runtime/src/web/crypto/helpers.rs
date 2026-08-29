@@ -258,7 +258,7 @@ pub fn op_error_to_v8<'s>(
         crate::state::OpErrorKind::NodeError(code) => {
             crate::node_error::build_node_exception(scope, code, &err.message)
         }
-        crate::state::OpErrorKind::CodedError { code, hint } => {
+        crate::state::OpErrorKind::CodedError { code, hint, status } => {
             let exc = v8::Exception::error(scope, msg);
             if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
                 let code_key = v8::String::new(scope, "code").unwrap();
@@ -268,6 +268,12 @@ pub fn op_error_to_v8<'s>(
                     let hint_key = v8::String::new(scope, "hint").unwrap();
                     let hint_val = v8::String::new(scope, h).unwrap();
                     obj.set(scope, hint_key.into(), hint_val.into());
+                }
+                if let Some(status) = status {
+                    let status_key = v8::String::new(scope, "status").unwrap();
+                    let status_val =
+                        v8::Integer::new_from_unsigned(scope, u32::from(*status));
+                    obj.set(scope, status_key.into(), status_val.into());
                 }
             }
             exc

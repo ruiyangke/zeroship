@@ -229,6 +229,9 @@ pub enum CleanupCause {
     EpochChanged,
     /// The classifier ruled the observation `Deny`.
     Denied(DenyReason),
+    /// Session setup produced a creator-facing classification that must be
+    /// preserved from the driver's exact error detail.
+    SessionSetupFailed,
     /// `BEGIN` failed outright.
     BeginFailed,
     /// The reducer itself discovered backend health to be unknown.
@@ -245,6 +248,7 @@ impl CleanupCause {
             Self::Detached => "transaction_detached",
             Self::EpochChanged => "SCHEMA_EPOCH_CHANGED",
             Self::Denied(reason) => reason.code(),
+            Self::SessionSetupFailed => "session_setup_failed",
             Self::BeginFailed => "begin_failed",
             Self::BackendHealthUnknown => "transaction_health_unknown",
         }
@@ -364,6 +368,27 @@ pub struct EventAuthority {
     pub domain: identity::AuthorityDomain,
 }
 
+/// The complete result of acquiring a session, issuing `BEGIN`, and applying
+/// its per-app setup.
+///
+/// Keeping the generation inside `Opened` makes success impossible to express
+/// without its identity. The failure variants keep semantic classification on
+/// the event instead of collapsing it to a boolean while the exact
+/// `DbError` stays with the driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeginOutcome {
+    /// `BEGIN` and session setup both succeeded.
+    Opened(BackendGeneration),
+    /// Setup produced a creator-facing error that should survive unchanged.
+    SetupFailed,
+    /// Setup says this attempt must re-resolve its authority.
+    ReResolve,
+    /// Setup produced a specific terminal denial.
+    Denied(DenyReason),
+    /// Acquisition, `BEGIN`, or unclassified setup failed.
+    Failed,
+}
+
 /// Every event the reducer accepts. Closed.
 #[derive(Debug, Clone)]
 pub enum TxEvent {
@@ -381,8 +406,7 @@ pub enum TxEvent {
     /// `BEGIN` answered.
     BeginCompleted {
         token: CommandToken,
-        generation: BackendGeneration,
-        opened: bool,
+        outcome: BeginOutcome,
     },
     /// A creator data statement is starting. Takes the session.
     OperationRequested,
@@ -805,11 +829,9 @@ impl TxReducer {
 
         match event {
             TxEvent::AuthorityObserved { observed, .. } => self.on_authority(&observed, now),
-            TxEvent::BeginCompleted {
-                token,
-                generation,
-                opened,
-            } => self.on_begin_completed(token, generation, opened, now),
+            TxEvent::BeginCompleted { token, outcome } => {
+                self.on_begin_completed(token, outcome, now)
+            }
             TxEvent::OperationRequested => self.on_operation_requested(),
             TxEvent::OperationCompleted { token, errored } => {
                 self.on_operation_completed(token, errored, now)
@@ -915,7 +937,15 @@ impl TxReducer {
     fn on_authority(&mut self, observed: &ObservedAuthority, now: Instant) -> Vec<Action> {
         // The reducer re-runs the classifier itself; a publisher cannot smuggle
         // a Deny through by labelling it Current.
-        match classify(observed, &self.expected) {
+        let verdict = classify(observed, &self.expected);
+        self.on_verdict(verdict, now)
+    }
+
+    /// Apply one already-classified semantic outcome. Authority observations
+    /// reach this only after the reducer ran `classify` itself; begin outcomes
+    /// reach only the forcing variants because a successful setup is `Opened`.
+    fn on_verdict(&mut self, verdict: Verdict, now: Instant) -> Vec<Action> {
+        match verdict {
             Verdict::Current { ceiling } => {
                 // Not forcing: it never claims the gate. The ceiling folds by
                 // meet, so it can only tighten (invariant 8).
@@ -953,8 +983,7 @@ impl TxReducer {
     fn on_begin_completed(
         &mut self,
         token: CommandToken,
-        generation: BackendGeneration,
-        opened: bool,
+        outcome: BeginOutcome,
         now: Instant,
     ) -> Vec<Action> {
         if let Some(reply) = self.check_token(token) {
@@ -964,18 +993,28 @@ impl TxReducer {
             return vec![Action::Reply(Err(TxProtocolError::TransactionNotReady))];
         }
         self.active = None;
-        if !opened {
-            // A failed BEGIN reaches `Cancelling` directly. It is found under
-            // the reducer lock with no publisher to arbitrate against, so it
-            // takes the state without claiming the gate - but it still goes
-            // through `force`, which is what keeps "exactly one cause" true.
-            return self.force(CleanupCause::BeginFailed, now).1;
+        match outcome {
+            BeginOutcome::Opened(generation) => {
+                self.generation = Some(generation);
+                self.session = SessionOwnership::Registry;
+                self.frames.open_root();
+                self.state = TxState::Idle;
+                vec![Action::Reply(Ok(TxReply::Began))]
+            }
+            BeginOutcome::SetupFailed => {
+                self.force(CleanupCause::SessionSetupFailed, now).1
+            }
+            BeginOutcome::ReResolve => self.on_verdict(Verdict::ReResolve, now),
+            BeginOutcome::Denied(reason) => self.on_verdict(Verdict::Deny(reason), now),
+            BeginOutcome::Failed => {
+                // A failed BEGIN reaches `Cancelling` directly. It is found
+                // under the reducer lock with no publisher to arbitrate
+                // against, so it takes the state without claiming the gate -
+                // but it still goes through `force`, which keeps exactly one
+                // cause true.
+                self.force(CleanupCause::BeginFailed, now).1
+            }
         }
-        self.generation = Some(generation);
-        self.session = SessionOwnership::Registry;
-        self.frames.open_root();
-        self.state = TxState::Idle;
-        vec![Action::Reply(Ok(TxReply::Began))]
     }
 
     fn on_operation_requested(&mut self) -> Vec<Action> {

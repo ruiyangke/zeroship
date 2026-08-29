@@ -186,8 +186,8 @@ pub struct ObservedAuthority {
     pub ceiling: MaskCeiling,
 }
 
-/// Why a `Deny` was returned. **All three are creator-visible, distinct, and
-/// non-retryable**, and they differ in what the *next* action should be.
+/// Why a `Deny` was returned. Every reason is creator-visible, distinct, and
+/// non-retryable, and they differ in what the next action should be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
     /// A permanent tombstone. There is nothing to re-resolve to.
@@ -203,6 +203,10 @@ pub enum DenyReason {
     /// Re-resolving locally does not help; this is an operational fault, not a
     /// lifecycle event.
     AuthorityDomainMismatch,
+    /// PostgreSQL refused the session's `SET LOCAL ROLE` because the worker
+    /// login no longer holds the app-role membership. Authorization already
+    /// failed closed; this reason supplies the terminal remedy.
+    GrantRevoked,
 }
 
 impl DenyReason {
@@ -214,10 +218,11 @@ impl DenyReason {
             Self::AppDeprovisioned => "APP_DEPROVISIONED",
             Self::StaleAppIncarnation => "STALE_APP_INCARNATION",
             Self::AuthorityDomainMismatch => "AUTHORITY_DOMAIN_MISMATCH",
+            Self::GrantRevoked => "GRANT_REVOKED",
         }
     }
 
-    /// None of the three is retryable. That is the point of a terminal denial:
+    /// None of the reasons is retryable. That is the point of a terminal denial:
     /// none of them is improved by trying again.
     ///
     /// Non-retryable is **not** the same as indistinguishable - see the
@@ -227,12 +232,20 @@ impl DenyReason {
         false
     }
 
-    /// Every reason, for a test that rules on the whole set rather than on the
-    /// variants it remembered.
-    pub const ALL: [Self; 3] = [
+    /// The reasons the authority-observation classifier itself can return.
+    pub const AUTHORITY: [Self; 3] = [
         Self::AppDeprovisioned,
         Self::StaleAppIncarnation,
         Self::AuthorityDomainMismatch,
+    ];
+
+    /// Every reason from either an authority observation or classified session
+    /// setup, for tests that rule on the closed set.
+    pub const ALL: [Self; 4] = [
+        Self::AppDeprovisioned,
+        Self::StaleAppIncarnation,
+        Self::AuthorityDomainMismatch,
+        Self::GrantRevoked,
     ];
 }
 
@@ -465,7 +478,7 @@ mod tests {
     /// implementation that collapses two reasons onto one code, or that marks
     /// one retryable.
     #[test]
-    fn the_three_denial_reasons_are_distinct_and_none_is_retryable() {
+    fn denial_reasons_are_distinct_and_none_is_retryable() {
         let codes: std::collections::BTreeSet<&str> =
             DenyReason::ALL.iter().map(|reason| reason.code()).collect();
         assert_eq!(
@@ -476,7 +489,12 @@ mod tests {
         );
         assert_eq!(
             codes,
-            ["APP_DEPROVISIONED", "AUTHORITY_DOMAIN_MISMATCH", "STALE_APP_INCARNATION"]
+            [
+                "APP_DEPROVISIONED",
+                "AUTHORITY_DOMAIN_MISMATCH",
+                "GRANT_REVOKED",
+                "STALE_APP_INCARNATION",
+            ]
                 .into_iter()
                 .collect()
         );

@@ -174,7 +174,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
         "missing-role SET LOCAL ROLE must report the measured SQLSTATE"
     );
 
-    let classified = DbError::from_pg_per_app_session_setup(&err, app_id);
+    let classified = DbError::classify_pg_per_app_session_setup_for_tests(&err, app_id);
     drop(client);
     drain_pg().await;
     classified

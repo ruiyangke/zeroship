@@ -42,10 +42,10 @@
 //! production path now returns `Result<_, DbError>` — SDK callers can
 //! branch on `err.code` end-to-end on the production code path.
 //!
-//! The wire format JS sees is unchanged: still a JS `Error` with
-//! `message` + `code` (+ `hint` when present). All this layer does is
-//! discipline the *origin* of the code so every native throw carries
-//! one.
+//! The wire format JS sees is a JS `Error` with `message` + `code`, plus
+//! `hint` when present and `status` when a classification has an HTTP remedy.
+//! This layer disciplines the *origin* of those fields so native throws do not
+//! reconstruct semantics from message or code strings downstream.
 //!
 //! ## When to use which variant
 //!
@@ -61,10 +61,13 @@
 //! | [`DbError::LockContention`] | Postgres 55P03 / lock-not-available | `SELECT … FOR UPDATE NOWAIT` |
 //! | [`DbError::Transient`] | Postgres class 08, deadlock, out-of-memory | connection drop, 40P01 |
 //! | [`DbError::Configuration`] | Plugin mis-configured, OR the app's own DB was never provisioned | `DB_URL` not set; `schema_not_provisioned` (per-app role missing, fix: `zeroship migrate`) |
+//! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked per-app database grant |
 //! | [`DbError::Coded`] | Pre-typed code from another subsystem | migrations.rs `migration_*` codes |
 //! | [`DbError::Internal`] | Anything else; logged but stamped `internal` | a `JSON.stringify` that lost a column |
 
 use zeroship_runtime::state::OpError;
+
+use crate::transaction::reducer::identity::DenyReason;
 
 /// Classified error origin for every fallible `plugin-db` helper.
 ///
@@ -148,6 +151,13 @@ pub enum DbError {
         hint: Option<String>,
     },
 
+    /// A classified authorization refusal. Unlike a generic coded error, this
+    /// carries the semantic 403 remedy through the native V8 boundary.
+    PermissionDenied {
+        code: &'static str,
+        message: &'static str,
+    },
+
     /// A code already chosen by another subsystem (e.g. the
     /// migrations lifecycle codes in `crate::migrations`) — propagated
     /// verbatim. Lets the typed `DbError` flow through helpers without
@@ -180,6 +190,57 @@ pub enum DbError {
     },
 }
 
+/// How a per-app session-setup failure must drive transaction startup.
+///
+/// The disposition is captured at the `SET LOCAL ROLE` provenance boundary,
+/// while the SQLSTATE is still available. Downstream code must never recover
+/// it by matching a creator-visible error code string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSetupDisposition {
+    /// Preserve the classified [`DbError`] as-is while ending this attempt.
+    Preserve,
+    /// End this attempt and re-resolve its authority. No producer selects this
+    /// yet; an epoch fence can use it without changing the begin event again.
+    #[allow(dead_code, reason = "reserved for the schema-epoch producer task")]
+    ReResolve,
+    /// End this attempt with a specific terminal denial.
+    Denied(DenyReason),
+    /// No setup-specific classification applied.
+    Failed,
+}
+
+/// A session-setup error plus the reducer outcome chosen at its provenance
+/// boundary.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionSetupError {
+    disposition: SessionSetupDisposition,
+    error: DbError,
+}
+
+impl SessionSetupError {
+    fn new(disposition: SessionSetupDisposition, error: DbError) -> Self {
+        Self { disposition, error }
+    }
+
+    /// The transaction-startup outcome. This is semantic state, not a wire
+    /// error code to be decoded later.
+    #[must_use]
+    pub(crate) const fn disposition(&self) -> SessionSetupDisposition {
+        self.disposition
+    }
+
+    pub(crate) fn error_mut(&mut self) -> &mut DbError {
+        &mut self.error
+    }
+
+    /// Discard the transaction disposition for a caller, such as autocommit,
+    /// that only needs the creator-facing database error.
+    #[must_use]
+    pub(crate) fn into_db_error(self) -> DbError {
+        self.error
+    }
+}
+
 /// Public error code for "this app's database was never provisioned".
 ///
 /// On the 5xx allow-list in `crates/runtime/src/core/dispatch.rs` in BOTH
@@ -189,6 +250,14 @@ pub enum DbError {
 /// one. Both must be listed or the exemption is inert on the path creators
 /// actually take.
 pub const SCHEMA_NOT_PROVISIONED: &str = "schema_not_provisioned";
+
+/// Public error code for a session whose database-role membership was revoked.
+pub const GRANT_REVOKED: &str = DenyReason::GrantRevoked.code();
+
+/// Fixed creator-facing message for [`GRANT_REVOKED`]. The PostgreSQL message
+/// and role name remain in the operator log.
+pub const GRANT_REVOKED_MESSAGE: &str =
+    "this app's database grant has been revoked. Restore the database grant before retrying.";
 
 /// The wire message for [`SCHEMA_NOT_PROVISIONED`]. Platform-authored and
 /// fixed: it names the condition and the exact command that fixes it, and it
@@ -248,7 +317,10 @@ impl DbError {
     /// Call this only at the two session-setup sites, after connection
     /// acquisition and transaction start have succeeded. All other Postgres
     /// errors, including pool connection failures, must use [`Self::from_pg`].
-    pub fn from_pg_per_app_session_setup(e: &compio_postgres::Error, app_id: &str) -> Self {
+    pub(crate) fn classify_pg_per_app_session_setup(
+        e: &compio_postgres::Error,
+        app_id: &str,
+    ) -> SessionSetupError {
         if e.as_db_error().is_some_and(|db| {
             is_missing_per_app_session_role(db.code(), db.message(), app_id)
         }) {
@@ -257,14 +329,42 @@ impl DbError {
                 error = %msg,
                 "per-app database role missing; app has not been migrated"
             );
-            return DbError::config_hinted(
-                SCHEMA_NOT_PROVISIONED,
-                MISSING_ROLE_MESSAGE,
-                MISSING_ROLE_HINT,
+            return SessionSetupError::new(
+                SessionSetupDisposition::Preserve,
+                DbError::config_hinted(
+                    SCHEMA_NOT_PROVISIONED,
+                    MISSING_ROLE_MESSAGE,
+                    MISSING_ROLE_HINT,
+                ),
             );
         }
 
-        Self::from_pg(e)
+        if e.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) {
+            let msg = walk_pg_chain(e);
+            tracing::warn!(
+                error = %msg,
+                "per-app database role membership was revoked"
+            );
+            return SessionSetupError::new(
+                SessionSetupDisposition::Denied(DenyReason::GrantRevoked),
+                DbError::PermissionDenied {
+                    code: GRANT_REVOKED,
+                    message: GRANT_REVOKED_MESSAGE,
+                },
+            );
+        }
+
+        SessionSetupError::new(SessionSetupDisposition::Failed, Self::from_pg(e))
+    }
+
+    /// Test-only view of the contextual classifier's creator-facing error.
+    /// Production transaction code also consumes the private disposition.
+    #[cfg(feature = "test-helpers")]
+    pub fn classify_pg_per_app_session_setup_for_tests(
+        e: &compio_postgres::Error,
+        app_id: &str,
+    ) -> Self {
+        Self::classify_pg_per_app_session_setup(e, app_id).into_db_error()
     }
 
     /// Classify a `compio_postgres::Error` by SQLSTATE. Falls back to
@@ -364,6 +464,9 @@ impl DbError {
             DbError::Configuration { code, message, hint } => {
                 OpError::coded(code, message, hint)
             }
+            DbError::PermissionDenied { code, message } => {
+                OpError::coded_with_status(code, message, None::<String>, 403)
+            }
             DbError::Coded { code, message, hint } => OpError::coded(code, message, hint),
             DbError::AccessDenied { code } => OpError::coded(
                 code,
@@ -396,6 +499,7 @@ impl DbError {
             | DbError::Configuration { message, .. }
             | DbError::Coded { message, .. }
             | DbError::Internal { message } => message,
+            DbError::PermissionDenied { message, .. } => message.to_string(),
             DbError::AccessDenied { .. } => {
                 "platform-internal capability is not reachable from app code".to_string()
             }
@@ -422,6 +526,7 @@ impl DbError {
             | DbError::Configuration { message, .. }
             | DbError::Coded { message, .. }
             | DbError::Internal { message } => message,
+            DbError::PermissionDenied { message, .. } => message,
             DbError::AccessDenied { .. } => {
                 "platform-internal capability is not reachable from app code"
             }
@@ -599,8 +704,8 @@ impl DbError {
 ///
 /// The set of "prefix-eligible" variants is the SQLSTATE-derived
 /// classification set plus `Internal` (the catch-all). The structured
-/// variants — `ValidationFailed`, `Configuration`, `Coded`,
-/// `SchemaRefused` — carry their own contracted message bodies (and
+/// variants: `ValidationFailed`, `Configuration`, `PermissionDenied`, `Coded`,
+/// and `SchemaRefused` carry their own contracted message bodies (and
 /// `.code`s the SDK already branches on) and are intentionally left
 /// alone: prefixing them would distort a wire payload the SDK parses
 /// verbatim.
@@ -616,7 +721,7 @@ pub(crate) fn prefix_message(err: &mut DbError, prefix: &str) {
         | DbError::Internal { message } => {
             *message = format!("{prefix}{message}");
         }
-        // ValidationFailed / Configuration / Coded / SchemaRefused
+        // ValidationFailed / Configuration / PermissionDenied / Coded / SchemaRefused
         // carry their own structured messages and `.code`s the SDK
         // branches on; leaving them alone keeps the wire format
         // verbatim.
@@ -685,6 +790,7 @@ impl std::fmt::Display for DbError {
             | DbError::Configuration { message, .. }
             | DbError::Coded { message, .. }
             | DbError::Internal { message } => f.write_str(message),
+            DbError::PermissionDenied { message, .. } => f.write_str(message),
             DbError::AccessDenied { .. } => {
                 f.write_str("platform-internal capability is not reachable from app code")
             }
@@ -935,7 +1041,7 @@ mod tests {
         );
         let op = err.to_op_error();
         match &op.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, SCHEMA_NOT_PROVISIONED);
                 assert!(hint.is_some(), "hint is set for direct env.db callers");
             }
@@ -984,7 +1090,7 @@ mod tests {
     fn configuration_stamps_code() {
         let e = DbError::config("not_configured", "db url missing").to_op_error();
         match &e.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "not_configured");
                 assert!(hint.is_none());
             }
@@ -1017,7 +1123,7 @@ mod tests {
         }
         .to_op_error();
         match &op.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "validation_refused");
                 assert!(hint.is_none());
             }
@@ -1039,12 +1145,29 @@ mod tests {
         }
         .to_op_error();
         match &e.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "migration_already_running");
                 assert_eq!(hint.as_deref(), Some("y"));
             }
             other => panic!("expected CodedError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn permission_denied_carries_its_terminal_http_status() {
+        let error = DbError::PermissionDenied {
+            code: GRANT_REVOKED,
+            message: GRANT_REVOKED_MESSAGE,
+        }
+        .to_op_error();
+        match &error.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, status, .. } => {
+                assert_eq!(code, GRANT_REVOKED);
+                assert_eq!(*status, Some(403));
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        assert_eq!(error.message, GRANT_REVOKED_MESSAGE);
     }
 
     /// Sweep the SQL-violation variants (the four 23xxx codes plus
@@ -1286,7 +1409,7 @@ mod tests {
         prefix_message(&mut coded, "audit: ctx: ");
         assert_eq!(coded.to_string(), "another worker holds the lock");
         match coded.to_op_error().kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "migration_already_running");
                 assert_eq!(hint.as_deref(), Some("retry later"));
             }
@@ -1436,7 +1559,7 @@ mod tests {
     fn version_mismatch_stamps_canonical_code_and_hint() {
         let e = DbError::version_mismatch("posts", Some("post_x"), 5).to_op_error();
         match &e.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "version_mismatch");
                 let h = hint.as_deref().expect("must carry a retry hint");
                 assert!(h.to_lowercase().contains("retry"), "hint: {h}");
@@ -1467,7 +1590,7 @@ mod tests {
     fn multi_row_version_filter_unsupported_stamps_canonical_code() {
         let e = DbError::multi_row_version_filter_unsupported("posts").to_op_error();
         match &e.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "multi_row_version_filter_unsupported");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }
@@ -1479,7 +1602,7 @@ mod tests {
     fn version_filter_must_be_top_level_stamps_canonical_code() {
         let e = DbError::version_filter_must_be_top_level("posts").to_op_error();
         match &e.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "version_filter_must_be_top_level");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }

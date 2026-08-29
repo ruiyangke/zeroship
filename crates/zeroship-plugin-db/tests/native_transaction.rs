@@ -623,6 +623,179 @@ const _procedures = { transactionBeforeMigrate };
     );
 }
 
+/// A classified failure from the top-level transaction's session setup must
+/// survive the begin-completion event. Revoking the login role's membership in
+/// the app role makes the first setup statement, `SET LOCAL ROLE`, return the
+/// measured SQLSTATE 42501. The callback must never run, and the error caught
+/// by app code must name the terminal grant denial rather than generic BEGIN.
+#[test]
+fn revoked_grant_transaction_surfaces_grant_revoked() {
+    let admin_url = require_pg();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let app_id = format!("zs_txgrant_{suffix}");
+    let login = format!("zs_txlogin_{}", &suffix[..16]);
+    let password = "ZsTxGrant9";
+    let app_role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(&app_id);
+    let (scheme, address) = admin_url
+        .split_once("://")
+        .and_then(|(scheme, rest)| rest.rsplit_once('@').map(|(_, address)| (scheme, address)))
+        .expect("PG_TEST_URL must contain scheme and login credentials");
+    let worker_url = format!("{scheme}://{login}:{password}@{address}");
+
+    block_on(async {
+        let (admin, connection) = compio_postgres::connect(&admin_url, NoTls)
+            .await
+            .expect("connect grant-revocation admin");
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE \"{login}\" LOGIN PASSWORD '{password}' \
+                   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT; \
+                 CREATE ROLE \"{app_role}\" NOLOGIN NOSUPERUSER NOCREATEDB \
+                   NOCREATEROLE NOREPLICATION; \
+                 CREATE SCHEMA \"{app_id}\"; \
+                 GRANT \"{app_role}\" TO \"{login}\""
+            ))
+            .await
+            .expect("provision login and app role");
+
+        // Prove this login can set the role before the one variable under test
+        // changes. Keeping this same backend alive also proves PostgreSQL
+        // observes the membership revoke without reconnecting it.
+        let (worker, worker_connection) = compio_postgres::connect(&worker_url, NoTls)
+            .await
+            .expect("connect temporary worker login");
+        compio::runtime::spawn(async move {
+            let _ = worker_connection.run().await;
+        })
+        .detach();
+        worker.batch_execute("BEGIN").await.expect("control BEGIN");
+        worker
+            .batch_execute(&zeroship_plugin_db::auth::bootstrap::set_local_role_sql(
+                &app_id,
+            ))
+            .await
+            .expect("membership must permit SET LOCAL ROLE before revoke");
+        worker
+            .batch_execute("ROLLBACK")
+            .await
+            .expect("control ROLLBACK");
+
+        admin
+            .batch_execute(&format!("REVOKE \"{app_role}\" FROM \"{login}\""))
+            .await
+            .expect("revoke app-role membership");
+        worker.batch_execute("BEGIN").await.expect("oracle BEGIN");
+        let revoked = worker
+            .batch_execute(&zeroship_plugin_db::auth::bootstrap::set_local_role_sql(
+                &app_id,
+            ))
+            .await
+            .expect_err("revoked membership must deny SET LOCAL ROLE");
+        assert_eq!(
+            revoked.code().map(compio_postgres::error::SqlState::code),
+            Some("42501"),
+            "the setup refusal must be PostgreSQL insufficient_privilege"
+        );
+        worker
+            .batch_execute("ROLLBACK")
+            .await
+            .expect("oracle ROLLBACK");
+        drop(worker);
+        drop(admin);
+        drain_open_connections().await;
+    });
+
+    let src = build_src(
+        r#"
+async function transactionAfterGrantRevoke(_input, _ctx) {
+    let callbackReached = false;
+    try {
+        await env.db.transaction(async () => {
+            callbackReached = true;
+            return "unreachable";
+        });
+        return { code: null, callbackReached };
+    } catch (error) {
+        return { code: error?.code ?? null, callbackReached };
+    }
+}
+transactionAfterGrantRevoke.config = { kind: "action" };
+
+async function transactionAfterGrantRevokeUncaught(_input, _ctx) {
+    return await env.db.transaction(async () => "unreachable");
+}
+transactionAfterGrantRevokeUncaught.config = { kind: "action" };
+
+const _procedures = {
+    transactionAfterGrantRevoke,
+    transactionAfterGrantRevokeUncaught,
+};
+"#,
+    );
+    let (status, body) = dispatch_zs_for_app(
+        &worker_url,
+        &src,
+        "transactionAfterGrantRevoke",
+        Some(&app_id),
+    );
+    let (uncaught_status, uncaught_body) = dispatch_zs_for_app(
+        &worker_url,
+        &src,
+        "transactionAfterGrantRevokeUncaught",
+        Some(&app_id),
+    );
+
+    // Clean up before asserting the creator-visible result so the intentional
+    // red run does not leave roles behind on the shared live-test server.
+    block_on(async {
+        drain_open_connections().await;
+        let (admin, connection) = compio_postgres::connect(&admin_url, NoTls)
+            .await
+            .expect("reconnect grant-revocation admin for cleanup");
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
+                 DROP ROLE IF EXISTS \"{app_role}\"; \
+                 DROP ROLE IF EXISTS \"{login}\""
+            ))
+            .await
+            .expect("clean up grant-revocation fixture");
+        drop(admin);
+        drain_open_connections().await;
+    });
+
+    assert_eq!(status, 200, "the handler catches the setup denial; body={body}");
+    let result = body.get("json").expect("caught error result");
+    assert_eq!(
+        result.get("callbackReached").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "session setup must fail before creator callback execution; body={body}"
+    );
+    assert_eq!(
+        result.get("code").and_then(serde_json::Value::as_str),
+        Some("GRANT_REVOKED"),
+        "the classified terminal denial must survive transaction BEGIN; body={body}"
+    );
+    assert_eq!(
+        uncaught_status, 403,
+        "an uncaught grant denial must carry its terminal HTTP remedy; body={uncaught_body}"
+    );
+    assert_eq!(
+        uncaught_body.get("code").and_then(serde_json::Value::as_str),
+        Some("GRANT_REVOKED"),
+        "the 403 response must retain the classified denial code; body={uncaught_body}"
+    );
+}
+
 #[test]
 fn unmigrated_app_streaming_response_names_migrate() {
     let url = require_pg();

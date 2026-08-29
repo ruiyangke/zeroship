@@ -211,7 +211,7 @@ pub(crate) async fn client_exec_on_tx(
 pub(crate) async fn apply_per_app_role(
     client: &compio_postgres::Client,
     app_id: &str,
-) -> Result<(), crate::error::DbError> {
+) -> Result<(), crate::error::SessionSetupError> {
     // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
     // in one simple-query batch — all SET LOCAL, so they revert at the tx end.
     // The idle-in-tx guard is the load-bearing defense: a creator callback that
@@ -219,9 +219,13 @@ pub(crate) async fn apply_per_app_role(
     // exhaust the shared Postgres for other tenants.
     let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id);
     client.simple_query(&sql).await.map_err(|e| {
-        let mut err = crate::error::DbError::from_pg_per_app_session_setup(&e, app_id);
-        crate::error::prefix_message(&mut err, "db: tx session setup (per-app §17.5 + DB-1 guards): ");
-        err
+        let mut classified =
+            crate::error::DbError::classify_pg_per_app_session_setup(&e, app_id);
+        crate::error::prefix_message(
+            classified.error_mut(),
+            "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
+        );
+        classified
     })?;
     Ok(())
 }
@@ -408,31 +412,15 @@ pub fn transaction_dispatch<'s>(
                 }
             }
             Err(e) => {
-                // BEGIN / SAVEPOINT itself failed — nothing to roll back.
-                // Top-level BEGIN failures normally carry `begin_failed`.
-                // Keep the provisioning diagnosis on the shared public-error
-                // rail used by autocommit; savepoints keep every coded error.
-                let preserve_provisioning_error = matches!(
-                    &e,
-                    DbError::Configuration { code, .. }
-                        if *code == crate::error::SCHEMA_NOT_PROVISIONED
-                );
                 // `admission` is still armed and drops here, which releases the
                 // claim, retires the reducer and destroys any session that was
-                // installed. There is no per-arm release to forget.
+                // installed. `exec_begin_or_savepoint` has already wrapped only
+                // an unclassified top-level failure as `begin_failed`; every
+                // classified setup error and every savepoint error stays exact.
                 drop(admission);
-                let coded = if nested || preserve_provisioning_error {
-                    e
-                } else {
-                    DbError::Coded {
-                        code: "begin_failed".to_string(),
-                        message: format!("db.transaction: BEGIN failed: {}", e.message_str()),
-                        hint: None,
-                    }
-                };
                 OpResult::JsValue {
                     resolver: outer_global,
-                    value: ResolveValue::RejectError(coded.to_op_error()),
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }
@@ -706,13 +694,26 @@ async fn exec_begin_or_savepoint(
     }
 
     let driven = driver::begin_top_level(app_id, isolation_level).await?;
-    match driven.outcome() {
-        // A `BEGIN` that never opened reaches `Settled` through forced cleanup,
-        // carrying the latched cause. Report the backend's own error - the
-        // caller re-codes it as `begin_failed` unless it is the provisioning
-        // diagnosis.
+    let outcome = driven.outcome();
+    match outcome {
+        // Only the genuinely unclassified startup outcome gets the generic
+        // code. SetupFailed, ReResolve, and Denied all carry the exact typed
+        // DbError captured beside their BeginOutcome.
+        Some(
+            reducer::TerminalOutcome::Cancelled(reducer::CleanupCause::BeginFailed)
+            | reducer::TerminalOutcome::Indeterminate(reducer::CleanupCause::BeginFailed),
+        ) => {
+            let error = driven.error.unwrap_or_else(|| {
+                DbError::internal("db.transaction: BEGIN did not open a transaction")
+            });
+            Err(DbError::Coded {
+                code: "begin_failed".to_string(),
+                message: format!("db.transaction: BEGIN failed: {}", error.message_str()),
+                hint: None,
+            })
+        }
         Some(_) => Err(driven.error.unwrap_or_else(|| {
-            DbError::internal("db.transaction: BEGIN did not open a transaction")
+            DbError::internal("db.transaction: classified BEGIN failure carried no detail")
         })),
         None => match driven.refusal() {
             Some(refusal) => Err(driver::protocol_error(refusal, driven.error)),

@@ -1157,7 +1157,7 @@ pub(crate) fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
         crate::state::OpErrorKind::NodeError(code) => {
             crate::node_error::build_node_exception(scope, code, &err.message)
         }
-        crate::state::OpErrorKind::CodedError { code, hint } => {
+        crate::state::OpErrorKind::CodedError { code, hint, status } => {
             let e = v8::Exception::error(scope, msg);
             if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
                 let ck = v8::String::new(scope, "code").unwrap();
@@ -1167,6 +1167,11 @@ pub(crate) fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
                     let hk = v8::String::new(scope, "hint").unwrap();
                     let hv = v8::String::new(scope, h).unwrap();
                     obj.set(scope, hk.into(), hv.into());
+                }
+                if let Some(status) = status {
+                    let sk = v8::String::new(scope, "status").unwrap();
+                    let sv = v8::Integer::new_from_unsigned(scope, u32::from(*status));
+                    obj.set(scope, sk.into(), sv.into());
                 }
             }
             e
