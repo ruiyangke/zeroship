@@ -29,6 +29,79 @@ measurements age.
 
 ## 2026-08-29
 
+### Three more operator decisions, two of which fix defects no review round found
+
+Taken in conversation. Recorded here because the design pages and the task list carry only the
+outcome, and tasks are working state rather than the durable record.
+
+**7. Pairwise subjects are scoped to the PROJECT, not the app.** "we support pairwise, so the same
+user might have different ids in different apps, let's scope the pairwise to project, all apps in the
+same project see consistent user id."
+
+Today the sector is per app: `crates/zeroship-auth/src/oidc/issuer.rs:849` derives the subject from
+`(user_id, sector_identifier)`, and `sector_identifier` is a column on `zeroship.app_oauth_clients`
+falling back to the client id (`crates/zeroship-auth/src/oidc/backchannel_logout.rs:129`). Correct
+OIDC pairwise behaviour, and a privacy feature.
+
+**It is also a correctness blocker on database sharing that five review rounds and two independent
+re-key designs all missed.** With a per-app sector, two apps sharing a database resolve the same human
+to different subjects:
+
+    storefront writes  orders.user_id = <storefront's sub for Alice>
+    admin queries      orders WHERE user_id = <admin's sub for Alice>   -> no rows
+
+Same person, same database, two keys, and nothing errors. Invisible in single-app testing, because it
+only appears when a SECOND app reads rows the first one wrote. Every reviewer reasoned about ACCESS to
+shared rows; none asked whether the two apps agree on WHO A ROW IS ABOUT.
+
+Consequence: this settles the workspace question. One re-key draft argued against a project row
+because a workspace "has no server-side lifecycle". A project-scoped pairwise sector IS server-side
+lifecycle - it decides identity resolution on every request and must stay stable for the life of the
+data. So the project becomes a row regardless of the ownership question, and #47's shape 2 is the
+answer rather than a candidate.
+
+Implementation trap: `COALESCE(aoc.sector_identifier, oc.client_id)` silently reinstates per-app
+scoping whenever the sector is unset. Under this decision an unset sector must be an ERROR, not a
+default.
+
+**8. A creator's bill survives deletion of the app that incurred it.** Raised as an exploit: "I
+created an app, produced $10k bill, then deleted the app, the creator does not need to pay."
+
+Verified, and it works today. Billing reads from `zeroship.usage_aggregates`
+(`crates/zeroship-control/src/api.rs:1499`, `registry.rs:931`,
+`crates/zeroship-control/src/proration.rs:166-171`), and
+`db/migrations-ts/20260702000600_constraints_indexes_fks.ts:194` carries
+`usage_aggregates_app_id_fkey -> apps(id) onDelete: "cascade"`, with the same shape on
+`app_spend_state` (`:130`), `app_usage` (`:131`) and `app_usage_history` (`:132`). Deleting an app
+deletes the rows its invoice is computed from - by referential action, with no code involved and
+nothing logged. Invoice items already pushed to Stripe survive; anything since the last reconcile
+cycle does not.
+
+The wire format already disagreed with the schema, which is the tell:
+`crates/zeroship-core/src/usage_event.rs:14-20` is `UsageSubject { app: Option<Uuid>, creator: Uuid }`
+- creator non-optional, app optional. The wire says the creator owes; the FK said the app owns.
+
+**9. An app with metered usage cannot be deleted, only archived.** "if user created an app, usage
+metered, then can not delete, just archive."
+
+This supersedes the fix proposed for decision 8. `ON DELETE SET NULL` would preserve the charge but
+degrade attribution to "this creator, app since deleted"; archiving keeps the `apps` row, so the FK
+never fires and the usage rows keep a VALID app id. Attribution stays exact.
+
+It also matches the decoupling rather than fighting it: archive separates the APP lifecycle from the
+DATABASE lifecycle, which is exactly the split the two-verb teardown introduces. An archived app stops
+serving and gives up its grant; its database persists and accrues storage until the creator deletes
+the DATABASE. "Stop running this app" and "destroy the data" are the same operation today only because
+one app owns one schema.
+
+The cascade fix is kept anyway as defence in depth. "No current API path reaches it" is the argument
+that was wrong twice on 2026-08-29 alone - on the audit-table grants and on the unmask read path.
+
+OPEN, and it belongs with the teardown split: under today's one-app-one-database model, archiving
+while keeping data means the creator keeps paying storage with no way to stop short of a deletion this
+decision has just forbidden. That resolves cleanly once the database is a separately deletable object,
+which is a reason to sequence archive after the split rather than inventing an interim answer.
+
 ### Round 5 on the reconciled design, and the thing I got wrong in its brief
 
 Three reviewers against the rewritten pages. Five findings survived my own check and became tasks;
