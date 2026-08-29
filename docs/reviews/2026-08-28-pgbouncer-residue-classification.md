@@ -285,3 +285,47 @@ pooled residue measured against one server version cannot be assumed complete:
 any entry whose oracle reads a server capability the pooler does not forward
 will only appear once the backend outgrows the pooler. Re-measure against the
 newest server available, not just the default fixture.
+
+## Re-measured 2026-08-29 at `a02f8909c`: 61 failures, 57 of them this list
+
+Full pooled run through `zs-cpg-pgb` on 6548, `--no-fail-fast`, 5 targets:
+**1172 passed, 61 failed**.
+
+The run is known to have reached the pooler: `login attempt` lines in the
+container log went from 23836 to 24775, a delta of 939. That check is not
+ceremony - 6548 fronts the same PostgreSQL as 5455, so a run that quietly
+connected direct would look like a much better result.
+
+57 of the 61 names are already classified above. The four that are not:
+
+    differential_tokio::both_drivers_agree_on_copy_in_results
+    differential_tokio::both_drivers_agree_on_copy_out_bytes
+    differential_tokio::both_drivers_agree_on_binary_copy_roundtrip
+    differential_tokio::a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one
+
+**All four are category A, and none is a COPY defect.** Each fails in FIXTURE
+SETUP with the same cause:
+
+    copy-in fixture: SqlState(E42501)
+    "permission denied to create pg_catalog.cpg_copyin_..._ours"
+    detail: "System catalog modifications are currently disallowed."
+
+The fixture's `CREATE TEMP TABLE` resolved into `pg_catalog`, meaning the
+session's temp schema was not on `search_path` for the backend it landed on.
+That is the transaction-pooling session-state limitation this document already
+names for entry 58, which notes a test "uses a temp table across transactions,
+so its fixture is not guaranteed". These four are the same shape, and they are
+inside the flaky fringe the section above measures rather than a new class.
+
+**Why they are not a regression from the COPY work landed this session.** The
+COPY-IN receiver state refactor (`bec97d0aa`) and the cancelled-close fix
+(`315c3e02d`) both touch `copy_in.rs`, so the coincidence deserved checking:
+
+- the four tests were added by `6301e2c61` on 2026-08-26, before that work;
+- all four PASS on a direct server - they are inside the 1348/0 run on 5455 at
+  the same commit;
+- the failure is SQLSTATE 42501 on table creation, before any COPY byte moves.
+
+**Match the SQLSTATE, not the test name.** A COPY-named test failing right after
+COPY changes is exactly the coincidence that invites a wrong conclusion; the
+error code says catalog permission, which no protocol change of ours can cause.
