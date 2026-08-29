@@ -820,6 +820,70 @@ mod tests {
         );
     }
 
+    /// Rediscovering the malformed tail on a later decode cannot substitute
+    /// for attaching its failure to the valid prefix. The split reader may
+    /// publish this first batch before it reads again, so dispatch needs the
+    /// side channel immediately to retire the session in the same turn.
+    #[compio::test]
+    async fn every_coalesced_failure_is_attached_to_the_wire_earlier_error_batch() {
+        let oversized = data_row(&[b'x'; 192]);
+        let startup = {
+            let mut frame = vec![b'K'];
+            frame.extend_from_slice(&265u32.to_be_bytes());
+            frame.extend_from_slice(&vec![0u8; 265 - 4]);
+            frame
+        };
+        let malformed_copy = copy_response_frame(backend::COPY_IN_RESPONSE_TAG, b"");
+        let malformed_header = [vec![b'D'], 3u32.to_be_bytes().to_vec()].concat();
+        let malformed_ready = [
+            vec![backend::READY_FOR_QUERY_TAG],
+            5u32.to_be_bytes().to_vec(),
+            vec![b'X'],
+        ]
+        .concat();
+
+        let cases = [
+            (
+                "invalid header",
+                malformed_header,
+                usize::MAX,
+                "invalid message length",
+            ),
+            ("message ceiling", oversized, 128, "message too large"),
+            ("startup limit", startup, usize::MAX, "BackendKeyData"),
+            ("COPY metadata", malformed_copy, usize::MAX, "COPY response"),
+            (
+                "ReadyForQuery",
+                malformed_ready,
+                usize::MAX,
+                "ReadyForQuery",
+            ),
+        ];
+
+        for (case, malformed, max_message_size, expected_error) in cases {
+            let mut batch = error_response("23505", "queued unique violation");
+            batch.extend_from_slice(&malformed);
+            let mut framer = ScriptedFramer::new(vec![batch]);
+            framer.max_message_size = max_message_size;
+
+            let mut decoded = match read_backend(&mut framer).await {
+                Ok(decoded) => decoded,
+                Err(error) => panic!(
+                    "{case} outranked the wire-earlier ErrorResponse: {}",
+                    error_chain(&error)
+                ),
+            };
+            let deferred = decoded
+                .take_deferred_error()
+                .unwrap_or_else(|| panic!("{case} was not attached to the first decoded batch"));
+            let chain = error_chain(&deferred);
+            assert!(
+                chain.contains(expected_error),
+                "{case} attached the wrong deferred failure: {chain}"
+            );
+        }
+    }
+
     /// Every frame in a coalesced batch is measured, not just the first.
     ///
     /// `read_backend` validates the head frame from its header and then walks
