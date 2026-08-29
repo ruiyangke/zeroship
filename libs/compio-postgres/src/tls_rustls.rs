@@ -1612,6 +1612,88 @@ mod tests {
         }
     }
 
+    fn scripted_tls_stream(
+        client: rustls::ClientConnection,
+        reads: VecDeque<Vec<u8>>,
+    ) -> MaybeTlsStream<ScriptedTlsSocket, RustlsStream<ScriptedTlsSocket>> {
+        MaybeTlsStream::Tls(RustlsStream {
+            inner: TlsStreamCore::new(ScriptedTlsSocket { reads }, share(client)),
+            tls_server_end_point: None,
+            client_cert_status: ClientCertStatus::NotApplicable,
+            negotiated_alpn_protocol: None,
+        })
+    }
+
+    #[compio::test]
+    async fn tls_split_reassembles_a_record_across_socket_reads() {
+        const PAYLOAD: &[u8] = b"one record in two reads";
+        let (client, mut server) = handshaken_pair();
+
+        server
+            .writer()
+            .write_all(PAYLOAD)
+            .expect("queue the TLS record");
+        let mut first = Vec::new();
+        while server.wants_write() {
+            server
+                .write_tls(&mut first)
+                .expect("serialize the TLS record");
+        }
+        assert!(
+            first.len() > 3,
+            "the TLS record must extend beyond its scripted first read"
+        );
+        let second = first.split_off(3);
+
+        let stream = scripted_tls_stream(client, VecDeque::from([first, second]));
+        let Ok((mut read, _write)) = stream.try_into_split() else {
+            panic!("the scripted TLS stream refused to split");
+        };
+        let BufResult(result, buf) = read.read(vec![0u8; PAYLOAD.len()]).await;
+        let n = result.expect("decrypt the TLS record split across two socket reads");
+        assert_eq!(n, PAYLOAD.len());
+        assert_eq!(&buf[..n], PAYLOAD);
+    }
+
+    #[compio::test]
+    async fn tls_split_reports_close_notify_and_socket_eof_as_eof() {
+        let (close_client, mut close_server) = handshaken_pair();
+        close_server.send_close_notify();
+        let mut close_wire = Vec::new();
+        while close_server.wants_write() {
+            close_server
+                .write_tls(&mut close_wire)
+                .expect("serialize close_notify");
+        }
+        assert!(
+            !close_wire.is_empty(),
+            "the close_notify fixture produced no ciphertext"
+        );
+
+        let close_stream = scripted_tls_stream(close_client, VecDeque::from([close_wire]));
+        let Ok((mut close_read, _write)) = close_stream.try_into_split() else {
+            panic!("the close_notify TLS stream refused to split");
+        };
+        let BufResult(close_result, _) = close_read.read(vec![0u8; 1]).await;
+        assert_eq!(
+            close_result.expect("read the peer's close_notify"),
+            0,
+            "close_notify must end the split TLS reader"
+        );
+
+        let (eof_client, _eof_server) = handshaken_pair();
+        let eof_stream = scripted_tls_stream(eof_client, VecDeque::new());
+        let Ok((mut eof_read, _write)) = eof_stream.try_into_split() else {
+            panic!("the socket-EOF TLS stream refused to split");
+        };
+        let BufResult(eof_result, _) = eof_read.read(vec![0u8; 1]).await;
+        assert_eq!(
+            eof_result.expect("read the closed socket"),
+            0,
+            "socket EOF must end the split TLS reader"
+        );
+    }
+
     #[compio::test]
     async fn tls_split_preserves_ciphertext_already_read_from_socket() {
         const BEFORE: &[u8] = b"before split";

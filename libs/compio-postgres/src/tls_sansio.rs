@@ -1160,6 +1160,52 @@ mod tests {
         wire_prefix: Vec<u8>,
     }
 
+    struct SplitStateSocket;
+
+    struct EofReadHalf;
+
+    #[derive(Default)]
+    struct ShutdownCapture {
+        wire: Vec<u8>,
+        shutdowns: usize,
+    }
+
+    impl AsyncRead for EofReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for ShutdownCapture {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.wire.extend_from_slice(buf.as_init());
+            let n = buf.buf_len();
+            BufResult(Ok(n), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            assert!(
+                !self.wire.is_empty(),
+                "the TLS write half shut down its transport before sending close_notify"
+            );
+            self.shutdowns += 1;
+            Ok(())
+        }
+    }
+
+    impl SplitStream for SplitStateSocket {
+        type ReadHalf = EofReadHalf;
+        type WriteHalf = ShutdownCapture;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((EofReadHalf, ShutdownCapture::default()))
+        }
+    }
+
     impl AsyncWrite for ParkedWriter {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
             let bytes = buf.as_init();
@@ -1251,6 +1297,56 @@ mod tests {
         async fn shutdown(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn tls_split_preserves_the_plain_scratch_buffer() {
+        let (client, _server) = handshaken_pair();
+        let mut stream = TlsStreamCore::new(SplitStateSocket, share(client));
+        stream.reader.plain = vec![0xa5; 257];
+        let plain_ptr = stream.reader.plain.as_ptr();
+        let plain_capacity = stream.reader.plain.capacity();
+
+        let Ok((read, _write)) = stream.try_into_split() else {
+            panic!("the state-carry TLS stream refused to split");
+        };
+
+        assert_eq!(read.reader.plain, vec![0xa5; 257]);
+        assert_eq!(read.reader.plain.capacity(), plain_capacity);
+        assert_eq!(
+            read.reader.plain.as_ptr(),
+            plain_ptr,
+            "the split replaced the TLS reader's plaintext scratch allocation"
+        );
+    }
+
+    #[compio::test]
+    async fn tls_write_half_shutdown_sends_close_notify() {
+        let (client, mut server) = handshaken_pair();
+        let stream = TlsStreamCore::new(SplitStateSocket, share(client));
+        let Ok((_read, mut writer)) = stream.try_into_split() else {
+            panic!("the shutdown TLS stream refused to split");
+        };
+
+        writer
+            .shutdown()
+            .await
+            .expect("shut down the TLS write half");
+        assert_eq!(writer.socket.shutdowns, 1);
+
+        let mut ciphertext = writer.socket.wire.as_slice();
+        let mut peer_has_closed = false;
+        while !ciphertext.is_empty() {
+            let accepted = server
+                .read_tls(&mut ciphertext)
+                .expect("server read close_notify ciphertext");
+            assert!(accepted > 0, "the server stopped consuming close_notify");
+            peer_has_closed |= server
+                .process_new_packets()
+                .expect("server process close_notify")
+                .peer_has_closed();
+        }
+        assert!(peer_has_closed, "the TLS write half sent no close_notify");
     }
 
     #[compio::test]
