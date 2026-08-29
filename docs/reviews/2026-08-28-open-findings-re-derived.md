@@ -321,3 +321,47 @@ amplitude of the run rather than to a fixed 64 KiB, or require the window to
 span several oscillation periods before the trend arm is allowed a verdict.
 Neither is attempted here - this is recorded so the next person to see a 180s
 soak go red does not go looking for a leak first.
+
+## The workspace clippy gate is red on main, and it is not compio-postgres
+
+Measured 2026-08-29. `./tests/clippy_gate.sh` fails with `rc=1`:
+
+    before: linted: 58 targets in 17 packages (expected 217 in 38)
+    after:  linted: 77 targets in 25 packages (expected 217 in 38)
+
+"after" is with `crates/zeroship-migrate-backend` fixed (99 doc-list indent
+errors plus five `#[allow(clippy::too_many_arguments)]`). That crate was red
+since `b044546c2` on 2026-08-26, three days.
+
+Fixing it moved the gate 19 targets and 8 packages further before aborting, and
+revealed the next layer. Remaining deny-level errors, none in this crate's area:
+
+    crates/zeroship-migrate-core      195
+    crates/zeroship-migrate-postgres  121
+    crates/zeroship-migrate-sqlite     84
+    crates/zeroship-migrate-mysql      84
+    crates/zeroship-plugin-db           1
+
+Mostly `doc_lazy_continuation`, plus `result_large_err` and
+`too_many_arguments`. `result_large_err` wants error types boxed, which is an
+API change, not a lint tidy - so the remaining work is NOT the mechanical sweep
+the first crate was.
+
+**What this means for compio-postgres specifically, stated exactly.** The crate
+is no longer in the gate's "produced NO linted target" list, so its lib is now
+linted. But nine of its targets still are not, because the run aborts before
+reaching them:
+
+    compio-postgres  suite (test)          serialized_loop (test)
+    compio-postgres  socket_release (test) tls_live (test)
+    compio-postgres  unix_socket_live (test)
+    compio-postgres  soak (bench)          query_live (bench)
+    compio-postgres  chaos_probe (example) chaos_slots (example)
+
+Those targets are NOT unverified: `cargo clippy -p compio-postgres
+--all-features --all-targets` covers all of them and reports 0 errors. What is
+true is only that the WORKSPACE GATE cannot vouch for them while an upstream
+crate is red. Do not read a green per-crate clippy as a green gate, and do not
+read the gate's silence about a target as evidence it is clean - the gate says
+so itself: "this list is the reason the run above is not evidence that they are
+clean."
