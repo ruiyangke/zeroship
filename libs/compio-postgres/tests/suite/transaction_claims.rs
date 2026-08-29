@@ -617,6 +617,60 @@ async fn rows_visible_to_another_session(url: &str, table: &str) -> i64 {
         .get(0)
 }
 
+/// The public raw-batch wrapper must preserve `PostgreSQL`'s final command tag.
+/// Success, failed-transaction COMMIT, and an empty batch distinguish all
+/// three observable outcomes rather than allowing a constant answer to pass.
+#[compio::test]
+async fn raw_batch_execution_reports_the_servers_final_command_tag() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+
+        let success_tag = client
+            .batch_execute_reporting_tag("SELECT 1")
+            .await
+            .expect("the successful batch must complete");
+
+        client.batch_execute("BEGIN").await.unwrap();
+        let failure = client
+            .batch_execute("SELECT 1 / 0")
+            .await
+            .expect_err("the transaction must enter its failed state");
+        assert_eq!(
+            failure.code(),
+            Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO),
+            "the fixture failed for a reason other than division by zero"
+        );
+        let rolled_back_tag = client
+            .batch_execute_reporting_tag("COMMIT")
+            .await
+            .expect("PostgreSQL accepts COMMIT in a failed transaction");
+        let empty_tag = client
+            .batch_execute_reporting_tag("")
+            .await
+            .expect("an empty batch must complete");
+
+        assert_eq!(
+            success_tag.as_deref(),
+            Some("SELECT 1"),
+            "the wrapper discarded an ordinary final command tag"
+        );
+        assert_eq!(
+            rolled_back_tag.as_deref(),
+            Some("ROLLBACK"),
+            "the wrapper hid that PostgreSQL rolled the failed transaction back"
+        );
+        assert_eq!(
+            empty_tag, None,
+            "an empty batch invented a command tag that PostgreSQL did not send"
+        );
+    })
+    .await
+    .expect("raw batch command-tag claim exceeded its watchdog");
+}
+
 /// `Transaction::commit` must not answer `Ok` for a transaction PostgreSQL
 /// threw away.
 ///

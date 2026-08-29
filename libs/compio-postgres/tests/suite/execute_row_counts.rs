@@ -18,6 +18,8 @@
 //! partner that keeps "returns the last number it can find" from passing.
 
 use compio_postgres::Client;
+use compio_postgres::types::{ToSql, Type};
+use std::time::Duration;
 
 #[allow(unused_imports)]
 use crate::common;
@@ -153,6 +155,57 @@ async fn the_count_is_rows_affected_not_parameters_supplied() {
         affected, 3,
         "the count must be rows affected (3), not parameters supplied (2)"
     );
+}
+
+/// The explicitly typed convenience path has its own client wrapper and must
+/// preserve counts greater than one rather than collapsing every success to 1.
+#[compio::test]
+async fn execute_typed_reports_a_multirow_select_count() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+        let limit = 4i32;
+        let params: [(&(dyn ToSql + Sync), Type); 1] = [(&limit, Type::INT4)];
+
+        let affected = client
+            .execute_typed(
+                "SELECT g::int4 FROM generate_series(1, $1::int4) AS g",
+                &params,
+            )
+            .await
+            .expect("execute_typed must accept the explicit parameter type");
+        assert_eq!(
+            affected, 4,
+            "execute_typed collapsed a four-row command tag to another count"
+        );
+    })
+    .await
+    .expect("typed execute row-count claim exceeded its 10 second deadline");
+}
+
+/// Text-format parameter execution takes a separate wrapper path. A count of
+/// five separates the server's command tag from both constant 1 and the single
+/// supplied parameter.
+#[compio::test]
+async fn execute_text_params_reports_a_multirow_select_count() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+
+        let affected = client
+            .execute_text_params(
+                "SELECT g::int4 FROM generate_series(1, $1::int4) AS g",
+                &[Some("5".to_owned())],
+            )
+            .await
+            .expect("execute_text_params must accept a text-format integer");
+        assert_eq!(
+            affected, 5,
+            "execute_text_params collapsed a five-row command tag to another count"
+        );
+    })
+    .await
+    .expect("text-parameter execute row-count claim exceeded its 10 second deadline");
 }
 
 /// After exhaustion, `rows_affected` must not still read `None`.
