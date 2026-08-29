@@ -87,7 +87,12 @@ cites_examined=0
 cites_bad=0
 for f in docs/proposals/2026-08-26-*.md; do
   [ -f "$f" ] || continue
-  for cite in $(grep -oE '(crates|libs|sdks|tests|db)/[A-Za-z0-9_./-]+\.(rs|ts|sh|toml):[0-9]+' "$f" \
+  # `tsx`/`jsx` come FIRST so the longer extension wins the alternation. Listing
+  # `ts` first truncates `Foo.tsx:12` to `Foo.ts`, which then fails to match the
+  # `:line` and is silently SKIPPED - a blind spot, not a false alarm, and the
+  # quieter of the two failure modes. The same truncation in a measurement script
+  # invented 143 missing paths under sdks/ui that were never wrong.
+  for cite in $(grep -oE '(crates|libs|sdks|tests|db)/[A-Za-z0-9_./-]+\.(tsx|jsx|mjs|cjs|rs|ts|js|sh|toml):[0-9]+' "$f" \
                 | sort -u); do
     path="${cite%%:*}"
     line="${cite##*:}"
