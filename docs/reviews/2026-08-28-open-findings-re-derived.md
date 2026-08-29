@@ -560,3 +560,44 @@ token can cancel the next borrower's query
 (`a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower`). A
 statement cannot do harm that way - it names an object that really is prepared
 on that backend. Different hazard, different scoping, both deliberate.
+
+## Why the two-server gate and `verify.sh` are both required, measured 2026-08-29
+
+Neither the standard feature set nor `--all-features` compiles every test, and
+the sets are not nested. Measured at `33a60076f` with `cargo test ... -- --list`:
+
+    lib target:    default 496   standard set 536   --all-features 536
+    suite target:  standard set 711   --all-features 710
+
+**The lib target is settled**: the standard set compiles the same 536 as
+`--all-features`, so the `with-*` type-codec features hide nothing there.
+
+**The suite target is not nested in either direction.** Three tests exist ONLY
+under the standard set, because `suite-over-tls` cfg-REPLACES them:
+
+    prefer_attestation_fallback::prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest
+    prefer_attestation_fallback::prefer_without_a_root_cert_still_connects
+    prefer_attestation_fallback::verify_full_still_refuses_a_connector_that_cannot_attest
+
+Two exist ONLY under `--all-features`, each behind a shape feature:
+
+    cancel_request::a_pool_can_cancel_tls_with_its_private_policy_lineage   #[cfg(feature = "suite-over-tls")]
+    integration::suite_statement_cache_mode_reuses_identical_sql            #[cfg(feature = "suite-with-statement-cache")]
+
+So the two-port gate at 711 misses two tests, and an `--all-features` run misses
+three - and would ALSO read its DSN from `tls_live.conf` instead of
+`PG_TEST_URL`, which is the trap recorded above.
+
+**`verify.sh` closes exactly that gap**, because it runs `suite-over-tls` and
+`statement-cache` as separate modes rather than as one merged feature set. The
+two tests the standard gate cannot see are run there. This is why the two are
+not redundant, and why a green two-port gate is not sufficient on its own.
+
+Practical rule: the gate answers "does it work on both server versions", and
+`verify.sh` answers "does it work in every shape". Both, every time production
+code changes. Neither substitutes for the other, and that is now measured rather
+than assumed.
+
+**There are no `#[ignore]`d tests in this crate.** Checked the same day; the one
+grep hit is a comment in `tests/suite/url_parity.rs` recording that six once-
+ignored tests were un-ignored. That hiding place is already closed.
