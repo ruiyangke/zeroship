@@ -89,38 +89,13 @@ COPY examples/ examples/
 # The engine's crates were a submodule under third_party/ and are now ordinary
 # members, so these two COPYs replace the one that brought the submodule in.
 COPY packages/ packages/
-# THE CARGO WORKSPACE ROOT AND THE ADDON'S CRATE CLOSURE. Without both, this
-# stage cannot build at all, and until 2026-08-28 it never had been - the stage
-# comment further down said so outright ("NOT MEASURED: THIS STAGE HAS NOT BEEN
-# BUILT"). Two failures, in order, each found by building `--target migrate`:
-#
-#   1. `zeroship-migrate-node/Cargo.toml` inherits `edition` from
-#      `[workspace.package]`, so with no root manifest `napi build` ->
-#      `cargo metadata` fails with "error inheriting `edition` from workspace root
-#      manifest's `workspace.package.edition` / failed to find a workspace root",
-#      and `pnpm build` dies on its FIRST filter.
-#   2. With the root manifest but not the crates it depends on: "failed to load
-#      manifest for dependency `zeroship-migrate`".
-#
-# The nine crates below are the addon's LOCAL closure, computed from
-# `cargo metadata --manifest-path crates/zeroship-migrate-node/Cargo.toml` rather
-# than guessed. They are listed one per line instead of globbed because
-# `COPY crates/zeroship-migrate* crates/` FLATTENS matched directories into the
-# destination, which silently produces a tree cargo cannot read.
-#
-# The workspace `members` globs are `crates/*` and `libs/*`; they match exactly
-# these nine and nothing respectively, and a glob matching less is not an error.
-# A tenth crate entering the closure fails this build loudly, which is the point.
+# `pnpm build` starts by compiling the Rust N-API addon. Its metadata pass
+# resolves every local dependency kind of every copied Cargo workspace member,
+# including dev dependencies, so a curated crate closure silently couples this
+# Docker stage to future manifest changes. Keep the workspace root and its full
+# `crates/*` membership together, as the native builder stage does below.
 COPY Cargo.toml Cargo.lock ./
-COPY crates/zeroship-migrate/ crates/zeroship-migrate/
-COPY crates/zeroship-migrate-backend/ crates/zeroship-migrate-backend/
-COPY crates/zeroship-migrate-core/ crates/zeroship-migrate-core/
-COPY crates/zeroship-migrate-ir/ crates/zeroship-migrate-ir/
-COPY crates/zeroship-migrate-mysql/ crates/zeroship-migrate-mysql/
-COPY crates/zeroship-migrate-node/ crates/zeroship-migrate-node/
-COPY crates/zeroship-migrate-policy/ crates/zeroship-migrate-policy/
-COPY crates/zeroship-migrate-postgres/ crates/zeroship-migrate-postgres/
-COPY crates/zeroship-migrate-sqlite/ crates/zeroship-migrate-sqlite/
+COPY crates/ crates/
 # `libs/` (4.6 MB of standalone driver source, no path deps, nothing here builds
 # it) exists ONLY to satisfy the root manifest's second members glob. Cargo does
 # not treat a glob that matches nothing as empty - it falls back to the literal
@@ -136,8 +111,7 @@ COPY libs/ libs/
 # own `import ... from "zero-migrate"` resolves through.
 COPY db/migrations-ts/ db/migrations-ts/
 RUN pnpm install --frozen-lockfile
-# Root build script only builds sdks/* (topo: @zeroship/db ->
-# @zeroship/bootstrap -> rest); it does not touch apps/ or examples/.
+# The root build compiles the native addon before the JavaScript packages.
 RUN pnpm build
 # Sanity: the two files the runtime crate include_str!s MUST exist.
 RUN test -f sdks/bootstrap/dist/runtime-entry.js \

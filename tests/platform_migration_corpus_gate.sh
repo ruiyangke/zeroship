@@ -391,9 +391,12 @@ gate_arm idempotence "$second_seen" 25
 container_status=0
 if [ "$WITH_CONTAINER" -eq 1 ]; then
   echo "building the migrate image"
+  image_build_log="$(mktemp)"
   if ! docker build -f "$ROOT/deploy/Dockerfile" --target migrate \
-       -t zeroship-migrate:gate "$ROOT" >/dev/null 2>&1; then
+       -t zeroship-migrate:gate "$ROOT" >"$image_build_log" 2>&1; then
     echo "FAIL[image]: the migrate target did not build." >&2
+    echo "  Last 80 lines of docker build output:" >&2
+    tail -80 "$image_build_log" >&2
     container_status=1
     img_applied=0
   else
@@ -442,6 +445,7 @@ if [ "$WITH_CONTAINER" -eq 1 ]; then
     fi
     rm -rf "$secret" "$img_log"
   fi
+  rm -f "$image_build_log"
   gate_arm image "$img_applied" 25
 fi
 
