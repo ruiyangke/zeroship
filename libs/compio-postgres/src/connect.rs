@@ -839,6 +839,7 @@ mod tests {
     use super::*;
     use crate::NoTls;
     use crate::config::SslMode;
+    use crate::test_utils::paired_loopback_port;
     use crate::tls::{MakeTlsConnect, NoTlsStream, TlsConnect};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::TcpListener;
@@ -1095,7 +1096,14 @@ mod tests {
     }
 
     async fn scripted_probe_server(reply: ProbeReply) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        scripted_probe_server_bound("127.0.0.1:0".parse().unwrap(), reply).await
+    }
+
+    async fn scripted_probe_server_bound(
+        bind: SocketAddr,
+        reply: ProbeReply,
+    ) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (query_seen, query_observed) = oneshot::channel();
 
@@ -1730,9 +1738,13 @@ mod tests {
     #[compio::test]
     async fn probe_sql_error_skips_transport_and_address_before_next_host() {
         let (tls_seen, mut tls_observed) = oneshot::channel();
-        let (first, first_query_observed) =
-            scripted_probe_server(ProbeReply::ErrorThenTls(tls_seen)).await;
-        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_query_observed) = scripted_probe_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            ProbeReply::ErrorThenTls(tls_seen),
+        )
+        .await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (sibling, mut sibling_startup_observed) =
             scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
         let (second, second_query_observed) =
@@ -1793,9 +1805,13 @@ mod tests {
     #[compio::test]
     async fn probe_transport_failure_stops_every_retry_path() {
         let (tls_seen, mut tls_observed) = oneshot::channel();
-        let (first, query_observed) =
-            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
-        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, query_observed) = scripted_probe_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            ProbeReply::CloseThenTls(tls_seen),
+        )
+        .await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (sibling, mut sibling_startup_observed) =
             scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
         let (second, mut second_query_observed) =
@@ -2056,9 +2072,13 @@ mod tests {
 
     #[compio::test]
     async fn target_mismatch_skips_other_addresses_for_the_same_host() {
-        let (first, first_query_observed) =
-            scripted_probe_server(ProbeReply::Recovery(false)).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_query_observed) = scripted_probe_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            ProbeReply::Recovery(false),
+        )
+        .await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, mut second_startup_observed) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
         let mut config = hostname_config_for(first, Duration::from_secs(2));
@@ -2274,9 +2294,10 @@ mod tests {
     /// proves the test traversed TLS legs rather than plaintext sockets.
     #[compio::test]
     async fn tls_failure_advances_to_second_resolved_address() {
+        let port = paired_loopback_port();
         let (first, first_opening) =
-            tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+            tls_handshake_server_bound(SocketAddr::from(([127, 0, 0, 1], port))).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_opening) = tls_handshake_server_bound(second_bind).await;
 
         let mut config = Config::new();
@@ -2315,8 +2336,10 @@ mod tests {
     /// win the walk.
     #[compio::test]
     async fn connect_succeeds_via_second_resolved_address() {
-        let (first, first_seen) = scripted_server_after_startup(Some(Vec::new())).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_seen) =
+            scripted_server_bound(SocketAddr::from(([127, 0, 0, 1], port)), Some(Vec::new())).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
         let config = hostname_config_for(first, Duration::from_secs(5));
@@ -2354,8 +2377,13 @@ mod tests {
 
     #[compio::test]
     async fn cannot_connect_now_skips_other_addresses_for_the_same_host() {
-        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_seen) = scripted_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            Some(refused_handshake()),
+        )
+        .await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (_second, mut second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
         let mut config = hostname_config_for(first, Duration::from_secs(5));
@@ -2439,9 +2467,11 @@ mod tests {
     /// noise.
     #[compio::test]
     async fn connect_timeout_restarts_for_each_resolved_address() {
-        let (first, first_seen) = scripted_server_after_startup(None).await;
+        let port = paired_loopback_port();
+        let (first, first_seen) =
+            scripted_server_bound(SocketAddr::from(([127, 0, 0, 1], port)), None).await;
         // Same port, second loopback IP: see `scripted_server_bound`.
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_seen) = scripted_server_bound(second_bind, None).await;
 
         let config = hostname_config_for(first, Duration::from_millis(150));

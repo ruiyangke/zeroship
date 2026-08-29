@@ -69,6 +69,51 @@ use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use postgres_protocol::message::backend::{DataRowBody, Message};
 
+/// A port that is free on BOTH loopback addresses the multi-address tests
+/// need.
+///
+/// Binding `127.0.0.1:0` and then reusing the kernel's ephemeral choice on
+/// `127.0.0.2` is a race, not a guarantee: the two addresses have independent
+/// port spaces, so a port free on one can be taken on the other. It almost
+/// always works when the test runs alone and fails occasionally inside the
+/// full `--lib` run, where several hundred other tests are churning sockets.
+/// Measured 2026-08-28: the suite went red on `bind TLS replication probe` in
+/// a 519-test run while the same test passed 2 of 2 in isolation on both
+/// servers.
+///
+/// Probe the PAIR and retry instead of asserting the first guess.
+#[cfg(test)]
+pub(crate) fn paired_loopback_port() -> u16 {
+    let mut last: Option<std::io::Error> = None;
+    for _ in 0..64 {
+        let first = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => listener,
+            Err(error) => {
+                last = Some(error);
+                continue;
+            }
+        };
+        let port = match first.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(error) => {
+                last = Some(error);
+                continue;
+            }
+        };
+        match std::net::TcpListener::bind(("127.0.0.2", port)) {
+            Ok(second) => {
+                // Release both so the caller can rebind them for real. The
+                // window is small and the loop covers losing it.
+                drop(second);
+                drop(first);
+                return port;
+            }
+            Err(error) => last = Some(error),
+        }
+    }
+    panic!("no port free on both 127.0.0.1 and 127.0.0.2 after 64 attempts: {last:?}");
+}
+
 /// Construct a [`Column`] for tests. Mirrors the `pub(crate)` field
 /// layout used internally; `table_oid` / `column_id` default to `None`
 /// (the values Postgres sends for an ad-hoc expression with no
@@ -304,4 +349,30 @@ pub async fn connect_serialized(
     });
 
     Ok((client, connection, split_refused))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paired_loopback_port;
+
+    #[test]
+    fn paired_loopback_port_is_bindable_on_both_addresses() {
+        let port = paired_loopback_port();
+        let first = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("bind returned port on 127.0.0.1");
+        let second = std::net::TcpListener::bind(("127.0.0.2", port))
+            .expect("bind returned port on 127.0.0.2 while 127.0.0.1 is held");
+
+        assert_eq!(
+            first.local_addr().expect("read first bind address").port(),
+            port
+        );
+        assert_eq!(
+            second
+                .local_addr()
+                .expect("read second bind address")
+                .port(),
+            port
+        );
+    }
 }
