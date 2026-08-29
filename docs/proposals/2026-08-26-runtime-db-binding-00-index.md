@@ -361,16 +361,23 @@ including the two the design records as owed for steps 3 and 5a.
 | --- | --- |
 | **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), and the `SQLITE_BUSY_SNAPSHOT` arm |
 | **SC-5** | **step 5a fully implemented** (`40c3df95f` plus three fixes), with unusually strong instrumentation. **SC-5 as a contract is at zero**: Fork C (`AppIncarnationId` occurs 0 times in the tree), the ceiling as a service field, service-owned key custody |
-| **SC-3** | shared core plus read family built (`5c83046fc`), zero dependencies. Five families and the ledger absent |
+| **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH family has since been ported onto the IR. `crates/zeroship-data-plan/src/` now carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
 | **SC-4** | **decision 4 is implemented** (`8c6caa465`, dev-ness as a typed input) and SC-4 does not record it. Decision 1 unblocked and small; decision 2 underspecified by SC-4's own admission |
-| **SC-1** | **not structurally blocked.** Its substrate (interruptible actor, terminal CAS) exists. It needs the one yes/no answer above |
-| **SC-6** | write path specified (`docs/reviews/2026-08-28-flip-write-path.md`); the flip itself is not in the tree - `mask_sibling_column_for_field` still returns `format!("{field}_masked")` and nothing anywhere spells the raw column. The descriptor work deliberately recorded today's real layout rather than one no migration creates, and pinned the two together with a test that fails if they diverge |
+| **SC-1** | **the reducer is BUILT AND WIRED** (re-checked 2026-08-29). `crates/zeroship-plugin-db/src/transaction/reducer/` carries `deadline.rs`, `frames.rs`, `identity.rs` and its own `tests.rs`, and it is reached from `transaction/driver.rs` and `transaction/probe.rs`. This row previously said only that SC-1 was "not structurally blocked" and awaited one answer; that answer was taken and the work landed |
+| **SC-6** | **the flip is IN THE TREE** (re-checked 2026-08-29). This row previously said it was not, on two specifics that are both now false: `mask_sibling_column_for_field` no longer exists at all, and the raw column is spelled throughout - `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material |
 
 At zero and named as such in the design: the private module map, the
 artifact/init channel, `DbIsolateBinding`, the deletion of `registerModel`, the
 mask-policy artifact wire, the operator ceiling as worker configuration, Fork C's
-identity substrate, `DbPlan`'s remaining families and its ledger, the SC-4 dev
-mechanism, and the masking storage flip.
+identity substrate (`AppIncarnationId` still occurs 0 times, re-checked
+2026-08-29 - though `AuthorityIdentity` in
+`transaction/reducer/identity.rs` does carry an `incarnation` field, so the
+substrate is not untouched ground), `DbPlan`'s remaining families and its
+ledger, and the SC-4 dev mechanism.
+
+**The masking storage flip is no longer on that list** - it shipped. Anything
+reading this page for "what is left to build" should take the per-contract table
+above as authoritative over any prose that predates it.
 
 ---
 
