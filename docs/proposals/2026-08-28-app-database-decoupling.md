@@ -238,6 +238,26 @@ Measured on 18.4:
 
 Three consequences, all load-bearing:
 
+- **THE COLUMN-GRANT MODEL BREAKS EVERY WRITE VERB AS THE BUILDERS EMIT THEM. Measured on 17.11.**
+  `zeroship-schema/src/query.rs` emits `RETURNING *` at **twelve** sites (insert, updateOne,
+  insertMany, updateMany, delete, soft-delete/restore, upsert, findOrCreate). Under a column-only
+  grant, `*` expands to columns the narrowed role cannot read:
+
+  | statement | result as `app_login` holding `SELECT (id, pub), INSERT (id, pub), UPDATE (id, pub)` |
+  | --- | --- |
+  | `INSERT ... RETURNING *` | `ERROR: permission denied for table t` |
+  | `INSERT ... RETURNING id, pub` | 1 row |
+  | `SELECT *` | `ERROR: permission denied for table t` |
+  | `SELECT id, pub` | 1 row |
+  | `UPDATE ... RETURNING *` | `ERROR: permission denied for table t` |
+
+  So 2.4 cannot land alone. **Every `RETURNING *` and every `SELECT *` must become an explicit
+  projection over the granted set first**, or the first column grant issued turns every creator write
+  into `permission denied`. This is a prerequisite, not a follow-up, and it is the same twelve sites
+  SC-6's storage flip already had to reason about - a projection built from the descriptor's
+  `readable` set would satisfy both, which is the strongest argument yet for wiring that payload
+  through.
+
 - **A table-level grant defeats a column list.** Column grants add, they never subtract. The
   blanket `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` at
   `crates/zeroship-migrate-server/src/apply.rs:1148` must be **deleted**, not supplemented.
