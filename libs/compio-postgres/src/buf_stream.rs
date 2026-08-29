@@ -411,6 +411,20 @@ where
     }
 }
 
+async fn flush_write_buffer<W>(writer: &mut W, write_buf: &mut BytesMut) -> Result<(), Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    if write_buf.is_empty() {
+        return Ok(());
+    }
+    let data = write_buf.split();
+    let BufResult(result, _) = writer.write_all(data).await;
+    result.map_err(Error::io)?;
+    flush_retry_interrupted(writer).await.map_err(Error::io)?;
+    Ok(())
+}
+
 /// Buffered read/write stream over any compio `AsyncRead + AsyncWrite`.
 ///
 /// The stream is generic so the same wrapper works for plain sockets
@@ -535,22 +549,7 @@ where
 
     /// Flush the write buffer to the socket.
     pub async fn flush(&mut self) -> Result<(), Error> {
-        if self.write_buf.is_empty() {
-            return Ok(());
-        }
-        let data = self.write_buf.split();
-        self.write_all_raw(data).await?;
-        flush_retry_interrupted(&mut self.inner)
-            .await
-            .map_err(Error::io)?;
-        Ok(())
-    }
-
-    /// Low-level write all bytes to the socket.
-    async fn write_all_raw(&mut self, data: BytesMut) -> Result<(), Error> {
-        let BufResult(result, _) = self.inner.write_all(data).await;
-        result.map_err(Error::io)?;
-        Ok(())
+        flush_write_buffer(&mut self.inner, &mut self.write_buf).await
     }
 }
 
@@ -683,16 +682,7 @@ where
 {
     /// Flush the write buffer to the socket. Mirrors [`BufStream::flush`].
     pub async fn flush(&mut self) -> Result<(), Error> {
-        if self.write_buf.is_empty() {
-            return Ok(());
-        }
-        let data = self.write_buf.split();
-        let BufResult(result, _) = self.inner.write_all(data).await;
-        result.map_err(Error::io)?;
-        flush_retry_interrupted(&mut self.inner)
-            .await
-            .map_err(Error::io)?;
-        Ok(())
+        flush_write_buffer(&mut self.inner, &mut self.write_buf).await
     }
 
     /// Best-effort socket shutdown (TCP FIN). Mirrors the shutdown call in
@@ -843,6 +833,13 @@ mod tests {
         flushes: usize,
     }
 
+    #[derive(Default)]
+    struct WriteProbe {
+        writes: usize,
+        flushes: usize,
+        shutdowns: usize,
+    }
+
     fn test_read_half<R>(inner: R) -> BufReadHalf<R>
     where
         R: AsyncRead + Unpin,
@@ -970,6 +967,30 @@ mod tests {
         }
     }
 
+    impl AsyncRead for WriteProbe {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for WriteProbe {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.writes += 1;
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.shutdowns += 1;
+            Ok(())
+        }
+    }
+
     impl AsyncRead for UnsplitIo {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             BufResult(Ok(0), buf)
@@ -1081,6 +1102,74 @@ mod tests {
             "one interrupted flush was treated as terminal"
         );
         assert_eq!(write_half.inner.flushes, 2, "split flush was not retried");
+    }
+
+    #[compio::test]
+    async fn empty_flush_skips_transport_on_serialized_and_split_paths() {
+        let mut stream = BufStream::new(WriteProbe::default());
+        stream.flush().await.expect("flush the serialized stream");
+        assert_eq!(stream.inner.writes, 0, "serialized empty flush wrote");
+        assert_eq!(stream.inner.flushes, 0, "serialized empty flush flushed");
+
+        let mut write_half = BufWriteHalf {
+            inner: WriteProbe::default(),
+            write_buf: BytesMut::new(),
+        };
+        write_half.flush().await.expect("flush the split stream");
+        assert_eq!(write_half.inner.writes, 0, "split empty flush wrote");
+        assert_eq!(write_half.inner.flushes, 0, "split empty flush flushed");
+    }
+
+    #[compio::test]
+    async fn successful_flush_drains_serialized_and_split_write_buffers() {
+        let mut stream = BufStream::new(WriteProbe::default());
+        stream.write(b"serialized request");
+        stream.flush().await.expect("flush the serialized stream");
+        assert!(
+            stream.write_buf.is_empty(),
+            "serialized buffer was retained"
+        );
+        assert_eq!(
+            stream.inner.writes, 1,
+            "serialized bytes were not written once"
+        );
+        assert_eq!(
+            stream.inner.flushes, 1,
+            "serialized transport was not flushed once"
+        );
+
+        let mut write_half = BufWriteHalf {
+            inner: WriteProbe::default(),
+            write_buf: BytesMut::from(&b"split request"[..]),
+        };
+        write_half.flush().await.expect("flush the split stream");
+        assert!(write_half.write_buf.is_empty(), "split buffer was retained");
+        assert_eq!(
+            write_half.inner.writes, 1,
+            "split bytes were not written once"
+        );
+        assert_eq!(
+            write_half.inner.flushes, 1,
+            "split transport was not flushed once"
+        );
+    }
+
+    #[compio::test]
+    async fn split_shutdown_delegates_to_transport() {
+        let mut write_half = BufWriteHalf {
+            inner: WriteProbe::default(),
+            write_buf: BytesMut::new(),
+        };
+
+        write_half
+            .shutdown()
+            .await
+            .expect("shut down the split stream");
+
+        assert_eq!(
+            write_half.inner.shutdowns, 1,
+            "split shutdown was not delegated"
+        );
     }
 
     #[test]
