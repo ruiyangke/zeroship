@@ -192,3 +192,80 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ProbeStream;
+
+    struct ProbeReadHalf;
+
+    #[derive(Default)]
+    struct ProbeWriteHalf {
+        flushes: usize,
+        shutdowns: usize,
+    }
+
+    impl AsyncRead for ProbeReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for ProbeWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let n = buf.buf_len();
+            BufResult(Ok(n), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            self.shutdowns += 1;
+            Ok(())
+        }
+    }
+
+    impl SplitStream for ProbeStream {
+        type ReadHalf = ProbeReadHalf;
+        type WriteHalf = ProbeWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((ProbeReadHalf, ProbeWriteHalf::default()))
+        }
+    }
+
+    #[compio::test]
+    async fn maybe_tls_write_half_delegates_tls_flush() {
+        let stream: MaybeTlsStream<ProbeStream, ProbeStream> = MaybeTlsStream::Tls(ProbeStream);
+        let Ok((_read, mut write)) = stream.try_into_split() else {
+            panic!("the TLS probe stream refused to split");
+        };
+
+        write.flush().await.expect("flush the TLS half");
+
+        let MaybeTlsWriteHalf::Tls(probe) = write else {
+            panic!("the TLS write half changed variants");
+        };
+        assert_eq!(probe.flushes, 1, "the TLS transport was not flushed");
+    }
+
+    #[compio::test]
+    async fn maybe_tls_write_half_delegates_tls_shutdown() {
+        let stream: MaybeTlsStream<ProbeStream, ProbeStream> = MaybeTlsStream::Tls(ProbeStream);
+        let Ok((_read, mut write)) = stream.try_into_split() else {
+            panic!("the TLS probe stream refused to split");
+        };
+
+        write.shutdown().await.expect("shut down the TLS half");
+
+        let MaybeTlsWriteHalf::Tls(probe) = write else {
+            panic!("the TLS write half changed variants");
+        };
+        assert_eq!(probe.shutdowns, 1, "the TLS transport was not shut down");
+    }
+}
