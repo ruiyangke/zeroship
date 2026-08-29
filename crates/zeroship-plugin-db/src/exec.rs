@@ -1398,7 +1398,6 @@ mod tests {
     fn dropping_in_flight_sqlite_query_restores_tx_slot() {
         reset_world("app_exec_cancel");
         run(async {
-            use crate::backend::sqlite::session::arm_next_command_gate_for_tests;
             use std::time::Duration;
 
             let dir = tempfile::tempdir().expect("tempdir");
@@ -1446,7 +1445,7 @@ mod tests {
                 assert!(prev.is_none(), "tx slot should start empty");
             });
 
-            let gate = arm_next_command_gate_for_tests();
+            let gate = backend.arm_next_command_gate_for_tests();
             let task = compio::runtime::spawn(async {
                 exec_query(&ambient_route_for_tests("app_exec_cancel"), BuiltQuery {
                     sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
@@ -1484,6 +1483,47 @@ mod tests {
             context::with_mut(|c| c.clear_pool());
         });
         reset_world("app_exec_cancel");
+    }
+
+    /// A gate armed on one session must leave every other session running.
+    ///
+    /// The slot used to be a process-global one-shot, taken in **every**
+    /// actor's run loop by whichever actor happened to receive the next
+    /// command. So arming it here stalled an unrelated, concurrently running
+    /// test's actor on `release_rx.recv()`, and satisfied the arming test's
+    /// `wait_until_blocked()` with that foreign command - leaving the arming
+    /// test to assert against a query that was never gated. That is a race
+    /// between tests, so it only bit when the timing lined up.
+    ///
+    /// The gate is held for the whole probe on purpose: dropping it closes
+    /// `release_tx`, which would release a wrongly-gated actor and hide the
+    /// very stall this test is looking for.
+    #[test]
+    fn next_command_gate_does_not_stall_another_session() {
+        run(async {
+            use std::time::Duration;
+
+            let dir_a = tempfile::tempdir().expect("tempdir a");
+            let dir_b = tempfile::tempdir().expect("tempdir b");
+            let backend_a =
+                SqliteBackend::new(PathBuf::from(dir_a.path())).expect("open backend a");
+            let backend_b =
+                SqliteBackend::new(PathBuf::from(dir_b.path())).expect("open backend b");
+
+            let _gate = backend_a.arm_next_command_gate_for_tests();
+
+            let ran = compio::time::timeout(
+                Duration::from_secs(5),
+                backend_b.pool_exec("CREATE TABLE probe (id INTEGER PRIMARY KEY)", &[]),
+            )
+            .await;
+
+            assert!(
+                ran.is_ok(),
+                "a gate armed on backend A must not stall backend B's actor"
+            );
+            ran.expect("not stalled").expect("backend B command");
+        });
     }
 
     // -------------------------------------------------------------------
