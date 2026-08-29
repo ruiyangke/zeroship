@@ -4,6 +4,28 @@ Date: 2026-08-27. Tree: `.worktrees/dbbind-impl`, HEAD `cca4e3553`.
 Status: enumeration + specification. No code changed; this file is the only
 addition.
 
+> **Four cited files have since been removed, by the very work this document
+> specified (checked 2026-08-29).** Each line below names one and says so, which
+> is the convention `tests/doc_citation_gate.sh` enforces - a citation may name a
+> file that no longer exists only if it states that outright.
+>
+> - `crates/zeroship-plugin-db/src/audit.rs` - DELETED with the data plane's DDL.
+> - `crates/zeroship-plugin-db/src/crud/introspect_schema.rs` - DELETED when the
+>   descriptor became the sole schema authority.
+> - `crates/zeroship-plugin-db/src/live_metadata.rs` - DELETED with the above.
+> - `crates/zeroship-migrate-adapter/src/platform.rs` - DELETED with that whole
+>   crate.
+>
+> Files of the same basename exist elsewhere - `crates/zeroship-auth/src/audit.rs`
+> and `crates/zeroship-core/src/auth_provider/platform.rs` - and are NOT the same
+> code. Do not follow them. The enumeration is kept as the record of what the
+> data plane read on its own date.
+>
+> **Citation convention:** an unqualified path such as `backend/sqlite/vector.rs`
+> or `v8_classes/transaction.rs` is relative to `crates/zeroship-plugin-db/src/`,
+> which is the crate this document enumerates. Anything outside that crate is
+> written repo-relative from the first segment.
+
 ## What this document is
 
 The operator has decided that the runtime **descriptor** is the sole authority
@@ -318,7 +340,7 @@ Two further measurements sharpen that `[delegated]`:
 Also `[delegated]`: **`compute_diff` (`diff.rs:900`) has no production call site
 in plugin-db at all** - grep finds only doc-comment mentions
 (`backend/mod.rs:565`, `lib.rs:127`, `cross_app_fk.rs:70`, `:94`, `:232`) and
-four calls in `tests/sqlite_integration.rs` (`:6999`, `:7087`, `:7156`, `:7224`).
+four calls in `crates/zeroship-plugin-db/tests/sqlite_integration.rs` (`:6999`, `:7087`, `:7156`, `:7224`).
 The diff classifier is a migration-engine facility that the data plane links but
 never runs.
 
@@ -840,14 +862,14 @@ Counts are from a delegated static enumeration `[delegated]`; nothing was run.
 | `crud/introspect_schema.rs:988` | `encrypted_column_maps_to_declared_shape` | retarget to descriptor -> runtime shape |
 | `crud/introspect_schema.rs:1008` | `masked_parent_maps_and_sibling_is_dropped` | **the assertion INVERTS.** Today: `phone_masked` must NOT be a schema field. Under the flip the physical raw column must be recorded in `storage`, not dropped |
 | `crud/introspect_schema.rs:1030` | `jsonb_and_date_families_collapse_to_representative_tokens` | pure `pg_type` -> DSL-token mapping; **DELETE** unless the descriptor keeps a physical-type projection |
-| `tests/integration.rs:5098` | `p4_round_trip_encrypted_masked_vector_via_introspected_metadata` | plants `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` (`:5146-5147`), asserts `runtime_schema_for_tests` recovered them (`:5162-5167`), then does a real round trip. **Keep the round trip; invert the assertion**: the metadata must come from the descriptor and no catalog read may occur |
-| `tests/integration.rs:5385` | `p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl` | same shape: sentinel plant at `:5425-5426`, assertions at `:5477-5482` |
-| `tests/native_transaction.rs:1071` | `update_many_randomised_failure_is_atomic_postgres` | the test body is fine; its FIXTURE `create_encrypted_users_table` (`:247`) writes the `zsenc:` comment at `:270`, which is the only channel telling the data plane `ssn` is encrypted. **Fixture-only rewrite** |
+| `crates/zeroship-plugin-db/tests/integration.rs:5098` | `p4_round_trip_encrypted_masked_vector_via_introspected_metadata` | plants `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` (`:5146-5147`), asserts `runtime_schema_for_tests` recovered them (`:5162-5167`), then does a real round trip. **Keep the round trip; invert the assertion**: the metadata must come from the descriptor and no catalog read may occur |
+| `crates/zeroship-plugin-db/tests/integration.rs:5385` | `p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl` | same shape: sentinel plant at `:5425-5426`, assertions at `:5477-5482` |
+| `crates/zeroship-plugin-db/tests/native_transaction.rs:1071` | `update_many_randomised_failure_is_atomic_postgres` | the test body is fine; its FIXTURE `create_encrypted_users_table` (`:247`) writes the `zsenc:` comment at `:270`, which is the only channel telling the data plane `ssn` is encrypted. **Fixture-only rewrite** |
 
 **REWRITE-or-DELETE, gate-dependent - 2.** `context.rs:1378`
 (`registered_models_round_trip`) and `:1389` (`mark_model_registered_is_idempotent`)
 die only if the `is_model_registered` gate goes. Note also
-`tests/sqlite_integration.rs:9748`
+`crates/zeroship-plugin-db/tests/sqlite_integration.rs:9748`
 (`p6c_data_plane_reaches_the_app_file_without_a_register`), which pins the exact
 cold-schema `None` path the descriptor removes; it currently passes for a reason
 that will no longer exist.
@@ -858,7 +880,7 @@ stays for drift and diff, which it should:
 `zeroship-schema/src/mask_codec.rs` 15 arms (`:231`-`:379`);
 `crud/mask_backfill.rs` 3 (`:390`, `:399`, `:425`);
 `backend/sqlite/mod.rs` 17 (`:2958`-`:3152`);
-`tests/sqlite_integration.rs` 4 (`:6949`, `:7111`, `:7196`, `:7250`) plus 2 pure
+`crates/zeroship-plugin-db/tests/sqlite_integration.rs` 4 (`:6949`, `:7111`, `:7196`, `:7250`) plus 2 pure
 introspection arms (`:542`, `:572`);
 `zeroship-migrate-backend/src/mask_codec.rs:298`;
 `zeroship-migrate/tests/column_shapes/encrypted_domain_catalog_sentinel.rs` 8
@@ -875,7 +897,7 @@ They are: `crud/read_pipeline.rs` 7 (`:417`, `:440`, `:460`, `:477`, `:494`,
 `crud/mask_backfill.rs` 5 (`:466`-`:531`); `crud/mask_drift.rs` 7 (`:988`-`:1162`);
 `crud/encryption_pass.rs` 3 (`:629`, `:710`, `:788`); `crud/bytes_pass.rs` 1
 (`:275`); `crud/write_pipeline.rs:754`; `backend/sqlite/mod.rs:2823`;
-`backend/sqlite/vector.rs:376`; `tests/sqlite_integration.rs` 6
+`backend/sqlite/vector.rs:376`; `crates/zeroship-plugin-db/tests/sqlite_integration.rs` 6
 (`:5246`, `:5432`, `:5465`, `:5539`, `:5667`, `:5716`).
 
 **But two of those flip on the MASKING FLIP, independently of the shape
@@ -898,8 +920,8 @@ that is the regression the flip can introduce with every existing test green
 (section 3.5).
 
 **UNAFFECTED - 12.** Class-(v) end-to-end arms that route through introspection
-without asserting on it (`tests/integration.rs:1161`, `:5328`;
-`tests/sqlite_integration.rs:9574`, `:9670`; `context.rs:1176`) and the three
+without asserting on it (`crates/zeroship-plugin-db/tests/integration.rs:1161`, `:5328`;
+`crates/zeroship-plugin-db/tests/sqlite_integration.rs:9574`, `:9670`; `context.rs:1176`) and the three
 compile-time trait assertions (`backend/postgres.rs:1798`,
 `backend/mod.rs:1931`, `backend/sqlite/mod.rs:2875`), which survive because
 `SchemaIntrospect` itself survives for the migrate plane.
@@ -1132,7 +1154,7 @@ column-name lookup.
   types, none touching a connection) but likewise did not characterise each
   builder's emitted SQL.
 - The ~200 test-only `use zeroship_plugin_db::query::{...}` import blocks in
-  `tests/sqlite_integration.rs` and `tests/integration.rs` were not expanded
+  `crates/zeroship-plugin-db/tests/sqlite_integration.rs` and `crates/zeroship-plugin-db/tests/integration.rs` were not expanded
   name by name `[delegated]`.
 - Non-Rust consumers beyond `sdks/db/src/types.ts`,
   `sdks/bootstrap/src/install-schema.ts` and the confined-shape mirror. In
