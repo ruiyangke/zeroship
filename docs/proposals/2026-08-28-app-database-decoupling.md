@@ -1074,9 +1074,26 @@ for the purpose - roles are cluster-global objects, so this must never be run ag
 
 **Established. Build on these.**
 
+> **FIVE OF THE NINE BELOW HAVE BEEN OVERTURNED OR QUALIFIED BY LATER MEASUREMENT.** They are kept in
+> place, each annotated, because a list of "established facts" that quietly loses entries is worse
+> than one that shows its corrections. Read the annotations before building on any item.
+>
+> | item | status |
+> | --- | --- |
+> | 1 | **Qualified.** Transitivity is why revocation fails, not a feature - see 2 and 3. |
+> | 2 | Holds, and now measured on 16.14, 17.11 and 18.4. The best-evidenced item here. |
+> | 3 | **False under co-tenancy.** Superseded by the per-grant role with `WITH SET FALSE`. |
+> | 5 | **Not viable as written** - column grants refuse every `RETURNING *`, which the builders emit at twelve sites. |
+> | 7 | **Incompatible with `REPLICA IDENTITY FULL`**, and neither DDL step refuses; writes break at DML time. |
+> | 9 | **False.** `AuthorityIdentity` carries an incarnation and ships. |
+
 1. `SET ROLE` resolves membership transitively, so a session narrows directly to
    `zs_ns_<N>_<cap>` without assuming the app principal, and the narrowed role cannot reach a sibling
    namespace (`permission denied for schema`). Per-statement confinement costs one statement.
+   **QUALIFIED:** transitivity resolves against the **login** role's closure, which under co-tenancy
+   is the union of every app the worker serves - so this is the mechanism that breaks item 3, not an
+   independent guarantee. And `SET ROLE` is a *lateral* move within that closure, never a narrowing:
+   measured, a session already narrowed to one role can assume any other in the closure.
 2. `GRANT <role> TO <login> WITH INHERIT FALSE` makes a bare, unfenced SELECT fail while
    `SET LOCAL ROLE` still works. `ALTER ROLE <login> NOINHERIT` does **not** do this: PG 16+ records
    `inherit_option` per membership at grant time and the existing membership stays inheriting.
