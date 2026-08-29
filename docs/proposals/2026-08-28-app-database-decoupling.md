@@ -385,7 +385,16 @@ Two facts fall out, and the second is the one that decides the design:
 - **The published column set per table is the INTERSECTION over every grant on the namespace, and
   the plaintext parent of any column with `classification != none` is never published to anyone.**
   This follows directly from 5.2: one column set per table, and the shared stream serves the weakest
-  reader. The mask sibling is published; the parent is not.
+  reader.
+
+  **The column names inverted on 2026-08-28 and this rule inverts with them.** SC-6's storage flip
+  (`3fd54f177`) made the field's own column hold the **mask** and moved the real value to
+  `__zs_raw__ssn`; the `"ssn_masked" AS "ssn"` substitution is deleted and there is no mask sibling
+  any more. So the rule is now: **publish `ssn`** - which holds the mask - **and exclude
+  `__zs_raw__ssn`**, which holds the plaintext. The property is unchanged and the mechanism is
+  simpler, because the column a publication would name by default is now the safe one. Anything
+  written against the old layout - "publish the sibling, exclude the parent" - is inverted and would
+  publish the plaintext.
 - **The filter becomes a fan-out.** `if rel.namespace != self.app_id { return; }`
   (`crates/zeroship-plugin-db/src/wal_consumer.rs:605`) becomes a lookup of `rel.namespace` in the
   worker's namespace-to-grant-holders map, delivering to each app holding a read grant. The broker's
