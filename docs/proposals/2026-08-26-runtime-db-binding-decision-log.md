@@ -29,6 +29,66 @@ measurements age.
 
 ## 2026-08-29
 
+### Reconciling the two re-key drafts: the epoch is enforced by PostgreSQL, not compared in Rust
+
+Two independent drafts of the identity re-key agreed on nearly everything - the key per subsystem, the
+two-verb teardown, the billing principal, what must land atomically - and disagreed on ONE thing: how
+the serve-time schema epoch is enforced.
+
+| | A | B |
+| --- | --- | --- |
+| mechanism | append `SELECT epoch ...` to the setup batch, compare in Rust | epoch in the per-grant role name; `SET LOCAL ROLE "zs_bind_<gid>_e<E>"` fails when it rotates |
+| steady-state cost | one index lookup, inside an existing round trip | none: the role name is already the batch's first statement |
+| enforced by | the worker | PostgreSQL |
+| resource | one row per database, datastore-scoped | a role + membership per (grant, epoch) in CLUSTER-SHARED `pg_authid` / `pg_auth_members` |
+
+B's own author nominated it as the choice most likely wrong, and named the two probes that would
+overturn it. **I ran both. Both fail to overturn it.**
+
+**Probe 1 - does `CREATE ROLE` in the apply bracket serialize applies across other databases?** If it
+did, B would put a cluster-wide serialization point in every migration. Method: session 1 holds an
+uncommitted `CREATE ROLE` in database `zeroship` (precondition proved via `pg_stat_activity` showing
+it `active`); session 2 runs `CREATE ROLE` in database `postgres` with `lock_timeout='3s'` so blocking
+surfaces as an error rather than a hang; control is the same statement with no holder.
+
+    CONTROL (no holder)           CREATE ROLE
+    CASE (concurrent holder)      CREATE ROLE   elapsed_ms=108
+
+No cross-database serialization.
+
+**Probe 2 - is `SET ROLE` superlinear in `pg_auth_members`?** B taxes every query on the platform if
+so. Method: grow the shared catalog, then time 2000 `SET ROLE` + 2000 `RESET ROLE` server-side in a
+plpgsql loop, so client round trips are excluded and the same N is used at every scale.
+
+    pg_auth_members=3      pg_authid=20      setrole_ms=6
+    pg_auth_members=103    pg_authid=120     setrole_ms=6
+    pg_auth_members=1103   pg_authid=1120    setrole_ms=6
+    pg_auth_members=6103   pg_authid=6120    setrole_ms=6
+
+Flat across a 2000x growth in membership rows - 1.5us per statement at both ends.
+
+**Decision: B.** It is the stronger shape and, once measured, the cheaper one. Stronger because the
+fence becomes a condition the worker FAILS rather than a function it CALLS - it is the first statement
+of the only batch that yields a usable connection, so no code path can skip, forget or be talked out
+of it. Cheaper because the epoch rides a string already being sent; A adds a statement to every setup
+batch forever to avoid a catalog cost that measures as zero.
+
+**What is still unmeasured, and must not be read as covered:** per-backend membership cache
+construction at CONNECTION time. Probe 2 measures `SET ROLE` on an established backend, not the cost a
+new backend pays to build its membership set - a different cost, paid at connect rather than per
+statement, and amortized by pooling but not eliminated. The proposal's cost 7 names it. Measure it
+before the role graph ships.
+
+**Also carried from B unchanged:** `epochs_in_flight <= 2`, enforced by making the epoch reaper part
+of the apply rather than a sweep, with an apply that cannot drop epoch E-1's roles REFUSING to advance
+to E+1. That converts an unbounded shared-catalog leak into a bounded, fail-closed one.
+
+**And the first version of probe 2 measured nothing.** It restarted role numbering at 1 for every
+scale, so every call after the first aborted on a duplicate name; the catalog stopped growing at 103
+while the timings kept printing - identical, plausible, and pointing at the same conclusion the real
+measurement later supported. It was caught only because the script printed `pg_auth_members` beside
+each timing. A scaling probe must print the thing it claims to be scaling.
+
 ### The four-reviewer round on the revised design, and the verdict it forces
 
 Four independent reviews of `data-system.md` + `2026-08-28-app-database-decoupling.md`: two
