@@ -2,6 +2,7 @@
 
 use crate::config::{SslCertMode, SslMode, SslNegotiation};
 use crate::encryption::Encryption;
+use crate::error::CancelDelivery;
 use crate::tls::{ServerVerification, TlsConnect, TlsPolicyIdentity};
 use crate::{
     Error, Socket, cancel_query, cancel_query_raw,
@@ -123,10 +124,10 @@ impl CancelDropTarget {
 
 /// Retires the target only while the cancellation operation is still pending.
 ///
-/// A returned transport error is not abandonment: the existing pool attempt
-/// records its uncertainty without changing the ordinary bare-client error
-/// path. This guard is disarmed as soon as the underlying future returns,
-/// before its `Result` is interpreted.
+/// A returned error is interpreted after this guard is disarmed. The standard
+/// cancellation path separately retires its target only if sending may have
+/// begun; the caller-owned raw path retains its existing returned-error
+/// behavior.
 struct CancelAbandonmentGuard<'a> {
     target: Option<&'a CancelDropTarget>,
 }
@@ -242,9 +243,19 @@ impl CancelToken {
         )
         .await;
         abandonment.disarm();
-        if result.is_ok()
-            && let Some(attempt) = attempt
+        if let Err(error) = &result
+            && error.cancel_delivery() == CancelDelivery::PossiblySent
+            && let Some(target) = &self.drop_target
         {
+            target.abandon();
+        }
+        let attempt_is_safe = match &result {
+            Ok(()) => true,
+            Err(error) => error.cancel_delivery() == CancelDelivery::Unsent,
+        };
+        // A pre-write failure is conclusive too: no late packet can target a
+        // later borrower, so the pool lease remains safe to reuse.
+        if attempt_is_safe && let Some(attempt) = attempt {
             attempt.confirm();
         }
         result
@@ -579,6 +590,30 @@ mod tests {
             !client.is_closed(),
             "a returned CancelRequest error was mistaken for abandonment"
         );
+    }
+
+    #[compio::test]
+    async fn a_provably_unsent_cancel_error_does_not_poison_its_pool_lease() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let (client, _receiver) = target_client(true);
+            {
+                let token = client.cancel_token();
+                token
+                    .cancel_query(NoTls)
+                    .await
+                    .expect_err("the address-less token unexpectedly sent a CancelRequest");
+            }
+            assert!(
+                !client.pool_cancel_lease_prevents_reuse(),
+                "a provably unsent cancellation poisoned the pool lease"
+            );
+            assert!(
+                !client.is_closed(),
+                "a provably unsent cancellation retired the pooled client"
+            );
+        })
+        .await
+        .expect("pre-write pooled cancel test exceeded its 5 second deadline");
     }
 
     #[compio::test]

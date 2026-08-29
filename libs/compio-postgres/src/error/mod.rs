@@ -417,6 +417,13 @@ enum Kind {
 struct ErrorInner {
     kind: Kind,
     cause: Option<Box<dyn error::Error + Sync + Send>>,
+    cancel_delivery: CancelDelivery,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum CancelDelivery {
+    Unsent,
+    PossiblySent,
 }
 
 /// An error communicating with the Postgres server.
@@ -601,7 +608,20 @@ impl Error {
     }
 
     fn new(kind: Kind, cause: Option<Box<dyn error::Error + Sync + Send>>) -> Error {
-        Error(Box::new(ErrorInner { kind, cause }))
+        Error(Box::new(ErrorInner {
+            kind,
+            cause,
+            cancel_delivery: CancelDelivery::Unsent,
+        }))
+    }
+
+    pub(crate) fn with_cancel_delivery(mut self, delivery: CancelDelivery) -> Error {
+        self.0.cancel_delivery = delivery;
+        self
+    }
+
+    pub(crate) fn cancel_delivery(&self) -> CancelDelivery {
+        self.0.cancel_delivery
     }
 
     pub(crate) fn closed() -> Error {
