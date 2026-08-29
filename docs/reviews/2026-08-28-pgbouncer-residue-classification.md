@@ -250,8 +250,9 @@ Set-differenced rather than compared by total:
 - Four `differential_tokio::*` COPY cases appear on both and are the known
   serial-run contamination set: each passes in isolation.
 
-**One failure exists ONLY against the newer server**, and it is a new shape of
-category A:
+**One failure exists ONLY against the newer server.** It was first written up
+here as "a new shape of category A"; that was wrong by this document's own
+definitions and is corrected below. **It is category C:**
 
     protocol_version_live::the_negotiated_version_matches_what_the_server_can_speak
     assertion failed: server_version_num=180004 speaks V3_2,
@@ -262,6 +263,22 @@ endpoint and speaks 3.0; the backend speaks 3.2. The test's oracle reads
 `server_version_num` from the SERVER and compares it against a version the
 driver negotiated with the POOLER. That is the same mistake as the synthetic-PID
 cases in the table above, in a new place.
+
+**Why C and not A.** Category A means the assertion needs something transaction
+pooling does not promise. Here the DRIVER DID THE RIGHT THING: it negotiated 3.0
+with the peer it actually has, which is what that peer offers. Only the oracle is
+wrong - `SELECT current_setting('server_version_num')` travels THROUGH the pooler
+to the backend and reports 180004, while `Client::protocol_version()` reports the
+negotiation with the pooler itself. The test silently assumes the peer you
+negotiate with is the server you query, which is a direct-connection assumption,
+not a pooling limitation. That is the category C definition exactly.
+
+**It is not straightforwardly fixable, which is why it stays in the residue.**
+Making it mode-aware needs an oracle for what the ENDPOINT speaks, and PgBouncer
+exposes no such thing over SQL - the file header already notes PostgreSQL itself
+offers no server-side view of the negotiated version. Asserting merely that the
+negotiation produced a valid version would be near-vacuous. Left as a known
+category C member rather than weakened.
 
 **It is invisible on PG 16**, where pooler and server both speak 3.0. So a
 pooled residue measured against one server version cannot be assumed complete:
