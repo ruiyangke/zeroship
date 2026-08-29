@@ -15,8 +15,23 @@ The shape:
   capability `owner` | `readwrite` | `readonly`.
 
 Enforcement is PostgreSQL role membership, not an in-process check. The worker connects once as
-`zeroship_worker`, holds **no** inherited privilege, and narrows per transaction with a single
-`SET LOCAL ROLE "zs_ns_<nsid>_<cap>"`. Revoking a grant is one `REVOKE`; the next transaction on
+`zeroship_worker`, holds no inherited privilege **over app data**, and narrows per transaction with a
+single `SET LOCAL ROLE "zs_ns_<nsid>_<cap>"`.
+
+**Two exceptions, both deliberate, both previously unstated here.** (1) The worker holds
+`zeroship_workflow_owner` by a plain `GRANT` with no inherit option
+(`db/migrations-ts/20260818000200_worker_database_authority.ts:43`), boot *requires* that membership
+(`crates/zeroship-worker/src/db_posture.rs:103-105`) and the fence exempts it by name
+(`AMBIENT_MEMBERSHIP_EXEMPTION`, `db_posture.rs:13`). That role **owns** every app's journal schema,
+owner privilege cannot be revoked, and the workflow store never narrows - it opens with a bare
+`batch_execute("BEGIN")` (`crates/zeroship-plugin-workflow/src/store/pg.rs:373`). Section 11 keeps
+journals app-keyed across datastores, which replicates the exception into each one. (2) The
+replication plane is not fenced at all - see 5.1, and the boot posture *requires* `REPLICATION` and
+`BYPASSRLS` on that same login.
+
+So the accurate claim is narrower than the one this paragraph used to make: **role membership fences
+the SQL executor plane, and nothing else.** Anyone reading it as "the worker cannot reach another
+tenant's bytes" is wrong on two paths. Revoking a grant is one `REVOKE`; the next transaction on
 the same already-pooled connection fails with SQLSTATE 42501 and no eviction, restart or cache
 flush. There is no incarnation token, no version counter, and no pre-query lookup that the
 worker could be wrong about.
@@ -361,6 +376,25 @@ column values for the affected row", "Populated by the WAL consumer from pgoutpu
 frames" (`crates/zeroship-plugin-db/src/broker.rs:97-112`).
 
 ### 5.2 The publication column list is the only server-side fence, and there is exactly one per table
+
+**UNRESOLVED, and it is the most fragile load-bearing fact in this document.** Two independent
+reviews reached this collision separately. The measurement below is on **18.4 only, on a single
+INSERT** - an INSERT emits only a new tuple. `UPDATE` and `DELETE` emit an **old** tuple, and whether
+a column list filters that image was never measured, on any version.
+
+That matters because the tree already records the fix that collides with it.
+`crates/zeroship-plugin-db/src/wal_consumer.rs:551-560`: a `DELETE` under the default replica
+identity carries a key-only old tuple, *"which is why a subscription filtered on a non-key column can
+miss a delete. **Fixing that needs REPLICA IDENTITY FULL on published tables**"*. Under
+`REPLICA IDENTITY FULL` **every** column is an identity column, and PostgreSQL requires a
+publication's column list to include the replica-identity columns - so a list that excludes
+`__zs_raw__<field>` cannot coexist with the fix.
+
+**So the one server-side fence this design has forecloses the one recorded fix the subscription
+feature needs.** This document contained zero occurrences of "replica identity" before this
+paragraph. Before any shared-datastore CDC is built, measure the column list against `UPDATE` and
+`DELETE`, on the deployed major, under both replica identities - and if they are incompatible, say
+which of the two features is given up.
 
 Measured on 18.4 against the same INSERT, decoded through `pg_logical_slot_peek_binary_changes` with
 `pgoutput`:
