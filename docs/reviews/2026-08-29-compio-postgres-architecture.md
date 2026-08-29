@@ -445,3 +445,38 @@ bytes. An untrapped run then dies on the harness timeout, which kills the
 restore before it runs and leaves the tree mutated. Wrap mutation runs in
 `timeout`, and confirm restoration with `git diff --numstat` rather than with
 the absence of an error message.
+
+## Cancellation and Drop: checked, and the dimension is sound
+
+The independent critique asked where `Drop` does real work and where a
+cancellation at an await point leaves inconsistent state, noting that
+`release.rs` documents one such case deliberately and asking for undocumented
+ones. Surveyed 2026-08-29.
+
+**19 `Drop` impls in production. Exactly TWO do work beyond setting a flag.**
+The other seventeen - permit guards, waiters, portal and savepoint cleanup,
+the copy-append commit guard, the reader registration, the cancel abandonment
+guard - only flip state or release a slot, which is what a destructor in an
+async runtime should be limited to.
+
+The two that act:
+
+`StatementInner::drop` -> `close_statement`. It takes no new allocation
+(`with_buf`), and on an unencodable name it LOGS and returns rather than
+panicking, with the reason recorded at the site: "silence here is
+indistinguishable from a successful DEALLOCATE". The send is
+`let _ = client.send_with(..., RequestDisposition::Housekeeping,
+TransactionEffect::Neutral)` - fire-and-forget, which is correct in a
+destructor: a connection that is already gone has no statement left to close,
+and there is no runtime to await on.
+
+`CommandRecoveryGuard::drop` -> `self.client.force_close()` behind an `armed`
+flag. Synchronous, no await, and the arming is what makes it a no-op on the
+success path.
+
+**Nothing here needs changing.** Naming what was checked is the useful output:
+a destructor that blocks, allocates, awaits or panics is the failure mode, and
+this crate has none. The critique's other five dimensions produced two
+disproved findings, two downgrades and one confirmed defect, all recorded in
+`docs/reviews/2026-08-28-open-findings-re-derived.md`; this is the sixth and it
+is clean.
