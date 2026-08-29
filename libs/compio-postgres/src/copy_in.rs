@@ -46,6 +46,20 @@ enum CopyInMessage {
     Abort,
 }
 
+#[derive(Clone, Copy)]
+enum CopyInState {
+    /// Caller-fed extended-protocol COPY input is still streaming.
+    Streaming,
+    /// A producerless extended query must terminate with `CopyFail + Sync`.
+    ExtendedFailing { reason: &'static str },
+    /// A producerless simple query must terminate with `CopyFail` alone.
+    SimpleFailing { reason: &'static str },
+    /// The extended-protocol stream has emitted or suppressed its terminal.
+    ExtendedFinished,
+    /// The simple-protocol stream has emitted its terminal without `Sync`.
+    SimpleFinished,
+}
+
 /// Stream of frontend messages fed to the connection task for a `COPY FROM
 /// STDIN` request. The connection's request-handler branch polls `next()`
 /// until the stream terminates. Extended protocol uses `CopyDone+Sync` or
@@ -53,18 +67,14 @@ enum CopyInMessage {
 /// that protocol emits `ReadyForQuery` without a Sync barrier.
 pub struct CopyInReceiver {
     receiver: mpsc::Receiver<CopyInMessage>,
-    done: bool,
-    abort_reason: Option<&'static str>,
-    sync_after_terminal: bool,
+    state: CopyInState,
 }
 
 impl CopyInReceiver {
     fn new(receiver: mpsc::Receiver<CopyInMessage>) -> CopyInReceiver {
         CopyInReceiver {
             receiver,
-            done: false,
-            abort_reason: None,
-            sync_after_terminal: true,
+            state: CopyInState::Streaming,
         }
     }
 
@@ -78,7 +88,10 @@ impl CopyInReceiver {
     /// terminal frame. Reusing the real COPY state machine is what makes both
     /// paths cost exactly one response slot.
     pub(crate) fn aborting(initial: FrontendMessage, reason: &'static str) -> Self {
-        Self::aborting_with_terminal(initial, reason, true)
+        Self {
+            receiver: Self::producerless_receiver(initial),
+            state: CopyInState::ExtendedFailing { reason },
+        }
     }
 
     /// Build the same producerless COPY for a simple-protocol `Query`.
@@ -88,40 +101,40 @@ impl CopyInReceiver {
     /// backend after the first, so the driver must neither send that redundant
     /// barrier nor account for a response to it.
     pub(crate) fn aborting_simple(initial: FrontendMessage, reason: &'static str) -> Self {
-        Self::aborting_with_terminal(initial, reason, false)
+        Self {
+            receiver: Self::producerless_receiver(initial),
+            state: CopyInState::SimpleFailing { reason },
+        }
     }
 
-    fn aborting_with_terminal(
-        initial: FrontendMessage,
-        reason: &'static str,
-        sync_after_terminal: bool,
-    ) -> Self {
+    fn producerless_receiver(initial: FrontendMessage) -> mpsc::Receiver<CopyInMessage> {
         let (mut sender, receiver) = mpsc::channel(1);
         sender
             .try_send(CopyInMessage::Message(initial))
             .expect("a new producerless COPY channel accepts its initial frame");
         drop(sender);
-        Self {
-            receiver,
-            done: false,
-            abort_reason: Some(reason),
-            sync_after_terminal,
-        }
+        receiver
     }
 
-    /// True after this stream emitted its terminal CopyDone/CopyFail frame,
-    /// including the extended-protocol Sync when one is required. The
-    /// connection uses this to start the final server-response read clock only
-    /// after that frame finishes flushing.
+    /// True after this stream emitted or suppressed its terminal
+    /// CopyDone/CopyFail frame, including the extended-protocol Sync when one
+    /// is required. The connection uses this to start the final server-response
+    /// read clock only after that frame finishes flushing.
     pub(crate) fn is_done(&self) -> bool {
-        self.done
+        matches!(
+            self.state,
+            CopyInState::ExtendedFinished | CopyInState::SimpleFinished
+        )
     }
 
     /// Whether this producer's terminal COPY frame includes an extended-query
     /// Sync. PostgreSQL can answer both the opening Sync and this terminal Sync
     /// after an error that occurs immediately after CopyInResponse.
     pub(crate) fn terminal_includes_sync(&self) -> bool {
-        self.sync_after_terminal
+        !matches!(
+            self.state,
+            CopyInState::SimpleFailing { .. } | CopyInState::SimpleFinished
+        )
     }
 }
 
@@ -129,28 +142,40 @@ impl Stream for CopyInReceiver {
     type Item = FrontendMessage;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
-        if self.done {
+        if self.is_done() {
             return Poll::Ready(None);
         }
 
         match ready!(self.receiver.poll_next_unpin(cx)) {
             Some(CopyInMessage::Message(message)) => Poll::Ready(Some(message)),
             Some(CopyInMessage::Abort) => {
-                self.done = true;
+                self.state = CopyInState::ExtendedFinished;
                 Poll::Ready(None)
             }
             Some(CopyInMessage::Done) => {
-                self.done = true;
+                self.state = CopyInState::ExtendedFinished;
                 let mut buf = BytesMut::new();
                 frontend::copy_done(&mut buf);
                 frontend::sync(&mut buf);
                 Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
             }
             None => {
-                self.done = true;
+                let (reason, include_sync, finished) = match self.state {
+                    CopyInState::Streaming => ("", true, CopyInState::ExtendedFinished),
+                    CopyInState::ExtendedFailing { reason } => {
+                        (reason, true, CopyInState::ExtendedFinished)
+                    }
+                    CopyInState::SimpleFailing { reason } => {
+                        (reason, false, CopyInState::SimpleFinished)
+                    }
+                    CopyInState::ExtendedFinished | CopyInState::SimpleFinished => {
+                        unreachable!("finished COPY streams return before polling their channel")
+                    }
+                };
+                self.state = finished;
                 let mut buf = BytesMut::new();
-                frontend::copy_fail(self.abort_reason.unwrap_or(""), &mut buf).unwrap();
-                if self.sync_after_terminal {
+                frontend::copy_fail(reason, &mut buf).unwrap();
+                if include_sync {
                     frontend::sync(&mut buf);
                 }
                 Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
