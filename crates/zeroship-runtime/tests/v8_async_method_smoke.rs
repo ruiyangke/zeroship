@@ -110,6 +110,17 @@ impl AsyncTest {
         Err(OpError::type_error("after await"))
     }
 
+    /// 7b. Coded rejection with an explicit HTTP remedy.
+    #[v8_async_method]
+    async fn throw_coded_status(&self) -> Result<(), OpError> {
+        Err(OpError::coded_with_status(
+            "GRANT_REVOKED",
+            "grant revoked",
+            None::<String>,
+            403,
+        ))
+    }
+
     /// 8. Multiple args of mixed types.
     #[v8_async_method]
     async fn multi_args(&self, a: u32, b: String, c: bool) -> Result<String, OpError> {
@@ -406,6 +417,37 @@ fn throw_async_rejects_after_await() {
     assert_eq!(r["caught"], serde_json::json!(true));
     assert_eq!(r["name"], serde_json::json!("TypeError"));
     assert_eq!(r["msg"], serde_json::json!("after await"));
+}
+
+#[test]
+fn coded_error_rejection_keeps_explicit_status() {
+    let body = run_async_js(
+        r#"
+        async function runTest() {
+            const t = new AsyncTest();
+            try {
+                await t.throw_coded_status();
+                return { caught: false };
+            } catch (e) {
+                return {
+                    caught: true,
+                    code: e.code,
+                    msg: e.message,
+                    status: e.status,
+                };
+            }
+        }
+        "#,
+    );
+    assert_eq!(
+        ok_result(&body),
+        serde_json::json!({
+            "caught": true,
+            "code": "GRANT_REVOKED",
+            "msg": "grant revoked",
+            "status": 403,
+        })
+    );
 }
 
 #[test]

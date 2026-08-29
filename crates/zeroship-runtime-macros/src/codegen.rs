@@ -101,7 +101,11 @@ pub(crate) fn gen_throw_op_error_arms(
                 ::zeroship_runtime::macro_runtime::state::OpErrorKind::NodeError(__code) => {
                     ::zeroship_runtime::macro_runtime::node_error::build_node_exception(#scope_expr, __code, &(#err_expr).message)
                 }
-                ::zeroship_runtime::macro_runtime::state::OpErrorKind::CodedError { code: __code, hint: __hint } => {
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::CodedError {
+                    code: __code,
+                    hint: __hint,
+                    status: __status,
+                } => {
                     let __exc = v8::Exception::error(#scope_expr, __msg);
                     if let Ok(__obj) = v8::Local::<v8::Object>::try_from(__exc) {
                         let __ck = v8::String::new(#scope_expr, "code").unwrap();
@@ -111,6 +115,14 @@ pub(crate) fn gen_throw_op_error_arms(
                             let __hk = v8::String::new(#scope_expr, "hint").unwrap();
                             let __hv = v8::String::new(#scope_expr, __h).unwrap();
                             __obj.set(#scope_expr, __hk.into(), __hv.into());
+                        }
+                        if let Some(&__s) = __status.as_ref() {
+                            let __sk = v8::String::new(#scope_expr, "status").unwrap();
+                            let __sv = v8::Integer::new_from_unsigned(
+                                #scope_expr,
+                                u32::from(__s),
+                            );
+                            __obj.set(#scope_expr, __sk.into(), __sv.into());
                         }
                     }
                     __exc

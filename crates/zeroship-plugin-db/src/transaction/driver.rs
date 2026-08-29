@@ -72,7 +72,7 @@ use std::time::{Duration, Instant};
 use compio_postgres::TransactionStatus;
 
 use crate::context::TxConnection;
-use crate::error::DbError;
+use crate::error::{DbError, SessionSetupDisposition, SessionSetupError};
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 
 use super::reducer::deadline::{DeadlineGeneration, DeadlineKind};
@@ -82,8 +82,9 @@ use super::reducer::identity::{
     ObservedAuthority, SchemaEpoch,
 };
 use super::reducer::{
-    Action, BackendGeneration, CleanupAck, CleanupGoal, CommandToken, EventAuthority, SettleIntent,
-    TerminalOutcome, TerminalResult, TxBudgets, TxEvent, TxProtocolError, TxReducer, TxReply,
+    Action, BackendGeneration, BeginOutcome, CleanupAck, CleanupGoal, CommandToken, EventAuthority,
+    SettleIntent, TerminalOutcome, TerminalResult, TxBudgets, TxEvent, TxProtocolError, TxReducer,
+    TxReply,
 };
 
 /// The authority axis a transaction is admitted under, today.
@@ -445,21 +446,29 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
             Action::IssueBegin { token } => {
                 let generation = crate::context::with_mut(|c| c.next_backend_generation());
                 let begin_sql = config.begin_sql.as_deref().unwrap_or("BEGIN");
-                let opened = match open_session(app_id, begin_sql).await {
-                    Ok(()) => true,
-                    Err(error) => {
+                let outcome = match open_session(app_id, begin_sql).await {
+                    Ok(()) => BeginOutcome::Opened(BackendGeneration(generation)),
+                    Err(OpenSessionError::Failed(error)) => {
                         driven.error = Some(error);
-                        false
+                        BeginOutcome::Failed
+                    }
+                    Err(OpenSessionError::Setup(setup)) => {
+                        let disposition = setup.disposition();
+                        driven.error = Some(setup.into_db_error());
+                        match disposition {
+                            SessionSetupDisposition::Preserve => BeginOutcome::SetupFailed,
+                            SessionSetupDisposition::ReResolve => BeginOutcome::ReResolve,
+                            SessionSetupDisposition::Denied(reason) => {
+                                BeginOutcome::Denied(reason)
+                            }
+                            SessionSetupDisposition::Failed => BeginOutcome::Failed,
+                        }
                     }
                 };
                 extend(
                     &mut queue,
                     app_id,
-                    TxEvent::BeginCompleted {
-                        token,
-                        generation: BackendGeneration(generation),
-                        opened,
-                    },
+                    TxEvent::BeginCompleted { token, outcome },
                 );
             }
 
@@ -638,6 +647,26 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 // The I/O each action turns into
 // ---------------------------------------------------------------------------
 
+/// A startup error before or during `BEGIN`, versus one classified at the
+/// per-app setup boundary. Keeping these variants typed is what lets the event
+/// carry a reducer outcome without parsing the creator-facing error code.
+enum OpenSessionError {
+    Failed(DbError),
+    Setup(SessionSetupError),
+}
+
+impl From<DbError> for OpenSessionError {
+    fn from(error: DbError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<SessionSetupError> for OpenSessionError {
+    fn from(error: SessionSetupError) -> Self {
+        Self::Setup(error)
+    }
+}
+
 /// Acquire the session, send `BEGIN`, and apply the per-app role.
 ///
 /// Ordering is the existing one: `BEGIN` first, then `SET LOCAL ROLE` + the DB-1
@@ -659,7 +688,7 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 /// lease drops un-installed. It goes back to the pool with a transaction open,
 /// which `Pool::return_client` handles: it rolls back any session it cannot
 /// prove `Idle` before publishing it.
-async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), DbError> {
+async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
 

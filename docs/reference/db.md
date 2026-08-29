@@ -1130,6 +1130,7 @@ Errors carry a `.code` property where applicable:
 | `UNIQUE_VIOLATION`          | Duplicate unique-key violation.                     |
 | `OPTIMISTIC_CONCURRENCY`    | `update` with a CAS version that didn't match.     |
 | `SCHEMA_NOT_PROVISIONED`    | The app's database was never provisioned: its per-app Postgres role does not exist. Run `zeroship migrate` for the app. Reachable only for an app deployed WITHOUT a generated descriptor - one that carries a descriptor is refused at deploy with `409 schema_not_applied` instead (see [Migrate before you deploy](#migrate-before-you-deploy)). |
+| `GRANT_REVOKED`             | PostgreSQL refused the transaction's per-app role because the worker login no longer holds that grant. This is a terminal HTTP 403; restore the database grant before retrying. |
 | `MIGRATION_*` (see above)   | Migration lifecycle errors.                         |
 | `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `POLYGON_OPS_PG_ONLY` | Vector / geo paths - see [Vector / Geo: Error codes](#error-codes). |
 

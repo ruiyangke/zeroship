@@ -140,8 +140,7 @@ impl Harness {
         let token = self.last_token();
         self.apply(TxEvent::BeginCompleted {
             token,
-            generation: BackendGeneration(1),
-            opened: true,
+            outcome: BeginOutcome::Opened(BackendGeneration(1)),
         });
         assert_eq!(self.state(), TxState::Idle);
         self
@@ -941,9 +940,10 @@ fn an_illegal_deadline_delivery_does_not_consume_the_arming() {
 /// denial, and it never issues `BEGIN`.
 ///
 /// Where this would fail today: on an implementation that collapses the three
-/// reasons, or that parks a denial in `Poisoned` (from which invariant 13's
-/// recovery arc resumes data SQL under an authority the classifier terminally
-/// denied). Driving `DenyReason::ALL` is what makes it rule on the whole set.
+/// authority-observation reasons, or that parks a denial in `Poisoned` (from
+/// which invariant 13's recovery arc resumes data SQL under an authority the
+/// classifier terminally denied). Driving `DenyReason::AUTHORITY` is what makes
+/// it rule on that classifier's whole output set; setup denials enter later.
 #[test]
 fn a_deny_verdict_forces_cleanup_and_carries_its_specific_reason() {
     let cases = [
@@ -971,8 +971,8 @@ fn a_deny_verdict_forces_cleanup_and_carries_its_specific_reason() {
     ];
     assert_eq!(
         cases.len(),
-        DenyReason::ALL.len(),
-        "every denial reason has a case here"
+        DenyReason::AUTHORITY.len(),
+        "every authority-observation denial reason has a case here"
     );
 
     for (reason, observed) in cases {
@@ -1629,8 +1629,7 @@ fn a_failed_begin_enters_cancelling_with_the_abort_if_opened_goal() {
     let token = harness.last_token();
     harness.apply(TxEvent::BeginCompleted {
         token,
-        generation: BackendGeneration(1),
-        opened: false,
+        outcome: BeginOutcome::Failed,
     });
     assert_eq!(harness.state(), TxState::Cancelling);
     assert_eq!(
@@ -1641,6 +1640,72 @@ fn a_failed_begin_enters_cancelling_with_the_abort_if_opened_goal() {
         }),
         "a BEGIN that may or may not have opened cannot demand OpenTransaction"
     );
+}
+
+/// A creator-facing setup classification remains distinct from an
+/// unclassified BEGIN failure, so the driver can return its exact `DbError`
+/// without naming each code in the transaction orchestrator.
+#[test]
+fn a_classified_setup_failure_does_not_collapse_into_begin_failed() {
+    let mut harness = Harness::at(TxState::Starting);
+    let token = harness.last_token();
+    harness.apply(TxEvent::BeginCompleted {
+        token,
+        outcome: BeginOutcome::SetupFailed,
+    });
+    assert_eq!(harness.state(), TxState::Cancelling);
+    assert_eq!(
+        harness.reducer.cleanup(),
+        Some(LatchedCleanup {
+            cause: CleanupCause::SessionSetupFailed,
+            goal: CleanupGoal::AbortIfOpened,
+        })
+    );
+    assert_ne!(
+        harness.reducer.cleanup().map(|cleanup| cleanup.cause),
+        Some(CleanupCause::BeginFailed)
+    );
+}
+
+/// A role-name epoch fence can report `ReResolve` through the same begin event
+/// without another event-shape change. This tests the seam only; there is no
+/// schema-epoch producer in this task.
+#[test]
+fn a_begin_setup_re_resolve_uses_the_existing_retryable_verdict_arm() {
+    let mut harness = Harness::at(TxState::Starting);
+    let token = harness.last_token();
+    let actions = harness.apply(TxEvent::BeginCompleted {
+        token,
+        outcome: BeginOutcome::ReResolve,
+    });
+    assert_eq!(harness.state(), TxState::Cancelling);
+    assert_eq!(
+        harness.reducer.cleanup().map(|cleanup| cleanup.cause),
+        Some(CleanupCause::EpochChanged)
+    );
+    assert!(CleanupCause::EpochChanged.retryable());
+    assert!(actions.contains(&Action::Reply(Err(TxProtocolError::EpochChanged))));
+}
+
+/// A revoked role membership is terminal and keeps its specific denial rather
+/// than taking either the retryable re-resolution route or generic BEGIN.
+#[test]
+fn a_begin_setup_grant_revoke_is_a_specific_terminal_denial() {
+    let mut harness = Harness::at(TxState::Starting);
+    let token = harness.last_token();
+    let actions = harness.apply(TxEvent::BeginCompleted {
+        token,
+        outcome: BeginOutcome::Denied(DenyReason::GrantRevoked),
+    });
+    assert_eq!(harness.state(), TxState::Cancelling);
+    assert_eq!(
+        harness.reducer.cleanup().map(|cleanup| cleanup.cause),
+        Some(CleanupCause::Denied(DenyReason::GrantRevoked))
+    );
+    assert!(!DenyReason::GrantRevoked.retryable());
+    assert!(actions.contains(&Action::Reply(Err(TxProtocolError::Denied(
+        DenyReason::GrantRevoked
+    )))));
 }
 
 /// The budget is armed on entry to `Preparing`, so queue time does not consume

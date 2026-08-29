@@ -328,6 +328,7 @@ pub(crate) fn __Marker_constructor_callback(
                     ::zeroship_runtime::macro_runtime::state::OpErrorKind::CodedError {
                         code: __code,
                         hint: __hint,
+                        status: __status,
                     } => {
                         let __exc = v8::Exception::error(scope, __msg);
                         if let Ok(__obj) = v8::Local::<v8::Object>::try_from(__exc) {
@@ -338,6 +339,14 @@ pub(crate) fn __Marker_constructor_callback(
                                 let __hk = v8::String::new(scope, "hint").unwrap();
                                 let __hv = v8::String::new(scope, __h).unwrap();
                                 __obj.set(scope, __hk.into(), __hv.into());
+                            }
+                            if let Some(&__s) = __status.as_ref() {
+                                let __sk = v8::String::new(scope, "status").unwrap();
+                                let __sv = v8::Integer::new_from_unsigned(
+                                    scope,
+                                    u32::from(__s),
+                                );
+                                __obj.set(scope, __sk.into(), __sv.into());
                             }
                         }
                         __exc

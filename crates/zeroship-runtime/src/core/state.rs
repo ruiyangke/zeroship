@@ -69,16 +69,20 @@ pub enum OpErrorKind {
     /// branch on `e.code === "ERR_..."`.
     NodeError(&'static str),
     /// A plugin-side coded error: a plain JS `Error` with a dynamic
-    /// `e.code` (and optional `e.hint`) property attached. Use this
+    /// `e.code` (and optional `e.hint` / `e.status`) property attached. Use this
     /// when the code is determined at runtime (e.g. plugin-db migration
     /// lifecycle errors like `"migration_already_running"`) and so
     /// can't be expressed as the `&'static str` payload `NodeError`
     /// carries. The plumbing in `core::runtime::OpResult::JsValue`
     /// builds a JS `Error`, sets `e.code = code`, and if `hint` is
-    /// non-empty also sets `e.hint = hint`. The optional `hint` is a
-    /// human-facing recovery note (one line) for messages we know
-    /// rejecters often need.
-    CodedError { code: String, hint: Option<String> },
+    /// non-empty also sets `e.hint = hint`. A status is present only when the
+    /// native classification has an HTTP remedy; otherwise the fetch wrapper
+    /// retains its existing 500 default.
+    CodedError {
+        code: String,
+        hint: Option<String>,
+        status: Option<u16>,
+    },
     /// A pre-built JS exception value, captured from a user-thrown
     /// exception in a nested V8 callback (custom `toString`,
     /// `Symbol.toPrimitive`, throwing `valueOf`, etc.). The macro's
@@ -164,6 +168,26 @@ impl OpError {
             kind: OpErrorKind::CodedError {
                 code: code.into(),
                 hint: hint.map(Into::into),
+                status: None,
+            },
+            message: msg.into(),
+        }
+    }
+
+    /// Construct a plugin-side coded error with an explicit HTTP status.
+    /// The status becomes `e.status`, which the standard fetch wrapper uses
+    /// when an app lets the error escape its handler.
+    pub fn coded_with_status(
+        code: impl Into<String>,
+        msg: impl Into<String>,
+        hint: Option<impl Into<String>>,
+        status: u16,
+    ) -> Self {
+        Self {
+            kind: OpErrorKind::CodedError {
+                code: code.into(),
+                hint: hint.map(Into::into),
+                status: Some(status),
             },
             message: msg.into(),
         }
@@ -221,7 +245,7 @@ impl OpError {
                     OpErrorKind::NodeError(code) => {
                         crate::node_error::build_node_exception(scope, code, &self.message)
                     }
-                    OpErrorKind::CodedError { code, hint } => {
+                    OpErrorKind::CodedError { code, hint, status } => {
                         let exc = v8::Exception::error(scope, msg);
                         if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
                             let code_key = v8::String::new(scope, "code").unwrap();
@@ -231,6 +255,12 @@ impl OpError {
                                 let hint_key = v8::String::new(scope, "hint").unwrap();
                                 let hint_val = v8::String::new(scope, h).unwrap();
                                 obj.set(scope, hint_key.into(), hint_val.into());
+                            }
+                            if let Some(status) = status {
+                                let status_key = v8::String::new(scope, "status").unwrap();
+                                let status_val =
+                                    v8::Integer::new_from_unsigned(scope, u32::from(*status));
+                                obj.set(scope, status_key.into(), status_val.into());
                             }
                         }
                         exc

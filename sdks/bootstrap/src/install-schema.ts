@@ -1382,10 +1382,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // `callback(rawTxView)` once BEGIN/SAVEPOINT succeeds and returns a
   // promise that resolves with the callback's result on commit (callback
   // resolved) or rejects with the callback's error on rollback (callback
-  // threw). The four observable error codes — `BEGIN_FAILED`,
-  // `COMMIT_FAILED_INDETERMINATE`, `savepoint_depth_exceeded`, and the
-  // body-error passthrough — are emitted by Rust and surface verbatim on
-  // the rejection (`err.code`).
+  // threw). BEGIN, classified session-setup, commit, savepoint, and body
+  // errors are emitted by Rust and surface verbatim on the rejection
+  // (`err.code`, plus `err.status` when the classification has an HTTP
+  // remedy).
   //
   // This wrapper keeps only the JS-side concerns that have no Rust
   // counterpart:
@@ -1454,8 +1454,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     try {
       // 3. Native orchestrator: begin → callback(txCollections) →
       //    commit/rollback. Resolves with the callback's result on
-      //    commit; rejects (with the typed `.code`) on rollback /
-      //    begin-failed / commit-indeterminate / depth-exceeded.
+      //    commit; rejects with the typed error on rollback, setup denial,
+      //    begin failure, commit indeterminacy, or depth exhaustion.
       const opts = txOptions?.isolationLevel
         ? { isolationLevel: txOptions.isolationLevel }
         : undefined;
@@ -1469,9 +1469,9 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return ok(bodyResult);
     } catch (txErr) {
       // The native rejection already carries the right code
-      // (`COMMIT_FAILED_INDETERMINATE` / `BEGIN_FAILED` /
-      // `savepoint_depth_exceeded`) or is the creator's own thrown error
-      // verbatim. Surface it as `result.error`.
+      // (`GRANT_REVOKED`, commit/begin/savepoint codes, or a future setup
+      // fence) or is the creator's own thrown error verbatim. Surface it as
+      // `result.error`.
       return err(txErr instanceof Error ? txErr : new Error(String(txErr)));
     } finally {
       exitTransactionScope(txScopedCollections);
