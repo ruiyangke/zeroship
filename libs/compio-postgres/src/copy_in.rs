@@ -189,6 +189,7 @@ enum SinkState {
     Active,
     Closing,
     Reading,
+    ReadingAfterClose,
     Finished(u64),
 }
 
@@ -358,14 +359,14 @@ where
                     match sender_closed {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {
-                            *self.as_mut().project().state = SinkState::Reading;
+                            *self.as_mut().project().state = SinkState::ReadingAfterClose;
                         }
                         Poll::Ready(Err(_)) => {
                             *self.as_mut().project().state = SinkState::Reading;
                         }
                     }
                 }
-                SinkState::Reading => {
+                SinkState::Reading | SinkState::ReadingAfterClose => {
                     let response = {
                         let this = self.as_mut().project();
                         this.responses.poll_next(cx)
@@ -484,6 +485,7 @@ where
         if matches!(self.state, SinkState::Finished(_)) {
             return Poll::Ready(Ok(()));
         }
+        let closed_by_sink = matches!(self.state, SinkState::ReadingAfterClose);
         let buffered = !self.as_mut().project().buf.is_empty();
         if buffered {
             let ready = self.as_mut().project().sender.as_mut().poll_ready(cx);
@@ -515,7 +517,9 @@ where
         match flushed {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
-            Poll::Ready(Ok(())) if disconnected => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) if disconnected && !closed_by_sink => {
+                self.poll_disconnected_diagnosis(cx)
+            }
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
         }
     }
@@ -1003,5 +1007,116 @@ mod tests {
                 "post-confirmation message reported the wrong protocol failure"
             ),
         }
+    }
+
+    #[compio::test]
+    async fn flush_after_cancelled_close_preserves_copy_completion() {
+        let rows = compio::time::timeout(std::time::Duration::from_secs(1), async {
+            let (request_sender, mut requests) = mpsc::unbounded();
+            let client = Client::new(
+                request_sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                0,
+                Some(0.into()),
+                None,
+            );
+            let (sender, receiver) = mpsc::channel(1);
+            let statement = Statement::unnamed(Vec::new(), Vec::new());
+            let (responses, copy_mode) = client
+                .inner()
+                .send_copy_statement(
+                    RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                    &statement,
+                    CopyMode::In,
+                )
+                .expect("enqueue the scripted COPY request");
+            let request = requests
+                .try_recv()
+                .expect("receive the scripted COPY request");
+            let crate::connection::Request {
+                messages,
+                sender: mut response_sender,
+                ..
+            } = request;
+            let mut receiver = match messages {
+                RequestMessages::CopyIn(receiver) => receiver,
+                RequestMessages::Single(_) => panic!("scripted COPY request was not streaming"),
+            };
+
+            let sink = CopyInSink::<Bytes> {
+                sender,
+                responses,
+                response: CopyResponse::default(),
+                buf: BytesMut::new(),
+                state: SinkState::Active,
+                completion: None,
+                _p2: PhantomData,
+                copy_mode: Some(copy_mode),
+            };
+            let mut sink = Box::pin(sink);
+
+            let close_poll = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(futures_util::Sink::poll_close(sink.as_mut(), cx))
+            })
+            .await;
+            assert!(
+                matches!(close_poll, std::task::Poll::Pending),
+                "the first close poll unexpectedly completed: {close_poll:?}"
+            );
+            assert!(
+                !matches!(
+                    sink.as_ref().get_ref().state,
+                    SinkState::Active | SinkState::Closing | SinkState::Finished(_)
+                ),
+                "the pending close poll did not reach response reading"
+            );
+            assert!(
+                sink.as_ref().get_ref().sender.is_closed(),
+                "the pending close poll did not close its own sender"
+            );
+
+            match receiver
+                .next()
+                .await
+                .expect("the cancelled close omitted CopyDone + Sync")
+            {
+                FrontendMessage::Raw(bytes) => {
+                    assert_eq!(&bytes[..], &[b'c', 0, 0, 0, 4, b'S', 0, 0, 0, 4]);
+                }
+                FrontendMessage::CopyData(_) => panic!("the COPY terminal was encoded as data"),
+            }
+
+            let mut command_frame = BytesMut::new();
+            command_frame.put_u8(b'C');
+            command_frame.put_u32(11);
+            command_frame.extend_from_slice(b"COPY 0\0");
+            let command = Message::parse(&mut command_frame)
+                .expect("parse COPY CommandComplete")
+                .expect("COPY CommandComplete is complete");
+            let mut ready_frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+            let ready = Message::parse(&mut ready_frame)
+                .expect("parse ReadyForQuery")
+                .expect("ReadyForQuery is complete");
+            response_sender
+                .try_send(ResponseMessages::Observed(VecDeque::from([
+                    Ok(command),
+                    Ok(ready),
+                ])))
+                .expect("deliver scripted COPY completion");
+            drop(response_sender);
+
+            std::future::poll_fn(|cx| futures_util::Sink::poll_flush(sink.as_mut(), cx))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("flush swallowed the completed COPY response: {error}")
+                });
+            sink.as_mut().finish().await
+        })
+        .await
+        .expect("cancelled-close regression timed out")
+        .expect("the completed COPY failed after the cancelled close");
+
+        assert_eq!(rows, 0);
     }
 }
