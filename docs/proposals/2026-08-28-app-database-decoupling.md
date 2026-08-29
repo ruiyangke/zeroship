@@ -392,9 +392,33 @@ publication's column list to include the replica-identity columns - so a list th
 
 **So the one server-side fence this design has forecloses the one recorded fix the subscription
 feature needs.** This document contained zero occurrences of "replica identity" before this
-paragraph. Before any shared-datastore CDC is built, measure the column list against `UPDATE` and
-`DELETE`, on the deployed major, under both replica identities - and if they are incompatible, say
-which of the two features is given up.
+paragraph.
+
+**Now measured, on PostgreSQL 17.11, and the failure mode is worse than the incompatibility.**
+
+| step | result |
+| --- | --- |
+| column list under `REPLICA IDENTITY DEFAULT` | works; the withheld column appears nowhere in the decoded stream, and `INSERT`/`UPDATE`/`DELETE` all decode |
+| `ALTER TABLE ... REPLICA IDENTITY FULL` with the column list already in place | **accepted, no error** |
+| `UPDATE` after that | `ERROR: cannot update table "t"` - *"Column list used by the publication does not cover the replica identity"* |
+| `DELETE` after that | same error |
+| `CREATE PUBLICATION ... (cols)` while the identity is already `FULL` | **accepted, no error** |
+
+**Neither DDL step refuses, in either order. The failure is at DML time, on the creator's write
+path.** So the incompatible combination is silently configurable, and the symptom is not a CDC fault
+but a table that has become append-only - every `UPDATE` and `DELETE` failing for a creator who
+changed neither.
+
+Three consequences:
+
+1. **The two features are mutually exclusive as designed.** Either classified columns are withheld
+   from the wire by a column list, or subscriptions can filter deletes on non-key columns. Not both.
+   Whichever is given up must be given up explicitly.
+2. **Ordering does not save it.** Because both DDL steps are accepted, no provisioning sequence
+   produces a safe combination, and no bracketing rule detects one.
+3. **This needs a refusal at the authoring boundary.** If a namespace has a classified column and
+   something asks for `REPLICA IDENTITY FULL` on that table, the migration service must refuse with a
+   reason - PostgreSQL will not, and the creator will learn about it when their writes stop.
 
 Measured on 18.4 against the same INSERT, decoded through `pg_logical_slot_peek_binary_changes` with
 `pgoutput`:
