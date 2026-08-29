@@ -782,3 +782,37 @@ is now checked rather than assumed.
 Mutation 9 is worth noting as a KILL: replacing `Detached` async parsing with
 `Shared` was caught by an allocation test. That is the fix for the
 13-bytes-pinning-1-MiB measurement recorded earlier, and it is bound.
+
+## The line numbers in THIS document are already stale. Cite symbols.
+
+Measured 2026-08-29, hours after writing them. Five references sampled from the
+sections above; three had moved:
+
+    connect_raw.rs:302  ->  316   (BackendMessage::Normal arm)
+    client.rs:2420      ->  2136  (pool_cancel_lease_prevents_reuse)
+    connect_raw.rs:290  ->  292   (the "13 bytes pinning 1 MiB" comment)
+    codec.rs:75                   still correct
+    pool.rs:1531                  still correct
+
+Every one drifted because of work landed the same day - a module extracted, a
+framing body unified, tests inserted above the cited line.
+
+**This document opens by criticising exactly this.** It records that a carried
+audit pointed at `tls_sansio.rs:750` for a split that lives elsewhere, and
+concludes "a stale line number is not a weak citation, it is a different claim."
+The same rot set into these notes within hours of writing them.
+
+**Updating the numbers is not the fix; they will rot again by the next commit.**
+Cite the SYMBOL, which survives edits:
+
+    BAD   connect_raw.rs:302 discards deferred_error
+    GOOD  connect_raw.rs, the `BackendMessage::Normal { messages, .. }` arm in
+          Handshake::next, discards deferred_error
+
+A reader can find a symbol with one grep whatever the line number is; a line
+number that has moved sends them to unrelated code and looks authoritative
+while doing it.
+
+Line numbers here are a convenience for the day they were written. When a claim
+in this file matters, re-resolve it by symbol before acting - the same rule the
+sections above apply to everyone else's findings.
