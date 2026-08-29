@@ -646,17 +646,59 @@ creators it is, and no role fixes it.
   swallow the journal bootstrap and would destroy that recovery model, so "one transaction covering the
   DDL" is not a thing this engine can be asked for. An earlier version of this bullet asked for it.
 
-  **OPEN, AND IT BLOCKS IMPLEMENTATION.** With N committing DDL transactions and one rotation, three
-  things are undecided and no document settles them:
-    1. Where the rotation sits relative to the DDL, and what a reader sees in between.
-    2. What unfences an app if the process dies mid-apply. Nothing does today:
-       `crates/zeroship-migrate-server/src/apply.rs:708` passes `recovery_scope: None`, failure closure
-       is an in-process best-effort helper that cannot run after process death (`:930`), and a retry
-       mints a fresh apply identity (`:245`) rather than resuming the old one.
-    3. Whether the rotation may reuse publication reconciliation, which today owns its own `BEGIN` and
-       `COMMIT` and whose caller-independent body is private
-       (`crates/zeroship-migrate-server/src/publication.rs:59`, `:79`).
-  Do not write the producer before these are answered; the answer determines what the producer writes.
+  **THE STRUCTURE, settled 2026-08-29 from two independent designs.** All SUBTRACTION from the
+  catalog happens before any DDL commits; all ADDITION happens after every DDL has committed:
+
+      L    host takes a SESSION advisory lock on the database key, held to U
+      P    preflight: lower every IR file, refuse a denied plan
+      S    record_submitted on the control connection - the audit row opens
+      T1   one transaction: head row FOR UPDATE, DROP ROLE IF EXISTS the E-1 bind roles, take a claim
+      D1..DN  the DDL, engine-journalled, EVERY file passing LockMode::AlreadyHeld
+      T4   one transaction: mint the E+1 bind roles and their grants, reconcile the publication,
+           advance the head to E+1 - iff the journal moved
+      C    mark_applied / mark_failed on the control connection
+      U    release the lock
+
+  **A SERVING APP IS NEVER FENCED.** The apply mints `E+1` and drops `E-1`; it never touches `E`. So
+  "what unfences an app when the process dies mid-apply" has the answer NOTHING HAS TO - every partial
+  crash state leaves the app serving on `E`. Recovery is a plain retry: the engine journal skips
+  completed DDL, and the head's recorded journal state decides whether the rotation still owes a
+  rotation. A retry after a crash between the last DDL and T4 finds every version already applied and
+  must STILL rotate; keying that on "did this run apply anything" strands the database at `E` with a
+  `v2` schema forever.
+
+  **The reap of `E-1` moves to the front, and this supersedes the bundled form this bullet used to
+  specify.** The settled rule is that an apply which cannot drop `E-1` refuses to advance to `E+1`.
+  That refusal is only fail-closed if it happens BEFORE anything commits. Bundled into the rotation it
+  means: N DDL transactions committed, the schema at `v2`, the epoch stuck at `E`, and every retry
+  failing on the same `DROP ROLE` forever - worse than the leak it guards. At the front the identical
+  refusal costs a clean 409 with zero side effects. The failure it guards is real and measured: a bind
+  role that has been granted a privilege OF ITS OWN cannot be dropped ("cannot be dropped because some
+  objects depend on it / DETAIL: privileges for table t"), which is exactly the violation of "no
+  privileges of its own" this design already forbids.
+
+  **The cost of moving it, stated:** an isolate at `E-1` loses its grace at the START of the apply
+  rather than the end, and recovers by re-resolving to `E`. THAT RECOVERY DOES NOT EXIST YET - the
+  worker composes its role name locally (`crates/zeroship-plugin-db/src/auth/bootstrap.rs:148-150`)
+  and there is no resolve step on the connection path. So the front reap is correct ONLY once the
+  binding producer lands, which the epoch needs regardless.
+
+  **The advisory lock must be taken by the HOST**, not by the engine per file. Today
+  `crates/zeroship-migrate-server/src/apply.rs:626-631` asks for `Acquire` on file 0 and `AlreadyHeld`
+  after, believing the lock spans the set; `crates/zeroship-migrate-core/src/engine.rs:1600-1608`
+  releases it at the end of that first plan, so every later file runs unlocked. Both designs found this
+  independently. Hoisting it is a prerequisite here, not a cleanup.
+
+  **The rotation MAY reuse publication reconciliation** - by taking its transactional body rather than
+  its wrapper. `crates/zeroship-migrate-server/src/publication.rs:59` owns a `BEGIN`/`COMMIT`; `:79` is
+  the caller-independent body. Make the body callable and delete the wrapper.
+
+  **STILL OPEN:** the ledger cannot close exactly once across a crash, and this is structural rather
+  than a defect to fix. The audit row and the schema live in DIFFERENT DATABASES - the store opens its
+  own connection on the control DSN - so no transaction spans both. The ledger is therefore an audit
+  projection with at-least-once closure, and the authority for "what schema does this database have" is
+  the app database's journal plus its head row, which do move together. Any design that treats the
+  ledger as authoritative is claiming a distributed transaction it does not have.
 - **Migrator role is `zs_db_<dbsid>_mig`**, named by no app. One migrator forever, so the ownership
   ping-pong and the silently-orphaned `ALTER DEFAULT PRIVILEGES` rules cannot occur.
 - **`ExecutorConfig::new(project_id, project_schema, policy)` stops taking the app id three times**
