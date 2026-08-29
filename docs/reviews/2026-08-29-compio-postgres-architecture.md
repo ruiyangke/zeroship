@@ -370,3 +370,32 @@ That is a larger change than this hardening pass should make unannounced, and
 the 14 tests being added now are worth having either way - they pin the current
 behaviour, which is exactly what makes such a refactor safe to attempt later.
 Recording it as the next structural move, with the measurement that justifies it.
+
+## Checked and adequate: the serialized loop is not the next gap
+
+The two mutation sweeps invite the obvious follow-up - `serialized_loop` has 25
+tests against `suite`'s 709, so is the fallback path under-tested too? Checked
+2026-08-29; it is not, and the reason is what it is FOR.
+
+`connection.rs:51` states the entry condition: `run_serialized` is "the fallback
+for a stream that refuses to split", reached only by "a custom `TlsConnect`
+whose stream answers `Err` to `try_into_split`". TCP, Unix sockets and the
+built-in rustls transport all split, so production never runs it. Its 25 tests
+are not covering a hot path with a thin suite; they are covering a narrow
+compatibility path in proportion.
+
+What the file covers, named: queries and parameters, an error leaving the
+session usable, transactions, COPY OUT, COPY IN, a post-COPY-IN response error
+not leaving a second `ReadyForQuery`, portal paging, a notice raised by an
+awaited statement, an abandoned query, a read timeout retiring the session, and
+a cancelled query. That is the fallback's surface, not a sample of it.
+
+It also carries `the_harness_is_really_on_the_serialized_loop` - a test whose
+only job is to confirm the harness reaches the path it claims to test. That is
+the same guard this effort has had to add by hand elsewhere (the pooler's login
+count, the soak's `max_connections` gate), and here it was already written.
+
+**The asymmetry the sweeps found is specific and does not generalise to "small
+test file means gap".** It was caused by ONE structural fact - two bodies behind
+one trait, 26 identical lines - not by test-count imbalance. Ratios of test
+counts are not evidence; the duplication was.
