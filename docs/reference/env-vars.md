@@ -26,7 +26,9 @@ a contract.
 
 - Shell suites under `tests/` set and read many variables of their own.
 - Names built at runtime by string concatenation are invisible to a text scan.
-- The vendored `third_party/zero-migrate` engine is out of scope.
+- The migration engine was vendored under `third_party/` when this was written and
+  was excluded on that basis. It is now in-sourced as the `crates/zeroship-migrate*`
+  crates, so its variables are in scope and have not yet been swept.
 - Third-party crates and npm packages read their own variables (`RUST_LOG`,
   `NODE_ENV`, `AWS_*`, `PLAYWRIGHT_*`); only those the repo reads directly are
   listed.
