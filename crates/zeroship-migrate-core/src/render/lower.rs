@@ -14650,6 +14650,35 @@ columns = [
         }
     }
 
+    // The production creator-deploy entry must refuse a platform-owned table
+    // prefix during IR loading, before lowering emits any SQL.
+    #[test]
+    fn load_and_lower_guarded_refuses_reserved_collection_during_authoring() {
+        let bytes = r#"{"ir_version":1,"name":"m","ops":[
+            {"op":"createTable","name":"__zeroship_probe","columns":[{"name":"title","type":"text"}]}
+        ]}"#;
+        let author = test_ir_author("app", "app_a", POSTGRES);
+        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let err = author
+            .load_and_lower_guarded(
+                bytes,
+                "app_a",
+                &registry(&[]),
+                &LiveSchema::default(),
+                &guard_cfg,
+            )
+            .expect_err("a reserved collection must be refused during authoring");
+
+        match err {
+            LoadAndLowerGuardedError::Load(crate::model::load::IrLoadError::Validate(ae)) => {
+                assert_eq!(ae.code, crate::model::validate::CODE_OP_INVALID);
+                assert_eq!(ae.op_index, 0);
+                assert!(ae.reason.contains("__zeroship"), "{}", ae.reason);
+            }
+            other => panic!("expected a load-time reserved-name refusal, got: {other}"),
+        }
+    }
+
     // The guarded deploy entry also reports the artifact's created tables (for the
     // cross-file registry/live-set advance) and lowers a clean createTable.
     #[test]

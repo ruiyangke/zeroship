@@ -268,16 +268,23 @@ mod schema_renderer_tests {
  * next person to add encrypted-column support would have built on top of it.
  */
 
+/// Platform-owned collection prefixes mirrored by `zeroship-schema`.
+///
+/// This is public only so the downstream parity suite can enforce exact
+/// agreement without adding a production dependency across the engine boundary.
+#[doc(hidden)]
+pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
+
 /// Validate a collection name: alphanumeric + underscores only.
 ///
 /// Additional security constraints (beyond character allowlist):
 /// - Must not be empty.
 /// - Must not exceed 63 bytes (Postgres `NAMEDATALEN` limit).
 /// - Must not contain a null byte.
-/// - Must not start with `pg_` (case-insensitive) - reserved for Postgres
-///   system catalogs.
-/// - Must not start with `__zero_migrate` (case-insensitive) - reserved for the
-///   platform's own internal tables (e.g. `__zero_migrate_migrations`).
+/// - Must not start with a registered backend's reserved catalog prefix
+///   (case-insensitive).
+/// - Must not start with a platform-owned prefix (case-insensitive):
+///   `__zero_migrate` or `__zeroship`.
 pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
@@ -311,10 +318,13 @@ pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryEr
             )));
         }
     }
-    if bytes.len() >= 14 && bytes[..14].eq_ignore_ascii_case(b"__zero_migrate") {
-        return Err(QueryError::InvalidCollection(format!(
-            "collection name '{name}' uses reserved prefix '__zero_migrate' (platform internal)"
-        )));
+    for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
+        let claimed = prefix.as_bytes();
+        if bytes.len() >= claimed.len() && bytes[..claimed.len()].eq_ignore_ascii_case(claimed) {
+            return Err(QueryError::InvalidCollection(format!(
+                "collection name '{name}' uses reserved prefix '{prefix}' (platform internal)"
+            )));
+        }
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(QueryError::InvalidCollection(format!(
@@ -4008,6 +4018,21 @@ columns = [
                 other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
             }
         }
+    }
+
+    /// This covers the schema-query DDL helper, not declarative IR loading.
+    #[test]
+    fn schema_query_create_table_rejects_zeroship_collection() {
+        let schema = serde_json::json!({ "probe": { "type": "string" } });
+        let err = build_create_table_with_fks(
+            "app1",
+            "__zeroship_probe",
+            &schema,
+            &FkEmission::Inline,
+        )
+        .expect_err("the schema-query helper must refuse the __zeroship prefix");
+
+        assert!(matches!(err, QueryError::InvalidCollection(_)), "{err:?}");
     }
 
     /// Names longer than 63 bytes must be rejected.

@@ -101,16 +101,16 @@ fn the_length_fence_is_inclusive_at_63() {
     println!("ruled on 2 lengths");
 }
 
-/// TABLE half of the pair. `validate_collection` fences `pg_` and `__zeroship`
-/// (`query.rs:645-653`); `sqlite_` is added here because `SQLite` reserves that
-/// prefix for table names specifically and `query.rs` fences it only on
-/// columns.
+/// TABLE half of the pair. The two shared platform prefixes are checked before
+/// the role-specific `pg_`, `__zs_`, and `sqlite_` reservations.
 #[test]
 fn the_table_fence_holds() {
     let refused = [
         "pg_class",
         "PG_CLASS",
         "pg_",
+        "__zero_migrate_journal",
+        "__ZERO_MIGRATE_x",
         "__zeroship_migrations",
         "__ZEROSHIP_x",
         "__zs_internal",
@@ -135,7 +135,7 @@ fn the_table_fence_holds() {
         );
         ruled_on += 1;
     }
-    assert_eq!(ruled_on, 12);
+    assert_eq!(ruled_on, 14);
     assert!(ruled_on >= 10, "ruled on {ruled_on} names");
     println!("ruled on {ruled_on} table names");
 }

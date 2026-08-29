@@ -128,8 +128,11 @@ app-level `Env.db` augmentation moved to generated code.
 
 Collection names created by migrations become physical table names. Keep them
 ASCII alphanumeric plus underscores, at most 63 bytes, and avoid the reserved
-prefixes `pg_` and `__zeroship`. Invalid names are refused at deploy time by
-the validator in `crates/zeroship-schema/src/query.rs`.
+prefixes `pg_`, `__zero_migrate`, and `__zeroship`. The data-plane and
+schema-query validators refuse these names, and declarative migration loading
+calls the engine validator before lowering emits SQL. The offline `loadVerify`
+surface reports this as `ok: false`; managed HTTP apply surfaces validation
+failures as 422, not as a literal authoring-time 400.
 
 ## Two return contracts
 

@@ -69,36 +69,40 @@ Without a fenced prefix, co-habitation is a live collision:
 So a creator declaring a table named `schema_migrations` in their own schema
 would have it silently **adopted as the journal**.
 
-**The prefix is NOT enforced by a validator on the authoring path, and an
-earlier version of this document said it was.** There are two forks of
-`validate_collection` with no dependency edge between them:
+There are two production forks of `validate_collection` with no dependency edge
+between them. Both now execute the same `__zero_migrate` and `__zeroship`
+platform-prefix list; a test-only edge from `zeroship-schema` compares the lists
+so they cannot silently diverge again:
 
 | fork | reserves | governs |
 | --- | --- | --- |
-| `zeroship-schema/src/query.rs:650` | `__zeroship` (10 bytes) | data-plane collection access |
-| `zeroship-migrate-core/src/schema/query.rs:313` | `__zero_migrate` (14 bytes) | **migration authoring** |
+| `zeroship-schema/src/query.rs` | `__zero_migrate`, `__zeroship` | data-plane collection access |
+| `zeroship-migrate-core/src/schema/query.rs` | `__zero_migrate`, `__zeroship` | schema-query DDL helpers |
 
-A creator's `createTable` passes through the **authoring** fork, which does not
-fence `__zeroship`. `__zeroship_schema_migrations` passes it cleanly.
+A creator's declarative `createTable` reaches the engine fork through
+`validate_ir_authorized`: the structural op gate explicitly calls
+`validate_collection`, so `__zeroship_schema_migrations` is refused before
+lowering emits SQL. This call is load-bearing; the matching constant alone would
+not fence authoring.
 
-**What actually closes the hazard is sequencing, not a rule.** `ensure_journal`
-bootstraps the journal before any creator DDL runs, so `createTable
-"__zeroship_schema_migrations"` is refused with *"relation already exists"* -
-and on an app with no journal yet it is refused the same way, so the
-silent-adoption case is closed for every app. That is a weaker guarantee than a
-reservation and should be stated as what it is.
+**Sequencing remains the independent apply-time defence.** `ensure_journal`
+bootstraps the journal before creator DDL runs, so even an unchecked artifact
+cannot silently adopt `__zeroship_schema_migrations`. The normal creator path now
+fails earlier with the actionable reserved-name error instead of relying on a
+relation collision.
 
 **A second refusal stands behind it, and it is conditional.** `dropTable` on the
 journal is refused by the engine's own gate - *"plan requires approval
 (destructive) but none was given"* - reached because the host passes
 `Approval::None`. **If the host is ever made to assert approval on the
 creator's behalf, the creator can drop their journal by name.** Both refusals
-are asserted by message in `abf7ec064`, so that change goes red.
+are asserted by exact message in the live apply API regression.
 
-`crates/zeroship-data-plan/src/ident.rs:54`, `:56` and `:157` assert the same
-false claim - that `__zeroship` is one of `validate_collection`'s reserved
-prefixes - and cite `query.rs:645-653`, line numbers that no longer exist. That
-comment is a claim that reads as protection and should be corrected.
+`crates/zeroship-data-plan/src/ident.rs` is a third copy because its
+zero-dependency boundary forbids importing either validator. Its collection
+role now consumes the same platform-prefix slice, and the data-plane parity
+test compares all three copies. Its additional backend and runtime-plan
+reservations remain separate.
 
 The prefix is still worth having: it means one thing everywhere, and the pattern
 is already in use - `__zeroship_workflow_{runs,steps,signals,blobs,subscriptions}`

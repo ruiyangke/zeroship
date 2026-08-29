@@ -30,5 +30,11 @@ tracing = { workspace = true }
 # constraint protects. The migration engine already depends on `sha2`.
 sha2 = { workspace = true }
 
+[dev-dependencies]
+# Test-only parity edges: the production crates stay separated by the migration
+# engine boundary, while this suite compares the exact prefix slices they run.
+zeroship-data-plan = { workspace = true }
+zeroship-migrate-core = { workspace = true }
+
 [lints]
 workspace = true

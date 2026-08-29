@@ -613,6 +613,9 @@ pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
     explicit.unwrap_or(MAX_QUERY_LIMIT)
 }
 
+/// Platform-owned collection prefixes mirrored by every collection validator.
+pub(crate) const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
+
 /// Validate a collection name: alphanumeric + underscores only.
 ///
 /// Additional security constraints (beyond character allowlist):
@@ -621,8 +624,8 @@ pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
 /// - Must not contain a null byte.
 /// - Must not start with `pg_` (case-insensitive) — reserved for Postgres
 ///   system catalogs.
-/// - Must not start with `__zeroship` (case-insensitive) — reserved for the
-///   platform's own internal tables (e.g. `__zeroship_migrations`).
+/// - Must not start with a platform-owned prefix (case-insensitive):
+///   `__zero_migrate` or `__zeroship`.
 pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
@@ -647,10 +650,13 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
             "collection name '{name}' uses reserved prefix 'pg_' (Postgres system catalog)"
         )));
     }
-    if bytes.len() >= 10 && bytes[..10].eq_ignore_ascii_case(b"__zeroship") {
-        return Err(QueryError::InvalidCollection(format!(
-            "collection name '{name}' uses reserved prefix '__zeroship' (platform internal)"
-        )));
+    for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
+        let claimed = prefix.as_bytes();
+        if bytes.len() >= claimed.len() && bytes[..claimed.len()].eq_ignore_ascii_case(claimed) {
+            return Err(QueryError::InvalidCollection(format!(
+                "collection name '{name}' uses reserved prefix '{prefix}' (platform internal)"
+            )));
+        }
     }
     if !name
         .chars()
@@ -9991,6 +9997,39 @@ mod tests {
                 other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
             }
         }
+    }
+
+    /// Names starting with `__zero_migrate` (any case) must be rejected.
+    #[test]
+    fn validate_collection_rejects_zero_migrate_prefix() {
+        for name in &[
+            "__zero_migrate_migrations",
+            "__ZERO_MIGRATE_audit",
+            "__zero_migrate",
+        ] {
+            let err = validate_collection(name).unwrap_err();
+            match err {
+                QueryError::InvalidCollection(msg) => assert!(
+                    msg.contains("__zero_migrate") || msg.contains("reserved"),
+                    "for '{name}': {msg}"
+                ),
+                other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reserved_collection_prefixes_match_migration_engine() {
+        assert_eq!(
+            PLATFORM_RESERVED_COLLECTION_PREFIXES,
+            zeroship_migrate_core::schema::query::PLATFORM_RESERVED_COLLECTION_PREFIXES,
+            "data-plane and migration-engine collection prefixes diverged"
+        );
+        assert_eq!(
+            PLATFORM_RESERVED_COLLECTION_PREFIXES,
+            zeroship_data_plan::ident::PLATFORM_RESERVED_COLLECTION_PREFIXES,
+            "data-plane and runtime-plan collection prefixes diverged"
+        );
     }
 
     /// Names longer than 63 bytes must be rejected.

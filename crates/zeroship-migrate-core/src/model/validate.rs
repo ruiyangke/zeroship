@@ -6413,6 +6413,40 @@ pub fn validate_op_scoped(
     validate_op_authorized(vendors, op, target_dialect, op_index, schema_scope, None)
 }
 
+/// Refuse an author-declared collection destination before any renderer sees it.
+///
+/// The schema-query DDL helpers already call `validate_collection`, but normal
+/// declarative IR loading does not use those helpers. Calling the same validator
+/// from the structural op gate makes `loadVerify` and guarded deploy reject the
+/// destination of a create, partition create, or rename while preserving op-index
+/// and dialect attribution.
+fn validate_declared_collection_name(
+    vendors: VendorSet,
+    op: &crate::model::ir::Op,
+    target_dialect: &DialectId,
+    op_index: usize,
+) -> Result<(), AuthoringError> {
+    let name = match op {
+        crate::model::ir::Op::CreateTable { name, .. }
+        | crate::model::ir::Op::CreatePartition { name, .. } => name,
+        crate::model::ir::Op::RenameTable { to, .. } => to,
+        _ => return Ok(()),
+    };
+
+    crate::schema::query::validate_collection(vendors, name).map_err(|error| AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        dialect: target_dialect.clone(),
+        reason: error.to_string(),
+        suggested_fix: Some(
+            "rename the collection so it uses only the portable identifier shape and no \
+             platform- or backend-reserved prefix"
+                .to_string(),
+        ),
+    })
+}
+
 /// [`validate_op_scoped`] threaded with the charter that answers vendor authority.
 ///
 /// # Errors
@@ -6445,6 +6479,7 @@ pub fn validate_op_authorized(
     // schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, schema_scope)?;
+    validate_declared_collection_name(vendors, op, target_dialect, op_index)?;
 
     // **VENDOR (`zero-migrate`)** - the capability gate, BEFORE any expression walk. A
     // privileged vendor op is refused fail-closed when (a) the target does not render
