@@ -240,6 +240,50 @@ Intentional divergences are catalogued in `docs/reference/sqlite-divergences.md`
 
 ---
 
+## Multi-region: NOT DESIGNED, and the shape it is forced into
+
+There is **no region or datacenter concept anywhere in the tree** (checked 2026-08-29: zero
+occurrences in the gateway or the route registry). What exists is CHWBL within one location - a
+consistent hash ring with load bounded at 125% of average, overflow spilling to the next worker
+(`crates/zeroship-gateway/src/proxy.rs`). This section records the constraint rather than a design,
+so that whoever takes it on does not start by rediscovering it.
+
+**CHWBL works today because workers are stateless with respect to data.** Any worker can serve any
+app. A Database is not stateless: it lives on one Datastore, on one PostgreSQL server, in one
+building, and PostgreSQL is not multi-master. So compute is freely balanceable and data is not.
+
+**The arithmetic settles it.** One `find` costs four network round trips - BEGIN, the `SET LOCAL`
+setup, the query, COMMIT - and a query execution measured about 555us locally
+(2026-08-29, loopback, cache off):
+
+```
+  same DC           RTT ~0.1ms  ->  4 x 0.1  =   0.4 ms    query cost dominates
+  cross-DC regional RTT ~10ms   ->  4 x 10   =  40   ms
+  cross-continent   RTT ~70ms   ->  4 x 70   = 280   ms    per find
+```
+
+Cross-region data access is not a tuning problem. **An app must be co-located with its database**,
+which makes routing DATA-BOUND rather than load-bound: you do not balance across regions, you
+*place* across them and balance within. Two layers answering different questions - placement is a
+slow control-plane decision fixed at provisioning; balancing stays exactly the CHWBL it is today,
+over local workers only.
+
+It also makes the round-trip count strategic rather than cosmetic. Collapsing four trips matters
+far more in a multi-region world than a single-region one.
+
+**The hook already exists:** `Datastore` carries `cluster_id`, so adding a region attribute makes
+placement expressible without touching the entity model. And the rule that creators see *attributes*
+of placement and never its identity already covers the creator half - they choose a region, they
+never name a datastore.
+
+**Two consequences worth stating before anyone designs this:**
+
+- **Two apps sharing a Database are pinned to the same region.** Co-tenancy and geo-distribution
+  pull against each other.
+- **Read replicas elsewhere are the obvious answer and are not obviously safe.** Replication lag
+  breaks the ordering the masking and deploy-gate story rests on: an app must not read a schema
+  older than the descriptor it was built against. That is a design problem, not a config flag.
+
 ## What this costs
 
 Two costs remain, and both are PostgreSQL constraints rather than choices:
