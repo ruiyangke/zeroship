@@ -323,3 +323,50 @@ must retry exactly two of them in plaintext and nothing else. `Closed` versus
 `Cancelled` splits "the socket is gone" from "the socket is fine but the two
 sides disagree about where they are in the byte stream". Each carries its libpq
 analogue or an explicit note that libpq has none.
+
+## The split-path test gap has a structural cause, measured 2026-08-29
+
+The section above predicted the split read path was under-tested and said the
+same asymmetry "plausibly exists" in `tls_sansio.rs` and `maybe_tls_stream.rs`.
+Two mutation sweeps have now measured it:
+
+    buf_stream.rs split half   7 mutations,  4 SURVIVED
+    tls split halves           19 mutations, 10 SURVIVED (sweep in progress)
+
+Fourteen behaviours where changing the code broke no test, all on the halves the
+multiplexed connection loop actually runs.
+
+**The cause is not that someone forgot to write tests.** `ReadFramer` already
+exists as a trait and BOTH `BufStream` and `BufReadHalf` implement it - `fill`,
+`buf`, `peek_u32_be`, `validate_length`. The trait unifies the INTERFACE and
+leaves each type its OWN BODY. Measured on `buf_stream.rs`: the whole-stream
+read region is 71 lines, the split one 79, and **26 non-trivial lines are
+character-identical**, including every guard the sweep mutated:
+
+    if min_bytes > self.max_message_size {
+    if n == 0 {
+    if self.read_scratch.is_empty() {
+    let buf = std::mem::take(&mut self.read_scratch);
+    let (n, buf) = self.read_raw(buf).await?;
+
+So each guard exists twice, and a test written against one copy says nothing
+about the other. That is exactly how the sweep's first attempt went wrong on
+2026-08-29: line numbers derived from the whole-stream copy mutated code the
+split tests never execute, and every mutation "passed".
+
+**The two impls differ in one thing only: how they obtain bytes.** Both call
+`self.read_raw(buf)`; `BufStream` reads the whole stream, `BufReadHalf` reads
+its half. Everything after that - the size guard, the zero-byte EOF check, the
+scratch reuse, the accumulation loop, the length validation - is the same
+framing logic written twice.
+
+**The fix is to hoist the framing body, not to keep adding paired tests.** One
+implementation parameterised over the byte source, with `read_raw` as the only
+thing the two supply. Then there is one guard per behaviour and one place a test
+can bind to, and the whole class of "killed here, survived there" disappears
+rather than being chased.
+
+That is a larger change than this hardening pass should make unannounced, and
+the 14 tests being added now are worth having either way - they pin the current
+behaviour, which is exactly what makes such a refactor safe to attempt later.
+Recording it as the next structural move, with the measurement that justifies it.
