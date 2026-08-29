@@ -47,8 +47,8 @@ const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// and an owner's rights are implicit and survive `REVOKE ... FROM <owner>`, so
 /// the loop below swept the name and changed nothing. Now that the migration
 /// service creates it, the worker is an ordinary grantee. The reserved sweep
-/// leaves this exact name for its dedicated recipe, which clears the blanket
-/// grants before adding only INSERT and serial-sequence USAGE.
+/// leaves this exact name for its dedicated recipe, which clears every additive
+/// privilege before adding only INSERT and serial-sequence USAGE.
 ///
 /// Losing ownership is a GAIN, not a regression: a process that owns its own
 /// audit log can `TRUNCATE` or `DROP` it, and privilege follows the process.
@@ -249,18 +249,13 @@ pub struct PerAppRoleOutcome {
 ///    `NOREPLICATION` is the §17.5 non-negotiable; `IN ROLE` anchors
 ///    every per-app role under one template so a cluster-wide audit
 ///    reads one membership edge per app.
-/// 2. `GRANT USAGE, CREATE ON SCHEMA "<app_id>"` — the role may use and
-///    add objects to its own schema.
-/// 3. `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA
-///    "<app_id>"`, plus matching sequence grants, then revoke every other
-///    reserved `__zeroship_*` table and replace the audit table's blanket
-///    privileges with exactly INSERT and serial-sequence USAGE - CRUD on
-///    existing creator tables only.
-/// 4. `ALTER DEFAULT PRIVILEGES IN SCHEMA "<app_id>" GRANT … ON
-///    TABLES/SEQUENCES` — so tables/sequences the role (or the platform
-///    migrator) creates LATER are auto-granted, no re-run needed.
-///    Reserved workflow journals are created under the platform owner role,
-///    so these caller-role default privileges do not cover them.
+/// 2. `GRANT USAGE ON SCHEMA "<app_id>"` - the runtime may enter the
+///    schema but may not author objects in it.
+/// 3. Grant sequence access for existing and future creator objects. Table DML
+///    is deliberately absent: the binding's column grants are its authority,
+///    and a table-level grant would subsume them.
+/// 4. Revoke every reserved `__zeroship_*` table, then give the unmask audit
+///    table exactly INSERT and its serial sequence exactly USAGE.
 ///
 /// Explicitly does NOT grant `REPLICATION`, nor any privilege on another
 /// app's schema. There is no privileged schema for it to reach: the
@@ -298,23 +293,12 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     )
     .await?;
 
-    // 2. schema-level: USAGE (enter the schema) + CREATE (add objects).
-    pool.execute(
-        &format!("GRANT USAGE, CREATE ON SCHEMA {schema} TO {qrole}"),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("GRANT USAGE,CREATE ON SCHEMA {app_id}"), e))?;
+    // 2. Schema-level USAGE only. Runtime code never authors schema objects.
+    pool.execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {qrole}"), &[])
+        .await
+        .map_err(|e| coded_sql(&format!("GRANT USAGE ON SCHEMA {app_id}"), e))?;
 
-    // 3. Existing tables + sequences. The blanket snapshots run first, the
-    //    reserved sweep strips every non-audit system table, and the exact
-    //    audit recipe is the final word on its table and sequence.
-    pool.execute(
-        &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {qrole}"),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("GRANT table CRUD ON SCHEMA {app_id}"), e))?;
+    // 3. Sequences only. The binding layer owns column-level table grants.
     pool.execute(
         &format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {qrole}"),
         &[],
@@ -324,18 +308,7 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     revoke_reserved_system_table_privileges(pool, app_id, &role).await?;
     set_worker_unmask_audit_append_privileges(pool, app_id, &role).await?;
 
-    // 4. default privileges for FUTURE objects in this schema. Without
-    //    this, a table the platform migrator creates next deploy would
-    //    be un-readable by the per-app role until a manual re-grant.
-    pool.execute(
-        &format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {qrole}"
-        ),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("ALTER DEFAULT PRIVILEGES tables {app_id}"), e))?;
+    // 4. Future sequences. Future tables still require explicit column grants.
     pool.execute(
         &format!(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
@@ -390,7 +363,7 @@ fn revoke_reserved_system_table_privileges_sql(app_id: &str, role: &str) -> Stri
     )
 }
 
-/// Remove the blanket snapshots from the exact unmask audit objects.
+/// Remove every additive privilege from the exact unmask audit objects.
 ///
 /// This runs as its own statement before the narrow grants. If a malformed
 /// audit table makes the grant step fail, this deny remains committed instead
@@ -451,8 +424,8 @@ fn revoke_worker_unmask_audit_privileges_sql(app_id: &str, role: &str) -> String
 /// Grant the unmask audit table its exact append-only recipe.
 ///
 /// PostgreSQL grants are additive, so this runs only after
-/// [`revoke_worker_unmask_audit_privileges_sql`] has cleared the blanket table
-/// and sequence grants. The lookup is a no-op when the audit table has not been
+/// [`revoke_worker_unmask_audit_privileges_sql`] has cleared every table and
+/// sequence privilege. The lookup is a no-op when the audit table has not been
 /// provisioned yet, preserving [`ensure_per_app_role`]'s schema-only
 /// precondition. A real audit table without its contractually required
 /// `BIGSERIAL` sequence is rejected after the deny has committed.
@@ -1155,6 +1128,14 @@ mod live_reserved_sweep_tests {
         ensure_per_app_role(&pool, &app)
             .await
             .expect("provision the per-app role");
+        admin
+            .batch_execute(&format!(
+                "GRANT INSERT ON TABLE {}.\"widgets\" TO {}",
+                crate::query::quote_ident(&app),
+                crate::query::quote_ident(&role),
+            ))
+            .await
+            .expect("give the control table one explicit privilege");
 
         let shipped = revoke_reserved_system_table_privileges_sql(&app, &role);
         let exemption = format!(

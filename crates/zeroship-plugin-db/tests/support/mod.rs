@@ -6,6 +6,77 @@
 
 pub mod tables;
 
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// Stand in for a readwrite binding's explicit column grants.
+///
+/// The integration provisioner intentionally grants no table DML. Fixtures
+/// whose subject is CRUD still need authority, but it must be expressed as
+/// column grants so an omitted column remains enforceable by PostgreSQL.
+pub async fn grant_all_runtime_table_columns(pool: &compio_postgres::Pool, app: &str, table: &str) {
+    let rows = pool
+        .query_text_params(
+            "SELECT column_name FROM information_schema.columns \
+              WHERE table_schema = $1 AND table_name = $2 \
+              ORDER BY ordinal_position",
+            &[app, table],
+        )
+        .await
+        .expect("read fixture table columns");
+    let columns = rows
+        .iter()
+        .map(|row| quote_ident(row.get::<_, &str>("column_name")))
+        .collect::<Vec<_>>();
+    assert!(
+        !columns.is_empty(),
+        "fixture table {app}.{table} is missing"
+    );
+
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("fixture app id must produce a runtime role");
+    let columns = columns.join(", ");
+    let table = format!("{}.{}", quote_ident(app), quote_ident(table));
+    let role = quote_ident(&role);
+    pool.batch_execute(&format!(
+        "GRANT SELECT ({columns}) ON TABLE {table} TO {role}; \
+         GRANT INSERT ({columns}) ON TABLE {table} TO {role}; \
+         GRANT UPDATE ({columns}) ON TABLE {table} TO {role}; \
+         GRANT DELETE ON TABLE {table} TO {role};"
+    ))
+    .await
+    .expect("grant fixture columns to the runtime role");
+}
+
+/// Grant only the columns an audited read fixture needs.
+pub async fn grant_runtime_select_columns(
+    pool: &compio_postgres::Pool,
+    app: &str,
+    table: &str,
+    columns: &[&str],
+) {
+    assert!(
+        !columns.is_empty(),
+        "a SELECT grant needs at least one column"
+    );
+    let role = zeroship_core::database_role::per_app_role_name(app)
+        .expect("fixture app id must produce a runtime role");
+    let columns = columns
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    pool.batch_execute(&format!(
+        "GRANT SELECT ({columns}) ON TABLE {}.{} TO {}",
+        quote_ident(app),
+        quote_ident(table),
+        quote_ident(&role),
+    ))
+    .await
+    .expect("grant fixture read columns to the runtime role");
+}
+
 /// Install a tracing subscriber for an integration binary, at most once.
 ///
 /// WHY THIS EXISTS. The runtime deliberately blanks non-allowlisted 5xx bodies

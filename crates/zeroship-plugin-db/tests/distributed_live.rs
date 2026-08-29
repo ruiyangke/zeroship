@@ -829,8 +829,12 @@ async fn provision_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
     for grant in [
         format!(r#"GRANT USAGE ON SCHEMA "{app_id}" TO "{role}""#),
         format!(
-            r#"GRANT SELECT, INSERT, UPDATE, DELETE
-                ON ALL TABLES IN SCHEMA "{app_id}" TO "{role}""#
+            r#"GRANT
+                  SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, title),
+                  INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, title),
+                  UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, title),
+                  DELETE
+                ON TABLE "{app_id}"."events" TO "{role}""#
         ),
         format!(
             r#"GRANT USAGE, SELECT

@@ -5081,12 +5081,13 @@ async fn snapshot_uri_content_hash_round_trip() {
 // ---------------------------------------------------------------------------
 // Per-app PG role hardening (§17.5).
 //
-// The per-app role (`app_<id>_role`) owns ONLY its schema and is
+// The per-app role (`app_<id>_role`) reaches ONLY its schema and is
 // NOREPLICATION — slot ownership stays platform-side. These tests
 // provision the role via `auth::bootstrap::ensure_per_app_role` and
-// fence it: it can CRUD its own schema, cannot read a sibling app's
-// schema, cannot create/list/drop replication slots, and carries no
-// `rolreplication` attribute. The per-app role is NOLOGIN (clients
+// add explicit column grants where their fixture needs DML. They fence it:
+// it can use those columns, cannot read a sibling app's schema, cannot
+// create/list/drop replication slots, and carries no `rolreplication`
+// attribute. The per-app role is NOLOGIN (clients
 // connect as the platform login role, then `SET ROLE`), so these tests
 // drive it via `SET ROLE` from the superuser pool — which is exactly how
 // `exec_begin` applies it to client SQL.
@@ -5214,15 +5215,9 @@ async fn provision_platform_login_pool(
         )
         .await
         .unwrap();
-    admin_pool
-        .execute(
-            &format!(
-                "GRANT SELECT ON ALL TABLES IN SCHEMA \"{app}\" TO \"{login_role}\""
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
+    // The membership edge inherits the app role's explicit column grants.
+    // Giving the login a table-level SELECT would bypass that column fence and
+    // make this RLS control unlike the production login.
     let login_url = login_role_test_url(base_url, login_role, password);
     let login_pool = std::rc::Rc::new(Pool::connect(&login_url, 4).await.unwrap());
     (login_url, login_pool)
@@ -5460,13 +5455,7 @@ async fn per_app_role_grant_scoped_to_schema() {
     )
     .await
     .unwrap();
-    // Re-run provision so the existing-table GRANT covers `widgets`
-    // (provision before table creation only set DEFAULT PRIVILEGES; the
-    // re-run also covers tables that already exist — proving idempotent
-    // grant coverage).
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
-        .await
-        .unwrap();
+    support::grant_all_runtime_table_columns(&pool, app, "widgets").await;
 
     // SET ROLE to the per-app role and CRUD its own schema — must work.
     pool.execute(&format!(r#"SET ROLE "{role}""#), &[]).await.unwrap();
@@ -5725,9 +5714,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
-        .await
-        .unwrap();
+    support::grant_all_runtime_table_columns(&admin_pool, app, coll).await;
     install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
     let login_role = "p6a_vector_login";
     let (login_url, login_pool) = provision_platform_login_pool(
@@ -5827,9 +5814,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
-        .await
-        .unwrap();
+    support::grant_all_runtime_table_columns(&admin_pool, app, coll).await;
     install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
     let login_role = "p6a_spatial_login";
     let (login_url, login_pool) = provision_platform_login_pool(
@@ -5920,9 +5905,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
-        .await
-        .unwrap();
+    support::grant_runtime_select_columns(&admin_pool, app, coll, &["id", &ssn_raw]).await;
     install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
     let login_role = "p6a_unmask_login";
     let (login_url, login_pool) = provision_platform_login_pool(
@@ -6041,11 +6024,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
         )
         .await
         .unwrap();
-    // Re-run AFTER the collection exists: the runtime role's DML comes from
-    // `GRANT ... ON ALL TABLES IN SCHEMA`, a snapshot over what exists then.
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
-        .await
-        .unwrap();
+    support::grant_runtime_select_columns(&admin_pool, app, coll, &["id", &ssn_raw]).await;
 
     let login_role = "p6a_unmask_audit_login";
     let _ = admin_pool
@@ -6202,6 +6181,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     )
     .await
     .unwrap();
+    support::grant_runtime_select_columns(&pool, app, coll, &["id", &ssn_raw]).await;
 
     zeroship_plugin_db::set_postgres_pool_for_tests(pool.clone(), &url);
     zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);

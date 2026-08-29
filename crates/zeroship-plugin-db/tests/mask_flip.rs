@@ -46,6 +46,9 @@ use zeroship_plugin_db::query::{
     FkEmission,
 };
 
+#[path = "support/mod.rs"]
+mod support;
+
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
 }
@@ -345,6 +348,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
+    support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
     let result = zeroship_plugin_db::crud::unmask::dispatch_unmask(
         &zeroship_plugin_db::binding::DbBinding::cold_start(app),

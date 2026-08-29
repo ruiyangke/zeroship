@@ -43,6 +43,7 @@ use crate::schema_apply_store::{
 };
 use crate::provisioning::{
     exec_retry, provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
+    AUDIT_UNMASK_TABLE,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -325,11 +326,11 @@ pub async fn apply_ir_documents(
     // three `CREATE INDEX` on every `unmask()` call; that was the last live DDL
     // in the data plane.
     //
-    // BEFORE `provision_runtime_app_role` below, and that is not cosmetic. The
-    // runtime role's `INSERT` and its `USAGE` on the `BIGSERIAL` sequence both
-    // come from `GRANT ... ON ALL TABLES/SEQUENCES IN SCHEMA`, which grants over
-    // what exists when it runs. Created after them, the table and its sequence
-    // would both be unreachable to the only process that writes to it.
+    // BEFORE `provision_runtime_app_role` below, and that is not cosmetic. That
+    // function explicitly looks up this table and its `BIGSERIAL` sequence,
+    // clears every additive privilege, then grants only table INSERT and
+    // sequence USAGE. Created after the last call, both lookups would be no-ops
+    // and the table would be unreachable to the only process that writes it.
     provision_audit_unmask_table(session.client(), &schema)
         .await
         .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
@@ -1263,6 +1264,8 @@ pub struct RuntimeRoleProvisioningSql {
     role_name: String,
     create_role: String,
     grants: String,
+    revoke_audit: String,
+    grant_audit: String,
     dependents: String,
 }
 
@@ -1273,9 +1276,123 @@ impl RuntimeRoleProvisioningSql {
         &self.role_name
     }
 
-    fn statements(&self) -> [&str; 3] {
-        [&self.create_role, &self.grants, &self.dependents]
+    fn statements(&self) -> [&str; 5] {
+        [
+            &self.create_role,
+            &self.grants,
+            &self.revoke_audit,
+            &self.grant_audit,
+            &self.dependents,
+        ]
     }
+}
+
+/// Clear every additive privilege from the runtime role's audit objects.
+///
+/// This is deliberately a separate statement from the narrow grant below. If
+/// the audit table is malformed and the grant fails, the deny remains committed
+/// instead of rolling back with it. The lookup is a no-op before the audit table
+/// exists, preserving the role provisioner's idempotent schema-only shape.
+fn revoke_runtime_audit_privileges_sql(schema: &str, runtime_role: &str) -> String {
+    let schema_lit = quote_lit(schema);
+    let role_lit = quote_lit(runtime_role);
+    let audit_lit = quote_lit(AUDIT_UNMASK_TABLE);
+    format!(
+        "DO $runtime_audit_revoke$ \
+         DECLARE \
+           audit_rel record; \
+           sequence_rel record; \
+         BEGIN \
+           SELECT n.nspname, c.relname, c.relkind \
+             INTO audit_rel \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE n.nspname = '{schema_lit}' \
+              AND c.relname = '{audit_lit}' \
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S'); \
+           IF FOUND THEN \
+             IF audit_rel.relkind = 'S' THEN \
+               EXECUTE format( \
+                 'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
+                 audit_rel.nspname, audit_rel.relname, '{role_lit}' \
+               ); \
+             ELSE \
+               EXECUTE format( \
+                 'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
+                 audit_rel.nspname, audit_rel.relname, '{role_lit}' \
+               ); \
+               IF audit_rel.relkind IN ('r', 'p') THEN \
+                 SELECT n.nspname, c.relname \
+                   INTO sequence_rel \
+                   FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE c.oid = pg_get_serial_sequence( \
+                          format('%I.%I', audit_rel.nspname, audit_rel.relname), \
+                          'id' \
+                        )::regclass \
+                    AND c.relkind = 'S'; \
+                 IF FOUND THEN \
+                   EXECUTE format( \
+                     'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
+                     sequence_rel.nspname, sequence_rel.relname, '{role_lit}' \
+                   ); \
+                 END IF; \
+               END IF; \
+             END IF; \
+           END IF; \
+         END \
+         $runtime_audit_revoke$"
+    )
+}
+
+/// Give the runtime role only the privileges needed to append an audit row.
+///
+/// PostgreSQL grants are additive, so this must execute after
+/// [`revoke_runtime_audit_privileges_sql`]. A real audit table without the
+/// `BIGSERIAL` sequence required by the data-plane INSERT is rejected.
+fn grant_runtime_audit_append_privileges_sql(schema: &str, runtime_role: &str) -> String {
+    let schema_lit = quote_lit(schema);
+    let role_lit = quote_lit(runtime_role);
+    let audit_lit = quote_lit(AUDIT_UNMASK_TABLE);
+    format!(
+        "DO $runtime_audit_grant$ \
+         DECLARE \
+           audit_rel record; \
+           sequence_rel record; \
+         BEGIN \
+           SELECT n.nspname, c.relname \
+             INTO audit_rel \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE n.nspname = '{schema_lit}' \
+              AND c.relname = '{audit_lit}' \
+              AND c.relkind IN ('r', 'p'); \
+           IF FOUND THEN \
+             SELECT n.nspname, c.relname \
+               INTO sequence_rel \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE c.oid = pg_get_serial_sequence( \
+                      format('%I.%I', audit_rel.nspname, audit_rel.relname), \
+                      'id' \
+                    )::regclass \
+                AND c.relkind = 'S'; \
+             IF NOT FOUND THEN \
+               RAISE EXCEPTION 'serial sequence missing for %.%.id', \
+                 audit_rel.nspname, audit_rel.relname; \
+             END IF; \
+             EXECUTE format( \
+               'GRANT USAGE ON SEQUENCE %I.%I TO %I', \
+               sequence_rel.nspname, sequence_rel.relname, '{role_lit}' \
+             ); \
+             EXECUTE format( \
+               'GRANT INSERT ON TABLE %I.%I TO %I', \
+               audit_rel.nspname, audit_rel.relname, '{role_lit}' \
+             ); \
+           END IF; \
+         END \
+         $runtime_audit_grant$"
+    )
 }
 
 /// Build the exact SQL plan used to provision an app's runtime role.
@@ -1334,13 +1451,12 @@ pub fn runtime_role_provisioning_sql(
         // register_model is a no-op on Postgres. Granting CREATE here would let
         // app runtime code author schema objects, which it must not.
         "GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
-         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema_q} TO {role_q};
-         ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
-             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_q};
          ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
              GRANT USAGE, SELECT ON SEQUENCES TO {role_q};"
     );
+    let revoke_audit = revoke_runtime_audit_privileges_sql(schema, &role_name);
+    let grant_audit = grant_runtime_audit_append_privileges_sql(schema, &role_name);
 
     // The migration identity creates no platform role here. It only delegates
     // to the narrow roles that the platform role migration precreated.
@@ -1349,6 +1465,8 @@ pub fn runtime_role_provisioning_sql(
         role_name,
         create_role,
         grants,
+        revoke_audit,
+        grant_audit,
         dependents,
     })
 }
@@ -1836,20 +1954,17 @@ mod live_audit_unmask_provisioning {
     /// 2. THE ORDERING MATTERS, shown by running it the other way round rather
     /// than asserted.
     ///
-    /// `provision_runtime_app_role` grants the runtime role its DML with
-    /// `GRANT ... ON ALL TABLES IN SCHEMA` / `ON ALL SEQUENCES IN SCHEMA`, which
-    /// are snapshots over what exists at that instant, plus `ALTER DEFAULT
-    /// PRIVILEGES FOR ROLE <migrator>` for the future - and the audit table is
-    /// created by the ADMIN principal, not the migrator, so the default
-    /// privileges do not cover it either. Every arm runs exactly the same
-    /// production functions against equivalent scratch schemas; only their order
-    /// differs.
+    /// `provision_runtime_app_role` explicitly looks up the audit table and its
+    /// owned serial sequence, revokes every additive privilege, then grants only
+    /// table INSERT and sequence USAGE. Both lookups are no-ops when the table is
+    /// absent. Every arm runs exactly the same production functions against
+    /// equivalent scratch schemas; only their order differs.
     ///
     /// ARM C locates the boundary rather than assuming it. `apply_ir_request`
     /// calls `provision_runtime_app_role` TWICE - once before `apply_sealed` and
     /// once after - so the binding constraint is "before the LAST call", not
     /// "before the first". A table created between the two is still reached,
-    /// because the second call re-runs the snapshot grants.
+    /// because the second call re-runs the explicit audit recipe.
     #[compio::test]
     async fn the_audit_table_must_be_provisioned_before_the_runtime_role() {
         let admin = admin_client().await;
@@ -1877,8 +1992,8 @@ mod live_audit_unmask_provisioning {
             .expect("provision audit table (inverted order)");
 
         // ARM C - between the apply path's TWO `provision_runtime_app_role`
-        // calls. The second one re-snapshots, so this arm is expected to be
-        // REACHABLE, and that is the honest statement of where the boundary is.
+        // calls. The second one finds the newly created audit objects, so this
+        // arm is expected to be REACHABLE.
         let between = scratch_schema();
         teardown(&admin, &between).await;
         let migrator_between = provision_schema_and_migrator(&admin, &between).await;
@@ -1916,13 +2031,13 @@ mod live_audit_unmask_provisioning {
             probe(&admin, &sequence_priv(&before)).await,
             "production order must leave the runtime role able to use the id sequence"
         );
-        // THE CONTROL. Same two calls, opposite order, and the snapshot grants
+        // THE CONTROL. Same two calls, opposite order, and the explicit lookups
         // now miss both objects. If this arm ever went true, the ordering
         // comment on `audit_unmask_table_sql` would be describing nothing and
         // arm A would be passing for some other reason.
         assert!(
             !probe(&admin, &insert_priv(&after)).await,
-            "a table created AFTER the snapshot grants must NOT be reachable - \
+            "a table created AFTER the explicit audit recipe must NOT be reachable - \
              if it is, the ordering constraint is not what makes the production \
              order work and arm A proves nothing"
         );
@@ -1934,18 +2049,17 @@ mod live_audit_unmask_provisioning {
         // ARM C. `audit_unmask_table_sql`'s docstring says "BEFORE
         // `provision_runtime_app_role`"; this is what that actually buys, and it
         // is looser than the sentence reads. Written as an assertion so a change
-        // that removed the apply path's SECOND call - making the strict reading
-        // true - fails here and forces the docstring to be re-read.
+        // that removed the apply path's SECOND call fails here visibly.
         assert!(
             probe(&admin, &insert_priv(&between)).await,
             "the apply path calls provision_runtime_app_role twice; a table \
-             created between them is re-snapshotted by the second call. If this \
+             created between them is granted by the second call. If this \
              is false, one of those two calls is gone and the ordering docstring \
              on audit_unmask_table_sql needs re-reading"
         );
         assert!(
             probe(&admin, &sequence_priv(&between)).await,
-            "the second call must re-snapshot the sequence as well"
+            "the second call must grant the sequence as well"
         );
 
         teardown(&admin, &before).await;
