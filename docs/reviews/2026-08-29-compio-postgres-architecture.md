@@ -480,3 +480,27 @@ this crate has none. The critique's other five dimensions produced two
 disproved findings, two downgrades and one confirmed defect, all recorded in
 `docs/reviews/2026-08-28-open-findings-re-derived.md`; this is the sixth and it
 is clean.
+
+## Re-derived at the end of the session, because a repeated number rots
+
+The figures above were measured when each cut landed. Re-measured at
+`07535df4c`, after the framing unification and every test addition:
+
+    edges 164      SCC 8
+    client connection copy_in copy_out prepare query simple_query statement
+
+The SCC is unchanged at 8 and holds the same eight modules. The edge count is
+**164, not the 167 recorded earlier** - extracting `read_with_deadline`,
+`read_raw_from`, `fill_read_buffer`, `peek_u32_be_from`,
+`validate_length_against` and `flush_retry_interrupted` into free functions
+removed three cross-module references as a side effect.
+
+Session arc, all measured rather than carried:
+
+    16 modules, 162 edges   start
+    10 modules, 162 edges   Config::connect moved out of config.rs
+     8 modules, 167 edges   Encryption moved to its own leaf
+     8 modules, 164 edges   read framing unified
+
+Edges rose then fell while the cycle only shrank, which is the point made
+earlier: edge count is not the health metric, the cycle is.
