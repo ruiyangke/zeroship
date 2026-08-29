@@ -625,13 +625,38 @@ creators it is, and no role fixes it.
   **project/workspace** row rather than a bare creator account, and "the apps that share this schema"
   is a structural fact of the config rather than a convention several files have to agree on. See
   section 9 for what that costs the project file.
-- **The apply lock moves to the database**: `pg_advisory_xact_lock(hashtextextended('db:' || <dbsid>, 0))`,
-  taken on the datastore connection before any DDL.
-- **The apply advances the schema epoch, and the epoch's whole lifecycle is inside that lock.** In
-  one transaction: apply the DDL, write the new epoch to the system schema's one table (6.5), mint
-  `zs_bind_<gid>_e<E+1>` for every live grant on the database, and drop `zs_bind_<gid>_e<E-1>`. **An
-  apply that cannot drop `E-1`'s roles refuses to advance to `E+1`** (6.2), which is what keeps the
-  cluster-shared catalog bounded and fail-closed rather than leaking a role family per migration.
+- **The apply lock moves to the database**, and it must be SESSION-scoped, not transaction-scoped.
+  `pg_advisory_xact_lock` releases at the first COMMIT, and the apply commits many times (below), so
+  it cannot hold across one. The engine already takes a session lock around a whole plan and releases
+  it explicitly (`crates/zeroship-migrate-postgres/src/backend/session.rs:60-77`,
+  `crates/zeroship-migrate-core/src/engine.rs:1382-1412`); the change is its KEY, from the app-as-project
+  to the database. Two separate defects live in that key and are filed apart from this: its scope, and
+  its `hashtext` width, which is int4 and collides.
+- **The apply advances the schema epoch. THE EPOCH ROTATION IS ATOMIC; THE APPLY AS A WHOLE IS NOT,
+  AND CANNOT BE.** The rotation - write the new epoch to the system schema's one table (6.5), mint
+  `zs_bind_<gid>_e<E+1>` for every live grant, drop `zs_bind_<gid>_e<E-1>` - is a small transaction and
+  stays one. **An apply that cannot drop `E-1`'s roles refuses to advance to `E+1`** (6.2), which keeps
+  the cluster-shared catalog bounded and fail-closed rather than leaking a role family per migration.
+
+  The DDL cannot join it. `crates/zeroship-migrate-core/src/engine.rs:2656` states the engine's
+  contract in its own words - "everything ahead of it commits in its own transaction" - and the host
+  loops the engine once per IR file (`crates/zeroship-migrate-server/src/apply.rs:617`, `:625`), whose
+  own comment records that earlier files are already committed when a later one fails (`:779`). The
+  engine's crash recovery is journal-driven on exactly that basis. A wrapping transaction would have to
+  swallow the journal bootstrap and would destroy that recovery model, so "one transaction covering the
+  DDL" is not a thing this engine can be asked for. An earlier version of this bullet asked for it.
+
+  **OPEN, AND IT BLOCKS IMPLEMENTATION.** With N committing DDL transactions and one rotation, three
+  things are undecided and no document settles them:
+    1. Where the rotation sits relative to the DDL, and what a reader sees in between.
+    2. What unfences an app if the process dies mid-apply. Nothing does today:
+       `crates/zeroship-migrate-server/src/apply.rs:708` passes `recovery_scope: None`, failure closure
+       is an in-process best-effort helper that cannot run after process death (`:930`), and a retry
+       mints a fresh apply identity (`:245`) rather than resuming the old one.
+    3. Whether the rotation may reuse publication reconciliation, which today owns its own `BEGIN` and
+       `COMMIT` and whose caller-independent body is private
+       (`crates/zeroship-migrate-server/src/publication.rs:59`, `:79`).
+  Do not write the producer before these are answered; the answer determines what the producer writes.
 - **Migrator role is `zs_db_<dbsid>_mig`**, named by no app. One migrator forever, so the ownership
   ping-pong and the silently-orphaned `ALTER DEFAULT PRIVILEGES` rules cannot occur.
 - **`ExecutorConfig::new(project_id, project_schema, policy)` stops taking the app id three times**
