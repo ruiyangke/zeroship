@@ -507,6 +507,21 @@ USE A PORT NO CONTAINER ALREADY PUBLISHES, and check with
 `docker pause` did not freeze a stranger's database mid-session. A published
 port is held by the container whether or not anything is listening right now.
 
+RE-MEASURED 2026-08-29 at `463191209`, 5s bound, on `zs-soak-5470` rather
+than the container the runbook names above - an agent was running the suite
+against `zs-cpg-types-5475` and `docker pause` would have frozen it. Pick a
+container nothing else is using, and check before pausing.
+
+```text
+PROBE query ended after 5.000496008s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+All three signals hold: 0.5ms past the bound, no descriptor outliving the
+failure, and the poisoned session refused on reuse. `is_closed=false` on the
+timeout error is the CORRECT value per the 2026-08-28 note above.
+
 ## Chaos: a healthy server with no connection slots left
 
 The third shape, and the one a platform running many apps against one
