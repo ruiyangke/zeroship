@@ -601,3 +601,46 @@ than assumed.
 **There are no `#[ignore]`d tests in this crate.** Checked the same day; the one
 grep hit is a comment in `tests/suite/url_parity.rs` recording that six once-
 ignored tests were un-ignored. That hiding place is already closed.
+
+## The pool's uncertain-cancel flag is unbound, and the mechanism is a masking disjunction
+
+Mutation sweep of the pool's retirement machinery, 2026-08-29: 14 mutations, 10
+KILLED, 4 SURVIVED. The survivors, derived independently of the sweep:
+
+    3  begin_cancel's post-Arc active recheck (the race-closing check) removed
+    4  is_uncertain() forced to false          (the READ of the flag)
+    6  the uncertain write in PoolCancelAttempt::drop removed  (the WRITE)
+    8  CommandRecoveryGuard::drop without force_close
+
+**4 and 6 are the read and the write of the SAME flag.** Both halves of the
+uncertain-cancel mechanism can be deleted and the suite stays green - the
+mechanism `ae8ba17f4` relies on to stop a possibly-sent cancel reaching the next
+borrower.
+
+**Why they survive, which the sweep alone does not say.** The flag has exactly
+one reader, `client.rs:2420`:
+
+    pub(crate) fn pool_cancel_lease_prevents_reuse(&self) -> bool {
+        self.pool_cancel_lease.as_ref()
+            .is_some_and(|lease| Arc::strong_count(lease) > 1 || lease.is_uncertain())
+    }
+
+It is a DISJUNCTION, and `Arc::strong_count(lease) > 1` is true in every
+scenario the suite constructs - any live `CancelToken` holds a second `Arc`. So
+the first term decides the outcome and the second is never load-bearing under
+test. Forcing `is_uncertain()` to false changes nothing observable.
+
+**What a binding test must therefore construct**, and this is the hard part:
+`strong_count == 1` AND the flag set - the token DROPPED (so no second `Arc`
+survives) while the attempt recorded uncertainty on its way out. That is exactly
+the case the flag exists for, and exactly the case nothing exercises.
+
+The only occurrence of "uncertain" anywhere in `tests/` is an assertion MESSAGE
+string in `hostile_peer.rs:2486`, not a test of this behaviour.
+
+**Mutation 8 is worth its own note.** `CommandRecoveryGuard::drop` is one of only
+two `Drop` impls in this crate that do real work; the Drop survey earlier today
+found its mechanism correct. It is correct AND untested - removing its
+`force_close` breaks nothing in the suite. Correct-by-inspection and
+bound-by-test are different properties, and the survey could only establish the
+first.
