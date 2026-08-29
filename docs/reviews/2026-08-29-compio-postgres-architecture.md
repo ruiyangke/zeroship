@@ -171,3 +171,155 @@ are recorded here as open and not yet independently verified.
 checked against the source, both because a fact elsewhere in the crate bounded
 the damage: a global counter in one case, existing tested 26000 handling in the
 other. Rank findings after reading what constrains them, not on first reading.
+
+## Correction: the stage-2 plan above was wrong, and the reason generalises
+
+The table near the top predicted that moving `impl Client`'s operation methods
+would take the SCC from 10 to **8**, "freeing client and copy_out". Measured, it
+takes it to **9** and frees **copy_out alone**. `client` stays in the cycle,
+because cutting its OUTGOING edges does nothing about `connection -> client`,
+`query -> client`, `copy_in -> client`, `copy_out -> client`, `prepare ->
+client`, `simple_query -> client` and `statement -> client`, all of which remain,
+alongside `client -> connection`.
+
+The error came from simulating a BUNDLE of five edge removals and then
+attributing the result to the bundle's theme. A bundle's effect is not evidence
+about any member. The right instrument is one edge at a time:
+
+```bash
+# for each intra-SCC edge, drop only that edge and recompute the SCC
+sccprobe.sh edges.txt <src> <dst>
+```
+
+Run over all 31 intra-SCC edges, that says only **four** are load-bearing at all:
+
+| edge cut (alone) | SCC | frees |
+| --- | ---: | --- |
+| `maybe_tls_stream -> connect_tls` | **8** | connect_tls, maybe_tls_stream |
+| `connect_tls -> maybe_tls_stream` | **8** | connect_tls, maybe_tls_stream |
+| `prepare -> statement` | 9 | statement |
+| `client -> copy_out` | 9 | copy_out |
+
+The other **27 edges are redundant**: cutting any one of them alone changes
+nothing, because the cycle routes around it. Effort spent on those 27 buys
+exactly zero, and four of the five edges in the stage-2 plan are among them.
+
+## The cut that was actually taken: `Encryption` to a leaf
+
+The two highest-value cuts are the two directions of one two-module cycle, so
+only one type had to move. `Encryption` - a two-variant enum plus
+`first_for(SslMode)` - lived in `connect_tls.rs`, the module that PERFORMS
+negotiation, while `maybe_tls_stream.rs` imported it only to NAME the answer in
+`negotiated_encryption()`. `connect_tls` imports `maybe_tls_stream` to build the
+stream. Two edges, two modules, one cycle.
+
+A grep for the type found five users. The compiler found **eleven**:
+`cancel_query`, `cancel_query_raw`, `cancel_token`, `client`, `connect`,
+`connect_raw`, `connect_tls`, `connection`, `maybe_tls_stream`, `replication`,
+`test_utils`. Two of them (`connect_raw`, `replication`) were invisible to the
+first grep because they import it as `use crate::connect_tls::{Encryption,
+negotiate_tls}` - a braced import the pattern did not match. **Let the type
+checker enumerate call sites; a grep answers spelling.**
+
+`src/encryption.rs` is now a leaf depending only on `config`. Measured result:
+
+    SCC 10 -> 8      connect_tls and maybe_tls_stream both freed
+    edges 162 -> 167
+
+**Edges went UP while the cycle went DOWN, and that is the point.** Eleven
+modules now name a leaf instead of naming the negotiation module, which adds
+edges and removes coupling. Anyone re-running the method should expect this and
+not read the edge count as a regression.
+
+## What is left, and why the next cut is not obvious
+
+The residual SCC is `client, connection, copy_in, copy_out, prepare, query,
+simple_query, statement`. The two remaining load-bearing edges are
+`prepare -> statement` and `client -> copy_out`, each worth exactly one module.
+
+Both are worth LESS than they look. `client -> copy_out` is a single `use
+crate::copy_out::CopyOutStream` - the RETURN TYPE of `Client::copy_out`. Moving
+that method into `copy_out.rs` would free one module and scatter the crate's
+primary public API across five files, so `client.rs` would no longer show what a
+`Client` can do. That is a maintainability LOSS bought with a metric GAIN, and
+the metric is not the goal. Recommend NOT taking it.
+
+Beyond those two, nothing single-edge remains: the eight-module core is a
+genuine mutual dependency between the connection loop and the protocol
+operations that drive it. Stop here.
+
+## Finding 2 checked and DISPROVED (2026-08-29)
+
+The claim was that an error's identity varies with response-channel occupancy:
+`Responses::poll_next` returns `Error::db(body)` when an `ErrorResponse` arrives
+in-band, but reaches a different constructor when the channel closes first, so
+the same server failure would surface as two different errors depending on a
+race.
+
+It does not. `client.rs` has two routes:
+
+    if let Message::ErrorResponse(body) = message {
+        let error = Error::db(body);            // in-band
+    ...
+    if let Some(error) = self.request_server_error.lock().take() {
+        return Poll::Ready(Err(Error::from_db_error(error)));   // channel closed
+    }
+
+and `error/mod.rs:644` shows the first delegates to the second:
+
+    pub(crate) fn db(error: ErrorResponseBody) -> Error {
+        match DbError::parse(&mut error.fields()) {
+            Ok(e) => Error::from_db_error(e),
+            ...
+
+Both routes produce `Kind::Db` wrapping the same `DbError`. The identity is
+stable across the race. The only case that differs is the one where NO server
+error was recorded on either channel, which yields `Kind::Closed` - and
+reporting a close differently from a server error is correct, not a defect.
+
+**Three of the seven findings have now changed status on inspection** (2 wrong,
+3 and 5 milder than stated). The pattern is consistent: each was written from
+the shape of the code at one site, and each was bounded by something one
+indirection away - a delegating constructor, a process-global counter, existing
+26000 handling. The reviewer could not have seen any of them without following
+the call.
+
+## Finding 6 checked and DISPROVED (2026-08-29)
+
+The claim was that a host-local encoding refusal is reclassified as fatal, so a
+purely client-side failure would abort a multi-host connect that should have
+tried the next host. The site is real, `connect_raw.rs:756`:
+
+    frontend::query(probe.query(), &mut buf)
+        .map_err(Error::encode)
+        .map_err(Error::target_session_attrs_fatal)?;
+
+and `Kind::TargetSessionAttrsFatal` does mean what the finding says: "no
+transport, address, configured host, or `prefer-standby` pass may be retried".
+
+It fails on two independent grounds.
+
+**The arm is unreachable.** `probe.query()` is a `const fn` returning one of two
+string literals - `"SHOW transaction_read_only"` and `"SELECT
+pg_catalog.pg_is_in_recovery()"`. `frontend::query` fails only on an interior
+NUL. Neither literal has one, and no caller supplies the string.
+
+**If it were reachable, fatal would be CORRECT.** An encode refusal of a
+compile-time constant is deterministic and host-independent: every remaining
+host would fail identically. Retrying them is guaranteed waste, which is exactly
+the condition `TargetSessionAttrsFatal` exists to express. Reclassifying it as
+retryable would be the defect.
+
+**Four of seven findings have now changed status** (2 and 6 wrong, 3 and 5
+milder). One - the post-write cancel - is confirmed and being fixed. Findings 4
+and 7 remain unverified; 7 is under investigation as the `copy_in` state
+question.
+
+The error model itself came out of this well, and that is worth recording since
+the review asked whether the classification is load-bearing or decorative. It is
+load-bearing and documented: `Tls`, `TlsHandshake` and `TlsUnattested` are three
+kinds for what a naive model would call one, and they exist because `sslmode=prefer`
+must retry exactly two of them in plaintext and nothing else. `Closed` versus
+`Cancelled` splits "the socket is gone" from "the socket is fine but the two
+sides disagree about where they are in the byte stream". Each carries its libpq
+analogue or an explicit note that libpq has none.

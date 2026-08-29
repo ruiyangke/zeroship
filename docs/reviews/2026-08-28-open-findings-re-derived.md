@@ -84,3 +84,126 @@ described code that had already changed, and two cited line numbers that no
 longer pointed at the named construct. **Re-derive before acting, and check the
 citation before trusting the claim** - a stale line number is the cheapest
 possible tell that the rest of the entry needs re-checking.
+
+## Second pass, 2026-08-29: three more carried findings re-derived
+
+### "The TLS split discards unconsumed ciphertext" - DISPROVED at all three layers
+
+The claim carried a line reference to `tls_sansio.rs:750` that no longer points
+at a split. Re-derived from scratch: the split chain is `MaybeTlsStream` ->
+`TlsStreamCore` -> `BufStream` -> socket, and EVERY layer carries its buffered
+bytes across.
+
+`maybe_tls_stream.rs:175` only delegates - it moves the inner stream whole into
+`s.try_into_split()` and discards nothing itself.
+
+`tls_sansio.rs:952` destructures the entire `TlsReader` and carries every field
+into the read half - `cipher`, `cipher_len`, `cipher_read` (the ciphertext
+buffer and both offsets) and `plain` (decrypted bytes not yet handed out). Its
+own doc states the property: "Split only the socket, carrying every byte already
+read from it into the owned read half. A refused split rebuilds the identical
+stream." The `Err` arm does exactly that.
+
+`buf_stream.rs:746` does the same for `read_buf`, `read_scratch`, `write_buf`,
+`read_deadline` and `max_message_size`, and its doc addresses the one case that
+looks lossy: "A non-empty `write_buf` does NOT force the serialized fallback -
+those bytes are simply carried onto the new write half and flushed with the next
+frame."
+
+**A stale line number is not a weak citation, it is a different claim.** Point it
+at the current code before judging it.
+
+### "codec.rs:75 has an uncalled take_deferred_error()" - DISPROVED
+
+It has two callers: `connection.rs:810` and `connection.rs:2685`. The field is
+handled at six further sites in the connection loop (1288, 1301, 1322, 1325,
+2296, 2317).
+
+### "connect_raw.rs:302 discards deferred_error" - CONFIRMED, and my first answer was wrong
+
+`BackendMessage::Normal { messages, .. }` drops the field. My initial reading
+said this was harmless because `take_deferred_error`'s doc attributes the field
+to "the split reader", and the handshake is not split.
+
+**That is wrong, and the doc is what made it wrong.** The producer is shared.
+`connect_raw.rs:294` calls `read_backend_detached_async_frames`, a two-line
+delegation to `read_backend_with_async_storage(stream,
+AsyncFrameStorage::Detached)` - and that function is where `deferred_error` is
+set, at five sites (`codec.rs` ~380, 419, 432, 449, 463). Both the split reader
+and the handshake go through it. So a `Normal` carrying `Some(_)` does reach
+line 302 and is dropped.
+
+The doc sentence is accurate about ONE producer and reads as if it names the
+only one. Under investigation: which of the five sites are reachable before
+`ReadyForQuery`, and what the handshake does after dropping the error.
+
+**Running tally across both passes: of the findings re-derived on 2026-08-28 and
+2026-08-29, the great majority did not survive contact with the code.** The two
+that did - the post-write cancel and this one - were both confirmed by following
+a call one level deeper than the finding's own citation.
+
+### "binary_copy.rs:63 write_raw cancellation discards up to 4KB of already-Ok rows" - DISPROVED, and inverted
+
+The claim has the direction of `split_off` backwards. `send_buffered_rows`:
+
+    // Keep rows whose calls already returned `Ok` in `buf` until the sink can
+    // accept their frame. The row which crossed the threshold stays local to
+    // this future, so cancellation while readiness is pending rolls back only
+    // that unfinished call.
+    let row = buf.split_off(row_start);
+    std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx)).await?;
+
+    // No cancellation point separates removing the completed prefix from
+    // transferring the combined frame into the sink. Once `start_send`
+    // succeeds, the sink owns the bytes while `poll_flush` is pending.
+    buf.unsplit(row);
+    sink.as_mut().start_send(buf.split().freeze())?;
+
+`BytesMut::split_off(n)` RETAINS `[..n]` in the receiver and returns `[n..]`.
+`buf` is `&mut BytesMut` owned by the `BinaryCopyInWriter`, not by this future.
+So the already-`Ok` rows are exactly what SURVIVES a cancellation, and the only
+thing lost is `row` - the current call's own row, whose call is the one being
+cancelled. That is the correct rollback boundary.
+
+The one remaining window, between `unsplit` and `start_send`, contains no await,
+and the comment says so.
+
+This is the fourth finding in this crate answered by a comment adjacent to the
+cited line. The audit's hit rate on carried findings is low enough that
+re-deriving each one before acting is cheaper than acting on it.
+
+### "connect_raw.rs:461 MAX_DELAYED_HANDSHAKE_BYTES charges frame_len but a retained frame pins the whole allocation" - DISPROVED
+
+`delay()` charges `frame_len`, and the retained frame is a private copy of
+exactly that many bytes, so charged equals held.
+
+`codec.rs` has two storage modes for an async frame. The handshake - the ONLY
+path that retains one, via `delay()` - uses `Detached`:
+
+    AsyncFrameStorage::Detached => {
+        let mut frame = BytesMut::from(&stream.buf()[..frame_len]);
+        stream.buf().advance(frame_len);
+        backend::Message::parse(&mut frame)
+    }
+
+`BytesMut::from(&[u8])` allocates and COPIES, then the shared buffer is
+advanced. A 13-byte notice therefore holds a 13-byte allocation.
+
+The hazard the finding describes is real and the crate already found it - the
+comment at `connect_raw.rs:290` records the measurement that drove the fix: "a
+13-byte notice keeps a grown read buffer alive in full - measured at 13 bytes
+pinning 1 MiB. `MAX_DELAYED_HANDSHAKE_BYTES` charges the frame, so what is
+charged and what is held must be the same bytes." `Detached` IS that fix. The
+`Shared` mode still parses in place, and is used only where nothing is retained.
+
+### "connect_raw.rs:993 handshake.stream.into_inner() drops unread buffered bytes" - STALE, no such call
+
+`into_inner()` does not occur anywhere in `connect_raw.rs`. The function near
+that line, `handshake_for_replication`, returns the `BufStream` WHOLE, and its
+doc states the property the finding asks for: "The returned `BufStream` is the
+SAME one that decoded startup: bytes following `ReadyForQuery` may already be in
+its read buffer."
+
+Second finding in this batch whose line reference points at code that no longer
+exists. A carried finding needs its citation re-resolved before its claim is
+even meaningful.
