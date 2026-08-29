@@ -74,21 +74,56 @@ Two further measurements on 17.11 close the neighbouring doors:
 - `SET SESSION AUTHORIZATION` as the non-superuser worker is denied, so the cheap "re-point
   `session_user` per checkout" variant does not exist.
 
-**What does work: assume the app hub, not the namespace role.** Keep one login and one
-`SET LOCAL ROLE`, but issue `SET LOCAL ROLE "zs_app_<A>"` and let the hub hold the namespace
-memberships *inheriting*. The privilege the session executes under is then derived from the hub's
-memberships and nothing else, so revoking the hub's edge bites at **the very next statement** -
-measured on one held backend, same pid, including mid-transaction, with a co-tenant unaffected
-throughout. Column grants still reach through the hub by inheritance, so grants stay
-O(namespaces) rather than O(namespaces x apps).
+### What works: a role per GRANT, and `WITH SET FALSE` on its namespace edge
 
-Its cost is a real inversion, not a free win: **per-statement confinement widens from one namespace
-to the app's whole namespace set.** The design as written buys exact confinement and pays revocation
-lag; this buys next-statement revocation and pays confinement breadth. The residual is the one
-section 2.2 already prices - a wrong resolution reaches another of the *same app's* namespaces.
+Reached independently by two reviewers, measured by one on 18.4 and by me on 17.11:
 
-The superseded reasoning follows, kept because the shape it describes is still the one to build; only
-the claim that it fixes revocation was wrong.
+```
+CREATE ROLE zs_grant_<gid> NOLOGIN;
+GRANT zs_ns_<N>_<cap> TO zs_grant_<gid> WITH SET FALSE;      -- inherits, cannot be assumed directly
+GRANT zs_grant_<gid>  TO zeroship_worker WITH INHERIT FALSE; -- assumable, never ambient
+```
+
+The data plane's setup batch issues `SET LOCAL ROLE "zs_grant_<gid>"` - same statement, same batch
+position, no extra round trip. Revocation is `REVOKE` on both edges in one control-plane
+transaction.
+
+| probe (17.11, unprivileged login, two grants on ONE namespace) | result |
+| --- | --- |
+| bare `SELECT`, no narrowing | `permission denied for schema` - fail-closed holds |
+| worker assumes the **namespace** role directly | **`permission denied to set role`** - `SET FALSE` blocks the shortcut |
+| narrow to `zs_grant_a`, read | 1 row |
+| `REVOKE zs_ns_1_rw FROM zs_grant_a`, read as A | **`permission denied for schema`** |
+| co-tenant `zs_grant_b`, same namespace | **1 row, unaffected** |
+
+**`WITH SET FALSE` is the load-bearing clause.** Without it the worker can assume the namespace role
+directly and the chain is decorative - which is exactly why the two-hop shape above passes on one app
+and fails on two. On 18.4 the same agent measured the revoke landing on **the very next statement of
+an already-open transaction**, same backend, no reconnect, and a re-grant restoring service on that
+same warm connection.
+
+**This keeps exact confinement.** A grant role inherits exactly one namespace role, so
+per-statement confinement stays one namespace - unlike assuming an app hub, which unions all of that
+app's namespaces. Confinement and revocation stop being a trade.
+
+Costs, stated: role count gains `#grants` (same order as the existing `apps + 3 x namespaces`); every
+bind and unbind is shared-catalog DDL serialized through the control plane, which needs rate-limiting
+against grant-flapping; and the boot posture gains two catalog-checkable arms - `inherit_option =
+false` on every `zs_grant_*` membership, and `pg_has_role(login, ns_role, 'SET') = false` for every
+namespace role.
+
+**For CDC, derive the fan-out map from `pg_auth_members`** - the same rows the executor fence reads.
+One `REVOKE` then becomes the single source of truth for both planes: the query path fails at the
+next statement, the reactive path at the next map refresh. That bound must be stated rather than
+assumed; see below, there is no binding-refresh interval in the tree today.
+
+**The irreducible limit, which no option closes.** PostgreSQL has no server-side notion of *which app
+a shared-login session is acting for* - `session_user` is fixed at authentication. Measured: while
+narrowed to `zs_grant_a`, the same session can `SET LOCAL ROLE zs_grant_b`. So every available fence
+decides whether a grant is **alive**, never whether the worker picked the grant matching the
+dispatch. That binding is worker-side, enforced by Rust provenance and the absence of a raw-SQL
+surface - which is what `AGENTS.md`'s "privilege follows the PROCESS" invariant predicts, and per-app
+logins would not change it either, since the process would then hold every tenant's credential.
 
 ```
 zs_worker --(WITH INHERIT FALSE)--> zs_app_<id> --> zs_ns_<n>_<cap>
