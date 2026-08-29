@@ -792,6 +792,7 @@ where
 mod tests {
     use super::*;
     use compio::buf::{BufResult, IoBuf};
+    use std::collections::VecDeque;
 
     struct ReadySplitIo;
 
@@ -826,6 +827,18 @@ mod tests {
 
     struct UnsplitIo;
 
+    struct OneByteReader {
+        bytes: VecDeque<u8>,
+        reads: usize,
+    }
+
+    struct ReadMustNotBePolled;
+
+    struct ScratchProbeReader {
+        reads: usize,
+        scratch_was_reused: bool,
+    }
+
     struct InterruptOnceReader {
         reads: usize,
     }
@@ -839,6 +852,68 @@ mod tests {
 
     struct InterruptOnceWriter {
         flushes: usize,
+    }
+
+    fn test_read_half<R>(inner: R) -> BufReadHalf<R>
+    where
+        R: AsyncRead + Unpin,
+    {
+        BufReadHalf {
+            inner,
+            read_buf: BytesMut::with_capacity(READ_BUF_CAPACITY),
+            read_scratch: vec![0u8; READ_CHUNK],
+            read_deadline: None,
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+        }
+    }
+
+    impl AsyncRead for OneByteReader {
+        async fn read<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
+            self.reads += 1;
+            match self.bytes.pop_front() {
+                Some(byte) => {
+                    assert!(
+                        buf.buf_len() > 0,
+                        "the split reader received an empty scratch buffer"
+                    );
+                    buf.as_mut_slice()[0] = byte;
+                    BufResult(Ok(1), buf)
+                }
+                None => BufResult(Ok(0), buf),
+            }
+        }
+    }
+
+    impl AsyncRead for ReadMustNotBePolled {
+        async fn read<B: IoBufMut>(&mut self, _buf: B) -> BufResult<usize, B> {
+            panic!("the split reader was polled past its configured message-size limit")
+        }
+    }
+
+    impl AsyncRead for ScratchProbeReader {
+        async fn read<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
+            const MARKER: u8 = 0xa5;
+
+            assert_eq!(
+                buf.buf_len(),
+                READ_CHUNK,
+                "the split reader received the wrong scratch-buffer size"
+            );
+            let byte = match self.reads {
+                0 => {
+                    buf.as_mut_slice()[READ_CHUNK - 1] = MARKER;
+                    b'a'
+                }
+                1 => {
+                    self.scratch_was_reused = buf.as_init()[READ_CHUNK - 1] == MARKER;
+                    b'b'
+                }
+                _ => return BufResult(Ok(0), buf),
+            };
+            self.reads += 1;
+            buf.as_mut_slice()[0] = byte;
+            BufResult(Ok(1), buf)
+        }
     }
 
     impl AsyncRead for InterruptOnceReader {
@@ -1054,6 +1129,96 @@ mod tests {
         assert_eq!(&rebuilt.read_buf[..], b"fallback server bytes");
         assert_eq!(&rebuilt.write_buf[..], b"fallback client bytes");
         assert!(rebuilt.read_deadline.is_some());
+    }
+
+    #[compio::test]
+    async fn split_fill_accumulates_partial_reads() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let mut read = test_read_half(OneByteReader {
+                bytes: VecDeque::from([b'a', b'b', b'c']),
+                reads: 0,
+            });
+
+            read.fill(3)
+                .await
+                .expect("the split read half failed to fill from partial reads");
+
+            assert_eq!(read.inner.reads, 3, "fill returned after a partial read");
+            assert_eq!(&read.read_buf[..], b"abc");
+        })
+        .await
+        .expect("split partial-read fill test exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn split_fill_enforces_configured_max_message_size_before_reading() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let mut read = test_read_half(ReadMustNotBePolled);
+            read.max_message_size = 8;
+
+            let error = read
+                .fill(9)
+                .await
+                .expect_err("the split read half accepted a fill above its configured limit");
+            let source = error
+                .into_source()
+                .expect("the split fill limit error must preserve its I/O cause");
+            let io = source
+                .downcast_ref::<std::io::Error>()
+                .expect("the split fill limit must be an I/O error");
+            assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(io.to_string(), "message too large: 9 bytes (max 8)");
+        })
+        .await
+        .expect("split fill-limit test exceeded its watchdog");
+    }
+
+    #[test]
+    fn split_length_validation_enforces_configured_max_message_size() {
+        let mut read = test_read_half(ReadMustNotBePolled);
+        read.max_message_size = 8;
+
+        read.validate_length(7)
+            .expect("a split frame exactly at the configured limit was rejected");
+        let error = read
+            .validate_length(8)
+            .expect_err("a split frame above the configured limit was accepted");
+        let source = error
+            .into_source()
+            .expect("the split frame limit error must preserve its I/O cause");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("the split frame limit must be an I/O error");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(io.to_string(), "message too large: 9 bytes (max 8)");
+    }
+
+    #[compio::test]
+    async fn split_fill_reuses_its_read_scratch_allocation() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let mut read = test_read_half(ScratchProbeReader {
+                reads: 0,
+                scratch_was_reused: false,
+            });
+
+            read.fill(1)
+                .await
+                .expect("the first split scratch-probe read failed");
+            assert_eq!(&read.read_buf[..], b"a");
+            read.read_buf.clear();
+            read.fill(1)
+                .await
+                .expect("the second split scratch-probe read failed");
+
+            assert_eq!(&read.read_buf[..], b"b");
+            assert_eq!(read.inner.reads, 2);
+            assert!(
+                read.inner.scratch_was_reused,
+                "the split read half replaced its scratch allocation between fills"
+            );
+        })
+        .await
+        .expect("split scratch-reuse test exceeded its watchdog");
     }
 
     #[test]
