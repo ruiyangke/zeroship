@@ -424,3 +424,41 @@ other people's findings.** I judged a change by the shape of one line -
 `eprintln!` where an `expect` used to be - and reasoned from a resource cap to a
 failure mode without checking whether anything reclaimed the resource. The
 sweep was two files away. Read what bounds the damage before ranking it.
+
+## Gate state after the teardown consolidation, 2026-08-29 at `80f6c07b6`
+
+    PORT 5455  CARGO_EXIT=0  TARGETS=7  1348 passed 0 failed
+    PORT 5459  CARGO_EXIT=0  TARGETS=7  1348 passed 0 failed
+
+5459 previously failed at 1347/1 on
+`pgoutput_subtransactions::a_stream_abort_never_lands_inside_an_open_chunk`
+with SQLSTATE 55006 in fixture teardown. It is clean now, with the retry in
+place at all 13 slot-drop sites.
+
+**That is the expected outcome, not proof.** One green run cannot show a race is
+gone; what can be shown is that the retry exists on the path that lost it, and
+that the previously-failing test is green on the server where it failed. Both
+hold.
+
+## Why coverage is NOT being re-run, and it is not an omission
+
+`docs/reviews/2026-08-28-coverage-cannot-see-test-gaps.md` records a controlled
+experiment on this crate: five tests that each provably catch a real defect were
+added, and the missed-line counts did not move - `transaction.rs` 40/314 before
+and 40/314 after, `connection.rs` 536 missed before and 536 after. A surviving
+mutant lives in code that ALREADY EXECUTES, so line coverage is blind to it by
+construction.
+
+Today is that experiment's confirmation from the other direction. Mutation
+sweeps found real gaps that coverage would not have flagged:
+
+    buf_stream split half   7 mutations, 4 SURVIVED -> 4 tests, each proved RED
+    tls split halves        in progress, 4 SURVIVED of 8 so far
+
+Eight gaps, all in lines the suite already executed. Re-running llvm-cov would
+cost a full instrumented suite and produce a number that moves by roughly
+nothing, which is precisely what was measured on 2026-08-28.
+
+Coverage stays useful for the opposite question - finding code NOTHING reaches.
+It is the wrong instrument for "is the code that runs actually checked", and
+that is the question this hardening effort keeps asking.
