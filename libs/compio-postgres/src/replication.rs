@@ -75,7 +75,8 @@ use crate::connect::{
     with_connect_timeout,
 };
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::{Encryption, negotiate_tls};
+use crate::connect_tls::negotiate_tls;
+use crate::encryption::Encryption;
 use crate::escape::{escape_literal_body, quote_identifier};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;

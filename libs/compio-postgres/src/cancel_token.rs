@@ -1,7 +1,7 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 
 use crate::config::{SslCertMode, SslMode, SslNegotiation};
-use crate::connect_tls::Encryption;
+use crate::encryption::Encryption;
 use crate::tls::{ServerVerification, TlsConnect, TlsPolicyIdentity};
 use crate::{
     Error, Socket, cancel_query, cancel_query_raw,
@@ -440,12 +440,12 @@ mod tests {
                 tcp_user_timeout: None,
                 keepalive: None,
                 require_peer: None,
-                encryption: crate::connect_tls::Encryption::Plaintext,
+                encryption: crate::encryption::Encryption::Plaintext,
                 ssl_sni: true,
                 ssl_cert_mode: crate::config::SslCertMode::Allow,
                 server_verification: crate::tls::ServerVerification::None,
             }),
-            encryption: crate::connect_tls::Encryption::Plaintext,
+            encryption: crate::encryption::Encryption::Plaintext,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -834,7 +834,7 @@ mod tests {
             let tls = PassthroughTls::new(Arc::clone(&connected));
             let token = CancelToken {
                 socket_config: None,
-                encryption: crate::connect_tls::Encryption::Tls,
+                encryption: crate::encryption::Encryption::Tls,
                 ssl_sni: true,
                 ssl_cert_mode: crate::config::SslCertMode::Allow,
                 server_verification: crate::tls::ServerVerification::None,
@@ -889,7 +889,7 @@ mod tests {
             let replacement = PassthroughTls::new(Arc::clone(&replacement_connected));
             let token = CancelToken {
                 socket_config: None,
-                encryption: crate::connect_tls::Encryption::Tls,
+                encryption: crate::encryption::Encryption::Tls,
                 ssl_sni: true,
                 ssl_cert_mode: crate::config::SslCertMode::Allow,
                 server_verification: crate::tls::ServerVerification::None,
@@ -958,7 +958,7 @@ mod tests {
                 .socket_config
                 .as_mut()
                 .expect("network token has socket policy")
-                .encryption = crate::connect_tls::Encryption::Tls;
+                .encryption = crate::encryption::Encryption::Tls;
 
             let peer = compio::runtime::spawn(async move {
                 let (mut stream, _) = listener.accept().await.expect("accept raw cancel");
@@ -1002,7 +1002,7 @@ mod tests {
                 .socket_config
                 .as_mut()
                 .expect("network token has socket policy");
-            socket_config.encryption = crate::connect_tls::Encryption::Tls;
+            socket_config.encryption = crate::encryption::Encryption::Tls;
             socket_config.server_verification = crate::tls::ServerVerification::ChainAndHostname;
 
             let peer = compio::runtime::spawn(async move {

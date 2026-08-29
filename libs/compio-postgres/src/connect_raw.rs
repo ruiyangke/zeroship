@@ -27,8 +27,9 @@ use crate::codec::{
 use crate::config::{
     self, AuthMethod, Config, ProtocolVersion, ReplicationMode, TargetSessionAttrs,
 };
-use crate::connect_tls::{Encryption, negotiate_tls};
+use crate::connect_tls::negotiate_tls;
 use crate::connection::Connection;
+use crate::encryption::Encryption;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{ServerVerification, TlsConnect, TlsStream};
 use bytes::{Bytes, BytesMut};

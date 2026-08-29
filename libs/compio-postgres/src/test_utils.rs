@@ -269,7 +269,7 @@ pub async fn connect_serialized(
     let (mut client, connection) = crate::connect_raw::connect_raw(
         socket,
         NoTls,
-        crate::connect_tls::Encryption::Plaintext,
+        crate::encryption::Encryption::Plaintext,
         true,
         config,
         None,
@@ -295,7 +295,7 @@ pub async fn connect_serialized(
         tcp_user_timeout: config.get_tcp_user_timeout().copied(),
         keepalive: None,
         require_peer: config.get_require_peer().map(str::to_owned),
-        encryption: crate::connect_tls::Encryption::Plaintext,
+        encryption: crate::encryption::Encryption::Plaintext,
         ssl_sni: config.get_ssl_sni(),
         ssl_cert_mode: config.get_ssl_cert_mode(),
         // Plaintext, so nothing is verified - the same value the connect path

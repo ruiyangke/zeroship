@@ -8,10 +8,10 @@
 use crate::cancel_token::{CancelKey, PoolCancelLease};
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{ProtocolVersion, SslCertMode, SslMode, SslNegotiation};
-use crate::connect_tls::Encryption;
 use crate::connection::{Request, RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInSink;
 use crate::copy_out::CopyOutStream;
+use crate::encryption::Encryption;
 use crate::keepalive::KeepaliveConfig;
 use crate::query::RowStream;
 use crate::release::ConnectionRelease;

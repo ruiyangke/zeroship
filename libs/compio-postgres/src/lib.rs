@@ -230,6 +230,7 @@ pub(crate) mod connection;
 mod copy_format;
 mod copy_in;
 mod copy_out;
+mod encryption;
 pub mod error;
 mod escape;
 mod generic_client;
