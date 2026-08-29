@@ -575,7 +575,7 @@ pub struct RuntimeState {
     pub env_vars: HashMap<String, String>,
 
     /// **Migration-first cutover (P4b/P5 S2)** — the bundled
-    /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`; v1 is
+    /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`; v2 is
     /// `{ version, collections: { fields, options, indexes } }`) carried in
     /// `manifest.runtime_descriptor`. The worker
     /// resolves the descriptor blob via `BlobStore` at bundle-load and stamps

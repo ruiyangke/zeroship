@@ -763,7 +763,7 @@ pub struct GenArtifactsReply {
     /// current `zero-migrate` authoring API and checked as `CreateTableArgs`.
     /// `None` on failure.
     pub env_db_ts: Option<String>,
-    /// The `schema.runtime.json` bytes (the v1 `RuntimeSchemaDescriptor`, pretty +
+    /// The `schema.runtime.json` bytes (the v2 `RuntimeSchemaDescriptor`, pretty +
     /// trailing newline). `None` on failure.
     pub runtime_json: Option<String>,
     /// A human-readable error when `ok == false`.

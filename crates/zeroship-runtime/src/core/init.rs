@@ -3407,10 +3407,10 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
     // __zsRuntimeDescriptor — the migration-first cutover (P5 S3). When the
     // deployed `.zship` carries a `manifest.runtime_descriptor`, the worker
     // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
-    // here and expose the resulting v1 `{ version, collections }` descriptor as
+    // here and expose the resulting v2 `{ version, collections }` descriptor as
     // a global so `@zeroship/bootstrap`'s entry sources the schema from the
     // migration fold. Absent (`None`) means schema-less app. A present but
-    // corrupt/non-v1 descriptor is a hard boot error, never a schema-less
+    // corrupt/non-v2 descriptor is a hard boot error, never a schema-less
     // fallback.
     {
         let descriptor_json = {
@@ -3743,7 +3743,7 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
         .and_then(serde_json::Value::as_object)
     else {
         return Err(
-            "runtime: manifest.runtime_descriptor v1 requires object field `collections`"
+            "runtime: manifest.runtime_descriptor v2 requires object field `collections`"
                 .into(),
         );
     };

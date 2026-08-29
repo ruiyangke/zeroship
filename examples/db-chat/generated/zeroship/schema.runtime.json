@@ -1,48 +1,118 @@
 {
-  "version": 1,
+  "version": 2,
   "collections": {
     "channels": {
       "fields": {
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "slug": {
           "type": "string",
           "required": true,
-          "unique": true
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "slug"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "topic": {
-          "type": "string"
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "topic"
+          }
         }
       },
       "options": {
@@ -83,52 +153,129 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "channelId": {
           "type": "string",
           "refTarget": "channels",
           "refColumn": "id",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "channelId"
+          }
         },
         "authorId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "authorId"
+          }
         },
         "body": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "body"
+          }
         },
         "flagged": {
           "type": "boolean",
           "required": true,
-          "default": false
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "flagged"
+          }
         }
       },
       "options": {
@@ -168,40 +315,103 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "handle": {
           "type": "string",
           "required": true,
-          "unique": true
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "handle"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         }
       },
       "options": {

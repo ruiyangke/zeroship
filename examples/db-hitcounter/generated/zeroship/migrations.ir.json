@@ -1,5 +1,6 @@
 {
   "kind": "ir",
+  "descriptor_sha256": "5735af1c2e25019d86939a3590ce7a2f13b5fc1c952275e491c84d18139106cf",
   "documents": [
     {
       "filename": "20260711000000_create_hits.ir.json",

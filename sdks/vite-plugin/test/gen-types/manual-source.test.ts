@@ -3,7 +3,7 @@
  *
  * A hand-written `schema.ts` (a map of collection → `@zeroship/db` builder)
  * evaluates → `CollectionDescriptorDto[]` → `genArtifacts({ descriptors })` →
- * `schema.runtime.json` (valid v1) + an AUGMENTATION `env.db.ts`. These tests run
+ * `schema.runtime.json` (valid v2) + an AUGMENTATION `env.db.ts`. These tests run
  * the LIBRARY path in-process — no CLI, no subprocess.
  */
 
@@ -46,14 +46,14 @@ const SYSTEM_FIELDS = [
 ] as const;
 
 /**
- * A minimal, self-contained re-statement of the v1 RuntimeSchemaDescriptor
+ * A minimal, self-contained re-statement of the v2 RuntimeSchemaDescriptor
  * contract validated at runtime by `@zeroship/bootstrap`
  * install-schema.ts:155-233. Throws on any violation.
  */
-function assertRuntimeDescriptorV1(descriptor: unknown): void {
+function assertRuntimeDescriptorV2(descriptor: unknown): void {
   assert.ok(descriptor && typeof descriptor === "object", "descriptor is an object");
   const d = descriptor as Record<string, unknown>;
-  assert.equal(d.version, 1, "version === 1");
+  assert.equal(d.version, 2, "version === 2");
   assert.ok(d.collections && typeof d.collections === "object", "collections object");
   for (const [name, rawColl] of Object.entries(d.collections as Record<string, unknown>)) {
     assert.ok(rawColl && typeof rawColl === "object", `collection ${name} is an object`);
@@ -147,7 +147,7 @@ describe("manual schema source", () => {
     }
   });
 
-  test("writes a valid v1 schema.runtime.json + an augmentation env.db.ts", async () => {
+  test("writes a valid v2 schema.runtime.json + an augmentation env.db.ts", async () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
     try {
@@ -156,7 +156,7 @@ describe("manual schema source", () => {
       assert.deepEqual([...res.files], [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE]);
 
       const json = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
-      assertRuntimeDescriptorV1(json);
+      assertRuntimeDescriptorV2(json);
 
       // Both collections present.
       assert.ok(json.collections.users, "users collection present");
@@ -283,7 +283,7 @@ describe("manual schema source", () => {
       // Inject drift into the committed runtime descriptor → --check hard-fails.
       await fs.writeFile(
         join(outDir, RUNTIME_DESCRIPTOR_FILE),
-        `{ "version": 1, "collections": {} }\n`,
+        `{ "version": 2, "collections": {} }\n`,
       );
       await assert.rejects(
         () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, { check: true }),

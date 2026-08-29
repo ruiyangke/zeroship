@@ -82,8 +82,8 @@ fn base_manifest() -> Manifest {
 #[compio::test]
 async fn descriptor_survives_pack_then_ingest_byte_identical() {
     // The exact JSON gen-types' `schema.runtime.json` emits:
-    // RuntimeSchemaDescriptor v1.
-    let descriptor_bytes = br#"{"version":1,"collections":{"users":{"fields":{"id":{"type":"id","idPrefix":"usr"},"email":{"type":"string"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#.to_vec();
+    // RuntimeSchemaDescriptor v2.
+    let descriptor_bytes = br#"{"version":2,"collections":{"users":{"fields":{"id":{"type":"id","idPrefix":"usr"},"email":{"type":"string"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#.to_vec();
     let descriptor_hash = sha256_hex(&descriptor_bytes);
 
     let mut manifest = base_manifest();

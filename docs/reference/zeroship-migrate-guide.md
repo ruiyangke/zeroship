@@ -801,7 +801,7 @@ The control-plane deploy path drives the same differ through `apply_declarative`
 
 The reverse direction makes the `op.*` migration set the **sole source of truth** for the typed `env.db` surface — the types are *generated from the fold*, never hand-declared (`frontend/gen_types.rs`). The former JS authoring CLI's `gen-types` command produced two artifacts in `generated/zeroship/` (the *committed* output dir, chosen so `env.db.ts` can be in tsconfig):
 
-1. **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`: `{ version: 1, collections: { [c]: { fields, options, indexes } } }` (`gen_types.rs:15-16,40`).
+1. **`schema.runtime.json`** — the v2 `RuntimeSchemaDescriptor`: `{ version: 2, collections: { [c]: { fields, options, indexes } } }` (`gen_types.rs:15-16,40`).
 2. **`env.db.ts`** — a real `.ts` **module** (not a `.d.ts`) reconstructing `const schema = { … t.text() … } as const` of `@zeroship/db` `t.*()` builder calls, wrapping collections in `defineSchema(...)` + runtime-metadata chains (`.softDelete()`, `.withVersioning()`, `.strictness(...)`, `.index(...)`), then `declare module "zeroship" { interface Env { db: Db<typeof schema> } }` (`gen_types.rs:493-548`). It **must** be a module because `t.*()` value expressions are illegal in a `.d.ts` ambient context, and the SDK's `InferFieldDef` inference keys only off `TypeBuilder` builder calls — so the emitter reconstructs builder calls rather than a hand-rolled interface (`gen_types.rs:42-51`).
 
 **Pipeline** (`gen_types.rs:1-25`): (1) record each committed `.ts` in version order through the sandboxed recorder and concatenate the transient `Op` lists (`load_dir_ops`); (2) `fold_to_field_defs(ops, SqlDialect::Postgres, project_schema)` folds-and-recovers per-collection wire-`FieldDef` maps (`render_artifacts`) — the *same fold the engine uses internally*; (3) render both artifacts. The `indexmap` dependency preserves `createTable` **declared column order** through the fold so a sorted-vs-declared difference can't perturb the parity comparison. A `--check` mode regenerates in memory and diffs against the on-disk files — the CI drift gate, no DB write (`GenTypesError::Drift`).
@@ -823,7 +823,7 @@ content-addressed `runtime_descriptor` blob
 the standalone migration service. At runtime boot, `@zeroship/bootstrap`'s
 `installSchema(schema, env.db, { descriptor })` walks the descriptor, runs
 `registerModel` in topological order, and plants typed `Collection` wrappers on
-the native `env.db`. So both directions meet at one wire type — the v1
+the native `env.db`. So both directions meet at one wire type — the v2
 `RuntimeSchemaDescriptor`: gen-types *emits* it, the `.zship` packer *carries*
 it, `installSchema` *installs* it. See
 [§11.6–§11.7](#11-platform-self-hosting--build-integration).
@@ -1624,7 +1624,7 @@ The platform schema carries ONE table for the creator-migration service: `zerosh
 
 ### 11.7 The build fold (cross-ref)
 
-The `gen-types` fold that turns a creator's migration set into `env.db.ts` + `schema.runtime.json`, and how the vite-plugin / `.zship` packer / `installSchema` consume the v1 `RuntimeSchemaDescriptor`, are documented in [§5.3–§5.4](#5-authoring-declarative-desired-state--the-fold). The two directions (declarative-differ vs migration-first fold) and the runtime installation meet at that one wire type.
+The `gen-types` fold that turns a creator's migration set into `env.db.ts` + `schema.runtime.json`, and how the vite-plugin / `.zship` packer / `installSchema` consume the v2 `RuntimeSchemaDescriptor`, are documented in [§5.3–§5.4](#5-authoring-declarative-desired-state--the-fold). The two directions (declarative-differ vs migration-first fold) and the runtime installation meet at that one wire type.
 
 ### 11.8 The submission ingress pipeline (`submit_migration`)
 

@@ -278,9 +278,9 @@ describe("devServerPlugin", () => {
     try {
       const runtime = await harness.runtimeLog();
       const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
-      // The in-process gen-types fold produced a valid v1 descriptor with the
+      // The in-process gen-types fold produced a valid v2 descriptor with the
       // `todos` collection + its author field (plus injected system fields).
-      assert.equal(descriptor?.version, 1, "valid v1 descriptor injected");
+      assert.equal(descriptor?.version, 2, "valid v2 descriptor injected");
       assert.ok(descriptor.collections.todos, "todos collection folded");
       assert.equal(descriptor.collections.todos.fields.title.type, "string", "author field folded");
       assert.ok(descriptor.collections.todos.fields.id, "system id injected");
@@ -312,7 +312,7 @@ describe("devServerPlugin", () => {
         `expected HMR payload to include ${migrationFile}`,
       );
       const descriptor = JSON.parse(payload.runtimeDescriptorJson ?? "null");
-      assert.equal(descriptor?.version, 1, "re-injected a valid v1 descriptor");
+      assert.equal(descriptor?.version, 2, "re-injected a valid v2 descriptor");
       assert.ok(descriptor.collections.todos, "original todos collection retained");
       assert.ok(descriptor.collections.notes, "new notes collection folded in");
       assert.equal(descriptor.collections.notes.fields.body.type, "string", "new author field folded");

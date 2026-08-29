@@ -1,68 +1,166 @@
 {
-  "version": 1,
+  "version": 2,
   "collections": {
     "places": {
       "fields": {
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "workspaceId": {
           "type": "string",
           "refTarget": "workspaces",
           "refColumn": "id",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "workspaceId"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "description": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         },
         "category": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
         },
         "loc": {
           "type": "geoPoint",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "loc"
+          }
         },
         "embedding": {
           "type": "vector",
           "vectorDims": 4,
-          "vectorMetric": "cosine"
+          "vectorMetric": "cosine",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "embedding"
+          }
         },
         "open": {
           "type": "boolean",
           "required": true,
-          "default": true
+          "default": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "open"
+          }
         }
       },
       "options": {
@@ -103,71 +201,183 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "workspaceId": {
           "type": "string",
           "refTarget": "workspaces",
           "refColumn": "id",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "workspaceId"
+          }
         },
         "ownerId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "ownerId"
+          }
         },
         "title": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "title"
+          }
         },
         "description": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "description"
+          }
         },
         "status": {
           "type": "string",
           "required": true,
-          "default": "open"
+          "default": "open",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
         },
         "priority": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "priority"
+          }
         },
         "score": {
           "type": "number",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "score"
+          }
         },
         "category": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
         },
         "tags": {
-          "type": "json"
+          "type": "json",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "tags"
+          }
         }
       },
       "options": {
@@ -215,51 +425,128 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "workspaceId": {
           "type": "string",
           "refTarget": "workspaces",
           "refColumn": "id",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "workspaceId"
+          }
         },
         "handle": {
           "type": "string",
           "required": true,
-          "unique": true
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "handle"
+          }
         },
         "fullName": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "fullName"
+          }
         },
         "email": {
           "type": "string",
           "required": true,
-          "unique": true
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "email"
+          }
         },
         "contactEmail": {
           "type": "string",
@@ -271,6 +558,17 @@
           "mask": {
             "kind": "full",
             "classification": "pii"
+          },
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "contactEmail",
+            "rawColumn": "__zs_raw__contactEmail",
+            "rawFilterable": false,
+            "rawSortable": false,
+            "rawProjectable": false
           }
         },
         "ssn": {
@@ -283,11 +581,29 @@
           "mask": {
             "kind": "full",
             "classification": "pii"
+          },
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "ssn",
+            "rawColumn": "__zs_raw__ssn",
+            "rawFilterable": false,
+            "rawSortable": false,
+            "rawProjectable": false
           }
         },
         "city": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "city"
+          }
         }
       },
       "options": {
@@ -341,49 +657,126 @@
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "slug": {
           "type": "string",
           "required": true,
-          "unique": true
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "slug"
+          }
         },
         "name": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "name"
+          }
         },
         "tier": {
           "type": "string",
           "required": true,
-          "default": "free"
+          "default": "free",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "tier"
+          }
         },
         "region": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "region"
+          }
         }
       },
       "options": {

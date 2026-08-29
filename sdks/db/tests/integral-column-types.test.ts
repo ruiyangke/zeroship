@@ -2,7 +2,7 @@
  * The runtime descriptor's integral column tokens, and the fail-open hole that
  * hid them.
  *
- * `installSchema` treats descriptor v1 as the only runtime schema source (the
+ * `installSchema` treats descriptor v2 as the only runtime schema source (the
  * declared TypeBuilder argument is ignored), so the tokens the generator emits
  * — `int`, `integer`, `bigInt`, `float` — are what `validateDoc` actually sees.
  * None of them is a `TypeName`, and the type dispatch had no final `else`, so

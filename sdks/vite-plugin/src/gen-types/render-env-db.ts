@@ -51,14 +51,14 @@ export interface RuntimeIndex {
   unique?: boolean;
 }
 
-/** One collection of the v1 RuntimeSchemaDescriptor. */
+/** One collection of the v2 RuntimeSchemaDescriptor. */
 export interface RuntimeCollection {
   fields?: Record<string, RuntimeFieldDef>;
   options?: RuntimeOptions;
   indexes?: RuntimeIndex[];
 }
 
-/** The v1 RuntimeSchemaDescriptor (`schema.runtime.json`). */
+/** The v2 RuntimeSchemaDescriptor (`schema.runtime.json`). */
 export interface RuntimeDescriptor {
   version?: number;
   collections?: Record<string, RuntimeCollection>;
@@ -108,7 +108,7 @@ export const GENERATED_ENV_DB_BANNER =
   "// type. The schema source above remains the ground truth for DDL.\n";
 
 /**
- * Render the generated `env.db.ts` from a parsed v1 runtime descriptor.
+ * Render the generated `env.db.ts` from a parsed v2 runtime descriptor.
  *
  * Collection and field order follow the descriptor's key order, which the
  * emitter produces deterministically - so the output is stable and the

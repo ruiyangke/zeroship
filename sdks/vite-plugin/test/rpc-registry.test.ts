@@ -515,7 +515,7 @@ export function createFetchHandler(loadNormalized) {
       );
 
       g.__zsRuntimeDescriptor = {
-        version: 1,
+        version: 2,
         collections: {
           todos: {
             fields: { title: { type: "string" } },

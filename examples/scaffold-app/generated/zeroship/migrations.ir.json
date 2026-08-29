@@ -1,5 +1,6 @@
 {
   "kind": "ir",
+  "descriptor_sha256": "19773ac48a0da4c96a4e62d7c30a12035777748786b6edceac0d8dd5c72bed9e",
   "documents": [
     {
       "filename": "20260628000000_initial_schema.ir.json",

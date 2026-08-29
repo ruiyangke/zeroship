@@ -142,7 +142,7 @@ export type NormalizedSchema = Record<string, FieldDef>;
  * a default projection reads and, when they differ, the column holding the
  * authoritative value. A consumer that stops deriving that second name by string
  * formatting depends on it being true of every field it is handed, and a committed v1
- * artifact does not carry it. Refusing a v1 descriptor outright is the whole reason the
+ * artifact does not carry it. Refusing a non-v2 descriptor outright is the whole reason the
  * number moved.
  */
 type RuntimeStrictness = "strict" | "lenient" | "off";
@@ -1126,7 +1126,7 @@ export interface InstallSchemaOptions {
   /**
    * **Migration-first cutover (P5 S3)** — the bundled
    * {@link RuntimeSchemaDescriptor}, resolved from `manifest.runtime_descriptor`
-   * and injected by the runtime as `globalThis.__zsRuntimeDescriptor`. v1 carries
+   * and injected by the runtime as `globalThis.__zsRuntimeDescriptor`. v2 carries
    * `{ fields, options, indexes }` per collection and is the schema SOURCE OF
    * TRUTH. The first `schemas` argument is no longer consulted for fields or
    * collection options; absent descriptor means schema-less install.
@@ -1267,7 +1267,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
   validateRefTargets(source);
 
-  // P5 S3: v1 descriptors carry collection-level options directly. Strictness
+  // P5 S3: v2 descriptors carry collection-level options directly. Strictness
   // is sent to the native register path as `schema._meta.strictness`.
   const collectionOptionsFor = (
     name: string,
@@ -1323,7 +1323,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     for (const [key, def] of Object.entries(normalized)) {
       dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
     }
-    // v1 descriptor mode carries indexes directly. On PG these are benign —
+    // v2 descriptor mode carries indexes directly. On PG these are benign —
     // migrations own DDL — but the dev-SQLite register feed and the
     // unindexed-filter warning both read them.
     const opts = collectionOptionsFor(name);

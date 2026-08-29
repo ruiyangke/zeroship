@@ -36,7 +36,7 @@ async function makeFixture(
 }
 
 const RUNTIME_DESCRIPTOR = `{
-  "version": 1,
+  "version": 2,
   "collections": {
     "notes": {
       "fields": {
@@ -154,7 +154,7 @@ describe("op.* runtime schema descriptor bundling", () => {
     const stem = "20240617123000_notes";
     const descriptor = Buffer.concat([
       Buffer.from(
-        `{"version":1,"collections":{"notes":{"fields":{"title":{"type":"stri`,
+        `{"version":2,"collections":{"notes":{"fields":{"title":{"type":"stri`,
         "utf8",
       ),
       Buffer.from([0xff]),

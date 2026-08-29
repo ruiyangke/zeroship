@@ -132,7 +132,7 @@ describe("dev-bootstrap HMR", () => {
         async json() {
           return {
             changed: [],
-            runtimeDescriptorJson: '{"version":1,"collections":{}}',
+            runtimeDescriptorJson: '{"version":2,"collections":{}}',
           };
         },
       } as Response),
@@ -140,6 +140,6 @@ describe("dev-bootstrap HMR", () => {
     });
 
     assert.equal(invalidated, 0);
-    assert.deepEqual(updates, ['{"version":1,"collections":{}}']);
+    assert.deepEqual(updates, ['{"version":2,"collections":{}}']);
   });
 });

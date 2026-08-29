@@ -212,7 +212,7 @@ describe("installSchema", () => {
       indexes: [],
     };
     const reentrantDescriptor = {
-      version: 1,
+      version: 2,
       collections: {
         get first() {
           try {

@@ -1,40 +1,96 @@
 {
-  "version": 1,
+  "version": 2,
   "collections": {
     "hits": {
       "fields": {
         "id": {
           "type": "string",
           "maxLength": 255,
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
         },
         "created_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
         },
         "updated_at": {
           "type": "date",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          }
         },
         "created_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          }
         },
         "updated_by": {
           "type": "string",
-          "maxLength": 255
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          }
         },
         "version": {
           "type": "int",
           "required": true,
-          "default": 1
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
         },
         "deleted_at": {
-          "type": "date"
+          "type": "date",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          }
         },
         "path": {
           "type": "string",
-          "required": true
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "path"
+          }
         }
       },
       "options": {

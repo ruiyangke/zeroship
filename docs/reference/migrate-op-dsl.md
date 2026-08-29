@@ -1151,7 +1151,7 @@ in `@zeroship/vite-plugin` records each `migrations/*.ts` source through its
 pure-JS recorder in version order, passes the resulting IR envelopes to
 `zeroship-migrate-node`'s `genArtifacts` renderer, and emits two artifacts:
 
-- **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
+- **`schema.runtime.json`** — the v2 `RuntimeSchemaDescriptor`:
   `{ version, collections: { [name]: { fields, options, indexes } } }`. It is
   content-addressed into the `.zship` artifact (a manifest `runtime_descriptor`
   blob) so the runtime can read the schema without re-evaluating a schema

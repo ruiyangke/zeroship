@@ -245,7 +245,7 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
     const { ready } = withResolver(env, handle, () =>
       installSchema({} as never, env, {
         descriptor: {
-          version: 1,
+          version: 2,
           collections: {
             users: {
               fields: { name: { type: "string", required: true } },
@@ -278,7 +278,7 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
       {
         platform: handle,
         descriptor: {
-          version: 1,
+          version: 2,
           collections: {
             posts: {
               fields: { title: { type: "string", required: true } },
@@ -307,7 +307,7 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
     try {
       const { ready } = installSchema({} as never, env, {
         descriptor: {
-          version: 1,
+          version: 2,
           collections: {
             items: {
               fields: { name: { type: "string", required: true } },
@@ -327,12 +327,12 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
 
 describe("installSchema — P4b migration-first descriptor source", () => {
   // The bundled RuntimeSchemaDescriptor (`schema.runtime.json`,
-  // v1 `{ version, collections }`) is the schema source of truth when handed
+  // v2 `{ version, collections }`) is the schema source of truth when handed
   // to installSchema via `options.descriptor`. These
   // pin: (a) collections + registerModel come FROM the descriptor (not the
   // declared t.* object), with platform system fields passing through the
   // normaliser fence; (b) an absent descriptor installs nothing instead of
-  // falling back to the declared schema; (c) a present but non-v1 descriptor
+  // falling back to the declared schema; (c) a present but non-v2 descriptor
   // is a hard boot error.
   function makeMockNative(calls: Array<{ name: string; schema: Record<string, unknown> }>) {
     return {
@@ -352,7 +352,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     // system fields included). DIFFERENT collection name than the declared
     // object so the source is unambiguous.
     const descriptor = {
-      version: 1,
+      version: 2,
       collections: {
         posts: {
           fields: {
@@ -426,7 +426,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       },
     } as unknown as ZeroshipDb;
     const descriptor = {
-      version: 1,
+      version: 2,
       collections: {
         hits: {
           fields: {
@@ -471,7 +471,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.deepEqual(calls.map((c) => c.name), []);
   });
 
-  test("throws when the descriptor is not v1-shaped", () => {
+  test("throws when the descriptor is not v2-shaped", () => {
     const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
     const native = makeMockNative(calls);
     assert.throws(
@@ -514,7 +514,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     } as unknown as ZeroshipDb;
   }
 
-  test("reads collection options and indexes directly from descriptor v1", async () => {
+  test("reads collection options and indexes directly from descriptor v2", async () => {
     const ops: Array<{ name: string; op: string }> = [];
     const calls: Array<{ name: string; schema: Record<string, unknown>; indexes: unknown }> = [];
     const native = {
@@ -538,7 +538,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       },
     } as unknown as ZeroshipDb;
     const descriptor = {
-      version: 1,
+      version: 2,
       collections: {
         posts: {
           fields: {
@@ -585,7 +585,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.deepEqual(
       ops,
       [{ name: "posts", op: "update" }],
-      "descriptor v1 softDelete must route delete through native update",
+      "descriptor v2 softDelete must route delete through native update",
     );
 
     const res = await handle.posts.update({ id: "post_abc", version: 1 }, { title: "x" });

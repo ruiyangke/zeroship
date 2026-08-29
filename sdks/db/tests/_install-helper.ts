@@ -80,7 +80,7 @@ export function descriptorFor(schemas: Record<string, unknown>): RuntimeSchemaDe
     };
   }
 
-  return { version: 1, collections } as RuntimeSchemaDescriptor;
+  return { version: 2, collections } as RuntimeSchemaDescriptor;
 }
 
 export function installSchemaForTest<
