@@ -33,7 +33,7 @@ Composite up 5 points (85→90). **Threshold reached for round 7.**
 | **Medium-β** ctx.signal client-disconnect propagation | Medium | ✅ **Resolved.** §3 "Abort source plumbing" specifies the gateway → connection-close → request body stream error → AbortController chain. |
 | **Medium-γ** breakingOk audit-log surface | Medium | ✅ **Resolved.** §13 "Audit log surface" sketches the `app_deploy_audit` table, retention, revocation rules. |
 | **Medium-δ** kind: "raw" + idempotent input hash | Medium | ✅ **Resolved.** §8 "Input hash" table covers all four wire types (json / multipart / raw / ai-ui-v1). |
-| **Low-α** compio-redis citation | Low | ✅ **Resolved.** §8 "Redis primitives used" cites `crates/compio-redis/src/{client,cluster}.rs`. |
+| **Low-α** compio-redis citation | Low | ✅ **Resolved.** §8 "Redis primitives used" cites `libs/compio-redis/src/{client,cluster}.rs`. |
 | **Low-β** zod-to-json-schema compat caveats | Low | ✅ **Resolved.** §13 "compatibility caveats" subsection documents `z.discriminatedUnion`, `z.lazy`, `z.transform`, `z.brand`. |
 | **Low-γ** z.union File detection ambiguity | Low | ✅ **Resolved.** §4b "Ambiguous schemas" build error specified. |
 | **Low-δ** Redis Cluster hash-slot colocation | Low | ✅ **Resolved.** `{idem:<key-hash>}` hash tag added. |
@@ -121,6 +121,6 @@ A round-8 reviser pass focused on the three Mediums (gateway double-decode contr
 - `/home/ruiyang/Projects/appbase/.worktrees/rpc-v2-revise/docs/proposals/rpc-v2.md` — subject (2,309 LOC, post round-6 reviser)
 - `/home/ruiyang/Projects/appbase/.worktrees/rpc-v2-revise/docs/reviews/round-05-critique.md` — round 5
 - `/home/ruiyang/Projects/appbase/crates/zeroship-worker/src/cache.rs` — LRU eviction, needs `entered_for_eviction()`
-- `/home/ruiyang/Projects/appbase/crates/compio-redis/src/cluster.rs` — Cluster keyspace hash tag
+- `/home/ruiyang/Projects/appbase/libs/compio-redis/src/cluster.rs` — Cluster keyspace hash tag
 </content>
 </invoke>

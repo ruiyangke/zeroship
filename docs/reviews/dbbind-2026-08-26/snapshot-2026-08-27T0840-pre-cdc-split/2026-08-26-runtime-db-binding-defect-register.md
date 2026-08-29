@@ -517,7 +517,7 @@ migration DSL (`sdks/migrate/src/ops.ts`, lowered in
 `crates/zeroship-migrate-postgres/src/ddl.rs`).
 
 **The repository already knows the right predicate and uses it elsewhere.**
-`creator_table_query` in `crates/zeroship-migrated/src/publication.rs:15-23`
+`creator_table_query` in `crates/zeroship-migrate-server/src/publication.rs:15-23`
 enumerates `relkind IN ('r','p') AND NOT c.relispartition` and excludes
 `__zeroship_%` by name. Two paths in one codebase disagree about what a creator
 table *is*, and the introspection path - the one that decides whether to decrypt

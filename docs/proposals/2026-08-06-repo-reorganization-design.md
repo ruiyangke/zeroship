@@ -89,7 +89,7 @@ near-empty; `docs/AGENTS.md` (23 lines) is a second, divergent copy of the root
 `AGENTS.md`.
 
 ### P7 — Cargo workspace cruft (trivial)
-`Cargo.toml` `members = ["crates/*", "crates/authz", "crates/compio-s3"]` — the last
+`Cargo.toml` `members = ["crates/*", "crates/authz", "libs/compio-s3"]` — the last
 two are already matched by `crates/*`. Redundant leftover.
 
 ### P8 — Crate-boundary findings (from the 2026-08-06 boundary audit)
@@ -248,12 +248,12 @@ the package gone; grep for dangling `@zeroship/migrations` / `migrateOne` /
 `migration_sweeper` refs → zero.
 
 ### Phase 5 — Crate hygiene + `libs/` extraction (P7, P8a–c) — Rust code changes
-- **`libs/` move:** `git mv crates/compio-{postgres,redis,s3} libs/`; set
+- **`libs/` move:** `git mv libs/compio-{postgres,redis,s3} libs/`; set
   `Cargo.toml` `members = ["crates/*", "libs/*"]`; re-point the three `compio-*` paths
   in `[workspace.dependencies]` (`crates/… → libs/…`). Per-crate manifests untouched
   (they use `{ workspace = true }`). Verify `cargo metadata` resolves + full build.
 - **P7:** the members line above supersedes the old
-  `["crates/*", "crates/authz", "crates/compio-s3"]` (compio-s3 now lives in `libs/`).
+  `["crates/*", "crates/authz", "libs/compio-s3"]` (compio-s3 now lives in `libs/`).
 - **P8b:** remove the dead `zeroship-auth` dev-dep from `crates/zeroship-authz/Cargo.toml`.
 - **P8c:** gate `zeroship-bench-server` + `echo-server` bins behind
   `required-features = ["bench-bins"]` in `crates/zeroship-runtime/Cargo.toml`; add the

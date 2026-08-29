@@ -1513,7 +1513,7 @@ This is gateway-side, not worker-side: the gateway is always the choke point for
 
 #### Redis primitives used
 
-All ops go through `compio-redis` (the platform's Redis driver — zero-tokio, compio-native, cluster-aware; `crates/compio-redis/src/{client,cluster}.rs`):
+All ops go through `compio-redis` (the platform's Redis driver — zero-tokio, compio-native, cluster-aware; `libs/compio-redis/src/{client,cluster}.rs`):
 
 - `SET {idem:<key-hash>}:lock value NX EX 30` — atomic acquire (Redis 2.6.12+ canonical pattern).
 - `HSET {idem:<key-hash>}:meta` / `HGET {idem:<key-hash>}:meta` — meta storage.

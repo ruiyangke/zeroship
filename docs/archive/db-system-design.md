@@ -245,7 +245,7 @@ PG uses two `compio-postgres` client kinds: extended-query for
 CRUD+DDL, and a replication-sub-protocol client for the WAL consumer
 (`replication=database`, `START_REPLICATION SLOT … LOGICAL …`,
 pgoutput via `CopyBothResponse`). Driver-side support in
-`crates/compio-postgres/`; §9.1.
+`libs/compio-postgres/`; §9.1.
 
 <!-- preupdate_hook amendment -->
 **CDC layer.** PG: WAL consumer streams pgoutput; pre-image arrives
@@ -672,7 +672,7 @@ replication sub-protocol — distinct from extended query:
 `replication=database` startup parameter, `START_REPLICATION SLOT …
 LOGICAL …`, `CopyBothResponse` framing, pgoutput decoding, keepalive
 responses, standby status updates. `compio-postgres` implements this
-in `crates/compio-postgres/src/replication.rs`; `wal_consumer.rs`
+in `libs/compio-postgres/src/replication.rs`; `wal_consumer.rs`
 ships against it. Consumer opens a dedicated replication connection
 per `(worker, app)` — NOT a pooled extended-query client.
 

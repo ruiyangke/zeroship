@@ -492,7 +492,7 @@ a security rule ends up unenforced while reading as settled. It now owns three:
 ## Relationship to the migration ceiling - shape only
 
 The platform already has operator-ceiling machinery with meet-semantics
-(`crates/zeroship-migrated/src/policy.rs`, `policies/confined.policy.toml`).
+(`crates/zeroship-migrate-server/src/policy.rs`, `policies/confined.policy.toml`).
 Reuse its **shape** - a versioned operator ceiling intersected with a
 creator-supplied value - and **not** its store or its staleness rule:
 
@@ -500,7 +500,7 @@ creator-supplied value - and **not** its store or its staleness rule:
   `CREATE SCHEMA` / `RENAME` / destructive-ops / RLS (`policy.rs:32-35`), with no
   vocabulary for mask classifications;
 - its staleness answer is `ApprovalStaleCeiling` -> **"re-submit required"**
-  (`crates/zeroship-migrated/src/apply.rs:192-199`), which is right for a
+  (`crates/zeroship-migrate-server/src/apply.rs:192-199`), which is right for a
   migration awaiting approval and is the **exact opposite** of what revocation
   needs here.
 

@@ -60,7 +60,7 @@ Replication has no tokio-postgres counterpart (upstream ships no `START_REPLICAT
 ### Critical
 
 #### POOL-1 — Cancellation of `get()` permanently leaks the `total` permit (and destroys a live connection at the barrier awaits), exhausting the pool
-**Area:** Connection pool (bespoke) · **File:** `crates/compio-postgres/src/pool.rs:360, 411, 434, 453-455`
+**Area:** Connection pool (bespoke) · **File:** `libs/compio-postgres/src/pool.rs:360, 411, 434, 453-455`
 **Reference:** bespoke — violates the production-pool RAII invariant (every early-return/cancellation between "permit taken" and "conn installed" must release the permit in `Drop`); compio `timeout` drops the losing future per `refs/compio/compio-runtime/src/time.rs:83-88`.
 
 `Pool::get` wraps `get_inner` in `compio::time::timeout`, which is a `select!` that *drops* the inner future on elapse. Inside `get_inner`, `total` is the de-facto permit but is hand-maintained with manual `±1` and no `Drop` guard. Three `await` points sit between a `total`/entry commitment and its release: (a) the on-demand connect path sets `total += 1` (line 454) then awaits `connect_one(...)` (line 455) — the compensating `-1` lives only in the `Err`/`Ok` match arms, so a drop while parked at the `.await` runs neither arm and inflates `total` permanently; (b)/(c) the dirty barrier (line 411) and alive-bypass validation (line 434) pop an `entry` out of `idle` (line 380) and `.await` a `simple_query("")` *before* the entry is wrapped in a `PooledClient` or `active` is incremented — a drop here drops the bare `entry` (killing a live backend) while `return_client`, the only decrement path, never runs. There is no reconciliation: `total`/`active` are never recomputed from `idle.len()+active`. Crucially, path (a) needs **zero external cancellation** — if `connect_one` hangs near the 30 s `connection_timeout` (the network-partition case this pool exists to survive), the pool's own outer timeout fires while parked at line 455 and self-inflicts the leak.
@@ -72,7 +72,7 @@ Replication has no tokio-postgres counterpart (upstream ships no `START_REPLICAT
 **Verify vote:** 2/2 upheld · **Confidence:** high
 
 #### COPY-1 — COPY FROM STDIN loop never reads the socket, deadlocking the connection
-**Area:** Transactions / cancel / COPY / replication · **File:** `crates/compio-postgres/src/connection.rs:352-381`
+**Area:** Transactions / cancel / COPY / replication · **File:** `libs/compio-postgres/src/connection.rs:352-381`
 **Reference:** `refs/rust-postgres/tokio-postgres/src/connection.rs:305-309` (poll_message_inner runs `poll_read` every wake, concurrent with poll_write's CopyIn branch at 243-260).
 
 The `RequestMessages::CopyIn` arm of `handle_request` is a send-only blocking loop: `receiver.next().await → write_frontend → flush().await`, with **no socket read** until the receiver yields `None`. A block comment claims it "poll[s] the socket non-blockingly between each frame by checking whether any parseable message is already in the read buffer" — that code does not exist. Upstream multiplexes: `poll_write`'s CopyIn branch writes one frame then stashes the receiver and returns, and `poll_read` runs in the same poll, so a mid-COPY `ErrorResponse` is delivered immediately. In compio, `flush().await` parks the *sole* connection task on the kernel send; during a large COPY the server can fill its recv buffer, stop draining, and (on a constraint violation / disk-full) try to send an `ErrorResponse` whose flush blocks because the client never reads — classic symmetric COPY deadlock with no timeout in the loop. One verifier found it is worse than scoped: because `copy_in()` awaits `BindComplete`/`CopyInResponse` *before* returning the sink while the connection task is already parked on the empty CopyIn receiver, the deadlock can fire at *every* COPY initiation, not only under backpressure.
@@ -87,7 +87,7 @@ The `RequestMessages::CopyIn` arm of `handle_request` is a send-only blocking lo
 ### High
 
 #### IO-2 — Idle connection never reads the socket; LISTEN/NOTIFY is silently never delivered to a pure-listener connection
-**Area:** I/O model & cancellation safety · **File:** `crates/compio-postgres/src/connection.rs:251-270, 144-148`; `lib.rs:7`
+**Area:** I/O model & cancellation safety · **File:** `libs/compio-postgres/src/connection.rs:251-270, 144-148`; `lib.rs:7`
 **Reference:** `refs/rust-postgres/tokio-postgres/src/connection.rs:95-136` (poll_read intercepts async `NotificationResponse` regardless of outstanding requests).
 
 When no response is in flight, Step E awaits **only** a new client request (`self.receiver.next().await`); it never reads the socket. The code's own comment admits unsolicited messages "remain in the kernel socket buffer." Upstream's `poll_read` returns `NotificationResponse` as an `AsyncMessage` on every readable poll, independent of any outstanding request. The crate advertises this feature — `lib.rs:7` ("async notifications preserved") and the public `Connection::notifications()` API exist specifically for LISTEN/NOTIFY. A connection used purely as a subscriber (the canonical pattern: `LISTEN chan` once, then await) never sends another request, so Step E blocks forever and the notification sits unread — no error, no log, just missing events. The non-delivery is total for a pure listener; connections that interleave queries instead see unbounded delivery latency (tied to the next query).
@@ -100,7 +100,7 @@ When no response is in flight, Step E awaits **only** a new client request (`sel
 **Severity note:** One verifier kept this **high** (fully-broken pure-subscriber path against a documented public API); the other corrected to **medium** after confirming zero first-party callers of `.notifications()` today (internal/pre-launch), so it bites only a future consumer or an external LISTEN/NOTIFY user. Both agree the divergence is real and not a forced adaptation.
 
 #### IO-1 — COPY IN streams writes with no concurrent socket read (I/O-model view of COPY-1)
-**Area:** I/O model & cancellation safety · **File:** `crates/compio-postgres/src/connection.rs:352-381`
+**Area:** I/O model & cancellation safety · **File:** `libs/compio-postgres/src/connection.rs:352-381`
 **Reference:** `refs/rust-postgres/tokio-postgres/src/connection.rs:243-260` (poll_write CopyIn) run together with poll_read via `poll_message_inner:301-318`.
 
 This is the same defect as COPY-1, raised independently in the I/O-model area: the CopyIn arm writes frames in a tight loop and never reads the socket until the receiver is exhausted, while a block comment falsely claims a non-blocking inter-frame read. The two sub-claims — (1) the arm has zero read/peek/try_recv calls; (2) upstream interleaves read+write in the same poll — were verified true by both verifiers.
@@ -111,7 +111,7 @@ This is the same defect as COPY-1, raised independently in the I/O-model area: t
 **Severity note:** Both verifiers corrected this entry to **low**, on a more detailed reading of PostgreSQL's server behavior than COPY-1's verifiers applied: on a *simple-query* COPY error, the backend (`postgres.c:4998-5007`) explicitly *accepts-but-ignores* leftover `CopyData`/`CopyDone`/`CopyFail` rather than blocking, so the server keeps draining, the client's `flush()` unblocks, and the `ErrorResponse` is surfaced *later* (after the client flushes its buffered frames) via `CopyInSink::finish` returning `Err` — a **timeliness/latency divergence plus a lying comment**, not a permanent hang, for the common error cases. A true symmetric deadlock additionally requires the server's send-toward-client buffer to be full at error time (e.g. a NOTICE flood the client never reads, or a never-finishing client), which the cited triggers do not by themselves cause. The minimum actionable fix (delete/correct the false comment; optionally model COPY-IN as upstream does for early error surfacing) stands regardless. The unresolved disagreement between the COPY-1 and IO-1 verifier pairs is whether the worst case is a hang (critical/medium) or delayed error delivery (low); both pairs agree there is a real, fixable defect and a provably false comment. **Recommended posture: fix the comment and the latency divergence now; treat the deadlock as a real but conditional worst case to close when COPY-IN is hardened.**
 
 #### REPL-1 — StandbyStatusUpdate reports received (not durably-flushed) LSN as `flush_lsn`
-**Area:** Transactions / cancel / COPY / replication · **File:** `crates/compio-postgres/src/replication.rs:618-625, 638-646`
+**Area:** Transactions / cancel / COPY / replication · **File:** `libs/compio-postgres/src/replication.rs:618-625, 638-646`
 **Reference:** bespoke — ground truth `PostgreSQL walsender.c:2496-2502` (`flushPtr` drives `LogicalConfirmReceivedLocation`, advancing the slot's `confirmed_flush` and freeing WAL).
 
 `advance_lsn` advances **both** `last_processed_lsn` and `last_received_lsn` from one value, and `send_standby_status_update` reports `max(processed, received)` into all three LSN slots — including `flush_lsn` (line 757). Per PG, `flush_lsn` is a durability promise that advances `confirmed_flush` and lets the server recycle WAL and advance catalog xmin. The consumer (`wal_consumer.rs:452,475`) calls `advance_lsn(wal_end)` on every non-commit `XLogData` and on keepalives — marking data merely seen on the wire / dispatched to in-memory broker events as flushed. Because the two pointers are folded and the reporter takes the max, `flush` can never lag `received`, so even a careful caller cannot truthfully report "received X but durably flushed Y < X."
@@ -126,7 +126,7 @@ This is the same defect as COPY-1, raised independently in the I/O-model area: t
 ### Medium
 
 #### IO-3 — Pipelined requests are write-serialized: a second concurrent query is not sent until the first's response starts arriving
-**Area:** I/O model & cancellation safety · **File:** `crates/compio-postgres/src/connection.rs:224-249`; `lib.rs:48-55`
+**Area:** I/O model & cancellation safety · **File:** `libs/compio-postgres/src/connection.rs:224-249`; `lib.rs:48-55`
 **Reference:** `refs/rust-postgres/tokio-postgres/src/connection.rs:195-263` (poll_write drains the request channel and writes ALL queued requests back-to-back every poll, independent of poll_read).
 
 While any response is outstanding, Step D **blocks** in `read_backend().await`; queued requests are drained (via `try_recv`) only *after* a server message arrives. With the documented pipelining pattern `join!(execute(A), execute(B))`, both futures push their `Request` onto the unbounded channel on first poll; the driver writes A in Step E, enters Step D, and blocks reading A's response — B is not written until A's first response frame arrives. Upstream's `poll_write` loops `start_send`-ing every queued request in one poll before any read, so A and B overlap on the wire. The crate copies the upstream pipelining doc verbatim (`lib.rs:48-55`), so this is a divergence from advertised behavior. FIFO ordering and correctness are preserved (A always completes and unblocks B; no deadlock).
@@ -139,7 +139,7 @@ While any response is outstanding, Step D **blocks** in `read_backend().await`; 
 **Coverage note:** Untested — `concurrent_connections` uses 5 separate connections sequentially and `large_result_set` collects via `try_collect`, so no test exercises true single-connection pipelining.
 
 #### POOL-2 — FIFO unfairness: fresh callers barge the idle slot ahead of parked waiters
-**Area:** Connection pool (bespoke) · **File:** `crates/compio-postgres/src/pool.rs:380, 502, 505, 737`
+**Area:** Connection pool (bespoke) · **File:** `libs/compio-postgres/src/pool.rs:380, 502, 505, 737`
 **Reference:** bespoke — violates the production-pool fair-FIFO invariant (waiters served in arrival order; no waiter starved by later arrivals barging the idle slot — bb8/deadpool back this with an ordered semaphore/notify queue).
 
 `return_client` pushes the freed entry into the shared idle vec and only then *advisorily* `wake_one_waiter()`. But `get_inner` step 1 unconditionally pops idle as its first action, with no "defer to existing waiters" gate. Sequence: pool full, waiter W parked; caller C returns a connection (push to idle + wake W); before W's task is polled, fresh caller N calls `get()`, pops the idle entry first, and takes it; W re-polls, finds idle empty and `total==max_size`, and re-parks at the tail. The hand-off is advisory, not direct — unlike bb8/deadpool, which hand the freed connection to the front waiter.
@@ -151,7 +151,7 @@ While any response is outstanding, Step D **blocks** in `read_backend().await`; 
 **Verify vote:** 1/1 upheld · **Confidence:** high
 
 #### BINCOPY-1 — Binary COPY header critical-flag mask is too broad (`0xFFFF_0000`), wrongly rejecting OID headers and making `has_oids` dead code
-**Area:** Transactions / cancel / COPY / replication · **File:** `crates/compio-postgres/src/binary_copy.rs:165-174`
+**Area:** Transactions / cancel / COPY / replication · **File:** `libs/compio-postgres/src/binary_copy.rs:165-174`
 **Reference:** `refs/rust-postgres/tokio-postgres/src/binary_copy.rs:163-164` (parses `has_oids`, no flag rejection); ground truth `PostgreSQL copyfromparse.c:206-214`.
 
 The port added header validation that cites the PG spec but uses the wrong mask: `if (flags as u32) & 0xFFFF_0000 != 0 { return …"critical flags set" }`, then `let has_oids = (flags & (1 << 16)) != 0`. PG's own reader handles bit 16 (the OID flag) separately, then *clears* it before checking the rest: the critical-flag space is bits 17..31 (`0xFFFE_0000`), not 16..31. With `0xFFFF_0000`, any header that sets bit 16 is rejected as "critical flags set" before reaching the `has_oids` line, so `has_oids` is permanently false and the `len += 1` path at lines 191-192 is dead. Upstream parses `has_oids` correctly and accepts OID-carrying input.
@@ -165,7 +165,7 @@ The port added header validation that cites the PG spec but uses the wrong mask:
 ### Low
 
 #### IO-4 — Dead EOF-recovery condition in Step D (`self.responses.is_empty()` is always false there)
-**Area:** I/O model & cancellation safety · **File:** `crates/compio-postgres/src/connection.rs:233-242`
+**Area:** I/O model & cancellation safety · **File:** `libs/compio-postgres/src/connection.rs:233-242`
 **Reference:** `refs/rust-postgres/tokio-postgres/src/connection.rs:101` (poll_response `None` → `Error::closed()`: EOF mid-request is an error — matches).
 
 Step D is entered only under `if !self.responses.is_empty()`. Its EOF handler is `if is_eof(&e) && self.responses.is_empty() { return Ok(()); }` — but `read_backend` does not touch `self.responses`, so the condition is necessarily false inside this branch and the `return Ok(())` is unreachable. The reachable behavior (return `Err(e)` on EOF mid-request) is correct and matches upstream's `Error::closed()`. The terminating-branch copy in Step C is live and correct because responses can drain across iterations there.
@@ -177,7 +177,7 @@ Step D is entered only under `if !self.responses.is_empty()`. Its EOF handler is
 **Verify vote:** 1/1 upheld · **Confidence:** high
 
 #### REPL-2 — IDENTIFY_SYSTEM DataRow parsed with unchecked indexing; malformed row panics the replication task
-**Area:** Transactions / cancel / COPY / replication · **File:** `crates/compio-postgres/src/replication.rs:282-307`
+**Area:** Transactions / cancel / COPY / replication · **File:** `libs/compio-postgres/src/replication.rs:282-307`
 **Reference:** bespoke — contrast with the bounds-checked `read_u8/u16/u32/u64` discipline in the same file (951-995) and the `body.len()` checks in `next()` (512, 548).
 
 The DataRow field loop indexes the buffer with no length validation: `u16::from_be_bytes([buf[0], buf[1]])` with no `buf.len() >= 2` check, `i32::from_be_bytes([buf[idx..idx+4]])` unchecked, and `&buf[idx..end]` unchecked. Every other server-data parser in the file is defensive. A truncated or unexpectedly-shaped `IDENTIFY_SYSTEM` DataRow triggers an index-out-of-bounds panic. (Note: upstream's own DataRow consumer, `DataRowRanges::next`, is bounds-checked and returns `UnexpectedEof` — so this is *less* safe than upstream, not equivalent.)
@@ -191,7 +191,7 @@ The DataRow field loop indexes the buffer with no length validation: `u16::from_
 ### Info
 
 #### REPL-3 — START_REPLICATION ErrorResponse is discarded; only a byte count is surfaced, not the DbError
-**Area:** Transactions / cancel / COPY / replication · **File:** `crates/compio-postgres/src/replication.rs:380-390`
+**Area:** Transactions / cancel / COPY / replication · **File:** `libs/compio-postgres/src/replication.rs:380-390`
 **Reference:** bespoke — contrast with `identify_system`, which maps `ErrorResponse → Error::db(body)` (replication.rs:319).
 
 The `ERROR_RESPONSE_TAG` arm reassembles the full error frame into `body`, then returns `Error::io(…"START_REPLICATION ErrorResponse: {} bytes", body.len())` — reporting a *length*, not the message. The same file's `identify_system` correctly does `Message::ErrorResponse(body) => return Err(Error::db(body))`, and `DbError::parse` is available. Every upstream `ErrorResponse` site maps to `Error::db`.
