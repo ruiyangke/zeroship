@@ -26,6 +26,8 @@ is what makes this page go stale.
 | `2026-08-28-deploy-schema-precondition.md` | Refusing a deploy whose migrations have not applied - path 1 of decision 9 |
 | `2026-08-28-migration-record-consolidation.md` | Where migration records live, and which of today's four are deleted |
 | `2026-08-28-migrate-server-rename.md` | The migration service is one crate, `zeroship-migrate-server` |
+| `2026-08-28-app-database-decoupling.md` | Datastore / Database / Grant: one database per app, many apps per database, the creator owning the schema |
+| `docs/architecture/data-system.md` | The high-level view of the whole data system. Start here if the set is unfamiliar |
 
 **Two of these files keep the set honest.** `decision-log.md` holds superseded
 decisions in full, with what produced the error; `defects-closed.md` holds the
@@ -38,15 +40,29 @@ else.
 
 ## Status
 
-The design is settled. **One question is open for the operator** - SC-1's
-durability scope, below. The CDC transport that several contracts depend on is no
+The design is settled. The CDC transport that several contracts depend on is no
 longer an open block: it is a decided service with its own specification.
 
 Implementation has landed on `feat/dbbind-impl`: defect repair on existing code,
 the test harness that makes TDD on this design possible, the descriptor cutover,
-and the platform migration move. Of the six sub-contracts, SC-2 and SC-5's step
-5a are substantially built and the rest are at or near zero. Per-contract detail
-is at the bottom of this page.
+and the platform migration move.
+
+**Per sub-contract, as of 2026-08-29** - the table at the bottom of this page is
+authoritative and carries the evidence:
+
+| | state |
+| --- | --- |
+| SC-1 | built and wired |
+| SC-6 | the masking storage flip has shipped |
+| SC-2 | ~80%, with the per-app-file actor and a production cancellation consumer missing |
+| SC-3 | shared core plus the read, search and write families; the remaining families and the ledger absent |
+| SC-4 | two decisions implemented, one still underspecified |
+| SC-5 | step 5a built; the contract itself at zero |
+
+**The decoupling is designed and unbuilt.** `Database`/`Grant` occur zero times
+in the tree. It is specified in `2026-08-28-app-database-decoupling.md`, and
+`docs/architecture/data-system.md` is the high-level view of the whole data
+system - read that first if you are new to this set.
 
 ---
 
@@ -359,12 +375,12 @@ including the two the design records as owed for steps 3 and 5a.
 
 | contract | state |
 | --- | --- |
-| **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), **Not** the `SQLITE_BUSY_SNAPSHOT` arm - this row claimed that was missing and it is not: the code is `crates/zeroship-plugin-db/src/backend/sqlite/error.rs:37` (the 517 constant), classified at `:97` and pinned at `:214`. Re-checked 2026-08-29 |
+| **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), The `SQLITE_BUSY_SNAPSHOT` arm IS handled - `crates/zeroship-plugin-db/src/backend/sqlite/error.rs:37` (the 517 constant), classified at `:97`, pinned at `:214` (checked 2026-08-29) |
 | **SC-5** | **step 5a fully implemented** (`40c3df95f` plus three fixes), with unusually strong instrumentation. **SC-5 as a contract is at zero**: Fork C (`AppIncarnationId` occurs 0 times in the tree), the ceiling as a service field, service-owned key custody |
-| **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH **and WRITE** families have since been ported onto the IR - `search.rs` is 562 lines and `write.rs` is 1057, so neither is a stub. (An earlier revision of this row named only search; that was me under-reporting a row I had just corrected, which is why each claim here now carries what was counted.) `crates/zeroship-data-plan/src/` also carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
+| **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH **and WRITE** families ported onto the IR - `search.rs` 562 lines, `write.rs` 1057, so neither is a stub (counted 2026-08-29). `crates/zeroship-data-plan/src/` also carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
 | **SC-4** | **decision 4 is implemented** (`8c6caa465`, dev-ness as a typed input) and SC-4 does not record it. Decision 1 unblocked and small; decision 2 underspecified by SC-4's own admission |
-| **SC-1** | **the reducer is BUILT AND WIRED** (re-checked 2026-08-29). `crates/zeroship-plugin-db/src/transaction/reducer/` carries `deadline.rs`, `frames.rs`, `identity.rs` and its own `tests.rs`, and it is reached from `transaction/driver.rs` and `transaction/probe.rs`. This row previously said only that SC-1 was "not structurally blocked" and awaited one answer; that answer was taken and the work landed |
-| **SC-6** | **the flip is IN THE TREE** (re-checked 2026-08-29). This row previously said it was not, on two specifics that are both now false: `mask_sibling_column_for_field` no longer exists at all, and the raw column is spelled throughout - `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material |
+| **SC-1** | **the reducer is BUILT AND WIRED** (checked 2026-08-29). `crates/zeroship-plugin-db/src/transaction/reducer/` carries `deadline.rs`, `frames.rs`, `identity.rs` and its own `tests.rs`, and it is reached from `crates/zeroship-plugin-db/src/transaction/driver.rs` and `.../transaction/probe.rs`. |
+| **SC-6** | **the flip is IN THE TREE** (checked 2026-08-29): `mask_sibling_column_for_field` no longer exists, and `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material |
 
 At zero and named as such in the design: the private module map, the
 artifact/init channel, `DbIsolateBinding`, the deletion of `registerModel`, the
