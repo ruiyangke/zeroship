@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-02
 **Long-form design:** [`docs/archive/streams-native.md`](../archive/streams-native.md)
-**Implementation:** [`crates/runtime/src/web/streams/`](../../crates/runtime/src/web/streams/) (~25 files: readable, writable, transform, controllers, readers, byte/BYOB, queues, strategies, tee, pipe, compression, async-iter)
+**Implementation:** [`crates/zeroship-runtime/src/web/streams/`](../../crates/zeroship-runtime/src/web/streams/) (~25 files: readable, writable, transform, controllers, readers, byte/BYOB, queues, strategies, tee, pipe, compression, async-iter)
 
 ## Context
 

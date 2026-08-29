@@ -786,7 +786,7 @@ Exact code shape:
 - Replace `WorkerCli.storage_root` with `storage_url`.
 - Replace `WorkerConfig.storage_root: Option<PathBuf>` with
   `storage_backend: Option<StorageBackendConfig>`.
-- Replace `KernelConfig.storage_root: Option<PathBuf>` in `crates/worker/src/cache.rs`
+- Replace `KernelConfig.storage_root: Option<PathBuf>` in `crates/zeroship-worker/src/cache.rs`
   with the same `StorageBackendConfig`.
 - `create_plugins()` matches `StorageBackendConfig::{Local,S3}` and constructs
   `StoragePlugin::local(root)` or `StoragePlugin::s3(config)`.
@@ -938,7 +938,7 @@ storage kind and non-secret local path/bucket/prefix/endpoint, never secrets.
 Pre-launch means no migration tooling and no compatibility aliases:
 
 - Add `compio-s3` and shared `StoreUrl` parsing without adding `aws-sigv4`.
-- Correct the `crates/plugin-storage/Cargo.toml` `s3` feature comment in the
+- Correct the `crates/zeroship-plugin-storage/Cargo.toml` `s3` feature comment in the
   implementation patch if it still claims `aws-sigv4` adds no tokio. The
   canonical comment must name cyper + hand-rolled SigV4 and forbid
   `aws-sigv4`.
@@ -1114,13 +1114,13 @@ async fn put_stream(&self, coords, body: impl Stream<Item=Result<Bytes>>, conten
 async fn get_stream(&self, coords) -> Result<Option<(ObjectMeta, impl Stream<Item=Result<Bytes>>)>>
 ```
 - **Upload (`env.storage.put`)** consumes a V8 `ReadableStream` via the EXISTING
-  `crates/runtime/src/web/streams/response_forwarder.rs` machinery (it already
+  `crates/zeroship-runtime/src/web/streams/response_forwarder.rs` machinery (it already
   drives `getReader()` + a promise-reaction read loop into a Rust channel — the
   same path the RPC response-body forwarder uses). The native callback feeds
   those chunks to `Backend::put_stream` → S3 multipart. `LocalFs::put_stream`
   writes chunks to a temp file + atomic rename.
 - **Download (`env.storage.get`)** returns a V8 `ReadableStream` fed by
-  `crates/runtime/src/core/channel.rs` `StreamWriter`/`stream_buffer` (the exact
+  `crates/zeroship-runtime/src/core/channel.rs` `StreamWriter`/`stream_buffer` (the exact
   bridge the RPC/SSE streaming path uses): a compio task pulls
   `Backend::get_stream` chunks and `push`es them to the `StreamWriter`; the
   worker exposes the `StreamReader` as the response body.

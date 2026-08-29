@@ -32,7 +32,7 @@ src/storage.rs                app-storage abstraction
 
 ## Invariants
 
-- V8 isolates are thread-bound. The worker keeps a thread-local cache in [cache.rs](../../crates/worker/src/cache.rs).
+- V8 isolates are thread-bound. The worker keeps a thread-local cache in [cache.rs](../../crates/zeroship-worker/src/cache.rs).
 - That `thread_local!` cache shape is what lets each worker thread own, re-enter, and evict only its own isolates without crossing V8 thread affinity.
 - `RuntimeInner` tracks `enter_depth`; isolates are entered for a V8 turn and exited afterwards so multiple isolates can live on one worker thread.
 - `build()` leaves a new isolate entered, and the worker exits it after caching so later requests can re-enter it just in time for dispatch.
@@ -52,7 +52,7 @@ The `#[v8_class]` macro support lives in `crates/runtime-macros`.
 
 ## Web APIs and streams
 
-`load_polyfills_and_modules` in [init.rs](../../crates/runtime/src/core/init.rs) installs the runtime surface before user code runs. The important current pieces are:
+`load_polyfills_and_modules` in [init.rs](../../crates/zeroship-runtime/src/core/init.rs) installs the runtime surface before user code runs. The important current pieces are:
 
 - native WHATWG Streams
 - native Blob/File
@@ -62,7 +62,7 @@ The `#[v8_class]` macro support lives in `crates/runtime-macros`.
 - native `EventSource`
 - WebSocket and crypto support
 
-Stream responses are pumped by [response_forwarder.rs](../../crates/runtime/src/web/streams/response_forwarder.rs), not by the older JS shim.
+Stream responses are pumped by [response_forwarder.rs](../../crates/zeroship-runtime/src/web/streams/response_forwarder.rs), not by the older JS shim.
 
 ## Limits
 
@@ -81,12 +81,12 @@ The runtime accepts many `ModuleEntry` values, but the current worker path still
 
 | Working on | Start here |
 | --- | --- |
-| V8 boot / globals | [init.rs](../../crates/runtime/src/core/init.rs) |
-| Runtime lifecycle / pump | [runtime.rs](../../crates/runtime/src/core/runtime.rs) |
-| HTTP request shaping | [handler.rs](../../crates/runtime/src/transport/handler.rs) |
-| Streams | [streams/mod.rs](../../crates/runtime/src/web/streams/mod.rs) |
-| Native plugin wiring | [plugin.rs](../../crates/runtime/src/core/plugin.rs) |
-| Bench tooling | `crates/runtime/benches/`, `docs/reference/zerobench.md` |
+| V8 boot / globals | [init.rs](../../crates/zeroship-runtime/src/core/init.rs) |
+| Runtime lifecycle / pump | [runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs) |
+| HTTP request shaping | [handler.rs](../../crates/zeroship-runtime/src/transport/handler.rs) |
+| Streams | [streams/mod.rs](../../crates/zeroship-runtime/src/web/streams/mod.rs) |
+| Native plugin wiring | [plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs) |
+| Bench tooling | `crates/zeroship-runtime/benches/`, `docs/reference/zerobench.md` |
 
 ## Related docs
 

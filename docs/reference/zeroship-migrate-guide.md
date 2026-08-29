@@ -104,7 +104,7 @@ author -> plan (lint) -> gate (approval) -> executor::apply (guard + role)
 2. **`MigrationEngine::plan`** runs the guard read-only (no DB) and returns a `MigrationPlan` — the dry-run/preview (`engine.rs:11-17`).
 3. **`MigrationEngine::apply`** is the gate: refuses any denial, refuses destructive-without-`Approval::Approved`, else delegates to the executor (`engine.rs:18-20`).
 
-**Integration touchpoints:** the control plane owns app CRUD/deploy/route-registry and runs migrations "*out of band*" (`crates/control/src/main.rs:1292`, `registry.rs:121`); the migration set ships in the `.zship` bundle as an immutable, replayable artifact. The `@zeroship/db` fold (`gen-types`) makes the migration set **the single source of truth for the schema** — the typed `env.db` surface is *generated from it* (see [§5](#5-authoring-declarative-desired-state--the-fold) and [§11](#11-platform-self-hosting--build-integration)).
+**Integration touchpoints:** the control plane owns app CRUD/deploy/route-registry and runs migrations "*out of band*" (`crates/zeroship-control/src/main.rs:1292`, `registry.rs:121`); the migration set ships in the `.zship` bundle as an immutable, replayable artifact. The `@zeroship/db` fold (`gen-types`) makes the migration set **the single source of truth for the schema** — the typed `env.db` surface is *generated from it* (see [§5](#5-authoring-declarative-desired-state--the-fold) and [§11](#11-platform-self-hosting--build-integration)).
 
 ### 1.6 The dialect-neutral, checksummed IR philosophy
 

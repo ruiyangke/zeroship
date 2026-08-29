@@ -44,7 +44,7 @@ The matrix is the contract. We do **not** pretend GoTrue can do consent-delegati
 
 ## 2. The seam: `core::auth_provider` (enum dispatch, no `dyn`, no async-trait)
 
-A new module `crates/core/src/auth_provider/`. It is **zero-tokio / cyper-based** and **`!Send` by construction** — the same constraint that already governs `core::oidc_verify` (its `cyper::Client` lives in a `thread_local!` because cyper's connector wraps its future in `send_wrapper::SendWrapper` and *panics* cross-thread; `oidc_verify.rs:39-66`) and `core::hydra` (`#[allow(clippy::future_not_send)]` on `introspect`, `hydra.rs:130/191`).
+A new module `crates/zeroship-core/src/auth_provider/`. It is **zero-tokio / cyper-based** and **`!Send` by construction** — the same constraint that already governs `core::oidc_verify` (its `cyper::Client` lives in a `thread_local!` because cyper's connector wraps its future in `send_wrapper::SendWrapper` and *panics* cross-thread; `oidc_verify.rs:39-66`) and `core::hydra` (`#[allow(clippy::future_not_send)]` on `introspect`, `hydra.rs:130/191`).
 
 <!-- Added in round 1: addressing CRITICAL C1 — async fn in a dyn trait does not compile, and the stack is !Send. -->
 **Dispatch mechanism — enum, not trait objects.** The original draft stored providers as `Arc<dyn TokenProvider>`. That does **not compile**: native `async fn` in traits (stable since 1.75) is **not `dyn`-compatible**, and the only escapes — `#[async_trait]` (imposes `Send`, which the cyper stack cannot satisfy) or `#[async_trait(?Send)]` (a `Pin<Box<dyn Future>>` heap allocation *per call* on the auth hot path) — are both wrong for a `!Send`, allocation-sensitive verify path.
@@ -278,7 +278,7 @@ The original keyed the pending record on the low-entropy `user_code` and specifi
 - **`user_code`:** 8 chars from the RFC-8628 ambiguity-free alphabet `BCDFGHJKLMNPQRSTVWXZ`, formatted `XXXX-XXXX`. It is a one-time selector for an *already-authenticated* approval, never a poll secret.
 - **TTL:** `device_code`/`user_code` expire in 600 s; expiry → `expired_token`.
 - **Poll rate-limit / backoff:** `interval = 5 s`; `slow_down` adds +5 s (the CLI already honours this, `cli/src/auth.rs:214`); control rate-limits per `device_code` and caps total attempts, returning `slow_down`/`access_denied` past the cap.
-- **`user_code → user` binding + CSRF:** the approval POST binds `user_code` to the authenticated principal **and** carries the existing `__Host-zsidp_csrf` double-submit token. `crates/auth/src/ui/device.rs:28-34` already implements this guard for the Hydra device-confirmation POST (BFF §5.4 names device confirmation as a CSRF target); the platform-mediated page **reuses the same `crate::csrf` module** rather than throwing it away — so a logged-in attacker cannot approve a victim's `user_code` via a forged cross-site POST.
+- **`user_code → user` binding + CSRF:** the approval POST binds `user_code` to the authenticated principal **and** carries the existing `__Host-zsidp_csrf` double-submit token. `crates/zeroship-auth/src/ui/device.rs:28-34` already implements this guard for the Hydra device-confirmation POST (BFF §5.4 names device confirmation as a CSRF target); the platform-mediated page **reuses the same `crate::csrf` module** rather than throwing it away — so a logged-in attacker cannot approve a victim's `user_code` via a forged cross-site POST.
 
 ---
 

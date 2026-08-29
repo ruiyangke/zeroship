@@ -855,7 +855,7 @@ The recorded op list is deterministic: same `.ts` source ⇒ identical `.ir.json
 
 The generic loader gains an `.ir.json` recognizer alongside the Flyway/dbmate `.sql` grammars (`crates/zeroship-migrate/src/loader.rs:19`). Filename grammar reuses the versioned prefix: `<NNNN>_<desc>.ir.json` (or `V<NNNN>__<desc>.ir.json` for legacy Flyway-style SQL directories). The numeric prefix → deterministic UUIDv7 mapping (`migration_id_for_version`) is identical to the SQL path — IR migrations interleave with SQL migrations in one ordered history. The zeroship platform path is separate: it reads `db/migrations-ts/` `.ts` files and records transient IR at apply time.
 
-In the bundle, an IR migration is a `MigrationFileEntry { name, hash }` (`crates/bundle/src/manifest.rs:160`) exactly like a `.sql` file. Deploy reconstructs the files from blobs and calls `load_dir`, which branches on extension to deserialize IR vs parse SQL.
+In the bundle, an IR migration is a `MigrationFileEntry { name, hash }` (`crates/zeroship-bundle/src/manifest.rs:160`) exactly like a `.sql` file. Deploy reconstructs the files from blobs and calls `load_dir`, which branches on extension to deserialize IR vs parse SQL.
 
 **Loader return shape (reconciled with the plan model, §2.0).** `load_dir` returns `Vec<Migration>` today (`loader.rs:606`). A `.sql` file → one `Migration`; an `.ir.json` → a `AppliedPlan`. The loader's signature generalizes to **`Vec<AppliedPlan>`** (a pure-DDL `.sql` or `.ir.json` is a single-step plan), preserving the order-by-version contract. This is a deliberate, owned wire-format change to the loader's return type (pre-launch, no back-compat), not a hidden shim.
 
@@ -863,7 +863,7 @@ In the bundle, an IR migration is a `MigrationFileEntry { name, hash }` (`crates
 
 | Caller | Edit |
 | --- | --- |
-| `crates/control/src/deploy_migrate.rs:133` | binds `Vec<AppliedPlan>`; the IR-path apply routes to `apply_plan` over each plan's steps and passes the target dialect (§2.4.1) into the IR lower. A pure-`.sql` deploy is a `Vec` of single-step plans. |
+| `crates/zeroship-control/src/deploy_migrate.rs:133` | binds `Vec<AppliedPlan>`; the IR-path apply routes to `apply_plan` over each plan's steps and passes the target dialect (§2.4.1) into the IR lower. A pure-`.sql` deploy is a `Vec` of single-step plans. |
 | Public dbmate CLI `crates/zeroship-migrate/src/bin/zeroship-migrate.rs` (`validate` at `:553`, plus `apply`/`status`/`rollback`) | `validate` now also accepts `.ir.json`. `apply`/`status`/`rollback` iterate `Vec<AppliedPlan>`; observable behavior preserved (see CLI-semantics below). |
 | `crates/zeroship-migrate/src/command/runner.rs` Platform profile path | Platform migrations load only `db/migrations-ts/` `.ts` files. The runner records each file to transient IR and applies the resulting platform-scoped plan; committed platform SQL/Flyway files are not part of the source of truth. The generic `.sql` loader branch remains for non-platform/dbmate-compatible use. |
 | `crates/zeroship-migrate/src/lib.rs:144-146` (`loader` re-export) + `lib.rs:111-113` (`engine` re-export) | The `load_dir` re-export (`lib.rs:144-146`) changes return type to `Vec<AppliedPlan>`. The **three new symbols `AppliedPlan` / `PlanStep` / `RenameStep` are added** to the public surface (from the new `apply_plan`/plan module). The **existing dry-run `MigrationPlan` re-export (`lib.rs:113`) is UNCHANGED** — it stays exported, still meaning the lint/dry-run preview. There is no collision because the two are distinct symbols: the public API diff is `+AppliedPlan, +PlanStep, +RenameStep` (added) with `MigrationPlan` (kept), not a redefinition. |
@@ -1357,8 +1357,8 @@ The recorder (PR4a) already exists; PR4 wires it into the build/CLI ergonomics, 
 | IR-path ownership check | **none today** on op path (`DeclarativeAuthor::diff` map at `declarative.rs:283-294`,`:904-913` is bypassed); NEW (§8.6) |
 | declarative diff (autogenerate source) | `desired_snapshot` / `DeclarativeAuthor::diff` — `generate.rs:93`/`:112` |
 | loader & versioning | grammar `loader.rs:19`; `load_dir`; `migration_id_for_version` |
-| bundle entry | `MigrationFileEntry { name, hash }` — `crates/bundle/src/manifest.rs:160` |
-| deploy reconstruct+apply | `crates/control/src/deploy_migrate.rs` |
+| bundle entry | `MigrationFileEntry { name, hash }` — `crates/zeroship-bundle/src/manifest.rs:160` |
+| deploy reconstruct+apply | `crates/zeroship-control/src/deploy_migrate.rs` |
 | guard | `SqlGuard::check`, `Confined` default — `crates/zeroship-migrate/src/guard.rs` |
 | least-priv role | `provision_migrator` — `role.rs:197` |
 | journal immutability | triggers — `journal.rs:332` |

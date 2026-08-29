@@ -130,7 +130,7 @@ bypass. Break the cycle with an install-time **`--bootstrap-console`** control p
   `control-client.ts` bearer/refresh loop. Replace control-plane calls with the **`@zeroship/control`**
   SDK authenticated by the console's server-side **control-credential env var** (MVP). _(Eventual target:
   `auth.getAccessToken({audience, scopes:[least-privilege per-op]})` + `fetchAs` once full-R4 is revived.)_
-- RIP OUT `crates/control/src/oidc_rp.rs` + `require_console_session` + the confidential console client in
+- RIP OUT `crates/zeroship-control/src/oidc_rp.rs` + `require_console_session` + the confidential console client in
   `ops/auth-clients-dev.toml`. **Control becomes a pure API resource server.**
 - Repoint `ops/Caddyfile` console block (and prod DNS) from `control:9090` to `gateway:8000`; the gateway
   serves `console.*` via `lookup_by_name` on the full host once the route entry exists (no auth-style
@@ -169,7 +169,7 @@ bypass. Break the cycle with an install-time **`--bootstrap-console`** control p
    wiring** (declare + inject the console's control-credential env var; point `@zeroship/control` at the
    internal control URL) lands in **R5**, with the console cutover.
 2. **Worker kernel convergence (blocking, independent value).** Register `KvPlugin` + `StoragePlugin` in
-   `crates/worker/src/cache.rs create_plugins()` so the multi-node worker exposes the full
+   `crates/zeroship-worker/src/cache.rs create_plugins()` so the multi-node worker exposes the full
    `env.{db,kv,storage,auth}` kernel that single-tenant `zeroship serve` already does. Removes a real
    dev/prod capability skew. Regression test: all four namespaces resolve in a worker-served app.
 3. ~~Gateway realtime~~ — skipped per the SSE decision (audit only if a hard WS dependency surfaces).

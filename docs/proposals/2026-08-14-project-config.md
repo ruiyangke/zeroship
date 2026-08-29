@@ -96,7 +96,7 @@ round-trip fixture (7.2):**
    mentions the config filename or links the config-parsing module. Today that
    set is clean - the only repo-wide hit for `jsonc` in those crates is a
    ```` ```jsonc ```` code-fence tag in a doc comment at
-   `crates/gateway/src/idempotency.rs:32` (**VERIFIED**) - so the gate starts
+   `crates/zeroship-gateway/src/idempotency.rs:32` (**VERIFIED**) - so the gate starts
    green and stays meaningful.
 3. **Parser lives in one crate.** The JSONC parsing dependency (5.2) is declared
    by `crates/cli` only. A `cargo tree` assertion that no runtime-side crate
@@ -119,8 +119,8 @@ of the four is configurable.
 | --- | --- | --- | --- |
 | 1 | Vite plugin (build) | `options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT` | `sdks/vite-plugin/src/build.ts:631` |
 | 1b | Vite plugin (dev, packer) | same expression, four more sites | `sdks/vite-plugin/src/dev-server.ts:308`, `:318`, `sdks/vite-plugin/src/zship.ts:479` |
-| 2 | `zeroship migrate` (Rust) | hardcoded `DEFAULT_IR_PATH` | `crates/cli/src/migrate.rs:43` |
-| 2b | `zeroship deploy` reminder (Rust) | same const | `crates/cli/src/main.rs:423` |
+| 2 | `zeroship migrate` (Rust) | hardcoded `DEFAULT_IR_PATH` | `crates/zeroship-cli/src/migrate.rs:43` |
+| 2b | `zeroship deploy` reminder (Rust) | same const | `crates/zeroship-cli/src/main.rs:423` |
 | 3 | `gen-types-all.ts` (repo runner) | hardcoded `join(app.root, "migrations")` | `sdks/vite-plugin/scripts/gen-types-all.ts:136` |
 | 4 | `zeroship-dev-migrate` (separate bin) | its own `--migrations` / `--out` flags with independently written defaults | `sdks/vite-plugin/src/cli/migrate-dev.ts:77-78` |
 
@@ -129,11 +129,11 @@ of the four is configurable.
 `MIGRATIONS_IR_FILE = "migrations.ir.json"` (`sdks/vite-plugin/src/gen-types/index.ts:52`),
 joined at write time (`sdks/vite-plugin/src/gen-types/index.ts:419`, written at
 `:436`). The Rust const is the literal concatenation of those two
-(`crates/cli/src/migrate.rs:43`). Set `genTypesOut: "src/gen"` and the build
+(`crates/zeroship-cli/src/migrate.rs:43`). Set `genTypesOut: "src/gen"` and the build
 writes `src/gen/migrations.ir.json`; `zeroship migrate` with no positional path
 reads `generated/zeroship/migrations.ir.json`
-(`crates/cli/src/migrate.rs:57`) and fails at
-`std::fs::read_to_string` (`crates/cli/src/migrate.rs:72`). Nothing reconciles
+(`crates/zeroship-cli/src/migrate.rs:57`) and fails at
+`std::fs::read_to_string` (`crates/zeroship-cli/src/migrate.rs:72`). Nothing reconciles
 them. The `.zship` archive is not a back-channel either: the packer explicitly
 never carries migration documents (`sdks/vite-plugin/src/zship.ts:216-220`).
 
@@ -225,7 +225,7 @@ already names as the intended future work at
 
 ### 2.4 The CLI surface
 
-**VERIFIED** by direct read of the dispatch site (`crates/cli/src/main.rs:52-63`)
+**VERIFIED** by direct read of the dispatch site (`crates/zeroship-cli/src/main.rs:52-63`)
 and each subcommand. Nine subcommands: `serve`, `deploy`, `migrate`, `login`,
 `logout`, `whoami`, `dev`, `secret`, `var`.
 
@@ -233,33 +233,33 @@ and each subcommand. Nine subcommands: `serve`, `deploy`, `migrate`, `login`,
 
 | Command | Flag | Default / fallback | Citation |
 | --- | --- | --- | --- |
-| `deploy` | positional `<path-to-.zship>` | required, `.expect()` panic | `crates/cli/src/main.rs:353-355` |
-| `deploy` | `--app=` | **required, no fallback of any kind, `.expect("--app=<name> is required")`** | `crates/cli/src/main.rs:362` |
-| `deploy` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `"http://localhost:9090"` | `crates/cli/src/main.rs:363-367` |
-| `deploy` | `--token=` | `ZEROSHIP_TOKEN`, then saved credentials | `crates/cli/src/main.rs:368-371`, `:912-938` |
-| `deploy` | `--no-create` | presence-only; auto-create is ON by default | `crates/cli/src/main.rs:698-700` |
-| `deploy` | known-flag allow-list | `DEPLOY_KNOWN_FLAGS` | `crates/cli/src/main.rs:867` |
-| `migrate` | positional IR path | `DEFAULT_IR_PATH` | `crates/cli/src/migrate.rs:43,57` |
-| `migrate` | `--app=` | required | `crates/cli/src/migrate.rs:58-63` |
-| `migrate` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `"http://localhost:9090"` | `crates/cli/src/migrate.rs:64-68` |
-| `migrate` | `--token=` | shared resolver | `crates/cli/src/migrate.rs:69` |
-| `migrate` | known-flag allow-list | `MIGRATE_KNOWN_FLAGS` | `crates/cli/src/migrate.rs:52` |
-| `secret` / `var` | `--app=` | required | `crates/cli/src/secrets.rs:140` |
-| `secret` / `var` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `"http://localhost:9090"` | `crates/cli/src/secrets.rs:141-145` |
-| `secret` / `var` | `--token=` | shared resolver | `crates/cli/src/secrets.rs:146-152` |
-| `secret set` | `--expose` | presence-only | `crates/cli/src/secrets.rs:168-175` |
-| `login` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `DEFAULT_CONTROL_URL` | `crates/cli/src/auth.rs:85-94`, const `:11` |
-| `login` | `--provider=` | `"platform"` | `crates/cli/src/auth.rs:343-346,364-366` |
+| `deploy` | positional `<path-to-.zship>` | required, `.expect()` panic | `crates/zeroship-cli/src/main.rs:353-355` |
+| `deploy` | `--app=` | **required, no fallback of any kind, `.expect("--app=<name> is required")`** | `crates/zeroship-cli/src/main.rs:362` |
+| `deploy` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `"http://localhost:9090"` | `crates/zeroship-cli/src/main.rs:363-367` |
+| `deploy` | `--token=` | `ZEROSHIP_TOKEN`, then saved credentials | `crates/zeroship-cli/src/main.rs:368-371`, `:912-938` |
+| `deploy` | `--no-create` | presence-only; auto-create is ON by default | `crates/zeroship-cli/src/main.rs:698-700` |
+| `deploy` | known-flag allow-list | `DEPLOY_KNOWN_FLAGS` | `crates/zeroship-cli/src/main.rs:867` |
+| `migrate` | positional IR path | `DEFAULT_IR_PATH` | `crates/zeroship-cli/src/migrate.rs:43,57` |
+| `migrate` | `--app=` | required | `crates/zeroship-cli/src/migrate.rs:58-63` |
+| `migrate` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `"http://localhost:9090"` | `crates/zeroship-cli/src/migrate.rs:64-68` |
+| `migrate` | `--token=` | shared resolver | `crates/zeroship-cli/src/migrate.rs:69` |
+| `migrate` | known-flag allow-list | `MIGRATE_KNOWN_FLAGS` | `crates/zeroship-cli/src/migrate.rs:52` |
+| `secret` / `var` | `--app=` | required | `crates/zeroship-cli/src/secrets.rs:140` |
+| `secret` / `var` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `"http://localhost:9090"` | `crates/zeroship-cli/src/secrets.rs:141-145` |
+| `secret` / `var` | `--token=` | shared resolver | `crates/zeroship-cli/src/secrets.rs:146-152` |
+| `secret set` | `--expose` | presence-only | `crates/zeroship-cli/src/secrets.rs:168-175` |
+| `login` | `--control=` | `ZEROSHIP_CONTROL_URL`, then `DEFAULT_CONTROL_URL` | `crates/zeroship-cli/src/auth.rs:85-94`, const `:11` |
+| `login` | `--provider=` | `"platform"` | `crates/zeroship-cli/src/auth.rs:343-346,364-366` |
 
 **`serve` (a local process, not a deploy-path command):** `--port` (default 3000,
-`crates/cli/src/main.rs:79`), `--workers` (0 = auto, `:80`), `--cpu-limit` (`:81`),
+`crates/zeroship-cli/src/main.rs:79`), `--workers` (0 = auto, `:80`), `--cpu-limit` (`:81`),
 `--wall-timeout` (`:83`), `--heap-limit-mb` (default 512, `:89-95`), allow-list
 `SERVE_KNOWN_FLAGS` at `:820-826`.
 
 **`dev init` is an OPERATOR command, not a creator one.** It provisions the local
 Docker Compose stack: `--secrets-dir` default `deploy/compose/secrets`, `--env-file`
-default `deploy/compose/.env` (`crates/cli/src/dev.rs:13-14,110-112`), and it
-generates the platform secrets in `ENV_KEYS` (`crates/cli/src/dev.rs`).
+default `deploy/compose/.env` (`crates/zeroship-cli/src/dev.rs:13-14,110-112`), and it
+generates the platform secrets in `ENV_KEYS` (`crates/zeroship-cli/src/dev.rs`).
 It is out of scope for a creator project file entirely.
 
 **Three commands have no unknown-flag gate at all.** `secret`, `var`, and `login`
@@ -272,10 +272,10 @@ silently swallows typos makes a wrong deploy target *more* reachable, not less.
 ### 2.5 Environment variables a creator's toolchain reads
 
 The Rust side registers every read through `declared_env!`
-(`crates/core/src/config/declared.rs:634-654`), which pushes a `DeclaredEnvRead`
+(`crates/zeroship-core/src/config/declared.rs:634-654`), which pushes a `DeclaredEnvRead`
 into the `linkme` slice `DECLARED_ENV_READS`
-(`crates/core/src/config/declared.rs:428-430`). The CLI's consumer marker is
-`ZeroshipCliConsumer` (`crates/cli/src/main.rs:25-35`).
+(`crates/zeroship-core/src/config/declared.rs:428-430`). The CLI's consumer marker is
+`ZeroshipCliConsumer` (`crates/zeroship-cli/src/main.rs:25-35`).
 
 **VERIFIED** call sites in `crates/cli`:
 
@@ -298,7 +298,7 @@ into the `linkme` slice `DECLARED_ENV_READS`
 **There is no app-id environment variable.** `grep -rn "ZEROSHIP_APP" crates/ sdks/ docs/`
 returns nothing (**VERIFIED**, empty result; see 2.7 for what that grep cannot
 see). The app id is typed by hand on every single command, and its absence is a
-panic, not an error message (`crates/cli/src/main.rs:362`).
+panic, not an error message (`crates/zeroship-cli/src/main.rs:362`).
 
 TS side, set by the Vite plugin for the spawned child
 (`sdks/vite-plugin/src/constants.ts`): `ZEROSHIP_DEV` (`:8`),
@@ -317,7 +317,7 @@ an internal parent-to-child transport, not a creator surface.
   **shell env > `.env` > dev default**; and the dev server splats the whole file
   into the child's environment: `const childEnv: NodeJS.ProcessEnv = { ...dotenvVars, ... }`
   (`sdks/vite-plugin/src/dev-server.ts:910-922`). Since the child snapshots its
-  whole environment into V8's `process.env` (`crates/cli/src/main.rs:286-288`),
+  whole environment into V8's `process.env` (`crates/zeroship-cli/src/main.rs:286-288`),
   `.env` is functionally already this platform's `.dev.vars`.
 - `.env` and `.env.local` are gitignored by the scaffold
   (`sdks/create-zeroship-app/template/_gitignore:5-6`), although no scaffold ships
@@ -347,7 +347,7 @@ before.
 
 1. **`format!`-constructed names.** A grep for a literal name cannot see a
    variable assembled at runtime. The repo's own source census admits this exact
-   gap: `crates/config-contract/tests/declared_env.rs:153-158` documents a
+   gap: `crates/zeroship-config-contract/tests/declared_env.rs:153-158` documents a
    "KNOWN BLIND SPOT ... a `macro_rules!` body is tokens rather than expressions,
    so this source census cannot see it." I checked `crates/cli` specifically for
    `format!` near env reads and found only URL and error-string construction -
@@ -356,11 +356,11 @@ before.
    the binary *links*. If `zeroship-runtime`, `plugin-db`, `plugin-kv`,
    `plugin-storage` or `plugin-workflow` read environment variables internally,
    those reads are in the shipped `zeroship` binary but are invisible to a grep of
-   `crates/cli/src/`. **NOT CHECKED.** The authoritative enumeration is to run a
+   `crates/zeroship-cli/src/`. **NOT CHECKED.** The authoritative enumeration is to run a
    program that dumps the linked slice, which I did not do.
 3. **Cross-crate delegation.** `serve` hands resolved values to the runtime; the
    runtime's own fallbacks (for example the 128 MB heap default at
-   `crates/runtime/src/core/serve.rs:55`, unreachable from the CLI because the CLI
+   `crates/zeroship-runtime/src/core/serve.rs:55`, unreachable from the CLI because the CLI
    always passes `Some`) are only visible by reading the callee.
 4. **Absence of a gate is invisible to a grep for gates.** The finding that
    `secret`, `var` and `login` have no unknown-flag allow-list came from reading
@@ -427,8 +427,8 @@ designs, one boundary.
 
 | Fact | Produced by | Consumed by | Why it must move |
 | --- | --- | --- | --- |
-| `app` | the creator (or `zeroship deploy` auto-create, `crates/cli/src/main.rs:698-700`) | `deploy`, `migrate`, `secret`, `var` - four commands, every invocation | Retyped on every command today; absent it is a **panic** (`crates/cli/src/main.rs:362`). Nothing else in the project records which app this directory deploys to. |
-| `control` | the creator / operator | same four commands plus `login` (`crates/cli/src/auth.rs:85-94`) | Today the only per-project memory is a shell env var. A wrong default silently targets `http://localhost:9090` - which the CLI's own comment calls out as unrecoverable for `migrate` (`crates/cli/src/migrate.rs:46-51`). |
+| `app` | the creator (or `zeroship deploy` auto-create, `crates/zeroship-cli/src/main.rs:698-700`) | `deploy`, `migrate`, `secret`, `var` - four commands, every invocation | Retyped on every command today; absent it is a **panic** (`crates/zeroship-cli/src/main.rs:362`). Nothing else in the project records which app this directory deploys to. |
+| `control` | the creator / operator | same four commands plus `login` (`crates/zeroship-cli/src/auth.rs:85-94`) | Today the only per-project memory is a shell env var. A wrong default silently targets `http://localhost:9090` - which the CLI's own comment calls out as unrecoverable for `migrate` (`crates/zeroship-cli/src/migrate.rs:46-51`). |
 | `migrations.dir` | the creator | Vite build (`build.ts:626`), dev server (`dev-server.ts:317`), repo runner (`gen-types-all.ts:136`), `zeroship-dev-migrate` (`migrate-dev.ts:77`) | Four derivations, one of which refuses to run rather than guess. |
 | `migrations.out` (renamed from `genTypesOut`) | Vite build (`gen-types/index.ts:419,436`) | `zeroship migrate` (`migrate.rs:43,57`), `zeroship deploy` reminder (`main.rs:423`), `zeroship-dev-migrate` (`migrate-dev.ts:78`) | **The canonical case.** Produced by the build, consumed by a Rust binary that cannot read `vite.config.ts`. |
 | `build.dist` / `build.output` | Vite packer (`zship.ts:250-252,267,271`) | the creator, who types `zeroship deploy ./dist/app.zship` (`docs/build-and-deploy-golden-path.md:68`) | Same producer/consumer split, one step less painful because the path appears in the build's own output. Moving it lets `zeroship deploy` take zero positional arguments. |
@@ -442,7 +442,7 @@ Note what is **absent** from this table and was present in revision 1:
 
 | Fact | Where it stays | Why it cannot move |
 | --- | --- | --- |
-| `resources` (the policy tree) | `src/server/config.ts` | Compiled into `Manifest.resources` (`crates/bundle/src/manifest.rs:51-59`) and turned into per-resource `EffectivePolicy` records by the **gateway** at app-load time. It is enforced on every end-user request, on a machine the creator does not own. |
+| `resources` (the policy tree) | `src/server/config.ts` | Compiled into `Manifest.resources` (`crates/zeroship-bundle/src/manifest.rs:51-59`) and turned into per-resource `EffectivePolicy` records by the **gateway** at app-load time. It is enforced on every end-user request, on a machine the creator does not own. |
 | `rpc.defaults` | `src/server/config.ts` | Same path: app-wide defaults inherited by procedures, resolved into the manifest and enforced at dispatch. |
 | `net` | `src/server/config.ts` | "Inert outbound TCP request hints ... the control plane diffs them against operator-authored grants for review" (`sdks/server/src/types.ts:232-236`). The consumer is the control plane, reached via the deploy artifact. |
 
@@ -455,11 +455,11 @@ argument in 7.4.
 
 | Fact | Why it must not move |
 | --- | --- |
-| `--token` / `ZEROSHIP_TOKEN` | Secret. Already resolved flag > env > `~/.config/zeroship/token.json` at mode `0600` (`crates/cli/src/auth.rs:412-436`, `:439-448`). A tracked file must never be able to supply it. |
+| `--token` / `ZEROSHIP_TOKEN` | Secret. Already resolved flag > env > `~/.config/zeroship/token.json` at mode `0600` (`crates/zeroship-cli/src/auth.rs:412-436`, `:439-448`). A tracked file must never be able to supply it. |
 | `devServerPort` | Must vary per machine and per concurrently-running example. Two of three scaffolds compute it from an env var at config-eval time (`examples/starter/vite.config.ts:8`, `examples/db-todos/vite.config.ts:8`). A committed value would make two examples collide. Keep it a plugin option and add `ZEROSHIP_DEV_PORT` as the per-machine override. |
 | `DATABASE_URL` (dev) | Per-machine, already has a working home in `.env` with documented precedence (`sdks/vite-plugin/src/dev-database-url.ts:46-59`). Moving it to a tracked file is a regression. |
 | `serve` runtime limits (`--cpu-limit`, `--wall-timeout`, `--heap-limit-mb`, `--workers`, `--port`) | These configure a **local process**, not the app. The deployed equivalents are per-app `AppRuntimeLimits` held by the control plane (`docs/reference/runtime-limits.md`). Putting local process tuning in the app's config file invites the belief that it applies in production. It does not. |
-| `dev init` flags | Operator command for the Compose stack (`crates/cli/src/dev.rs:13-15`). Not a creator surface. |
+| `dev init` flags | Operator command for the Compose stack (`crates/zeroship-cli/src/dev.rs:13-15`). Not a creator surface. |
 | `ZEROSHIP_CONFIG_HOME` / `XDG_CONFIG_HOME` / `HOME` | Machine identity, not project identity. |
 | `ZEROSHIP_STORAGE_URL`, `ZEROSHIP_KV_URL`, `ZEROSHIP_KV_PATH`, `ZEROSHIP_WORKFLOW_SQLITE_PATH` | Local `serve` backend selection. Per-machine. |
 
@@ -547,7 +547,7 @@ override of auto-detection, not a requirement).
 
 Deliberately **not** required: `app`. A brand-new project has no app id, and
 `zeroship deploy` already auto-creates by default
-(`crates/cli/src/main.rs:698-700`). The first deploy writes it back (5.2).
+(`crates/zeroship-cli/src/main.rs:698-700`). The first deploy writes it back (5.2).
 
 ### 4.3 Format: JSONC, and why not plain JSON or TOML
 
@@ -652,7 +652,7 @@ zeroship({
 
 That restriction is the whole design, and it is not a nicety. A `config`
 function runs inside Vite. The Rust CLI cannot execute it and never will - it is
-the same wall that produced the original defect (`crates/cli/src/migrate.rs:9-14`
+the same wall that produced the original defect (`crates/zeroship-cli/src/migrate.rs:9-14`
 is explicit that the CLI does not evaluate `.ts`). Letting the hatch touch a
 CLI-read field would reintroduce the exact drift this proposal removes, wearing
 a feature's clothing. Fields the **plugin alone** reads (`build.mode`,
@@ -677,8 +677,8 @@ This extends the server-side order established by
 `docs/decisions/2026-05-28-server-config-unification.md:30-46` and restated at
 `docs/proposals/2026-08-11-config-name-alignment.md:36-38`, inserting the
 environment overlay between file-root and default. It also matches what the CLI
-already does for `--control` (`crates/cli/src/main.rs:363-367`) and `--token`
-(`crates/cli/src/main.rs:920-938`), so no existing behaviour inverts.
+already does for `--control` (`crates/zeroship-cli/src/main.rs:363-367`) and `--token`
+(`crates/zeroship-cli/src/main.rs:920-938`), so no existing behaviour inverts.
 
 **One addition, and it is the important one.** Because three commands silently
 swallow unknown flags (2.4), every command that resolves a value from the file
@@ -691,7 +691,7 @@ must be typed. The provenance line is what makes it safe, and it is cheap.
 
 Concretely, `zeroship migrate` should print
 `control: https://control.staging.zeroship.ai (from zeroship.jsonc environments.staging)`
-before it POSTs. The CLI's own comment at `crates/cli/src/migrate.rs:46-51`
+before it POSTs. The CLI's own comment at `crates/zeroship-cli/src/migrate.rs:46-51`
 explains why: applying a migration set to the wrong database "is not something an
 error message afterwards can undo."
 
@@ -699,7 +699,7 @@ error message afterwards can undo."
 
 Wrangler writes provisioned resource IDs back into the config on deploy
 (**VERIFIED**). The zeroship analogue is exactly one field: `app`, written by
-`zeroship deploy` when it auto-creates (`crates/cli/src/main.rs:388-392` already
+`zeroship deploy` when it auto-creates (`crates/zeroship-cli/src/main.rs:388-392` already
 reports `created app {name} ({id})` to stderr and then throws the id away).
 
 **Design:**
@@ -730,8 +730,8 @@ adding one for the runtime would not be, and is not needed.
 **VERIFIED: zeroship has no per-app runtime version pin.** A repo-wide grep for
 `compatibility_date|compat_date|runtime_version|api_version` finds only Stripe's
 `api_version` in the billing tests, and `schema_version` in `plugin-db`, which is
-a per-app DDL counter (`crates/plugin-db/src/register_model/bootstrap.rs:39-42`),
-not a runtime behaviour pin. `Manifest.version` (`crates/bundle/src/manifest.rs:33-39`)
+a per-app DDL counter (`crates/zeroship-plugin-db/src/register_model/bootstrap.rs:39-42`),
+not a runtime behaviour pin. `Manifest.version` (`crates/zeroship-bundle/src/manifest.rs:33-39`)
 is a **wire-format** version - "Schema version. Reject unknown values" - not a
 behaviour selector. Nothing in the tree lets a deployed app say "give me the V8
 runtime semantics of date D".
@@ -776,7 +776,7 @@ misremembered key name fails loudly on both sides.
 The failure mode that actually survives is **divergent defaults**. If
 `zeroship.jsonc` omits `migrations.out`, the TS side falls back to
 `GEN_TYPES_OUT_DEFAULT` (`sdks/vite-plugin/src/gen-types/index.ts:60`) and the
-Rust side falls back to `DEFAULT_IR_PATH` (`crates/cli/src/migrate.rs:43`) - and
+Rust side falls back to `DEFAULT_IR_PATH` (`crates/zeroship-cli/src/migrate.rs:43`) - and
 we have reproduced the exact bug the file was built to remove, one layer up. A
 second, quieter mode: a key the TS side reads and the Rust side silently ignores,
 so the config *looks* honoured.
@@ -788,8 +788,8 @@ must agree in both directions, as `tests/config_name_alignment_gate.sh` checks 2
 and 3 do.
 
 *Cost, measured.* The server-side apparatus is roughly 6,000 LOC in
-`crates/config-contract/`, 1,654 LOC in `crates/config-macros/`, 5,264 LOC in
-`crates/core/src/config/`, and 2,552 LOC of shell gates - approximately 18,000
+`crates/zeroship-config-contract/`, 1,654 LOC in `crates/zeroship-config-macros/`, 5,264 LOC in
+`crates/zeroship-core/src/config/`, and 2,552 LOC of shell gates - approximately 18,000
 LOC total, requiring a `cargo build` of six server binaries in CI
 (`tests/config_name_alignment_gate.sh:217`). It exists because a name mismatch
 silently boots a production service on a wrong default, an incident class the
@@ -803,7 +803,7 @@ no Compose surface, no multi-binary fan-out. **REJECT.**
 - `schema/project-v1.json` is a hand-written JSON Schema and is **the single
   source of truth**, including every `default`.
 - `sdks/vite-plugin/src/project-config.ts` (TS types + defaults) and
-  `crates/cli/src/project_config.rs` (serde structs + defaults) are both
+  `crates/zeroship-cli/src/project_config.rs` (serde structs + defaults) are both
   **generated from it** and committed.
 - One gate, `tests/project_config_gate.sh`, does three things: (1) regenerate
   both and `diff` against the committed files (the `env-vars-doc --check` shape
@@ -868,7 +868,7 @@ independent, and conflating them would have bought a better parser at the price
 of a boundary.
 
 **What the boundary actually is** (axis C, 1.2): `resources` and `rpc.defaults`
-are compiled into `Manifest.resources` (`crates/bundle/src/manifest.rs:51-59`)
+are compiled into `Manifest.resources` (`crates/zeroship-bundle/src/manifest.rs:51-59`)
 and turned into per-resource `EffectivePolicy` records by the gateway at
 app-load time. They are enforced on every end-user request on infrastructure the
 creator does not own. `net` is diffed by the control plane against
@@ -909,11 +909,11 @@ This is the part that makes the rule cheap: **zeroship has already built both
 halves of Wrangler's split.**
 
 - **Deployed values:** `zeroship secret set KEY=value --app=<uuid> [--expose]`
-  (`crates/cli/src/secrets.rs:3-9`). Values live in the control plane. The
+  (`crates/zeroship-cli/src/secrets.rs:3-9`). Values live in the control plane. The
   `--expose` list is the per-app opt-in deciding which secrets also reach
   `process.env`, because `process.env` "is readable by any npm dependency without
-  the creator writing a line of code" (`crates/cli/src/secrets.rs:15-19`). Key
-  rule: 1-64 bytes, `^[A-Z][A-Z0-9_]*$` (`crates/cli/src/secrets.rs:31`,
+  the creator writing a line of code" (`crates/zeroship-cli/src/secrets.rs:15-19`). Key
+  rule: 1-64 bytes, `^[A-Z][A-Z0-9_]*$` (`crates/zeroship-cli/src/secrets.rs:31`,
   `:404-413`).
 - **Local dev values:** `<root>/.env`, parsed at
   `sdks/vite-plugin/src/dev-database-url.ts:26-43`, splatted whole into the dev
@@ -921,7 +921,7 @@ halves of Wrangler's split.**
   the scaffold (`sdks/create-zeroship-app/template/_gitignore:5-6`).
 - **Platform credentials:** never in the project at all -
   `~/.config/zeroship/token.json` at mode `0600`
-  (`crates/cli/src/auth.rs:412-436`, `:439-448`).
+  (`crates/zeroship-cli/src/auth.rs:412-436`, `:439-448`).
 
 So `.env` is already `.dev.vars`, and `zeroship secret` is already
 `wrangler secret put`. The `"secrets": [...]` array in `zeroship.jsonc` adds one
@@ -1002,7 +1002,7 @@ For the creator file, do better, because it is cheap:
   `apiKey`, and `credentials` anywhere in the tree, with an error message naming
   `zeroship secret set` and `.env`.
 - `"secrets"` is `{"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}}` -
-  the same rule the CLI already enforces (`crates/cli/src/secrets.rs:404-413`). An
+  the same rule the CLI already enforces (`crates/zeroship-cli/src/secrets.rs:404-413`). An
   array of strings cannot carry a value; there is no place to put one.
 
 That is a structural guarantee rather than a convention, and it costs three
@@ -1020,11 +1020,11 @@ section). There is nothing to inherit.
 
 **The real hazard is the deploy target,** and it is worse than Wrangler's,
 because `control` has a *default* and `app` does not. Concretely
-(**VERIFIED** from `crates/cli/src/migrate.rs:64-68`): if the file's `control` is
+(**VERIFIED** from `crates/zeroship-cli/src/migrate.rs:64-68`): if the file's `control` is
 production and the creator meant staging, `zeroship migrate` applies a migration
 set to the production database. The CLI's own comment on
 `MIGRATE_KNOWN_FLAGS` says a mistake here "is not something an error message
-afterwards can undo" (`crates/cli/src/migrate.rs:46-51`).
+afterwards can undo" (`crates/zeroship-cli/src/migrate.rs:46-51`).
 
 **Design, borrowing Wrangler's non-inheritance principle and pointing it at the
 right field:**
@@ -1079,10 +1079,10 @@ enumeration reached from the other direction.
   is deleted.** It exists solely because the runner could not read the config. It
   now reads `zeroship.jsonc`, and the hardcoded `join(app.root, "migrations")` at
   `:136` goes with it. This is the clearest single proof the file was needed.
-- **`crates/cli/src/migrate.rs:43` - `DEFAULT_IR_PATH` is deleted** (7.3). The path
+- **`crates/zeroship-cli/src/migrate.rs:43` - `DEFAULT_IR_PATH` is deleted** (7.3). The path
   comes from the file or the command errors naming the key. The positional
-  override at `crates/cli/src/migrate.rs:57,99-103` stays as an escape hatch;
-  `crates/cli/src/main.rs:423`'s reminder reads the resolved path.
+  override at `crates/zeroship-cli/src/migrate.rs:57,99-103` stays as an escape hatch;
+  `crates/zeroship-cli/src/main.rs:423`'s reminder reads the resolved path.
 - **`sdks/vite-plugin/src/cli/migrate-dev.ts:77-78` - the `--migrations` / `--out`
   defaults are deleted**; the flags stay as overrides, defaults come from the file.
 **Explicitly NOT deleted**, reversing revision 1: `src/server/config.ts`,
@@ -1158,11 +1158,11 @@ commands. The file's headline benefit is not typing them. But there is a cheaper
 fix that is one afternoon of work:
 
 - Add `ZEROSHIP_APP`, resolved exactly like `ZEROSHIP_CONTROL_URL` already is
-  (`crates/cli/src/main.rs:363-367`). Ten lines, four call sites.
+  (`crates/zeroship-cli/src/main.rs:363-367`). Ten lines, four call sites.
 - Put both in `.env`, which already exists, is already gitignored, and is already
   parsed and forwarded (`sdks/vite-plugin/src/dev-database-url.ts:26-43`,
   `sdks/vite-plugin/src/dev-server.ts:910-922`).
-- Fix `crates/cli/src/main.rs:362`'s `.expect()` panic into an error naming the
+- Fix `crates/zeroship-cli/src/main.rs:362`'s `.expect()` panic into an error naming the
   env var.
 
 That solves the typing problem completely, adds **no** new file, **no** second
@@ -1193,7 +1193,7 @@ reasons it fails are both recorded, because a rejected alternative that is not
 written down gets re-proposed.
 
 **The alternative.** Do not give the Rust CLI a parser at all. `zeroship migrate`
-already treats the IR body as opaque - `crates/cli/src/migrate.rs:9-14` is
+already treats the IR body as opaque - `crates/zeroship-cli/src/migrate.rs:9-14` is
 explicit that the CLI "does not build, parse or rewrite it". Extend that shape:
 the build emits `generated/zeroship/project.resolved.json`, flat and
 machine-written, every path already absolute and every default already applied.

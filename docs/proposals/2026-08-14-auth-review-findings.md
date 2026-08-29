@@ -13,7 +13,7 @@ that disagreed with the code.
 
 ## 1. The CSRF cookie was not `HttpOnly` - FIXED (`ed596318f`)
 
-`crates/auth/src/csrf.rs` set `__Host-zsidp_csrf` without `HttpOnly`, and the
+`crates/zeroship-auth/src/csrf.rs` set `__Host-zsidp_csrf` without `HttpOnly`, and the
 module doc presented that as a requirement:
 
 > Cookie is **NOT** `HttpOnly` - the inline `<script nonce>` reads it for
@@ -33,7 +33,7 @@ No such script exists, and the claim is what stopped anyone checking.
 3. A repo-wide search for `zsidp_csrf` outside `crates/auth` returns only
    documentation and one comment.
 
-`ui::login::render_challenge` (`crates/auth/src/ui/login.rs:258-275`) shows the
+`ui::login::render_challenge` (`crates/zeroship-auth/src/ui/login.rs:258-275`) shows the
 actual mechanism: a single `csrf::generate_token()` feeds both the template's
 `{{ csrf }}` and `csrf::set_cookie`, in one response. Double-submit needs the
 cookie to be SENT, not to be READABLE.
@@ -55,7 +55,7 @@ sentence that was never true.
 `docs/reference/auth-dev-tier.md` rewritten to state the real mechanism and to
 record that the old claim was false, so the next reader does not re-derive it.
 
-**Verification.** `crates/auth/src/csrf.rs` gained
+**Verification.** `crates/zeroship-auth/src/csrf.rs` gained
 `set_cookie_is_http_only`, which fails on the pre-fix code printing the exact
 cookie:
 
@@ -77,7 +77,7 @@ did not hold.
 ## 2. Fourteen gateway auth tests never ran, and could not pass - FIXED (`77de1cd0e`, `5646d3654`)
 
 `GATEWAY_ANCHORS_DB_URL` is set nowhere in the repository, so 13 tests in
-`crates/gateway/tests/auth_token_anchors_test.rs` and 1 in
+`crates/zeroship-gateway/tests/auth_token_anchors_test.rs` and 1 in
 `browser_auth_test.rs` returned without executing. They cover, among other
 things:
 
@@ -105,14 +105,14 @@ binding was requested app=myapp
 ```
 
 `session_post` calls `verify_id_token(.., Some(&tokens.access_token), ..)`
-(`crates/gateway/src/auth_token.rs:478`), which makes `at_hash` mandatory
-(`crates/core/src/oidc_verify.rs:513`). The mock OP in the test file never
+(`crates/zeroship-gateway/src/auth_token.rs:478`), which makes `at_hash` mandatory
+(`crates/zeroship-core/src/oidc_verify.rs:513`). The mock OP in the test file never
 minted one, and minted its ID token and access token independently, so even a
 present hash would not have matched.
 
 This is a stale fixture, not a product defect, and that was checked rather than
 assumed: the REAL OP does mint `at_hash`, at
-`crates/auth/src/oidc/issuer.rs:536`, using `oidc_at_hash` - SHA-512 over the
+`crates/zeroship-auth/src/oidc/issuer.rs:536`, using `oidc_at_hash` - SHA-512 over the
 access token, leftmost 256 bits, base64url unpadded - which is exactly the
 EdDSA branch the verifier computes. Handler correct, production issuer correct,
 mock wrong.
@@ -154,7 +154,7 @@ the prose:
   `__Host-zeroship_app_anchor` are `Strict`, not `Lax`.
 - The table gave `__Host-zeroship_app_session` a lifetime of 12 h. It is
   `SESSION_TOKEN_TTL_SECS`, which is `15 * 60`
-  (`crates/gateway/src/session_token.rs:67`). The cookie is a signed
+  (`crates/zeroship-gateway/src/session_token.rs:67`). The cookie is a signed
   `zeroship-sess+jwt` assertion whose lifetime is its own `exp`; the durable
   credential is the 30-day anchor.
 
@@ -341,7 +341,7 @@ consistent with the headers being absent everywhere.
 
 ## 11. Re-clicking a verification link says "session expired" - OPEN
 
-`crates/auth/src/ui/verify.rs:90-102` collapses three outcomes into one arm.
+`crates/zeroship-auth/src/ui/verify.rs:90-102` collapses three outcomes into one arm.
 `verification::redeem_and_mark_verified` returns `Ok(None)` when the token is
 invalid, when it is expired, AND when it has already been redeemed; all three
 render `PublicErrorMessage::SessionExpired` - the words "session expired" plus
@@ -372,7 +372,7 @@ evidence belongs to that decision; whoever lands it should pick this up.
 
 `docs/feature-map.md` marked TOTP 2FA green, which that file's own legend defines
 as "Implemented, wired, and exercised end-to-end". It is implemented and it is
-exercised - `crates/auth/tests/totp_enroll_reauth_test.rs` drives the real route,
+exercised - `crates/zeroship-auth/tests/totp_enroll_reauth_test.rs` drives the real route,
 and there are four more TOTP test files. It is not WIRED.
 
 The three enrolment routes are POST-only (`/me/2fa/enroll`, `/me/2fa/confirm`,
@@ -432,7 +432,7 @@ exactly like "no callers, as expected".
 `auth_token_anchors_test.rs` panics if `CI` is set while
 `GATEWAY_ANCHORS_DB_URL` is not, so the coverage hole cannot survive in CI. The
 mechanism is sound - `declared_env!` resolves to `std::env::var`
-(`crates/core/src/config/env.rs:20`), with no registry gate that would swallow
+(`crates/zeroship-core/src/config/env.rs:20`), with no registry gate that would swallow
 it - but it has never run: the repository has no GitHub Actions history
 (`gh run list` returns HTTP 404), so `.github/workflows/ci.yml` is aspirational.
 Worth knowing before treating any CI-only guard as load-bearing.
@@ -461,7 +461,7 @@ Recorded so the next pass does not spend time re-deriving them.
 
 - **Device-flow CSRF.** An archived 2026-06-02 review reported `POST /device`
   approving a device with no CSRF check. It is present now:
-  `crates/auth/src/ui/device.rs:151` calls `csrf_valid` before approval, and
+  `crates/zeroship-auth/src/ui/device.rs:151` calls `csrf_valid` before approval, and
   `device.html` renders the token into both forms.
 - **The Supabase device page's cross-origin `fetch`es.** The page calls GoTrue
   and control from the browser while the baseline CSP is `connect-src 'self'`,
@@ -471,7 +471,7 @@ Recorded so the next pass does not spend time re-deriving them.
   authenticated by a `Bearer` access token obtained in-page from GoTrue and
   sends no cookies, so a cross-site attacker cannot forge it. The test asserting
   the token's ABSENCE is correct.
-- **`return_to` open-redirect validation.** `crates/auth/src/return_to.rs`
+- **`return_to` open-redirect validation.** `crates/zeroship-auth/src/return_to.rs`
   rejects scheme-relative, backslash-folded, absolute, and control-character
   forms, and its test table covers the post-decode shapes.
 - **Password length parity.** `signup.html` and `reset.html` both use

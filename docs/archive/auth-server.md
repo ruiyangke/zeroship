@@ -1,10 +1,10 @@
 # zeroship auth server (`auth.zeroship.ai`) — proposal
 
-**Status:** Shipped — archived 2026-06-11. Built as `crates/auth/`; living docs: `docs/reference/auth.md`, `docs/reference/auth-dev-tier.md`, `docs/runbooks/auth-deploy.md`.
+**Status:** Shipped — archived 2026-06-11. Built as `crates/zeroship-auth/`; living docs: `docs/reference/auth.md`, `docs/reference/auth-dev-tier.md`, `docs/runbooks/auth-deploy.md`.
 **Date:** 2026-05-26
 **Branch:** `proposal/auth-server`
 **Worktree:** `.claude/worktrees/auth-server`
-**Replaces:** the in-process creator auth currently embedded in `crates/control/src/auth_*.rs`
+**Replaces:** the in-process creator auth currently embedded in `crates/zeroship-control/src/auth_*.rs`
 
 This document proposes the v1 design for `crates/auth` (the zeroship Identity Provider). It is grounded in five upstream research briefings produced on 2026-05-26 (OIDC/OAuth spec stack, cryptographic core, identity flows + mailer, reference IdPs + threat model, and ory/hydra integration). Citations are inline.
 
@@ -14,7 +14,7 @@ Per the project's proposal workflow: this file lives in a fresh worktree off mai
 
 ## 0 · One-line product framing
 
-> **`auth.zeroship.ai` is the zeroship platform's single Identity Provider.** It uses **ory/hydra** as the OIDC/OAuth 2.1 protocol kernel and ships a Rust crate `crates/auth/` that owns everything around it — login UI, consent UI, user store, identity flows (password, Google, GitHub, magic-link), mailer, audit log, and the gateway integration. Every other surface — the gateway (default Relying Party for hosted creator apps), the control plane (creator dashboard), the builder, and eventually third-party "Sign in with Zeroship" RPs — authenticates users by speaking OIDC to this server.
+> **`auth.zeroship.ai` is the zeroship platform's single Identity Provider.** It uses **ory/hydra** as the OIDC/OAuth 2.1 protocol kernel and ships a Rust crate `crates/zeroship-auth/` that owns everything around it — login UI, consent UI, user store, identity flows (password, Google, GitHub, magic-link), mailer, audit log, and the gateway integration. Every other surface — the gateway (default Relying Party for hosted creator apps), the control plane (creator dashboard), the builder, and eventually third-party "Sign in with Zeroship" RPs — authenticates users by speaking OIDC to this server.
 
 One identity per human, one global user pool, one place that ever holds raw passwords. Hydra is the only place that ever holds signing keys or issues tokens. Per AGENTS.md System 2: this fills the standalone **Auth Service** box.
 
@@ -26,7 +26,7 @@ One identity per human, one global user pool, one place that ever holds raw pass
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | Service form | New Rust crate `crates/auth/` — compio binary, sibling of gateway/control/worker. Pairs with a sidecar `oryd/hydra` container. |
+| 1 | Service form | New Rust crate `crates/zeroship-auth/` — compio binary, sibling of gateway/control/worker. Pairs with a sidecar `oryd/hydra` container. |
 | 2 | OIDC engine | **ory/hydra v25.4.0** (current Docker Hub tag; calendar versioning track since 2025-10). Apache-2.0, OpenID-Foundation-certified. Pinned by major-minor in deployment. Bump to v26.x when ory publishes that tag. |
 | 3 | Tenancy model | Single global user pool. The `sub` claim is one zeroship-wide identity (typed_id `usr_…`) for every app and every internal surface. |
 | 4 | Delegation model | OIDC Identity Provider. RPs include the gateway (default RP for hosted creator apps), the control plane, the builder, and third-party apps later. |
@@ -46,7 +46,7 @@ One identity per human, one global user pool, one place that ever holds raw pass
 
 Everything in this table is load-bearing for the implementation plan. Detailed reasoning lives in the relevant sections below.
 
-**Abstraction boundary.** The `crates/auth/src/hydra_client/` module is the only code that knows hydra's wire format. If a future decision swaps the OIDC kernel (back to roll-our-own, or to dex/zitadel/keycloak), only this module + the deployment topology change.
+**Abstraction boundary.** The `crates/zeroship-auth/src/hydra_client/` module is the only code that knows hydra's wire format. If a future decision swaps the OIDC kernel (back to roll-our-own, or to dex/zitadel/keycloak), only this module + the deployment topology change.
 
 ---
 
@@ -245,7 +245,7 @@ Note: back-channel logout fan-out is **best-effort** per ory/hydra issue [#3186]
 ## 4 · Crate layout
 
 ```
-crates/auth/
+crates/zeroship-auth/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs                 # binary entrypoint; flags & config
@@ -700,7 +700,7 @@ The `gateway` client's `redirect_uris` list grows by one entry every time a crea
 
 ### 10.3 Consent UI
 
-For first-party clients (`skip_consent=true`): `crates/auth/src/ui/consent.rs` reads the challenge, sees `client.skip_consent=true`, immediately calls `accept_consent` with all requested scopes. The browser sees a single 302 from `/consent` → `/oauth2/auth` → `redirect_uri`. No human interaction.
+For first-party clients (`skip_consent=true`): `crates/zeroship-auth/src/ui/consent.rs` reads the challenge, sees `client.skip_consent=true`, immediately calls `accept_consent` with all requested scopes. The browser sees a single 302 from `/consent` → `/oauth2/auth` → `redirect_uri`. No human interaction.
 
 For third-party clients (`skip_consent=false`): render the consent UI per §10.4 of revision 1 (RP identity + readable scope translation + Allow/Deny buttons + "Remember this choice" checkbox).
 
@@ -712,12 +712,12 @@ Honour `prompt=none|login|consent` per OIDC Core §3.1.2.1.
 
 In-place, single-PR, no back-compat.
 
-1. **Retire the orphaned legacy `crates/auth/`.** A previous attempt at the auth service (bcrypt + the tokio-shaped `openidconnect` crate + Apple/Meta/Google/GitHub OAuth providers) lives on main but nothing depends on `zeroship-auth` from elsewhere in the workspace — it is dead code. Delete the legacy contents wholesale before laying down the new skeleton; git history preserves the old code if anything ever needs to be retrieved.
-2. **New crate** `crates/auth/` per §4, replacing the legacy contents.
+1. **Retire the orphaned legacy `crates/zeroship-auth/`.** A previous attempt at the auth service (bcrypt + the tokio-shaped `openidconnect` crate + Apple/Meta/Google/GitHub OAuth providers) lives on main but nothing depends on `zeroship-auth` from elsewhere in the workspace — it is dead code. Delete the legacy contents wholesale before laying down the new skeleton; git history preserves the old code if anything ever needs to be retrieved.
+2. **New crate** `crates/zeroship-auth/` per §4, replacing the legacy contents.
 3. **Hydra deployment**: add `oryd/hydra:v25.4.0` (current Docker Hub tag) to compose / Nomad spec. `hydra migrate sql up` runs as an init step. Hydra config (§16) lives in `ops/hydra.yaml`.
-4. **`auth.*` schema** added via `crates/auth/src/store/migrations.rs`. The existing `auth_users` / `auth_app_consents` / `auth_sessions` tables in the public schema are migrated by `INSERT INTO auth.users SELECT … FROM auth_users` once, then the public-schema tables are `DROP TABLE`d in the same transaction.
-5. **Control plane** loses `auth_service.rs`, `auth_handlers.rs`, `oauth.rs`, and the `/auth/*` routes. It gains a small `crates/control/src/oidc_rp.rs` that runs an OIDC client against `auth.zeroship.ai`.
-6. **Gateway** loses `crates/gateway/src/user_auth.rs`'s JWT-cookie path. It gains an OIDC RP module that:
+4. **`auth.*` schema** added via `crates/zeroship-auth/src/store/migrations.rs`. The existing `auth_users` / `auth_app_consents` / `auth_sessions` tables in the public schema are migrated by `INSERT INTO auth.users SELECT … FROM auth_users` once, then the public-schema tables are `DROP TABLE`d in the same transaction.
+5. **Control plane** loses `auth_service.rs`, `auth_handlers.rs`, `oauth.rs`, and the `/auth/*` routes. It gains a small `crates/zeroship-control/src/oidc_rp.rs` that runs an OIDC client against `auth.zeroship.ai`.
+6. **Gateway** loses `crates/zeroship-gateway/src/user_auth.rs`'s JWT-cookie path. It gains an OIDC RP module that:
    - On unauthenticated HTML requests, redirects to `auth.zeroship.ai/oauth2/auth`.
    - On `/__zeroship/auth/callback`, exchanges the code at `auth.zeroship.ai/oauth2/token`, validates the ID token against cached JWKS, sets `__Host-zeroship_app_session` at the app's origin.
    - The HMAC-signed `ZeroShip-User` payload to the worker is **unchanged**.
@@ -816,7 +816,7 @@ Cookies set at `auth.zeroship.ai`:
 
 Hydra's cookies are intentionally not `__Host-`-prefixed because hydra needs to share its session across subdomains in some deployments. We force them to `auth.zeroship.ai` exact-host scope by setting `serve.cookies.domain=auth.zeroship.ai`. They're SameSite=Lax + Secure + HttpOnly.
 
-Per-app cookies (`__Host-zeroship_app_session`) are set at the app's origin by the gateway — those are documented in `crates/gateway/`'s design.
+Per-app cookies (`__Host-zeroship_app_session`) are set at the app's origin by the gateway — those are documented in `crates/zeroship-gateway/`'s design.
 
 ---
 

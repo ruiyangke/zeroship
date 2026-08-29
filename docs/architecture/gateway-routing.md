@@ -5,12 +5,12 @@ That compile step replaced the rule walker so inheritance flattening and RPC/pat
 
 ## Relevant files
 
-- [crates/bundle/src/manifest.rs](../../crates/bundle/src/manifest.rs): `Manifest`
-- [crates/bundle/src/rule.rs](../../crates/bundle/src/rule.rs): `ResourceEntry`, `AuthLevel`, `ProcedureKind`, `Cors`, `RateLimit`
-- [crates/gateway/src/compiled.rs](../../crates/gateway/src/compiled.rs): `CompiledManifest`, `EffectivePolicy`, `ResolvedAction`
-- [crates/gateway/src/router/dispatch.rs](../../crates/gateway/src/router/dispatch.rs): request entry and policy enforcement
-- [crates/gateway/src/router/static_serve.rs](../../crates/gateway/src/router/static_serve.rs): static asset path
-- [crates/gateway/src/sync.rs](../../crates/gateway/src/sync.rs): `/internal/routes` poller and route cache
+- [crates/zeroship-bundle/src/manifest.rs](../../crates/zeroship-bundle/src/manifest.rs): `Manifest`
+- [crates/zeroship-bundle/src/rule.rs](../../crates/zeroship-bundle/src/rule.rs): `ResourceEntry`, `AuthLevel`, `ProcedureKind`, `Cors`, `RateLimit`
+- [crates/zeroship-gateway/src/compiled.rs](../../crates/zeroship-gateway/src/compiled.rs): `CompiledManifest`, `EffectivePolicy`, `ResolvedAction`
+- [crates/zeroship-gateway/src/router/dispatch.rs](../../crates/zeroship-gateway/src/router/dispatch.rs): request entry and policy enforcement
+- [crates/zeroship-gateway/src/router/static_serve.rs](../../crates/zeroship-gateway/src/router/static_serve.rs): static asset path
+- [crates/zeroship-gateway/src/sync.rs](../../crates/zeroship-gateway/src/sync.rs): `/internal/routes` poller and route cache
 
 ## Request pipeline
 
@@ -62,7 +62,7 @@ Policy flattening is done once per route update. The compiled policy carries aut
 
 When a resource's inheritance chain declares no `auth` at all, the default depends on the surface:
 
-- **`rpc:` procedures fail closed — they default to `auth: user`.** A server function nobody gave an explicit policy still requires an authenticated session, so a forgotten or mistyped resource key can never *silently* expose it. This is the root-cause fix for the SEC-5 class (a drifted `rpc:apps` vs `projects.*` family key had left the whole surface anonymous); see `crates/gateway/src/compiled.rs::resolve_effective_policy`.
+- **`rpc:` procedures fail closed — they default to `auth: user`.** A server function nobody gave an explicit policy still requires an authenticated session, so a forgotten or mistyped resource key can never *silently* expose it. This is the root-cause fix for the SEC-5 class (a drifted `rpc:apps` vs `projects.*` family key had left the whole surface anonymous); see `crates/zeroship-gateway/src/compiled.rs::resolve_effective_policy`.
 - **URL / SSR / static resources stay public by default (`auth: anon`)** — the web norm: a creator's blog, landing page, or static asset is readable without login.
 
 To expose an RPC procedure publicly, opt in **explicitly** with `auth: "anon"` + `publicly_accessible: true` on the procedure or a `rpc:<prefix>` family policy (the `publicly_accessible` flag is the deliberate confirmation the manifest validator requires alongside `auth: anon`). Manifest auth is enforced only by the gateway — the single-tenant CLI `serve` and the dev runtime do not gate by manifest policy.
@@ -101,7 +101,7 @@ Static serving is handled by `router/static_serve.rs`:
 
 ## Idempotency
 
-Idempotency lives in [idempotency.rs](../../crates/gateway/src/idempotency.rs).
+Idempotency lives in [idempotency.rs](../../crates/zeroship-gateway/src/idempotency.rs).
 
 Current behavior:
 
@@ -124,10 +124,10 @@ validates each manifest before compiling the route.
 
 | Change | Start here |
 | --- | --- |
-| Resource lookup / policy merge | [compiled.rs](../../crates/gateway/src/compiled.rs) |
-| Request gating | [dispatch.rs](../../crates/gateway/src/router/dispatch.rs) |
-| Static asset behavior | [static_serve.rs](../../crates/gateway/src/router/static_serve.rs) |
-| Route sync | [sync.rs](../../crates/gateway/src/sync.rs) |
+| Resource lookup / policy merge | [compiled.rs](../../crates/zeroship-gateway/src/compiled.rs) |
+| Request gating | [dispatch.rs](../../crates/zeroship-gateway/src/router/dispatch.rs) |
+| Static asset behavior | [static_serve.rs](../../crates/zeroship-gateway/src/router/static_serve.rs) |
+| Route sync | [sync.rs](../../crates/zeroship-gateway/src/sync.rs) |
 
 ## Related docs
 

@@ -12,7 +12,7 @@
 
 **Out of scope:**
 - HA / failover (microsandbox volumes are local-disk; revisit when snapshots ship)
-- Replacing the Tier-1 V8 runtime (`crates/runtime/`, `crates/worker/`) — this plan only touches `crates/sandbox/`
+- Replacing the Tier-1 V8 runtime (`crates/zeroship-runtime/`, `crates/zeroship-worker/`) — this plan only touches `crates/sandbox/`
 - GPU passthrough (microsandbox issue #291)
 - macOS hosts (KVM on Linux only; macOS works for `zeroship serve` local dev only)
 
@@ -87,7 +87,7 @@ exfiltrate placeholders, not real secrets. No other sandbox primitive ships
 this today.
 
 We do **not** adopt microsandbox for the Tier-1 V8 worker
-(`crates/runtime/`). That runtime stays compio + V8 isolates.
+(`crates/zeroship-runtime/`). That runtime stays compio + V8 isolates.
 
 ## Constraints we accept
 

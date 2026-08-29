@@ -1,14 +1,14 @@
 # v8_class Audit — 2026-05-04 @ ca71a55
 
-Read-only audit of `crates/runtime/src/web/` for `#[v8_class]` consumer
+Read-only audit of `crates/zeroship-runtime/src/web/` for `#[v8_class]` consumer
 adoption gaps and macro-side capability gaps revealed by hand-rolled
 patterns. The macro feature set is the "Done" section of
-`crates/runtime-macros/TODO.md`. Already-in-flight Tier 4 gaps
+`crates/zeroship-runtime-macros/TODO.md`. Already-in-flight Tier 4 gaps
 (`WebIdlEnum(case_insensitive)`, `silent_default`, dict-member
 `reject_null`, `DictOrBool<T>`, dict/enum `tc_scope` exception
 preservation) are NOT re-listed.
 
-26 files in `crates/runtime/src/web/` use `#[v8_class]`. The biggest
+26 files in `crates/zeroship-runtime/src/web/` use `#[v8_class]`. The biggest
 hold-outs are Request, Response, all of `streams/` (8 files), and the
 listener-bearing parents (EventTarget). Each is hand-rolled for a
 specific macro gap that this audit catalogs.
@@ -22,7 +22,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 ### A.1 Highest leverage
 
 #### A.1.1 Request — full `#[v8_class]` migration (blocked partially; see Part B)
-- Consumer: `crates/runtime/src/web/fetch/request.rs:182-1341` (~1160 LOC of class wiring)
+- Consumer: `crates/zeroship-runtime/src/web/fetch/request.rs:182-1341` (~1160 LOC of class wiring)
 - Pattern: hand-rolled FunctionTemplate, hand-rolled `install_*_getter`
   per scalar, `string_getter!` / `bool_getter!` macros, hand-rolled
   brand check (`brand_check`), hand-rolled finalizer, hand-rolled
@@ -47,7 +47,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
   state struct; item 3 needs an "external prototype installer" hook.
 
 #### A.1.2 Response — full `#[v8_class]` migration (same pattern as Request)
-- Consumer: `crates/runtime/src/web/fetch/response.rs:222-1131` (~900 LOC class wiring)
+- Consumer: `crates/zeroship-runtime/src/web/fetch/response.rs:222-1131` (~900 LOC class wiring)
 - Pattern: identical to Request — same hand-rolled FunctionTemplate,
   same `install_*_getter` per scalar (8 getters), same `[SameObject]`
   hand-roll for `headers`, plus 3 hand-rolled static methods
@@ -60,7 +60,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
   are an additional Part B gap.
 
 #### A.1.3 ReadableStream — `#[v8_class]` migration
-- Consumer: `crates/runtime/src/web/streams/readable.rs:212-1447` (~1200 LOC class wiring)
+- Consumer: `crates/zeroship-runtime/src/web/streams/readable.rs:212-1447` (~1200 LOC class wiring)
 - Pattern: hand-rolled FunctionTemplate (line 222, `stream_class_template`),
   hand-rolled `is_construct_call` check (line 302), hand-rolled
   finalizer, hand-rolled `Symbol.toStringTag` install, hand-rolled
@@ -78,8 +78,8 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 
 #### A.1.4 WritableStream / TransformStream — `#[v8_class]` migration
 - Consumers:
-  - `crates/runtime/src/web/streams/writable.rs:303-605` (~300 LOC class wiring)
-  - `crates/runtime/src/web/streams/transform.rs:280-905` (~500 LOC class wiring)
+  - `crates/zeroship-runtime/src/web/streams/writable.rs:303-605` (~300 LOC class wiring)
+  - `crates/zeroship-runtime/src/web/streams/transform.rs:280-905` (~500 LOC class wiring)
 - Pattern: same as ReadableStream — hand-rolled class template,
   is_construct_call (lines 312 / 298), brand-symbol set_private
   (writable.rs:373-375, transform.rs:358-360).
@@ -96,9 +96,9 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 
 #### A.1.5 ReadableStreamDefaultReader / BYOBReader / WritableStreamDefaultWriter
 - Consumers:
-  - `crates/runtime/src/web/streams/readable_default_reader.rs:188-742` (~400 LOC class wiring)
-  - `crates/runtime/src/web/streams/readable_byob_reader.rs:285-894` (~500 LOC)
-  - `crates/runtime/src/web/streams/writable_writer.rs:166-795` (~600 LOC)
+  - `crates/zeroship-runtime/src/web/streams/readable_default_reader.rs:188-742` (~400 LOC class wiring)
+  - `crates/zeroship-runtime/src/web/streams/readable_byob_reader.rs:285-894` (~500 LOC)
+  - `crates/zeroship-runtime/src/web/streams/writable_writer.rs:166-795` (~600 LOC)
 - Pattern: hand-rolled class template, hand-rolled `is_construct_call`,
   closed-promise resolver allocation (these need the resolver minted
   in the constructor itself — outside the macro's expressive range
@@ -118,13 +118,13 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 
 #### A.1.6 Migrate hand-rolled `[SameObject]` getters (already in macro TODO.md "Open")
 - Consumers:
-  - `crates/runtime/src/web/url/url.rs:574-651` (`url.searchParams`,
+  - `crates/zeroship-runtime/src/web/url/url.rs:574-651` (`url.searchParams`,
     ~80 LOC manual private-symbol cache + JS-instance allocation)
-  - `crates/runtime/src/web/fetch/request.rs:1167-1183` (`request.headers`)
-  - `crates/runtime/src/web/fetch/request.rs:1185-1210` (`request.signal`,
+  - `crates/zeroship-runtime/src/web/fetch/request.rs:1167-1183` (`request.headers`)
+  - `crates/zeroship-runtime/src/web/fetch/request.rs:1185-1210` (`request.signal`,
     plus lazy-mint logic that's complementary to the cache)
-  - `crates/runtime/src/web/fetch/response.rs` (`response.headers`)
-  - `crates/runtime/src/web/dom/abort_controller.rs:9-65`
+  - `crates/zeroship-runtime/src/web/fetch/response.rs` (`response.headers`)
+  - `crates/zeroship-runtime/src/web/dom/abort_controller.rs:9-65`
     (`controller.signal` — comment claims SameObject; check actual
     getter shape)
 - Pattern: each manually mints + stashes a `Global<v8::Object>` on the
@@ -149,14 +149,14 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 
 #### A.1.7 Static methods — many hand-rolled `install_static`
 - Consumers:
-  - `crates/runtime/src/web/dom/abort_signal.rs:742-744`
+  - `crates/zeroship-runtime/src/web/dom/abort_signal.rs:742-744`
     (`AbortSignal.abort` / `.timeout` / `.any`)
-  - `crates/runtime/src/web/fetch/response.rs:264-266`
+  - `crates/zeroship-runtime/src/web/fetch/response.rs:264-266`
     (`Response.error` / `.redirect` / `.json`)
-  - `crates/runtime/src/web/url/url.rs:399-412` (`URL.canParse` / `.parse`)
-  - `crates/runtime/src/web/streams/readable.rs:1446`
+  - `crates/zeroship-runtime/src/web/url/url.rs:399-412` (`URL.canParse` / `.parse`)
+  - `crates/zeroship-runtime/src/web/streams/readable.rs:1446`
     (`ReadableStream.from`)
-  - `crates/runtime/src/web/dom/exception.rs:303-308` (legacy
+  - `crates/zeroship-runtime/src/web/dom/exception.rs:303-308` (legacy
     constants — see A.2.4)
 - Pattern: hand-rolled `install_static(scope, class_fn, "name", cb)`
   helper, raw FunctionCallback per static. Each ~30-80 LOC.
@@ -169,7 +169,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 ### A.2 Medium leverage
 
 #### A.2.1 Headers — migrate to `#[v8_iterable(mode = live)]`
-- Consumer: `crates/runtime/src/web/headers.rs:705-1203` (~500 LOC of
+- Consumer: `crates/zeroship-runtime/src/web/headers.rs:705-1203` (~500 LOC of
   iterator + factory + forEach hand-roll)
 - Pattern: explicit `HeadersIterator` `#[v8_class]` + hand-rolled
   factories + hand-rolled forEach (lines 1044-1100). Already on
@@ -186,7 +186,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
   noncompliant for live mutation.
 
 #### A.2.2 URLSearchParamsIterator — migrate to `#[v8_iterable(mode = live)]`
-- Consumer: `crates/runtime/src/web/url/search_params.rs:705-1012` (~150 LOC)
+- Consumer: `crates/zeroship-runtime/src/web/url/search_params.rs:705-1012` (~150 LOC)
 - Pattern: hand-rolled `URLSearchParamsIterator` class + factory +
   forEach. Local brand check `is_url_search_params` (lines 173-198)
   is now redundant with the macro's brand check (commit c95915e1)
@@ -201,7 +201,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
   `self.sync_from_parent(scope)` first — macro must pass `scope`.
 
 #### A.2.3 FormDataIterator — migrate to `#[v8_iterable(mode = live)]`
-- Consumer: `crates/runtime/src/web/dom/form_data.rs:160-256` (~100 LOC)
+- Consumer: `crates/zeroship-runtime/src/web/dom/form_data.rs:160-256` (~100 LOC)
 - Pattern: hand-rolled iterator. FormData entries are `Vec<(String, FormDataValue)>`
   where FormDataValue is `String | File-Global<Object>` — the
   iterator yields strings or live File JS objects.
@@ -216,7 +216,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
   supported. See B.5.
 
 #### A.2.4 DOMException — migrate legacy code constants to `#[v8_const]`
-- Consumer: `crates/runtime/src/web/dom/exception.rs:84-110, 303-308`
+- Consumer: `crates/zeroship-runtime/src/web/dom/exception.rs:84-110, 303-308`
   (25 constants installed via two-loop boilerplate)
 - Pattern: `LEGACY_CODE_CONSTANTS: &[(&str, u16)]` table + a hand-
   rolled install loop that sets each on BOTH the constructor function
@@ -231,7 +231,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
   table is a one-shot codegen target.
 
 #### A.2.5 WebSocket close code — migrate to `ClampU16` newtype
-- Consumer: `crates/runtime/src/web/websocket/algorithms.rs:34-92`
+- Consumer: `crates/zeroship-runtime/src/web/websocket/algorithms.rs:34-92`
   (`clamp_unsigned_short` ~60 LOC) + WebSocket.close usage
 - Pattern: hand-rolled IDL `[Clamp] unsigned short` per WebIDL
   §3.2.3-converttoint Clamp branch. Already called out in
@@ -241,12 +241,12 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 - Spec: WHATWG WebSockets §3.1.
 - Risk: hand-roll has a re-clamp safeguard for the 65535.5 → 65536
   edge case. The macro's `read_clamp_u16` does the same — verified
-  in `crates/runtime/src/webidl/clamp.rs`.
+  in `crates/zeroship-runtime/src/webidl/clamp.rs`.
 
 #### A.2.6 Blob.slice — migrate to `ClampI64`
-- Consumer: `crates/runtime/src/web/blob/blob.rs:121-160`
+- Consumer: `crates/zeroship-runtime/src/web/blob/blob.rs:121-160`
   (`clamp_long_long` + `_public` re-export, ~40 LOC) +
-  `crates/runtime/src/web/blob/file.rs` (re-uses `clamp_long_long_public`).
+  `crates/zeroship-runtime/src/web/blob/file.rs` (re-uses `clamp_long_long_public`).
 - Pattern: hand-rolled IDL `[Clamp] long long` for `Blob.slice(start,
   end)`. Documented in macro TODO.md "Done" section under `[Clamp]`
   (`Blob.slice` listed).
@@ -258,7 +258,7 @@ Findings ordered within each tier by leverage (LOC × spec-correctness).
 
 #### A.2.7 streams/strategies.rs — `QueuingStrategyInit` is dict-parsed but
 required-member check is hand-rolled
-- Consumer: `crates/runtime/src/web/streams/strategies.rs:228-267`
+- Consumer: `crates/zeroship-runtime/src/web/streams/strategies.rs:228-267`
 - Pattern: `QueuingStrategyInit` IS a `WebIdlDict` already, but
   `highWaterMark` is required per IDL and the derive can't enforce
   that. The wrapper makes it `Option<f64>` and checks `None` at the
@@ -272,7 +272,7 @@ required-member check is hand-rolled
   per-class message. Easy to add.
 
 #### A.2.8 EventTarget brand check is now redundant
-- Consumer: `crates/runtime/src/web/dom/event_target.rs:117-180`
+- Consumer: `crates/zeroship-runtime/src/web/dom/event_target.rs:117-180`
 - Pattern: EventTarget hand-rolls `__InstallSlot_EventTarget` to be
   compatible with the macro convention so `#[v8_inherit(EventTarget)]`
   resolves the SAME template. The reason for hand-rolling is the
@@ -299,7 +299,7 @@ required-member check is hand-rolled
   collapses to `#[v8_constructor(must_new)]` after the migration.
 
 #### A.3.2 CloseEvent.code "default unsigned short modulo" — NEW newtype gap
-- Consumer: `crates/runtime/src/web/dom/close_event.rs:62-88`
+- Consumer: `crates/zeroship-runtime/src/web/dom/close_event.rs:62-88`
   (`convert_unsigned_short_modulo` ~30 LOC)
 - Pattern: hand-rolled WebIDL default-case `unsigned short` (NaN→0,
   ±∞→0, truncate-toward-zero, modulo 2^16). NOT `[Clamp]` — that's
@@ -316,8 +316,8 @@ required-member check is hand-rolled
 
 #### A.3.3 Blob/File `text()` / `arrayBuffer()` / `bytes()` — sync-but-Promise
 - Consumers:
-  - `crates/runtime/src/web/blob/blob.rs:629-678` (3 methods × ~15 LOC)
-  - `crates/runtime/src/web/blob/file.rs:292-338` (3 methods, identical)
+  - `crates/zeroship-runtime/src/web/blob/blob.rs:629-678` (3 methods × ~15 LOC)
+  - `crates/zeroship-runtime/src/web/blob/file.rs:292-338` (3 methods, identical)
 - Pattern: each manually allocates `PromiseResolver::new`, gets the
   promise, resolves immediately with the synchronously-computed value,
   returns the promise as `Local<Value>`. The user method returns
@@ -336,7 +336,7 @@ required-member check is hand-rolled
   macro emits the resolver+resolve dance.
 
 #### A.3.4 fetch_request.rs — RequestInit dict members
-- Consumer: `crates/runtime/src/web/fetch/request.rs:430-477`
+- Consumer: `crates/zeroship-runtime/src/web/fetch/request.rs:430-477`
   (`copy_string_init` × 9 + `keepalive` bool)
 - Pattern: hand-rolled `copy_string_init` helper (per-member loop) +
   ad-hoc dispatch for the boolean. Already on macro TODO.md "Open"
@@ -353,10 +353,10 @@ required-member check is hand-rolled
 #### A.3.5 Hand-rolled `is_blob_instance` / `is_request_instance` /
 `is_readable_stream_global_instance` brand checks
 - Consumers:
-  - `crates/runtime/src/web/blob/blob.rs:382-397` (`is_blob_instance`)
-  - `crates/runtime/src/web/fetch/request.rs:842-854` (`is_request_instance`)
-  - `crates/runtime/src/web/fetch/request.rs:859-875` (`is_readable_stream_global_instance`)
-  - `crates/runtime/src/web/url/search_params.rs:173-198` (`is_url_search_params`)
+  - `crates/zeroship-runtime/src/web/blob/blob.rs:382-397` (`is_blob_instance`)
+  - `crates/zeroship-runtime/src/web/fetch/request.rs:842-854` (`is_request_instance`)
+  - `crates/zeroship-runtime/src/web/fetch/request.rs:859-875` (`is_readable_stream_global_instance`)
+  - `crates/zeroship-runtime/src/web/url/search_params.rs:173-198` (`is_url_search_params`)
 - Pattern: per-class `obj.instance_of(scope, globalThis.Foo)` walks.
   These are CROSS-class brand checks (e.g. asking "is this arg a
   Blob?") — different from the receiver brand check the macro emits
@@ -473,7 +473,7 @@ NEW gaps revealed by the audit, beyond the 5 already in flight (Tier 4).
 - Pattern hand-rolled: the iterator's value-marshaling is hand-coded
   to materialize `entry_value_to_v8(scope, &entry.1)` per yield.
 - Proposed macro feature: extend `classify_ty` in
-  `crates/runtime-macros/src/v8_iterable.rs:175-194` to recognise a
+  `crates/zeroship-runtime-macros/src/v8_iterable.rs:175-194` to recognise a
   `value = Local<Value>` or a custom-trait-based marshal. Live mode
   already needs to call into the parent each yield; adding
   Global-projection is a small step from there.
@@ -489,7 +489,7 @@ NEW gaps revealed by the audit, beyond the 5 already in flight (Tier 4).
 - Consumers blocked: DOMException (A.2.4) — 25 legacy code constants.
   Future consumers: any IDL surface with `const` declarations
   (e.g. Event NONE/AT_TARGET/etc.; currently hand-rolled in
-  `crates/runtime/src/web/dom/event.rs:34-40` as Rust constants but
+  `crates/zeroship-runtime/src/web/dom/event.rs:34-40` as Rust constants but
   not exposed on the JS class).
 - Pattern hand-rolled: a `&[(&str, u16)]` table + a `for (name, val)
   in TABLE { class_fn.set(...); proto.set(...); }` loop.
@@ -512,7 +512,7 @@ NEW gaps revealed by the audit, beyond the 5 already in flight (Tier 4).
 - Pattern hand-rolled: model the field as `Option<f64>` and check
   `None` at the call site, dressing the converter error with the
   class name. See `strategies.rs:227-266` and the `WebIdlDict`
-  reserved-hooks comment (`crates/runtime-macros/TODO.md:177-181`).
+  reserved-hooks comment (`crates/zeroship-runtime-macros/TODO.md:177-181`).
 - Proposed macro feature: `#[webidl_required]` field-level attribute
   on `WebIdlDict`. The derive emits `if undefined { return Err(TypeError("…required…")) }`
   for that field's read step.
@@ -552,7 +552,7 @@ NEW gaps revealed by the audit, beyond the 5 already in flight (Tier 4).
 - Pattern hand-rolled: 30 LOC fn doing NaN→0, truncate, modulo 2^16.
 - Proposed macro feature: a `WrapU16` newtype mirroring the
   `EnforceRangeU64` / `ClampU16` pattern in
-  `crates/runtime/src/webidl/`. Reader fn + macro detection by
+  `crates/zeroship-runtime/src/webidl/`. Reader fn + macro detection by
   ident in `clamp_kind`-style helper. Optional broader scope: full
   set `WrapU8 / WrapU16 / WrapU32 / WrapI8 / WrapI16 / WrapI32`
   for completeness.

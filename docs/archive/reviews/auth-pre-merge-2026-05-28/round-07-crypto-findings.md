@@ -2,7 +2,7 @@
 
 Total: 6 findings (0 critical, 1 high, 3 medium, 2 low).
 
-Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree. The encrypted app-env secret store is `crates/control/src/env_store.rs`, backed by `crates/core/src/crypto.rs`.
+Scope note: `crates/zeroship-auth/src/store/env_store.rs` does not exist in this worktree. The encrypted app-env secret store is `crates/zeroship-control/src/env_store.rs`, backed by `crates/zeroship-core/src/crypto.rs`.
 
 ## CRITICAL
 
@@ -11,7 +11,7 @@ Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree
 ## HIGH
 
 ### H1. App secret ciphertexts are not bound to `app_id` or `key_name`
-**File:** `crates/core/src/crypto.rs:70`, `crates/control/src/env_store.rs:269`, `crates/control/src/env_store.rs:353`, `crates/control/src/env_store.rs:497`
+**File:** `crates/zeroship-core/src/crypto.rs:70`, `crates/zeroship-control/src/env_store.rs:269`, `crates/zeroship-control/src/env_store.rs:353`, `crates/zeroship-control/src/env_store.rs:497`
 
 **Severity rationale:** `crypto::encrypt` calls AES-256-GCM with only plaintext (`encrypt(&nonce, plaintext)`) and no associated data. `EnvStore` stores only `nonce || ciphertext || tag` and decrypts the blob without passing the row context. Because every app uses the same derived control-plane key, any actor with a DB write primitive but without the master key can transplant one row's ciphertext into another `(app_id, key_name)` row and the target app will decrypt it successfully. That turns an app-env table write bug or compromised DB role into cross-app secret exfiltration through the normal worker env endpoint.
 
@@ -34,7 +34,7 @@ Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree
 ## MEDIUM
 
 ### M1. Control master key derivation is a single SHA-256 with no entropy check
-**File:** `crates/core/src/crypto.rs:51`, `crates/control/src/env_store.rs:127`, `crates/control/src/env_store.rs:137`
+**File:** `crates/zeroship-core/src/crypto.rs:51`, `crates/zeroship-control/src/env_store.rs:127`, `crates/zeroship-control/src/env_store.rs:137`
 
 **Severity rationale:** Production only rejects an empty `MASTER_KEY`; any non-empty string is accepted and turned into the AES key with `SHA256("zeroship-secret-key-v1" || master)`. There is no memory-hard KDF, no salt, and no minimum entropy/format validation. If an operator uses a human password or short shared secret, a DB dump of `app_secrets.ciphertext` becomes an offline password-cracking target. Because the same derived key protects every app secret, each guessed master key is amortized across the whole table.
 
@@ -46,7 +46,7 @@ Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree
 **Suggested fix:** Pick one contract and enforce it at boot. The simplest pre-launch shape is `MASTER_KEY` must decode to 32 random bytes (base64url or hex) and is then fed into HKDF for domain separation. If password-style master keys must be supported, use Argon2id or PBKDF2 with a persisted deployment salt and explicit parameters. Add startup tests that reject short/default-looking master keys in non-dev mode.
 
 ### M2. JWK old-key retirement never runs under the default rotation cadence
-**File:** `crates/auth/src/cron/jwk_rotation.rs:114`, `crates/auth/src/cron/jwk_rotation.rs:177`, `crates/auth/src/cron/jwk_rotation.rs:189`, `crates/auth/src/cron/jwk_rotation.rs:213`
+**File:** `crates/zeroship-auth/src/cron/jwk_rotation.rs:114`, `crates/zeroship-auth/src/cron/jwk_rotation.rs:177`, `crates/zeroship-auth/src/cron/jwk_rotation.rs:189`, `crates/zeroship-auth/src/cron/jwk_rotation.rs:213`
 
 **Severity rationale:** The cron uses one `auth.cron_state.last_rotated_at` timestamp for both rotation due-ness and retirement age. With defaults (`rotation_days = 90`, `retain_days = 31`), every normal tick at day 90 sees `days_since = 90`, skips retirement because `90 < 121`, rotates, and records `last_rotated_at = NOW()`. The next cycle repeats with `days_since = 90`. As long as cron is running normally, `days_since` never reaches `rotation_days + retain_days`, so old signing keys accumulate indefinitely. A retired or compromised old Hydra private key therefore remains published and accepted far beyond the intended 31-day overlap.
 
@@ -58,7 +58,7 @@ Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree
 **Suggested fix:** Track retirement state separately from rotation state, or retire by key generation/creation time rather than the latest rotation timestamp. For this list-based Hydra store, the pragmatic pre-launch fix is: after a successful rotation, retain only the current generation plus the previous generation for each algorithm once the previous generation is older than `retain_days`. Add a regression test that runs three simulated 90-day rotations and asserts generation 0 is removed.
 
 ### M3. Gateway OIDC stash HMAC key falls back to a public default outside dev mode
-**File:** `crates/gateway/src/main.rs:48`, `crates/gateway/src/main.rs:54`, `crates/gateway/src/main.rs:189`, `crates/gateway/src/oidc_rp.rs:380`, `crates/gateway/src/oidc_rp.rs:392`
+**File:** `crates/zeroship-gateway/src/main.rs:48`, `crates/zeroship-gateway/src/main.rs:54`, `crates/zeroship-gateway/src/main.rs:189`, `crates/zeroship-gateway/src/oidc_rp.rs:380`, `crates/zeroship-gateway/src/oidc_rp.rs:392`
 
 **Severity rationale:** The gateway defaults `STASH_SIGNING_KEY` to `dev-stash-key-please-rotate` and never rejects it when `INSECURE_DEV=false`. That key signs the per-app `__Host-zs_oidc_stash` containing OAuth `state`, PKCE verifier, OIDC nonce, original path, and redirect URI. Control and auth have production guards for equivalent stash keys; gateway does not. In a misconfigured deployment, stash integrity depends on a known public string, so any stash-cookie tamper/injection primitive becomes a valid signed stash instead of failing HMAC verification.
 
@@ -72,7 +72,7 @@ Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree
 ## LOW
 
 ### L1. SES-SNS webhook verification is pinned to legacy RSA-SHA1 signatures
-**File:** `crates/auth/src/ui/webhooks.rs:200`, `crates/auth/src/ui/webhooks.rs:221`, `crates/auth/src/mailer/sns.rs:30`, `crates/auth/src/mailer/sns.rs:237`
+**File:** `crates/zeroship-auth/src/ui/webhooks.rs:200`, `crates/zeroship-auth/src/ui/webhooks.rs:221`, `crates/zeroship-auth/src/mailer/sns.rs:30`, `crates/zeroship-auth/src/mailer/sns.rs:237`
 
 **Severity rationale:** The SNS webhook handler rejects every `SignatureVersion` except `1`, and the verifier uses `RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY`. This is compatible with legacy SNS deliveries, but it keeps SHA-1 in an inbound webhook authenticity boundary even though SNS supports SignatureVersion 2 with SHA-256. It also prevents operators from hardening the SNS topic to v2 without breaking bounces/complaints.
 

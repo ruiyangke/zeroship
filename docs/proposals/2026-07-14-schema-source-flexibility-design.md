@@ -13,8 +13,8 @@
 
 Two facts about the *current* code bound the problem:
 
-- **Deploy already refuses to apply migrations.** `crates/control/src/api.rs:416` returns `migration_approval_removed` — *"deploy no longer applies migrations; use the migration service `/v1/apps/{id}/migrations/apply`."* The out-of-band migration-service path (`zeroship-platform-migrate`) is **shipped** (Phase F), not future.
-- **`registerModel` on PG is already a DDL no-op.** `crates/plugin-db/src/register_model/mod.rs:210` is `(Some(_pg), _) => Ok(())`. The four-phase convergence modules (`bootstrap` / `plan` / `validate`) are `#[cfg(any(test, feature = "test-helpers"))]`-gated (`mod.rs:56-63`) — they do **not** compile into the production worker. On PG, `registerModel` still *runs* at boot (via `installSchema` off `globalThis.__zsRuntimeDescriptor`, the fold's `RuntimeSchemaDescriptor`), but only to **populate the metadata cache** (idPrefix, encrypted/mask facets — `mod.rs:198-218`). No CREATE, no ALTER.
+- **Deploy already refuses to apply migrations.** `crates/zeroship-control/src/api.rs:416` returns `migration_approval_removed` — *"deploy no longer applies migrations; use the migration service `/v1/apps/{id}/migrations/apply`."* The out-of-band migration-service path (`zeroship-platform-migrate`) is **shipped** (Phase F), not future.
+- **`registerModel` on PG is already a DDL no-op.** `crates/zeroship-plugin-db/src/register_model/mod.rs:210` is `(Some(_pg), _) => Ok(())`. The four-phase convergence modules (`bootstrap` / `plan` / `validate`) are `#[cfg(any(test, feature = "test-helpers"))]`-gated (`mod.rs:56-63`) — they do **not** compile into the production worker. On PG, `registerModel` still *runs* at boot (via `installSchema` off `globalThis.__zsRuntimeDescriptor`, the fold's `RuntimeSchemaDescriptor`), but only to **populate the metadata cache** (idPrefix, encrypted/mask facets — `mod.rs:198-218`). No CREATE, no ALTER.
 
 So the genuine, still-open problem is **schema sourcing**, in three parts:
 
@@ -81,7 +81,7 @@ All three feed the **same emitter core**; they differ only in how they build the
 The creator writes a `schema(...)` literal in a committed **`schema.ts` at app root** — the same `@zeroship/db` calls that appear in the generated `env.db.ts`, but authored by hand. This file **is the source**. The toolchain evaluates it (it is just `@zeroship/db` builder calls producing a descriptor in memory) → snapshot → emits `schema.runtime.json` and an `env.db.ts` that reduces to the module augmentation over the author's `schema.ts` (see §11.3). The author owns drift, exactly as with any hand-written type.
 
 ### 4.3 Introspection (bootstrap helper for the manual source)
-`gen-types --from-db <dsn>` connects to an existing database, reads `information_schema` (the capability already in `crates/plugin-db/src/crud/introspect_schema.rs`), maps columns → `t.*()` fields / PK+nullable → `.required()` / indexes → `.index(...)`, and **writes the initial declaration**. After that, it is an ordinary manual source. This is how a Liquibase/Prisma/raw-SQL app gets typed `env.db` without adopting our migration engine. Introspection is **lossy** — see §9 Phase 2 for the explicit fidelity gaps (idPrefix, JSON-family logical types, SQLite introspector status).
+`gen-types --from-db <dsn>` connects to an existing database, reads `information_schema` (the capability already in `crates/zeroship-plugin-db/src/crud/introspect_schema.rs`), maps columns → `t.*()` fields / PK+nullable → `.required()` / indexes → `.index(...)`, and **writes the initial declaration**. After that, it is an ordinary manual source. This is how a Liquibase/Prisma/raw-SQL app gets typed `env.db` without adopting our migration engine. Introspection is **lossy** — see §9 Phase 2 for the explicit fidelity gaps (idPrefix, JSON-family logical types, SQLite introspector status).
 
 ---
 
@@ -189,7 +189,7 @@ DDL against a *real* (non-dev) database is already out of the deploy path. This 
   - **Lossy-fidelity subsection (explicit).** Introspection cannot recover everything the snapshot carries:
     - **idPrefix** (`t.id(prefix)`) is a platform convention with no `information_schema` footprint — it must be defaulted or prompted, and the emitted declaration flags it as author-supplied.
     - **JSON-family logical type** — `information_schema` collapses several logical types (json/jsonb, enum-as-text, vector) into base column types; the introspector emits the base type and documents the widening.
-    - **The SQLite introspector is a documented follow-up** per the header of `crates/plugin-db/src/crud/introspect_schema.rs` — Phase 2 ships the PG introspector; SQLite `--from-db` is deferred.
+    - **The SQLite introspector is a documented follow-up** per the header of `crates/zeroship-plugin-db/src/crud/introspect_schema.rs` — Phase 2 ships the PG introspector; SQLite `--from-db` is deferred.
 - `zero-migrate sync --from-snapshot` (gated, opt-in) → managed DDL from a snapshot.
   - **Version-identity / journal story (explicit).** A file-based migration derives a stable version from its filename (Phase F's filename-derived stable versions). A **snapshot has no filename** → `sync --from-snapshot` must define its own version identity: hash the snapshot (content-addressed version), record a synthetic journal entry keyed by that hash, and make re-runs idempotent (a snapshot whose hash matches the last-applied journal entry is a no-op). This must interoperate with the existing `_mig` journal so a later `op.*` migration on the same DB does not conflict with a sync-authored baseline. Design this before shipping `sync`.
 - `zero-migrate check --against-db` → drift warning (dev/CI only; never blocks deploy, never mutates).

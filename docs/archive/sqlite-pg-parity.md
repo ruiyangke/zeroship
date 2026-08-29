@@ -92,7 +92,7 @@ A concurrent refactor (landed 2026-05-24 on branch `refactor/remove-hardening-fl
 
 The matrix is the **verifier** of the Tier-1 contract; it cannot *define* it. A literal "Tier-1 = deep-equal" assertion is unrunnable against today's decoders — it fails on row one of every fixture, because `created_at`, `boolean`, and `json` decode to different JSON *types* on the two backends (§0 note, §4.4). So the dependency is: **first the §4.4 canonical wire-shape contract + the normalization layer that makes both backends emit it; then the matrix asserts deep-equal against that contract.** The matrix is the regression guard for the normalization layer, not a substitute for it.
 
-Structure (`crates/plugin-db/tests/parity/` or a dedicated harness):
+Structure (`crates/zeroship-plugin-db/tests/parity/` or a dedicated harness):
 - A fixture schema exercising every field type, index kind, encryption, masking, system fields, refs.
 - For each SDK operation: run on PG (via test pool) + SQLite (via temp file), then assert:
   - **Tier 1**: deep-equal *after* both rows have passed the §4.4 normalization layer — i.e. the matrix asserts each backend independently produces the canonical wire shape, then asserts the two are equal. A divergence is a normalization-layer bug, surfaced at the field that broke (the matrix names the field + declared type, not just "rows differ").

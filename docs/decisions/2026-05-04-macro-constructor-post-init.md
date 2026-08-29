@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-04
 **Long-form design:** [`docs/archive/macro-constructor-post-init.md`](../archive/macro-constructor-post-init.md)
-**Implementation:** [`crates/runtime-macros/src/v8_class/parse/marker_attr.rs`](../../crates/runtime-macros/src/v8_class/parse/marker_attr.rs) (codegen lives in `crates/runtime-macros/`).
+**Implementation:** [`crates/zeroship-runtime-macros/src/v8_class/parse/marker_attr.rs`](../../crates/zeroship-runtime-macros/src/v8_class/parse/marker_attr.rs) (codegen lives in `crates/zeroship-runtime-macros/`).
 
 ## Context
 

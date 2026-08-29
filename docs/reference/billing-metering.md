@@ -47,7 +47,7 @@ Trusted producers feed the process-wide `Meter` in `crates/metering`:
 primitives receive a handle for their app and cannot meter another app.
 
 `Meter::drain` emits one `UsageEvent` per drained `(app_id, metric)` window. The
-stable JSON contract lives in `crates/core/src/usage_event.rs`:
+stable JSON contract lives in `crates/zeroship-core/src/usage_event.rs`:
 
 - `event_id`: provider idempotency key.
 - `source`: producer namespace.
@@ -57,7 +57,7 @@ stable JSON contract lives in `crates/core/src/usage_event.rs`:
 - `event_time`: Unix seconds.
 - `dims`: optional string dimensions.
 
-The worker outbox in `crates/metering/src/outbox.rs` publishes each event as one
+The worker outbox in `crates/zeroship-metering/src/outbox.rs` publishes each event as one
 stream record. The partition key is the app id, so one app's usage remains
 ordered within a stream partition.
 
@@ -84,7 +84,7 @@ reconciliation findings.
 
 ## Provider Stack
 
-Billing providers live under `crates/control/src/metering/provider/`. The
+Billing providers live under `crates/zeroship-control/src/metering/provider/`. The
 registry maps a string id to a provider factory. Boot builds a role-addressed
 `BillingStack`:
 
@@ -125,7 +125,7 @@ taken as literal material.
 
 ## Event Forwarder
 
-`crates/control/src/cron/event_forwarder.rs` consumes the stream and forwards
+`crates/zeroship-control/src/cron/event_forwarder.rs` consumes the stream and forwards
 usage to the meter-capable provider.
 
 For each batch:
@@ -145,7 +145,7 @@ retries from double-counting.
 ## Pricing Catalog
 
 The platform plan catalog is data-driven, held in `zeroship.plans` and read
-through `crates/control/src/plan_catalog.rs`. It is edited in the DATABASE:
+through `crates/zeroship-control/src/plan_catalog.rs`. It is edited in the DATABASE:
 the operator HTTP surface that used to front it (`/api/plans`,
 `/api/pricing-config`) was gated on a fleet-wide grant that no principal holds
 since the platform staff roles were deleted, and it went with them. Per tier:
@@ -156,7 +156,7 @@ since the platform staff roles were deleted, and it went with them. Per tier:
 - `spend_limit_default_cents`
 - runtime and network limits
 
-Pricing math lives in `crates/control/src/pricing.rs`. Money is integer cents
+Pricing math lives in `crates/zeroship-control/src/pricing.rs`. Money is integer cents
 with widened intermediates and line-boundary rounding. For a period:
 
 ```text
@@ -172,13 +172,13 @@ same catalog and frozen invoice records that the creator billing APIs expose.
 Spend limits are per app and are distinct from included quota. The effective
 limit is either the app override in `app_spend_limit` or the plan default.
 
-`crates/control/src/cron/spend_recompute.rs` periodically reads the retained
+`crates/zeroship-control/src/cron/spend_recompute.rs` periodically reads the retained
 stream for the current billing period, computes a full sum per `(app_id, metric)`,
 overwrites the `usage_aggregates` snapshot for that period, and runs the spend
 evaluator. The default recompute cadence is hourly and is configurable with
 `ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL`.
 
-`crates/control/src/spend.rs` derives `SpendState`:
+`crates/zeroship-control/src/spend.rs` derives `SpendState`:
 
 - `Allow`: below warning threshold.
 - `Warn`: near the limit; the gateway can surface a warning header.
@@ -186,7 +186,7 @@ evaluator. The default recompute cadence is hourly and is configurable with
 - `Block`: hard cap; the gateway returns 402 before dispatch.
 
 The gateway pulls route and spend state from control on its normal registry poll
-and enforces locally in `crates/gateway/src/enforce.rs`. No provider call is made
+and enforces locally in `crates/zeroship-gateway/src/enforce.rs`. No provider call is made
 on the request path.
 
 The gateway also applies a coarse per-app throughput backstop with rate and
@@ -195,7 +195,7 @@ tier apps use tighter limits because they have little or no paid headroom.
 
 ## Reconciliation Safety Net
 
-`crates/control/src/cron/billing_reconcile.rs` is the safety net for provider
+`crates/zeroship-control/src/cron/billing_reconcile.rs` is the safety net for provider
 drift and late period adjustments. It compares:
 
 - the local stream witness for the period,

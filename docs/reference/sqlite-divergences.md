@@ -34,19 +34,19 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 
 ## Source of truth
 
-- [crates/plugin-db/src/backend/mod.rs](../../crates/plugin-db/src/backend/mod.rs) - cross-backend trait contracts for vector and spatial search
-- [crates/plugin-db/src/backend/sqlite/mod.rs](../../crates/plugin-db/src/backend/sqlite/mod.rs) — SQLite implementations
-- [crates/plugin-db/src/backend/sqlite/vector.rs](../../crates/plugin-db/src/backend/sqlite/vector.rs) — `vector_unsupported_metric`
-- [crates/plugin-db/src/backend/sqlite/spatial.rs](../../crates/plugin-db/src/backend/sqlite/spatial.rs) — haversine helper
-- [crates/plugin-db/src/backend/sqlite/session.rs](../../crates/plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
-- [crates/plugin-db/src/backend/sqlite/error.rs](../../crates/plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
-- [crates/plugin-db/src/v8_classes/transaction.rs](../../crates/plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
+- [crates/zeroship-plugin-db/src/backend/mod.rs](../../crates/zeroship-plugin-db/src/backend/mod.rs) - cross-backend trait contracts for vector and spatial search
+- [crates/zeroship-plugin-db/src/backend/sqlite/mod.rs](../../crates/zeroship-plugin-db/src/backend/sqlite/mod.rs) — SQLite implementations
+- [crates/zeroship-plugin-db/src/backend/sqlite/vector.rs](../../crates/zeroship-plugin-db/src/backend/sqlite/vector.rs) — `vector_unsupported_metric`
+- [crates/zeroship-plugin-db/src/backend/sqlite/spatial.rs](../../crates/zeroship-plugin-db/src/backend/sqlite/spatial.rs) — haversine helper
+- [crates/zeroship-plugin-db/src/backend/sqlite/session.rs](../../crates/zeroship-plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
+- [crates/zeroship-plugin-db/src/backend/sqlite/error.rs](../../crates/zeroship-plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
+- [crates/zeroship-plugin-db/src/v8_classes/transaction.rs](../../crates/zeroship-plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
 - [crates/zeroship-schema/src/query.rs](../../crates/zeroship-schema/src/query.rs) — cross-backend `ORDER BY` shaping and the `IS NULL` buckets, plus the system-column and index emission
-- [crates/plugin-db/src/crud/mod.rs](../../crates/plugin-db/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
-- [crates/plugin-db/src/backend/sqlite/dialect.rs](../../crates/plugin-db/src/backend/sqlite/dialect.rs) — `now_fn()` returns `CURRENT_TIMESTAMP`, which is where the whole-second system-timestamp resolution comes from
+- [crates/zeroship-plugin-db/src/crud/mod.rs](../../crates/zeroship-plugin-db/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
+- [crates/zeroship-plugin-db/src/backend/sqlite/dialect.rs](../../crates/zeroship-plugin-db/src/backend/sqlite/dialect.rs) — `now_fn()` returns `CURRENT_TIMESTAMP`, which is where the whole-second system-timestamp resolution comes from
 
 ## Test coverage
 
-SQLite-specific backend coverage lives in [crates/plugin-db/tests/sqlite_integration.rs](../../crates/plugin-db/tests/sqlite_integration.rs). The parity matrix helpers live in [crates/plugin-db/tests/parity/mod.rs](../../crates/plugin-db/tests/parity/mod.rs).
+SQLite-specific backend coverage lives in [crates/zeroship-plugin-db/tests/sqlite_integration.rs](../../crates/zeroship-plugin-db/tests/sqlite_integration.rs). The parity matrix helpers live in [crates/zeroship-plugin-db/tests/parity/mod.rs](../../crates/zeroship-plugin-db/tests/parity/mod.rs).
 
 The two rows above that compare the *tiers* rather than the engines — transaction isolation, and system timestamp resolution — are measured by [tests/e2e_dev_vs_deployed_db.sh](../../tests/e2e_dev_vs_deployed_db.sh), which runs one identical operation sequence against `pnpm dev` and against the same app deployed behind the gateway and diffs the results. A crate-local test cannot see either, because both are properties of the seam and not of a backend.

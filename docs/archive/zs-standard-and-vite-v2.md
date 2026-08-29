@@ -155,7 +155,7 @@ The runtime — `crates/runtime` — at isolate boot:
    - WebSocket upgrade on `/_zs/v1/<wireId>` → dispatcher (subscription path).
    - everything else → `default.fetch` (existing).
 
-The dispatcher (embedded in `crates/runtime/src/bootstrap/rpc_dispatch.js`) implements:
+The dispatcher (embedded in `crates/zeroship-runtime/src/bootstrap/rpc_dispatch.js`) implements:
 
 ```js
 async function dispatch(rpc, name, input, ctx) {
@@ -294,9 +294,9 @@ Five sub-stages. Each shippable, smoke-testable, and additive (back-compat prese
 
 ### 5a — Runtime grows dict-shape `default.rpc` dispatcher
 
-**New:** `crates/runtime/src/bootstrap/rpc_dispatch.js` — the dispatcher described above. Embedded via `include_str!`. Evaluated at isolate boot. Exports `__zsKernelDispatch` (or similar) on globalThis.
+**New:** `crates/zeroship-runtime/src/bootstrap/rpc_dispatch.js` — the dispatcher described above. Embedded via `include_str!`. Evaluated at isolate boot. Exports `__zsKernelDispatch` (or similar) on globalThis.
 
-**Runtime change:** `crates/runtime/src/core/init.rs` (around line 656) — when `user.default.rpc` is an object, wrap it in a dispatcher; when it's a function, use directly (back-compat).
+**Runtime change:** `crates/zeroship-runtime/src/core/init.rs` (around line 656) — when `user.default.rpc` is an object, wrap it in a dispatcher; when it's a function, use directly (back-compat).
 
 **Acceptance:**
 - Two new runtime tests: dict-shape dispatch + back-compat function-shape dispatch.
@@ -323,7 +323,7 @@ Five sub-stages. Each shippable, smoke-testable, and additive (back-compat prese
 
 ### 5c — Drop `manifest.exports.schema` reliance
 
-**Change:** `crates/runtime/src/bootstrap/db_init.js` reads `default.schema` off the loaded entry module instead of dynamic-importing via `manifest.exports.schema`. Removes the need for the Vite plugin to compute + bake the path.
+**Change:** `crates/zeroship-runtime/src/bootstrap/db_init.js` reads `default.schema` off the loaded entry module instead of dynamic-importing via `manifest.exports.schema`. Removes the need for the Vite plugin to compute + bake the path.
 
 **Change:** `sdks/vite-plugin/src/resolve-schema.ts` deleted. Schema lives on the entry's `default.schema`; Vite plugin's only schema concern is re-exporting `src/schema.ts` (when split) onto the synthetic entry's default.
 

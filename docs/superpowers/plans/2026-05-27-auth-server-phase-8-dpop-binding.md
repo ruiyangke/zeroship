@@ -76,14 +76,14 @@ The gateway needs its own Ed25519 key pair to sign wrapper tokens. Phase 8 v1: l
 
 ### Files
 
-- Create `crates/gateway/src/signing.rs`
-- Modify `crates/gateway/src/main.rs` — load key at boot, add to GateState
-- Modify `crates/gateway/src/lib.rs` — GateState gets `signing_key: Arc<SigningKey>`
+- Create `crates/zeroship-gateway/src/signing.rs`
+- Modify `crates/zeroship-gateway/src/main.rs` — load key at boot, add to GateState
+- Modify `crates/zeroship-gateway/src/lib.rs` — GateState gets `signing_key: Arc<SigningKey>`
 
 ### Implementation
 
 ```rust
-//! crates/gateway/src/signing.rs
+//! crates/zeroship-gateway/src/signing.rs
 //!
 //! Gateway-issued JWT signing key. Phase 8 v1 loads from disk (PKCS#8 PEM
 //! or DER). KMS integration is Phase 9+.
@@ -184,8 +184,8 @@ gateway: signing — Ed25519 PKCS#8 key loader + JWK thumbprint helper
 
 ### Files
 
-- Create `crates/gateway/src/wrapper_token.rs`
-- Modify `crates/gateway/src/lib.rs` (export)
+- Create `crates/zeroship-gateway/src/wrapper_token.rs`
+- Modify `crates/zeroship-gateway/src/lib.rs` (export)
 
 ### Wrapper-token claim shape
 
@@ -356,8 +356,8 @@ gateway: wrapper_token — Ed25519-signed JWT with cnf.jkt binding + RFC 9068 at
 
 ### Files
 
-- Create `crates/gateway/src/dpop_exchange.rs`
-- Modify `crates/gateway/src/main.rs` — register route
+- Create `crates/zeroship-gateway/src/dpop_exchange.rs`
+- Modify `crates/zeroship-gateway/src/main.rs` — register route
 
 ### Endpoint
 
@@ -465,7 +465,7 @@ gateway: /__zs/auth/dpop-exchange — issue wrapper token bound to client's DPoP
 
 - [x] Landed 2026-05-27 — `841211f0 gateway: dispatch — verify wrapper tokens locally + enforce cnf.jkt binding (raw hydra path preserved)`.
 
-### Modify `crates/gateway/src/router/auth.rs::resolve_dpop_user_header`
+### Modify `crates/zeroship-gateway/src/router/auth.rs::resolve_dpop_user_header`
 
 Currently the DPoP path in P7-U5 introspects the access token at hydra per request. Phase 8 changes this for wrapper tokens:
 
@@ -537,9 +537,9 @@ gateway: dispatch — verify wrapper tokens locally + enforce cnf.jkt binding (r
 
 ## Unit U5 · E2e test: full DPoP-bound flow
 
-- [x] Landed 2026-05-27 — `269d62b6 gateway: e2e — DPoP-bound wrapper-token flow (exchange + dispatch + mismatch rejection)`. (Test file landed as `crates/gateway/tests/dpop_bound_e2e.rs`.)
+- [x] Landed 2026-05-27 — `269d62b6 gateway: e2e — DPoP-bound wrapper-token flow (exchange + dispatch + mismatch rejection)`. (Test file landed as `crates/zeroship-gateway/tests/dpop_bound_e2e.rs`.)
 
-File: `crates/gateway/tests/dpop_binding_e2e.rs`.
+File: `crates/zeroship-gateway/tests/dpop_binding_e2e.rs`.
 
 ```rust
 //! End-to-end DPoP binding flow:

@@ -220,7 +220,7 @@ call. The driver has `prepare_cached` (`libs/compio-postgres/src/prepare.rs`), b
 references to either name. SQLite mirrors it exactly: `backend/sqlite/session.rs`
 calls `conn.prepare` twice and `prepare_cached` zero times, recompiling every
 statement. All of it runs against `Pool::connect(&url, 8)`
-(`plugin-db/src/lib.rs:998`) - **8 connections per worker thread**, shared by the
+(`plugin-crates/zeroship-plugin-db/src/lib.rs:998`) - **8 connections per worker thread**, shared by the
 ~200 co-resident isolates that thread admits.
 
 **What is measured and what is not.** The four round trips, the unnamed statement,
@@ -231,7 +231,7 @@ no benchmark exists and no multiplier should be quoted until one is run.
 
 A smaller sibling, folded here rather than given its own entry: **deprovision opens
 a fresh pool per deleted app.** `deprovision_app_cdc` calls `Pool::connect(url, 2)`
-(`plugin-db/src/lib.rs:698`) on every deletion driven by the version poller - two
+(`plugin-crates/zeroship-plugin-db/src/lib.rs:698`) on every deletion driven by the version poller - two
 connects, two authentications and two TLS handshakes per app, discarded
 immediately, for work that could share one long-lived platform-role pool. SC-5
 names the ownership that would fix it; nothing on this branch does.
@@ -380,7 +380,7 @@ different cases sharing one code path.
 
 `mint_tx_view` needs the collection names to hang off `tx.<name>`, and gets them
 from `declared_collections` -> `cached_schemas_for_binding`
-(`plugin-db/src/context.rs:674-686`), which builds a `"{app}:{deploy}:"` prefix and
+(`plugin-crates/zeroship-plugin-db/src/context.rs:674-686`), which builds a `"{app}:{deploy}:"` prefix and
 **iterates the whole thread-global schema map** to find the handful belonging to
 this binding. The caller is `.map(|(name, _schema)| name)`
 (`v8_classes/transaction.rs:78-81`) - the underscore is the tell: the payload
@@ -482,7 +482,7 @@ unrelated to replication, so removing `REPLICATION` leaves it untouched. Measure
   can render ENABLE ROW LEVEL SECURITY"* (`src/error.rs:493-512`).
 - **The policy charter denies creating one.** `assert_denied("CREATE POLICY p ON
   project_acme.t USING (true)")`
-  (`zeroship-migrate/tests/policy_charter/guard_security.rs:678`).
+  (`zeroship-migrate/crates/zeroship-migrate/tests/policy_charter/guard_security.rs:678`).
 
 So `BYPASSRLS` on `zeroship_worker` bypasses nothing today - it is dead privilege.
 **That is precisely why it should go now.** RLS is unused, not unreachable: the IR
@@ -511,7 +511,7 @@ So the rendered statement is `UPDATE "app"."t" SET ... RETURNING *`.
 **What makes it invisible is the part worth keeping.** The cap has a test and the
 test is green:
 `update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime`
-(`tests/sqlite_integration.rs:4191`). Its fixture updates `{ ssn: ... }` against
+(`crates/zeroship-plugin-db/tests/sqlite_integration.rs:4191`). Its fixture updates `{ ssn: ... }` against
 `users_encrypted_ssn_schema`, and `ssn` is the randomised-encrypted column - which
 is exactly what selects the **guarded** branch. The guard exists, has a passing
 test, and the test's fixture is what routes around the hole. Not a vacuous test and
@@ -610,7 +610,7 @@ pgvector+PostGIS image and `--ignored`.
 The diagnostic the sanitization rail relies on ("diagnosable only from a worker
 log", `dispatch.rs:245-246`) went to a discarded stream because no integration
 binary installed a subscriber, so `RUST_LOG` had nothing to configure.
-`support::init_test_tracing` (`plugin-db/tests/support/mod.rs:25`) now exists and is
+`support::init_test_tracing` (`plugin-crates/zeroship-plugin-db/tests/support/mod.rs:25`) now exists and is
 called by `native_transaction.rs` and `distributed_live.rs`. Installing it
 immediately surfaced the cause of four opaque failures: `permission denied for
 schema default`, from a `DROP SCHEMA ... CASCADE` in the harness that destroyed the

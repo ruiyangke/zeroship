@@ -19,7 +19,7 @@ where a number can't be measured cleanly.
 client on 1, both with `numactl --cpunodebind --membind`). Build:
 `cargo build --release -p zeroship-runtime --bin zeroship-bench-server`
 at HEAD `b08786a` + the uncommitted lazy-Request-Headers diff in
-`crates/runtime/src/web/fetch/request.rs:67-1130`. Server:
+`crates/zeroship-runtime/src/web/fetch/request.rs:67-1130`. Server:
 `--port=5101 --workers=16`. Client: zerobench at
 `~/Projects/zerobench/target/release/zerobench`, single-scenario plan
 hitting `GET /hello`, 300 conns × 16 client threads × 10 s saturate.
@@ -61,7 +61,7 @@ during saturate: 159,003 samples, 159.16 G event count. Flamegraph at
 ### Microbench harness
 
 A temporary `/_bench/op-distribution` path in
-`crates/runtime/benches/scenarios.js`'s `default.fetch` handler
+`crates/zeroship-runtime/benches/scenarios.js`'s `default.fetch` handler
 measures each op in a hot loop after a 200-iter warmup. The bench
 `request` is the live Request `build_kernel_request` constructs.
 First `request.headers` access is measured single-shot (median across
@@ -71,7 +71,7 @@ larger counts within one sync handler invocation reliably crashed the
 worker after 1–5 calls (silent abort, likely GC-pressure-induced).
 **scenarios.js was restored to HEAD before the final macrobench
 numbers and before finishing this report** (`git diff
-crates/runtime/benches/scenarios.js` returns zero lines); the bench
+crates/zeroship-runtime/benches/scenarios.js` returns zero lines); the bench
 source lives only at
 `/tmp/httpget-distrib/scenarios.js.bench-version`.
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-14
 **Branch:** `feat/billing-metering`
-**Harness:** `crates/control/benches/metering_load.rs` (+ `tests/metering_rowlock_pgbench.sh`)
+**Harness:** `crates/zeroship-control/benches/metering_load.rs` (+ `tests/metering_rowlock_pgbench.sh`)
 **DB:** dedicated `zeroship_metering_load` on PostgreSQL 17.7 :5440 (full Liquibase changelog, 165 changesets)
 **Env:** shared dev box; PG `max_connections = 100` (3 reserved, ~6 used by the co-resident stack)
 

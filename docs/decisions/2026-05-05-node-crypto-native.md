@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-05 — synthetic module + Stages A/B/C kernel (Hash/HMAC/KDF/random/KeyObject/Sign/Verify/Cipher/keygen). Surface beyond Stage C tracked in the proposal.
 **Long-form design:** [`docs/archive/node-crypto-native.md`](../archive/node-crypto-native.md)
-**Implementation:** [`crates/runtime/src/web/crypto/`](../../crates/runtime/src/web/crypto/) (shared kernel) + `node:crypto` synthetic module registered via `crates/runtime/src/core/native_modules.rs` (`"node:crypto"` → `node::crypto::synthetic_module`).
+**Implementation:** [`crates/zeroship-runtime/src/web/crypto/`](../../crates/zeroship-runtime/src/web/crypto/) (shared kernel) + `node:crypto` synthetic module registered via `crates/zeroship-runtime/src/core/native_modules.rs` (`"node:crypto"` → `node::crypto::synthetic_module`).
 
 ## Context
 

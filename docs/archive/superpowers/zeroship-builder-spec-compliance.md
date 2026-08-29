@@ -201,7 +201,7 @@ Status legend:
 |---|---|---|---|---|
 | §12.1 | Builder loop (per turn) | **shipped** | `_translator.ts` + `_prompts.ts` BUILDER_SYSTEM | Plan / execute / submit-to-Critic via `task("critic", …)` while-loop in Builder's planning; max-iter capped via system prompt. |
 | §12.1.1 | Native coordination tools (ask_survey / propose_diff / file_issue / request_review) | **partial** | `_tools.ts` `askSurveyTool` only | Other coordination tools rolled into deepagents built-ins: `propose_diff` is `write_file` + `data-diff` middleware; `file_issue` is `write_todos` (TodoListMiddleware); `request_review` is `task("reviewer", …)`; `tag_milestone` deferred. |
-| §12.2 | Skill registry shape | **deferred** | — | `crates/control/skills/` directory not built. |
+| §12.2 | Skill registry shape | **deferred** | — | `crates/zeroship-control/skills/` directory not built. |
 | §12.3 | Skill catalog UI (`/skills`) | **stubbed** | `pages/Skills.tsx` | Static (ISS-13). |
 | §12.4 | Active skills per project | **deferred** | — | Settings → Active skills not wired. |
 

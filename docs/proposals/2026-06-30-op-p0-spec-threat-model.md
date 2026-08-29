@@ -684,11 +684,11 @@ Exact code sites that gain a platform-issuer arm:
 
 | Site | Current role | Platform arm |
 | --- | --- | --- |
-| `crates/gateway/src/router/auth.rs` Bearer/DPoP path | Peeks raw Hydra `iss`; verifies/introspects Hydra access token; binds `client_id`. | If `iss == platform_issuer`, verify RFC 9068 JWT via platform JWKS, enforce `typ=at+jwt`, EdDSA, `aud`, `client_id`, expiry, revocation marker, and pairwise projection. |
-| `crates/gateway/src/router/auth.rs` introspection path | Calls Hydra introspection for DPoP/opaque fallback. | Prefer local platform JWT verification; keep Hydra introspection only for Hydra-issuer apps until P6. |
-| `crates/gateway/src/oidc_rp.rs` ID-token verify | Verifies Hydra ID token through `core::oidc_verify`. | Dial platform `/authorize`/`/token`; verify platform `id_token` against platform JWKS, issuer, audience, nonce, at_hash. Hydra circuit breaker deletes after cutover. |
-| `crates/core/src/auth_provider/mod.rs` deploy-token seam | `AuthProvider::{Hydra, Supabase}` verifies deploy/control tokens by introspection/JWKS. | Add `Platform` JWKS arm that verifies platform access tokens for control/deploy audience. Remove Hydra arm last. |
-| `crates/gateway/src/backchannel_logout.rs` | Receives Hydra-originated logout tokens. | During migration accept Hydra and platform logout tokens by issuer/JWKS; final shape is platform-originated BCL or platform-internal fan-out. |
+| `crates/zeroship-gateway/src/router/auth.rs` Bearer/DPoP path | Peeks raw Hydra `iss`; verifies/introspects Hydra access token; binds `client_id`. | If `iss == platform_issuer`, verify RFC 9068 JWT via platform JWKS, enforce `typ=at+jwt`, EdDSA, `aud`, `client_id`, expiry, revocation marker, and pairwise projection. |
+| `crates/zeroship-gateway/src/router/auth.rs` introspection path | Calls Hydra introspection for DPoP/opaque fallback. | Prefer local platform JWT verification; keep Hydra introspection only for Hydra-issuer apps until P6. |
+| `crates/zeroship-gateway/src/oidc_rp.rs` ID-token verify | Verifies Hydra ID token through `core::oidc_verify`. | Dial platform `/authorize`/`/token`; verify platform `id_token` against platform JWKS, issuer, audience, nonce, at_hash. Hydra circuit breaker deletes after cutover. |
+| `crates/zeroship-core/src/auth_provider/mod.rs` deploy-token seam | `AuthProvider::{Hydra, Supabase}` verifies deploy/control tokens by introspection/JWKS. | Add `Platform` JWKS arm that verifies platform access tokens for control/deploy audience. Remove Hydra arm last. |
+| `crates/zeroship-gateway/src/backchannel_logout.rs` | Receives Hydra-originated logout tokens. | During migration accept Hydra and platform logout tokens by issuer/JWKS; final shape is platform-originated BCL or platform-internal fan-out. |
 
 Cutover sequence:
 
@@ -696,7 +696,7 @@ Cutover sequence:
 2. P2/P3: platform device and auth-code flows mint platform tokens for selected clients.
 3. P4/P5: gateway RP dials platform OP for flagged apps; raw Hydra arms remain for unflagged apps.
 4. Rollback before P6: flip an app's `issuer_mode` back to `hydra`. Verifiers still accept both.
-5. P6: once every app is platform and no raw Hydra tokens remain within max TTL/overlap, remove Hydra issuer recognition, Hydra sidecar/config/schema, HydraAdmin, and `crates/auth/src/hydra_client/`.
+5. P6: once every app is platform and no raw Hydra tokens remain within max TTL/overlap, remove Hydra issuer recognition, Hydra sidecar/config/schema, HydraAdmin, and `crates/zeroship-auth/src/hydra_client/`.
 
 ## 8. P0 self-check
 

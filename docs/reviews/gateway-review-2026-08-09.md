@@ -1,6 +1,6 @@
 # Gateway review - 2026-08-09
 
-Scope: `crates/gateway/` only (manifest dispatch, JWT/session validation, rate
+Scope: `crates/zeroship-gateway/` only (manifest dispatch, JWT/session validation, rate
 limiting, CHWBL routing, asset proxy, OIDC RP, back-channel logout, sessions,
 signing). Regenerated from the code, not from a prior report.
 
@@ -75,7 +75,7 @@ line.
 | G7 | **LIVE, and it has replicated** | Doc comment unchanged; a fourth wrong site was *added* post-review by `4e4dafce4`. One supporting claim in the finding is **wrong** - see below. |
 | G8 | **LIVE** | 17 functions / 566 lines, all `#[cfg(test)]`; duplication confirmed by actual `diff`, not assertion. Two corrections to the finding's counts. |
 | G9 | **SHIPPED** | `fd54716ec`. Verified on the real binary, not only in a unit test. |
-| G10 | **LIVE (both consequences)** | `grep` for any host allow-list in `crates/gateway/` returns nothing. |
+| G10 | **LIVE (both consequences)** | `grep` for any host allow-list in `crates/zeroship-gateway/` returns nothing. |
 | G11 | **LIVE (all four legs)** | Each leg read at HEAD and confirmed. Not observed against a live stack. |
 | G12 | **LIVE** | Guard is `want_mint` on both axes; the non-mint fall-through reaches `rotate_family` / `sessions::create` / `sign_session_cookie`. |
 | G13 | **LIVE (all three parts)** | `if let Ok(..) else` intact; both siblings match `NoMatchingKey` only; `refresh()` has no throttle. |
@@ -95,8 +95,8 @@ Recorded here because a confidently-written review is not evidence, and both
 were quoted as supporting reasoning rather than as the finding itself.
 
 1. **G7's "The gateway never calls `is_family_revoked_since` at all - the only
-   callers in the tree are `crates/auth/src/oidc/{userinfo,introspect}.rs` and
-   two test files."** False, and it was false when written. `crates/gateway/src/
+   callers in the tree are `crates/zeroship-auth/src/oidc/{userinfo,introspect}.rs` and
+   two test files."** False, and it was false when written. `crates/zeroship-gateway/src/
    auth_token.rs:1319` calls it, in production, inside
    `session_cookie_family_revoked` on the `GET /__zeroship/auth/session` fast
    path - and *that* call really is an uncached `SELECT EXISTS`. The gateway has
@@ -152,7 +152,7 @@ takes no `identity_verified` parameter at all, so it read the header
 unconditionally - an entirely unauthenticated caller could steer their own CHWBL
 worker.
 
-Consequence 1 is **LIVE**. `crates/gateway/src/router/auth.rs:670` is unchanged:
+Consequence 1 is **LIVE**. `crates/zeroship-gateway/src/router/auth.rs:670` is unchanged:
 
 ```rust
 let Some(token) = auth_header.strip_prefix("Bearer ") else {
@@ -166,7 +166,7 @@ removed; one-variable control is the existing
 
 ```
 thread 'router::auth::tests::temp_triage_g1_lowercase_bearer_reaches_the_same_arm'
-panicked at crates/gateway/src/router/auth.rs:2062:9:
+panicked at crates/zeroship-gateway/src/router/auth.rs:2062:9:
 RFC 7235 makes the auth scheme case-insensitive: lowercase `bearer` must reach
 the same reserved-scheme arm as `Bearer`, got NotBearer
 ```
@@ -174,9 +174,9 @@ the same reserved-scheme arm as `Bearer`, got NotBearer
 Not fixed here: it is the contract call the fixing commit deliberately left
 open, and widening an authentication gate is not a small change.
 
-**File / symbol:** `crates/gateway/src/router/auth.rs:670`
-(`resolve_bearer_user_header`) vs `crates/gateway/src/router/dispatch.rs:833-835`
-(`compute_bucket_id`) and `crates/gateway/src/router/dispatch.rs:929`
+**File / symbol:** `crates/zeroship-gateway/src/router/auth.rs:670`
+(`resolve_bearer_user_header`) vs `crates/zeroship-gateway/src/router/dispatch.rs:833-835`
+(`compute_bucket_id`) and `crates/zeroship-gateway/src/router/dispatch.rs:929`
 (`subscription_affinity_key`).
 
 **What is wrong.** The auth gate strips exactly one spelling:
@@ -245,12 +245,12 @@ entry points and then removed. One-variable controls: identical to the existing
 
 ```
 thread 'router::auth::tests::temp_g_verify_lowercase_bearer_reserved_scheme'
-panicked at crates/gateway/src/router/auth.rs:2072:9:
+panicked at crates/zeroship-gateway/src/router/auth.rs:2072:9:
 reserved-scheme Bearer must 401 even on Anon regardless of scheme case,
 got Allowed { user_header: None }
 
 thread 'router::auth::tests::temp_g_verify_lowercase_bearer_on_user_route'
-panicked at crates/gateway/src/router/auth.rs:2099:9:
+panicked at crates/zeroship-gateway/src/router/auth.rs:2099:9:
 lowercase bearer must reach the same reserved-scheme arm, got NotBearer
 ```
 
@@ -269,14 +269,14 @@ by making the bucket readers case-sensitive - that leaves consequence 1 intact.
 ## G2 - a tightened per-resource rate limit never takes effect on an already-created bucket
 
 **Status (triage 2026-08-10): LIVE.** `get_or_create` is unchanged at
-`crates/gateway/src/enforce.rs:279-292`; the `or_insert_with` still discards the
+`crates/zeroship-gateway/src/enforce.rs:279-292`; the `or_insert_with` still discards the
 `rate`/`burst` of every later `check()`.
 
 Re-proved by execution (temporary test, since removed):
 
 ```
 thread 'enforce::tests::temp_triage_g2_tightened_rate_takes_effect_on_existing_bucket'
-panicked at crates/gateway/src/enforce.rs:633:9:
+panicked at crates/zeroship-gateway/src/enforce.rs:633:9:
 the SECOND request in the same second must 429 under rps=1; if it passes, the
 pre-existing bucket kept deploy 1's rate and the tightening had no effect
 ```
@@ -291,9 +291,9 @@ Keying on `(rate, burst)` makes the stale bucket immortal, which worsens the
 unbounded map; storing and resetting the parameters on the bucket touches the
 lock-free `TokenBucket` CAS loop. That is a design decision, not a small fix.
 
-**File / symbol:** `crates/gateway/src/enforce.rs:280`
+**File / symbol:** `crates/zeroship-gateway/src/enforce.rs:280`
 (`PerRuleRateLimitRegistry::get_or_create`), reached from
-`crates/gateway/src/router/dispatch.rs:1477`.
+`crates/zeroship-gateway/src/router/dispatch.rs:1477`.
 
 **What is wrong.** The bucket's `(rate, burst)` are baked in at creation:
 
@@ -333,7 +333,7 @@ equivalent on the type. Confirmed by reading the whole `impl` block
 
 ```
 thread 'enforce::tests::temp_g_verify_tightened_rate_takes_effect_on_existing_bucket'
-panicked at crates/gateway/src/enforce.rs:607:9:
+panicked at crates/zeroship-gateway/src/enforce.rs:607:9:
 the SECOND request in the same second must 429 under rps=1; if it passes,
 the pre-existing bucket kept deploy 1's rate and the tightening had no effect
 ```
@@ -358,7 +358,7 @@ anyway.
 **Status (triage 2026-08-10): was LIVE, FIXED IN THIS TRIAGE (main defect).**
 
 The clobber was confirmed still live and then fixed. `inject_cors_response_headers`
-now calls a new `append_vary_origin(headers)` (`crates/gateway/src/router/cors.rs`),
+now calls a new `append_vary_origin(headers)` (`crates/zeroship-gateway/src/router/cors.rs`),
 which reads the existing `Vary`, splits it, adds `Origin` only if absent, and
 writes back one joined header. `Vary: *` is left alone (narrowing it to a list
 would weaken the response's cacheability contract).
@@ -367,7 +367,7 @@ Red before the fix, with the fixture precondition asserting first and passing:
 
 ```
 thread 'router::cors::tests::cors_injection_appends_to_vary_instead_of_clobbering_it'
-panicked at crates/gateway/src/router/cors.rs:349:9:
+panicked at crates/zeroship-gateway/src/router/cors.rs:349:9:
 Vary must still list Accept-Encoding after CORS injection, got "Origin"
 ```
 
@@ -394,9 +394,9 @@ origin is a cache-behaviour change on a response that currently carries no CORS
 headers at all - a contract decision about what shared caches should key on,
 not a mechanical fix. Left for the operator.
 
-**File / symbol:** `crates/gateway/src/router/cors.rs:83-86`
+**File / symbol:** `crates/zeroship-gateway/src/router/cors.rs:83-86`
 (`inject_cors_response_headers`), interacting with
-`crates/gateway/src/router/static_serve.rs:385`.
+`crates/zeroship-gateway/src/router/static_serve.rs:385`.
 
 **What is wrong.** `static_serve` sets `Vary: Accept-Encoding` when it serves a
 negotiated pre-compressed variant. `inject_cors_response_headers` then does:
@@ -440,7 +440,7 @@ exact header set `static_serve.rs:385` emits:
 
 ```
 thread 'router::cors::tests::temp_g_verify_vary_accept_encoding_survives_cors_injection'
-panicked at crates/gateway/src/router/cors.rs:324:9:
+panicked at crates/zeroship-gateway/src/router/cors.rs:324:9:
 Vary must still list Accept-Encoding after CORS injection, got "Origin"
 ```
 
@@ -467,7 +467,7 @@ too.
 ## G4 - the per-rule rate-limit bucket map is unbounded and keyed on caller-controlled strings
 
 **Status (triage 2026-08-10): LIVE.** The whole `impl PerRuleRateLimitRegistry`
-(`crates/gateway/src/enforce.rs:249-323`) was re-enumerated: exactly `new`,
+(`crates/zeroship-gateway/src/enforce.rs:249-323`) was re-enumerated: exactly `new`,
 `resolve_rate`, `get_or_create`, `check`. No `remove`, `retain`, `clear`, TTL or
 cap. The only `remove` calls in the file (`enforce.rs:168`, `:371`) are
 `w.remove(app_id)` on the *degraded* `HashSet<Uuid>` of two different registries,
@@ -477,7 +477,7 @@ outside `enforce.rs` are one real construction (`main.rs:723`), the field decl
 (`dispatch.rs:1486`), and two comments.
 
 The contrast the finding draws is real, with a corrected line:
-`crates/authz/src/wrapper_revocation.rs:159` (not 154) is
+`crates/zeroship-authz/src/wrapper_revocation.rs:159` (not 154) is
 `pub const REVOCATION_CACHE_MAX_ENTRIES: usize = 100_000;`, wired through
 `with_ttl_and_capacity` at `:191`.
 
@@ -485,7 +485,7 @@ Not fixed here: adding an LRU with a cap changes the enforcement semantics
 (eviction hands the evicted caller a fresh allowance) and, as the finding itself
 says, has to be designed together with G2. Not small.
 
-**File / symbol:** `crates/gateway/src/enforce.rs:236`
+**File / symbol:** `crates/zeroship-gateway/src/enforce.rs:236`
 (`PerRuleRateLimitRegistry.buckets`).
 
 **What is wrong.** `buckets: RwLock<HashMap<PerRuleKey, Arc<TokenBucket>>>` has
@@ -497,7 +497,7 @@ never freed while the process lives.
 
 The gateway *does* bound its other unbounded-input cache - the revocation cache
 has `REVOCATION_CACHE_MAX_ENTRIES`
-(`crates/authz/src/wrapper_revocation.rs:154` neighbourhood) - so this is an
+(`crates/zeroship-authz/src/wrapper_revocation.rs:154` neighbourhood) - so this is an
 inconsistency inside the gateway's own design, not a missing convention.
 
 **Concrete failure scenario.** Any app with a `per: "ip"` rule and an attacker
@@ -528,7 +528,7 @@ treating them separately.
 ## G5 - CORS preflight is answered before every enforcement gate
 
 **Status (triage 2026-08-10): LIVE, ordering unchanged.** The preflight
-short-circuit is now at `crates/gateway/src/router/dispatch.rs:1239-1247`
+short-circuit is now at `crates/zeroship-gateway/src/router/dispatch.rs:1239-1247`
 (`return build_preflight_response(cors, origin, wall_start);`).
 `execute_resource_tree` is called ten lines later at `dispatch.rs:1260`, and
 every gate is inside it: `check_account` `:1307`, `check_spend` `:1318`,
@@ -536,7 +536,7 @@ every gate is inside it: `check_account` `:1307`, `check_spend` `:1318`,
 (`:1201`) and `canonicalize_dispatch_path` (`:1220`) run before the preflight
 return, and neither gates.
 
-Nothing upstream gates either: `grep -n "\.wrap(\|middleware" crates/gateway/src/main.rs`
+Nothing upstream gates either: `grep -n "\.wrap(\|middleware" crates/zeroship-gateway/src/main.rs`
 returns nothing - there is no middleware chain at all - and
 `enforce::check_rate_limit` has exactly one non-test call site platform-wide.
 
@@ -548,7 +548,7 @@ changes what an OPTIONS request costs and when it can 402/429 - a product
 decision about whether preflights are billable and blockable, which is exactly
 the "what the platform SHOULD do" class. Report, do not patch.
 
-**File / symbol:** `crates/gateway/src/router/dispatch.rs:1230-1241`
+**File / symbol:** `crates/zeroship-gateway/src/router/dispatch.rs:1230-1241`
 (`handle_request`).
 
 **What is wrong.** The preflight short-circuit returns
@@ -603,11 +603,11 @@ before it is real and discarded (`select_with_affinity` `:2307`, `acquire`
 search over `crates/` and `sdks/` returns exactly two hits, both comments:
 
 ```
-crates/gateway/src/router/dispatch.rs:1361:    //    in `proxy_subscription_upgrade` once we get past the rest of
-crates/gateway/src/router/dispatch.rs:1577:            // WS proxy itself is wired in `proxy::forward_subscription`.
+crates/zeroship-gateway/src/router/dispatch.rs:1361:    //    in `proxy_subscription_upgrade` once we get past the rest of
+crates/zeroship-gateway/src/router/dispatch.rs:1577:            // WS proxy itself is wired in `proxy::forward_subscription`.
 ```
 
-`crates/gateway/src/proxy.rs` contains `forward_dispatch`,
+`crates/zeroship-gateway/src/proxy.rs` contains `forward_dispatch`,
 `forward_workflow_advance`, `forward_to_worker_dispatch`, `forward_to_worker_path`,
 `forward_http` and private helpers - no `forward_subscription`. Note that
 `3e98347fa` edited comments nearby on 2026-08-09 and left both phantom-symbol
@@ -639,7 +639,7 @@ line, both cheap - but a comment fix admits no red-before-green test, and the
 underlying gap (build the WS proxy, or declare subscriptions single-tenant-only)
 is the product decision this finding names. Left whole rather than half-fixed.
 
-**File / symbol:** `crates/gateway/src/router/dispatch.rs:2272`
+**File / symbol:** `crates/zeroship-gateway/src/router/dispatch.rs:2272`
 (`handle_subscription_dispatch`).
 
 **What is wrong (behaviour).** Every `kind: "subscription"` resource dispatched
@@ -708,18 +708,18 @@ so a creator learns it before building on it, not after deploying.
 **Status (triage 2026-08-10): LIVE, and it has REPLICATED since the review.**
 One supporting claim in this finding is **wrong** - see below.
 
-Site 1 unchanged, `crates/gateway/src/router/auth.rs:912-916`, still says
+Site 1 unchanged, `crates/zeroship-gateway/src/router/auth.rs:912-916`, still says
 `is_family_revoked_since` and still says `(NOT cached)`. The body still calls
 `family_revocation_decision` (`auth.rs:992`), which short-circuits on the cache
 at `auth.rs:99` and only reaches the DB via `revoked_after_for` at `auth.rs:123`.
 
-Site 2 unchanged, `crates/gateway/src/lib.rs:138` still says *"A miss performs
+Site 2 unchanged, `crates/zeroship-gateway/src/lib.rs:138` still says *"A miss performs
 one `is_family_revoked_since` DB read"*. The miss performs `revoked_after_for`.
 The TTL sentence in the same doc is correct, so this site is a wrong-name defect
 only.
 
 **Site 3 is new and post-review.** Commit `4e4dafce4` (2026-08-10, *after* the
-review) added `crates/gateway/src/sessions.rs:157-159`:
+review) added `crates/zeroship-gateway/src/sessions.rs:157-159`:
 
 ```
 /// marker (`is_family_revoked_since(client_id, pws_, iat)`, an uncached
@@ -735,9 +735,9 @@ the strongest possible argument for the finding.
 
 **CORRECTION - this finding's supporting claim is FALSE.** The review states
 *"The gateway never calls `is_family_revoked_since` at all - the only callers in
-the tree are `crates/auth/src/oidc/{userinfo,introspect}.rs` and two test
+the tree are `crates/zeroship-auth/src/oidc/{userinfo,introspect}.rs` and two test
 files."* It does call it, in production, and did when the review was written:
-`crates/gateway/src/auth_token.rs:1319`, inside `session_cookie_family_revoked`,
+`crates/zeroship-gateway/src/auth_token.rs:1319`, inside `session_cookie_family_revoked`,
 on the `GET /__zeroship/auth/session` fast path - and *that* call really is a
 direct uncached read. So the gateway has **two** revocation readers with
 different caching, and the defect is sharper than stated: the doc comments do not
@@ -749,7 +749,7 @@ Not fixed here: three doc-comment sites, no red-before-green test is possible
 for a comment. Recommended as the cheapest high-value follow-up, precisely
 because `4e4dafce4` proves an unfixed wrong comment gets re-derived as truth.
 
-**File / symbol:** `crates/gateway/src/router/auth.rs:911-918`, doc comment on
+**File / symbol:** `crates/zeroship-gateway/src/router/auth.rs:911-918`, doc comment on
 `resolve_app_session_user_header_inner`.
 
 **What is wrong.** Step 4 of the function's doc comment says:
@@ -761,10 +761,10 @@ because `4e4dafce4` proves an unfixed wrong comment gets re-derived as truth.
 
 The body (`auth.rs:991-1007`) calls `family_revocation_decision`, which is a
 read-through cache with a 5-second TTL
-(`REVOCATION_CACHE_TTL_SECS = 5`, `crates/authz/src/wrapper_revocation.rs:154`)
+(`REVOCATION_CACHE_TTL_SECS = 5`, `crates/zeroship-authz/src/wrapper_revocation.rs:154`)
 and returns the cached answer with no DB round-trip on a hit. The gateway never
 calls `is_family_revoked_since` at all - the only callers in the tree are
-`crates/auth/src/oidc/{userinfo,introspect}.rs` and two test files.
+`crates/zeroship-auth/src/oidc/{userinfo,introspect}.rs` and two test files.
 
 This is the third comment on the same path to be wrong in the same direction.
 Commit `fe8788eb8` ("stop claiming the revocation marker is read uncached")
@@ -793,7 +793,7 @@ reachable from the gateway. Walked down from the entry point: `resolve_auth` ->
 **Confidence:** high.
 
 **A second site with the same wrong name.** I expected
-`crates/gateway/src/lib.rs:136-147` (the doc comment on
+`crates/zeroship-gateway/src/lib.rs:136-147` (the doc comment on
 `GateState::revocation_cache`) to be the correct counter-example. It is not: it
 states the TTL correctly but also says *"A miss performs one
 `is_family_revoked_since` DB read"*. The miss path calls
@@ -842,14 +842,14 @@ runs 13 tests, 13 passed. The 10:3 ratio still makes the finding's argument.
 Not fixed here: deleting 566 lines and 10 tests is not a small change, and
 "delete coverage" is the kind of edit that wants its own reviewed commit.
 
-**File / symbol:** `crates/gateway/src/router/dispatch.rs:209-775`
+**File / symbol:** `crates/zeroship-gateway/src/router/dispatch.rs:209-775`
 (`workflow_worker_result_to_step_result`, `normalize_workflow_outcomes`,
 `legacy_step_result_to_outcomes`, `normalize_workflow_step_result`,
 `single_worker_result_to_outcome`, `parse_iso8601_duration_ms`, and ~11 more).
 
 **What is wrong.** Each of these functions is behind `#[cfg(test)]`. They are
 byte-for-byte siblings of the same-named functions in
-`crates/plugin-workflow/src/advance.rs:167-713`, which is where the *production*
+`crates/zeroship-plugin-workflow/src/advance.rs:167-713`, which is where the *production*
 normalisation happens. The gateway's own production path,
 `workflow_advance_internal` (`dispatch.rs:105`), calls only
 `workflow_worker_advance_response` (`dispatch.rs:182`), which checks
@@ -867,7 +867,7 @@ tests in the same module that *do* drive production  -
 `public_vhost_workflow_advance_path_is_404` - are the whole real surface.
 
 **Concrete failure scenario.** Someone changes the wake-at normalisation or the
-legacy-`StepResult` shape in `crates/plugin-workflow/src/advance.rs`. The eight
+legacy-`StepResult` shape in `crates/zeroship-plugin-workflow/src/advance.rs`. The eight
 gateway tests stay green, because they exercise the frozen copy. A reviewer
 looking for "who covers the gateway's workflow edge" finds them and concludes it
 is covered. The gateway's actual contribution - the `ack`/`nack` validation and
@@ -909,11 +909,11 @@ validator refuses only the scheme it cannot serve and compose/local dev keeps
 working).
 
 Note the finding's second site is **not** covered by that commit:
-`crates/gateway/src/proxy.rs` still has the same `unwrap_or(80)` for the worker
+`crates/zeroship-gateway/src/proxy.rs` still has the same `unwrap_or(80)` for the worker
 hop. That is intra-cluster and the finding treats it as an aside, but it is
 untouched.
 
-**File / symbol:** `crates/gateway/src/sync.rs:200-207` (`http_get_inner`),
+**File / symbol:** `crates/zeroship-gateway/src/sync.rs:200-207` (`http_get_inner`),
 called from `sync_once:177`.
 
 **What is wrong.**
@@ -930,7 +930,7 @@ let mut stream = TcpStream::connect(&addr).await...;
 `https://control.zeroship.ai/internal/routes` yields port **80**, and the
 request is written as plaintext HTTP/1.1 on a raw `TcpStream` - including
 `Authorization: Bearer {control_key}`. The scheme is never inspected. There is
-no TLS anywhere in this path. `crates/gateway/src/proxy.rs:169,182` has the
+no TLS anywhere in this path. `crates/zeroship-gateway/src/proxy.rs:169,182` has the
 same `unwrap_or(80)` for the worker hop.
 
 Intra-cluster plaintext may well be the intended topology. The finding is that
@@ -960,7 +960,7 @@ scheme-validated at boot. Neither: `sync_once` is the only caller, it passes
 `String` (`lib.rs:45`) with no parse.
 
 **Confidence:** high on the mechanism; the severity depends on the deployment
-topology, which is outside `crates/gateway/`.
+topology, which is outside `crates/zeroship-gateway/`.
 
 **Fix shape.** Validate the scheme at boot the way `--blob-store` is validated:
 reject `https://` with a message saying the control hop is plaintext-only, or
@@ -979,7 +979,7 @@ The host extraction is now at `dispatch.rs:2434-2439` and unchanged; `forward_ur
 The decisive check the finding rests on was re-run and is still empty:
 
 ```
-$ grep -rn "base_domain\|app_domain\|allowed_host\|host_suffix\|allowed_hosts\|root_domain\|apex_domain" crates/gateway/
+$ grep -rn "base_domain\|app_domain\|allowed_host\|host_suffix\|allowed_hosts\|root_domain\|apex_domain" crates/zeroship-gateway/
 (no output)
 ```
 
@@ -1006,7 +1006,7 @@ reconstructing the URL from the resolved route's canonical hostname) add
 configuration surface and change what `request.url` says to every deployed app.
 Contract decision.
 
-**File / symbol:** `crates/gateway/src/router/dispatch.rs:2425-2430`
+**File / symbol:** `crates/zeroship-gateway/src/router/dispatch.rs:2425-2430`
 (`handle_dispatch` -> `forward_url`).
 
 **What is wrong.** The URL handed to the worker is built from the client's
@@ -1053,7 +1053,7 @@ deployment normalises `Host`. `deploy/` is outside this crate and I did not
 read it, so this may be mitigated in practice by the edge rather than by the
 gateway. It is still a defence the gateway itself does not have.
 
-**Confidence:** high that `Host` is unvalidated in `crates/gateway/`; medium on
+**Confidence:** high that `Host` is unvalidated in `crates/zeroship-gateway/`; medium on
 end-to-end exploitability, for the reason above.
 
 **A second consequence in the same class.** `browser_auth.rs:170-174`
@@ -1089,17 +1089,17 @@ NOT observed against a live stack.**
    `revoked_after >= rotation_started_at`, so a marker written *before* the
    request lands in `Ok(_) => {}`. The comment at `:1223-1226` confirms the
    intent is the TOCTOU window only - the design is the gap.
-2. `revoke_grant_cascade` (`crates/control/src/oauth_grants_handlers.rs:170-232`)
+2. `revoke_grant_cascade` (`crates/zeroship-control/src/oauth_grants_handlers.rs:170-232`)
    read in full: it deletes the `oauth_grants` row (`:186`), revokes the relay
    alias (`:194-198`) and inserts `token_revocations` (`:223-225`). It never
    names `app_session_anchors`. The complete set of non-test writers of that
-   table is `crates/auth/src/identity/password_reset.rs:344` and
-   `crates/gateway/src/anchors.rs:302,328,361` - no control-plane grant path.
-3. `crates/auth/src/oidc/refresh.rs:509-513` gates on `row.revoked_at`,
+   table is `crates/zeroship-auth/src/identity/password_reset.rs:344` and
+   `crates/zeroship-gateway/src/anchors.rs:302,328,361` - no control-plane grant path.
+3. `crates/zeroship-auth/src/oidc/refresh.rs:509-513` gates on `row.revoked_at`,
    `family_has_revoked_row` (which queries `oauth_refresh_tokens` only,
    `refresh.rs:1117-1124`) and two expiries. `oauth_grants` has zero hits in the
    file; `token_revocations` appears only as three INSERTs, never as a read gate.
-4. `family_revoked_at` is at `crates/authz/src/wrapper_revocation.rs:108-110`
+4. `family_revoked_at` is at `crates/zeroship-authz/src/wrapper_revocation.rs:108-110`
    and is strictly `>`: `revoked_after.is_some_and(|ra| ra > iat)`. Its own doc
    at `:88-89` states the resurrection property outright: *"A token whose `iat`
    predates the marker is rejected; one minted after the marker is fine."*
@@ -1116,7 +1116,7 @@ comparison instant in the gateway, or make `revoke_grant_cascade` revoke the
 anchor in the control plane). Which one is right is a decision about where
 revocation authority lives. Highest-severity LIVE item in this document.
 
-**File / symbol:** `crates/gateway/src/auth_token.rs:1210-1226` (the F4
+**File / symbol:** `crates/zeroship-gateway/src/auth_token.rs:1210-1226` (the F4
 post-refresh re-check in the rotation path), reached from
 `auth_token.rs:737-778` (`session`).
 
@@ -1138,7 +1138,7 @@ rotation - the TOCTOU window it was designed for. A marker written *before* the
 request lands in `Ok(_) => {}` and the rotation proceeds. The rotation then
 signs a fresh session cookie with `iat = now`, and the dispatch-side gate is
 `family_revoked_at(revoked_after, iat) == revoked_after > iat`
-(`crates/authz/src/wrapper_revocation.rs:108-110`), which is now permanently
+(`crates/zeroship-authz/src/wrapper_revocation.rs:108-110`), which is now permanently
 false. `sweep_expired_families` (same file, line 115) then deletes the marker
 after the retention window, so even the raw-OP-Bearer arm stops rejecting.
 
@@ -1150,12 +1150,12 @@ recovery "will end in `login_required` for a revoked family". It does not.
 **Concrete failure scenario.** All four legs read directly, not inferred:
 
 1. User revokes an app's grant: `DELETE /me/oauth-grants/oac_abc`.
-   `revoke_grant_cascade` (`crates/control/src/oauth_grants_handlers.rs:170-230`)
+   `revoke_grant_cascade` (`crates/zeroship-control/src/oauth_grants_handlers.rs:170-230`)
    deletes the `oauth_grants` row, revokes the relay alias, and writes
    `token_revocations(oac_abc, pws_X, revoked_after = T0)`. It does **not**
    touch `zeroship.app_session_anchors` - I read the whole function; the only
    writers of that table's `revoked_at` are
-   `crates/auth/src/identity/password_reset.rs:344`, and the gateway's own
+   `crates/zeroship-auth/src/identity/password_reset.rs:344`, and the gateway's own
    `anchors::delete` / `delete_all_for_user` (`browser_auth.rs:444,463`,
    `backchannel_logout.rs:515`).
 2. The victim's ~15-minute signed cookie is correctly rejected on dispatch.
@@ -1163,7 +1163,7 @@ recovery "will end in `login_required` for a revoked family". It does not.
    `GET /__zeroship/auth/session`. The fast path sees the revoked family and
    falls through to reload-recovery.
 4. The 30-day anchor is still live (`revoked_at IS NULL`), so `read_live`
-   returns it. The OP refresh succeeds: `crates/auth/src/oidc/refresh.rs:509-510`
+   returns it. The OP refresh succeeds: `crates/zeroship-auth/src/oidc/refresh.rs:509-510`
    gates on `oauth_refresh_tokens.revoked_at` and `family_has_revoked_row`, and
    consults neither `oauth_grants` nor `token_revocations`.
 5. The F4 re-check sees `T0 < T1` -> `Ok(_) => {}` -> pass. A fresh cookie with
@@ -1230,7 +1230,7 @@ to pin. The module tests the guard, never the handler.
 Not fixed here: "run the guard after the fast path decides" restructures the
 handler's control flow on the authentication path. Not small.
 
-**File / symbol:** `crates/gateway/src/auth_token.rs:277-284`
+**File / symbol:** `crates/zeroship-gateway/src/auth_token.rs:277-284`
 (`session_csrf_guard`) and `:737-778` / `:794-965` (`session`).
 
 **What is wrong.**
@@ -1294,12 +1294,12 @@ The `if let Ok(..) else` at `oidc_rp.rs:740-749` is unchanged, and `try_verify`
 claims - all landing in the same `else`.
 
 Both siblings still match `NoMatchingKey` only:
-`crates/core/src/oidc_verify.rs:476-484` and
-`crates/core/src/logout_token.rs:289-302`, the latter still documenting why.
+`crates/zeroship-core/src/oidc_verify.rs:476-484` and
+`crates/zeroship-core/src/logout_token.rs:289-302`, the latter still documenting why.
 The false "mirroring [`zeroship_core::oidc_verify::verify_id_token`]" claim is
 still at `oidc_rp.rs:676-678`.
 
-`JwksCache::refresh` was read end to end (`crates/core/src/oidc_verify.rs:253-362`):
+`JwksCache::refresh` was read end to end (`crates/zeroship-core/src/oidc_verify.rs:253-362`):
 no single-flight, no minimum interval, no rate limit, no breaker. Its only two
 protections are a per-fetch timeout (`:275`, 5s default) and stale-on-error. The
 struct has no in-flight flag and no last-attempt timestamp - `JwksState` is
@@ -1326,7 +1326,7 @@ it would be an untested change on the token-verification path. **Strongest
 candidate for the next fix** - the target behaviour, and its test shape, are
 already written in `crates/core`.
 
-**File / symbol:** `crates/gateway/src/oidc_rp.rs:740-749` (`verify_access_jwt`);
+**File / symbol:** `crates/zeroship-gateway/src/oidc_rp.rs:740-749` (`verify_access_jwt`);
 doc comment at `:676-678`.
 
 **What is wrong.**
@@ -1349,9 +1349,9 @@ no circuit breaker in front of it.
 
 The one-variable controls are in the same codebase and do it correctly:
 
-- `crates/core/src/oidc_verify.rs:476-484` matches `Err(OidcError::NoMatchingKey(_))`
+- `crates/zeroship-core/src/oidc_verify.rs:476-484` matches `Err(OidcError::NoMatchingKey(_))`
   and returns every other error unrefreshed.
-- `crates/core/src/logout_token.rs:289-302` does the same **and documents why**:
+- `crates/zeroship-core/src/logout_token.rs:289-302` does the same **and documents why**:
   *"Signature/claim failures aren't fixable by refetching the JWKS, and forcing
   a refresh on them just doubles the latency on every bad token."*
 
@@ -1384,7 +1384,7 @@ free 401 into a multi-second stall per request.
 
 **What would have to be true for this to be wrong.** `refresh()` would need
 coalescing or rate limiting (read end to end in
-`crates/core/src/oidc_verify.rs` - it has none), or the Bearer arm would have to
+`crates/zeroship-core/src/oidc_verify.rs` - it has none), or the Bearer arm would have to
 reject unsigned garbage first (`router/auth.rs:655-694` - the only pre-check is
 the unsigned `iss` peek), or `resolve_auth` would have to skip anon routes
 (`router/auth.rs:329-334` serves anon *after* the verify ran).
@@ -1402,7 +1402,7 @@ true.
 **Status (triage 2026-08-10): was LIVE, FIXED IN THIS TRIAGE.**
 
 `is_safe_oidc_original_path` now ends the first segment at the first `/`, `?` or
-`#` (`crates/gateway/src/router/dispatch.rs`, `path[1..].find(['/', '?', '#'])`),
+`#` (`crates/zeroship-gateway/src/router/dispatch.rs`, `path[1..].find(['/', '?', '#'])`),
 with a comment stating why the delimiter set is what it is. The security intent
 is untouched: a colon in the first *path* segment still fails.
 
@@ -1410,7 +1410,7 @@ Red before the fix, colon-free control asserting first and passing:
 
 ```
 thread 'router::dispatch::tests::oidc_original_path_keeps_a_colon_that_lives_in_the_query'
-panicked at crates/gateway/src/router/dispatch.rs:5062:9:
+panicked at crates/zeroship-gateway/src/router/dispatch.rs:5062:9:
 assertion `left == right` failed: a colon inside the QUERY must not make the path unsafe
   left: "/"
  right: "/search?q=https://example.com"
@@ -1435,7 +1435,7 @@ its `/foo:bar/baz` case, stays green.
 the wire (browsers never send them) and nothing about the `bytes[1]` alnum gate,
 which the neighbouring test owns.
 
-**File / symbol:** `crates/gateway/src/router/dispatch.rs:2893-2915`
+**File / symbol:** `crates/zeroship-gateway/src/router/dispatch.rs:2893-2915`
 (`is_safe_oidc_original_path`), via `sanitize_oidc_original_path:2885`.
 
 **What is wrong.** The "first segment" used for the scheme-lookalike check is
@@ -1462,7 +1462,7 @@ on the app root with their destination gone. Same for `/agenda?t=12:30`,
 
 ```
 thread 'router::dispatch::tests::temp_g_verify_query_string_colon_survives_sanitise'
-panicked at crates/gateway/src/router/dispatch.rs:3629:9:
+panicked at crates/zeroship-gateway/src/router/dispatch.rs:3629:9:
 assertion `left == right` failed: a colon inside the QUERY must not make the path unsafe
   left: "/"
  right: "/search?q=https://example.com"
@@ -1517,7 +1517,7 @@ Not fixed here: deciding that a 5xx counts as a breaker failure while a 4xx does
 not is a policy change to a deliberately documented rule, and (b) needs a
 compare-exchange state machine plus a concurrency test the module has never had.
 
-**File / symbol:** `crates/gateway/src/op_client.rs:395-405` (`call`) and
+**File / symbol:** `crates/zeroship-gateway/src/op_client.rs:395-405` (`call`) and
 `:223-230` (`CircuitBreaker::on_success`); module doc `:5-7`.
 
 **Two defects, one type.**
@@ -1559,7 +1559,7 @@ breaker is explicitly `Arc`-shared across ntex worker threads
 ## G16 - the public signal-ingress endpoint has an unbounded limiter map, the wrong client key, and a fresh HTTP client per request
 
 **Status (triage 2026-08-10): LIVE, all three sub-defects.**
-`git log -- crates/gateway/src/signal_ingress.rs` shows a single commit
+`git log -- crates/zeroship-gateway/src/signal_ingress.rs` shows a single commit
 (`549e2656e`); nothing has been fixed since the file was written.
 
 (a) `PLACEHOLDER_LIMITER` (`signal_ingress.rs:48`) is still an uncapped
@@ -1597,7 +1597,7 @@ limiter is the operator-pending design decision the comment names, and patching
 the key without the store would make the endpoint look correct while remaining
 unbounded.
 
-**File / symbol:** `crates/gateway/src/signal_ingress.rs:48-65` and `:103`.
+**File / symbol:** `crates/zeroship-gateway/src/signal_ingress.rs:48-65` and `:103`.
 Mounted at `POST /__zeroship/v1/signal` and `POST /__zeroship/signals/v1`
 (`main.rs:851-864`), outside the per-app dispatch path, so
 `enforce::check_rate_limit` never applies.
@@ -1648,7 +1648,7 @@ check. `finish_callback` goes decode (`:227-228`) -> state compare (`:233-235`)
 `Max-Age` attribute (`:1048`).
 
 **Evidence the finding did not cite:** the platform already implements this
-correctly elsewhere. `crates/auth/src/ui/oauth_stash.rs` has its own
+correctly elsewhere. `crates/zeroship-auth/src/ui/oauth_stash.rs` has its own
 `STASH_MAX_AGE_SECS` (`:146`) *and* puts it inside the signed blob -
 `oauth_stash.rs:65`: `exp: iat.saturating_add(STASH_MAX_AGE_SECS)`. So this is
 not a missing convention; the gateway's copy dropped the field the sibling
@@ -1665,7 +1665,7 @@ pre-launch (`AGENTS.md`: break the shape, update every producer and consumer in
 one patch) but it is still a wire-format decision, and it should land with the
 age gate in `decode`, not as a field nothing reads.
 
-**File / symbol:** `crates/gateway/src/oidc_rp.rs:1032-1034`
+**File / symbol:** `crates/zeroship-gateway/src/oidc_rp.rs:1032-1034`
 (`STASH_MAX_AGE_SECS`), `:899-943` (`Stash`, `encode`, `decode`).
 
 **What is wrong.** The constant is documented as *"10-minute window for the OIDC
@@ -1710,7 +1710,7 @@ read as an accepted risk, not an open bug.
 inside `handle` (now `backchannel_logout.rs:128-141`, and it is a good rewrite:
 *"the fallback is WIDER than 'sid was absent'"*). It left the **rustdoc on
 `handle`** - the text this finding actually quoted - untouched.
-`crates/gateway/src/backchannel_logout.rs:48-50` at HEAD:
+`crates/zeroship-gateway/src/backchannel_logout.rs:48-50` at HEAD:
 
 ```
 /// Revocation policy: for per-app clients, prefer `sid` and revoke only local
@@ -1728,7 +1728,7 @@ Code arm unchanged (`backchannel_logout.rs:222-226`, `if users.is_empty()` ->
 `revoke_by_sub` at `:461`).
 
 The "OP always sends both" premise is confirmed:
-`crates/auth/src/oidc/backchannel_logout.rs:158-163` passes `sub: Some(&rp.sub)`
+`crates/zeroship-auth/src/oidc/backchannel_logout.rs:158-163` passes `sub: Some(&rp.sub)`
 and `sid: Some(&rp.sid)` from non-nullable `RelyingPartySession` fields, and it
 is the only production caller of `issue_logout_token`. So the "lacks sid" branch
 the rustdoc describes is dead against this OP - which is precisely why leaving
@@ -1740,14 +1740,14 @@ that can never run as though it were the policy.
 `logout_jti_cache.insert` at `:326` is reached only after successful revocation;
 every earlier return drops `LogoutJtiClaim`, whose `Drop` at `:446-458` removes
 the in-flight entry), and the sender does not retry - `emit_to_rps`
-(`crates/auth/src/oidc/backchannel_logout.rs:174-184`) makes one pass, warns on
+(`crates/zeroship-auth/src/oidc/backchannel_logout.rs:174-184`) makes one pass, warns on
 failure and continues. No queue, no backoff, no outbox.
 
 Not fixed here: the rustdoc correction is a comment (no red-before-green test
 possible), and it should land with G7's three sites as one "stale rustdoc over
 correct inline comment" sweep.
 
-**File / symbol:** `crates/gateway/src/backchannel_logout.rs:209-247`; doc
+**File / symbol:** `crates/zeroship-gateway/src/backchannel_logout.rs:209-247`; doc
 comment at `:47-50`.
 
 **What is wrong.** The doc says: *"prefer `sid` and revoke only local sessions
@@ -1761,7 +1761,7 @@ sessions for that user at that app), writes the per-app family revocation
 marker, and calls `anchors::delete_all_for_user` (line 515).
 
 Since the platform OP always sends both `sub` and `sid`
-(`crates/auth/src/oidc/backchannel_logout.rs:158-163`), the "lacks sid" branch
+(`crates/zeroship-auth/src/oidc/backchannel_logout.rs:158-163`), the "lacks sid" branch
 the doc describes is dead, and this fallback is the only one that ever fires.
 
 **Concrete failure scenario.** A user is signed in on a laptop (OP session S1)
@@ -1784,7 +1784,7 @@ exhaustion.
 
 **Related, same file:** `retryable_processing_error()` (`:392-396`) returns 503
 without burning the `jti`, on the assumption that the sender retries. It does
-not: `crates/auth/src/oidc/backchannel_logout.rs:174-184` posts once per RP and,
+not: `crates/zeroship-auth/src/oidc/backchannel_logout.rs:174-184` posts once per RP and,
 on a non-2xx, logs a warning and moves on - no queue, no backoff, no outbox. So
 a momentary pool exhaustion on the gateway silently drops a real logout, and the
 user's sessions live out their full lifetime. Every 503 arm in the handler has
@@ -1823,7 +1823,7 @@ worker to hot-spot today. Worth revisiting *if* G6 is fixed - at that point a
 caller pinning N connections to one worker becomes a live availability question.
 
 **K3b - `alg` confusion in `verify_id_token`.**
-`crates/core/src/oidc_verify.rs:458-466` takes `header.alg` from the untrusted
+`crates/zeroship-core/src/oidc_verify.rs:458-466` takes `header.alg` from the untrusted
 token and builds `Validation::new(alg)` - the textbook shape. Killed: the key
 lookup at `461-464` requires `k.kid == kid && k.alg == alg`, and `CachedKey.alg`
 is populated only from the JWKS through the whitelist at `refresh()` (296-307),
@@ -1836,7 +1836,7 @@ HS256 token finds no key; `jsonwebtoken::Algorithm` has no `none` variant.
 `jsonwebtoken`'s `aud` check is *membership*, so a multi-audience ID token would
 pass `finish_callback`'s single-`aud` expectation. Killed as exploitable: this
 OP's `IdTokenClaims.aud` is a plain `String`
-(`crates/auth/src/oidc/issuer.rs:51`), so multi-audience tokens cannot be
+(`crates/zeroship-auth/src/oidc/issuer.rs:51`), so multi-audience tokens cannot be
 issued. Retained as a defence-in-depth note - `backchannel_logout.rs:79-88`
 picks the *first* provisioned client out of an `aud` array and verifies against
 it, so both would break together if the OP ever gained multi-aud tokens.
@@ -1865,7 +1865,7 @@ gateway's own MAC'd stash.
 `sync.rs`'s test fixtures spell `name` as `"provisioned.zeroship.ai"` while
 `extract_app_name` yields only the first label. Killed as a *bug*: control
 populates `name` from `zeroship.apps.name`
-(`crates/control/src/registry.rs:642`), which is the bare app slug, so
+(`crates/zeroship-control/src/registry.rs:642`), which is the bare app slug, so
 production agrees. It survives as a note: those fixtures do not match the
 production shape, so they cannot catch a first-label-vs-full-host regression.
 
@@ -1893,30 +1893,30 @@ Stated so the gap is visible rather than implied:
 
 Recorded so they are not re-found, but not written up as full findings:
 
-- `crates/gateway/src/sessions.rs:157` - `validate` has zero production callers
+- `crates/zeroship-gateway/src/sessions.rs:157` - `validate` has zero production callers
   (the only two references in the crate are doc comments saying it is no longer
   used), yet the module doc at `:5-12` still lists it under "Lifecycle" and
   advertises the "30 min sliding idle / 12 h absolute" limits it enforces. Those
   limits therefore constrain nothing.
-- `crates/gateway/src/sessions.rs:255-287` - `latest_sid_for_user` orders by
+- `crates/zeroship-gateway/src/sessions.rs:255-287` - `latest_sid_for_user` orders by
   `issued_at DESC LIMIT 1` with no `revoked_at IS NULL` and no expiry filter, so
   a `?mint=1` rotation can copy forward a `sid` that a back-channel logout
   already revoked.
-- `crates/gateway/src/anchors.rs:300-307` - `update_rotated_family` is the only
+- `crates/zeroship-gateway/src/anchors.rs:300-307` - `update_rotated_family` is the only
   anchor operation without an explicit `AND app_id = $2`; `read_live` (`:259`)
   and `delete` (`:328`) both carry one in addition to RLS.
-- `crates/gateway/src/session_token.rs:174-177` - `Issuer::issue` rejects an
+- `crates/zeroship-gateway/src/session_token.rs:174-177` - `Issuer::issue` rejects an
   empty `sub` but not an empty `app`, and `Verifier::verify` (`:319`) compares
   `app` with a plain `!=`. Two routes that both resolved
   `oauth_client_id = Some("")` would cross-accept each other's cookies. I did
   not find a path that stores an empty `oauth_client_id`.
-- `crates/gateway/src/anchors.rs:483-485` - the single-flight rationale cites "the
+- `crates/zeroship-gateway/src/anchors.rs:483-485` - the single-flight rationale cites "the
   short cached wrapper", which the same file's header (`:19-24`) declares
   removed. The conclusion still holds (the OP's `SELECT ... FOR UPDATE` plus its
   30 s idempotent-replay window absorbs the concurrency), but the stated reason
   does not, and it is what a future reader would trust when widening the
   single-flight's scope.
-- `crates/gateway/src/anchors.rs:138-142` - `breadcrumb_cookie_name` interpolates
+- `crates/zeroship-gateway/src/anchors.rs:138-142` - `breadcrumb_cookie_name` interpolates
   the unvalidated `Host` into a `Set-Cookie` *name*
   (`format!("zs.{host}.is.authenticated")`), so a crafted `Host` can inject
   cookie attributes such as `Domain=`. CR/LF is blocked by the HTTP parser, so

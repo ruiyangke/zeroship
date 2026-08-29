@@ -46,31 +46,31 @@ this document was still open.
 
 ### 2.1 The OP implements RFC 8628 completely
 
-- `crates/auth/src/oidc/device_token.rs:107` - `device_authorization`, the
+- `crates/zeroship-auth/src/oidc/device_token.rs:107` - `device_authorization`, the
   device authorization endpoint.
-- `crates/auth/src/oidc/device_token.rs:27` - `DEVICE_CODE_GRANT_TYPE`,
+- `crates/zeroship-auth/src/oidc/device_token.rs:27` - `DEVICE_CODE_GRANT_TYPE`,
   `urn:ietf:params:oauth:grant-type:device_code`.
-- `crates/auth/src/oidc/device_token.rs:153` - writes `zeroship.device_grants`
+- `crates/zeroship-auth/src/oidc/device_token.rs:153` - writes `zeroship.device_grants`
   itself.
-- `crates/auth/src/ui/device.rs` - the OP has its own device approval page,
+- `crates/zeroship-auth/src/ui/device.rs` - the OP has its own device approval page,
   alongside `consent.rs`, `login.rs`, `sessions.rs`.
 
 So the OP owns the endpoints, the grant table and the approval UI.
 
 ### 2.2 The control plane implements a parallel flow
 
-- `crates/control/src/device_handlers.rs:148` - `device_auth`
-- `crates/control/src/device_handlers.rs:236` - `device_approve`
-- `crates/control/src/device_handlers.rs:294` - `device_token`
+- `crates/zeroship-control/src/device_handlers.rs:148` - `device_auth`
+- `crates/zeroship-control/src/device_handlers.rs:236` - `device_approve`
+- `crates/zeroship-control/src/device_handlers.rs:294` - `device_token`
 
 ### 2.3 The CLI uses the control plane's flow, not the OP's
 
-- `crates/cli/src/auth.rs:166` - posts to control `/api/device/auth`
-- `crates/cli/src/auth.rs:229` - polls control `/api/device/token`
+- `crates/zeroship-cli/src/auth.rs:166` - posts to control `/api/device/auth`
+- `crates/zeroship-cli/src/auth.rs:229` - polls control `/api/device/token`
 
 ### 2.4 The control plane cannot sign, so it asks the OP to mint
 
-`crates/auth/src/oidc/device_token.rs:566` - `mint_platform_token`:
+`crates/zeroship-auth/src/oidc/device_token.rs:566` - `mint_platform_token`:
 
 - `:572` - the entire authorization decision is
   `authorized(&req, cfg)`, which is `extract_bearer` + `validate_control_key`
@@ -83,14 +83,14 @@ So the OP owns the endpoints, the grant table and the approval UI.
 
 ### 2.5 The scope ceiling lives in the caller, not the issuer
 
-`crates/control/src/device_handlers.rs:60-65` intersects `DEPLOY_TOKEN_SCOPES`
+`crates/zeroship-control/src/device_handlers.rs:60-65` intersects `DEPLOY_TOKEN_SCOPES`
 with the principal's grants **before** calling. That is discipline in one
 client, not an invariant of the mint. Any other holder of the secret bypasses
 it entirely.
 
 ### 2.6 The secret is not exclusive to the control plane
 
-- `crates/worker/src/cache.rs:98`, `:130`, `:208` - the worker holds
+- `crates/zeroship-worker/src/cache.rs:98`, `:130`, `:208` - the worker holds
   `control_key`.
 - `deploy/compose/docker-compose.yml` - `ZEROSHIP_CONTROL_KEY` is injected into
   five services: `auth`, `control`, `gateway`, `migrated`, `worker`.
@@ -99,7 +99,7 @@ The worker is the process that executes untrusted creator code in V8.
 
 ### 2.7 These tokens cannot be recalled
 
-`crates/control/src/device_handlers.rs:76-81` records in its own doc comment
+`crates/zeroship-control/src/device_handlers.rs:76-81` records in its own doc comment
 that what does not bound this token is server-side revocation:
 `zeroship.token_revocations` is only ever written for per-app RP clients with a
 pairwise subject. **NOT CHECKED** by me independently; the fix branch was asked
@@ -143,21 +143,21 @@ lifetime. A contained compromise becomes a total one. This is an escalation
 **This section previously claimed the provider-pluggability justification was
 dead. That claim was WRONG, and the correction matters to the decision.**
 
-What I read at `crates/control/src/device_handlers.rs:519` and `:533-545` is
+What I read at `crates/zeroship-control/src/device_handlers.rs:519` and `:533-545` is
 about `ensure_platform_device_provider`, which governs how the flow **starts**.
 It is true that starting requires the platform OP. I generalised that to the
 whole flow. I3 checked the **approval** path and found the GoTrue branch very
 much alive:
 
 - Supabase mode can construct a trusted set holding both Supabase and the
-  platform OP (`crates/control/src/main.rs:129-158`).
+  platform OP (`crates/zeroship-control/src/main.rs:129-158`).
 - On approval, B accepts the authenticated GoTrue role, checks email
   confirmation fail-closed, links or provisions a canonical platform principal,
   merges only on verified email, and seeds default grants for new principals
-  (`crates/control/src/device_handlers.rs:834-893`,
-  `crates/control/src/identity_bridge.rs:128-223,298-342`).
+  (`crates/zeroship-control/src/device_handlers.rs:834-893`,
+  `crates/zeroship-control/src/identity_bridge.rs:128-223,298-342`).
 - A dual-provider test reaches this path and completes minting
-  (`crates/control/tests/device_handlers_test.rs:1048-1066,1175-1222`).
+  (`crates/zeroship-control/tests/device_handlers_test.rs:1048-1066,1175-1222`).
 
 So the identity bridge is live behaviour, not vestigial scaffolding. Deleting B
 requires one of: retiring direct Supabase deploy login, completing upstream
@@ -277,7 +277,7 @@ product-console UX argument.
 
 **I3 has made this MOOT for us.** Our approval already happens on the auth
 service: B's `verification_uri` points at the OP's `/device` page, not the
-console and not control (`crates/control/src/device_handlers.rs:908-921`). Auth
+console and not control (`crates/zeroship-control/src/device_handlers.rs:908-921`). Auth
 already ships compiled pages for login, signup, consent, device authorization,
 linking, reset, magic links, federation and TOTP.
 
@@ -348,7 +348,7 @@ I3 measured it, and it is NOT a CLI URL change. Three real costs:
    generic OAuth client mint issues `aud = "zeroship"` and a *pairwise*
    `pws_...` subject, while control requires `aud = control.zeroship.ai` and a
    `sub` that parses as a UUID (`control/src/config.rs:266-268`,
-   `crates/authn/src/lib.rs`). **A first-party CLI token policy is required;
+   `crates/zeroship-authn/src/lib.rs`). **A first-party CLI token policy is required;
    registering a `zeroship-cli` client is not sufficient.**
 2. **Per-principal live grant intersection.** B intersects its four-scope
    ceiling with the principal's current `principal_grants` at redemption
@@ -517,8 +517,8 @@ A compromised point of presence must yield edge authority and nothing more.
 S4 has a local precedent that is better guidance than "adopt RFC 8693": the
 gateway does NOT tell the worker who the end user is. It HMAC-signs a
 request-bound `ZeroShip-User` header which the worker verifies
-(`crates/runtime/src/core/dev_auth.rs:6-8`,
-`crates/gateway/src/router/dispatch.rs:2425`), and dispatch strips inbound
+(`crates/zeroship-runtime/src/core/dev_auth.rs:6-8`,
+`crates/zeroship-gateway/src/router/dispatch.rs:2425`), and dispatch strips inbound
 `zeroship-user` headers as platform-reserved so a forged one cannot ride in.
 
 That is exactly the separation the mint lacks. Generalise it:
@@ -725,7 +725,7 @@ forever. In flight now.
 | 0.3 | Issuer-capped TTL | same | branch `fix/platform-mint` |
 | 0.4 | Split the shared secret; per-service endpoint allowlist | auth + all callers | TODO |
 | 0.5 | Erased accounts revoke every credential class | `crates/authn`, `crates/auth` | branch `fix/credential-lifecycle` |
-| 0.6 | Prune retired signing keys from JWKS | `crates/auth/src/oidc` | **BLOCKED on 0.3** - see 9.1.1 |
+| 0.6 | Prune retired signing keys from JWKS | `crates/zeroship-auth/src/oidc` | **BLOCKED on 0.3** - see 9.1.1 |
 
 #### 9.1.1 Why 0.6 cannot ship before 0.3 (correction)
 
@@ -735,7 +735,7 @@ and an agent briefed to implement 0.6 refused and explained why - correctly.
 A retirement horizon must be at least the maximum lifetime of anything signed
 with the key. On main today there is no such maximum: the mint accepts any
 positive `i64` TTL and the issuer uses it directly as `exp = now + ttl`
-(`crates/auth/src/oidc/issuer.rs:426`). **No finite horizon is safe until the
+(`crates/zeroship-auth/src/oidc/issuer.rs:426`). **No finite horizon is safe until the
 issuer-side TTL ceiling (0.3) exists.** Any number chosen now would be a guess
 that can silently break verification for a longer-lived token.
 
@@ -746,7 +746,7 @@ Two useful facts established while proving this:
   signing key, and require an active DB lookup. So the horizon is governed by
   OIDC token lifetimes - 15 minutes for access and ID tokens, 2 minutes for
   logout tokens, and the 12-hour CLI deploy token as the largest fixed caller
-  (`crates/control/src/device_handlers.rs`).
+  (`crates/zeroship-control/src/device_handlers.rs`).
 - **A second prerequisite nobody had named:** an old process can keep signing
   with its in-memory copy of a key after another process marks that key
   `retiring`. So `retiring_at` is not a reliable "last possible signature"
@@ -769,7 +769,7 @@ A-issued token is rejected outright.
 the platform principal UUID; `aud` that control accepts; deploy-appropriate
 TTL. Today A issues `aud = "zeroship"` and a pairwise `pws_...` subject while
 control requires its own audience and a UUID `sub`
-(`crates/control/src/config.rs:266-268`).
+(`crates/zeroship-control/src/config.rs:266-268`).
 
 1.2 **Move the four-scope ceiling onto the client registration.** Cheap; I3
 classified it so.
@@ -809,7 +809,7 @@ entitlement-aware authorization at request time.
 3.3 Retire the direct-Supabase deploy path per ADR `:32`; keep Supabase as
 upstream social federation per ADR `:13`.
 3.4 Update the tests I3 enumerated: five control tests plus the mock at
-`crates/control/tests/device_handlers_test.rs:331-369`,
+`crates/zeroship-control/tests/device_handlers_test.rs:331-369`,
 `tests/e2e_device_login.sh`, `tests/supabase_deploy_e2e.sh`.
 
 ### 9.5 What this deletes, stated plainly
@@ -883,8 +883,8 @@ Not a preference to be traded off in design. PATs are REMOVED, not hardened.
 
 **Why this is coherent with the rest of the document.** A PAT is a SECOND
 issuance authority: control holds its own signing key (`PatIssuer`,
-`crates/control/src/main.rs:707`) and mints credentials with it, valid up to
-365 days (`crates/control/src/token_handlers.rs:20`). Section 9 argues the OP
+`crates/zeroship-control/src/main.rs:707`) and mints credentials with it, valid up to
+365 days (`crates/zeroship-control/src/token_handlers.rs:20`). Section 9 argues the OP
 must be the sole issuer and control a resource server. PATs are the largest
 counterexample to that, and were not previously named as one.
 
@@ -892,11 +892,11 @@ counterexample to that, and were not previously named as one.
 
 ```
 routes      POST /me/tokens, GET /me/tokens, DELETE /me/tokens/{id}
-            (crates/control/src/token_handlers.rs:257-264)
-consumers   crates/authn/src/lib.rs:226   per-request validation query
-            crates/authn/src/lib.rs:263   last_used_at update
-            crates/authz/src/eval.rs:149  policy lookup
-            crates/control/src/lib.rs:496 AuthzGuard bearer path
+            (crates/zeroship-control/src/token_handlers.rs:257-264)
+consumers   crates/zeroship-authn/src/lib.rs:226   per-request validation query
+            crates/zeroship-authn/src/lib.rs:263   last_used_at update
+            crates/zeroship-authz/src/eval.rs:149  policy lookup
+            crates/zeroship-control/src/lib.rs:496 AuthzGuard bearer path
 storage     zeroship.permission_tokens
 key         the control plane's own signing key, if PATs are its only
             consumer - CHECK before deleting it
@@ -907,10 +907,10 @@ verified on zeroship.co ran on the 12-hour device token, not a 365-day PAT. So
 removal does not break deployment.
 
 **What replaces the automation use case:** a refresh-token family on the
-device-flow credential. `crates/auth/src/oidc/refresh.rs` already implements
+device-flow credential. `crates/zeroship-auth/src/oidc/refresh.rs` already implements
 families, rotation, reuse detection and `family_absolute_expires_at`; its own
 header says "CLI/programmatic rotation + reuse detection". The CLI simply never
-requested one - `crates/control/src/device_handlers.rs:68` states the flow
+requested one - `crates/zeroship-control/src/device_handlers.rs:68` states the flow
 "issues no refresh token", which is also WHY that token was given a 12-hour life.
 
 With refresh in place the access token should get SHORTER, not longer: a brief

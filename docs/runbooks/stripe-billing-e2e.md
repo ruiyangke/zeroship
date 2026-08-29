@@ -87,7 +87,7 @@ On the test account's default API version (`2025-09-30.clover`, Basil line):
 
 - **D1 — invoice items not swept:** `POST /v1/invoices` does NOT include pending
   invoice items unless `pending_invoice_items_behavior=include` is passed; our
-  `create_invoice` (`crates/control/src/stripe_client.rs`) omits it, so the
+  `create_invoice` (`crates/zeroship-control/src/stripe_client.rs`) omits it, so the
   finalized invoice can be **$0** and the creator is not billed.
 - **D2 — settlement ids not inline:** the Invoice object (and Stripe's OWN
   delivered `invoice.paid` event) carries **no** top-level `payment_intent` /

@@ -17,7 +17,7 @@ database:
   `zeroship.deleted_sandboxes` (`0011_sandbox_initial.sql`) key on
   typed-id base62 strings: `user_id TEXT CHECK (~ '^usr_[0-9A-Za-z]{20,40}$')`,
   `sandbox_id sbx_…`, `project_id prj_…`, `host_id hst_…`, `token_id tok_…`.
-  These are `crates/core/src/typed_id.rs` ids (UUIDv7 + base62 + entity
+  These are `crates/zeroship-core/src/typed_id.rs` ids (UUIDv7 + base62 + entity
   prefix), produced and validated by the sandbox controller — **not** the
   raw UUIDs stored in `zeroship.users.id` / `zeroship.apps.id`.
 
@@ -134,4 +134,4 @@ GDPR endpoint, scoped by the `sandbox_gdpr` role.
 - Related: `docs/decisions/2026-05-26-builder-sandbox-project-typed-id.md`
   (deterministic `prj_` derivation), `2026-05-05-sandbox-admin-shared-bearer.md`
   (admin bearer / `admin_id = "operator"` placeholder on the audit row).
-- typed-id definition: `crates/core/src/typed_id.rs`.
+- typed-id definition: `crates/zeroship-core/src/typed_id.rs`.

@@ -36,7 +36,7 @@ only the backend that answers them differs.
 > There is
 > no gateway under `pnpm dev`, and nothing in the dev path substitutes for one:
 > `AuthLevel` is read only in `crates/gateway` (`compiled.rs`,
-> `router/auth.rs`), and `crates/cli/src` and `crates/runtime/src` contain no
+> `router/auth.rs`), and `crates/zeroship-cli/src` and `crates/zeroship-runtime/src` contain no
 > reader for it at all.
 >
 > So a procedure declared `auth: "user"` runs for **anyone** in dev and returns
@@ -90,7 +90,7 @@ table.** It does not run locally at all.
 The dev provider serves exactly four routes (`dev-auth.ts`, the `path ===`
 arms): `/__zeroship/auth/` `authorize`, `popup-callback`, `session`, `signout`.
 The string `signup` does not appear in the file. Deployed, `POST /signup` is a
-real route (`crates/auth/src/server.rs`). Dev users come from **configuration** —
+real route (`crates/zeroship-auth/src/server.rs`). Dev users come from **configuration** —
 a `users` list and a `defaultUserId` -- never from a creation flow. Their
 passwords are not configured at all; the provider derives a `passwords` map from
 the ids (see the `devAuth` section below).
@@ -144,7 +144,7 @@ session cookie + an identity projection, never a token. Two surfaces:
    helper) and `currentUser()` (the `zeroship` module / `@zeroship/server`). In
    prod these are fed by the gateway's request-bound `ZeroShip-User` header
    (`base64(JSON).<request_id>.<iat>.<hex-hmac>`, signed with the worker key —
-   `crates/core/src/auth/mod.rs`, `crates/gateway/src/oidc_rp.rs`). The worker
+   `crates/zeroship-core/src/auth/mod.rs`, `crates/zeroship-gateway/src/oidc_rp.rs`). The worker
    verifies + decodes it into `user_json` and threads it through
    `Runtime::call_fetch_handler_with_user`, which populates BOTH the
    `env.auth` per-request state (`crate::auth::set_request_user`) and the RPC
@@ -218,7 +218,7 @@ is same-origin (localhost), so the iframe loads with no header relax needed:
 The `__zeroship_dev_session` cookie value is
 `base64url(user_json) "." hex-HMAC-SHA256(secret, base64url-payload)`, signed
 with a per-dev-server secret (`ZEROSHIP_DEV_AUTH_SECRET`). The dev runtime's
-serve path (`crates/runtime/src/core/serve.rs::handle_request`) calls
+serve path (`crates/zeroship-runtime/src/core/serve.rs::handle_request`) calls
 `dev_auth::resolve_dev_user_json(headers)` BEFORE dispatch: it reads the cookie,
 verifies the dev HMAC, and threads the decoded `user_json` through the SAME
 `call_fetch_handler_with_user` path the worker uses for the gateway header. So
@@ -266,7 +266,7 @@ session cookie.
 Deriving it rather than configuring it keeps a property the dev-vs-deployed
 harnesses measure: the derived password is always under 15 characters, and the
 deployed platform refuses any password shorter than that
-(`crates/auth/src/ui/signup.rs`). So a dev credential works locally and
+(`crates/zeroship-auth/src/ui/signup.rs`). So a dev credential works locally and
 **cannot exist in production** -- `tests/e2e_dev_vs_deployed_login.sh` asserts
 exactly that in its `policy.short_password` row. The authority is
 `devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts`.
@@ -298,7 +298,7 @@ This is **grep-provable** and guarded by a test
 
 ## Tests (the faithful path)
 
-- `crates/runtime/tests/dev_auth.rs` — drives the real serve-path seam
+- `crates/zeroship-runtime/tests/dev_auth.rs` — drives the real serve-path seam
   (`resolve_dev_user_json` → `call_fetch_handler_with_user`) and asserts BOTH
   `env.auth.getUser()` and `currentUser()` resolve the dev user from the cookie,
   plus forgery rejection (wrong-secret cookie → anonymous). No gateway or
@@ -313,8 +313,8 @@ This is **grep-provable** and guarded by a test
 ## Files
 
 ```
-crates/runtime/src/core/dev_auth.rs        cookie verify → user_json (dev-gated)
-crates/runtime/src/core/serve.rs           handle_request calls resolve_dev_user_json
+crates/zeroship-runtime/src/core/dev_auth.rs        cookie verify → user_json (dev-gated)
+crates/zeroship-runtime/src/core/serve.rs           handle_request calls resolve_dev_user_json
 sdks/bootstrap/src/dev-auth.ts             the /__zeroship/auth/* provider + cookie signing
 sdks/bootstrap/src/dev-entry.ts            wires the provider into the dev fetch handler
 sdks/vite-plugin/src/dev-auth-config.ts    devAuth option → env pair + secret

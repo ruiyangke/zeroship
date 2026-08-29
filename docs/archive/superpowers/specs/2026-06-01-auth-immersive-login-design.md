@@ -44,7 +44,7 @@ gateway/dev popup-callback relay (also target `window.parent`, not only `window.
 `signInWithOAuth` launcher + `SignInOptions.provider` union (re-add `password`) + `AuthClientOptions`
 (new `authOrigin`/`immersive` field) + `AuthModal` (host the iframe instead of the credential form);
 the builder `Login.tsx`/`Signup.tsx` (host the iframe launcher) + the three builder e2e specs; the
-`crates/auth/tests/threat_model.rs` clickjacking-headers test (assert the NEW framed contract).
+`crates/zeroship-auth/tests/threat_model.rs` clickjacking-headers test (assert the NEW framed contract).
 
 What is **retained** despite looking password-only: `mint_session_from_code` + the `auth_token.rs`
 helpers (the surviving `/session` path); `verify_password_credentials` + `identity/password.rs` (the
@@ -67,7 +67,7 @@ auth.zeroship.ai         The auth service: /login /signup /consent /oauth/google
 ```
 
 Under the **app/console** origin, the gateway serves the same-origin BFF "integration" endpoints
-(`crates/gateway/src/browser_auth.rs` + `crates/gateway/src/auth_token.rs`):
+(`crates/zeroship-gateway/src/browser_auth.rs` + `crates/zeroship-gateway/src/auth_token.rs`):
 
 ```
 GET  /__zeroship/auth/authorize        the ONE cross-site hop: build the per-app PUBLIC PKCE client's
@@ -302,7 +302,7 @@ blockers). The new shape adds an iframe branch that must be chosen **before** th
 - The `.css` `zs-auth-form` / `zs-auth-field` form selectors are dropped or repurposed as iframe-modal
   chrome.
 
-### 4.2 Gateway popup-callback — dual-target postMessage (`crates/gateway/src/browser_auth.rs`)
+### 4.2 Gateway popup-callback — dual-target postMessage (`crates/zeroship-gateway/src/browser_auth.rs`)
 
 **Reused, with a one-line target change.** `popup_callback()` (194-209) and `popup_callback_html(nonce)`
 (218-244) stay. The single postMessage line (230) currently targets only `window.opener`:
@@ -351,7 +351,7 @@ try { if (tgt) tgt.postMessage(msg, location.origin); } catch (e) {}
 `resolve_route` + `same_origin_guard` + `error_response` + `CACHE_NO_STORE` (shared with `/session` +
 `/signout`); the `authorize`/`popup-callback`/`signout` handlers + their tests survive.
 
-### 4.3 Auth-service security headers — route-aware `frame-ancestors` (`crates/auth/src/headers.rs`)
+### 4.3 Auth-service security headers — route-aware `frame-ancestors` (`crates/zeroship-auth/src/headers.rs`)
 
 This is the pivot point (constraints 2 + 5). **Correcting the earlier draft:** the framed login GET
 handlers currently emit **NO** CSP of their own — `login.rs` GET (131-134) and `signup.rs` GET (70-73)
@@ -432,22 +432,22 @@ See §7 for the full dev-parity treatment. In brief:
 
 **Removed (the `auth_internal_key` shared secret + the gateway `trusted_oauth_clients` consumer):**
 
-- `crates/auth/src/config.rs` — `AuthConfig.auth_internal_key` field + its
+- `crates/zeroship-auth/src/config.rs` — `AuthConfig.auth_internal_key` field + its
   `#[arg(long="internal-key", env="AUTH_INTERNAL_KEY")]` clap attr (~109-130) + the Debug-impl redaction
   line (~501). **Add** the new `frame_ancestor_origins: Vec<String>` field here (§4.3, §10.1).
-- `crates/auth/src/main.rs` — the `require_unless_dev("AUTH_INTERNAL_KEY / --internal-key", …)` startup
+- `crates/zeroship-auth/src/main.rs` — the `require_unless_dev("AUTH_INTERNAL_KEY / --internal-key", …)` startup
   gate (~82-97) and the `obtain_secret(…file_secrets.auth_internal_key…)` resolution (~251-256). The
   `stash_signing_key` obtain/require directly above SURVIVES.
-- `crates/gateway/src/lib.rs` — `GateConfig.auth_internal_key` field (~66-73) AND
+- `crates/zeroship-gateway/src/lib.rs` — `GateConfig.auth_internal_key` field (~66-73) AND
   `GateState.trusted_oauth_clients` field (~211-217). The frame-ancestors CSP allowlist is the
   browser-enforced replacement for the deleted gateway gate.
-- `crates/gateway/src/main.rs` — the `--auth-internal-key`/`AUTH_INTERNAL_KEY` clap arg (~136-145),
+- `crates/zeroship-gateway/src/main.rs` — the `--auth-internal-key`/`AUTH_INTERNAL_KEY` clap arg (~136-145),
   `obtain_secret` (~346-352), `require_unless_dev` (~396-405), `auth_internal_key_configured`
   check-config report (~545-546), `GateConfig{…auth_internal_key}` init (~727); the
   `resolve_trusted_oauth_clients(&file.auth)` (~283) + the `trusted_oauth_clients` GateState init (~752);
   the `/__zeroship/auth/password` route mount (~810-820). The other secrets (control_key, oidc_secret,
   stash, pairwise) + the `{authorize,popup-callback,signout,session}` mounts + backchannel-logout SURVIVE.
-- `crates/core/src/config/file.rs` — `SecretSection.auth_internal_key` (~89-92). `SecretSection` has
+- `crates/zeroship-core/src/config/file.rs` — `SecretSection.auth_internal_key` (~89-92). `SecretSection` has
   `#[serde(deny_unknown_fields)]`, so any deployment TOML still carrying `[secrets].auth_internal_key`
   now fails to parse — **intended** (no-back-compat). The other `SecretSection` fields survive.
 - `docker-compose.yml` — `AUTH_INTERNAL_KEY` env + comment on BOTH the gateway (~206-214) and auth
@@ -458,8 +458,8 @@ See §7 for the full dev-parity treatment. In brief:
 - `zeroship_core::auth::trusted_clients::{resolve_trusted_oauth_clients, is_trusted_client_id,
   default_trusted_oauth_clients}` — the CORE module SURVIVES (`crates/control` consumes it for the
   console `skip_consent` decision). Only the gateway-side consumer is removed.
-- `crates/control/src/app_oauth_client.rs::ensure_app_client(first_party)` +
-  `crates/control/src/bootstrap_console.rs::bootstrap_console(first_party=true)` +
+- `crates/zeroship-control/src/app_oauth_client.rs::ensure_app_client(first_party)` +
+  `crates/zeroship-control/src/bootstrap_console.rs::bootstrap_console(first_party=true)` +
   the `control.oauth_clients.skip_consent` mirror — SURVIVE: drive the console's `skip_consent=true` so
   the framed `/oauth2/auth → /login → /consent` dance auto-accepts identity consent (no consent screen
   for the platform's own console).
@@ -473,7 +473,7 @@ See §7 for the full dev-parity treatment. In brief:
 
 **Added (the new console-origin config):**
 
-- `crates/auth/src/config.rs` `frame_ancestor_origins: Vec<String>` + a `--frame-ancestor-origin`
+- `crates/zeroship-auth/src/config.rs` `frame_ancestor_origins: Vec<String>` + a `--frame-ancestor-origin`
   (repeatable) / `FRAME_ANCESTOR_ORIGINS` clap input; `ops/zeroship.toml` + `ops/zeroship.example.toml`
   `[auth].frame_ancestor_origins = ["https://console.zeroship.ai"]`; `docker-compose.yml` auth service
   `FRAME_ANCESTOR_ORIGINS=https://console.zeroship.localhost` (or the dev no-op, §7). Full field/arg/env/
@@ -508,51 +508,51 @@ goes.
 
 **Delete whole file (3):**
 
-- `crates/auth/src/ui/password.rs` — the `POST /password` credential→code oracle handler
+- `crates/zeroship-auth/src/ui/password.rs` — the `POST /password` credential→code oracle handler
   (`ui::password::post`), `PasswordLoginRequest`, `check_internal_secret`, `credential_error_json`/
   `error_json`, all `secret_gate_*` tests. It imports `verify_password_credentials` (SHARED — do NOT
   delete that fn) and `mint_code_for_subject`/`MintCodeParams`/`HeadlessError` (deleted with
   `oauth/headless.rs`).
-- `crates/auth/src/oauth/headless.rs` — `mint_code_for_subject` + `MintCodeParams` + `HeadlessError` +
+- `crates/zeroship-auth/src/oauth/headless.rs` — `mint_code_for_subject` + `MintCodeParams` + `HeadlessError` +
   the private `CookieJar`/`point_at_hydra`/`extract_query_param`/`build_id_token_claims` helpers. Its
   `IDENTITY_SCOPES` is a private copy; the surviving `ui/consent.rs` has its own. Sole consumer was
   `ui/password.rs`.
-- `crates/auth/src/oauth/mod.rs` — the module exists only to host `pub mod headless;`. With `headless.rs`
-  gone it is empty; delete it and remove `pub mod oauth;` from `crates/auth/src/lib.rs` (15).
+- `crates/zeroship-auth/src/oauth/mod.rs` — the module exists only to host `pub mod headless;`. With `headless.rs`
+  gone it is empty; delete it and remove `pub mod oauth;` from `crates/zeroship-auth/src/lib.rs` (15).
 
 **Delete whole test file (1):**
 
-- `crates/auth/tests/e2e_password_grant.rs` — the live e2e for the `/password` oracle. Do NOT confuse with
-  `crates/auth/tests/e2e_password.rs` (`e2e_password_flow`), which tests the INTERACTIVE `/login → Hydra`
+- `crates/zeroship-auth/tests/e2e_password_grant.rs` — the live e2e for the `/password` oracle. Do NOT confuse with
+  `crates/zeroship-auth/tests/e2e_password.rs` (`e2e_password_flow`), which tests the INTERACTIVE `/login → Hydra`
   dance with `skip_consent` and **SURVIVES** (it backs the iframe's login UI; it never references
   `/password`, `mint_code_for_subject`, `auth_internal_key`, or `verify_password_credentials`).
 
 **Modify — auth crate module decls / routes / comments:**
 
-- `crates/auth/src/lib.rs` — remove `pub mod oauth;` (15).
-- `crates/auth/src/ui/mod.rs` — remove `pub mod password;` (23). (Other `password` mentions at 103/243/283
+- `crates/zeroship-auth/src/lib.rs` — remove `pub mod oauth;` (15).
+- `crates/zeroship-auth/src/ui/mod.rs` — remove `pub mod password;` (23). (Other `password` mentions at 103/243/283
   are unrelated `has_password` doc/struct contexts — do NOT touch.)
-- `crates/auth/src/server.rs` — remove the `web::resource("/password").route(web::post().to(ui::password::post))`
+- `crates/zeroship-auth/src/server.rs` — remove the `web::resource("/password").route(web::post().to(ui::password::post))`
   registration (~49-51) + the preceding comment block (~45-49). `/login`, `/signup`, `/consent`,
   `/oauth/google`, `/device`, `/logout`, `/link` SURVIVE (they back the iframe login UI).
-- `crates/auth/src/identity/credentials.rs` — KEEP `verify_password_credentials` / `CredentialError` /
+- `crates/zeroship-auth/src/identity/credentials.rs` — KEEP `verify_password_credentials` / `CredentialError` /
   `VerifiedUser` (SHARED with `ui/login.rs`). Doc-only: scrub the rustdoc referencing the deleted
   `ui::password` headless endpoint (the "so the headless in-page login endpoint reuses…" / "or a hydra
   login acceptance (password.rs)" comments).
-- `crates/auth/src/ui/login.rs` — comment-only: scrub the ~243 comment claiming the verify path "lives in
+- `crates/zeroship-auth/src/ui/login.rs` — comment-only: scrub the ~243 comment claiming the verify path "lives in
   identity::credentials so the headless /password endpoint can reuse it." The `verify_password_credentials`
   import/call STAY.
 
 **Modify — auth security headers (NOT a deletion — the pivot, §4.3):**
 
-- `crates/auth/src/headers.rs` — make `apply()` + `SecurityHeadersService::call` route-aware: framed routes
+- `crates/zeroship-auth/src/headers.rs` — make `apply()` + `SecurityHeadersService::call` route-aware: framed routes
   emit `frame-ancestors 'self' <console origins>` and SKIP `X-Frame-Options`; everything else keeps
   `XFO: DENY` + `frame-ancestors 'none'`. Thread the request path + a new `frame_ancestor_origins` config
   into the middleware. New `AuthConfig` field for the console origin(s).
 
 **Modify — auth threat-model regression test (the behavior change MUST carry its regression test):**
 
-- `crates/auth/tests/threat_model.rs` — `login_clickjacking_headers_present` (140) currently hard-asserts
+- `crates/zeroship-auth/tests/threat_model.rs` — `login_clickjacking_headers_present` (140) currently hard-asserts
   `X-Frame-Options == DENY` AND CSP `frame-ancestors 'none'` on `GET /login`. After the pivot that
   assertion is FALSE and the test fails. **Rewrite it** to assert the NEW contract: `GET /login` emits
   `frame-ancestors 'self' https://console.zeroship.ai` (read from config) and **NO** `X-Frame-Options`
@@ -563,34 +563,34 @@ goes.
 
 **Remove symbols — gateway:**
 
-- `crates/gateway/src/browser_auth.rs` — the `/password` section (~487-716): `password`, `PasswordRequest`,
+- `crates/zeroship-gateway/src/browser_auth.rs` — the `/password` section (~487-716): `password`, `PasswordRequest`,
   `parse_password_request`, `parse_password_code`, `forward_auth_error`, `PASSWORD_LOGIN_SCOPE` (49),
   `PasswordLoginParams` import (43), the `is_trusted_client_id` gate (547). KEEP `mint_session_from_code`
   import + the shared helpers + the `authorize`/`popup-callback`/`signout` handlers and tests. **Modify**
   `popup_callback_html` (218-244) for the both-targets postMessage (§4.2).
-- `crates/gateway/src/oidc_rp.rs` — `OidcRp::password_login` (~537-608), `PasswordLoginParams` (~1000-1022),
+- `crates/zeroship-gateway/src/oidc_rp.rs` — `OidcRp::password_login` (~537-608), `PasswordLoginParams` (~1000-1022),
   `PasswordLoginOutcome` (~1024-1032). KEEP `hydra_client::call` + breaker + `OidcRpError::from_hydra` +
   `exchange_code_public`/`refresh_token_public`/`finish_callback`/`introspect_token`/`revoke_token_public`.
-- `crates/gateway/src/lib.rs` — `GateConfig.auth_internal_key` + `GateState.trusted_oauth_clients` (§4.5).
-- `crates/gateway/src/main.rs` — the `auth_internal_key` CLI/obtain/require/report/struct-init,
+- `crates/zeroship-gateway/src/lib.rs` — `GateConfig.auth_internal_key` + `GateState.trusted_oauth_clients` (§4.5).
+- `crates/zeroship-gateway/src/main.rs` — the `auth_internal_key` CLI/obtain/require/report/struct-init,
   `trusted_oauth_clients` resolve+wiring, and the `/__zeroship/auth/password` route mount (§4.5). KEEP
   `obtain_secret`/`require_unless_dev` (used by other secrets).
 
 **Modify — gateway test GateState constructors (drop the removed fields; mechanical, tied to lib.rs):**
 
-- `crates/gateway/src/router/auth.rs` — `auth_internal_key: String::new()` (1649, 2626) +
+- `crates/zeroship-gateway/src/router/auth.rs` — `auth_internal_key: String::new()` (1649, 2626) +
   `trusted_oauth_clients: default_trusted_oauth_clients()` (1680, 2651).
-- `crates/gateway/src/router/dispatch.rs` — `auth_internal_key` (1701) + `trusted_oauth_clients` (1731).
-- `crates/gateway/src/router/static_serve.rs` — `auth_internal_key` (886) + `trusted_oauth_clients` (916).
-- `crates/gateway/tests/auth_token_anchors_test.rs` — `auth_internal_key` (344).
-- `crates/gateway/tests/backchannel_logout_test.rs` — `auth_internal_key` (344).
-- `crates/gateway/tests/dpop_bound_e2e.rs` — `auth_internal_key` (240). (Leave the unrelated
+- `crates/zeroship-gateway/src/router/dispatch.rs` — `auth_internal_key` (1701) + `trusted_oauth_clients` (1731).
+- `crates/zeroship-gateway/src/router/static_serve.rs` — `auth_internal_key` (886) + `trusted_oauth_clients` (916).
+- `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` — `auth_internal_key` (344).
+- `crates/zeroship-gateway/tests/backchannel_logout_test.rs` — `auth_internal_key` (344).
+- `crates/zeroship-gateway/tests/dpop_bound_e2e.rs` — `auth_internal_key` (240). (Leave the unrelated
   `skip_consent` Hydra-seeding reference.)
-- `crates/gateway/tests/dpop_exchange_test.rs` — `auth_internal_key` (122).
+- `crates/zeroship-gateway/tests/dpop_exchange_test.rs` — `auth_internal_key` (122).
 
 **Modify — gateway security-regression test file (SHARED — surviving tests must keep compiling):**
 
-- `crates/gateway/tests/browser_auth_test.rs` — delete the `// POST /__zeroship/auth/password` section
+- `crates/zeroship-gateway/tests/browser_auth_test.rs` — delete the `// POST /__zeroship/auth/password` section
   (~651+): `password_first_party_gate_fails_closed_for_untrusted_client`, the same-origin-guard `/password`
   cases (~731-775), and any other `password_*` tests. Remove `StateOpts.trusted` + the
   `trusted_oauth_clients` insert/build (~100-154, 197), the `auth_internal_key:"test-internal-key"` init
@@ -604,9 +604,9 @@ goes.
 
 **Remove config:**
 
-- `crates/auth/src/config.rs` + `crates/auth/src/main.rs` — `auth_internal_key` (§4.5); ADD
+- `crates/zeroship-auth/src/config.rs` + `crates/zeroship-auth/src/main.rs` — `auth_internal_key` (§4.5); ADD
   `frame_ancestor_origins`.
-- `crates/core/src/config/file.rs` — `SecretSection.auth_internal_key` (§4.5).
+- `crates/zeroship-core/src/config/file.rs` — `SecretSection.auth_internal_key` (§4.5).
 - `docker-compose.yml` — `AUTH_INTERNAL_KEY` on both services; ADD `FRAME_ANCESTOR_ORIGINS` on auth (§4.5).
 
 **Modify config comments (keep the values):**
@@ -650,19 +650,19 @@ goes.
 
 **Shared symbols that MUST be KEPT (do NOT delete — they look password-only but are not):**
 
-- `crates/gateway/src/auth_token.rs::mint_session_from_code` + `{resolve_route, same_origin_guard,
+- `crates/zeroship-gateway/src/auth_token.rs::mint_session_from_code` + `{resolve_route, same_origin_guard,
   error_response, db_error, CACHE_NO_STORE}` — the surviving `/session` + `/signout` + `/authorize` +
   `/popup-callback` use them.
-- `crates/auth/src/identity/credentials.rs::verify_password_credentials` (+ `CredentialError`,
-  `VerifiedUser`) and `crates/auth/src/identity/password.rs::{verify, dummy_hash}` — back the interactive
+- `crates/zeroship-auth/src/identity/credentials.rs::verify_password_credentials` (+ `CredentialError`,
+  `VerifiedUser`) and `crates/zeroship-auth/src/identity/password.rs::{verify, dummy_hash}` — back the interactive
   `/login` the iframe frames.
-- `crates/auth/src/ui/consent.rs::get_consent` + `IDENTITY_SCOPES` + the `skip_consent` silent-accept fast
+- `crates/zeroship-auth/src/ui/consent.rs::get_consent` + `IDENTITY_SCOPES` + the `skip_consent` silent-accept fast
   path — LOAD-BEARING: the framed dance must NOT show a consent screen for the console, which requires the
   console client's `skip_consent=true`.
 - `zeroship_core::auth::trusted_clients::*` + `crates/control` `ensure_app_client(first_party)` /
   `bootstrap_console` / the `skip_consent` mirror + the `ops/*.toml` `trusted_oauth_clients` value — the
   CONTROL/skip-consent consumer survives; only the gateway gate goes.
-- `crates/auth/tests/e2e_password.rs::e2e_password_flow` (interactive) survives; only
+- `crates/zeroship-auth/tests/e2e_password.rs::e2e_password_flow` (interactive) survives; only
   `e2e_password_grant.rs` (oracle) is deleted.
 - `sdks/auth`: `signInWithOAuth`/`exchangeCodeForSession`/`Transport.{exchangeCode,session,sessionMint,
   signout,authorizeUrl,redirectUri}`/`openPopup`/`listenForRelay`/`runPopup` — back BOTH the surviving
@@ -697,14 +697,14 @@ auth iframe; the console has the escape for free.
 
 | Cookie | Where set | Attrs | Verdict |
 | --- | --- | --- | --- |
-| `__Host-zsidp_session` | `crates/auth/src/sessions/login.rs:34` | HttpOnly; SameSite=Lax | fine in same-site iframe |
-| `__Host-zsidp_csrf` | `crates/auth/src/csrf.rs:53` | **SameSite=Strict** | see the dedicated invariant below |
-| `__Host-zsidp_pkce` / `__Host-zsidp_nonce` | `crates/auth/src/handlers.rs:57,64` | HttpOnly; SameSite=Lax | fine |
-| oauth-stash | `crates/auth/src/ui/oauth_stash.rs:167` | HttpOnly; SameSite=Lax | fine |
-| magic-link | `crates/auth/src/ui/magic.rs:92` | HttpOnly; SameSite=Lax | fine |
-| `__Host-zeroship_app_session` | `crates/gateway/src/oidc_rp.rs:1136` | HttpOnly; SameSite=Lax | app-origin first-party; set by the parent's `POST /session`; unchanged |
-| `__Host-zeroship_app_anchor` | `crates/gateway/src/anchors.rs:97` | HttpOnly; **SameSite=Strict** | read only by same-origin `?mint=1` fetch from console JS; Strict satisfied; unchanged |
-| breadcrumb | `crates/gateway/src/anchors.rs:142` | SameSite=Lax | fine |
+| `__Host-zsidp_session` | `crates/zeroship-auth/src/sessions/login.rs:34` | HttpOnly; SameSite=Lax | fine in same-site iframe |
+| `__Host-zsidp_csrf` | `crates/zeroship-auth/src/csrf.rs:53` | **SameSite=Strict** | see the dedicated invariant below |
+| `__Host-zsidp_pkce` / `__Host-zsidp_nonce` | `crates/zeroship-auth/src/handlers.rs:57,64` | HttpOnly; SameSite=Lax | fine |
+| oauth-stash | `crates/zeroship-auth/src/ui/oauth_stash.rs:167` | HttpOnly; SameSite=Lax | fine |
+| magic-link | `crates/zeroship-auth/src/ui/magic.rs:92` | HttpOnly; SameSite=Lax | fine |
+| `__Host-zeroship_app_session` | `crates/zeroship-gateway/src/oidc_rp.rs:1136` | HttpOnly; SameSite=Lax | app-origin first-party; set by the parent's `POST /session`; unchanged |
+| `__Host-zeroship_app_anchor` | `crates/zeroship-gateway/src/anchors.rs:97` | HttpOnly; **SameSite=Strict** | read only by same-origin `?mint=1` fetch from console JS; Strict satisfied; unchanged |
+| breadcrumb | `crates/zeroship-gateway/src/anchors.rs:142` | SameSite=Lax | fine |
 
 **The single most fragile invariant in the design — make it explicit (not a footnote).** The
 `__Host-zsidp_csrf` cookie is SET on the auth `/login` GET response and READ on the auth `/login` POST.
@@ -953,14 +953,14 @@ Every behavior change carries a regression test (project mandate — one that wo
   `immersive` is false OR `authOrigin` is cross-site. Replaces the deleted `signInWithCredentials` cases in
   `client.test.ts` / `react.test.tsx`. Type-check: `provider:'password'` compiles (the union re-add).
 - **Relay (existing, unchanged):** the `ev.origin`/`asEnvelope`/`state` tests stay green (no relay change).
-- **Gateway callback dual-target (modified):** `crates/gateway/tests/browser_auth_test.rs` — update the
+- **Gateway callback dual-target (modified):** `crates/zeroship-gateway/tests/browser_auth_test.rs` — update the
   postMessage-targets-`location.origin` assertion (~415) for the both-targets form (`window.opener` ||
   `window.parent`, never `'*'`); keep the no-DOM-reflection + nonce-only-interpolation invariants; confirm
   the authorize foreign-`redirect_uri` → 400 test survives the `StateOpts` field removals. The surviving
   `authorize_*`/`popup_callback_*`/`signout_*` tests must still compile after the `StateOpts`/`build_state`
   field removals.
 - **Auth headers `frame-ancestors` (REWRITE of the existing test, replaces the deleted gateway fail-closed
-  gate test):** rewrite `crates/auth/tests/threat_model.rs::login_clickjacking_headers_present` to assert
+  gate test):** rewrite `crates/zeroship-auth/tests/threat_model.rs::login_clickjacking_headers_present` to assert
   (a) `/login` (and `/signup`, and the interactive `/consent` render) emit
   `frame-ancestors 'self' https://console.zeroship.ai` (read from `frame_ancestor_origins` config, not
   hard-coded) and **NO** `X-Frame-Options`; (b) every other auth route keeps `X-Frame-Options: DENY` +
@@ -986,7 +986,7 @@ shims):**
   drives `POST /session`, and the `__Host-zeroship_app_session` + `__Host-zeroship_app_anchor` cookies are
   set with **no new window**. Assert the `__Host-zsidp_csrf` (`Strict`) cookie rides the framed GET→POST
   (§6.1). Add the negative assertion: a cross-site embedder attempting the framed POST gets a CSRF failure
-  (proves the §6.5 gate matters). The interactive `crates/auth/tests/e2e_password.rs::e2e_password_flow`
+  (proves the §6.5 gate matters). The interactive `crates/zeroship-auth/tests/e2e_password.rs::e2e_password_flow`
   survives and continues to pin the `/login → Hydra` dance the iframe frames.
 - **Hydra/proxy framing-header guard:** assert (a) `ops/hydra.yaml` emits no `X-Frame-Options` /
   `frame-ancestors` on `/oauth2/*`; (b) `ops/Caddyfile` injects no global framing header on
@@ -1008,15 +1008,15 @@ framing-header assertions) cover the deterministic surface.
 
 ## 10. Open questions / decisions
 
-1. **Console origin config field (DECIDED + enumerated).** `crates/auth/src/headers.rs` needs the console
+1. **Console origin config field (DECIDED + enumerated).** `crates/zeroship-auth/src/headers.rs` needs the console
    origin(s) for `frame-ancestors`. **Decision:** a deployment-injected `AuthConfig.frame_ancestor_origins:
    Vec<String>` (a one-entry vector in prod; the `Vec` future-proofs staging/preview origins). Full edit
    inventory:
-   - **Field:** `crates/auth/src/config.rs` `pub frame_ancestor_origins: Vec<String>`.
+   - **Field:** `crates/zeroship-auth/src/config.rs` `pub frame_ancestor_origins: Vec<String>`.
    - **Clap arg:** `#[arg(long = "frame-ancestor-origin", env = "FRAME_ANCESTOR_ORIGINS",
      value_delimiter = ',')]` (repeatable / comma-split).
    - **Env:** `FRAME_ANCESTOR_ORIGINS=https://console.zeroship.ai`.
-   - **Resolution:** read in `crates/auth/src/main.rs` alongside the other `AuthConfig` fields; in dev it
+   - **Resolution:** read in `crates/zeroship-auth/src/main.rs` alongside the other `AuthConfig` fields; in dev it
      may be empty (relax is a no-op) or set to the dev console origin.
    - **Compose:** `docker-compose.yml` auth service env
      `FRAME_ANCESTOR_ORIGINS=https://console.zeroship.localhost`.

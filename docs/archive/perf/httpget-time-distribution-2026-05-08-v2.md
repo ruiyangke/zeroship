@@ -25,7 +25,7 @@ no source modifications. Server:
 **State changes vs prior round.** Prior was `b08786a` + an
 uncommitted lazy-Request-Headers diff. Single new commit since:
 `5bb35bb` — merges that diff plus the new native
-`build_response_json_fast` (`crates/runtime/src/web/fetch/response.rs:450-523`)
+`build_response_json_fast` (`crates/zeroship-runtime/src/web/fetch/response.rs:450-523`)
 that bypasses the JS Response constructor when `init.headers` is
 absent. The brand-slot Eternal optimisation (`b08786a`) was active
 in both rounds.
@@ -530,7 +530,7 @@ roughly 470–520K req/s if all three land. The remaining gap to the
 - JS microbench harness: `/tmp/perf-microbench/op-bench-v2.js` (NOT in repo, untouched)
 - Microbench driver: `/tmp/httpget-distrib-v2/run-microbench.sh`
 - Cluster Python: `/tmp/httpget-distrib-v2/cluster.py`
-- Sources cited (read-only): `crates/runtime/src/web/fetch/{response,request}.rs`,
-  `crates/runtime/src/web/headers.rs`,
-  `crates/runtime/src/transport/handler.rs`,
-  `crates/runtime/benches/scenarios.js` (unmodified).
+- Sources cited (read-only): `crates/zeroship-runtime/src/web/fetch/{response,request}.rs`,
+  `crates/zeroship-runtime/src/web/headers.rs`,
+  `crates/zeroship-runtime/src/transport/handler.rs`,
+  `crates/zeroship-runtime/benches/scenarios.js` (unmodified).

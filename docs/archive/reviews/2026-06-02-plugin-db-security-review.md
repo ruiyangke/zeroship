@@ -1,7 +1,7 @@
 # plugin-db layer — security review (2026-06-02)
 
 Five-lane adversarial security review of the `env.db` native primitive
-(`crates/plugin-db/`, ~90K LOC), the database kernel that every creator app
+(`crates/zeroship-plugin-db/`, ~90K LOC), the database kernel that every creator app
 reaches through untrusted JS. Each lane was an independent opus reviewer; the
 top findings below were re-verified against source by the orchestrator
 (file:line confirmations inline).

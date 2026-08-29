@@ -6,7 +6,7 @@ Philosophy: **billing-platform-grade** — fully effective-dated rate cards, an 
 
 This document specifies the **full Postgres DDL** for every table (columns, types, PK/FK, CHECK, RLS, grants, indexes, partitioning), a **table-by-table rationale**, an **OLD→NEW mapping**, and **flow walkthroughs** proving the load-bearing invariants survive: idempotent ingest dedup, spend enforcement reading the *local* current-period aggregate, reproducible cross-provider month-end invoicing, and crash/retry/>24h idempotency.
 
-Every choice is grounded in (a) the real query paths in `crates/control/src/{pricing,pricing_store,spend,metering,internal}.rs` + `cron/{billing_reconcile,metering_export,spend_reconcile}.rs`, (b) the four research briefs (rate cards, metering ledgers, invoice/money model, spend/hygiene), and (c) the hard constraints (PG16 via compio-postgres, zero exotic extensions, RLS fail-closed + least-priv, CU+FX neutral unit, pluggable providers, local spend coupling, idempotent ingest + invoicing).
+Every choice is grounded in (a) the real query paths in `crates/zeroship-control/src/{pricing,pricing_store,spend,metering,internal}.rs` + `cron/{billing_reconcile,metering_export,spend_reconcile}.rs`, (b) the four research briefs (rate cards, metering ledgers, invoice/money model, spend/hygiene), and (c) the hard constraints (PG16 via compio-postgres, zero exotic extensions, RLS fail-closed + least-priv, CU+FX neutral unit, pluggable providers, local spend coupling, idempotent ingest + invoicing).
 
 ---
 

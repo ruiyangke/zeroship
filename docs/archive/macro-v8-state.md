@@ -3,8 +3,8 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macr
 # MAC-01 — `#[v8_state_marker(MarkerTy)]`: project V8 internal-field-0 from a separate state struct
 
 - **Date:** 2026-05-04
-- **Status:** **Shipped** — `#[v8_state_marker]` macro lives in `crates/runtime-macros/src/lib.rs` (`pub fn v8_state_marker`) and is preserved unchanged through the runtime-macros refactor (see `runtime-macros-refactor.md`). Document retained as design spec.
-- **Tracking:** `crates/runtime-macros/TODO.md` Open section — once
+- **Status:** **Shipped** — `#[v8_state_marker]` macro lives in `crates/zeroship-runtime-macros/src/lib.rs` (`pub fn v8_state_marker`) and is preserved unchanged through the runtime-macros refactor (see `runtime-macros-refactor.md`). Document retained as design spec.
+- **Tracking:** `crates/zeroship-runtime-macros/TODO.md` Open section — once
   this proposal lands, the entry "Migrate hand-rolled
   `[SameObject]` getters to `#[v8_getter(same_object)]`"
   (TODO.md:265) becomes actionable for `Request.headers /
@@ -12,8 +12,8 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macr
   (state-less today, no marker projection needed). Add a "Done"
   entry referencing this proposal's commit hash when the macro PR
   lands.
-- **Owner / scope:** `crates/runtime-macros/src/v8_class.rs`, with one
-  follow-up consumer migration in `crates/runtime/src/web/fetch/{request,response}.rs`.
+- **Owner / scope:** `crates/zeroship-runtime-macros/src/v8_class.rs`, with one
+  follow-up consumer migration in `crates/zeroship-runtime/src/web/fetch/{request,response}.rs`.
 - **LOC delta when both follow-up migrations land:** approximately
   **-535 LOC net** (Request -390, Response -145), revised from the
   brief's -1200 target after honest line-by-line accounting in §7.2
@@ -31,10 +31,10 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macr
 > consistently.
 >
 > **Why this polarity:** the existing codebase already uses state-shaped
-> impls de facto. `crates/runtime/src/web/dom/close_event.rs:151-204`
+> impls de facto. `crates/zeroship-runtime/src/web/dom/close_event.rs:151-204`
 > declares `#[v8_class] #[v8_inherit(Event)] impl CloseEventState { ... }`
 > — `CloseEventState` (the state struct) IS the impl receiver, with no
-> separate marker type. `crates/runtime/src/web/dom/abort_signal.rs:123-125`
+> separate marker type. `crates/zeroship-runtime/src/web/dom/abort_signal.rs:123-125`
 > declares `#[v8_class] #[v8_inherit(EventTarget)] impl AbortSignal { ... }`
 > where `AbortSignal` is the state struct (its name happens to match the
 > JS class name, but it's the state). So existing classes ALREADY use
@@ -52,7 +52,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macr
 ### 1.1 What today's `#[v8_class]` mandates
 
 Every existing `#[v8_class]` consumer pairs the JS-facing class with a
-single Rust type that **is** the boxed state. `crates/runtime-macros/src/v8_class.rs:1731-1757`
+single Rust type that **is** the boxed state. `crates/zeroship-runtime-macros/src/v8_class.rs:1731-1757`
 emits:
 
 ```rust
@@ -86,11 +86,11 @@ Both fetch classes already separate the JS-facing marker from the
 storage struct:
 
 ```rust
-// crates/runtime/src/web/fetch/request.rs:55-107
+// crates/zeroship-runtime/src/web/fetch/request.rs:55-107
 pub struct RequestState { /* RefCell<...> for every spec field */ }
 impl Default for RequestState { /* spec defaults */ }
 
-// crates/runtime/src/web/fetch/request.rs:116
+// crates/zeroship-runtime/src/web/fetch/request.rs:116
 pub struct Request;                         // unit marker
 impl BodyMarker for Request { /* CLASS_LABEL */ }
 impl Body     for Request { /* body_state, content_type via state_ptr */ }
@@ -295,8 +295,8 @@ attribute. A single `#[v8_state_class]` super-attribute would either
 duplicate that surface or introduce a third, parallel attribute family.
 
 **Why this matches the de-facto codebase convention:** existing classes
-like `CloseEventState` (`crates/runtime/src/web/dom/close_event.rs:151`)
-and `AbortSignal` (`crates/runtime/src/web/dom/abort_signal.rs:123`)
+like `CloseEventState` (`crates/zeroship-runtime/src/web/dom/close_event.rs:151`)
+and `AbortSignal` (`crates/zeroship-runtime/src/web/dom/abort_signal.rs:123`)
 already write `#[v8_class] impl <state-struct>` — the impl receiver IS
 the boxed state. They don't use a marker because their state struct
 already has the right name. Request/Response are the anomaly — they
@@ -476,7 +476,7 @@ substitutions:
 
 ### 2.9 Iterable (`#[v8_iterable]`)
 
-Expanded in `crates/runtime-macros/src/v8_iterable.rs`. The companion
+Expanded in `crates/zeroship-runtime-macros/src/v8_iterable.rs`. The companion
 class is named after the **marker** (`<MarkerTy>Iterator`), NOT the
 state. So `Headers.entries()` returns a `HeadersIterator` (today and
 forever), and a hypothetical `RequestBody.entries()` (under state
@@ -528,7 +528,7 @@ type.
 
 #### Worked example: CloseEvent : Event
 
-`crates/runtime/src/web/dom/close_event.rs:37-48` declares:
+`crates/zeroship-runtime/src/web/dom/close_event.rs:37-48` declares:
 
 ```rust
 #[repr(C)]
@@ -595,7 +595,7 @@ thread-local set, per-instance entry — unchanged.
 
 ### 2.12 `BodyMarker` and `install_body_methods` continue to work as-is
 
-`crates/runtime/src/web/fetch/body/consumers.rs` defines:
+`crates/zeroship-runtime/src/web/fetch/body/consumers.rs` defines:
 
 ```rust
 pub trait BodyMarker { const CLASS_LABEL: &'static str; }
@@ -752,7 +752,7 @@ in §6.1 row 9 adds the state-projected variant.
 
 ### 4.1 Substitution table
 
-Every site in `crates/runtime-macros/src/v8_class.rs` that emits
+Every site in `crates/zeroship-runtime-macros/src/v8_class.rs` that emits
 `#class_ty` as a *token*. Grouped by what becomes the marker
 (`#marker_ty`, the JS-identity ident) vs. what becomes the state
 (`#state_ty`, the boxed-payload ident). Rows are tagged
@@ -760,7 +760,7 @@ Every site in `crates/runtime-macros/src/v8_class.rs` that emits
 (the `quote!` block stays the same; only the type that's
 interpolated changes meaning when `state_ty != class_ty`).
 
-> Line numbers verified against `crates/runtime-macros/src/v8_class.rs`
+> Line numbers verified against `crates/zeroship-runtime-macros/src/v8_class.rs`
 > at HEAD on branch `worktree-agent-a737cfe3` (master tip @ 4c41db3,
 > file at 1939 LOC). Token quotes are exact.
 
@@ -1028,7 +1028,7 @@ default `state_ty := class_ty := <ConsumerName>` AND
   `#[v8_getter(same_object)]` in production, this row's no-op claim
   is vacuous — the change is observable only the first time a
   consumer adopts `same_object`. The smoke test
-  `crates/runtime/tests/v8_same_object_smoke.rs` exercises
+  `crates/zeroship-runtime/tests/v8_same_object_smoke.rs` exercises
   `same_object` and would observe the new qualified name on the
   Private; we update the test's assertion to match the qualified form
   (or, equivalently, observe behavior — `===` identity across reads —
@@ -1045,7 +1045,7 @@ default `state_ty := class_ty := <ConsumerName>` AND
   class_ty := ConsumerName`. **Identical to today**.
 
 **Snapshot test (added in round 1, addresses MAJOR #3).** We add
-`insta` to `crates/runtime-macros/Cargo.toml` and snapshot the
+`insta` to `crates/zeroship-runtime-macros/Cargo.toml` and snapshot the
 post-expansion token tree for one reference impl per attribute
 combination:
 
@@ -1066,7 +1066,7 @@ The CI guard rejects any diff against the no-attr snapshots
 drift while letting the new shapes evolve.
 
 **Behavioral verification.** Beyond snapshot equivalence, every
-existing smoke test in `crates/runtime/tests/v8_*_smoke.rs` MUST
+existing smoke test in `crates/zeroship-runtime/tests/v8_*_smoke.rs` MUST
 continue passing without modification (except `v8_same_object_smoke.rs`
 to match the qualified Private name — see row 16 above). Lockdown is
 the macro PR's CI gate.
@@ -1186,7 +1186,7 @@ blocks that don't use it.
 
 ## 6. Testing strategy
 
-### 6.1 New test file: `crates/runtime/tests/v8_state_smoke.rs`
+### 6.1 New test file: `crates/zeroship-runtime/tests/v8_state_smoke.rs`
 
 Coverage matrix:
 
@@ -1206,10 +1206,10 @@ Coverage matrix:
 <!-- Revised in round 2 (addressing MAJOR #8): added the marker == state
      hard error from §4.7 to the compile-fail matrix. -->
 
-### 6.2 Compile-fail tests (`crates/runtime-macros/tests/ui/`)
+### 6.2 Compile-fail tests (`crates/zeroship-runtime-macros/tests/ui/`)
 
 Today the `runtime-macros` crate has no UI test scaffold; the runtime
-crate has compile-fail mirrors in `crates/runtime/tests/v8_async_method_smoke.rs`'s
+crate has compile-fail mirrors in `crates/zeroship-runtime/tests/v8_async_method_smoke.rs`'s
 inline `#[allow(dead_code)]` patterns. We add explicit
 `compile-fail`-shaped coverage:
 
@@ -1224,12 +1224,12 @@ inline `#[allow(dead_code)]` patterns. We add explicit
 
 <!-- Revised in round 1 (addressing MAJOR #6): the v1 referenced
      test files that don't exist (wpt_fetch.rs / wpt_response.rs).
-     Verified actual test names by listing crates/runtime/tests/. -->
+     Verified actual test names by listing crates/zeroship-runtime/tests/. -->
 
 ### 6.3 WPT regression coverage
 
 Once Request/Response migrate (§7), we run the existing WPT subset
-(`crates/runtime/tests/wpt_*.rs`):
+(`crates/zeroship-runtime/tests/wpt_*.rs`):
 
 | WPT file | Today | After migration |
 |---|---|---|
@@ -1270,13 +1270,13 @@ drops.
 ### 6.4 Snapshot tests for codegen output
 
 Committed in §5.1's "Snapshot test (added in round 1, addresses
-MAJOR #3)" — `insta` is added to `crates/runtime-macros/Cargo.toml`
+MAJOR #3)" — `insta` is added to `crates/zeroship-runtime-macros/Cargo.toml`
 and seven reference shapes are snapshotted. The Phase 1 PR's CI gate
 rejects any unauthorized diff against the seven snapshot files;
 intentional bumps require `cargo insta accept` with reviewer audit.
 
 The snapshot stability concerns (rustc / quote-crate version pinning)
-are documented in `crates/runtime-macros/README.md` per §8 settled-
+are documented in `crates/zeroship-runtime-macros/README.md` per §8 settled-
 question 9.
 
 ---
@@ -1288,9 +1288,9 @@ question 9.
 PR scope:
 - Add `#[v8_state_marker(...)]` parsing.
 - Wire `state_ty` / `marker_ty` through the codegen (§4.1).
-- Add `crates/runtime/tests/v8_state_smoke.rs` with the §6.1 matrix.
+- Add `crates/zeroship-runtime/tests/v8_state_smoke.rs` with the §6.1 matrix.
 - Compile-fail tests (§6.2).
-- Update `crates/runtime-macros/lib.rs` doc comment.
+- Update `crates/zeroship-runtime-macros/lib.rs` doc comment.
 
 Reviewers focus on the substitution-table diff. No consumer is
 migrated yet, so all 30+ existing `#[v8_class]` users continue to work
@@ -1304,7 +1304,7 @@ unchanged. Land this PR alone.
 
 ### 7.2 Phase 2 — Request migration
 
-`crates/runtime/src/web/fetch/request.rs`. Diff laid out in 6 chunks:
+`crates/zeroship-runtime/src/web/fetch/request.rs`. Diff laid out in 6 chunks:
 
 <!-- Revised in round 2 (addressing MAJOR #11): state_ptr stays
      private; addressing CRITICAL #6: body / bodyUsed getters are
@@ -1332,7 +1332,7 @@ unchanged. Land this PR alone.
 by the macro — they come from the `Body` trait via
 `install_body_methods::<Request>(scope, proto)` (request.rs:237).
 Specifically (verified by reading
-`crates/runtime/src/web/fetch/body/consumers.rs:53-100`):
+`crates/zeroship-runtime/src/web/fetch/body/consumers.rs:53-100`):
 - `install_body_methods` installs **8 prototype properties**:
   - `body` (getter, returns `ReadableStream | null`),
   - `bodyUsed` (getter, returns `bool`),
@@ -1411,7 +1411,7 @@ prototype properties** = 27, matching today's hand-roll surface.
 
   *Perf gate (added in round 2 addressing CRITICAL #8).* The estimated
   ~100ns cost cited in v1 was an unverified guess. **The proper gate is
-  end-to-end:** run `crates/runtime/benches/run_zerobench.sh` (the
+  end-to-end:** run `crates/zeroship-runtime/benches/run_zerobench.sh` (the
   existing HTTP/SSE/WS benchmark suite) on the macro PR's pre-
   substitution baseline AND post-migration commit. Compare req/s on
   the `fetch-echo` and `static` scenarios. Commit-by-commit benchmark
@@ -1626,7 +1626,7 @@ pub fn build_kernel_request(scope, ...) -> Option<v8::Local<v8::Object>> {
 
 ### 7.3 Phase 3 — Response migration
 
-`crates/runtime/src/web/fetch/response.rs`. Same shape as Request,
+`crates/zeroship-runtime/src/web/fetch/response.rs`. Same shape as Request,
 with three extra concerns:
 
 #### 7.3.1 Static methods (Response.error / redirect / json)
@@ -1827,7 +1827,7 @@ Per `feedback_estimates_hours_not_weeks` (industry estimates / 40):
    collision-free. See §2.7 and row 16 in §4.1.
 
 7. **Macro test scaffold (insta snapshots).** ~~Worth establishing?~~ —
-   **Settled: yes, add insta to `crates/runtime-macros/Cargo.toml`**
+   **Settled: yes, add insta to `crates/zeroship-runtime-macros/Cargo.toml`**
    and snapshot the seven reference shapes in §5.1. The byte-level
    regression guard is the one piece of evidence the no-attr back-
    compat claim isn't possible to fake.
@@ -1839,7 +1839,7 @@ Per `feedback_estimates_hours_not_weeks` (industry estimates / 40):
    from the FunctionTemplate on demand (3 V8 calls). The 3 V8 calls
    per kernel-fast-path Request build add ~100ns to `inspect_response`'s
    hot path. The Phase 2 PR must benchmark via
-   `crates/runtime/benches/fetch_kernel_path.rs` (or equivalent — add
+   `crates/zeroship-runtime/benches/fetch_kernel_path.rs` (or equivalent — add
    one if absent) and demonstrate < 5% regression on the kernel-
    fast-path path. If regression > 5%, we DO add `RequestPrototypeSlot`
    in Phase 2 ahead of MAC-02. Same for Response.
@@ -1852,10 +1852,10 @@ Per `feedback_estimates_hours_not_weeks` (industry estimates / 40):
        (with reviewer audit) to refresh snapshots.
    (b) The `quote` crate's whitespace handling has historically had
        benign tweaks across minor versions. Mitigation: pin `quote`
-       to a specific minor version in `crates/runtime-macros/Cargo.toml`
+       to a specific minor version in `crates/zeroship-runtime-macros/Cargo.toml`
        (`quote = "=1.0.x"` rather than `quote = "1"`). Bumping `quote`
        is a dedicated PR with snapshot refresh.
-   Both gates are documented in `crates/runtime-macros/README.md`
+   Both gates are documented in `crates/zeroship-runtime-macros/README.md`
    (added during Phase 1 PR).
 
 ---
@@ -1867,7 +1867,7 @@ Per `feedback_estimates_hours_not_weeks` (industry estimates / 40):
   what's behind the pointer; composable with all existing impl-block
   attributes; backward-compatible (additive attribute); aligns with
   existing codebase convention (CloseEventState / AbortSignal pattern).
-- **Codegen change:** ~120 LOC in `crates/runtime-macros/src/v8_class.rs`,
+- **Codegen change:** ~120 LOC in `crates/zeroship-runtime-macros/src/v8_class.rs`,
   threading two idents (`state_ty`, `marker_ty`) through the existing
   emit functions per the substitution table in §4.1. 22 emit-change
   sites + 2 invariants under propagation.
@@ -1894,14 +1894,14 @@ Per `feedback_estimates_hours_not_weeks` (industry estimates / 40):
      `wpt_fetch_basic_network.rs`, `wpt_fetch_redirect.rs`,
      `wpt_fetch_abort.rs`, and `wpt_headers.rs` pass-rate not
      regressed (full table in §6.3).
-  4. Benchmark gate: run `crates/runtime/benches/run_zerobench.sh` (HTTP
+  4. Benchmark gate: run `crates/zeroship-runtime/benches/run_zerobench.sh` (HTTP
      scenarios that exercise build_kernel_request) — regression on the
      `fetch-echo` and `static` scenarios must be < 5% on req/s and
      < 10% on p99 latency, measured against the immediately-preceding
      commit on the PR (i.e., baseline = first commit of the PR
      pre-substitution; gate = final commit post-substitution). The
      standard bench box is whatever `benches/results-2026-04-30-cross-runtime.txt`
-     was produced on. If `crates/runtime/benches/` lacks a focused
+     was produced on. If `crates/zeroship-runtime/benches/` lacks a focused
      kernel-path micro-bench at migration time, add one
      (`fetch_kernel_path.rs` allocating Request and Response wrappers
      in a tight loop, ~50 LOC). Per

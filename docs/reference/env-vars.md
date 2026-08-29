@@ -123,7 +123,7 @@ What a service does when it finds either:
 The last row is the only escape and it is keyed to `cfg!(debug_assertions)` -
 the build profile, decided at compile time. There is no flag and no environment
 variable that reaches it. `--dev-insecure` and `ZEROSHIP_DEV_INSECURE` were both
-deleted and `crates/auth/src/config.rs` carries a test that refuses to let
+deleted and `crates/zeroship-auth/src/config.rs` carries a test that refuses to let
 either return.
 
 `--check-config` **exits non-zero** for a placeholder credential in every build,
@@ -580,7 +580,7 @@ cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
 `ZEROSHIP_CONFIG` is one name over two contracts, and the generated table above
 cannot say so. For the six server binaries it selects the operator TOML overlay
 (the `config` bootstrap-control row). For the creator toolchain it selects the
-project file `zeroship.jsonc`: `crates/cli/src/project_config/mod.rs` reads it
+project file `zeroship.jsonc`: `crates/zeroship-cli/src/project_config/mod.rs` reads it
 in `deploy`, `migrate`, `secret`, `var` and `config` (and `login` reads the
 file's `control`, though it accepts no `--config` of its own), and the Vite
 plugin reads the same name in `sdks/vite-plugin/src/project-config/index.ts`. Both readers
@@ -697,7 +697,7 @@ NOWHERE in the repository, so its one test had never executed;
 is the single override, and `REDIS_TEST_URL` its Redis peer.
 
 SEVEN of those eight are deleted, not eight. `CONTROL_TEST_DB` is still read at
-`crates/control/tests/workflow_engine_test.rs:59` and still exported at
+`crates/zeroship-control/tests/workflow_engine_test.rs:59` and still exported at
 `tests/run_billing_suite.sh:181`, which records why: dropping the export before
 converting that file made its 93 tests announce "skip: CONTROL_TEST_DB not set"
 and pass without executing. This paragraph claimed all eight were gone from the
@@ -719,7 +719,7 @@ required now, like Postgres, for the same reason
 
 `ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were on
 that list until 2026-08-20 and NOTHING READ EITHER ONE. They appeared in this
-file and in one comment in `crates/runtime/src/transport/egress.rs` that cites
+file and in one comment in `crates/zeroship-runtime/src/transport/egress.rs` that cites
 the pair as an analogy; no reader, no setter, in any language. A list of live
 names that has stopped being live reads exactly like a correct one, which is
 why `tests/test_only_env_gate.sh` arm 2 now checks this section's claim against

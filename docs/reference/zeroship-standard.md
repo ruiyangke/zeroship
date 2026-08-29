@@ -2,7 +2,7 @@
 
 The deploy contract is centered on the app entry module's default export. The
 runtime bootstrap code is in `sdks/bootstrap/src/runtime-entry.ts`, and the
-runtime-side loader lives in `crates/runtime/src/core/init.rs`.
+runtime-side loader lives in `crates/zeroship-runtime/src/core/init.rs`.
 
 ## Default export
 

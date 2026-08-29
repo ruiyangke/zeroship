@@ -1,4 +1,4 @@
-> Archived 2026-05-25: shipped. Live reference: docs/reference/kv.md. Code: crates/plugin-kv/ + sdks/kv/.
+> Archived 2026-05-25: shipped. Live reference: docs/reference/kv.md. Code: crates/zeroship-plugin-kv/ + sdks/kv/.
 # plugin-kv redesign — implementation plan (2026-05-24)
 
 Status: pre-ship proposal, drafted in worktree `kv-v8class`. Do NOT commit until the implementing PR. Pre-launch → no back-compat (rename/break freely).
@@ -79,10 +79,10 @@ async fn list(&self, app_id, prefix, cursor: Option<&str>, limit: usize) -> Resu
 
 Per the confirmed macro mechanics (Shape A — sync `#[v8_method] -> v8::Local<Value>` + a `dispatch_*` helper, because `incr` returns `i64` which the macro's async-return allowlist can't express):
 
-- **`crates/plugin-kv/src/v8_class.rs`** (new): `Kv { backend: Arc<dyn Backend>, app_id: String }`; `#[v8_class] impl Kv` with illegal-`#[v8_constructor]` + the 9 `#[v8_method]`s; `mint_kv(scope, backend, app_id)` (mirrors `mint_db`).
-- **`crates/plugin-kv/src/dispatch.rs`** (new): `spawn_kv_op` (promise/resolver/op-id boilerplate) + per-op resolve mappers. Replaces `callbacks.rs` (deleted).
-- **`crates/plugin-kv/src/error.rs`** (new): `KvError`.
-- **`crates/plugin-kv/src/limits.rs`** (new): constants + `validate_key`/`validate_value`/`validate_delta` + `#[cfg(test)]` unit tests.
+- **`crates/zeroship-plugin-kv/src/v8_class.rs`** (new): `Kv { backend: Arc<dyn Backend>, app_id: String }`; `#[v8_class] impl Kv` with illegal-`#[v8_constructor]` + the 9 `#[v8_method]`s; `mint_kv(scope, backend, app_id)` (mirrors `mint_db`).
+- **`crates/zeroship-plugin-kv/src/dispatch.rs`** (new): `spawn_kv_op` (promise/resolver/op-id boilerplate) + per-op resolve mappers. Replaces `callbacks.rs` (deleted).
+- **`crates/zeroship-plugin-kv/src/error.rs`** (new): `KvError`.
+- **`crates/zeroship-plugin-kv/src/limits.rs`** (new): constants + `validate_key`/`validate_value`/`validate_delta` + `#[cfg(test)]` unit tests.
 - **`lib.rs`**: drop `KV_BACKEND` thread-local + `KvPlugin::new()` (back-compat); `build_instance` → `mint_kv`; `register` → no-op.
 
 ### Arg marshalling notes

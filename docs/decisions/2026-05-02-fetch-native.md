@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-02
 **Long-form design:** [`docs/archive/fetch-native.md`](../archive/fetch-native.md)
-**Implementation:** [`crates/runtime/src/web/fetch/`](../../crates/runtime/src/web/fetch/) (~5,400 LOC: request.rs, response.rs, body/, algorithms.rs)
+**Implementation:** [`crates/zeroship-runtime/src/web/fetch/`](../../crates/zeroship-runtime/src/web/fetch/) (~5,400 LOC: request.rs, response.rs, body/, algorithms.rs)
 
 ## Context
 
@@ -27,7 +27,7 @@ was too far from spec for the harness work to be worthwhile.
 ## Consequences
 
 - Modern web libraries work end-to-end on zeroship for the first time.
-- Deletion of `crates/runtime/src/embed/fetch.js` (705 LOC).
+- Deletion of `crates/zeroship-runtime/src/embed/fetch.js` (705 LOC).
 - WPT `fetch/api/{headers,request,response,abort}` runnable.
 - Post-ship perf work: typed enums for Request/Response init dicts (`7417cc1`), lazy Request Headers + native `Response.json` (`5bb35bb`), `ResponseTemplateSlot` Eternals (`6fa5422`). MAC-01 migrated Request/Response to `#[v8_state_marker]` (`16451c8`, `ec2d3dc`).
 

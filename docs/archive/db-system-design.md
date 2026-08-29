@@ -90,7 +90,7 @@ sequencing.
 
 ## 1. Overview & system context
 
-`plugin-db` is a single Rust crate (`crates/plugin-db/`) that registers
+`plugin-db` is a single Rust crate (`crates/zeroship-plugin-db/`) that registers
 the `env.db.*` namespace on every worker V8 isolate, marshals JS
 calls into typed Rust operations, and executes them against a storage
 backend. Owns: declarative-migration orchestration, CRUD execution,
@@ -207,12 +207,12 @@ language, query builder, subscription receiver, per-handler tx routing,
 retry wrappers. Calls native primitives through `env.db.*`. Does NOT
 own SQL.
 
-**V8 plugin layer** (`crates/plugin-db/src/v8_classes/` + `v8_bridge.rs`) —
+**V8 plugin layer** (`crates/zeroship-plugin-db/src/v8_classes/` + `v8_bridge.rs`) —
 V8 classes `Db`, `Collection`, `Transaction`, `Subscription`, `Migration`,
 `Migrations`, `Replication` with `v8::Weak` finalizers; V8↔Rust marshaling;
 capability gate.
 
-**Orchestrator** (`crates/plugin-db/src/{orchestrator,crud,exec}.rs`) —
+**Orchestrator** (`crates/zeroship-plugin-db/src/{orchestrator,crud,exec}.rs`) —
 CRUD dispatch, register_model four-phase pipeline, transaction lifecycle,
 auto-tx envelope, migration backfill, RAII lock guards, pending-emit
 queue/drain/clear.
@@ -643,7 +643,7 @@ when busy (§16.1).
 Most PG behaviour is already shipped. After the §7 split, `PostgresBackend`
 implements every sub-trait — a mechanical partition of the current
 monolithic impl. Every capability already has working PG code in
-`crates/plugin-db/src/backend/postgres.rs`; the split is structural
+`crates/zeroship-plugin-db/src/backend/postgres.rs`; the split is structural
 rebinding, not new functionality.
 
 `compio-postgres` driver (zero-tokio, io_uring) used everywhere.
@@ -957,7 +957,7 @@ map; nothing crosses the isolate boundary on the hot path.
 
 **Flusher.** Background task pushes thread-local counters to the
 control plane every 5s (`ZEROSHIP_METER_FLUSH_MS`). Wire shape:
-`crates/core/src/lib.rs::UsageReport`.
+`crates/zeroship-core/src/lib.rs::UsageReport`.
 
 **Failure modes.** Cannot reach control plane → worker accumulates
 in-memory; reconnect includes the backlog. Overflow policy in
@@ -1472,21 +1472,21 @@ when SQLite is enabled.
 
 All features GA at day-1 launch. Each phase names the integration test
 that closes it. Test fixtures live under
-`crates/plugin-db/tests/{pg,sqlite,common}/` unless noted; SDK-side
+`crates/zeroship-plugin-db/tests/{pg,sqlite,common}/` unless noted; SDK-side
 contract tests live under `sdks/db/tests/`.
 
 **P0** — capability trait split + `PostgresBackend` migration. Closes
 [C1]. Split the 26-method trait into fifteen sub-traits; migrate every
 `&PostgresBackend` to `&impl <bound>`; introduce `BackendHandle` (no `dyn
 Backend`); classify every advisory-lock site under `LockScope`. Gate
-(`crates/plugin-db/tests/pg/`): existing `register_model_idempotent`,
+(`crates/zeroship-plugin-db/tests/pg/`): existing `register_model_idempotent`,
 `tx_savepoint_rollback`, `subscription_fanout_basic` pass unchanged.
 
 **P1** — `SqliteBackend` core: `SqlExecutor` + `NamespaceManager` +
 `LockManager` + `DialectBuilder` + `SchemaIntrospect` + `IndexBuilder`.
 New `backend/sqlite.rs`, `_session.rs`, `_dialect.rs`. Cargo feature
 `sqlite` gates the module; `pg` default. Cross-app FK parse-time check
-lands here (§18 Q1). Gate (`crates/plugin-db/tests/sqlite/`): every
+lands here (§18 Q1). Gate (`crates/zeroship-plugin-db/tests/sqlite/`): every
 existing PG test runs identically under `sqlite`, with documented
 divergences `#[cfg]`-gated; new `cross_app_fk_rejected_at_parse`.
 
@@ -1495,7 +1495,7 @@ divergences `#[cfg]`-gated; new `cross_app_fk_rejected_at_parse`.
 Register `Connection::preupdate_hook` once per `SqliteSession` at
 open time (§11.5); hook callback owns the per-tx event buffer +
 relation filter (§13.5). Gate
-(`crates/plugin-db/tests/sqlite/cdc/`):
+(`crates/zeroship-plugin-db/tests/sqlite/cdc/`):
 `update_publishes_change_event_with_pre_image`,
 `rollback_does_not_publish`,
 `insert_publishes_via_preupdate_hook`,

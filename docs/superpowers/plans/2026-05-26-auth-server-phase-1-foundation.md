@@ -15,9 +15,9 @@
 
 **Reference docs to keep open:**
 - `docs/archive/auth-server.md` — the proposal this plan implements.
-- `crates/control/src/auth_*.rs` and `crates/control/src/oauth.rs` — the existing creator-auth code that gets retired in Phase 3.
-- `crates/control/src/main.rs` — pattern for ntex routes + compio-postgres + tracing init.
-- `crates/gateway/src/user_auth.rs` — the JWT-cookie path being replaced in Phase 3.
+- `crates/zeroship-control/src/auth_*.rs` and `crates/zeroship-control/src/oauth.rs` — the existing creator-auth code that gets retired in Phase 3.
+- `crates/zeroship-control/src/main.rs` — pattern for ntex routes + compio-postgres + tracing init.
+- `crates/zeroship-gateway/src/user_auth.rs` — the JWT-cookie path being replaced in Phase 3.
 
 **Pre-launch posture (AGENTS.md):** no `@deprecated` aliases, no migration shims. We add new code; nothing yet calls it. Phase 3 deletes the old paths in one PR.
 
@@ -54,14 +54,14 @@ Total bite-sized steps below: ~70.
 ## Task 1 · Create `crates/auth` skeleton
 
 **Files:**
-- Create: `crates/auth/Cargo.toml`
-- Create: `crates/auth/src/main.rs`
-- Create: `crates/auth/src/lib.rs`
-- Create: `crates/auth/src/config.rs`
-- Create: `crates/auth/src/error.rs`
-- Create: `crates/auth/README.md`
+- Create: `crates/zeroship-auth/Cargo.toml`
+- Create: `crates/zeroship-auth/src/main.rs`
+- Create: `crates/zeroship-auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/config.rs`
+- Create: `crates/zeroship-auth/src/error.rs`
+- Create: `crates/zeroship-auth/README.md`
 
-- [ ] **Step 1.1: Create `crates/auth/Cargo.toml`**
+- [ ] **Step 1.1: Create `crates/zeroship-auth/Cargo.toml`**
 
 ```toml
 [package]
@@ -99,7 +99,7 @@ zeroship-test-utils = { workspace = true }     # only if it exists; otherwise om
 
 Verify these dependencies exist in the workspace `Cargo.toml`. If `cyper`, `toml`, `clap`, `thiserror`, `hex` are not workspace-declared, add them now via a single edit to the root `Cargo.toml`. Use the same versions other crates use.
 
-- [ ] **Step 1.2: Create `crates/auth/src/main.rs`**
+- [ ] **Step 1.2: Create `crates/zeroship-auth/src/main.rs`**
 
 ```rust
 //! zeroship-auth — the OIDC IdP login UI + identity flows + hydra admin client.
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-- [ ] **Step 1.3: Create `crates/auth/src/lib.rs`** (so integration tests can import internals)
+- [ ] **Step 1.3: Create `crates/zeroship-auth/src/lib.rs`** (so integration tests can import internals)
 
 ```rust
 //! Library surface for integration tests. The binary is `main.rs`.
@@ -135,7 +135,7 @@ pub mod config;
 pub mod error;
 ```
 
-- [ ] **Step 1.4: Create `crates/auth/src/config.rs`**
+- [ ] **Step 1.4: Create `crates/zeroship-auth/src/config.rs`**
 
 ```rust
 //! Auth server configuration.
@@ -176,7 +176,7 @@ pub struct AuthConfig {
 }
 ```
 
-- [ ] **Step 1.5: Create `crates/auth/src/error.rs`**
+- [ ] **Step 1.5: Create `crates/zeroship-auth/src/error.rs`**
 
 ```rust
 //! Auth-wide error type.
@@ -204,7 +204,7 @@ pub enum AuthError {
 pub type Result<T> = std::result::Result<T, AuthError>;
 ```
 
-- [ ] **Step 1.6: Create `crates/auth/README.md`**
+- [ ] **Step 1.6: Create `crates/zeroship-auth/README.md`**
 
 ```markdown
 # zeroship-auth
@@ -240,12 +240,12 @@ cargo run -p zeroship-auth
 Run: `cargo check -p zeroship-auth`
 Expected: clean build (no warnings; `clippy` left for end-of-phase pass).
 
-If `zeroship_core::observability::init_tracing` doesn't exist verbatim, grep `crates/core/src/observability.rs` and adapt the call to the actual function name used by `crates/control/src/main.rs`.
+If `zeroship_core::observability::init_tracing` doesn't exist verbatim, grep `crates/zeroship-core/src/observability.rs` and adapt the call to the actual function name used by `crates/zeroship-control/src/main.rs`.
 
 - [ ] **Step 1.8: Commit**
 
 ```bash
-git add crates/auth/
+git add crates/zeroship-auth/
 git commit -m "auth: create crates/auth skeleton (binary + config + error)"
 ```
 
@@ -276,11 +276,11 @@ git commit -m "workspace: register crates/auth"
 ## Task 3 · ntex server + health endpoints
 
 **Files:**
-- Create: `crates/auth/src/server.rs`
-- Modify: `crates/auth/src/main.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/server.rs`
+- Modify: `crates/zeroship-auth/src/main.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
-- [ ] **Step 3.1: Create `crates/auth/src/server.rs`**
+- [ ] **Step 3.1: Create `crates/zeroship-auth/src/server.rs`**
 
 ```rust
 //! ntex routes wiring. Bootstrap of routes/handlers happens here; the
@@ -369,7 +369,7 @@ Stop the process when done.
 - [ ] **Step 3.6: Commit**
 
 ```bash
-git add crates/auth/src/server.rs crates/auth/src/main.rs crates/auth/src/lib.rs
+git add crates/zeroship-auth/src/server.rs crates/zeroship-auth/src/main.rs crates/zeroship-auth/src/lib.rs
 git commit -m "auth: ntex server + /healthz and /readyz endpoints"
 ```
 
@@ -378,13 +378,13 @@ git commit -m "auth: ntex server + /healthz and /readyz endpoints"
 ## Task 4 · Database schema migrations
 
 **Files:**
-- Create: `crates/auth/src/store/mod.rs`
-- Create: `crates/auth/src/store/migrations.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/store/mod.rs`
+- Create: `crates/zeroship-auth/src/store/migrations.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
 These are the tables from §5 of the proposal. We create them all in Phase 1 so subsequent phases just slot in. Each `CREATE TABLE` is idempotent (`IF NOT EXISTS`).
 
-- [ ] **Step 4.1: Create `crates/auth/src/store/mod.rs`**
+- [ ] **Step 4.1: Create `crates/zeroship-auth/src/store/mod.rs`**
 
 ```rust
 //! `auth.*` schema CRUD. Phase 1 only creates the migrations; per-table
@@ -393,7 +393,7 @@ These are the tables from §5 of the proposal. We create them all in Phase 1 so 
 pub mod migrations;
 ```
 
-- [ ] **Step 4.2: Create `crates/auth/src/store/migrations.rs`**
+- [ ] **Step 4.2: Create `crates/zeroship-auth/src/store/migrations.rs`**
 
 ```rust
 //! `auth.*` schema migrations. Run on every boot; statements are idempotent.
@@ -546,7 +546,7 @@ psql postgres://zeroship@localhost/zeroship -c 'DROP SCHEMA IF EXISTS auth CASCA
 Then write a one-off integration test or add to `tests/migrations_smoke.rs`:
 
 ```rust
-// crates/auth/tests/migrations_smoke.rs
+// crates/zeroship-auth/tests/migrations_smoke.rs
 //! Migration smoke test — only runs if AUTH_DB_URL is set.
 //! See `compio-postgres/tests/` for the harness pattern.
 
@@ -580,7 +580,7 @@ Expected: PASS (creates the `auth` schema).
 - [ ] **Step 4.6: Commit**
 
 ```bash
-git add crates/auth/src/store/ crates/auth/src/lib.rs crates/auth/tests/migrations_smoke.rs
+git add crates/zeroship-auth/src/store/ crates/zeroship-auth/src/lib.rs crates/zeroship-auth/tests/migrations_smoke.rs
 git commit -m "auth: auth.* schema migrations (idempotent, eight tables)"
 ```
 
@@ -589,13 +589,13 @@ git commit -m "auth: auth.* schema migrations (idempotent, eight tables)"
 ## Task 5 · Hydra admin client — types module
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/mod.rs` (stub — populated in Task 6)
-- Create: `crates/auth/src/hydra_client/types.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/hydra_client/mod.rs` (stub — populated in Task 6)
+- Create: `crates/zeroship-auth/src/hydra_client/types.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
 Hydra's admin API wire format. We define the structs we'll use across login/consent/logout/clients/jwks. Reference: hydra docs at <https://www.ory.com/docs/oauth2-oidc/custom-login-consent/flow> and ory/hydra-client-rust (which we do NOT vendor — too many deps).
 
-- [ ] **Step 5.1: Create `crates/auth/src/hydra_client/mod.rs` (stub)**
+- [ ] **Step 5.1: Create `crates/zeroship-auth/src/hydra_client/mod.rs` (stub)**
 
 ```rust
 //! Hand-rolled hydra admin API client.
@@ -607,7 +607,7 @@ Hydra's admin API wire format. We define the structs we'll use across login/cons
 pub mod types;
 ```
 
-- [ ] **Step 5.2: Create `crates/auth/src/hydra_client/types.rs`**
+- [ ] **Step 5.2: Create `crates/zeroship-auth/src/hydra_client/types.rs`**
 
 ```rust
 //! Wire types for hydra admin API.
@@ -771,7 +771,7 @@ Expected: clean.
 - [ ] **Step 5.5: Commit**
 
 ```bash
-git add crates/auth/src/hydra_client/ crates/auth/src/lib.rs
+git add crates/zeroship-auth/src/hydra_client/ crates/zeroship-auth/src/lib.rs
 git commit -m "auth: hydra admin client — wire-format types"
 ```
 
@@ -780,11 +780,11 @@ git commit -m "auth: hydra admin client — wire-format types"
 ## Task 6 · Hydra admin client — transport
 
 **Files:**
-- Modify: `crates/auth/src/hydra_client/mod.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs`
 
-The thin HTTP client. `cyper` is the project's existing compio HTTP client (used by `crates/control/src/oauth.rs`). Pattern matches that file.
+The thin HTTP client. `cyper` is the project's existing compio HTTP client (used by `crates/zeroship-control/src/oauth.rs`). Pattern matches that file.
 
-- [ ] **Step 6.1: Rewrite `crates/auth/src/hydra_client/mod.rs`**
+- [ ] **Step 6.1: Rewrite `crates/zeroship-auth/src/hydra_client/mod.rs`**
 
 ```rust
 //! Hand-rolled hydra admin API client over `cyper` (compio HTTP).
@@ -910,7 +910,7 @@ async fn finish<T: DeserializeOwned>(res: cyper::Response, path: &str) -> Result
 }
 ```
 
-If `cyper::Response::text()` doesn't exist on the project's pinned version, mirror what `crates/control/src/oauth.rs` does (it has the same pattern).
+If `cyper::Response::text()` doesn't exist on the project's pinned version, mirror what `crates/zeroship-control/src/oauth.rs` does (it has the same pattern).
 
 - [ ] **Step 6.2: Build**
 
@@ -920,7 +920,7 @@ Expected: clean.
 - [ ] **Step 6.3: Commit**
 
 ```bash
-git add crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — transport (GET/PUT/POST/DELETE over cyper)"
 ```
 
@@ -929,10 +929,10 @@ git commit -m "auth: hydra admin client — transport (GET/PUT/POST/DELETE over 
 ## Task 7 · Hydra admin client — login endpoints
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/login.rs`
-- Modify: `crates/auth/src/hydra_client/mod.rs` (add `pub mod login;`)
+- Create: `crates/zeroship-auth/src/hydra_client/login.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs` (add `pub mod login;`)
 
-- [ ] **Step 7.1: Create `crates/auth/src/hydra_client/login.rs`**
+- [ ] **Step 7.1: Create `crates/zeroship-auth/src/hydra_client/login.rs`**
 
 ```rust
 //! Login challenge admin endpoints.
@@ -958,7 +958,7 @@ impl HydraAdmin {
 
 - [ ] **Step 7.2: Register the module**
 
-In `crates/auth/src/hydra_client/mod.rs` add `pub mod login;` next to `pub mod types;`.
+In `crates/zeroship-auth/src/hydra_client/mod.rs` add `pub mod login;` next to `pub mod types;`.
 
 - [ ] **Step 7.3: Build**
 
@@ -968,7 +968,7 @@ Expected: clean.
 - [ ] **Step 7.4: Commit**
 
 ```bash
-git add crates/auth/src/hydra_client/login.rs crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/login.rs crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — login challenge endpoints"
 ```
 
@@ -977,10 +977,10 @@ git commit -m "auth: hydra admin client — login challenge endpoints"
 ## Task 8 · Hydra admin client — consent endpoints
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/consent.rs`
-- Modify: `crates/auth/src/hydra_client/mod.rs`
+- Create: `crates/zeroship-auth/src/hydra_client/consent.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs`
 
-- [ ] **Step 8.1: Create `crates/auth/src/hydra_client/consent.rs`**
+- [ ] **Step 8.1: Create `crates/zeroship-auth/src/hydra_client/consent.rs`**
 
 ```rust
 //! Consent challenge admin endpoints.
@@ -1010,7 +1010,7 @@ impl HydraAdmin {
 
 ```bash
 cargo check -p zeroship-auth
-git add crates/auth/src/hydra_client/consent.rs crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/consent.rs crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — consent challenge endpoints"
 ```
 
@@ -1019,10 +1019,10 @@ git commit -m "auth: hydra admin client — consent challenge endpoints"
 ## Task 9 · Hydra admin client — logout endpoints
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/logout.rs`
-- Modify: `crates/auth/src/hydra_client/mod.rs`
+- Create: `crates/zeroship-auth/src/hydra_client/logout.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs`
 
-- [ ] **Step 9.1: Create `crates/auth/src/hydra_client/logout.rs`**
+- [ ] **Step 9.1: Create `crates/zeroship-auth/src/hydra_client/logout.rs`**
 
 ```rust
 //! Logout challenge admin endpoints.
@@ -1049,7 +1049,7 @@ impl HydraAdmin {
 ```bash
 # add `pub mod logout;` to hydra_client/mod.rs
 cargo check -p zeroship-auth
-git add crates/auth/src/hydra_client/logout.rs crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/logout.rs crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — logout challenge endpoints"
 ```
 
@@ -1058,10 +1058,10 @@ git commit -m "auth: hydra admin client — logout challenge endpoints"
 ## Task 10 · Hydra admin client — clients CRUD
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/clients.rs`
-- Modify: `crates/auth/src/hydra_client/mod.rs`
+- Create: `crates/zeroship-auth/src/hydra_client/clients.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs`
 
-- [ ] **Step 10.1: Create `crates/auth/src/hydra_client/clients.rs`**
+- [ ] **Step 10.1: Create `crates/zeroship-auth/src/hydra_client/clients.rs`**
 
 ```rust
 //! OAuth2 client CRUD via hydra admin API.
@@ -1099,7 +1099,7 @@ impl HydraAdmin {
 ```bash
 # add `pub mod clients;` to hydra_client/mod.rs
 cargo check -p zeroship-auth
-git add crates/auth/src/hydra_client/clients.rs crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/clients.rs crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — OAuth2 client CRUD"
 ```
 
@@ -1108,10 +1108,10 @@ git commit -m "auth: hydra admin client — OAuth2 client CRUD"
 ## Task 11 · Hydra admin client — JWKS admin
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/jwks.rs`
-- Modify: `crates/auth/src/hydra_client/mod.rs`
+- Create: `crates/zeroship-auth/src/hydra_client/jwks.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs`
 
-- [ ] **Step 11.1: Create `crates/auth/src/hydra_client/jwks.rs`**
+- [ ] **Step 11.1: Create `crates/zeroship-auth/src/hydra_client/jwks.rs`**
 
 ```rust
 //! JWK set admin endpoints (used by bootstrap + rotation).
@@ -1148,7 +1148,7 @@ Note on `kid`: per the proposal §7.5 the long-term plan is RFC 7638 thumbprint 
 ```bash
 # add `pub mod jwks;` to hydra_client/mod.rs
 cargo check -p zeroship-auth
-git add crates/auth/src/hydra_client/jwks.rs crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/jwks.rs crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — JWKS admin endpoints"
 ```
 
@@ -1157,10 +1157,10 @@ git commit -m "auth: hydra admin client — JWKS admin endpoints"
 ## Task 12 · Hydra admin client — session admin
 
 **Files:**
-- Create: `crates/auth/src/hydra_client/sessions.rs`
-- Modify: `crates/auth/src/hydra_client/mod.rs`
+- Create: `crates/zeroship-auth/src/hydra_client/sessions.rs`
+- Modify: `crates/zeroship-auth/src/hydra_client/mod.rs`
 
-- [ ] **Step 12.1: Create `crates/auth/src/hydra_client/sessions.rs`**
+- [ ] **Step 12.1: Create `crates/zeroship-auth/src/hydra_client/sessions.rs`**
 
 ```rust
 //! Session admin endpoints (sign-out-everywhere).
@@ -1182,7 +1182,7 @@ impl HydraAdmin {
 ```bash
 # add `pub mod sessions;` to hydra_client/mod.rs
 cargo check -p zeroship-auth
-git add crates/auth/src/hydra_client/sessions.rs crates/auth/src/hydra_client/mod.rs
+git add crates/zeroship-auth/src/hydra_client/sessions.rs crates/zeroship-auth/src/hydra_client/mod.rs
 git commit -m "auth: hydra admin client — session admin (sign-out-everywhere)"
 ```
 
@@ -1191,13 +1191,13 @@ git commit -m "auth: hydra admin client — session admin (sign-out-everywhere)"
 ## Task 13 · Clients config TOML parser
 
 **Files:**
-- Create: `crates/auth/src/bootstrap/mod.rs` (stub — populated in Task 15)
-- Create: `crates/auth/src/bootstrap/clients_config.rs`
-- Modify: `crates/auth/src/lib.rs`
+- Create: `crates/zeroship-auth/src/bootstrap/mod.rs` (stub — populated in Task 15)
+- Create: `crates/zeroship-auth/src/bootstrap/clients_config.rs`
+- Modify: `crates/zeroship-auth/src/lib.rs`
 
 The TOML the operator edits to declare OIDC clients. Reconciled against hydra's admin API at every boot.
 
-- [ ] **Step 13.1: Create `crates/auth/src/bootstrap/mod.rs` (stub)**
+- [ ] **Step 13.1: Create `crates/zeroship-auth/src/bootstrap/mod.rs` (stub)**
 
 ```rust
 //! First-boot bootstrap: JWK generation + OIDC client reconciliation.
@@ -1206,7 +1206,7 @@ pub mod clients_config;
 pub mod keys;
 ```
 
-- [ ] **Step 13.2: Create `crates/auth/src/bootstrap/clients_config.rs`**
+- [ ] **Step 13.2: Create `crates/zeroship-auth/src/bootstrap/clients_config.rs`**
 
 ```rust
 //! Parse and validate the operator-provided OIDC clients config.
@@ -1304,7 +1304,7 @@ impl ClientEntry {
 
 - [ ] **Step 13.3: Write a parse-and-mapping test**
 
-Create `crates/auth/tests/clients_config_test.rs`:
+Create `crates/zeroship-auth/tests/clients_config_test.rs`:
 
 ```rust
 use zeroship_auth::bootstrap::clients_config::ClientsConfig;
@@ -1348,7 +1348,7 @@ Expected: PASS.
 - [ ] **Step 13.6: Commit**
 
 ```bash
-git add crates/auth/src/bootstrap/ crates/auth/src/lib.rs crates/auth/tests/clients_config_test.rs
+git add crates/zeroship-auth/src/bootstrap/ crates/zeroship-auth/src/lib.rs crates/zeroship-auth/tests/clients_config_test.rs
 git commit -m "auth: bootstrap — clients config TOML parser"
 ```
 
@@ -1357,9 +1357,9 @@ git commit -m "auth: bootstrap — clients config TOML parser"
 ## Task 14 · Bootstrap — first-boot JWK generation
 
 **Files:**
-- Create: `crates/auth/src/bootstrap/keys.rs`
+- Create: `crates/zeroship-auth/src/bootstrap/keys.rs`
 
-- [ ] **Step 14.1: Create `crates/auth/src/bootstrap/keys.rs`**
+- [ ] **Step 14.1: Create `crates/zeroship-auth/src/bootstrap/keys.rs`**
 
 ```rust
 //! First-boot JWK generation. Called only when `--bootstrap` is set
@@ -1402,7 +1402,7 @@ Expected: clean.
 - [ ] **Step 14.3: Commit**
 
 ```bash
-git add crates/auth/src/bootstrap/keys.rs
+git add crates/zeroship-auth/src/bootstrap/keys.rs
 git commit -m "auth: bootstrap — first-boot JWK generation"
 ```
 
@@ -1411,9 +1411,9 @@ git commit -m "auth: bootstrap — first-boot JWK generation"
 ## Task 15 · Bootstrap — client reconciliation
 
 **Files:**
-- Modify: `crates/auth/src/bootstrap/mod.rs`
+- Modify: `crates/zeroship-auth/src/bootstrap/mod.rs`
 
-- [ ] **Step 15.1: Rewrite `crates/auth/src/bootstrap/mod.rs`**
+- [ ] **Step 15.1: Rewrite `crates/zeroship-auth/src/bootstrap/mod.rs`**
 
 ```rust
 //! First-boot bootstrap orchestrator.
@@ -1479,7 +1479,7 @@ Expected: clean.
 - [ ] **Step 15.3: Commit**
 
 ```bash
-git add crates/auth/src/bootstrap/mod.rs
+git add crates/zeroship-auth/src/bootstrap/mod.rs
 git commit -m "auth: bootstrap — orchestrator (keys + client reconciliation)"
 ```
 
@@ -1650,7 +1650,7 @@ git commit -m "ops: add hydra v2.4 service, config, and example clients TOML"
 ## Task 17 · Wire everything in `main.rs`
 
 **Files:**
-- Modify: `crates/auth/src/main.rs`
+- Modify: `crates/zeroship-auth/src/main.rs`
 
 - [ ] **Step 17.1: Rewrite `main.rs` to run migrations + bootstrap on startup**
 
@@ -1708,7 +1708,7 @@ Expected: clean.
 - [ ] **Step 17.3: Commit**
 
 ```bash
-git add crates/auth/src/main.rs
+git add crates/zeroship-auth/src/main.rs
 git commit -m "auth: wire PG + migrations + bootstrap in main"
 ```
 
@@ -1717,7 +1717,7 @@ git commit -m "auth: wire PG + migrations + bootstrap in main"
 ## Task 18 · Smoke test — real hydra round-trip
 
 **Files:**
-- Create: `crates/auth/tests/hydra_client_smoke.rs`
+- Create: `crates/zeroship-auth/tests/hydra_client_smoke.rs`
 
 A test that boots against a real hydra (the compose stack). Skips when `AUTH_HYDRA_ADMIN` is unset, so CI without docker doesn't break.
 
@@ -1839,7 +1839,7 @@ If `client_crud_roundtrip` fails: inspect hydra's response (`docker compose logs
 - [ ] **Step 18.4: Commit**
 
 ```bash
-git add crates/auth/tests/hydra_client_smoke.rs
+git add crates/zeroship-auth/tests/hydra_client_smoke.rs
 git commit -m "auth: smoke test — hydra admin client round-trips against live hydra"
 ```
 
@@ -1908,11 +1908,11 @@ git tag auth-phase-1
 
 ### Task P2-1 · Argon2id password module
 
-**Files:** Create `crates/auth/src/identity/mod.rs`, `crates/auth/src/identity/password.rs`. Modify `src/lib.rs`.
+**Files:** Create `crates/zeroship-auth/src/identity/mod.rs`, `crates/zeroship-auth/src/identity/password.rs`. Modify `src/lib.rs`.
 
 - [ ] **Step P2-1.1: Add Argon2id deps**
 
-Open `crates/auth/Cargo.toml` and add to `[dependencies]`:
+Open `crates/zeroship-auth/Cargo.toml` and add to `[dependencies]`:
 
 ```toml
 argon2 = "0.5"
@@ -1922,7 +1922,7 @@ rand = "0.8"
 
 If these are workspace-pinned, use `argon2 = { workspace = true }`.
 
-- [ ] **Step P2-1.2: Create `crates/auth/src/identity/mod.rs`**
+- [ ] **Step P2-1.2: Create `crates/zeroship-auth/src/identity/mod.rs`**
 
 ```rust
 //! User identity flows. Phase 2 = password; later phases add federation,
@@ -1931,7 +1931,7 @@ If these are workspace-pinned, use `argon2 = { workspace = true }`.
 pub mod password;
 ```
 
-- [ ] **Step P2-1.3: Create `crates/auth/src/identity/password.rs`**
+- [ ] **Step P2-1.3: Create `crates/zeroship-auth/src/identity/password.rs`**
 
 ```rust
 //! Argon2id password hashing + enumeration-resistant verification.
@@ -2004,7 +2004,7 @@ pub mod store;
 
 - [ ] **Step P2-1.5: Write the roundtrip + enumeration-defense test**
 
-Create `crates/auth/tests/password_test.rs`:
+Create `crates/zeroship-auth/tests/password_test.rs`:
 
 ```rust
 use std::time::Instant;
@@ -2052,13 +2052,13 @@ Expected: both PASS.
 - [ ] **Step P2-1.7: Commit**
 
 ```bash
-git add crates/auth/Cargo.toml crates/auth/src/identity/ crates/auth/src/lib.rs crates/auth/tests/password_test.rs
+git add crates/zeroship-auth/Cargo.toml crates/zeroship-auth/src/identity/ crates/zeroship-auth/src/lib.rs crates/zeroship-auth/tests/password_test.rs
 git commit -m "auth: identity/password — Argon2id + dummy-hash enumeration defense"
 ```
 
 ### Task P2-2 · Rate-limit token-bucket
 
-**Files:** Create `crates/auth/src/ratelimit.rs`, `crates/auth/src/store/ratelimit.rs`. Modify `src/store/mod.rs`.
+**Files:** Create `crates/zeroship-auth/src/ratelimit.rs`, `crates/zeroship-auth/src/store/ratelimit.rs`. Modify `src/store/mod.rs`.
 
 (Full bite-sized steps continue in the same shape as Task P2-1.)
 
@@ -2090,15 +2090,15 @@ Triggers when Phase 2 lands. Outline only here:
 
 | # | Task |
 |---|---|
-| 1 | New module `crates/gateway/src/oidc_rp.rs` — code exchange, JWKS cache, per-app session set |
+| 1 | New module `crates/zeroship-gateway/src/oidc_rp.rs` — code exchange, JWKS cache, per-app session set |
 | 2 | Gateway proxy rules: forward `auth.zeroship.ai/oauth2/*` and `/.well-known/*` to hydra-public |
 | 3 | Gateway 401-redirect to `auth.zeroship.ai/oauth2/auth` with PKCE |
 | 4 | Gateway `/__zs/auth/callback` handler |
 | 5 | Per-app session cookie `__Host-zs_app_session` |
 | 6 | Worker payload (`ZeroShip-User`) unchanged — verify HMAC tests still pass |
-| 7 | New module `crates/control/src/oidc_rp.rs` — same shape for the dashboard |
-| 8 | Delete `crates/control/src/{auth_service,auth_handlers,oauth}.rs` |
-| 9 | Delete `crates/gateway/src/user_auth.rs` JWT-cookie path |
+| 7 | New module `crates/zeroship-control/src/oidc_rp.rs` — same shape for the dashboard |
+| 8 | Delete `crates/zeroship-control/src/{auth_service,auth_handlers,oauth}.rs` |
+| 9 | Delete `crates/zeroship-gateway/src/user_auth.rs` JWT-cookie path |
 | 10 | Migrate `auth_users` → `auth.users` (one-shot in store::migrations) |
 | 11 | Drop legacy tables (`auth_users`, `auth_app_consents`, `auth_sessions`) |
 | 12 | Update `docs/reference/auth.md` to point at the new architecture |
@@ -2109,7 +2109,7 @@ Triggers when Phase 2 lands. Outline only here:
 | # | Task |
 |---|---|
 | 1 | `identity/oauth/mod.rs` — shared PKCE+state machinery for FEDERATION (distinct from our IdP) |
-| 2 | `identity/oauth/google.rs` — Google OIDC; reuse existing `crates/control/src/oauth.rs` patterns |
+| 2 | `identity/oauth/google.rs` — Google OIDC; reuse existing `crates/zeroship-control/src/oauth.rs` patterns |
 | 3 | `identity/oauth/github.rs` — `/user` + `/user/emails`; verified-primary picker |
 | 4 | `/oauth/google/start` + `/oauth/google/callback` handlers |
 | 5 | `/oauth/github/start` + `/oauth/github/callback` handlers |

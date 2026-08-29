@@ -27,16 +27,16 @@ on procedures that are statically proven not to read ctx.
 
 Source of truth:
 
-- `crates/runtime/src/core/runtime.rs:1389-1589` — `call_fetch_handler` (Tier 1 RPC dispatch)
-- `crates/runtime/src/core/runtime.rs:3146-3178` — `build_rpc_context_from_request`
-- `crates/runtime/src/core/runtime.rs:3189-3212` — `call_rpc_inner`
-- `crates/runtime/src/rpc/dispatch.rs:69-160` — `RpcContext::build_js_object`
-- `crates/runtime/src/rpc/dispatch.rs:236-313` — `seal_url`, `install_throwing_setter`
-- `crates/runtime/src/rpc/dispatch.rs:368-395` — `with_rpc_context_in_als`
-- `crates/runtime/src/web/headers.rs:798-913` — `build_kernel_headers`, `seal_immutable`
-- `crates/runtime/src/web/dom/abort_signal.rs:240-278` — `mint_abort_signal`
-- `crates/runtime/src/web/dom/abort_controller.rs:42-72` — AbortController constructor
-- `crates/runtime/src/node/async_hooks/als.rs:277-323` — `read_context_map`, `clone_map`
+- `crates/zeroship-runtime/src/core/runtime.rs:1389-1589` — `call_fetch_handler` (Tier 1 RPC dispatch)
+- `crates/zeroship-runtime/src/core/runtime.rs:3146-3178` — `build_rpc_context_from_request`
+- `crates/zeroship-runtime/src/core/runtime.rs:3189-3212` — `call_rpc_inner`
+- `crates/zeroship-runtime/src/rpc/dispatch.rs:69-160` — `RpcContext::build_js_object`
+- `crates/zeroship-runtime/src/rpc/dispatch.rs:236-313` — `seal_url`, `install_throwing_setter`
+- `crates/zeroship-runtime/src/rpc/dispatch.rs:368-395` — `with_rpc_context_in_als`
+- `crates/zeroship-runtime/src/web/headers.rs:798-913` — `build_kernel_headers`, `seal_immutable`
+- `crates/zeroship-runtime/src/web/dom/abort_signal.rs:240-278` — `mint_abort_signal`
+- `crates/zeroship-runtime/src/web/dom/abort_controller.rs:42-72` — AbortController constructor
+- `crates/zeroship-runtime/src/node/async_hooks/als.rs:277-323` — `read_context_map`, `clone_map`
 
 ### Step-by-step ping path (HEAD = `d2e7e22`)
 
@@ -101,7 +101,7 @@ contributions are **(a) URL construction + sealing (~2 µs combined)** and
 **(b) Headers + AbortController construction (~1.5 µs)** — both of which
 the user procedure for `ping` literally never reads.
 
-Cross-check against `crates/runtime/benches/results-2026-05-05-rpc-v2-dispatch.txt:91-99`
+Cross-check against `crates/zeroship-runtime/benches/results-2026-05-05-rpc-v2-dispatch.txt:91-99`
 which estimated `RpcContext::build_js_object ~10-15 µs`. That estimate is
 stale: `seal_url` was recently expanded to install per-setter shadows
 (see `dispatch.rs:254-260`) — but the headline 10–15 µs is in the right

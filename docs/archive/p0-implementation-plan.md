@@ -3,7 +3,7 @@
 # P0 Implementation Plan — Capability Trait Split + PostgresBackend Migration
 
 **Source design**: `docs/proposals/db-system-design.md` §5, §7, §19 P0
-**Working crate**: `crates/plugin-db/`
+**Working crate**: `crates/zeroship-plugin-db/`
 **Closes**: `docs/reviews/plugin-db-deferred.md` CRITICAL [C1]
 **Per-PR budget**: builds + `cargo test -p zeroship-plugin-db` green on its own; keeps 364 lib + 73 integration tests passing; ≤~800 LOC diff; one-line purpose.
 
@@ -11,7 +11,7 @@
 
 ## 0. Measured baseline — sites that must be migrated
 
-Counted at HEAD across `crates/plugin-db/src/**`:
+Counted at HEAD across `crates/zeroship-plugin-db/src/**`:
 
 | concrete reference | site | count |
 |---|---|---|
@@ -37,8 +37,8 @@ Counted at HEAD across `crates/plugin-db/src/**`:
 **Goal**: get the two most-used capabilities into their own traits via `Backend: SqlExecutor + LockManager + ...` super-trait. Zero behaviour / call-site change.
 
 **Files**:
-- `crates/plugin-db/src/backend/mod.rs` — split trait; `Backend` becomes a super-trait carrying remaining 16 methods.
-- `crates/plugin-db/src/backend/postgres.rs` — add `impl SqlExecutor` + `impl LockManager` blocks.
+- `crates/zeroship-plugin-db/src/backend/mod.rs` — split trait; `Backend` becomes a super-trait carrying remaining 16 methods.
+- `crates/zeroship-plugin-db/src/backend/postgres.rs` — add `impl SqlExecutor` + `impl LockManager` blocks.
 - Add `assert_impl::<PostgresBackend, SqlExecutor>()` compile-time tests.
 
 **Trait shapes**:
@@ -201,9 +201,9 @@ pub trait Backend: SqlExecutor<Client = compio_postgres::Client> + LockManager +
 
 ## 5. Critical files
 
-- `crates/plugin-db/src/backend/mod.rs` — trait declarations land here; becomes the capability-trait registry.
-- `crates/plugin-db/src/backend/capabilities.rs` (new) — populated across PRs 1–2.
-- `crates/plugin-db/src/backend/postgres.rs` — split monolithic `impl Backend` into per-capability impl blocks.
-- `crates/plugin-db/src/migrations.rs` — largest concrete-type holdout; PR 4's budget.
-- `crates/plugin-db/src/context.rs` — `IsolateDbContext::backend` field is the API boundary v8_classes sees; PR 5 swaps it.
-- `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs` — the `backend.pool().get()` escape hatch lives here; PR 3 closes it.
+- `crates/zeroship-plugin-db/src/backend/mod.rs` — trait declarations land here; becomes the capability-trait registry.
+- `crates/zeroship-plugin-db/src/backend/capabilities.rs` (new) — populated across PRs 1–2.
+- `crates/zeroship-plugin-db/src/backend/postgres.rs` — split monolithic `impl Backend` into per-capability impl blocks.
+- `crates/zeroship-plugin-db/src/migrations.rs` — largest concrete-type holdout; PR 4's budget.
+- `crates/zeroship-plugin-db/src/context.rs` — `IsolateDbContext::backend` field is the API boundary v8_classes sees; PR 5 swaps it.
+- `crates/zeroship-plugin-db/src/orchestrator/register_model/bootstrap.rs` — the `backend.pool().get()` escape hatch lives here; PR 3 closes it.

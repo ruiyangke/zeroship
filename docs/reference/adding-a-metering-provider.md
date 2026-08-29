@@ -1,7 +1,7 @@
 # Adding A Metering Provider
 
 Billing providers plug into the control plane through the registry in
-`crates/control/src/metering/provider/`. A provider is a self-contained adapter:
+`crates/zeroship-control/src/metering/provider/`. A provider is a self-contained adapter:
 it implements the capability traits it supports, validates its own config in a
 factory, registers one id in `provider/adapters/mod.rs`, and passes the shared
 provider conformance suite.
@@ -14,7 +14,7 @@ correction capability to repair drift.
 ## Provider Surface
 
 The base trait is `MeteringProvider` in
-`crates/control/src/metering/provider/mod.rs`.
+`crates/zeroship-control/src/metering/provider/mod.rs`.
 
 Every adapter implements:
 
@@ -80,7 +80,7 @@ local invoice store.
 
 ## Registration
 
-Add the adapter file under `crates/control/src/metering/provider/adapters/`, then
+Add the adapter file under `crates/zeroship-control/src/metering/provider/adapters/`, then
 register it in `adapters/mod.rs`:
 
 ```rust
@@ -112,7 +112,7 @@ backfill unless the provider actually guarantees it.
 ## Worked Examples
 
 `openmeter` is a meter-only adapter in
-`crates/control/src/metering/provider/adapters/openmeter.rs`.
+`crates/zeroship-control/src/metering/provider/adapters/openmeter.rs`.
 
 - Config: `base_url`, `token`, `event_type`, and `meter_slug`.
 - Capabilities: `METER`.
@@ -122,7 +122,7 @@ backfill unless the provider actually guarantees it.
 - Correction capability: none; pair it with an invoicer that can correct bills.
 
 `lago` is a full-stack adapter in
-`crates/control/src/metering/provider/adapters/lago.rs`.
+`crates/zeroship-control/src/metering/provider/adapters/lago.rs`.
 
 - Config: `api_url`, `api_key`, and `billable_metric_code`.
 - Capabilities: `METER | INVOICE`.
@@ -142,5 +142,5 @@ nix develop --command cargo test -p zeroship-control --test provider_conformance
 The suite checks capability/downcast consistency, fail-closed config, retry
 idempotency, aggregate read-back, dedup TTL behavior, invoice close idempotency,
 webhook verification, and correction capability declarations. Add a fixture for
-the new provider in `crates/control/tests/provider_conformance.rs` with a DB-free
+the new provider in `crates/zeroship-control/tests/provider_conformance.rs` with a DB-free
 recording backend or mock HTTP server.

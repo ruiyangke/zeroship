@@ -31,20 +31,20 @@ cited line:
 
 | Fragment | Origin | Layer |
 | --- | --- | --- |
-| `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/plugin-db/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
-| inner `db: ` | `crates/plugin-db/src/error.rs:721` -- `format!("db: {e}")` in `walk_pg_chain` | plugin-db classifier |
+| `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/zeroship-plugin-db/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
+| inner `db: ` | `crates/zeroship-plugin-db/src/error.rs:721` -- `format!("db: {e}")` in `walk_pg_chain` | plugin-db classifier |
 | `db error` | `libs/compio-postgres/src/error/mod.rs:395` -- `Kind::Db => fmt.write_str("db error")` | driver Display |
-| ` <U+2014> caused by: ` | `crates/plugin-db/src/error.rs:724` -- `msg.push_str(&format!(" <U+2014> caused by: {src}"))` | plugin-db source-chain walk |
+| ` <U+2014> caused by: ` | `crates/zeroship-plugin-db/src/error.rs:724` -- `msg.push_str(&format!(" <U+2014> caused by: {src}"))` | plugin-db source-chain walk |
 | `ERROR: role "app_<uuid>_role" does not exist` | `libs/compio-postgres/src/error/mod.rs:313-315` -- `write!(fmt, "{}: {}", self.severity, self.message)` | PostgreSQL server text, verbatim |
 
 The user-facing body is built by `build_internal_error_body`
-(`crates/runtime/src/core/dispatch.rs:349-361`), reached from `build_error_body`
+(`crates/zeroship-runtime/src/core/dispatch.rs:349-361`), reached from `build_error_body`
 (`dispatch.rs:148-226`): at `dispatch.rs:155` the status is in `500..=599`, at
 `dispatch.rs:179` the error's code fails `is_public_error_code`
 (`dispatch.rs:276-305`), so the blanked body is returned at `dispatch.rs:183-186`.
 
 `request_id` is `"1"` because it is a per-isolate `u64` counter, not a trace id:
-declared at `crates/runtime/src/core/runtime.rs:882`, initialised to `1` at
+declared at `crates/zeroship-runtime/src/core/runtime.rs:882`, initialised to `1` at
 `runtime.rs:1197`, incremented per dispatch at `runtime.rs:2130-2131`. A cold
 app whose first request fails always yields `"1"`.
 
@@ -52,9 +52,9 @@ Two findings fall directly out of this decomposition and shape everything below.
 
 **Finding A: the worst leak is not a string in this repository.** The text
 `role "app_<uuid>_role" does not exist` appears in this tree only inside
-comments (`crates/plugin-db/src/register_model/bootstrap.rs:201-202`,
-`crates/cli/src/migrate.rs:23`). The runtime value is PostgreSQL's own message,
-copied verbatim by `walk_pg_chain` (`crates/plugin-db/src/error.rs:720-728`). No
+comments (`crates/zeroship-plugin-db/src/register_model/bootstrap.rs:201-202`,
+`crates/zeroship-cli/src/migrate.rs:23`). The runtime value is PostgreSQL's own message,
+copied verbatim by `walk_pg_chain` (`crates/zeroship-plugin-db/src/error.rs:720-728`). No
 scanner over our source literals can ever find this class of leak. Any proposal
 that consists of "grep for bad strings and fix them" is structurally incapable
 of preventing the failure that prompted it.
@@ -62,11 +62,11 @@ of preventing the failure that prompted it.
 **Finding B: the message was not merely ugly, it was misclassified.** This is a
 creator configuration error with a known, documented, one-command fix. The
 in-tree documentation already says so:
-`crates/cli/src/migrate.rs:16-25` states that deploying an `env.db` app without
+`crates/zeroship-cli/src/migrate.rs:16-25` states that deploying an `env.db` app without
 running `zeroship migrate` makes the first DB call fail with
 `role "app_..._role" does not exist`, "which reaches the end user as
 `{"message":"internal error"}`". `DbError::from_pg`
-(`crates/plugin-db/src/error.rs:189-230`) has no arm for this SQLSTATE, so it
+(`crates/zeroship-plugin-db/src/error.rs:189-230`) has no arm for this SQLSTATE, so it
 falls through to the catch-all `DbError::Internal` at `error.rs:228`, which
 stamps the code `internal` (`error.rs:287-289`). `internal` is on neither
 allow-list, so the rail correctly blanks a message it has been told is internal.
@@ -98,7 +98,7 @@ trusted, and it failed the first time.** The first classifier used a guessed
 list of error constructors (`format!`, `anyhow!`, `panic!`, `.context(`, ...).
 It found the `exec.rs:326` literal but marked it `err=false`, because this
 codebase builds that error through its own helper, `prefix_message`
-(`crates/plugin-db/src/error.rs:521-539`), which is in no such list. The
+(`crates/zeroship-plugin-db/src/error.rs:521-539`), which is in no such list. The
 vocabulary was then **derived from the data** -- ranking the identifier
 preceding every literal in the tree -- rather than guessed, and re-run. After
 widening, the ground-truth literal classifies as `err=true` and the guard-token
@@ -154,13 +154,13 @@ files, non-test:
 
 | Count | File |
 | --- | --- |
-| 44 | `crates/control/src/stripe_handlers.rs` |
-| 26 | `crates/control/src/proration.rs` |
+| 44 | `crates/zeroship-control/src/stripe_handlers.rs` |
+| 26 | `crates/zeroship-control/src/proration.rs` |
 | 24 | `sdks/ui/src/stories/Input.stories.tsx` |
-| 21 | `crates/control/src/pricing.rs` |
+| 21 | `crates/zeroship-control/src/pricing.rs` |
 | 19 | `sdks/ui/src/stories/NavigationMenu.stories.tsx` |
-| 17 | `crates/control/src/cron/billing_reconcile.rs` |
-| 17 | `crates/control/src/notify.rs` |
+| 17 | `crates/zeroship-control/src/cron/billing_reconcile.rs` |
+| 17 | `crates/zeroship-control/src/notify.rs` |
 
 By crate, non-test: `sdks/ui` 425, `crates/control` 217, `crates/plugin-db` 59,
 `sdks/vite-plugin` 38, `crates/runtime` 27, `crates/auth` 25,
@@ -170,7 +170,7 @@ Note the shape: `sdks/ui` leads on raw count but those are Storybook demo
 strings, not errors. `crates/control` is the real error-surface concentration.
 
 **The single highest-value non-ASCII site is one line:**
-`crates/plugin-db/src/error.rs:724`. It is the em-dash in the anchor string, and
+`crates/zeroship-plugin-db/src/error.rs:724`. It is the em-dash in the anchor string, and
 because it sits in the source-chain walk it stamps an em-dash into *every*
 multi-layer database error the platform produces.
 
@@ -184,20 +184,20 @@ multi-layer database error the platform produces.
 
 This is the finding most improved by classification. **The majority of guard
 tokens are legitimate.** `SEC-1` and `SEC-4` appear in `assert!` messages
-(`crates/plugin-db/src/context.rs:1206-1275`,
-`crates/plugin-db/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
+(`crates/zeroship-plugin-db/src/context.rs:1206-1275`,
+`crates/zeroship-plugin-db/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
 where naming the guard being tested is exactly right. A blanket ban on guard
 tokens in strings would delete these correctly-written test assertions.
 
 The runtime offenders are a small, tightly-scoped set:
 
-- `crates/plugin-db/src/exec.rs:316` -- `db: autocommit BEGIN (per-app U+00A7 17.5 + DB-1 guards): `
-- `crates/plugin-db/src/exec.rs:326` -- `db: autocommit session setup (...)` (the anchor)
-- `crates/plugin-db/src/exec.rs:344` -- `db: autocommit COMMIT (...)`
-- `crates/plugin-db/src/transaction/mod.rs:171` -- `db: tx session setup (...)`
-- `crates/plugin-db/src/auth/bootstrap.rs:1786` -- `per-app role MUST be NOREPLICATION (U+00A7 17.5 slot-ownership-stays-platform)`
-- `crates/core/src/logout_token.rs:195,204` -- `(forbidden by OIDC BCL U+00A7 2.4)` (arguably legitimate: a public RFC citation, not an internal doc)
-- `crates/runtime/src/web/streams/readable_default_controller.rs:1230` -- `see streams-native.md U+00A7 VII`
+- `crates/zeroship-plugin-db/src/exec.rs:316` -- `db: autocommit BEGIN (per-app U+00A7 17.5 + DB-1 guards): `
+- `crates/zeroship-plugin-db/src/exec.rs:326` -- `db: autocommit session setup (...)` (the anchor)
+- `crates/zeroship-plugin-db/src/exec.rs:344` -- `db: autocommit COMMIT (...)`
+- `crates/zeroship-plugin-db/src/transaction/mod.rs:171` -- `db: tx session setup (...)`
+- `crates/zeroship-plugin-db/src/auth/bootstrap.rs:1786` -- `per-app role MUST be NOREPLICATION (U+00A7 17.5 slot-ownership-stays-platform)`
+- `crates/zeroship-core/src/logout_token.rs:195,204` -- `(forbidden by OIDC BCL U+00A7 2.4)` (arguably legitimate: a public RFC citation, not an internal doc)
+- `crates/zeroship-runtime/src/web/streams/readable_default_controller.rs:1230` -- `see streams-native.md U+00A7 VII`
 - `crates/zeroship-schema/src/query.rs:8728` -- `(was INTEGER pre-PR 3 -- see proposal U+00A7 9 PR 3)`
 
 **Four lines in `plugin-db` account for the entire observed problem.** That is a
@@ -207,9 +207,9 @@ mechanical fix, not a program.
 
 The `opaque` regex tag returned 792 hits and is **the least trustworthy number
 in this document**, so it is reported with its false positives rather than as a
-headline. Inspection showed most hits in `crates/auth/src/oidc/` are the JSON
+headline. Inspection showed most hits in `crates/zeroship-auth/src/oidc/` are the JSON
 *field name* `"error"` or RFC 6749 error *codes* (`invalid_scope`,
-`invalid_principal_id` at `crates/auth/src/oidc/device_token.rs:573-592`) --
+`invalid_principal_id` at `crates/zeroship-auth/src/oidc/device_token.rs:573-592`) --
 which are stable machine-readable codes, i.e. a good pattern, tagged as a bad
 one.
 
@@ -224,20 +224,20 @@ Hand-verified counts of actual opaque phrases (non-test, excluding `.md`):
 | 2 | `"something went wrong"` |
 | 2 | `"bad request"` |
 
-`"internal error"` concentration: `crates/control/src/stripe_handlers.rs` 17,
-`crates/runtime/src/core/dispatch.rs` 11, `crates/control/src/api.rs` 5,
-`crates/auth/src/ui/reset.rs` 5, `sdks/bootstrap/src/fetch-handler.ts` 2,
-`crates/control/src/env_handlers.rs` 2.
+`"internal error"` concentration: `crates/zeroship-control/src/stripe_handlers.rs` 17,
+`crates/zeroship-runtime/src/core/dispatch.rs` 11, `crates/zeroship-control/src/api.rs` 5,
+`crates/zeroship-auth/src/ui/reset.rs` 5, `sdks/bootstrap/src/fetch-handler.ts` 2,
+`crates/zeroship-control/src/env_handlers.rs` 2.
 
 The `invalid request` observation holds: **5 Rust UI handlers** produce it with
-different causes -- `crates/auth/src/ui/device.rs:154`,
-`crates/auth/src/ui/signup.rs:110`, `crates/auth/src/ui/reset.rs:87`,
-`crates/auth/src/ui/login.rs:172`, `crates/auth/src/ui/forgot.rs:70` -- plus
+different causes -- `crates/zeroship-auth/src/ui/device.rs:154`,
+`crates/zeroship-auth/src/ui/signup.rs:110`, `crates/zeroship-auth/src/ui/reset.rs:87`,
+`crates/zeroship-auth/src/ui/login.rs:172`, `crates/zeroship-auth/src/ui/forgot.rs:70` -- plus
 `sdks/bootstrap/src/dev-auth.ts:697,710` and the enum arm at
-`crates/auth/src/ui/mod.rs:95`. Undiagnosable from the outside, as stated.
+`crates/zeroship-auth/src/ui/mod.rs:95`. Undiagnosable from the outside, as stated.
 
 However, this surface is **already half-fixed** and that matters for the
-recommendation. `PublicErrorMessage` (`crates/auth/src/ui/mod.rs:82-113`) is a
+recommendation. `PublicErrorMessage` (`crates/zeroship-auth/src/ui/mod.rs:82-113`) is a
 closed enum yielding both `as_str()` (human) and `error_code()` (stable slug),
 and `ErrorPage` (`mod.rs:76-80`) carries `error_code` into
 `templates/error.html`. The five handlers are distinguishable *if* they stop
@@ -248,7 +248,7 @@ sharing one variant. The mechanism exists; the variants are too coarse.
 The `leak` regex tag returned 833 hits, 52 in err/log positions in non-test
 files. **This tag is heavily false-positive and its raw count should not be
 quoted.** Inspection showed the bulk are SQL DDL strings matching on `_role` or
-`information_schema` -- e.g. `crates/plugin-db/src/auth/bootstrap.rs:147,160,728`
+`information_schema` -- e.g. `crates/zeroship-plugin-db/src/auth/bootstrap.rs:147,160,728`
 (`CREATE SCHEMA`, `GRANT EXECUTE`), `crates/zeroship-migrate-server/src/provisioning.rs:123`.
 These are SQL being *built*, not messages being *shown*.
 
@@ -262,12 +262,12 @@ none of it reaches an anonymous HTTP caller. Six redaction mechanisms exist
 
 | Helper | Location | Coverage |
 | --- | --- | --- |
-| `build_error_body` 5xx rail | `crates/runtime/src/core/dispatch.rs:148` | the main boundary |
-| `infrastructure_error_response` | `crates/control/src/api.rs:140` | 15 sites in `api.rs`, 4 in `workflow_instance_api.rs` |
-| `redact_url` | `crates/plugin-kv/src/error.rs:178-189` | 3 sites, all URL-bearing plugin-kv messages |
-| `scrub_constraint_detail` | `crates/plugin-db/src/error.rs:713-718` | strips PG `DETAIL:` (the conflicting value) |
-| `PublicErrorMessage` | `crates/auth/src/ui/mod.rs:83-113` | closed enum, 5 strings, end-user login UI |
-| `oidc_callback_public_error` | `crates/gateway/src/router/dispatch.rs:2909` | returns `&'static str` -- leak-proof by type |
+| `build_error_body` 5xx rail | `crates/zeroship-runtime/src/core/dispatch.rs:148` | the main boundary |
+| `infrastructure_error_response` | `crates/zeroship-control/src/api.rs:140` | 15 sites in `api.rs`, 4 in `workflow_instance_api.rs` |
+| `redact_url` | `crates/zeroship-plugin-kv/src/error.rs:178-189` | 3 sites, all URL-bearing plugin-kv messages |
+| `scrub_constraint_detail` | `crates/zeroship-plugin-db/src/error.rs:713-718` | strips PG `DETAIL:` (the conflicting value) |
+| `PublicErrorMessage` | `crates/zeroship-auth/src/ui/mod.rs:83-113` | closed enum, 5 strings, end-user login UI |
+| `oidc_callback_public_error` | `crates/zeroship-gateway/src/router/dispatch.rs:2909` | returns `&'static str` -- leak-proof by type |
 
 `scrub_constraint_detail` fires for only four SQLSTATEs (`error.rs:201-207`:
 23505/23503/23502/23514); for 42P01, 42501, 28000 the `DETAIL` and `HINT` lines
@@ -277,7 +277,7 @@ are allow-listed.**
 
 Specific leak sites worth fixing, all traced to OPERATOR-ONLY over HTTP:
 
-- **`crates/control/src/cron/workflow_engine.rs:1084`** --
+- **`crates/zeroship-control/src/cron/workflow_engine.rs:1084`** --
   `format!("workflow scheduler store: {error:?}")`. The `Debug` (not `Display`)
   formatter on `compio_postgres::Error` prints the full PG payload: schema,
   table, column, constraint, SQLSTATE, detail, hint, position, file, line,
@@ -285,19 +285,19 @@ Specific leak sites worth fixing, all traced to OPERATOR-ONLY over HTTP:
   this reads as an oversight rather than intent. Routes only to
   `infrastructure_error_response`, so it is logged and blanked.
 - **Redis credentials bypassing the helper built to stop them.**
-  `crates/plugin-kv/src/backend/redis.rs:170` applies `redact_url` to the outer
+  `crates/zeroship-plugin-kv/src/backend/redis.rs:170` applies `redact_url` to the outer
   URL but interpolates the inner error raw, and
   `libs/compio-redis/src/client.rs:94` builds `bad URL '{url_str}': {e}` with the
   password intact. Separately, `redact_url` passes unparseable input through
-  verbatim (`crates/plugin-kv/src/error.rs:187`, `Err(_) => raw.to_string()`) --
+  verbatim (`crates/zeroship-plugin-kv/src/error.rs:187`, `Err(_) => raw.to_string()`) --
   and a malformed URL can still contain a password. Reaches app JS; requires
   operator misconfiguration.
-- **`crates/plugin-db/src/backend/postgres.rs:1504-1546`** -- pg_dump/pg_restore
+- **`crates/zeroship-plugin-db/src/backend/postgres.rs:1504-1546`** -- pg_dump/pg_restore
   stderr passthrough carrying internal hostname, IP, port and role name; the
   catch-all arm keeps 4096 bytes of raw stderr.
 
 Negative results worth recording (each traced, not assumed): the gateway's 502
-`worker error: {e}` (`crates/gateway/src/router/dispatch.rs:2564`) wraps a bare
+`worker error: {e}` (`crates/zeroship-gateway/src/router/dispatch.rs:2564`) wraps a bare
 `io::Error` and carries no host, IP or port; `compio_postgres::Error`'s `Display`
 is 17 fixed literals with no DSN, and `Config`'s `Debug` redacts the password
 (`libs/compio-postgres/src/config.rs:835`); no site in scope splices raw SQL into
@@ -321,14 +321,14 @@ appear in an error.
 
 VERIFIED, the code has genuine audience awareness in four places:
 
-1. **`build_error_body`** (`crates/runtime/src/core/dispatch.rs:148-226`) is an
+1. **`build_error_body`** (`crates/zeroship-runtime/src/core/dispatch.rs:148-226`) is an
    explicit END-USER/OPERATOR split: log everything at `dispatch.rs:156-166`,
    blank the body unless the code is allow-listed.
-2. **`PublicErrorMessage`** (`crates/auth/src/ui/mod.rs:82-113`) is named for the
+2. **`PublicErrorMessage`** (`crates/zeroship-auth/src/ui/mod.rs:82-113`) is named for the
    audience boundary it enforces.
-3. **`infrastructure_error_response`** (`crates/control/src/api.rs:139-152`)
+3. **`infrastructure_error_response`** (`crates/zeroship-control/src/api.rs:139-152`)
    logs detail, returns generic.
-4. **`scrub_constraint_detail`** (`crates/plugin-db/src/error.rs:713-718`)
+4. **`scrub_constraint_detail`** (`crates/zeroship-plugin-db/src/error.rs:713-718`)
    redacts a value while keeping a classification.
 
 The failure is not absence of the concept. It is that the boundary is
@@ -339,25 +339,25 @@ The failure is not absence of the concept. It is that the boundary is
 **Direction A -- internal text reaching an END USER.** These are the real
 exposures (VERIFIED by the tracing agent, spot-checked by me):
 
-- `errorResponse()` at `crates/runtime/src/core/init.rs:1723-1744` forwards
+- `errorResponse()` at `crates/zeroship-runtime/src/core/init.rs:1723-1744` forwards
   `err.message` verbatim **at any status including 500**, with no rail at all.
   Reachable from the `user.index()` catch at `init.rs:2160-2162`. Had the anchor
   app rendered its homepage through `index()` rather than RPC, the browser would
   have received the full `db: ... role "app_<uuid>_role" does not exist` string.
   `dispatch.rs:106-115` documents this divergence explicitly.
-- `settle_rpc_promise` at `crates/runtime/src/core/runtime.rs:3716-3725` takes an
+- `settle_rpc_promise` at `crates/zeroship-runtime/src/core/runtime.rs:3716-3725` takes an
   Error *returned* (not thrown) by a procedure and emits the raw message to
-  `make_error` (`crates/worker/src/handler.rs:1363-1373`), producing a 500 body
-  with no blanking and no request_id. `crates/runtime/src/transport/handler.rs:373-376`
+  `make_error` (`crates/zeroship-worker/src/handler.rs:1363-1373`), producing a 500 body
+  with no blanking and no request_id. `crates/zeroship-runtime/src/transport/handler.rs:373-376`
   contains a comment warning against exactly this shape.
-- `_zsSubError` at `crates/runtime/src/core/init.rs:1771-1779` forwards
+- `_zsSubError` at `crates/zeroship-runtime/src/core/init.rs:1771-1779` forwards
   `err.message` verbatim into the WebSocket `{"t":"error"}` frame.
 
 **Direction B -- useful cause discarded.** The anchor case, plus:
 
 - **`hint` never reaches the wire.** `OpError::coded` carries a remediation hint
-  set at `crates/runtime/src/core/state.rs:230-234` and populated with genuinely
-  useful text (`crates/plugin-db/src/error.rs:266,271,276`, e.g. "retry the
+  set at `crates/zeroship-runtime/src/core/state.rs:230-234` and populated with genuinely
+  useful text (`crates/zeroship-plugin-db/src/error.rs:266,271,276`, e.g. "retry the
   transaction"). I verified independently that `build_verbose_error_body`
   (`dispatch.rs:363-396`) emits `message`, `name`, `stack`, `code`, `details`,
   `retryable` -- and that the token `hint` appears nowhere in `dispatch.rs`
@@ -369,8 +369,8 @@ exposures (VERIFIED by the tracing agent, spot-checked by me):
   covers only responses routed through this helper; direct control 5xx bodies
   still exist outside it and remain id-less.
 - **Three unrelated request-id concepts still exist.** The gateway mints a UUID
-  as `X-Request-Id` (`crates/gateway/src/proxy.rs:558`); the worker uses it only
-  to bind the `ZeroShip-User` HMAC (`crates/worker/src/handler.rs:96-104`) and
+  as `X-Request-Id` (`crates/zeroship-gateway/src/proxy.rs:558`); the worker uses it only
+  to bind the `ZeroShip-User` HMAC (`crates/zeroship-worker/src/handler.rs:96-104`) and
   never forwards it; the runtime invents its own per-isolate `u64`.
   Generic sanitized app 5xx bodies carry a per-isolate `request_id` that cannot
   be joined to the gateway trace. Public-code app 5xx bodies carry no id.
@@ -386,7 +386,7 @@ right in one shape.
 ### 2.4 The structural gap: the 4xx path has no rail
 
 `build_error_body` applies its sanitising rail **only** in `500..=599`
-(`crates/runtime/src/core/dispatch.rs:155`). At 4xx it skips the rail entirely
+(`crates/zeroship-runtime/src/core/dispatch.rs:155`). At 4xx it skips the rail entirely
 and emits `message`, `code`, `details` and `retryable` verbatim; only `stack` is
 stripped, at every status (`dispatch.rs:223`). The TS twin
 (`sdks/bootstrap/src/fetch-handler.ts:313`) behaves identically.
@@ -394,7 +394,7 @@ stripped, at every status (`dispatch.rs:223`). The TS twin
 Today this is safe, and the reason is worth writing down because it is load-
 bearing and accidental: **no platform component mints a 4xx carrying internals.**
 `OpErrorKind::CodedError` sets only `.code` and `.hint`, never `.status`
-(`crates/runtime/src/core/state.rs:224-237`); `reject_op` builds a bare exception
+(`crates/zeroship-runtime/src/core/state.rs:224-237`); `reject_op` builds a bare exception
 with neither (`dispatch.rs:627`); `@zeroship/db` re-stamps `.code` but never
 `.status` (`sdks/db/src/errors.ts`). So every `env.db` / `env.kv` / `env.storage`
 error lands at 500 and is blanked -- which is precisely why the anchor failure
@@ -419,7 +419,7 @@ deserves an explicit note in the creator-facing docs.
 ### 3.1 Verdict: no support exists, and none should be built now
 
 VERIFIED absent, with the patterns tried (all counts exclude the vendored
-`crates/runtime/tests/wpt/`, `refs/`, `third_party/` trees, which dominate naive
+`crates/zeroship-runtime/tests/wpt/`, `refs/`, `third_party/` trees, which dominate naive
 greps -- my own `Accept-Language` search returned hits **only** in WPT):
 
 | Probe | Patterns tried | Hits |
@@ -432,13 +432,13 @@ greps -- my own `Accept-Language` search returned hits **only** in WPT):
 | Locale as a field | `locale`/`lang`/`language` on user, session, or app config | 0 (every `language` hit is plpgsql `LANGUAGE` or an FTS dictionary) |
 
 Two adjacent capabilities do exist and should not be oversold: ICU data is
-loaded into V8 (`crates/runtime/src/core/init.rs:59-64`) so app code has
+loaded into V8 (`crates/zeroship-runtime/src/core/init.rs:59-64`) so app code has
 `Intl.*` -- but the comment says this was done because npm packages crash
 without it, a dependency fix rather than a feature. And `sdks/ui` has real RTL
 support (logical properties, `[dir="rtl"]` selectors, `lang="ar"`/`lang="he"`
 stories). Direction is handled; translation is not.
 
-One stale claim worth fixing on sight: `crates/control/src/notify.rs:169-171`
+One stale claim worth fixing on sight: `crates/zeroship-control/src/notify.rs:169-171`
 asserts that "the template KEY carries a locale segment so adding locales later
 is a template-pack drop, not a code change." There is no template key;
 `render_template` is a hardcoded `match` returning inline English
@@ -465,12 +465,12 @@ exist."** VERIFIED:
 
 | # | Namespace | Convention | Where |
 | --- | --- | --- | --- |
-| 1 | `ZsErrorCode` / `ErrorCode`, 14-15 gRPC codes | UPPER_SNAKE | `crates/runtime/src/rpc/error.rs:63-153`, `sdks/rpc/src/error.ts:20-52` |
-| 2 | plugin-db codes | lower_snake, canonicalised to UPPER_SNAKE | `crates/plugin-db/src/error.rs:236-291`, `sdks/db/src/errors.ts:27-36` |
+| 1 | `ZsErrorCode` / `ErrorCode`, 14-15 gRPC codes | UPPER_SNAKE | `crates/zeroship-runtime/src/rpc/error.rs:63-153`, `sdks/rpc/src/error.ts:20-52` |
+| 2 | plugin-db codes | lower_snake, canonicalised to UPPER_SNAKE | `crates/zeroship-plugin-db/src/error.rs:236-291`, `sdks/db/src/errors.ts:27-36` |
 | 3 | `AuthErrorCode` | lower_snake | `sdks/auth/src/types.ts:72-100` |
-| 4 | `PublicErrorMessage` | lower_snake | `crates/auth/src/ui/mod.rs:83-113` |
+| 4 | `PublicErrorMessage` | lower_snake | `crates/zeroship-auth/src/ui/mod.rs:83-113` |
 | 5 | Workflow codes | UPPER_SNAKE, not in the enum | `sdks/bootstrap/src/dispatcher.ts:305,1331` |
-| 6 | Billing gates | UPPER_SNAKE, not in the enum | `crates/gateway/src/enforce.rs:25-26,43-44` |
+| 6 | Billing gates | UPPER_SNAKE, not in the enum | `crates/zeroship-gateway/src/enforce.rs:25-26,43-44` |
 
 The design principle is already written down: `docs/reference/api-design-guidelines.md:131-155`,
 principle 9, "Use stable machine-readable error codes."
@@ -480,7 +480,7 @@ The gaps that make this fragile:
 - **Rust has 15 codes, TS has 14** (Rust-only `UNKNOWN`), hand-mirrored with **no
   parity test**.
 - **The control plane has essentially no codes**: 171 inline `"error":` sites in
-  `crates/control/src/`, exactly one emitting a `code` field
+  `crates/zeroship-control/src/`, exactly one emitting a `code` field
   (`cron/workflow_engine.rs:1638`). The `"error"` field mixes prose
   (`"app not found"`), slugs (`"invalid_scope"`), and leaked Rust type names
   (`"LimitExceededError"`, `"RunConflict"`). Meanwhile
@@ -511,31 +511,31 @@ The recommendation should extend these, not replace them.
 **The config-refusal family** is genuinely excellent and is the model to copy.
 
 - **Name the exact knob in both tiers, as one constant.**
-  `crates/worker/src/main.rs:29` -- `const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file"`.
+  `crates/zeroship-worker/src/main.rs:29` -- `const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file"`.
   Siblings at `worker/src/main.rs:33`, `gateway/src/main.rs:40`,
   `auth/src/main.rs:22`, `control/src/main.rs:101,202`.
 - **The shared validator names nothing; the caller passes the label.**
-  `crates/core/src/config/secrets.rs:60`. The rationale at `secrets.rs:48-55`
+  `crates/zeroship-core/src/config/secrets.rs:60`. The rationale at `secrets.rs:48-55`
   records that the module previously interpolated a bare `STASH_SIGNING_KEY`
   which "was right for neither and named nothing a binary reads."
 - **Expected vs found, with units.** `"{label} is too short ({} bytes); minimum 32 bytes"`
   (`secrets.rs:67-70`); `"consumers of {canonical} disagree about {property}: {first} declares {first_value}, {second} declares {second_value}"`
-  (`crates/config-contract/src/contract.rs:53-56`).
-- **Say what IS allowed.** `crates/core/src/config/names.rs:1026-1029` --
+  (`crates/zeroship-config-contract/src/contract.rs:53-56`).
+- **Say what IS allowed.** `crates/zeroship-core/src/config/names.rs:1026-1029` --
   "names an unsupported secret source; supply the value itself or a
   `urn:zeroship:file:<path>` reference".
 - **Print the exact command that fixes it.**
-  `crates/config-contract/src/docs.rs:54-58` -- "Regenerate with
+  `crates/zeroship-config-contract/src/docs.rs:54-58` -- "Regenerate with
   `cargo run -p zeroship-config-contract -- env-vars-doc`".
-- **Report ALL missing inputs, not the first.** `crates/control/src/main.rs:401-417`.
-- **Withhold the value, name the identity.** `crates/core/src/config/names.rs:1010-1041`.
+- **Report ALL missing inputs, not the first.** `crates/zeroship-control/src/main.rs:401-417`.
+- **Withhold the value, name the identity.** `crates/zeroship-core/src/config/names.rs:1010-1041`.
 
 **The strongest pattern in the tree: leak-proof by type, not by discipline.**
-`oidc_callback_public_error` (`crates/gateway/src/router/dispatch.rs:2909`)
+`oidc_callback_public_error` (`crates/zeroship-gateway/src/router/dispatch.rs:2909`)
 returns `&'static str`. A `'static` return type makes it **impossible to
 interpolate a runtime value** -- the compiler, not a reviewer and not a CI gate,
 enforces that nothing internal can reach the user. `PublicErrorMessage`
-(`crates/auth/src/ui/mod.rs:82-113`) achieves the same via a closed enum with a
+(`crates/zeroship-auth/src/ui/mod.rs:82-113`) achieves the same via a closed enum with a
 `const fn as_str`. These two are the only places where the audience boundary is
 guaranteed rather than merely observed, and they are the right model for any new
 end-user-facing surface. (Ironically, the doc comment inside
@@ -545,11 +545,11 @@ pervasive the habit is.)
 
 **Elsewhere in the tree:**
 
-- `crates/cli/src/main.rs:888-894` -- unknown-flag error naming the bad token,
+- `crates/zeroship-cli/src/main.rs:888-894` -- unknown-flag error naming the bad token,
   the *consequence* ("`--control` falling back to its default would deploy to
   http://localhost:9090 instead of the control plane you named"), and corrected
   usage. Regression test at `main.rs:1049-1065`.
-- `crates/cli/src/main.rs:909-910` -- "no API token found; run `zeroship login`,
+- `crates/zeroship-cli/src/main.rs:909-910` -- "no API token found; run `zeroship login`,
   pass `--token=<PAT>`, or set ZEROSHIP_TOKEN" (three exact next actions).
 - `sdks/vite-plugin/src/dev-server.ts:431-436` -- names the missing collections,
   the exact next command (`pnpm migrate`), and the db path. (Contains an em-dash.)
@@ -557,16 +557,16 @@ pervasive the habit is.)
 
 **The test that proves a diagnostic names a real variable**, which is the
 enforcement model for Section 6:
-`crates/control/src/main.rs:1645-1689`,
+`crates/zeroship-control/src/main.rs:1645-1689`,
 `every_auth_provider_diagnostic_names_a_variable_control_reads()`. Its expected
 set is **derived from compiled metadata, never listed**
 (`main.rs:1531-1545`: clap `CommandFactory` plus the macro-generated
 `ControlSettings::SPECS`), so editing a list cannot satisfy it. The token scanner
-(`crates/core/src/config/diagnostics.rs:26-31`) is shape-based, not
+(`crates/zeroship-core/src/config/diagnostics.rs:26-31`) is shape-based, not
 dictionary-based, "because a scanner that only recognised names it already knew
 could not see the stale one". It has a one-variable control at
 `main.rs:1691-1708` and states its own non-coverage at `main.rs:1660-1665`. The
-inverse property is pinned in `crates/core/src/config/secrets.rs:457-505`.
+inverse property is pinned in `crates/zeroship-core/src/config/secrets.rs:457-505`.
 
 It exists for **2 of 5 servers** (control, migrated). Gateway, worker and auth do
 not have one. That is the obvious extend-what-works move.
@@ -579,7 +579,7 @@ not have one. That is the obvious extend-what-works move.
 
 **Option 1a. Strip non-ASCII from runtime error strings.**
 Scope: 196 literals in error/log positions in non-test files; the em-dash is 83%
-of them. The single highest-value edit is `crates/plugin-db/src/error.rs:724`
+of them. The single highest-value edit is `crates/zeroship-plugin-db/src/error.rs:724`
 (` <U+2014> caused by: ` becomes ` -- caused by: `), which fixes every
 multi-layer DB error at once.
 Cost: hours. Risk: low, but **not zero** -- any test asserting on an em-dash
@@ -589,8 +589,8 @@ where typographic dashes are arguably correct. Recommend scoping to
 `sdks/ui`.
 
 **Option 1b. Delete doc markers and guard IDs from the four runtime sites.**
-`crates/plugin-db/src/exec.rs:316,326,344` and
-`crates/plugin-db/src/transaction/mod.rs:171`. Replace
+`crates/zeroship-plugin-db/src/exec.rs:316,326,344` and
+`crates/zeroship-plugin-db/src/transaction/mod.rs:171`. Replace
 `db: autocommit session setup (per-app U+00A7 17.5 + DB-1 guards): ` with
 `db: autocommit session setup: `. The guard rationale belongs in the comment
 directly above, where it already is (`exec.rs:301`).
@@ -599,10 +599,10 @@ Cost: under an hour. Risk: very low.
 `context.rs:1206-1275` are correct for their audience.
 
 **Option 1d. Fix the three concrete leak sites.** Change `{error:?}` to
-`{error}` at `crates/control/src/cron/workflow_engine.rs:1084` to match its
+`{error}` at `crates/zeroship-control/src/cron/workflow_engine.rs:1084` to match its
 sibling at `:1080`; interpolate `redact_url(...)` rather than the raw inner error
-at `crates/plugin-kv/src/backend/redis.rs:170`; and either bound or drop the
-4096-byte raw-stderr arm at `crates/plugin-db/src/backend/postgres.rs:1504-1546`.
+at `crates/zeroship-plugin-kv/src/backend/redis.rs:170`; and either bound or drop the
+4096-byte raw-stderr arm at `crates/zeroship-plugin-db/src/backend/postgres.rs:1504-1546`.
 Cost: an hour. Risk: very low. All three are currently contained by the 5xx rail,
 so this is defence in depth rather than an active exposure -- which is also the
 argument for doing it cheaply now rather than scheduling it.
@@ -636,7 +636,7 @@ existing rail with no new machinery. **This is the single highest-value change i
 this document.**
 Decision required: is "the app's DB role does not exist" a creator-facing
 condition? I argue yes -- it has a documented one-command fix
-(`crates/cli/src/migrate.rs:16-25`) and reveals nothing an attacker gains from.
+(`crates/zeroship-cli/src/migrate.rs:16-25`) and reveals nothing an attacker gains from.
 
 **Option 2b. Emit `hint` on the wire.** The field is populated and dropped
 (Section 2.3). Adding it to `build_verbose_error_body` surfaces existing,
@@ -662,7 +662,7 @@ Cost: (i) is an hour; (iii) is several days.
 
 **Option 2d. Split `PublicErrorMessage::InvalidRequest` into per-cause variants**
 so the five auth UI handlers stop sharing one string. The enum and the
-`error_code()` rendering already exist (`crates/auth/src/ui/mod.rs:82-113`,
+`error_code()` rendering already exist (`crates/zeroship-auth/src/ui/mod.rs:82-113`,
 `templates/error.html`).
 Cost: half a day.
 
@@ -710,9 +710,9 @@ Properties it must have, all copied from existing gates:
 - **A measured PASS floor**, per `config_name_alignment_gate.sh:425-434`:
   "Nothing FAILED, so this is not a broken check - it is MISSING ones."
 - **The inverted-gate half.** The strongest shape in this repo is the raw-env
-  scanner (`crates/config-contract/src/main.rs:404-415`), where **a clean scan is
+  scanner (`crates/zeroship-config-contract/src/main.rs:404-415`), where **a clean scan is
   the FAILING case**: two violations are planted under
-  `crates/config-contract/tests/fixtures/`, and `PLANTED_VIOLATIONS = 2`
+  `crates/zeroship-config-contract/tests/fixtures/`, and `PLANTED_VIOLATIONS = 2`
   (`main.rs:471`) is documented as "A FLOOR, not a ceiling, is the wrong shape
   here." A runtime-string gate should plant an em-dash and a `DB-1` in a fixture
   and fail if it stops finding them.
@@ -791,7 +791,7 @@ generic app body currently exposes a per-isolate `request_id` counter (`"1"`
 announces a cold isolate), while the public-code body exposes no id. The new
 contract should carry an opaque, joinable `trace_id`; relabeling the counter
 would overstate what it can correlate. I have not verified what depends on the
-counter's current format. `crates/runtime/src/core/dispatch.rs:117-137` uses the
+counter's current format. `crates/zeroship-runtime/src/core/dispatch.rs:117-137` uses the
 format as evidence for which rail served a request, so changing it would also
 invalidate an existing diagnostic technique documented in the tree.
 

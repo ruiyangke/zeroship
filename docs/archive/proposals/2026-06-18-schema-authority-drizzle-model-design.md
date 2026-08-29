@@ -88,7 +88,7 @@ migration DDL; plugin-db reads it at runtime.
 | FTS | `t.fts()` | `__fts tsvector` col + GIN + `tsvector_update_trigger` | FTS query ops |
 | CHECK/enum/min/max/literal | `t.literal/.enum/.min/.max` | `CHECK (…)` constraints + `DEFAULT` | (enforced in DB) |
 
-Cross-app FK is rejected at `generate` (mirror `crates/plugin-db/src/cross_app_fk.rs`).
+Cross-app FK is rejected at `generate` (mirror `crates/zeroship-plugin-db/src/cross_app_fk.rs`).
 
 ## 5. Reuse via a shared `zeroship-schema` core (corrected 2026-06-19)
 
@@ -212,7 +212,7 @@ is prevented by `generate` keeping them in sync + a `generate --check` in CI.)
 
 ## 8. Control deploy integration + ordering
 
-The control-plane deploy step (`crates/control/src/api.rs` deploy handler
+The control-plane deploy step (`crates/zeroship-control/src/api.rs` deploy handler
 ~394–620) gains a migrate phase **after ingest, before the go-live commit**
 (`set_deploy_with_manifest` ~605):
 

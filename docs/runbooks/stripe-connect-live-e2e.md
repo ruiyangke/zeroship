@@ -6,7 +6,7 @@ webhooks). It drives zeroship's **Stripe Connect payment** path against
 **REAL Stripe TEST mode** (`api.stripe.com`), not the in-repo mock: the cyper
 `StripeClient` Connect calls (`create_connect_account`, `create_account_link`,
 `retrieve_account`, `create_connect_payment_intent`), the server-held `FeePolicy` (seeded directly in the database now that the operator PUT is deleted)
-(`crates/control/src/fee_policy.rs`), the `connect_checkout` / `callback`
+(`crates/zeroship-control/src/fee_policy.rs`), the `connect_checkout` / `callback`
 handlers, and the signature-verified `/internal/webhooks/stripe`
 ingest of `account.updated` / `invoice.paid` (Connect payment) / `payout.failed`.
 
@@ -103,17 +103,17 @@ down control and deletes the test-mode connected accounts it minted on exit.
    row (idempotent on `po_…`); an unlinked-account `payout.failed` is a benign
    no-op.
 
-Code map: handlers in `crates/control/src/stripe_handlers.rs`
+Code map: handlers in `crates/zeroship-control/src/stripe_handlers.rs`
 (`onboard` :128, `callback` :329, `connect_checkout` :459, `dispatch_event`
 :1107, `handle_account_updated` :1440, `handle_payout_failed` :2121); fee math in
-`crates/control/src/fee_policy.rs` (`fee_cents`); store ownership in
-`crates/control/src/stripe_store.rs` (`account_belongs_to_creator` :295,
+`crates/zeroship-control/src/fee_policy.rs` (`fee_cents`); store ownership in
+`crates/zeroship-control/src/stripe_store.rs` (`account_belongs_to_creator` :295,
 `get_creator_by_account` :316, `update_account_flags_by_account_id` :228); Connect
-wire shapes in `crates/control/src/stripe_client.rs`
+wire shapes in `crates/zeroship-control/src/stripe_client.rs`
 (`create_connect_account` :963, `create_account_link` :983,
 `create_connect_payment_intent` :1021); schema in
 `db/migrations-ts/20260702000400_billing_metering_invoice_tables.ts`. Offline logic coverage:
-`crates/control/tests/connect_fee_test.rs`.
+`crates/zeroship-control/tests/connect_fee_test.rs`.
 
 Any genuine handler bug surfaced by real Stripe is **flagged** (a divergence),
 never patched in the test.

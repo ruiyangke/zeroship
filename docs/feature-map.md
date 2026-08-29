@@ -1,6 +1,6 @@
-| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 4 policies (self-service + 3 creator); build.rs parses at compile. |
-| OAuth client registration (config) | 🟢 | boot-time reconcile | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Scope + redirect validation; fatal on reject. |
-| First-party OAuth client registration | 🟢 | config `[auth] oauth_clients` | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Reconciled at boot; upsert + prune. |
+| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/zeroship-authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/platform_policies_test.rs` | 4 policies (self-service + 3 creator); build.rs parses at compile. |
+| OAuth client registration (config) | 🟢 | boot-time reconcile | `crates/zeroship-control/src/oauth_clients.rs` | — | `crates/zeroship-control/tests/oauth_clients_test.rs` | Scope + redirect validation; fatal on reject. |
+| First-party OAuth client registration | 🟢 | config `[auth] oauth_clients` | `crates/zeroship-control/src/oauth_clients.rs` | — | `crates/zeroship-control/tests/oauth_clients_test.rs` | Reconciled at boot; upsert + prune. |
 # zeroship Feature Map
 
 zeroship is a platform where anyone can create, launch, and run software without
@@ -69,58 +69,58 @@ capability enforcement). All JS polyfills are replaced with native Rust v8_class
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| V8 Isolate / Event Loop (compio) | 🟢 | internal | `crates/runtime/src/core/runtime.rs` | `docs/architecture/runtime.md` | `crates/runtime/tests/call_fetch_handler.rs` | Slow handler blocks thread; deploys drop in-flight; single Rc<RefCell> SharedState. |
-| WinterCG fetch handler dispatch | 🟢 | internal | `crates/runtime/src/core/runtime.rs` | `docs/architecture/runtime.md` | `crates/runtime/tests/call_fetch_handler.rs` | 3 entry points: fetch, rpc fast-path, fetchFast. |
-| globalThis.fetch (outbound) | 🟢 | `globalThis.fetch` | `crates/runtime/src/web/fetch/mod.rs` | — | `crates/runtime/tests/fetch_native.rs` | Streaming request body deferred; 10 MB max body; query/mutation cannot fetch. |
-| Request / Response classes | 🟢 | `globalThis.Request` / `Response` | `crates/runtime/src/web/fetch/request.rs`, `response.rs` | — | `crates/runtime/tests/fetch_request.rs` | Body streams pumped by Rust forwarder; WPT-tested. |
-| Headers class | 🟢 | `globalThis.Headers` | `crates/runtime/src/web/headers.rs` | — | `crates/runtime/tests/headers.rs` | WPT suite in wpt_headers.rs. |
-| WHATWG Streams | 🟢 | `globalThis.ReadableStream` / `WritableStream` / `TransformStream` | `crates/runtime/src/web/streams/` | — | `crates/runtime/tests/streams_native.rs` | BYOB, byte streams, tee, pipe, async iter; cap 65,536/isolate. |
-| CompressionStream / DecompressionStream | 🟢 | `globalThis.CompressionStream` / `DecompressionStream` | `crates/runtime/src/web/streams/compression.rs` | — | `crates/runtime/tests/compression_streams.rs` | gzip/deflate/deflate-raw/brotli. |
-| WebCrypto (SubtleCrypto) | 🟢 | `globalThis.crypto.subtle.*` | `crates/runtime/src/web/crypto/` | — | `crates/runtime/tests/crypto_native.rs` | AES/RSA/ECDSA/ECDH/Ed25519/X25519/HMAC/HKDF/PBKDF2/SHA/JWK. |
-| crypto.getRandomValues / randomUUID | 🟢 | `globalThis.crypto.getRandomValues()` / `randomUUID()` | `crates/runtime/src/web/crypto/crypto_class.rs` | — | `crates/runtime/tests/crypto.rs` | Part of the Crypto global. |
-| WebSocket client (outbound) | 🟢 | `globalThis.WebSocket` | `crates/runtime/src/web/websocket/mod.rs` | `docs/reference/websocket-design.md` | `crates/runtime/tests/websocket_e2e.rs` | SSRF checks; no permessage-deflate. |
-| WebSocketPair (server upgrade) | 🟢 | `globalThis.WebSocketPair` | `crates/runtime/src/web/websocket/pair.rs` | `docs/reference/websocket-design.md` | `crates/runtime/tests/websocket_e2e.rs` | `new Response(null, { status: 101, webSocket })`. |
-| WS Subscription transport | 🟢 | internal (bootstrap); via @zeroship/rpc subscriptions | `crates/runtime/src/core/init.rs` | `docs/reference/websocket-design.md` | `crates/runtime/tests/websocket_e2e.rs` | User-space JS; hello/data/end/error/ping/pong. |
-| URL / URLSearchParams | 🟢 | `globalThis.URL` / `URLSearchParams` | `crates/runtime/src/web/url/` | — | `crates/runtime/tests/url_native.rs` | ada-url backed; live-sync params. |
-| TextEncoder / TextDecoder | 🟢 | `globalThis.TextEncoder` / `TextDecoder` | `crates/runtime/src/web/encoding/mod.rs` | — | `crates/runtime/tests/wpt_text_encoding.rs` | All WHATWG encodings (encoding_rs). |
-| TextEncoderStream / TextDecoderStream | 🟢 | `globalThis.TextEncoderStream` / `TextDecoderStream` | `crates/runtime/src/web/encoding/streams.rs` | — | `crates/runtime/tests/text_encoding_streams.rs` | Loaded after native streams. |
-| AbortController / AbortSignal | 🟢 | `globalThis.AbortController` / `AbortSignal` | `crates/runtime/src/web/dom/abort_controller.rs`, `abort_signal.rs` | — | `crates/runtime/tests/abort.rs` | RPC eviction fan-out in rpc/abort.rs. |
-| EventTarget / Event / CustomEvent | 🟢 | `globalThis.EventTarget` / `Event` / `CustomEvent` | `crates/runtime/src/web/dom/event_target.rs`, `event.rs`, `custom_event.rs` | — | `crates/runtime/tests/event_target.rs` | MessageEvent/CloseEvent also native. |
-| DOMException | 🟢 | `globalThis.DOMException` | `crates/runtime/src/web/dom/exception.rs` | — | `crates/runtime/tests/dom_exception.rs` | Replaces former JS polyfill. |
-| FormData | 🟢 | `globalThis.FormData` | `crates/runtime/src/web/dom/form_data.rs` | — | `crates/runtime/tests/form_data.rs` | Live iterators; Blob→File at append. |
-| Blob / File | 🟢 | `globalThis.Blob` / `File` | `crates/runtime/src/web/blob/` | — | `crates/runtime/tests/blob_native.rs` | Blob.stream() → ReadableStream. |
-| structuredClone | 🟢 | `globalThis.structuredClone(value)` | `crates/runtime/src/web/structured_clone.rs` | — | — | V8 ValueSerializer; transfer deferred. |
-| atob / btoa | 🟢 | `globalThis.atob()` / `btoa()` | `crates/runtime/src/web/base64.rs` | — | `crates/runtime/tests/base64.rs` | WHATWG §8.6. |
-| EventSource (SSE client) | 🟢 | `globalThis.EventSource` | `crates/runtime/src/web/eventsource.rs` | — | `crates/runtime/tests/eventsource.rs` | Delegates IO to globalThis.fetch. |
-| Timers (setTimeout/Interval/clear*) | 🟢 | `globalThis.setTimeout` / `setInterval` / `clear*` | `crates/runtime/src/core/init.rs` | — | `crates/runtime/tests/web_apis.rs` | Per-isolate admission control; setImmediate is a JS shim. |
-| queueMicrotask | 🟢 | `globalThis.queueMicrotask(fn)` | `crates/runtime/src/core/init.rs` | — | — | Via Promise.resolve().then(fn). |
-| performance.now() | 🟢 | `globalThis.performance.now()` | `crates/runtime/src/core/init.rs` | — | — | Per-isolate epoch (no cross-isolate timing). |
-| console.* | 🟢 | `globalThis.console.*` | `crates/runtime/src/core/init.rs` | — | `crates/runtime/tests/console.rs` | Per-request capture; 4096 B/line, 1000 lines. |
-| Intl / ICU | 🟢 | `globalThis.Intl.*` | `crates/runtime/src/core/init.rs` | — | — | ICU data loaded at init_v8(). |
-| node:async_hooks (AsyncLocalStorage) | 🟢 | `import { AsyncLocalStorage } from 'node:async_hooks'` | `crates/runtime/src/node/async_hooks/als.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/async_local_storage.rs` | V8 ContinuationPreservedEmbedderData. |
-| node:crypto | 🟢 | `import { createHash, ... } from 'node:crypto'` | `crates/runtime/src/node/crypto/` | `docs/reference/node-compat.md` | `crates/runtime/tests/crypto_node.rs` | getCiphers/getCurves stubs; async KDFs deferred. |
-| node:buffer (Buffer global) | 🟢 | `import { Buffer } from 'node:buffer'` / global | `crates/runtime/src/node/buffer/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/node_buffer.rs` | transcode / MAX_STRING_LENGTH deferred. |
-| node:zlib | 🟢 | `import { gzipSync, ... } from 'node:zlib'` | `crates/runtime/src/node/zlib/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/codec.rs` | Stream constructors are throwing stubs. |
-| node:os | 🟢 | `import { platform, ... } from 'node:os'` | `crates/runtime/src/node/os/mod.rs` | `docs/reference/node-compat.md` | — | networkInterfaces/get/setPriority are stubs. |
-| node:path | 🟢 | `import { join, ... } from 'node:path'` | `crates/runtime/src/node/path/mod.rs` | `docs/reference/node-compat.md` | — | Backed by static path.js. |
-| node:util | 🟡 | `import { format, promisify, ... } from 'node:util'` | `crates/runtime/src/node/util/mod.rs` | `docs/reference/node-compat.md` | — | inspect quirks, styleText, parseArgs short flags deferred. |
-| Dynamic import (await import()) | 🟢 | `globalThis` (import() expr) | `crates/runtime/src/core/dynamic_import.rs` | — | `crates/runtime/tests/dynamic_import.rs` | Bundle is the closed world; no fetch-on-demand. |
-| CPU limit enforcement | 🟢 | internal (RuntimeBuilder::cpu_limit) | `crates/runtime/src/core/cpu_timer.rs` | `docs/reference/runtime-limits.md` | — | Linux only; pump CPU budget also enforced. |
-| Wall timeout enforcement | 🟢 | internal (RuntimeBuilder::wall_timeout) | `crates/runtime/src/core/serve.rs` | `docs/reference/runtime-limits.md` | — | Default unset. |
-| V8 Heap limit | 🟢 | internal (RuntimeBuilder::heap_limit_mb) | `crates/runtime/src/core/runtime.rs` | `docs/reference/runtime-limits.md` | `crates/runtime/tests/heap_limits.rs` | Default 128 MB; terminates after 5 hits. |
-| Idle GC | 🟢 | internal (RuntimeBuilder::idle_gc_after_ms) | `crates/runtime/src/core/runtime.rs` | `docs/reference/runtime-limits.md` | `crates/runtime/tests/idle_gc.rs` | Default 30s; 0 disables. |
-| SSRF protection (fetch + WS) | 🟢 | internal | `crates/runtime/src/transport/ssrf.rs` | — | — | String + DNS-level blocklist. |
-| RPC capability enforcement | 🟢 | internal (__zsEnterKind/__zsExitKind) | `crates/runtime/src/rpc/capability.rs` | — | `crates/runtime/tests/capability.rs` | query can't write, mutation can't fetch. |
-| waitUntil / getRequest / getRequestContext | 🟢 | `import { waitUntil, getRequest, ... } from 'zeroship'` | `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | — | getRequest() null on RPC fast-path. |
-| env / runQuery / currentUser etc. | 🟢 | `import { env, runQuery, currentUser, ... } from 'zeroship'` | `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | — | runQuery/runMutation push capability frame. |
-| Native plugin system (env.* namespaces) | 🟢 | `env.db.*` / `env.kv.*` / `env.storage.*` / `env.auth.*` / `env.workflows.*` | `crates/runtime/src/core/plugin.rs` | `docs/reference/plugin-system.md` | — | `env.workflows.*` also registered; `env.assets.*` documented as planned; there is no `env.meter`. |
-| AI SDK Data Stream Protocol (SSE) | 🟢 | internal (sseFromAsyncGen) | `crates/runtime/src/core/init.rs` | — | `crates/runtime/tests/ai_sdk_stream.rs` | 0:text 2:object e:error d:done. |
-| WebIDL conversion layer | 🟢 | internal | `crates/runtime/src/webidl/` | — | — | USVString/ByteString/Clamp/EnforceRange/WebIdlDict. |
-| v8_class proc macro | 🟢 | internal (crates/runtime-macros) | `crates/runtime-macros/` | `docs/reference/plugin-system.md` | — | Backs every native class. |
-| structuredClone transfer | 🔵 | `globalThis.structuredClone(value, { transfer })` | `crates/runtime/src/web/structured_clone.rs` | — | — | Deferred; always deep-clones. |
-| Streaming fetch request body | 🔵 | `globalThis.fetch(url, { body: stream })` | `crates/runtime/src/web/fetch/mod.rs` | — | — | snapshot_request returns error. |
-| node:zlib stream constructors | 🟠 | `import { createGzip } from 'node:zlib'` | `crates/runtime/src/node/zlib/mod.rs` | — | — | Throwing stubs → gzipSync/CompressionStream. |
-| node:os networkInterfaces / get/setPriority | 🟠 | `import { networkInterfaces } from 'node:os'` | `crates/runtime/src/node/os/mod.rs` | — | — | Throwing stubs; no sandbox OS introspection. |
+| V8 Isolate / Event Loop (compio) | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/architecture/runtime.md` | `crates/zeroship-runtime/tests/call_fetch_handler.rs` | Slow handler blocks thread; deploys drop in-flight; single Rc<RefCell> SharedState. |
+| WinterCG fetch handler dispatch | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/architecture/runtime.md` | `crates/zeroship-runtime/tests/call_fetch_handler.rs` | 3 entry points: fetch, rpc fast-path, fetchFast. |
+| globalThis.fetch (outbound) | 🟢 | `globalThis.fetch` | `crates/zeroship-runtime/src/web/fetch/mod.rs` | — | `crates/zeroship-runtime/tests/fetch_native.rs` | Streaming request body deferred; 10 MB max body; query/mutation cannot fetch. |
+| Request / Response classes | 🟢 | `globalThis.Request` / `Response` | `crates/zeroship-runtime/src/web/fetch/request.rs`, `response.rs` | — | `crates/zeroship-runtime/tests/fetch_request.rs` | Body streams pumped by Rust forwarder; WPT-tested. |
+| Headers class | 🟢 | `globalThis.Headers` | `crates/zeroship-runtime/src/web/headers.rs` | — | `crates/zeroship-runtime/tests/headers.rs` | WPT suite in wpt_headers.rs. |
+| WHATWG Streams | 🟢 | `globalThis.ReadableStream` / `WritableStream` / `TransformStream` | `crates/zeroship-runtime/src/web/streams/` | — | `crates/zeroship-runtime/tests/streams_native.rs` | BYOB, byte streams, tee, pipe, async iter; cap 65,536/isolate. |
+| CompressionStream / DecompressionStream | 🟢 | `globalThis.CompressionStream` / `DecompressionStream` | `crates/zeroship-runtime/src/web/streams/compression.rs` | — | `crates/zeroship-runtime/tests/compression_streams.rs` | gzip/deflate/deflate-raw/brotli. |
+| WebCrypto (SubtleCrypto) | 🟢 | `globalThis.crypto.subtle.*` | `crates/zeroship-runtime/src/web/crypto/` | — | `crates/zeroship-runtime/tests/crypto_native.rs` | AES/RSA/ECDSA/ECDH/Ed25519/X25519/HMAC/HKDF/PBKDF2/SHA/JWK. |
+| crypto.getRandomValues / randomUUID | 🟢 | `globalThis.crypto.getRandomValues()` / `randomUUID()` | `crates/zeroship-runtime/src/web/crypto/crypto_class.rs` | — | `crates/zeroship-runtime/tests/crypto.rs` | Part of the Crypto global. |
+| WebSocket client (outbound) | 🟢 | `globalThis.WebSocket` | `crates/zeroship-runtime/src/web/websocket/mod.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/websocket_e2e.rs` | SSRF checks; no permessage-deflate. |
+| WebSocketPair (server upgrade) | 🟢 | `globalThis.WebSocketPair` | `crates/zeroship-runtime/src/web/websocket/pair.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/websocket_e2e.rs` | `new Response(null, { status: 101, webSocket })`. |
+| WS Subscription transport | 🟢 | internal (bootstrap); via @zeroship/rpc subscriptions | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/websocket_e2e.rs` | User-space JS; hello/data/end/error/ping/pong. |
+| URL / URLSearchParams | 🟢 | `globalThis.URL` / `URLSearchParams` | `crates/zeroship-runtime/src/web/url/` | — | `crates/zeroship-runtime/tests/url_native.rs` | ada-url backed; live-sync params. |
+| TextEncoder / TextDecoder | 🟢 | `globalThis.TextEncoder` / `TextDecoder` | `crates/zeroship-runtime/src/web/encoding/mod.rs` | — | `crates/zeroship-runtime/tests/wpt_text_encoding.rs` | All WHATWG encodings (encoding_rs). |
+| TextEncoderStream / TextDecoderStream | 🟢 | `globalThis.TextEncoderStream` / `TextDecoderStream` | `crates/zeroship-runtime/src/web/encoding/streams.rs` | — | `crates/zeroship-runtime/tests/text_encoding_streams.rs` | Loaded after native streams. |
+| AbortController / AbortSignal | 🟢 | `globalThis.AbortController` / `AbortSignal` | `crates/zeroship-runtime/src/web/dom/abort_controller.rs`, `abort_signal.rs` | — | `crates/zeroship-runtime/tests/abort.rs` | RPC eviction fan-out in rpc/abort.rs. |
+| EventTarget / Event / CustomEvent | 🟢 | `globalThis.EventTarget` / `Event` / `CustomEvent` | `crates/zeroship-runtime/src/web/dom/event_target.rs`, `event.rs`, `custom_event.rs` | — | `crates/zeroship-runtime/tests/event_target.rs` | MessageEvent/CloseEvent also native. |
+| DOMException | 🟢 | `globalThis.DOMException` | `crates/zeroship-runtime/src/web/dom/exception.rs` | — | `crates/zeroship-runtime/tests/dom_exception.rs` | Replaces former JS polyfill. |
+| FormData | 🟢 | `globalThis.FormData` | `crates/zeroship-runtime/src/web/dom/form_data.rs` | — | `crates/zeroship-runtime/tests/form_data.rs` | Live iterators; Blob→File at append. |
+| Blob / File | 🟢 | `globalThis.Blob` / `File` | `crates/zeroship-runtime/src/web/blob/` | — | `crates/zeroship-runtime/tests/blob_native.rs` | Blob.stream() → ReadableStream. |
+| structuredClone | 🟢 | `globalThis.structuredClone(value)` | `crates/zeroship-runtime/src/web/structured_clone.rs` | — | — | V8 ValueSerializer; transfer deferred. |
+| atob / btoa | 🟢 | `globalThis.atob()` / `btoa()` | `crates/zeroship-runtime/src/web/base64.rs` | — | `crates/zeroship-runtime/tests/base64.rs` | WHATWG §8.6. |
+| EventSource (SSE client) | 🟢 | `globalThis.EventSource` | `crates/zeroship-runtime/src/web/eventsource.rs` | — | `crates/zeroship-runtime/tests/eventsource.rs` | Delegates IO to globalThis.fetch. |
+| Timers (setTimeout/Interval/clear*) | 🟢 | `globalThis.setTimeout` / `setInterval` / `clear*` | `crates/zeroship-runtime/src/core/init.rs` | — | `crates/zeroship-runtime/tests/web_apis.rs` | Per-isolate admission control; setImmediate is a JS shim. |
+| queueMicrotask | 🟢 | `globalThis.queueMicrotask(fn)` | `crates/zeroship-runtime/src/core/init.rs` | — | — | Via Promise.resolve().then(fn). |
+| performance.now() | 🟢 | `globalThis.performance.now()` | `crates/zeroship-runtime/src/core/init.rs` | — | — | Per-isolate epoch (no cross-isolate timing). |
+| console.* | 🟢 | `globalThis.console.*` | `crates/zeroship-runtime/src/core/init.rs` | — | `crates/zeroship-runtime/tests/console.rs` | Per-request capture; 4096 B/line, 1000 lines. |
+| Intl / ICU | 🟢 | `globalThis.Intl.*` | `crates/zeroship-runtime/src/core/init.rs` | — | — | ICU data loaded at init_v8(). |
+| node:async_hooks (AsyncLocalStorage) | 🟢 | `import { AsyncLocalStorage } from 'node:async_hooks'` | `crates/zeroship-runtime/src/node/async_hooks/als.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/async_local_storage.rs` | V8 ContinuationPreservedEmbedderData. |
+| node:crypto | 🟢 | `import { createHash, ... } from 'node:crypto'` | `crates/zeroship-runtime/src/node/crypto/` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/crypto_node.rs` | getCiphers/getCurves stubs; async KDFs deferred. |
+| node:buffer (Buffer global) | 🟢 | `import { Buffer } from 'node:buffer'` / global | `crates/zeroship-runtime/src/node/buffer/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_buffer.rs` | transcode / MAX_STRING_LENGTH deferred. |
+| node:zlib | 🟢 | `import { gzipSync, ... } from 'node:zlib'` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/codec.rs` | Stream constructors are throwing stubs. |
+| node:os | 🟢 | `import { platform, ... } from 'node:os'` | `crates/zeroship-runtime/src/node/os/mod.rs` | `docs/reference/node-compat.md` | — | networkInterfaces/get/setPriority are stubs. |
+| node:path | 🟢 | `import { join, ... } from 'node:path'` | `crates/zeroship-runtime/src/node/path/mod.rs` | `docs/reference/node-compat.md` | — | Backed by static path.js. |
+| node:util | 🟡 | `import { format, promisify, ... } from 'node:util'` | `crates/zeroship-runtime/src/node/util/mod.rs` | `docs/reference/node-compat.md` | — | inspect quirks, styleText, parseArgs short flags deferred. |
+| Dynamic import (await import()) | 🟢 | `globalThis` (import() expr) | `crates/zeroship-runtime/src/core/dynamic_import.rs` | — | `crates/zeroship-runtime/tests/dynamic_import.rs` | Bundle is the closed world; no fetch-on-demand. |
+| CPU limit enforcement | 🟢 | internal (RuntimeBuilder::cpu_limit) | `crates/zeroship-runtime/src/core/cpu_timer.rs` | `docs/reference/runtime-limits.md` | — | Linux only; pump CPU budget also enforced. |
+| Wall timeout enforcement | 🟢 | internal (RuntimeBuilder::wall_timeout) | `crates/zeroship-runtime/src/core/serve.rs` | `docs/reference/runtime-limits.md` | — | Default unset. |
+| V8 Heap limit | 🟢 | internal (RuntimeBuilder::heap_limit_mb) | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/reference/runtime-limits.md` | `crates/zeroship-runtime/tests/heap_limits.rs` | Default 128 MB; terminates after 5 hits. |
+| Idle GC | 🟢 | internal (RuntimeBuilder::idle_gc_after_ms) | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/reference/runtime-limits.md` | `crates/zeroship-runtime/tests/idle_gc.rs` | Default 30s; 0 disables. |
+| SSRF protection (fetch + WS) | 🟢 | internal | `crates/zeroship-runtime/src/transport/ssrf.rs` | — | — | String + DNS-level blocklist. |
+| RPC capability enforcement | 🟢 | internal (__zsEnterKind/__zsExitKind) | `crates/zeroship-runtime/src/rpc/capability.rs` | — | `crates/zeroship-runtime/tests/capability.rs` | query can't write, mutation can't fetch. |
+| waitUntil / getRequest / getRequestContext | 🟢 | `import { waitUntil, getRequest, ... } from 'zeroship'` | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | — | getRequest() null on RPC fast-path. |
+| env / runQuery / currentUser etc. | 🟢 | `import { env, runQuery, currentUser, ... } from 'zeroship'` | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | — | runQuery/runMutation push capability frame. |
+| Native plugin system (env.* namespaces) | 🟢 | `env.db.*` / `env.kv.*` / `env.storage.*` / `env.auth.*` / `env.workflows.*` | `crates/zeroship-runtime/src/core/plugin.rs` | `docs/reference/plugin-system.md` | — | `env.workflows.*` also registered; `env.assets.*` documented as planned; there is no `env.meter`. |
+| AI SDK Data Stream Protocol (SSE) | 🟢 | internal (sseFromAsyncGen) | `crates/zeroship-runtime/src/core/init.rs` | — | `crates/zeroship-runtime/tests/ai_sdk_stream.rs` | 0:text 2:object e:error d:done. |
+| WebIDL conversion layer | 🟢 | internal | `crates/zeroship-runtime/src/webidl/` | — | — | USVString/ByteString/Clamp/EnforceRange/WebIdlDict. |
+| v8_class proc macro | 🟢 | internal (crates/runtime-macros) | `crates/zeroship-runtime-macros/` | `docs/reference/plugin-system.md` | — | Backs every native class. |
+| structuredClone transfer | 🔵 | `globalThis.structuredClone(value, { transfer })` | `crates/zeroship-runtime/src/web/structured_clone.rs` | — | — | Deferred; always deep-clones. |
+| Streaming fetch request body | 🔵 | `globalThis.fetch(url, { body: stream })` | `crates/zeroship-runtime/src/web/fetch/mod.rs` | — | — | snapshot_request returns error. |
+| node:zlib stream constructors | 🟠 | `import { createGzip } from 'node:zlib'` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | — | Throwing stubs → gzipSync/CompressionStream. |
+| node:os networkInterfaces / get/setPriority | 🟠 | `import { networkInterfaces } from 'node:os'` | `crates/zeroship-runtime/src/node/os/mod.rs` | — | — | Throwing stubs; no sandbox OS introspection. |
 | env.meter.* (billing metering primitive) | ⚫ | none (deliberately absent) | — | `docs/reference/billing-metering.md` | — | Not planned: metering is platform-measured infrastructure per AGENTS.md; there is no `env.meter`. |
 | env.assets.* (runtime-emitted assets) | 🔵 | `env.assets.*` (not registered) | — | — | — | Planned/platform-internal only. |
 
@@ -129,46 +129,46 @@ capability enforcement). All JS polyfills are replaced with native Rust v8_class
 ## 2. Node.js compatibility
 
 A narrow Node.js compat layer in two tiers: (1) seven runtime-native synthetic ESM modules
-registered directly in V8 (`crates/runtime/src/core/native_modules.rs`), and (2) a
+registered directly in V8 (`crates/zeroship-runtime/src/core/native_modules.rs`), and (2) a
 Vite-plugin build-time layer (`sdks/vite-plugin/src/node-compat.ts`) combining custom
 polyfills with unenv@2 aliases. A partial mismatch: `node:zlib`/`node:os` are runtime-native
 but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall through to unenv.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| node:async_hooks — AsyncLocalStorage | 🟢 | `import { AsyncLocalStorage } from "node:async_hooks"` | `crates/runtime/src/node/async_hooks/als.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/async_local_storage.rs` | run/getStore/enterWith/disable; rest are throw-stubs. |
-| node:async_hooks — stub exports | 🟠 | `import { AsyncResource, createHook, ... }` | `crates/runtime/src/node/async_hooks/mod.rs` | `docs/reference/node-compat.md` | — | Throw ERR_METHOD_NOT_IMPLEMENTED. |
-| node:buffer — Buffer class | 🟢 | `import { Buffer } from "node:buffer"` / global | `crates/runtime/src/node/buffer/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/node_buffer.rs` | transcode/MAX_STRING_LENGTH deferred; same identity as global. |
-| node:buffer — module helpers | 🟢 | `import { kMaxLength, isUtf8, isAscii }` | `crates/runtime/src/node/buffer/mod.rs` | — | `crates/runtime/tests/node_buffer.rs` | MAX_STRING_LENGTH absent. |
-| node:crypto — Hash / createHash | 🟢 | `import { createHash } from "node:crypto"` | `crates/runtime/src/node/crypto/hash.rs` | — | `crates/runtime/tests/crypto_node.rs` | aws-lc-rs; throws after digest. |
-| node:crypto — Hmac / createHmac | 🟢 | `import { createHmac } from "node:crypto"` | `crates/runtime/src/node/crypto/hmac.rs` | — | `crates/runtime/tests/crypto_node.rs` | Hmac.copy not implemented. |
-| node:crypto — random functions | 🟢 | `import { randomBytes, randomUUID }` | `crates/runtime/src/node/crypto/random.rs` | — | `crates/runtime/tests/crypto_node.rs` | aws-lc-rs SystemRandom. |
-| node:crypto — KDFs (pbkdf2/hkdf/scrypt) | 🟢 | `import { pbkdf2Sync, hkdfSync, scryptSync }` | `crates/runtime/src/node/crypto/kdf.rs` | — | `crates/runtime/tests/crypto_node.rs` | Async variants run sync on V8 thread. |
-| node:crypto — KeyObject + factories | 🟢 | `import { createSecretKey, KeyObject }` | `crates/runtime/src/node/crypto/key_object.rs` | — | `crates/runtime/tests/crypto_node.rs` | Interops with WebCrypto CryptoKey. |
-| node:crypto — Sign/Verify + one-shot | 🟢 | `import { createSign, sign, publicEncrypt }` | `crates/runtime/src/node/crypto/sign_verify.rs` | — | `crates/runtime/tests/crypto_node.rs` | ECDSA DER output; RSA-OAEP. |
-| node:crypto — Cipher / Decipher | 🟢 | `import { createCipheriv, createDecipheriv }` | `crates/runtime/src/node/crypto/cipher.rs` | — | `crates/runtime/tests/crypto_node.rs` | CCM deferred; getCiphers() stale-empty. |
-| node:crypto — key generation | 🟢 | `import { generateKeyPairSync, generateKeySync }` | `crates/runtime/src/node/crypto/keygen.rs` | — | `crates/runtime/tests/crypto_node.rs` | Async counterparts may lack callback wiring. |
-| node:crypto — misc | 🟡 | `import { timingSafeEqual, getHashes, getCurves }` | `crates/runtime/src/node/crypto/misc.rs` | — | `crates/runtime/tests/crypto_node.rs` | getCiphers empty; setFips throws; secureHeapUsed stub. |
-| node:crypto — WebCrypto bridge | 🟢 | `import { webcrypto, subtle }` | `crates/runtime/src/node/crypto/module.rs` | — | — | crypto.webcrypto === globalThis.crypto. |
-| node:zlib — sync one-shot codecs | 🟢 | `import { gzipSync, brotliCompressSync }` | `crates/runtime/src/node/zlib/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/node_zlib.rs` | flate2 + brotli; level option. |
-| node:zlib — async callback codecs | 🟡 | `import { gzip, brotliCompress }` | `crates/runtime/src/node/zlib/mod.rs` | — | `crates/runtime/tests/node_zlib.rs` | Runs sync on V8 thread; large input blocks loop. |
-| node:zlib — stream constructors | 🟠 | `import { createGzip } from "node:zlib"` | `crates/runtime/src/node/zlib/mod.rs` | — | — | Throw ERR_METHOD_NOT_IMPLEMENTED. |
-| node:zlib — constants | 🟡 | `import { constants } from "node:zlib"` | `crates/runtime/src/node/zlib/mod.rs` | — | — | ~30 of ~80 constants. |
+| node:async_hooks — AsyncLocalStorage | 🟢 | `import { AsyncLocalStorage } from "node:async_hooks"` | `crates/zeroship-runtime/src/node/async_hooks/als.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/async_local_storage.rs` | run/getStore/enterWith/disable; rest are throw-stubs. |
+| node:async_hooks — stub exports | 🟠 | `import { AsyncResource, createHook, ... }` | `crates/zeroship-runtime/src/node/async_hooks/mod.rs` | `docs/reference/node-compat.md` | — | Throw ERR_METHOD_NOT_IMPLEMENTED. |
+| node:buffer — Buffer class | 🟢 | `import { Buffer } from "node:buffer"` / global | `crates/zeroship-runtime/src/node/buffer/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_buffer.rs` | transcode/MAX_STRING_LENGTH deferred; same identity as global. |
+| node:buffer — module helpers | 🟢 | `import { kMaxLength, isUtf8, isAscii }` | `crates/zeroship-runtime/src/node/buffer/mod.rs` | — | `crates/zeroship-runtime/tests/node_buffer.rs` | MAX_STRING_LENGTH absent. |
+| node:crypto — Hash / createHash | 🟢 | `import { createHash } from "node:crypto"` | `crates/zeroship-runtime/src/node/crypto/hash.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | aws-lc-rs; throws after digest. |
+| node:crypto — Hmac / createHmac | 🟢 | `import { createHmac } from "node:crypto"` | `crates/zeroship-runtime/src/node/crypto/hmac.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | Hmac.copy not implemented. |
+| node:crypto — random functions | 🟢 | `import { randomBytes, randomUUID }` | `crates/zeroship-runtime/src/node/crypto/random.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | aws-lc-rs SystemRandom. |
+| node:crypto — KDFs (pbkdf2/hkdf/scrypt) | 🟢 | `import { pbkdf2Sync, hkdfSync, scryptSync }` | `crates/zeroship-runtime/src/node/crypto/kdf.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | Async variants run sync on V8 thread. |
+| node:crypto — KeyObject + factories | 🟢 | `import { createSecretKey, KeyObject }` | `crates/zeroship-runtime/src/node/crypto/key_object.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | Interops with WebCrypto CryptoKey. |
+| node:crypto — Sign/Verify + one-shot | 🟢 | `import { createSign, sign, publicEncrypt }` | `crates/zeroship-runtime/src/node/crypto/sign_verify.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | ECDSA DER output; RSA-OAEP. |
+| node:crypto — Cipher / Decipher | 🟢 | `import { createCipheriv, createDecipheriv }` | `crates/zeroship-runtime/src/node/crypto/cipher.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | CCM deferred; getCiphers() stale-empty. |
+| node:crypto — key generation | 🟢 | `import { generateKeyPairSync, generateKeySync }` | `crates/zeroship-runtime/src/node/crypto/keygen.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | Async counterparts may lack callback wiring. |
+| node:crypto — misc | 🟡 | `import { timingSafeEqual, getHashes, getCurves }` | `crates/zeroship-runtime/src/node/crypto/misc.rs` | — | `crates/zeroship-runtime/tests/crypto_node.rs` | getCiphers empty; setFips throws; secureHeapUsed stub. |
+| node:crypto — WebCrypto bridge | 🟢 | `import { webcrypto, subtle }` | `crates/zeroship-runtime/src/node/crypto/module.rs` | — | — | crypto.webcrypto === globalThis.crypto. |
+| node:zlib — sync one-shot codecs | 🟢 | `import { gzipSync, brotliCompressSync }` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_zlib.rs` | flate2 + brotli; level option. |
+| node:zlib — async callback codecs | 🟡 | `import { gzip, brotliCompress }` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | `crates/zeroship-runtime/tests/node_zlib.rs` | Runs sync on V8 thread; large input blocks loop. |
+| node:zlib — stream constructors | 🟠 | `import { createGzip } from "node:zlib"` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | — | Throw ERR_METHOD_NOT_IMPLEMENTED. |
+| node:zlib — constants | 🟡 | `import { constants } from "node:zlib"` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | — | ~30 of ~80 constants. |
 | node:zlib — build↔runtime mismatch | 🟡 | internal | `sdks/vite-plugin/src/node-compat.ts` | — | — | Absent from RUNTIME_NATIVE_MODULES → unenv in dev. |
-| node:os | 🟡 | `import { platform, arch, cpus } from "node:os"` | `crates/runtime/src/node/os/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/node_os.rs` | Sandbox constants; networkInterfaces empty; build mismatch. |
-| node:path (POSIX) | 🟢 | `import { join, resolve, dirname }` | `crates/runtime/src/node/path/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/node_path.rs` | win32 is throwing Proxy; posix aliases module. |
-| node:util — format/inspect | 🟡 | `import { format, inspect } from "node:util"` | `crates/runtime/src/node/util/mod.rs` | `docs/reference/node-compat.md` | `crates/runtime/tests/node_util.rs` | inspect.custom, styleText, MIMEType deferred. |
-| node:util — promisify/callbackify/deprecate | 🟢 | `import { promisify, callbackify }` | `crates/runtime/src/node/util/mod.rs` | — | `crates/runtime/tests/node_util.rs` | promisify.custom supported. |
-| node:util — types predicates | 🟢 | `import { types } from "node:util"` | `crates/runtime/src/node/util/mod.rs` | — | `crates/runtime/tests/node_util.rs` | isProxy always false. |
-| node:util — isDeepStrictEqual | 🟢 | `import { isDeepStrictEqual }` | `crates/runtime/src/node/util/mod.rs` | — | `crates/runtime/tests/node_util.rs` | Map order not enforced. |
-| node:util — parseArgs | 🟡 | `import { parseArgs }` | `crates/runtime/src/node/util/mod.rs` | — | — | Long-form only; short flags/strict deferred. |
-| node:util — TextEncoder/Decoder re-export | 🟢 | `import { TextEncoder, TextDecoder }` | `crates/runtime/src/node/util/mod.rs` | — | — | Identity with globals. |
-| globalThis.process polyfill | 🟡 | bare `process` / `import process from "node:process"` | `crates/runtime/src/core/init.rs` | — | — | Runtime sets global; Vite wraps it; not a real EventEmitter. |
+| node:os | 🟡 | `import { platform, arch, cpus } from "node:os"` | `crates/zeroship-runtime/src/node/os/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_os.rs` | Sandbox constants; networkInterfaces empty; build mismatch. |
+| node:path (POSIX) | 🟢 | `import { join, resolve, dirname }` | `crates/zeroship-runtime/src/node/path/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_path.rs` | win32 is throwing Proxy; posix aliases module. |
+| node:util — format/inspect | 🟡 | `import { format, inspect } from "node:util"` | `crates/zeroship-runtime/src/node/util/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_util.rs` | inspect.custom, styleText, MIMEType deferred. |
+| node:util — promisify/callbackify/deprecate | 🟢 | `import { promisify, callbackify }` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | `crates/zeroship-runtime/tests/node_util.rs` | promisify.custom supported. |
+| node:util — types predicates | 🟢 | `import { types } from "node:util"` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | `crates/zeroship-runtime/tests/node_util.rs` | isProxy always false. |
+| node:util — isDeepStrictEqual | 🟢 | `import { isDeepStrictEqual }` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | `crates/zeroship-runtime/tests/node_util.rs` | Map order not enforced. |
+| node:util — parseArgs | 🟡 | `import { parseArgs }` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | — | Long-form only; short flags/strict deferred. |
+| node:util — TextEncoder/Decoder re-export | 🟢 | `import { TextEncoder, TextDecoder }` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | — | Identity with globals. |
+| globalThis.process polyfill | 🟡 | bare `process` / `import process from "node:process"` | `crates/zeroship-runtime/src/core/init.rs` | — | — | Runtime sets global; Vite wraps it; not a real EventEmitter. |
 | node:timers/promises — Vite polyfill | 🟡 | `import { setTimeout, setInterval } from "node:timers/promises"` | `sdks/vite-plugin/src/node-compat.ts` | — | — | Custom (unenv setInterval isn't async gen); build-only. |
 | node:module — Vite polyfill | 🟠 | `import { createRequire } from "node:module"` | `sdks/vite-plugin/src/node-compat.ts` | — | — | noop-Proxy; documented as "not a feature". |
 | unenv@2 fallback for other node: modules | 🟡 | any unhandled `node:*` (build only) | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | events/stream/http/fs/etc.; quality varies. |
 | Bare global injection (Buffer/process/...) | 🟢 | internal (build transform) | `sdks/vite-plugin/src/node-compat.ts` | — | — | @rollup/plugin-inject; SSR env only. |
-| __zeroshipNodeBuiltin dev bridge | 🟢 | internal | `crates/runtime/src/core/native_modules.rs` | — | — | Lets Vite ModuleRunner source native node: exports. |
+| __zeroshipNodeBuiltin dev bridge | 🟢 | internal | `crates/zeroship-runtime/src/core/native_modules.rs` | — | — | Lets Vite ModuleRunner source native node: exports. |
 | Bare-without-prefix specifiers ('crypto') | 🟡 | `import { createHash } from 'crypto'` | `sdks/vite-plugin/src/node-compat.ts` | — | — | Works in Vite; bare 'crypto' fails at runtime (prod). |
 
 ---
@@ -187,54 +187,54 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | t.encrypted/vector/geoPoint/id; no t.date(). |
 | Schema refinements (.required/.unique/.index/...) | &#x1F7E2; | chained on t.*() | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | |
 | Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
-| registerModel DDL pipeline | 🟢 | internal (via bootstrap) | `crates/plugin-db/src/register_model/` | `docs/reference/db.md` | `crates/plugin-db/tests/integration.rs` | PG advisory-lock + CONCURRENTLY; SQLite skips mask ops. |
-| Per-app Postgres schema isolation | 🟢 | internal | `crates/plugin-db/src/register_model/bootstrap.rs` | `docs/reference/db.md` | — | app_id runtime-injected; SQLite is one file/app. |
-| System fields (id, created_at, ..., deleted_at) | 🟢 | internal (on every Row<S>) | `crates/zeroship-schema/src/query.rs`, `crates/plugin-db/src/crud/system_fields_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | 7 columns; names reserved at deploy. |
-| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
-| Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
-| Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters deleted_at; masked → MaskedValue. |
+| registerModel DDL pipeline | 🟢 | internal (via bootstrap) | `crates/zeroship-plugin-db/src/register_model/` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/integration.rs` | PG advisory-lock + CONCURRENTLY; SQLite skips mask ops. |
+| Per-app Postgres schema isolation | 🟢 | internal | `crates/zeroship-plugin-db/src/register_model/bootstrap.rs` | `docs/reference/db.md` | — | app_id runtime-injected; SQLite is one file/app. |
+| System fields (id, created_at, ..., deleted_at) | 🟢 | internal (on every Row<S>) | `crates/zeroship-schema/src/query.rs`, `crates/zeroship-plugin-db/src/crud/system_fields_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | 7 columns; names reserved at deploy. |
+| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
+| Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
+| Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters deleted_at; masked → MaskedValue. |
 | Query builder (lazy thenable) | 🟢 | `@zeroship/db` Query class | `sdks/db/src/query.ts` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | sort/limit/skip/select/after/paginate/with/first/unique. |
 | Collection.exists | 🟢 | `Collection.exists(filter?)` | `sdks/db/src/collection/crud.ts` | `docs/reference/db.md` | — | find(...).limit(1) SDK-side. |
-| Collection.count | 🟢 | `Collection.count(filter, opts?)` | `crates/plugin-db/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | Auto-filters soft-deleted. |
-| Collection.distinct | 🟢 | `Collection.distinct(field, filter?, opts?)` | `crates/plugin-db/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | opts.field required. |
-| Collection.update / updateMany | 🟢 | `Collection.update(filter, patch)` / `updateMany(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr4-update-version.test.ts` | CAS version; $inc/$push/$set operators. |
-| Collection.delete / deleteMany (soft) | 🟢 | `Collection.delete(idOrFilter)` / `deleteMany(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Sets deleted_at; emits Update CDC. |
-| Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
-| Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Clears deleted_at, bumps version. |
-| Collection.upsert | 🟢 | `Collection.upsert(doc, { conflictFields })` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | — | conflictFields required. |
-| Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/plugin-db/src/crud/mod.rs`, `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
+| Collection.count | 🟢 | `Collection.count(filter, opts?)` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | Auto-filters soft-deleted. |
+| Collection.distinct | 🟢 | `Collection.distinct(field, filter?, opts?)` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | opts.field required. |
+| Collection.update / updateMany | 🟢 | `Collection.update(filter, patch)` / `updateMany(...)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr4-update-version.test.ts` | CAS version; $inc/$push/$set operators. |
+| Collection.delete / deleteMany (soft) | 🟢 | `Collection.delete(idOrFilter)` / `deleteMany(...)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Sets deleted_at; emits Update CDC. |
+| Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
+| Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Clears deleted_at, bumps version. |
+| Collection.upsert | 🟢 | `Collection.upsert(doc, { conflictFields })` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | — | conflictFields required. |
+| Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
 | Filter operators | &#x1F7E2; | Filter<S> on read/write | `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized. |
-| Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
+| Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/zeroship-plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
 | Relations — with: { fk: true } | 🟢 | `find(filter, { with })` / `Query.with(spec)` | `sdks/db/src/collection/relations.ts` | `docs/reference/db.md` | `sdks/db/tests/relations.test.ts` | v1 single-level; no nested with. |
 | Foreign keys (t.ref) | 🟢 | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `third_party/zero-migrate/crates/zeroship-migrate/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` + server-derived schema), NOT `plugin-db/src/cross_app_fk.rs`, which has no production call site as of 2026-08-20. See db.md. |
-| Named multi-column indexes | 🟢 | `schema({...}).index('name', [...])` | `sdks/db/src/types.ts`, `crates/plugin-db/src/register_model/apply.rs` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Field-list change is currently a no-op. |
-| Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/plugin-db/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `sdks/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
-| Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/plugin-db/src/crud/mod.rs`, `backend/sqlite/vector.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
-| Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/plugin-db/src/crud/mod.rs`, `backend/sqlite/spatial.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan; polygon PG-only. |
-| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({wraps})` | `crates/plugin-db/src/encryption/`, `crud/encryption_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | AES-256-GCM; fenced from filters. |
-| Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/plugin-db/src/crud/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
-| MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/plugin-db/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
-| defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/plugin-db/src/crud/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
-| Mask drift detection cron | 🟡 | internal (no JS surface) | `crates/plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Test-only cfg; cron scheduling not wired. |
-| Mask/encryption backfill pipeline | 🟡 | internal (DDL apply) | `crates/plugin-db/src/crud/mask_backfill.rs` | — | — | PG only; SQLite returns backend_unsupported. |
+| Named multi-column indexes | 🟢 | `schema({...}).index('name', [...])` | `sdks/db/src/types.ts`, `crates/zeroship-plugin-db/src/register_model/apply.rs` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Field-list change is currently a no-op. |
+| Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-plugin-db/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `sdks/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
+| Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `backend/sqlite/vector.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
+| Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `backend/sqlite/spatial.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan; polygon PG-only. |
+| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({wraps})` | `crates/zeroship-plugin-db/src/encryption/`, `crud/encryption_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | AES-256-GCM; fenced from filters. |
+| Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-plugin-db/src/crud/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
+| MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-plugin-db/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
+| defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/zeroship-plugin-db/src/crud/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
+| Mask drift detection cron | 🟡 | internal (no JS surface) | `crates/zeroship-plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Test-only cfg; cron scheduling not wired. |
+| Mask/encryption backfill pipeline | 🟡 | internal (DDL apply) | `crates/zeroship-plugin-db/src/crud/mask_backfill.rs` | — | — | PG only; SQLite returns backend_unsupported. |
 | Data backfill migrations | ⚫ | none (superseded) | — | `docs/reference/migrate-op-dsl.md` | — | `@zeroship/migrations` and plugin-db's `migrations.rs` were REMOVED: the online-backfill orchestrator was redundant with the migration engine's own batched/cursor/resumable `.backfill()` op (`sdks/migrate/src/types.ts`, `BackfillArgs`), which is now the only way to backfill data. |
 | Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | Deleted with `@zeroship/migrations`; there is no orphan-migration state left to reap. |
-| Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/plugin-db/src/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
+| Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-plugin-db/src/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
 | Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
-| WAL replication consumer | green | `Subscription.ready()` auto-start | `crates/plugin-db/src/cdc_lifecycle.rs`, `wal_consumer.rs`, `replication.rs` | `docs/reference/db.md` | `crates/plugin-db/tests/distributed_live.rs` | One slot per app per worker process; starts on first live subscription and stops on last close. |
-| Replication slot/publication lifecycle | green | automatic on first subscription | `crates/plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close and app-delete teardown. |
-| DDL audit log (__zeroship_migrations) | 🟢 | internal (SQL-readable) | `crates/plugin-db/src/audit.rs`, `register_model/apply.rs` | — | — | Per-app schema. |
-| Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/plugin-db/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
-| Mask drift audit log (__zeroship_audit_mask_drift) | 🟡 | internal (SQL-readable) | `crates/plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Drift cron not scheduled. |
-| App namespace drop (drop_namespace) | 🟢 | internal (control-plane) | `crates/plugin-db/src/drop_namespace.rs` | — | — | DROP SCHEMA CASCADE; PG-only. |
+| WAL replication consumer | green | `Subscription.ready()` auto-start | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `wal_consumer.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | One slot per app per worker process; starts on first live subscription and stops on last close. |
+| Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close and app-delete teardown. |
+| DDL audit log (__zeroship_migrations) | 🟢 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/audit.rs`, `register_model/apply.rs` | — | — | Per-app schema. |
+| Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
+| Mask drift audit log (__zeroship_audit_mask_drift) | 🟡 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Drift cron not scheduled. |
+| App namespace drop (drop_namespace) | 🟢 | internal (control-plane) | `crates/zeroship-plugin-db/src/drop_namespace.rs` | — | — | DROP SCHEMA CASCADE; PG-only. |
 | Dual-backend support (PG + SQLite) | 🟢 | internal (`DbService::new`) | `crates/zeroship-plugin-db/src/service.rs` | `docs/reference/sqlite-divergences.md` | `crates/zeroship-plugin-db/tests/sqlite_integration.rs` | URL-driven; the backend is selected once at composition. SQLite dev/test only. |
-| Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/plugin-db/src/auth/` | — | — | PG-only; SQLite has shim. |
+| Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-plugin-db/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
 | env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `sdks/vite-plugin/src/gen-types/` | `docs/reference/db.md` | `sdks/vite-plugin/test/gen-types/` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
-| Schema strictness (strict/lenient/off) | 🟢 | `schema({...}).strictness(...)` | `crates/plugin-db/src/register_model/validate.rs` | `docs/reference/db.md` | — | Default strict; refuses destructive. |
-| Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
-| Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/plugin-db/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
+| Schema strictness (strict/lenient/off) | 🟢 | `schema({...}).strictness(...)` | `crates/zeroship-plugin-db/src/register_model/validate.rs` | `docs/reference/db.md` | — | Default strict; refuses destructive. |
+| Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
+| Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/zeroship-plugin-db/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
 | Unindexed query runtime warnings | 🟢 | automatic (dev) | `sdks/db/src/collection/index-warnings.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Suppressed in production. |
 | Encrypted field filter fence | 🟢 | automatic when schema has t.encrypted | `sdks/db/src/collection/encryption-fence.ts` | — | `sdks/db/tests/filter-encryption-types.test.ts` | Deterministic mode allows equality. |
 
@@ -249,22 +249,22 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| env.kv.get | 🟢 | `env.kv.get(key)` | `crates/plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Raw string at native layer; SDK JSON.parses. |
-| env.kv.set | 🟢 | `env.kv.set(key, value, {ttlMs?})` | `crates/plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Value must be string; TTL≤100yr. |
-| env.kv.delete | 🟢 | `env.kv.delete(key)` | `crates/plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | {deleted:bool}; no error on miss. |
-| env.kv.incr | 🟢 | `env.kv.incr(key, {by?, ttlMs?})` | `crates/plugin-kv/src/v8_class.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Fixed-window TTL; Lua EVAL on Redis. |
-| env.kv.setIfAbsent | 🟢 | `env.kv.setIfAbsent(key, value, {ttlMs?})` | `crates/plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Redis SET NX; redb MVCC. |
-| env.kv.expire | 🟢 | `env.kv.expire(key, ttlMs)` | `crates/plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | PEXPIRE; updated:false on miss. |
-| env.kv.ttl | 🟢 | `env.kv.ttl(key)` | `crates/plugin-kv/src/v8_class.rs`, `backend/mod.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | 3-state TtlState. |
-| env.kv.persist | 🟢 | `env.kv.persist(key)` | `crates/plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Redis PERSIST. |
-| env.kv.list | 🟢 | `env.kv.list(prefix?, {cursor?, limit?})` | `crates/plugin-kv/src/v8_class.rs`, `backend/redb.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Literal prefix; opaque cursor; max 10000. |
-| redb backend | 🟢 | internal (ZEROSHIP_KV_URL unset) | `crates/plugin-kv/src/backend/redb.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Single-writer MVCC; Durability::Immediate. |
-| Redis/Dragonfly backend (single-node) | 🟢 | internal (redis:// URL) | `crates/plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/redis_backend.rs` | Per-thread pool; Lua incr. |
-| Redis/Dragonfly backend (cluster) | 🟢 | internal (?cluster=true) | `crates/plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/redis_backend.rs` | Hash-tag slot; single-shard ceiling per app. |
-| Per-app key namespacing / isolation | 🟢 | internal (Backend::scope) | `crates/plugin-kv/src/backend/mod.rs` | — | `crates/plugin-kv/tests/redis_backend.rs` | {app_id}:key; braces rejected in user keys. |
-| Input validation and limits | 🟢 | internal | `crates/plugin-kv/src/limits.rs` | — | `crates/plugin-kv/tests/e2e_runtime.rs` | key 512B, value 256KiB, list clamp 10000. |
-| Typed error classification | 🟢 | error.code on rejected Promises | `crates/plugin-kv/src/error.rs` | `docs/reference/kv.md` | `crates/plugin-kv/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
-| KvPlugin / NativePlugin registration | 🟢 | internal | `crates/plugin-kv/src/lib.rs`, `v8_class.rs` | — | `crates/plugin-kv/tests/e2e_runtime.rs` | One Kv instance/isolate. |
+| env.kv.get | 🟢 | `env.kv.get(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Raw string at native layer; SDK JSON.parses. |
+| env.kv.set | 🟢 | `env.kv.set(key, value, {ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Value must be string; TTL≤100yr. |
+| env.kv.delete | 🟢 | `env.kv.delete(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | {deleted:bool}; no error on miss. |
+| env.kv.incr | 🟢 | `env.kv.incr(key, {by?, ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Fixed-window TTL; Lua EVAL on Redis. |
+| env.kv.setIfAbsent | 🟢 | `env.kv.setIfAbsent(key, value, {ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Redis SET NX; redb MVCC. |
+| env.kv.expire | 🟢 | `env.kv.expire(key, ttlMs)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | PEXPIRE; updated:false on miss. |
+| env.kv.ttl | 🟢 | `env.kv.ttl(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/mod.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | 3-state TtlState. |
+| env.kv.persist | 🟢 | `env.kv.persist(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Redis PERSIST. |
+| env.kv.list | 🟢 | `env.kv.list(prefix?, {cursor?, limit?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/redb.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Literal prefix; opaque cursor; max 10000. |
+| redb backend | 🟢 | internal (ZEROSHIP_KV_URL unset) | `crates/zeroship-plugin-kv/src/backend/redb.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Single-writer MVCC; Durability::Immediate. |
+| Redis/Dragonfly backend (single-node) | 🟢 | internal (redis:// URL) | `crates/zeroship-plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Per-thread pool; Lua incr. |
+| Redis/Dragonfly backend (cluster) | 🟢 | internal (?cluster=true) | `crates/zeroship-plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Hash-tag slot; single-shard ceiling per app. |
+| Per-app key namespacing / isolation | 🟢 | internal (Backend::scope) | `crates/zeroship-plugin-kv/src/backend/mod.rs` | — | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | {app_id}:key; braces rejected in user keys. |
+| Input validation and limits | 🟢 | internal | `crates/zeroship-plugin-kv/src/limits.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | key 512B, value 256KiB, list clamp 10000. |
+| Typed error classification | 🟢 | error.code on rejected Promises | `crates/zeroship-plugin-kv/src/error.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
+| KvPlugin / NativePlugin registration | 🟢 | internal | `crates/zeroship-plugin-kv/src/lib.rs`, `v8_class.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | One Kv instance/isolate. |
 | @zeroship/kv kv.get<T> | 🟢 | `kv.get<T>(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | ok(null) on miss. |
 | @zeroship/kv kv.getString | 🟢 | `kv.getString(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | get<string> convenience. |
 | @zeroship/kv kv.set<T> | 🟢 | `kv.set<T>(key, value, {ttlMs?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | JSON-encodes. |
@@ -279,10 +279,10 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 | @zeroship/kv kv.getOrSet | 🟢 | `kv.getOrSet<T>(key, {ttlMs?}, factory)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | NOT atomic (stampede possible). |
 | @zeroship/kv kv.namespace | 🟢 | `kv.namespace(prefix)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | String-concat sugar; composes. |
 | createKv factory / NativeKv injection | 🟢 | `import { createKv } from "@zeroship/kv"` | `sdks/kv/src/index.ts` | — | `sdks/kv/tests/kv.test.ts` | Mock injection for tests. |
-| Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/plugin-kv/src/backend/redis.rs`, `error.rs` | — | `crates/plugin-kv/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
-| Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/plugin-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/plugin-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
-| Redis list SCAN glob escaping | 🟢 | internal | `crates/plugin-kv/src/limits.rs` | — | `crates/plugin-kv/src/limits.rs` | Escapes glob metachars. |
-| Worker / CLI plugin wiring | 🟢 | `zeroship serve` / worker | `crates/cli/src/main.rs`, `crates/worker/src/main.rs` | `docs/reference/kv.md` | — | URL→Redis, else redb; absent → env.kv absent. |
+| Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/zeroship-plugin-kv/src/backend/redis.rs`, `error.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
+| Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/zeroship-plugin-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
+| Redis list SCAN glob escaping | 🟢 | internal | `crates/zeroship-plugin-kv/src/limits.rs` | — | `crates/zeroship-plugin-kv/src/limits.rs` | Escapes glob metachars. |
+| Worker / CLI plugin wiring | 🟢 | `zeroship serve` / worker | `crates/zeroship-cli/src/main.rs`, `crates/zeroship-worker/src/main.rs` | `docs/reference/kv.md` | — | URL→Redis, else redb; absent → env.kv absent. |
 
 ---
 
@@ -295,17 +295,17 @@ implementation**. The SDK ships in the app template, but there is **no reference
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| env.storage.put | 🟢 | `env.storage.put(bucket, key, bytesBase64, contentType?)` | `crates/plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/worker/src/handler.rs` | content_type silently ignored; 2x-RAM OOM vector (ST-2). |
-| env.storage.get | 🟢 | `env.storage.get(bucket, key)` | `crates/plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/worker/src/handler.rs` | contentType always null; triple-buffers (ST-3). |
-| env.storage.delete | 🟢 | `env.storage.delete(bucket, key)` | `crates/plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Returns false on NotFound. |
-| env.storage.list | 🟢 | `env.storage.list(bucket, prefix?)` | `crates/plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `sdks/create-zeroship-app/template/src/index.ts` | Blocking read_dir; no pagination; follows symlinks (ST-6). |
-| Multi-tenancy isolation via app_id | 🟢 | internal | `crates/plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Falls back to "default" if APP_ID absent (ST-5). |
-| Path-traversal rejection | 🟡 | internal | `crates/plugin-storage/src/backend/mod.rs` | — | `crates/plugin-storage/src/backend/mod.rs` | No NUL/backslash/dotfile reject (ST-1); list bypasses validator (ST-4). |
-| LocalFs backend | 🟢 | internal | `crates/plugin-storage/src/backend/local.rs` | — | — | compio AsyncWriteAt/ReadAt; list walk is blocking std::fs. |
-| S3/R2/MinIO/Spaces/B2 backend (s3 flag) | 🟠 | internal | `crates/plugin-storage/Cargo.toml` | — | — | Feature flag exists; zero source files; gates nothing. |
-| Pluggable Backend trait | 🟢 | internal | `crates/plugin-storage/src/backend/mod.rs` | `docs/reference/plugin-system.md` | — | async_trait(?Send); ObjectMeta/ListEntry. |
-| StoragePlugin constructor variants | 🟢 | internal | `crates/plugin-storage/src/lib.rs` | — | — | ::new is a back-compat alias (removal candidate). |
-| StoragePlugin registration | 🟢 | `zeroship serve` / worker --storage-root | `crates/cli/src/main.rs`, `crates/worker/src/main.rs`, `worker/src/cache.rs` | — | — | Degrades gracefully if root empty. |
+| env.storage.put | 🟢 | `env.storage.put(bucket, key, bytesBase64, contentType?)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/zeroship-worker/src/handler.rs` | content_type silently ignored; 2x-RAM OOM vector (ST-2). |
+| env.storage.get | 🟢 | `env.storage.get(bucket, key)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/zeroship-worker/src/handler.rs` | contentType always null; triple-buffers (ST-3). |
+| env.storage.delete | 🟢 | `env.storage.delete(bucket, key)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Returns false on NotFound. |
+| env.storage.list | 🟢 | `env.storage.list(bucket, prefix?)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `sdks/create-zeroship-app/template/src/index.ts` | Blocking read_dir; no pagination; follows symlinks (ST-6). |
+| Multi-tenancy isolation via app_id | 🟢 | internal | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Falls back to "default" if APP_ID absent (ST-5). |
+| Path-traversal rejection | 🟡 | internal | `crates/zeroship-plugin-storage/src/backend/mod.rs` | — | `crates/zeroship-plugin-storage/src/backend/mod.rs` | No NUL/backslash/dotfile reject (ST-1); list bypasses validator (ST-4). |
+| LocalFs backend | 🟢 | internal | `crates/zeroship-plugin-storage/src/backend/local.rs` | — | — | compio AsyncWriteAt/ReadAt; list walk is blocking std::fs. |
+| S3/R2/MinIO/Spaces/B2 backend (s3 flag) | 🟠 | internal | `crates/zeroship-plugin-storage/Cargo.toml` | — | — | Feature flag exists; zero source files; gates nothing. |
+| Pluggable Backend trait | 🟢 | internal | `crates/zeroship-plugin-storage/src/backend/mod.rs` | `docs/reference/plugin-system.md` | — | async_trait(?Send); ObjectMeta/ListEntry. |
+| StoragePlugin constructor variants | 🟢 | internal | `crates/zeroship-plugin-storage/src/lib.rs` | — | — | ::new is a back-compat alias (removal candidate). |
+| StoragePlugin registration | 🟢 | `zeroship serve` / worker --storage-root | `crates/zeroship-cli/src/main.rs`, `crates/zeroship-worker/src/main.rs`, `worker/src/cache.rs` | — | — | Degrades gracefully if root empty. |
 | @zeroship/storage — Bucket class | 🟢 | `import { Bucket, bucket } from '@zeroship/storage'` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | Result envelopes; no tests dir present. |
 | @zeroship/storage — bucket() factory | 🟢 | `import { bucket } from '@zeroship/storage'` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | Canonical template entry. |
 | @zeroship/storage — Bucket.put() | 🟢 | `bucket.put(key, body, opts?)` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | contentType discarded by LocalFs. |
@@ -315,7 +315,7 @@ implementation**. The SDK ships in the app template, but there is **no reference
 | @zeroship/storage — Bucket.list() | 🟢 | `bucket.list(prefix?)` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | modifiedAt → Date; inherits unbounded walk. |
 | Presigned URL / direct upload URL | 🔵 | `env.storage.presignUrl` (planned) | — | `docs/proposals/feature-roadmap.md` | — | Requires S3 backend. |
 | Image resize / transform on upload | 🔵 | @zeroship/storage (planned) | — | `docs/proposals/feature-roadmap.md` | — | No code. |
-| content_type sidecar metadata | 🟠 | put contentType / get contentType | `crates/plugin-storage/src/backend/local.rs` | — | — | Accepted, dropped; always null on get. |
+| content_type sidecar metadata | 🟠 | put contentType / get contentType | `crates/zeroship-plugin-storage/src/backend/local.rs` | — | — | Accepted, dropped; always null on get. |
 | Per-app storage quota enforcement | 🔵 | internal | — | — | — | Open finding ST-2 (HIGH); no code. |
 
 ---
@@ -330,53 +330,53 @@ audit, and a dev-tier parity implementation.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Password signup | 🟢 | GET/POST /signup | `crates/auth/src/ui/signup.rs`, `identity/password.rs` | `docs/reference/auth.md` | `sdks/auth/tests/identity.test.ts` | Argon2id OWASP 2026; per-IP rate-limit. |
-| Password login | 🟢 | GET/POST /login | `crates/auth/src/ui/login.rs`, `identity/password.rs` | `docs/reference/auth.md` | `sdks/auth/tests/identity.test.ts` | Enumeration-resistant; leaky token buckets. |
-| Password hashing (Argon2id) | 🟢 | internal | `crates/auth/src/identity/password.rs` | — | — | spawn_blocking for CPU-bound ops. |
-| Google OIDC federation | 🟢 | GET /oauth/google/start, /callback | `crates/auth/src/identity/oauth/google.rs`, `ui/oauth_google.rs` | `docs/reference/auth.md` | — | S256 PKCE + nonce + at_hash; hd claim. |
-| GitHub OAuth federation | 🟢 | GET /oauth/github/start, /callback | `crates/auth/src/identity/oauth/github.rs`, `ui/oauth_github.rs` | `docs/reference/auth.md` | — | OAuth 2.0 (no ID token); rejects noreply. |
-| Account linking / federation linker | 🟢 | GET/POST /link | `crates/auth/src/identity/linker.rs`, `ui/link.rs` | `docs/reference/auth.md` | `crates/auth/src/identity/linker.rs` | 10-min HMAC PendingLink token. |
-| OAuth identity unlink | 🟢 | POST /me/unlink/{provider} | `crates/auth/src/ui/me.rs`, `store/identities.rs` | `docs/reference/auth.md` | — | Must-retain-one-credential; CSRF. |
-| Magic-link login | 🟢 | POST /magic/start, /await, /verify... | `crates/auth/src/identity/magic_link.rs`, `ui/magic.rs` | `docs/reference/auth.md` | — | 32B CSPRNG; 15-min TTL; cross-device polling. |
-| Email verification | 🟢 | GET /verify, POST /verify/redeem | `crates/auth/src/identity/verification.rs`, `ui/verify.rs` | `docs/reference/auth.md` | — | 24h single-use; one-active-per-user. |
-| Password reset | 🟢 | GET/POST /forgot, /reset | `crates/auth/src/identity/password_reset.rs`, `ui/forgot.rs`, `ui/reset.rs` | `docs/reference/auth.md` | — | 60-min token; target bound at issue. |
-| TOTP 2FA | 🟡 | POST /me/2fa/enroll, /confirm, /disable; /login/2fa | `crates/auth/src/identity/totp.rs`, `ui/totp.rs`, `sessions/totp_challenge.rs` | `docs/reference/auth.md` | `crates/auth/src/identity/totp.rs` | RFC 6238; AES-256-GCM secret bound to user_id. NO IN-REPO CALLER: the three enrolment routes are POST-only and nothing in this repository calls them; `/me` renders no two-factor section. Same shape as `/me/sessions` (JSON) and `/me/delete` (POST-only), so the console may own all three - unverifiable from here. Green requires "wired", and in-tree it is not. |
-| TOTP backup codes | 🟢 | internal | `crates/auth/src/identity/totp.rs` | — | `crates/auth/src/identity/totp.rs` | 10 single-use Argon2id-hashed codes. |
-| IdP session management | 🟢 | GET /me/sessions, POST /me/sessions/{id}/revoke | `crates/auth/src/sessions/login.rs`, `store/sessions.rs`, `ui/sessions.rs` | `docs/reference/auth.md` | — | 12h hard / 30m sliding; __Host- cookie. |
-| GDPR deletion request / erasure | 🟢 | POST /me/delete, /me/delete/cancel; cron | `crates/auth/src/ui/account_deletion.rs`, `cron/account_reaper.rs` | `docs/reference/auth.md` | `crates/auth/src/cron/account_reaper.rs` | 30-day grace; branches on Stripe history. |
-| OIDC consent flow | 🟢 | GET /consent, POST /consent/accept, /deny | `crates/auth/src/ui/consent.rs`, `oidc/authorization_code.rs` | `docs/reference/auth.md` | — | Mints relay alias at consent. |
-| Device Authorization Grant (RFC 8628) | 🟢 | GET/POST /device; POST /oauth2/device/authorization | `crates/auth/src/ui/device.rs`, `oidc/device_token.rs` | `docs/reference/auth.md` | — | Requires IdP session; CSRF. |
-| RP-initiated logout | 🟢 | GET/POST /oauth2/logout | `crates/auth/src/ui/logout.rs`, `oidc/refresh.rs` | `docs/reference/auth.md` | — | Revokes local OP session + refresh families. |
-| OIDC backchannel logout (BCL 1.0) | 🟢 | POST /oidc/backchannel-logout (gateway) | `crates/gateway/src/backchannel_logout.rs` | `docs/reference/auth.md` | — | jti replay prevention; per-app + global. |
-| User profile page (/me) | 🟡 | GET /me | `crates/auth/src/ui/me.rs` | `docs/reference/auth.md` | — | Link-a-new-provider deferred ("coming soon"). |
-| JWK rollover (operator-driven) | &#x1F7E1; | internal | `crates/auth/src/oidc/issuer.rs` (`publish_active_key`), `oidc/metadata.rs`, `cron/signing_key_retention.rs` | - | `crates/auth/tests/signing_key_retention_test.rs` | Boot reconcile of `AUTH_SIGNING_KEY_FILE` moves the prior active key to `retiring`; JWKS keeps it until the persisted maximum issued expiry plus cache and skew allowances elapse. The hourly cron then changes it to terminal `retired` and preserves the audit row. EdDSA only. |
-| Audit retention cron | 🟢 | internal | `crates/auth/src/cron/audit_retention.rs` | — | `crates/auth/src/cron/audit_retention.rs` | security 365d / PII 90d / debug 30d. |
-| Token sweep cron | 🟢 | internal | `crates/auth/src/cron/token_sweep.rs` | — | `crates/auth/src/cron/token_sweep.rs` | Expired magic_links/verifications/etc. |
-| Account reaper cron | 🟢 | internal | `crates/auth/src/cron/account_reaper.rs` | — | `crates/auth/src/cron/account_reaper.rs` | Per-user txns; financial-history retention. |
-| Audit log (structured events) | 🟢 | internal | `crates/auth/src/audit.rs`, `store/audit.rs` | — | — | emit() swallows PG fail; emit_strict() propagates. |
-| Rate limiting (leaky token bucket) | 🟢 | internal | `crates/auth/src/ratelimit.rs`, `store/ratelimit.rs` | — | — | Atomic PG upsert; Bucket::* constants. |
-| Mailer abstraction (stdout/SMTP/Resend) | 🟢 | internal | `crates/mailer/src/lib.rs`, `smtp.rs`, `resend.rs`, `stdout.rs` | — | — | Own crate since the shared-mailer extraction; suppression check at trait level. |
-| Email suppression list | 🟢 | POST /webhooks/postmark, /ses-sns | `crates/mailer/src/suppressions.rs`, `bounce.rs`, `sns.rs`, `crates/auth/src/ui/webhooks.rs` | — | — | Basic auth (Postmark); RSA-SHA1 (SES-SNS). |
-| Relay email forwarding | 🟢 | POST /webhooks/relay-inbound | `crates/auth/src/store/relay.rs`, `ui/webhooks.rs`, `crates/mailer/src/forward.rs`, `inbound.rs` | — | `crates/mailer/src/forward.rs` | Real inbox never in headers; loop cap N=3; one-way v1. |
-| Relay alias minting at consent | 🟢 | internal | `crates/auth/src/store/relay.rs` | — | `crates/auth/src/store/relay.rs` | 62-bit base36; re-grant reuses alias. |
-| env.auth.getUser() | 🟢 | `env.auth.getUser()` | `crates/runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/runtime/tests/auth_plugin.rs` | Per-request keyed; WS fallback. |
-| env.auth.requireUser() | 🟢 | `env.auth.requireUser()` | `crates/runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/runtime/tests/auth_plugin.rs` | Throws → 401; RPC fail-closed (SEC-5). |
+| Password signup | 🟢 | GET/POST /signup | `crates/zeroship-auth/src/ui/signup.rs`, `identity/password.rs` | `docs/reference/auth.md` | `sdks/auth/tests/identity.test.ts` | Argon2id OWASP 2026; per-IP rate-limit. |
+| Password login | 🟢 | GET/POST /login | `crates/zeroship-auth/src/ui/login.rs`, `identity/password.rs` | `docs/reference/auth.md` | `sdks/auth/tests/identity.test.ts` | Enumeration-resistant; leaky token buckets. |
+| Password hashing (Argon2id) | 🟢 | internal | `crates/zeroship-auth/src/identity/password.rs` | — | — | spawn_blocking for CPU-bound ops. |
+| Google OIDC federation | 🟢 | GET /oauth/google/start, /callback | `crates/zeroship-auth/src/identity/oauth/google.rs`, `ui/oauth_google.rs` | `docs/reference/auth.md` | — | S256 PKCE + nonce + at_hash; hd claim. |
+| GitHub OAuth federation | 🟢 | GET /oauth/github/start, /callback | `crates/zeroship-auth/src/identity/oauth/github.rs`, `ui/oauth_github.rs` | `docs/reference/auth.md` | — | OAuth 2.0 (no ID token); rejects noreply. |
+| Account linking / federation linker | 🟢 | GET/POST /link | `crates/zeroship-auth/src/identity/linker.rs`, `ui/link.rs` | `docs/reference/auth.md` | `crates/zeroship-auth/src/identity/linker.rs` | 10-min HMAC PendingLink token. |
+| OAuth identity unlink | 🟢 | POST /me/unlink/{provider} | `crates/zeroship-auth/src/ui/me.rs`, `store/identities.rs` | `docs/reference/auth.md` | — | Must-retain-one-credential; CSRF. |
+| Magic-link login | 🟢 | POST /magic/start, /await, /verify... | `crates/zeroship-auth/src/identity/magic_link.rs`, `ui/magic.rs` | `docs/reference/auth.md` | — | 32B CSPRNG; 15-min TTL; cross-device polling. |
+| Email verification | 🟢 | GET /verify, POST /verify/redeem | `crates/zeroship-auth/src/identity/verification.rs`, `ui/verify.rs` | `docs/reference/auth.md` | — | 24h single-use; one-active-per-user. |
+| Password reset | 🟢 | GET/POST /forgot, /reset | `crates/zeroship-auth/src/identity/password_reset.rs`, `ui/forgot.rs`, `ui/reset.rs` | `docs/reference/auth.md` | — | 60-min token; target bound at issue. |
+| TOTP 2FA | 🟡 | POST /me/2fa/enroll, /confirm, /disable; /login/2fa | `crates/zeroship-auth/src/identity/totp.rs`, `ui/totp.rs`, `sessions/totp_challenge.rs` | `docs/reference/auth.md` | `crates/zeroship-auth/src/identity/totp.rs` | RFC 6238; AES-256-GCM secret bound to user_id. NO IN-REPO CALLER: the three enrolment routes are POST-only and nothing in this repository calls them; `/me` renders no two-factor section. Same shape as `/me/sessions` (JSON) and `/me/delete` (POST-only), so the console may own all three - unverifiable from here. Green requires "wired", and in-tree it is not. |
+| TOTP backup codes | 🟢 | internal | `crates/zeroship-auth/src/identity/totp.rs` | — | `crates/zeroship-auth/src/identity/totp.rs` | 10 single-use Argon2id-hashed codes. |
+| IdP session management | 🟢 | GET /me/sessions, POST /me/sessions/{id}/revoke | `crates/zeroship-auth/src/sessions/login.rs`, `store/sessions.rs`, `ui/sessions.rs` | `docs/reference/auth.md` | — | 12h hard / 30m sliding; __Host- cookie. |
+| GDPR deletion request / erasure | 🟢 | POST /me/delete, /me/delete/cancel; cron | `crates/zeroship-auth/src/ui/account_deletion.rs`, `cron/account_reaper.rs` | `docs/reference/auth.md` | `crates/zeroship-auth/src/cron/account_reaper.rs` | 30-day grace; branches on Stripe history. |
+| OIDC consent flow | 🟢 | GET /consent, POST /consent/accept, /deny | `crates/zeroship-auth/src/ui/consent.rs`, `oidc/authorization_code.rs` | `docs/reference/auth.md` | — | Mints relay alias at consent. |
+| Device Authorization Grant (RFC 8628) | 🟢 | GET/POST /device; POST /oauth2/device/authorization | `crates/zeroship-auth/src/ui/device.rs`, `oidc/device_token.rs` | `docs/reference/auth.md` | — | Requires IdP session; CSRF. |
+| RP-initiated logout | 🟢 | GET/POST /oauth2/logout | `crates/zeroship-auth/src/ui/logout.rs`, `oidc/refresh.rs` | `docs/reference/auth.md` | — | Revokes local OP session + refresh families. |
+| OIDC backchannel logout (BCL 1.0) | 🟢 | POST /oidc/backchannel-logout (gateway) | `crates/zeroship-gateway/src/backchannel_logout.rs` | `docs/reference/auth.md` | — | jti replay prevention; per-app + global. |
+| User profile page (/me) | 🟡 | GET /me | `crates/zeroship-auth/src/ui/me.rs` | `docs/reference/auth.md` | — | Link-a-new-provider deferred ("coming soon"). |
+| JWK rollover (operator-driven) | &#x1F7E1; | internal | `crates/zeroship-auth/src/oidc/issuer.rs` (`publish_active_key`), `oidc/metadata.rs`, `cron/signing_key_retention.rs` | - | `crates/zeroship-auth/tests/signing_key_retention_test.rs` | Boot reconcile of `AUTH_SIGNING_KEY_FILE` moves the prior active key to `retiring`; JWKS keeps it until the persisted maximum issued expiry plus cache and skew allowances elapse. The hourly cron then changes it to terminal `retired` and preserves the audit row. EdDSA only. |
+| Audit retention cron | 🟢 | internal | `crates/zeroship-auth/src/cron/audit_retention.rs` | — | `crates/zeroship-auth/src/cron/audit_retention.rs` | security 365d / PII 90d / debug 30d. |
+| Token sweep cron | 🟢 | internal | `crates/zeroship-auth/src/cron/token_sweep.rs` | — | `crates/zeroship-auth/src/cron/token_sweep.rs` | Expired magic_links/verifications/etc. |
+| Account reaper cron | 🟢 | internal | `crates/zeroship-auth/src/cron/account_reaper.rs` | — | `crates/zeroship-auth/src/cron/account_reaper.rs` | Per-user txns; financial-history retention. |
+| Audit log (structured events) | 🟢 | internal | `crates/zeroship-auth/src/audit.rs`, `store/audit.rs` | — | — | emit() swallows PG fail; emit_strict() propagates. |
+| Rate limiting (leaky token bucket) | 🟢 | internal | `crates/zeroship-auth/src/ratelimit.rs`, `store/ratelimit.rs` | — | — | Atomic PG upsert; Bucket::* constants. |
+| Mailer abstraction (stdout/SMTP/Resend) | 🟢 | internal | `crates/zeroship-mailer/src/lib.rs`, `smtp.rs`, `resend.rs`, `stdout.rs` | — | — | Own crate since the shared-mailer extraction; suppression check at trait level. |
+| Email suppression list | 🟢 | POST /webhooks/postmark, /ses-sns | `crates/zeroship-mailer/src/suppressions.rs`, `bounce.rs`, `sns.rs`, `crates/zeroship-auth/src/ui/webhooks.rs` | — | — | Basic auth (Postmark); RSA-SHA1 (SES-SNS). |
+| Relay email forwarding | 🟢 | POST /webhooks/relay-inbound | `crates/zeroship-auth/src/store/relay.rs`, `ui/webhooks.rs`, `crates/zeroship-mailer/src/forward.rs`, `inbound.rs` | — | `crates/zeroship-mailer/src/forward.rs` | Real inbox never in headers; loop cap N=3; one-way v1. |
+| Relay alias minting at consent | 🟢 | internal | `crates/zeroship-auth/src/store/relay.rs` | — | `crates/zeroship-auth/src/store/relay.rs` | 62-bit base36; re-grant reuses alias. |
+| env.auth.getUser() | 🟢 | `env.auth.getUser()` | `crates/zeroship-runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-runtime/tests/auth_plugin.rs` | Per-request keyed; WS fallback. |
+| env.auth.requireUser() | 🟢 | `env.auth.requireUser()` | `crates/zeroship-runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-runtime/tests/auth_plugin.rs` | Throws → 401; RPC fail-closed (SEC-5). |
 | @zeroship/auth server helper | 🟢 | `@zeroship/auth` (server) | `sdks/auth/src/server.ts` | `docs/reference/auth.md` | `sdks/auth/tests/server.test.ts` | getUser/requireUser/isLoggedIn; no signOut. |
 | @zeroship/auth headless browser client | 🟢 | `@zeroship/auth/client` | `sdks/auth/src/client.ts`, `internal/` | `docs/reference/auth-dev-tier.md` | `sdks/auth/tests/client.test.ts` | BFF; PKCE S256; no token in browser. |
 | @zeroship/auth React adapter | 🟢 | `@zeroship/auth/react` | `sdks/auth/src/react.tsx` | — | `sdks/auth/tests/react.test.tsx` | AuthProvider/useAuth/AuthModal (cross-origin iframe). |
 | Session scope step-up / requestScopes | 🟢 | `client.requestScopes(scopes)` | `sdks/auth/src/client.ts` | — | — | prompt:'consent'; no browser token. |
 | Auth state change events | 🟢 | `client.onAuthStateChange(cb)` | `sdks/auth/src/client.ts` | — | `sdks/auth/tests/client.test.ts` | RECOVERING event during 503 backoff. |
-| Dev-tier auth provider | 🟢 | internal (ZEROSHIP_DEV=1) | `crates/runtime/src/core/dev_auth.rs` | `docs/reference/auth-dev-tier.md` | `sdks/auth/tests/dev-tier.test.ts` | Distinct cookie; contract parity. |
-| Pairwise subject identifier (pws_) | 🟢 | internal (User.id) | `crates/gateway/src/identities.rs`, `auth_token.rs` | `docs/reference/auth.md` | — | Per-app opaque; global usr_ never exposed. |
-| CSRF protection (double-submit) | 🟢 | internal | `crates/auth/src/csrf.rs` | — | — | Constant-time; __Host- prefix in prod. |
-| Native OP issuer/signing | 🟢 | internal | `crates/auth/src/oidc/issuer.rs`, `oidc/signing.rs` | `docs/reference/auth.md` | — | EdDSA signing; public JWK metadata. |
-| Security headers middleware | 🟢 | internal | `crates/auth/src/headers.rs` | — | — | Per-route frame-ancestors for immersive iframe. |
-| Bootstrap (JWK seeding + client reg) | 🟢 | internal (boot) | `crates/auth/src/bootstrap/` | — | — | Advisory lock; backchannel_logout_uri per client. |
-| Startup validation | 🟢 | internal | `crates/auth/src/startup_validation.rs` | — | — | Refuses start on misconfig. |
-| Account eligibility check | 🟢 | internal | `crates/auth/src/identity/eligibility.rs` | — | — | Guards login/device for disabled/pending. |
-| Link-from-/me (add identity) | 🟠 | GET /me (placeholder) | `crates/auth/src/ui/me.rs` | — | — | Only "coming soon" template text. |
-| Email address change | 🔵 | none | `crates/auth/src/` | — | — | No handler/store/doc found. |
-| Refresh token management | 🟢 | internal (gateway) | `crates/gateway/src/session_token.rs` | `docs/reference/auth.md` | `sdks/auth/tests/refresh.test.ts` | reuse-detected never swept; BFF holds token. |
+| Dev-tier auth provider | 🟢 | internal (ZEROSHIP_DEV=1) | `crates/zeroship-runtime/src/core/dev_auth.rs` | `docs/reference/auth-dev-tier.md` | `sdks/auth/tests/dev-tier.test.ts` | Distinct cookie; contract parity. |
+| Pairwise subject identifier (pws_) | 🟢 | internal (User.id) | `crates/zeroship-gateway/src/identities.rs`, `auth_token.rs` | `docs/reference/auth.md` | — | Per-app opaque; global usr_ never exposed. |
+| CSRF protection (double-submit) | 🟢 | internal | `crates/zeroship-auth/src/csrf.rs` | — | — | Constant-time; __Host- prefix in prod. |
+| Native OP issuer/signing | 🟢 | internal | `crates/zeroship-auth/src/oidc/issuer.rs`, `oidc/signing.rs` | `docs/reference/auth.md` | — | EdDSA signing; public JWK metadata. |
+| Security headers middleware | 🟢 | internal | `crates/zeroship-auth/src/headers.rs` | — | — | Per-route frame-ancestors for immersive iframe. |
+| Bootstrap (JWK seeding + client reg) | 🟢 | internal (boot) | `crates/zeroship-auth/src/bootstrap/` | — | — | Advisory lock; backchannel_logout_uri per client. |
+| Startup validation | 🟢 | internal | `crates/zeroship-auth/src/startup_validation.rs` | — | — | Refuses start on misconfig. |
+| Account eligibility check | 🟢 | internal | `crates/zeroship-auth/src/identity/eligibility.rs` | — | — | Guards login/device for disabled/pending. |
+| Link-from-/me (add identity) | 🟠 | GET /me (placeholder) | `crates/zeroship-auth/src/ui/me.rs` | — | — | Only "coming soon" template text. |
+| Email address change | 🔵 | none | `crates/zeroship-auth/src/` | — | — | No handler/store/doc found. |
+| Refresh token management | 🟢 | internal (gateway) | `crates/zeroship-gateway/src/session_token.rs` | `docs/reference/auth.md` | `sdks/auth/tests/refresh.test.ts` | reuse-detected never swept; BFF holds token. |
 
 ---
 
@@ -407,9 +407,9 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 | fetch handler (createFetchHandler) | 🟢 | internal | `sdks/bootstrap/src/fetch-handler.ts` | — | `sdks/bootstrap/tests/` | GET base64url / POST JSON; SuperJSON envelope. |
 | Zod input validation | 🟢 | `query(handler, { input })` | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/make-procedure.test.ts` | Any .parse()-able. |
 | Zod output validation (dev-only) | 🟡 | `query(handler, { output })` | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/rpc.md` | — | __zsValidateOutput never set true today. |
-| B3 capability frame enforcement | 🟢 | internal (__zsEnterKind/__zsExitKind) | `crates/runtime/src/core/init.rs`, `sdks/bootstrap/src/dispatcher.ts` | — | — | Falls back to no-op without natives. |
-| runQuery / runMutation composition | 🟢 | `runQuery(fn, args)` / `runMutation(...)` | `crates/runtime/src/core/init.rs` | — | — | Only in action/stream/subscription. |
-| per-request context getters | 🟢 | `currentUser()` / `currentRequestId()` / ... | `crates/runtime/src/core/init.rs` | — | — | Via `zeroship` synthetic module. |
+| B3 capability frame enforcement | 🟢 | internal (__zsEnterKind/__zsExitKind) | `crates/zeroship-runtime/src/core/init.rs`, `sdks/bootstrap/src/dispatcher.ts` | — | — | Falls back to no-op without natives. |
+| runQuery / runMutation composition | 🟢 | `runQuery(fn, args)` / `runMutation(...)` | `crates/zeroship-runtime/src/core/init.rs` | — | — | Only in action/stream/subscription. |
+| per-request context getters | 🟢 | `currentUser()` / `currentRequestId()` / ... | `crates/zeroship-runtime/src/core/init.rs` | — | — | Via `zeroship` synthetic module. |
 | transport — query (GET/POST fallback) | 🟢 | `rpc.query(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | 6 KB URL threshold. |
 | transport — mutation/action (POST) | 🟢 | `rpc.mutation(id)` / `rpc.action(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Idempotency-Key UUIDv7. |
 | transport — stream (SSE/AI-SDK) | 🟢 | `rpc.stream(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/stream.test.ts` | Demand-driven iteration. |
@@ -417,9 +417,9 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 | streamUrl helper | 🟢 | `rpc.stream('id').streamUrl(input)` | `sdks/rpc/src/transport.ts`, `runtime.ts` | `docs/reference/rpc.md` | — | For ai-sdk useChat. |
 | retry policy (unary) | 🟢 | `createRpcClient({ retry })` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Writes retry only with idempotency key. |
 | call timeout | 🟢 | `createRpcClient({ timeout })` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Composes with caller signal. |
-| idempotency-key support | 🟢 | `mutation(handler, { idempotent: true })` | `sdks/rpc/src/idempotency.ts`, `transport.ts`, `crates/gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | `sdks/rpc/test/idempotency.test.ts` | TTL 24h default, 7d max; fails closed. |
+| idempotency-key support | 🟢 | `mutation(handler, { idempotent: true })` | `sdks/rpc/src/idempotency.ts`, `transport.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | `sdks/rpc/test/idempotency.test.ts` | TTL 24h default, 7d max; fails closed. |
 | auth resolver (client-side) | 🟢 | `createRpcClient({ auth })` | `sdks/rpc/src/client.ts`, `runtime.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/auth.test.ts` | Null result → anon call. |
-| gateway auth fail-closed default (SEC-5) | 🟢 | internal | `crates/gateway/src/compiled.rs` | `docs/reference/rpc.md` | `crates/gateway/src/compiled.rs` | rpc: defaults to user; anon needs publiclyAccessible. |
+| gateway auth fail-closed default (SEC-5) | 🟢 | internal | `crates/zeroship-gateway/src/compiled.rs` | `docs/reference/rpc.md` | `crates/zeroship-gateway/src/compiled.rs` | rpc: defaults to user; anon needs publiclyAccessible. |
 | RpcError typed error class | 🟢 | `import { RpcError, ErrorCode }` | `sdks/rpc/src/error.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/error.test.ts` | 14 gRPC-style codes. |
 | JSON transformer (default) | 🟢 | `createRpcClient({ transformer: 'json' })` | `sdks/rpc/src/encoding.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Unwraps {json, meta}. |
 | superjson transformer | 🟢 | `createRpcClient({ transformer: 'superjson' })` | `sdks/rpc/src/encoding.ts` | `docs/reference/rpc.md` | — | Optional peer dep; must match server. |
@@ -430,9 +430,9 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 | server-reference brand | 🟢 | internal | `sdks/rpc/src/make-procedure.ts` | — | — | Symbol.for('zeroship/server-reference'). |
 | module-level $config | 🟢 | `export const $config = {...}` | `sdks/vite-plugin/src/transform.ts`, `manifest.ts` | — | — | Lower precedence than fn.config. |
 | defineApp resource tree + RPC defaults | 🟢 | `defineApp({ resources, rpc })` | `sdks/server/src/define-app.ts`, `types.ts`, `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | override array required to shadow. |
-| per-procedure rate limiting | 🟢 | `query(handler, { rateLimit })` | `sdks/server/src/types.ts`, `crates/gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | ip/user/session/app; min-wins. |
-| per-procedure timeout | 🟡 | `query(handler, { timeout })` | `sdks/server/src/types.ts`, `crates/gateway/src/compiled.rs` | `docs/reference/rpc.md` | — | timeout_ms hardcoded None; not enforced. |
-| per-procedure max input bytes | 🟢 | `mutation(handler, { maxInputBytes })` | `sdks/server/src/types.ts`, `crates/gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | Gateway enforces. |
+| per-procedure rate limiting | 🟢 | `query(handler, { rateLimit })` | `sdks/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | ip/user/session/app; min-wins. |
+| per-procedure timeout | 🟡 | `query(handler, { timeout })` | `sdks/server/src/types.ts`, `crates/zeroship-gateway/src/compiled.rs` | `docs/reference/rpc.md` | — | timeout_ms hardcoded None; not enforced. |
+| per-procedure max input bytes | 🟢 | `mutation(handler, { maxInputBytes })` | `sdks/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | Gateway enforces. |
 | per-procedure middleware list | 🟠 | `query(handler, { middleware })` | `sdks/server/src/types.ts`, `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | Carried in manifest; runtime chain not wired. |
 | dev HMR registry (__registerModule) | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/rpc-registry.ts`, `transform.ts` | — | — | No-op in production. |
 | configureRpcClient global defaults | 🟢 | `configureRpcClient(opts)` | `sdks/rpc/src/runtime.ts` | `docs/reference/rpc.md` | — | Returns restore fn. |
@@ -448,30 +448,30 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 
 How a zeroship app module is loaded and dispatched. It centers on a standard default-export
 shape (`{ fetch?, rpc? }`), which the runtime bootstrap
-(`crates/runtime/src/core/init.rs` + `sdks/bootstrap/`) wraps around every user module before
+(`crates/zeroship-runtime/src/core/init.rs` + `sdks/bootstrap/`) wraps around every user module before
 V8 evaluates it. The bootstrap package is framework-internal: the runtime crate `include_str!`s
 its compiled dist files and the Vite plugin imports it for dev. User code must not import it.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| default-export contract | 🟢 | internal (user module namespace) | `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | fetchFast recognized but undocumented. |
+| default-export contract | 🟢 | internal (user module namespace) | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | fetchFast recognized but undocumented. |
 | normalizeUserModule | 🟢 | `@zeroship/bootstrap` API | `sdks/bootstrap/src/normalize.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Named exports win over default.rpc; registry wins. |
 | installSchema / schema auto-discovery | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | registerModel in topo order; __zsDbPlatform deleted after. |
 | normalizeSchema + expandUnionToFlatColumns | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Refuses reserved system names. |
 | validateRefTargets | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Every `t.ref` target must be a key of the same schema map, else `REF_TARGET_NOT_FOUND`. A qualified `other_app.users` fails that membership test, but as an undeclared name, not by a cross-app rule. |
 | __zsDispatch (embedded RPC dispatcher) | 🟢 | internal | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Idempotent IIFE; dev+prod identical JS. |
-| runtime-entry (prod TLA orchestrator) | 🟢 | internal (include_str!) | `sdks/bootstrap/src/runtime-entry.ts`, `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Runs after dispatcher; skips if env.db absent. |
+| runtime-entry (prod TLA orchestrator) | 🟢 | internal (include_str!) | `sdks/bootstrap/src/runtime-entry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Runs after dispatcher; skips if env.db absent. |
 | dev-entry (dev coordinator) | 🟢 | internal (@zeroship/bootstrap dev) | `sdks/bootstrap/src/dev-entry.ts` | — | — | Not in barrel; lazy schema install. |
 | createFetchHandler (WinterCG wrapper) | 🟢 | internal | `sdks/bootstrap/src/fetch-handler.ts` | — | `sdks/bootstrap/tests/fetch-handler.test.ts` | 5xx sanitized in prod; SuperJSON optional. |
 | dev-tier auth provider | 🟢 | internal (@zeroship/bootstrap/dev-auth) | `sdks/bootstrap/src/dev-auth.ts` | `docs/reference/auth-dev-tier.md` | `sdks/bootstrap/tests/dev-auth.test.ts` | Absent from .zship; byte-compatible with Rust. |
-| WS subscription dispatch | 🟢 | `default.subscribe` (kernel-called) | `crates/runtime/src/core/init.rs` | — | `examples/raw-streaming.js` | hello/data/ping/pong; close 4400/4408. |
-| fetchFast extension | 🟢 | internal (user namespace) | `crates/runtime/src/core/init.rs` | — | — | Signature undocumented; no example. |
-| zeroship facade module | 🟢 | `import { env } from 'zeroship'` | `crates/runtime/src/core/init.rs` | — | `examples/http-handler.js` | env/waitUntil/getRequest/current*/runQuery. |
-| raw-JS deploy (no-tooling) | 🟢 | `zeroship serve <file>.js` | `crates/runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Dict or function-shape rpc; fn.config drives frames. |
+| WS subscription dispatch | 🟢 | `default.subscribe` (kernel-called) | `crates/zeroship-runtime/src/core/init.rs` | — | `examples/raw-streaming.js` | hello/data/ping/pong; close 4400/4408. |
+| fetchFast extension | 🟢 | internal (user namespace) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Signature undocumented; no example. |
+| zeroship facade module | 🟢 | `import { env } from 'zeroship'` | `crates/zeroship-runtime/src/core/init.rs` | — | `examples/http-handler.js` | env/waitUntil/getRequest/current*/runQuery. |
+| raw-JS deploy (no-tooling) | 🟢 | `zeroship serve <file>.js` | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Dict or function-shape rpc; fn.config drives frames. |
 | mask policy flush at boot | 🟢 | internal | `sdks/bootstrap/src/runtime-entry.ts`, `dev-entry.ts` | — | — | Single-shot at cold start. |
-| __zsDbPlatform resolver + capability boundary | 🟢 | internal (V8 Private symbol) | `crates/runtime/src/core/init.rs` | — | — | Resolver deleted after use (P9 §8). |
-| legacy fallback fetch / user.index() | 🟡 | internal (fallbackFetch) | `crates/runtime/src/core/init.rs` | — | — | Undocumented "legacy"; unary RPC fallthrough → 404. |
-| manifest.exports.schema (deprecated field) | ⚫ | internal (manifest wire) | `crates/bundle/src/manifest.rs` | — | — | No longer read/written; kept for archive upgrade. |
+| __zsDbPlatform resolver + capability boundary | 🟢 | internal (V8 Private symbol) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Resolver deleted after use (P9 §8). |
+| legacy fallback fetch / user.index() | 🟡 | internal (fallbackFetch) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Undocumented "legacy"; unary RPC fallthrough → 404. |
+| manifest.exports.schema (deprecated field) | ⚫ | internal (manifest wire) | `crates/zeroship-bundle/src/manifest.rs` | — | — | No longer read/written; kept for archive upgrade. |
 | bootstrap build ordering (pnpm before cargo) | 🟢 | internal (build toolchain) | `sdks/bootstrap/scripts/post-build.mjs` | `sdks/bootstrap/README.md` | — | post-build strips export marker for splice. |
 
 ---
@@ -486,51 +486,51 @@ are internally accessed; end-users hit it indirectly via HTTP.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Manifest-based resource-tree dispatch | 🟢 | internal | `crates/gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | Rule-walker removed; resources is the only path. |
-| Subdomain routing (Host-header) | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/router/dispatch.rs` | Path-based takes priority over subdomain. |
-| Path canonicalization + traversal rejection (SEC-2) | 🟢 | internal | `crates/gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `tests/e2e_gateway_path_backslash.sh` | Canonical form used for auth match + forward. Rejects `\` (WHATWG folds it to `/`) as well as dot-segments; the 2026-06-09 review's "RPC is not affected" was wrong — the worker's RPC tag match was a substring, now anchored to the path root. |
-| Compiled policy inheritance | 🟢 | internal | `crates/gateway/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | timeout_ms declared but None. |
-| RPC fail-closed default (SEC-5) | 🟢 | internal | `crates/gateway/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | rpc: defaults to User. |
-| Multi-arm per-request auth (cookie / OP Bearer / BFF token) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Fail-closed. The DPoP arm was removed with the closed-world OP (P5e). |
-| Pairwise subject projection (pws_) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/identities_relay_test.rs` | 503 if no sector_identifier. |
-| Per-app family-marker revocation + cache (R1d) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Fail-closed on cache-miss + DB error. |
-| BFF browser-auth endpoints | 🟢 | /__zeroship/auth/authorize, /popup-callback, /signout | `crates/gateway/src/browser_auth.rs` | `docs/reference/auth.md` | `crates/gateway/tests/browser_auth_test.rs` | Same-origin only; strict CSP relay. |
-| BFF session token endpoint | 🟢 | POST/GET /__zeroship/auth/session | `crates/gateway/src/auth_token.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | No JWT in body; reload-storm coalescing. |
-| Stateless signed session cookie | 🟢 | internal | `crates/gateway/src/session_token.rs`, `signing.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Ed25519; verified locally, no DB. |
-| OIDC RP authorize→callback→mint | 🟢 | GET /__zeroship/auth/callback | `crates/gateway/src/oidc_rp.rs`, `router/dispatch.rs` | `docs/reference/auth.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | HMAC-signed stash cookie. |
+| Manifest-based resource-tree dispatch | 🟢 | internal | `crates/zeroship-gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/compiled.rs` | Rule-walker removed; resources is the only path. |
+| Subdomain routing (Host-header) | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/router/dispatch.rs` | Path-based takes priority over subdomain. |
+| Path canonicalization + traversal rejection (SEC-2) | 🟢 | internal | `crates/zeroship-gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `tests/e2e_gateway_path_backslash.sh` | Canonical form used for auth match + forward. Rejects `\` (WHATWG folds it to `/`) as well as dot-segments; the 2026-06-09 review's "RPC is not affected" was wrong — the worker's RPC tag match was a substring, now anchored to the path root. |
+| Compiled policy inheritance | 🟢 | internal | `crates/zeroship-gateway/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/compiled.rs` | timeout_ms declared but None. |
+| RPC fail-closed default (SEC-5) | 🟢 | internal | `crates/zeroship-gateway/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/compiled.rs` | rpc: defaults to User. |
+| Multi-arm per-request auth (cookie / OP Bearer / BFF token) | 🟢 | internal | `crates/zeroship-gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | Fail-closed. The DPoP arm was removed with the closed-world OP (P5e). |
+| Pairwise subject projection (pws_) | 🟢 | internal | `crates/zeroship-gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/identities_relay_test.rs` | 503 if no sector_identifier. |
+| Per-app family-marker revocation + cache (R1d) | 🟢 | internal | `crates/zeroship-gateway/src/router/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | Fail-closed on cache-miss + DB error. |
+| BFF browser-auth endpoints | 🟢 | /__zeroship/auth/authorize, /popup-callback, /signout | `crates/zeroship-gateway/src/browser_auth.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/browser_auth_test.rs` | Same-origin only; strict CSP relay. |
+| BFF session token endpoint | 🟢 | POST/GET /__zeroship/auth/session | `crates/zeroship-gateway/src/auth_token.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | No JWT in body; reload-storm coalescing. |
+| Stateless signed session cookie | 🟢 | internal | `crates/zeroship-gateway/src/session_token.rs`, `signing.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | Ed25519; verified locally, no DB. |
+| OIDC RP authorize→callback→mint | 🟢 | GET /__zeroship/auth/callback | `crates/zeroship-gateway/src/oidc_rp.rs`, `router/dispatch.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/oidc_rp_e2e.rs` | HMAC-signed stash cookie. |
 | DPoP proof verification + jti replay (RFC 9449) | ⚫ | none | — | — | — | REMOVED with the closed-world OP (P5e): the platform OP never issues DPoP-bound tokens, and Bearer tokens verify locally against JWKS. The gateway arm, the core proof verifier, and the gateway DPoP e2e test were all deleted. |
-| OIDC back-channel logout webhook | 🟢 | POST /oidc/backchannel-logout | `crates/gateway/src/backchannel_logout.rs` | — | `crates/gateway/tests/backchannel_logout_test.rs` | Revokes app sessions and token families. |
-| auth.zeroship.ai reverse proxy | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | `crates/gateway/tests/oidc_rp_e2e.rs` | XFF re-authored (SEC-3); exact host match. |
-| CSRF origin guard (cookie mutations) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | Mismatch drops cookie; Bearer-authenticated requests exempt. |
-| Route-level OAuth scope enforcement | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `compiled.rs` | `docs/reference/auth.md` | `crates/gateway/src/sync.rs` | Only User/Admin routes; anon never 403s. |
-| CORS preflight + header injection | 🟢 | internal | `crates/gateway/src/router/cors.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/router/cors.rs` | Wildcard requires no credentials. |
-| Global per-app rate limiting | 🟢 | internal | `crates/gateway/src/enforce.rs` | — | `crates/gateway/src/enforce.rs` | Boot-time bucket; separate from per-resource. |
-| Per-resource rate limiting (4 scopes) | 🟢 | internal | `crates/gateway/src/enforce.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/enforce.rs` | ip/user/session/app; Retry-After. |
-| Per-app concurrency limiting (RAII) | 🟢 | internal | `crates/gateway/src/enforce.rs` | — | `crates/gateway/src/enforce.rs` | Subscriptions hold one slot for life. |
-| Idempotency dedup for RPC mutations | 🟢 | internal | `crates/gateway/src/idempotency.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | In-memory default; Redis store not wired in main. |
-| Max-input-bytes request body cap | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | 413 on overflow. |
-| ProcedureKind method gate | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | 405/426; Action None-kind path. |
-| CHWBL hash-ring worker routing | 🟢 | internal | `crates/gateway/src/proxy.rs` | `docs/architecture/gateway-routing.md` | — | 150 vnodes; Unix socket support. |
-| Worker dispatch proxy + connection pooling | 🟢 | internal | `crates/gateway/src/proxy.rs` | `docs/architecture/distributed.md` | — | Reserved headers scrubbed. |
-| ZeroShip-User HMAC signing | 🟢 | internal | `crates/gateway/src/proxy.rs`, `oidc_rp.rs` | `docs/architecture/distributed.md` | — | Empty worker_key disables (dev). |
-| App response header sanitization (SEC-9) | 🟢 | internal | `crates/gateway/src/proxy.rs` | — | `crates/gateway/src/proxy.rs` | Strips cookie Domain; caps count/size. |
-| Route cache with 5s polling | 🟢 | internal | `crates/gateway/src/sync.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/sync.rs` | Push-pull; configurable interval. |
-| Static asset serving (tiered cache) | 🟢 | internal | `crates/gateway/src/router/static_serve.rs`, `blob_cache.rs`, `router/variants.rs`, `conditional.rs` | `docs/architecture/gateway-routing.md` | — | mem→disk→BlobStore; br/gzip; 304/206. |
-| Redirect and rewrite actions | 🟢 | internal | `crates/gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | Recursive rewrites unsupported. |
-| WS subscription affinity routing | 🟡 | internal | `crates/gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | Affinity runs; WS proxy returns 501 (use zeroship serve). |
-| API key validation (legacy) | 🟡 | internal | `crates/gateway/src/auth.rs` | — | — | check_api_key not called from main dispatch. |
-| Native OP client with circuit breaker | 🟢 | internal | `crates/gateway/src/op_client.rs`, `oidc_rp.rs` | — | `crates/gateway/tests/op_breaker_test.rs` | 4xx doesn't trip; only transport/timeouts. |
-| Per-app anchor store (reload-recovery) | 🟢 | internal | `crates/gateway/src/anchors.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | 30-day; single-flight per anchor. |
-| Gateway sessions store (audit/revocation) | 🟢 | internal | `crates/gateway/src/sessions.rs` | `docs/reference/auth.md` | `crates/gateway/tests/sessions_test.rs` | Not read on hot path (R1b). |
-| Per-app identities store (pws_ + relay) | 🟢 | internal | `crates/gateway/src/identities.rs` | `docs/reference/auth.md` | `crates/gateway/tests/identities_relay_test.rs` | Relay lookup fail → empty email. |
-| Row-level-security tenant isolation | 🟢 | internal | `crates/gateway/src/rls.rs` | — | `crates/gateway/tests/sessions_test.rs` | SET LOCAL GUC; unset fails closed. |
-| Per-thread PostgreSQL pool | 🟢 | internal | `crates/gateway/src/db.rs`, `lib.rs` | — | `crates/gateway/tests/db_pool_smoke.rs` | !Send; None in dev no-DB. |
-| Trust-proxy client IP derivation | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | — | Default false; behind trusted L7 only. |
-| DPoP jti replay cache (tiered) | ⚫ | none | — | — | — | REMOVED with the DPoP arm (P5e). The surviving replay cache is `LogoutJtiCache` (back-channel logout), in `crates/core/src/logout_token.rs`. |
-| Insecure-dev mode (HTTP cookies) | 🟢 | internal (--insecure-dev) | `crates/gateway/src/lib.rs`, `main.rs` | — | — | Prod must be false (__Host- needs Secure). |
-| x-wall-time-ms response header | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | — | Informational. |
-| Relay email alias (email-claim swap §7) | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `identities.rs` | `docs/reference/auth.md` | `crates/gateway/tests/identities_relay_test.rs` | All 3 auth arms; fail-closed empty. |
-| Ed25519 signing key load + rotation overlap | 🟢 | internal (--signing-key-file) | `crates/gateway/src/signing.rs`, `session_token.rs` | — | — | --prev-signing-key-file overlap; perm check. |
+| OIDC back-channel logout webhook | 🟢 | POST /oidc/backchannel-logout | `crates/zeroship-gateway/src/backchannel_logout.rs` | — | `crates/zeroship-gateway/tests/backchannel_logout_test.rs` | Revokes app sessions and token families. |
+| auth.zeroship.ai reverse proxy | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | — | `crates/zeroship-gateway/tests/oidc_rp_e2e.rs` | XFF re-authored (SEC-3); exact host match. |
+| CSRF origin guard (cookie mutations) | 🟢 | internal | `crates/zeroship-gateway/src/router/auth.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/tests/oidc_rp_e2e.rs` | Mismatch drops cookie; Bearer-authenticated requests exempt. |
+| Route-level OAuth scope enforcement | 🟢 | internal | `crates/zeroship-gateway/src/router/auth.rs`, `compiled.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/src/sync.rs` | Only User/Admin routes; anon never 403s. |
+| CORS preflight + header injection | 🟢 | internal | `crates/zeroship-gateway/src/router/cors.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/router/cors.rs` | Wildcard requires no credentials. |
+| Global per-app rate limiting | 🟢 | internal | `crates/zeroship-gateway/src/enforce.rs` | — | `crates/zeroship-gateway/src/enforce.rs` | Boot-time bucket; separate from per-resource. |
+| Per-resource rate limiting (4 scopes) | 🟢 | internal | `crates/zeroship-gateway/src/enforce.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/enforce.rs` | ip/user/session/app; Retry-After. |
+| Per-app concurrency limiting (RAII) | 🟢 | internal | `crates/zeroship-gateway/src/enforce.rs` | — | `crates/zeroship-gateway/src/enforce.rs` | Subscriptions hold one slot for life. |
+| Idempotency dedup for RPC mutations | 🟢 | internal | `crates/zeroship-gateway/src/idempotency.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | In-memory default; Redis store not wired in main. |
+| Max-input-bytes request body cap | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/compiled.rs` | 413 on overflow. |
+| ProcedureKind method gate | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/compiled.rs` | 405/426; Action None-kind path. |
+| CHWBL hash-ring worker routing | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs` | `docs/architecture/gateway-routing.md` | — | 150 vnodes; Unix socket support. |
+| Worker dispatch proxy + connection pooling | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs` | `docs/architecture/distributed.md` | — | Reserved headers scrubbed. |
+| ZeroShip-User HMAC signing | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs`, `oidc_rp.rs` | `docs/architecture/distributed.md` | — | Empty worker_key disables (dev). |
+| App response header sanitization (SEC-9) | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs` | — | `crates/zeroship-gateway/src/proxy.rs` | Strips cookie Domain; caps count/size. |
+| Route cache with 5s polling | 🟢 | internal | `crates/zeroship-gateway/src/sync.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/sync.rs` | Push-pull; configurable interval. |
+| Static asset serving (tiered cache) | 🟢 | internal | `crates/zeroship-gateway/src/router/static_serve.rs`, `blob_cache.rs`, `router/variants.rs`, `conditional.rs` | `docs/architecture/gateway-routing.md` | — | mem→disk→BlobStore; br/gzip; 304/206. |
+| Redirect and rewrite actions | 🟢 | internal | `crates/zeroship-gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/compiled.rs` | Recursive rewrites unsupported. |
+| WS subscription affinity routing | 🟡 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | Affinity runs; WS proxy returns 501 (use zeroship serve). |
+| API key validation (legacy) | 🟡 | internal | `crates/zeroship-gateway/src/auth.rs` | — | — | check_api_key not called from main dispatch. |
+| Native OP client with circuit breaker | 🟢 | internal | `crates/zeroship-gateway/src/op_client.rs`, `oidc_rp.rs` | — | `crates/zeroship-gateway/tests/op_breaker_test.rs` | 4xx doesn't trip; only transport/timeouts. |
+| Per-app anchor store (reload-recovery) | 🟢 | internal | `crates/zeroship-gateway/src/anchors.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | 30-day; single-flight per anchor. |
+| Gateway sessions store (audit/revocation) | 🟢 | internal | `crates/zeroship-gateway/src/sessions.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/sessions_test.rs` | Not read on hot path (R1b). |
+| Per-app identities store (pws_ + relay) | 🟢 | internal | `crates/zeroship-gateway/src/identities.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/identities_relay_test.rs` | Relay lookup fail → empty email. |
+| Row-level-security tenant isolation | 🟢 | internal | `crates/zeroship-gateway/src/rls.rs` | — | `crates/zeroship-gateway/tests/sessions_test.rs` | SET LOCAL GUC; unset fails closed. |
+| Per-thread PostgreSQL pool | 🟢 | internal | `crates/zeroship-gateway/src/db.rs`, `lib.rs` | — | `crates/zeroship-gateway/tests/db_pool_smoke.rs` | !Send; None in dev no-DB. |
+| Trust-proxy client IP derivation | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | — | — | Default false; behind trusted L7 only. |
+| DPoP jti replay cache (tiered) | ⚫ | none | — | — | — | REMOVED with the DPoP arm (P5e). The surviving replay cache is `LogoutJtiCache` (back-channel logout), in `crates/zeroship-core/src/logout_token.rs`. |
+| Insecure-dev mode (HTTP cookies) | 🟢 | internal (--insecure-dev) | `crates/zeroship-gateway/src/lib.rs`, `main.rs` | — | — | Prod must be false (__Host- needs Secure). |
+| x-wall-time-ms response header | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | — | — | Informational. |
+| Relay email alias (email-claim swap §7) | 🟢 | internal | `crates/zeroship-gateway/src/router/auth.rs`, `identities.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/identities_relay_test.rs` | All 3 auth arms; fail-closed empty. |
+| Ed25519 signing key load + rotation overlap | 🟢 | internal (--signing-key-file) | `crates/zeroship-gateway/src/signing.rs`, `session_token.rs` | — | — | --prev-signing-key-file overlap; perm check. |
 
 ---
 
@@ -546,39 +546,39 @@ no second issuance authority.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| App CRUD — create/get/list/delete | 🟢 | POST/GET/DELETE /api/apps | `crates/control/src/api.rs` | `docs/reference/control.md` | `crates/control/tests/registry_schema_test.rs` | list scoped to ownership (C1 fix). |
-| Deploy ingest (.zship) | 🟢 | POST /api/apps/{id}/deploy | `crates/control/src/api.rs`, `deploy.rs` | `docs/architecture/control-plane.md` | `crates/control/tests/deploy_test.rs` | Scope validation before provisioning. |
-| Route feed for gateway | 🟢 | GET /internal/routes | `crates/control/src/internal.rs`, `registry.rs` | `docs/architecture/control-plane.md` | — | Passthrough fallback on null manifest. |
-| Version feed for workers | 🟢 | GET /internal/versions, /internal/apps/{id} | `crates/control/src/internal.rs`, `registry.rs` | `docs/architecture/control-plane.md` | — | env_version is lazy refetch trigger. |
-| Env feed for workers | 🟢 | GET /internal/apps/{id}/env | `crates/control/src/internal.rs`, `env_store.rs` | `docs/architecture/control-plane.md` | `crates/control/tests/env_store.rs` | 404 on deleted app. |
-| Usage ingest from workers | 🟢 | POST /internal/usage | `crates/control/src/internal.rs`, `registry.rs` | `docs/reference/billing-metering.md` | — | Upsert; positive deltas only. |
-| Usage read for creators | 🟢 | GET /api/apps/{id}/usage | `crates/control/src/api.rs`, `registry.rs` | `docs/reference/billing-metering.md` | — | JSON by resource. |
-| Plan management | 🟢 | PUT /api/apps/{id}/plan | `crates/control/src/api.rs`, `registry.rs` | `docs/reference/control.md` | — | Limits hardcoded in runtime_limits_for_plan. |
-| App logs fan-out | 🟢 | GET /api/apps/{id}/logs | `crates/control/src/api.rs` | `docs/reference/control.md` | `crates/control/tests/app_logs_http_test.rs` | 2s/worker; 502 only if all fail. |
-| Env vars CRUD | 🟢 | GET/PUT/DELETE /api/apps/{id}/env/vars | `crates/control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | `crates/control/tests/env_store.rs` | env_version bump; audited. |
-| Secrets CRUD (encrypted) | 🟢 | GET/PUT/DELETE /api/apps/{id}/env/secrets | `crates/control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | `crates/control/tests/env_store.rs` | AES-256-GCM; AAD binds app+key. |
-| Secret key rotation (re-encrypt) | 🟢 | internal (EnvStore::rotate_app) | `crates/control/src/env_store.rs` | — | — | No HTTP endpoint to trigger yet. |
-| Secret process.env exposure list | 🟢 | GET/PUT /api/apps/{id}/env/expose | `crates/control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | — | Atomic; audited. |
-| Audit log read (per-app) | 🟢 | GET /api/apps/{id}/audit | `crates/control/src/env_handlers.rs`, `audit.rs` | `docs/reference/control.md` | — | Append-only with tamper trigger. |
-| Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | Native OP introspection is the only bearer path. |
-| First-party OAuth client registration | 🟢 | config `[auth] oauth_clients` | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Reconciled at boot; upsert + prune. |
-| Per-app OAuth client provisioning (auto) | 🟢 | internal (create_app + deploy) | `crates/control/src/app_oauth_client.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Idempotent; non-destructive URI merge. |
-| Custom-domain OAuth redirect URI sync | 🟡 | internal (sync_app_redirect_uris) | `crates/control/src/app_oauth_client.rs` | — | — | Implemented/tested; no production caller. |
-| App-declared OAuth scope registry | 🟢 | internal (deploy) | `crates/control/src/app_oauth_client.rs`, `api.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Hard-fails deploy on vocab collision. |
-| OAuth grant listing (user-facing) | 🟢 | GET /api/me/oauth-grants | `crates/control/src/oauth_grants_handlers.rs` | — | `crates/control/tests/oauth_grants_handlers_test.rs` | Joined with client metadata. |
-| OAuth grant revocation (user-facing) | 🟢 | DELETE /api/me/oauth-grants/{client_id} | `crates/control/src/oauth_grants_handlers.rs` | — | `crates/control/tests/oauth_grants_handlers_test.rs` | Owned connection; family marker; grant delete. |
-| Stripe Connect onboarding | 🟡 | POST /api/creators/{id}/stripe/onboard | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Placeholder URL; real account_links TODO. |
-| Stripe Connect account link / unlink | 🟢 | POST /callback, DELETE /api/creators/{id}/stripe | `crates/control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_store.rs` | Cascades payouts. |
-| Stripe webhook ingest (invoice.paid) | 🟢 | POST /internal/webhooks/stripe | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_webhook_test.rs` | HMAC; idempotent on event_id. |
-| Creator earnings view | 🟢 | GET /api/creators/{id}/earnings | `crates/control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | — | Cents; 50 recent payouts. |
-| Builder OAuth client bootstrap | 🟡 | --bootstrap-builder-client | `crates/control/src/bootstrap_builder.rs` | — | `crates/control/tests/bootstrap_builder_test.rs` | Retired in R5; code retained (effectively dead). |
-| Orphaned-app reaper (cron) | 🟢 | internal | `crates/control/src/cron/orphaned_app_reaper.rs` | — | `crates/control/tests/orphaned_app_reaper_test.rs` | system=true never reaped. |
-| Audit retention sweep (cron) | 🟢 | internal | `crates/control/src/cron/audit_retention.rs` | — | `crates/control/tests/audit_retention_test.rs` | GUC flag cleared on exit. |
-| Rate limiting (per-IP token bucket) | 🟢 | internal | `crates/control/src/rate_limit.rs`, `http_util.rs` | — | — | In-memory per-process; DB-backed for multi-node. |
-| Metering aggregation / period snapshots | 🟢 | internal | `crates/control/src/metering/mod.rs`, `metering/provider/` | `docs/reference/billing-metering.md` | `crates/control/tests/billing_pipeline_redpanda_e2e.rs` | No longer a stub: `UsageEvent`s arrive on the durable stream and the spend-recompute cron overwrites `zeroship.usage_aggregates` as an idempotent period snapshot; `record_direct` for trusted control-plane work; dev fallback does an immediate `+=`. |
-| Control health + readiness | 🟢 | GET /healthz, GET /readyz | `crates/control/src/internal.rs` | — | `tests/health_endpoints.sh` | /healthz is a constant 200 (liveness); /readyz probes the shared Postgres client, cached 2s. |
+| App CRUD — create/get/list/delete | 🟢 | POST/GET/DELETE /api/apps | `crates/zeroship-control/src/api.rs` | `docs/reference/control.md` | `crates/zeroship-control/tests/registry_schema_test.rs` | list scoped to ownership (C1 fix). |
+| Deploy ingest (.zship) | 🟢 | POST /api/apps/{id}/deploy | `crates/zeroship-control/src/api.rs`, `deploy.rs` | `docs/architecture/control-plane.md` | `crates/zeroship-control/tests/deploy_test.rs` | Scope validation before provisioning. |
+| Route feed for gateway | 🟢 | GET /internal/routes | `crates/zeroship-control/src/internal.rs`, `registry.rs` | `docs/architecture/control-plane.md` | — | Passthrough fallback on null manifest. |
+| Version feed for workers | 🟢 | GET /internal/versions, /internal/apps/{id} | `crates/zeroship-control/src/internal.rs`, `registry.rs` | `docs/architecture/control-plane.md` | — | env_version is lazy refetch trigger. |
+| Env feed for workers | 🟢 | GET /internal/apps/{id}/env | `crates/zeroship-control/src/internal.rs`, `env_store.rs` | `docs/architecture/control-plane.md` | `crates/zeroship-control/tests/env_store.rs` | 404 on deleted app. |
+| Usage ingest from workers | 🟢 | POST /internal/usage | `crates/zeroship-control/src/internal.rs`, `registry.rs` | `docs/reference/billing-metering.md` | — | Upsert; positive deltas only. |
+| Usage read for creators | 🟢 | GET /api/apps/{id}/usage | `crates/zeroship-control/src/api.rs`, `registry.rs` | `docs/reference/billing-metering.md` | — | JSON by resource. |
+| Plan management | 🟢 | PUT /api/apps/{id}/plan | `crates/zeroship-control/src/api.rs`, `registry.rs` | `docs/reference/control.md` | — | Limits hardcoded in runtime_limits_for_plan. |
+| App logs fan-out | 🟢 | GET /api/apps/{id}/logs | `crates/zeroship-control/src/api.rs` | `docs/reference/control.md` | `crates/zeroship-control/tests/app_logs_http_test.rs` | 2s/worker; 502 only if all fail. |
+| Env vars CRUD | 🟢 | GET/PUT/DELETE /api/apps/{id}/env/vars | `crates/zeroship-control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | `crates/zeroship-control/tests/env_store.rs` | env_version bump; audited. |
+| Secrets CRUD (encrypted) | 🟢 | GET/PUT/DELETE /api/apps/{id}/env/secrets | `crates/zeroship-control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | `crates/zeroship-control/tests/env_store.rs` | AES-256-GCM; AAD binds app+key. |
+| Secret key rotation (re-encrypt) | 🟢 | internal (EnvStore::rotate_app) | `crates/zeroship-control/src/env_store.rs` | — | — | No HTTP endpoint to trigger yet. |
+| Secret process.env exposure list | 🟢 | GET/PUT /api/apps/{id}/env/expose | `crates/zeroship-control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | — | Atomic; audited. |
+| Audit log read (per-app) | 🟢 | GET /api/apps/{id}/audit | `crates/zeroship-control/src/env_handlers.rs`, `audit.rs` | `docs/reference/control.md` | — | Append-only with tamper trigger. |
+| Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/zeroship-control/src/authz_guard.rs` | — | `crates/zeroship-control/tests/authz_guard_oauth_test.rs` | Native OP introspection is the only bearer path. |
+| First-party OAuth client registration | 🟢 | config `[auth] oauth_clients` | `crates/zeroship-control/src/oauth_clients.rs` | — | `crates/zeroship-control/tests/oauth_clients_test.rs` | Reconciled at boot; upsert + prune. |
+| Per-app OAuth client provisioning (auto) | 🟢 | internal (create_app + deploy) | `crates/zeroship-control/src/app_oauth_client.rs` | — | `crates/zeroship-control/tests/app_oauth_client_test.rs` | Idempotent; non-destructive URI merge. |
+| Custom-domain OAuth redirect URI sync | 🟡 | internal (sync_app_redirect_uris) | `crates/zeroship-control/src/app_oauth_client.rs` | — | — | Implemented/tested; no production caller. |
+| App-declared OAuth scope registry | 🟢 | internal (deploy) | `crates/zeroship-control/src/app_oauth_client.rs`, `api.rs` | — | `crates/zeroship-control/tests/app_oauth_client_test.rs` | Hard-fails deploy on vocab collision. |
+| OAuth grant listing (user-facing) | 🟢 | GET /api/me/oauth-grants | `crates/zeroship-control/src/oauth_grants_handlers.rs` | — | `crates/zeroship-control/tests/oauth_grants_handlers_test.rs` | Joined with client metadata. |
+| OAuth grant revocation (user-facing) | 🟢 | DELETE /api/me/oauth-grants/{client_id} | `crates/zeroship-control/src/oauth_grants_handlers.rs` | — | `crates/zeroship-control/tests/oauth_grants_handlers_test.rs` | Owned connection; family marker; grant delete. |
+| Stripe Connect onboarding | 🟡 | POST /api/creators/{id}/stripe/onboard | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Placeholder URL; real account_links TODO. |
+| Stripe Connect account link / unlink | 🟢 | POST /callback, DELETE /api/creators/{id}/stripe | `crates/zeroship-control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/stripe_store.rs` | Cascades payouts. |
+| Stripe webhook ingest (invoice.paid) | 🟢 | POST /internal/webhooks/stripe | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/stripe_webhook_test.rs` | HMAC; idempotent on event_id. |
+| Creator earnings view | 🟢 | GET /api/creators/{id}/earnings | `crates/zeroship-control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | — | Cents; 50 recent payouts. |
+| Builder OAuth client bootstrap | 🟡 | --bootstrap-builder-client | `crates/zeroship-control/src/bootstrap_builder.rs` | — | `crates/zeroship-control/tests/bootstrap_builder_test.rs` | Retired in R5; code retained (effectively dead). |
+| Orphaned-app reaper (cron) | 🟢 | internal | `crates/zeroship-control/src/cron/orphaned_app_reaper.rs` | — | `crates/zeroship-control/tests/orphaned_app_reaper_test.rs` | system=true never reaped. |
+| Audit retention sweep (cron) | 🟢 | internal | `crates/zeroship-control/src/cron/audit_retention.rs` | — | `crates/zeroship-control/tests/audit_retention_test.rs` | GUC flag cleared on exit. |
+| Rate limiting (per-IP token bucket) | 🟢 | internal | `crates/zeroship-control/src/rate_limit.rs`, `http_util.rs` | — | — | In-memory per-process; DB-backed for multi-node. |
+| Metering aggregation / period snapshots | 🟢 | internal | `crates/zeroship-control/src/metering/mod.rs`, `metering/provider/` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/billing_pipeline_redpanda_e2e.rs` | No longer a stub: `UsageEvent`s arrive on the durable stream and the spend-recompute cron overwrites `zeroship.usage_aggregates` as an idempotent period snapshot; `record_direct` for trusted control-plane work; dev fallback does an immediate `+=`. |
+| Control health + readiness | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-control/src/internal.rs` | — | `tests/health_endpoints.sh` | /healthz is a constant 200 (liveness); /readyz probes the shared Postgres client, cached 2s. |
 | TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `sdks/control/src/index.ts` | `docs/reference/control.md` | — | Auth namespace removed (R5); missing admin wrappers. |
-| Config validation (--check-config) | 🟢 | --check-config [--format] | `crates/control/src/main.rs` | — | — | Text/JSON; prod startup guards. |
+| Config validation (--check-config) | 🟢 | --check-config [--format] | `crates/zeroship-control/src/main.rs` | — | — | Text/JSON; prod startup guards. |
 
 ---
 
@@ -593,26 +593,26 @@ code on disk**.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Cedar engine (Authorizer) | 🟢 | internal | `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | Schema field always None; DB policy rows not merged at boot. |
-| Wrapper Policy / Statement / Effect types | 🟢 | internal | `crates/authz/src/policy.rs`, `statement.rs`, `effect.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/scaffold_test.rs` | serde round-trip tested. |
-| Action enum (closed vocabulary) | 🟢 | internal | `crates/authz/src/action.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/scaffold_test.rs` | 17 variants; PlatformPoliciesWrite extra. |
-| Resource enum (App, Org, Any) | 🟢 | internal | `crates/authz/src/resource.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/scaffold_test.rs` | Org for P11; no org CRUD yet. |
-| Condition library (IpRange/TimeWindow/Mfa) | 🟡 | internal | `crates/authz/src/condition.rs`, `lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | IpRange/TimeWindow work; MFA conditions not enforced; TimeWindow UTC-only. |
-| Cedar source lowering (lower()) | 🟢 | internal | `crates/authz/src/lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/injection_test.rs` | Injection-hardened. |
-| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 4 policies (self-service + 3 creator); build.rs parses at compile. |
-| Entity assembly + LRU cache | 🟢 | internal | `crates/authz/src/entities.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | 30s TTL; default role 'none' (C1 fix). |
-| enforce() — two-call TOKEN⊂USER | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Both must allow; 100% audited (no sampling). |
-| is_authorized_anywhere() | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + creator self-scope probe. |
-| AuthzGuard ntex extractor | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | `crates/control/tests/authz_guard_oauth_test.rs` | Bearer-only (R5); MFA context always false. |
-| OAuth scope vocabulary (Scope enum) | 🟢 | internal | `crates/authz/src/scope.rs` | `docs/proposals/authorization.md` | `crates/authz/src/scope.rs` | 16-scope 1:1 with Action; no PlatformPoliciesWrite scope. |
-| OAuth consent UI with authz gate | 🟢 | internal | `crates/auth/src/ui/consent.rs` | `docs/proposals/authorization.md` | — | Identity scopes bypass gate. |
-| policy_hash (SHA-256 canonical) | 🟢 | internal | `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | Key-sorted; drift detection. |
-| Authorization audit log | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Fire-and-forget; 100% audited. |
-| Build-time Cedar lint (build.rs) | 🟢 | internal | `crates/authz/build.rs` | `docs/proposals/authorization.md` | — | Panics on invalid Cedar. |
-| OAuth native OP introspection in AuthzGuard | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | — | Audience check; unknown scope → 401. |
-| OAuth Device Authorization Grant UI | 🟢 | HTTP endpoint | `crates/auth/src/ui/device.rs` | `docs/proposals/authorization.md` | — | CSRF; emits device_grant_accepted. |
-| OAuth client registration (config) | 🟢 | boot-time reconcile | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Scope + redirect validation; fatal on reject. |
-| User OAuth grant listing/revocation | 🟢 | HTTP endpoint | `crates/control/src/oauth_grants_handlers.rs` | — | — | Deletes consent grants and revokes token families. |
+| Cedar engine (Authorizer) | 🟢 | internal | `crates/zeroship-authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/engine_test.rs` | Schema field always None; DB policy rows not merged at boot. |
+| Wrapper Policy / Statement / Effect types | 🟢 | internal | `crates/zeroship-authz/src/policy.rs`, `statement.rs`, `effect.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/scaffold_test.rs` | serde round-trip tested. |
+| Action enum (closed vocabulary) | 🟢 | internal | `crates/zeroship-authz/src/action.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/scaffold_test.rs` | 17 variants; PlatformPoliciesWrite extra. |
+| Resource enum (App, Org, Any) | 🟢 | internal | `crates/zeroship-authz/src/resource.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/scaffold_test.rs` | Org for P11; no org CRUD yet. |
+| Condition library (IpRange/TimeWindow/Mfa) | 🟡 | internal | `crates/zeroship-authz/src/condition.rs`, `lower.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/engine_test.rs` | IpRange/TimeWindow work; MFA conditions not enforced; TimeWindow UTC-only. |
+| Cedar source lowering (lower()) | 🟢 | internal | `crates/zeroship-authz/src/lower.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/injection_test.rs` | Injection-hardened. |
+| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/zeroship-authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/platform_policies_test.rs` | 4 policies (self-service + 3 creator); build.rs parses at compile. |
+| Entity assembly + LRU cache | 🟢 | internal | `crates/zeroship-authz/src/entities.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/two_call_test.rs` | 30s TTL; default role 'none' (C1 fix). |
+| enforce() — two-call TOKEN⊂USER | 🟢 | internal | `crates/zeroship-authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/two_call_test.rs` | Both must allow; 100% audited (no sampling). |
+| is_authorized_anywhere() | 🟢 | internal | `crates/zeroship-authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + creator self-scope probe. |
+| AuthzGuard ntex extractor | 🟢 | internal | `crates/zeroship-control/src/authz_guard.rs` | `docs/proposals/authorization.md` | `crates/zeroship-control/tests/authz_guard_oauth_test.rs` | Bearer-only (R5); MFA context always false. |
+| OAuth scope vocabulary (Scope enum) | 🟢 | internal | `crates/zeroship-authz/src/scope.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/src/scope.rs` | 16-scope 1:1 with Action; no PlatformPoliciesWrite scope. |
+| OAuth consent UI with authz gate | 🟢 | internal | `crates/zeroship-auth/src/ui/consent.rs` | `docs/proposals/authorization.md` | — | Identity scopes bypass gate. |
+| policy_hash (SHA-256 canonical) | 🟢 | internal | `crates/zeroship-authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/engine_test.rs` | Key-sorted; drift detection. |
+| Authorization audit log | 🟢 | internal | `crates/zeroship-authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/zeroship-authz/tests/two_call_test.rs` | Fire-and-forget; 100% audited. |
+| Build-time Cedar lint (build.rs) | 🟢 | internal | `crates/zeroship-authz/build.rs` | `docs/proposals/authorization.md` | — | Panics on invalid Cedar. |
+| OAuth native OP introspection in AuthzGuard | 🟢 | internal | `crates/zeroship-control/src/authz_guard.rs` | `docs/proposals/authorization.md` | — | Audience check; unknown scope → 401. |
+| OAuth Device Authorization Grant UI | 🟢 | HTTP endpoint | `crates/zeroship-auth/src/ui/device.rs` | `docs/proposals/authorization.md` | — | CSRF; emits device_grant_accepted. |
+| OAuth client registration (config) | 🟢 | boot-time reconcile | `crates/zeroship-control/src/oauth_clients.rs` | — | `crates/zeroship-control/tests/oauth_clients_test.rs` | Scope + redirect validation; fatal on reject. |
+| User OAuth grant listing/revocation | 🟢 | HTTP endpoint | `crates/zeroship-control/src/oauth_grants_handlers.rs` | — | — | Deletes consent grants and revokes token families. |
 | P10: Toggle-matrix UI for token policies | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No dashboard route; no cedar-wasm. |
 | P11: Orgs + analyzer + incident lock | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No org CRUD/table/analyzer/lock policy. |
 | P12: End-user authz in worker (env.authz) | 🔵 | `env.authz.*` / `@zeroship/permissions` | — | `docs/proposals/authorization.md` | — | No plugin-authz crate; no SDK; no manifest field. |
@@ -633,31 +633,31 @@ purely trust-based.
 **STALE (flagged 2026-08-10, metering rows only).** The paragraph above predates the metering
 pipeline landing and was not re-audited during the citation repair; treat its metering claims as
 unverified. Three things are certain: the worker DOES meter (it records the platform counters
-into `zeroship_metering::Meter` - `crates/worker/src/cache.rs`, `handler.rs`), control ingests
+into `zeroship_metering::Meter` - `crates/zeroship-worker/src/cache.rs`, `handler.rs`), control ingests
 `UsageEvent`s off the durable stream and writes idempotent period snapshots
-(`crates/control/src/metering/mod.rs`), and there is no `POST /internal/usage` endpoint in
-`crates/control/src/internal.rs` anymore. `env.meter` is absent by design, not by omission. The
+(`crates/zeroship-control/src/metering/mod.rs`), and there is no `POST /internal/usage` endpoint in
+`crates/zeroship-control/src/internal.rs` anymore. `env.meter` is absent by design, not by omission. The
 former "complete but dead" `crates/platform` tokio/axum monolith has been DELETED from the tree.
 The Stripe-Connect rows below were not part of that flag.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Stripe Connect onboarding URL | 🟠 | POST /api/creators/{id}/stripe/onboard | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Hardcoded placeholder URL; real account_links TODO. |
-| Stripe Connect account link (callback) | 🟢 | POST /api/creators/{id}/stripe/callback | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_store.rs` | Validates acct_ shape; idempotent. |
-| Stripe Connect account unlink | 🟢 | DELETE /api/creators/{id}/stripe | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_store.rs` | Soft-delete; FK RESTRICT preserves payouts. |
-| Creator account link-history ledger | 🟢 | internal (StripeStore::account_history) | `crates/control/src/stripe_store.rs` | — | `crates/control/tests/stripe_store.rs` | No HTTP endpoint exposes it. |
-| Stripe webhook ingest (invoice.paid) | 🟢 | POST /internal/webhooks/stripe | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_webhook_test.rs` | Fee read from payload, not re-computed. |
-| Webhook signature verification (Rust) | 🟢 | internal | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/src/stripe_handlers.rs` | Constant-time; cross-validated with TS. |
-| Payout ledger (write) | 🟢 | internal (StripeStore::record_payout) | `crates/control/src/stripe_store.rs` | — | `crates/control/tests/stripe_store.rs` | DB CHECK net = gross - fee; cents. |
-| Earnings dashboard (read) | 🟢 | GET /api/creators/{id}/earnings | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Totals + 50 recent; no pagination. |
+| Stripe Connect onboarding URL | 🟠 | POST /api/creators/{id}/stripe/onboard | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Hardcoded placeholder URL; real account_links TODO. |
+| Stripe Connect account link (callback) | 🟢 | POST /api/creators/{id}/stripe/callback | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/stripe_store.rs` | Validates acct_ shape; idempotent. |
+| Stripe Connect account unlink | 🟢 | DELETE /api/creators/{id}/stripe | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/stripe_store.rs` | Soft-delete; FK RESTRICT preserves payouts. |
+| Creator account link-history ledger | 🟢 | internal (StripeStore::account_history) | `crates/zeroship-control/src/stripe_store.rs` | — | `crates/zeroship-control/tests/stripe_store.rs` | No HTTP endpoint exposes it. |
+| Stripe webhook ingest (invoice.paid) | 🟢 | POST /internal/webhooks/stripe | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/stripe_webhook_test.rs` | Fee read from payload, not re-computed. |
+| Webhook signature verification (Rust) | 🟢 | internal | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/src/stripe_handlers.rs` | Constant-time; cross-validated with TS. |
+| Payout ledger (write) | 🟢 | internal (StripeStore::record_payout) | `crates/zeroship-control/src/stripe_store.rs` | — | `crates/zeroship-control/tests/stripe_store.rs` | DB CHECK net = gross - fee; cents. |
+| Earnings dashboard (read) | 🟢 | GET /api/creators/{id}/earnings | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Totals + 50 recent; no pagination. |
 | @zeroship/payments — checkout / startOnboarding | 🟢 | `createPaymentsClient({ baseUrl, creatorId, auth }).checkout/startOnboarding` | `sdks/payments/src/connect.ts` | `docs/reference/billing-metering.md` | `sdks/payments/tests/connect.test.ts` | Thin client over control (`POST …/connect/checkout`, `…/stripe/onboard`); NO fee param — fee is server-authoritative (ISS-29). |
 | @zeroship/payments — verifyWebhook | 🟢 | `verifyWebhook(rawBody, sig, secret, opts)` | `sdks/payments/src/webhook.ts` | `docs/reference/billing-metering.md` | `sdks/payments/tests/webhook.test.ts` | WebCrypto HMAC; runs in V8/browser/Node. |
-| App plan management | 🟡 | PUT /api/apps/{id}/plan | `crates/control/src/api.rs` | — | — | plan_id is a label; no billing logic acts on it. |
-| Usage counter ingest (worker → control) | 🟡 | POST /internal/usage | `crates/control/src/internal.rs` | `docs/reference/billing-metering.md` | — | No worker ever calls it; ingest-only. |
-| Usage counter read (dashboard) | 🟡 | GET /api/apps/{id}/usage | `crates/control/src/api.rs` | `docs/reference/billing-metering.md` | — | Returns empty maps in real deploys. |
+| App plan management | 🟡 | PUT /api/apps/{id}/plan | `crates/zeroship-control/src/api.rs` | — | — | plan_id is a label; no billing logic acts on it. |
+| Usage counter ingest (worker → control) | 🟡 | POST /internal/usage | `crates/zeroship-control/src/internal.rs` | `docs/reference/billing-metering.md` | — | No worker ever calls it; ingest-only. |
+| Usage counter read (dashboard) | 🟡 | GET /api/apps/{id}/usage | `crates/zeroship-control/src/api.rs` | `docs/reference/billing-metering.md` | — | Returns empty maps in real deploys. |
 | Usage history / snapshots | 🟠 | internal (DB schema only) | `db/migrations-ts/20260702000200_control_tables.ts` | — | — | Table exists; no code reads/writes it. |
 | env.meter.* native primitive | ⚫ | none (deliberately absent) | — | `docs/reference/billing-metering.md` | — | Not planned: metering is infrastructure so app code can neither forge nor suppress it. The worker emits the platform counters and `env.{db,kv,storage}` emit usage metrics into `crates/metering`; no `env.meter` is registered. |
-| Platform fee enforcement | 🟡 | internal (reads application_fee_amount) | `crates/control/src/stripe_handlers.rs` | — | — | Fee set by SDK; not re-verified server-side. |
+| Platform fee enforcement | 🟡 | internal (reads application_fee_amount) | `crates/zeroship-control/src/stripe_handlers.rs` | — | — | Fee set by SDK; not re-verified server-side. |
 
 ---
 
@@ -671,45 +671,45 @@ Gateway, control, and worker all read from a shared `LocalDiskBlobStore`; **no S
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| .zship archive format (tar.zst) | 🟢 | internal | `crates/bundle/src/unpack.rs` | `docs/reference/zship.md` | `crates/bundle/tests/manifest_test.rs` | Version 1 only; built by vite-plugin. |
-| Manifest struct (dispatch table) | 🟢 | internal (wire) | `crates/bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/bundle/tests/manifest_test.rs` | deploy_hash stamped by control on ingest. |
-| Manifest::validate() | 🟢 | internal | `crates/bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/bundle/tests/manifest_test.rs` | Scope vocab-collision delegated to control. |
-| Manifest::passthrough() | 🟢 | internal | `crates/bundle/src/manifest.rs` | — | `crates/core/src/types.rs` | Epoch built_at sentinel. |
-| WorkerCode (entry + modules map) | 🟢 | internal (manifest.worker) | `crates/bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/bundle/tests/manifest_test.rs` | None for SSG-only. |
-| ResourceEntry (unified map entry) | 🟢 | internal (manifest.resources) | `crates/bundle/src/rule.rs` | `docs/reference/zship.md` | `crates/bundle/src/rule.rs` | Compiled to EffectivePolicy at load. |
-| Resource inheritance chain | 🟢 | internal | `crates/bundle/src/manifest.rs` | — | `crates/bundle/src/manifest.rs` | Depth 16; scopes/middleware union. |
-| AuthLevel (anon/user/admin) | 🟢 | internal (ResourceEntry.auth) | `crates/bundle/src/rule.rs` | `docs/reference/zship.md` | `crates/bundle/src/rule.rs` | anon requires publicly_accessible. |
-| ProcedureKind (query/mutation/...) | 🟢 | internal (rpc: entries) | `crates/bundle/src/rule.rs` | — | `crates/bundle/src/rule.rs` | None default = Action. |
-| Match variants (Exact/Prefix/Glob/Any) | 🟢 | internal (Rule.match) | `crates/bundle/src/rule.rs` | — | `crates/bundle/src/rule.rs` | Segment-aware prefix. |
-| Action variants (Static/Worker/Redirect/Rewrite) | 🟢 | internal (Rule.action) | `crates/bundle/src/rule.rs` | — | `crates/bundle/src/rule.rs` | Rewrite hop limit in gateway. |
-| CacheCtl (cache policy) | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | Wire only; enforcement in gateway. |
-| RateLimit (per-resource) | 🟢 | internal (ResourceEntry.rate_limit) | `crates/bundle/src/rule.rs` | — | `crates/bundle/src/rule.rs` | 4 scopes; rpm→rps ceil. |
-| Cors (per-rule CORS) | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | Exact origins only (v1). |
-| RedirectAction / StaticAction | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | At most one of redirect/rewrite/static. |
-| AuthConfig + ScopeDef (declared scopes) | 🟢 | internal (manifest.auth.scopes) | `crates/bundle/src/manifest.rs` | — | `crates/bundle/tests/manifest_test.rs` | Format-validated; collision check in control. |
-| required_scopes on ResourceEntry | 🟢 | internal | `crates/bundle/src/rule.rs` | — | `crates/bundle/src/rule.rs` | Union along chain; OIDC scopes reserved. |
-| AssetEntry + AssetVariant | 🟢 | internal (manifest.assets) | `crates/bundle/src/asset.rs` | — | — | br/gzip variants only. |
-| runtime_assets + asset_version | 🟡 | internal (manifest.runtime_assets) | `crates/bundle/src/manifest.rs` | — | — | Wire+gateway ship; env.assets.* not registered. |
-| sourcemaps map | 🟢 | internal (manifest.sourcemaps) | `crates/bundle/src/manifest.rs` | — | `crates/bundle/src/unpack.rs` | Sourcemaps are first-class blobs. |
-| schemas map (JSONSchema refs) | 🟢 | internal (manifest.schemas) | `crates/bundle/src/manifest.rs` | — | — | sha256: ref format validated. |
-| aliases map (wire-id stability) | 🟢 | internal (manifest.aliases) | `crates/bundle/src/manifest.rs` | — | — | Gateway ignores; vite-plugin not yet writing it. |
-| transformer field | 🟢 | internal (manifest.transformer) | `crates/bundle/src/manifest.rs` | `docs/reference/zship.md` | — | json (default) / superjson. |
-| ManifestMetadata (compiler + built_at) | 🟢 | internal (manifest.metadata) | `crates/bundle/src/manifest.rs` | — | — | built_at required by ingest. |
-| ManifestExports + HandlerEntry | ⚫ | internal (manifest.exports) | `crates/bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/bundle/tests/manifest_test.rs` | Deprecated Stage 5c; runtime no longer reads. |
-| deploy_hash computation | 🟢 | internal (ingest) | `crates/bundle/src/unpack.rs` | `docs/reference/zship.md` | `crates/bundle/src/unpack.rs` | Canonical key-sorted, deploy_hash omitted. |
-| ingest() — streaming ingestion | 🟢 | internal (control deploy) | `crates/bundle/src/unpack.rs` | `docs/architecture/blob-store.md` | `crates/control/tests/deploy_http_test.rs` | O(64 KiB) peak; asserts all hashes present. |
-| Ingest limits (size/count caps) | 🟢 | internal (limits.rs) | `crates/bundle/src/limits.rs` | `docs/reference/zship.md` | — | 256MB/256MB/1MB/16MB/10000; zip-bomb defense. |
-| BlobStore trait | 🟢 | internal | `crates/bundle/src/blob.rs` | `docs/architecture/blob-store.md` | `crates/bundle/tests/blob_test.rs` | async_trait(?Send); put_blob_stream idempotent. |
-| LocalDiskBlobStore | 🟢 | internal (all 3 services) | `crates/bundle/src/blob.rs` | `docs/architecture/blob-store.md` | `crates/bundle/tests/blob_test.rs` | Only backend; disk loss irrecoverable. |
-| S3BlobStore / CachedBlobStore | 🔵 | internal | `crates/bundle/src/blob.rs` | `docs/architecture/blob-store.md` | — | Comment-referenced only; no impl. |
-| sha256_hex() / validate_hash_format() | 🟢 | internal | `crates/bundle/src/blob.rs` | — | `crates/bundle/tests/blob_test.rs` | pub re-exported. |
-| BundleStore trait + LocalFs (legacy VFS) | 🟡 | internal (plugin-storage) | `crates/bundle/src/store.rs` | — | `crates/bundle/tests/store_test.rs` | Predates BlobStore; blocking std::fs; no remote. |
-| CLI deploy command | 🟢 | `zeroship deploy` (path/app/control from `zeroship.jsonc`; flags override) | `crates/cli/src/main.rs` | `docs/reference/project-config.md` | — | curl wrapper; token 3-priority chain; splices an auto-created app id back into the file. |
-| CLI migrate command | 🟢 | `zeroship migrate` (posts `<migrations.out>/migrations.ir.json`) | `crates/cli/src/migrate.rs` | `docs/reference/project-config.md` | — | Same token chain; positional path overrides; no compiled default path. |
-| middleware list on ResourceEntry | 🟡 | internal | `crates/bundle/src/rule.rs` | — | — | Wire+compile ship; dispatch target not implemented. |
-| idempotent / idempotency_ttl_hours | 🟢 | internal | `crates/bundle/src/rule.rs` | — | `crates/gateway/src/idempotency.rs` | TTL [1,168]; gateway implements dedup. |
-| max_input_bytes on ResourceEntry | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | Gateway enforces. |
-| csrf_origins on ResourceEntry | 🟢 | internal | `crates/bundle/src/rule.rs` | — | — | Intersection merge along chain. |
+| .zship archive format (tar.zst) | 🟢 | internal | `crates/zeroship-bundle/src/unpack.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/tests/manifest_test.rs` | Version 1 only; built by vite-plugin. |
+| Manifest struct (dispatch table) | 🟢 | internal (wire) | `crates/zeroship-bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/tests/manifest_test.rs` | deploy_hash stamped by control on ingest. |
+| Manifest::validate() | 🟢 | internal | `crates/zeroship-bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/tests/manifest_test.rs` | Scope vocab-collision delegated to control. |
+| Manifest::passthrough() | 🟢 | internal | `crates/zeroship-bundle/src/manifest.rs` | — | `crates/zeroship-core/src/types.rs` | Epoch built_at sentinel. |
+| WorkerCode (entry + modules map) | 🟢 | internal (manifest.worker) | `crates/zeroship-bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/tests/manifest_test.rs` | None for SSG-only. |
+| ResourceEntry (unified map entry) | 🟢 | internal (manifest.resources) | `crates/zeroship-bundle/src/rule.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/src/rule.rs` | Compiled to EffectivePolicy at load. |
+| Resource inheritance chain | 🟢 | internal | `crates/zeroship-bundle/src/manifest.rs` | — | `crates/zeroship-bundle/src/manifest.rs` | Depth 16; scopes/middleware union. |
+| AuthLevel (anon/user/admin) | 🟢 | internal (ResourceEntry.auth) | `crates/zeroship-bundle/src/rule.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/src/rule.rs` | anon requires publicly_accessible. |
+| ProcedureKind (query/mutation/...) | 🟢 | internal (rpc: entries) | `crates/zeroship-bundle/src/rule.rs` | — | `crates/zeroship-bundle/src/rule.rs` | None default = Action. |
+| Match variants (Exact/Prefix/Glob/Any) | 🟢 | internal (Rule.match) | `crates/zeroship-bundle/src/rule.rs` | — | `crates/zeroship-bundle/src/rule.rs` | Segment-aware prefix. |
+| Action variants (Static/Worker/Redirect/Rewrite) | 🟢 | internal (Rule.action) | `crates/zeroship-bundle/src/rule.rs` | — | `crates/zeroship-bundle/src/rule.rs` | Rewrite hop limit in gateway. |
+| CacheCtl (cache policy) | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | — | Wire only; enforcement in gateway. |
+| RateLimit (per-resource) | 🟢 | internal (ResourceEntry.rate_limit) | `crates/zeroship-bundle/src/rule.rs` | — | `crates/zeroship-bundle/src/rule.rs` | 4 scopes; rpm→rps ceil. |
+| Cors (per-rule CORS) | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | — | Exact origins only (v1). |
+| RedirectAction / StaticAction | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | — | At most one of redirect/rewrite/static. |
+| AuthConfig + ScopeDef (declared scopes) | 🟢 | internal (manifest.auth.scopes) | `crates/zeroship-bundle/src/manifest.rs` | — | `crates/zeroship-bundle/tests/manifest_test.rs` | Format-validated; collision check in control. |
+| required_scopes on ResourceEntry | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | `crates/zeroship-bundle/src/rule.rs` | Union along chain; OIDC scopes reserved. |
+| AssetEntry + AssetVariant | 🟢 | internal (manifest.assets) | `crates/zeroship-bundle/src/asset.rs` | — | — | br/gzip variants only. |
+| runtime_assets + asset_version | 🟡 | internal (manifest.runtime_assets) | `crates/zeroship-bundle/src/manifest.rs` | — | — | Wire+gateway ship; env.assets.* not registered. |
+| sourcemaps map | 🟢 | internal (manifest.sourcemaps) | `crates/zeroship-bundle/src/manifest.rs` | — | `crates/zeroship-bundle/src/unpack.rs` | Sourcemaps are first-class blobs. |
+| schemas map (JSONSchema refs) | 🟢 | internal (manifest.schemas) | `crates/zeroship-bundle/src/manifest.rs` | — | — | sha256: ref format validated. |
+| aliases map (wire-id stability) | 🟢 | internal (manifest.aliases) | `crates/zeroship-bundle/src/manifest.rs` | — | — | Gateway ignores; vite-plugin not yet writing it. |
+| transformer field | 🟢 | internal (manifest.transformer) | `crates/zeroship-bundle/src/manifest.rs` | `docs/reference/zship.md` | — | json (default) / superjson. |
+| ManifestMetadata (compiler + built_at) | 🟢 | internal (manifest.metadata) | `crates/zeroship-bundle/src/manifest.rs` | — | — | built_at required by ingest. |
+| ManifestExports + HandlerEntry | ⚫ | internal (manifest.exports) | `crates/zeroship-bundle/src/manifest.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/tests/manifest_test.rs` | Deprecated Stage 5c; runtime no longer reads. |
+| deploy_hash computation | 🟢 | internal (ingest) | `crates/zeroship-bundle/src/unpack.rs` | `docs/reference/zship.md` | `crates/zeroship-bundle/src/unpack.rs` | Canonical key-sorted, deploy_hash omitted. |
+| ingest() — streaming ingestion | 🟢 | internal (control deploy) | `crates/zeroship-bundle/src/unpack.rs` | `docs/architecture/blob-store.md` | `crates/zeroship-control/tests/deploy_http_test.rs` | O(64 KiB) peak; asserts all hashes present. |
+| Ingest limits (size/count caps) | 🟢 | internal (limits.rs) | `crates/zeroship-bundle/src/limits.rs` | `docs/reference/zship.md` | — | 256MB/256MB/1MB/16MB/10000; zip-bomb defense. |
+| BlobStore trait | 🟢 | internal | `crates/zeroship-bundle/src/blob.rs` | `docs/architecture/blob-store.md` | `crates/zeroship-bundle/tests/blob_test.rs` | async_trait(?Send); put_blob_stream idempotent. |
+| LocalDiskBlobStore | 🟢 | internal (all 3 services) | `crates/zeroship-bundle/src/blob.rs` | `docs/architecture/blob-store.md` | `crates/zeroship-bundle/tests/blob_test.rs` | Only backend; disk loss irrecoverable. |
+| S3BlobStore / CachedBlobStore | 🔵 | internal | `crates/zeroship-bundle/src/blob.rs` | `docs/architecture/blob-store.md` | — | Comment-referenced only; no impl. |
+| sha256_hex() / validate_hash_format() | 🟢 | internal | `crates/zeroship-bundle/src/blob.rs` | — | `crates/zeroship-bundle/tests/blob_test.rs` | pub re-exported. |
+| BundleStore trait + LocalFs (legacy VFS) | 🟡 | internal (plugin-storage) | `crates/zeroship-bundle/src/store.rs` | — | `crates/zeroship-bundle/tests/store_test.rs` | Predates BlobStore; blocking std::fs; no remote. |
+| CLI deploy command | 🟢 | `zeroship deploy` (path/app/control from `zeroship.jsonc`; flags override) | `crates/zeroship-cli/src/main.rs` | `docs/reference/project-config.md` | — | curl wrapper; token 3-priority chain; splices an auto-created app id back into the file. |
+| CLI migrate command | 🟢 | `zeroship migrate` (posts `<migrations.out>/migrations.ir.json`) | `crates/zeroship-cli/src/migrate.rs` | `docs/reference/project-config.md` | — | Same token chain; positional path overrides; no compiled default path. |
+| middleware list on ResourceEntry | 🟡 | internal | `crates/zeroship-bundle/src/rule.rs` | — | — | Wire+compile ship; dispatch target not implemented. |
+| idempotent / idempotency_ttl_hours | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | `crates/zeroship-gateway/src/idempotency.rs` | TTL [1,168]; gateway implements dedup. |
+| max_input_bytes on ResourceEntry | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | — | Gateway enforces. |
+| csrf_origins on ResourceEntry | 🟢 | internal | `crates/zeroship-bundle/src/rule.rs` | — | — | Intersection merge along chain. |
 
 ---
 
@@ -854,33 +854,33 @@ snapshots are shared across threads via a process-wide RwLock.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| HTTP dispatch endpoint | 🟢 | POST /dispatch/{app_id} | `crates/worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | 4 MiB body cap; Bearer worker_key. |
-| Streaming (SSE/ReadableStream) forwarding | 🟢 | internal | `crates/worker/src/handler.rs` | — | — | Waker-based mpsc; no busy-poll. |
-| WebSocket upgrade via dispatch endpoint | ⚫ | HTTP endpoint (unreachable) | `crates/worker/src/handler.rs` | — | — | Returns 500; gateway uses separate WS path. |
-| Per-thread V8 isolate LRU cache | 🟢 | internal | `crates/worker/src/cache.rs` | `AGENTS.md` | `tests/e2e_platform.sh` | Thread-local; default 200; abort fan-out on evict. |
-| On-demand app loading (cold start) | 🟢 | internal (cache miss) | `crates/worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | env committed before isolate. |
-| Process-wide version poller | 🟢 | internal | `crates/worker/src/sync.rs` | `docs/architecture/distributed.md` | — | Single task; GCs SharedEnvs. |
-| Per-thread reconcile loop | 🟢 | internal | `crates/worker/src/sync.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | env refresh + isolate swap; startup jitter. |
-| Env-only isolate rotation (SEC-7) | 🟢 | internal | `crates/worker/src/sync.rs` | — | `crates/worker/src/sync.rs` | env_version bump → isolate swap. |
-| Process-wide env snapshot cache | 🟢 | internal | `crates/worker/src/sync.rs` | — | — | Fail-closed 503 (ENV_UNAVAILABLE). |
-| App kernel namespace wiring | 🟢 | env.db/kv/storage/auth | `crates/worker/src/cache.rs` | `AGENTS.md` | `crates/worker/src/handler.rs` | KV=Redis multi-node; namespaces degrade independently. |
-| Worker gateway authentication | 🟢 | HTTP (gateway-facing) | `crates/worker/src/handler.rs` | — | — | Bearer + ZeroShip-User HMAC; ≥32B key. |
-| ZeroShip-User header forwarding | 🟢 | internal (env.auth.*) | `crates/worker/src/handler.rs` | `docs/reference/auth.md` | — | Requires x-request-id; missing → no-user. |
-| Wall-clock timeout with cancellation | 🟢 | internal | `crates/worker/src/handler.rs` | `docs/reference/runtime-limits.md` | — | Default 30s; CancelFlag + pump notify. |
-| Per-app runtime limits enforcement | 🟢 | internal | `crates/worker/src/cache.rs` | `docs/reference/runtime-limits.md` | — | Limits change triggers reload. |
-| In-flight request abort on LRU eviction | 🟢 | internal | `crates/worker/src/cache.rs` | — | — | Synchronous abort before drop. |
-| App console log capture + /logs endpoint | 🟢 | GET /logs/{app_id} | `crates/worker/src/logs.rs` | — | `crates/worker/src/handler.rs` | Ring buffer 1000 lines; no persistence. |
-| Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/worker/src/metrics.rs` | — | — | 13 counters; no auth. |
-| Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
-| Config validation dry-run | 🟢 | --check-config [--format] | `crates/worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
-| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_WORKER_KEY / ... | `crates/core/src/config/secrets.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
-| Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/worker/src/main.rs` | — | — | Stale socket removed at startup. |
-| Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/worker/src/main.rs` | — | — | 0 skips the drain and drops in-flight work at once; use a large value to wait. |
-| mimalloc global allocator | 🟢 | internal | `crates/worker/src/main.rs` | — | — | #[global_allocator]. |
-| Deleted-app cleanup | 🟢 | internal | `crates/worker/src/sync.rs` | — | — | reconcile evict + version-poller env GC. |
-| LoadedMeta tracking | 🟢 | internal | `crates/worker/src/cache.rs` | — | — | deploy hash + env version per isolate. |
-| Per-thread cyper HTTP client | 🟢 | internal | `crates/worker/src/sync.rs` | — | — | SendWrapper; 5s control timeout. |
-| SSG-only deploy handling | 🟢 | internal | `crates/worker/src/sync.rs` | — | — | Evicts/skips missing worker hash. |
+| HTTP dispatch endpoint | 🟢 | POST /dispatch/{app_id} | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | 4 MiB body cap; Bearer worker_key. |
+| Streaming (SSE/ReadableStream) forwarding | 🟢 | internal | `crates/zeroship-worker/src/handler.rs` | — | — | Waker-based mpsc; no busy-poll. |
+| WebSocket upgrade via dispatch endpoint | ⚫ | HTTP endpoint (unreachable) | `crates/zeroship-worker/src/handler.rs` | — | — | Returns 500; gateway uses separate WS path. |
+| Per-thread V8 isolate LRU cache | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | `AGENTS.md` | `tests/e2e_platform.sh` | Thread-local; default 200; abort fan-out on evict. |
+| On-demand app loading (cold start) | 🟢 | internal (cache miss) | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | env committed before isolate. |
+| Process-wide version poller | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | `docs/architecture/distributed.md` | — | Single task; GCs SharedEnvs. |
+| Per-thread reconcile loop | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | env refresh + isolate swap; startup jitter. |
+| Env-only isolate rotation (SEC-7) | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | `crates/zeroship-worker/src/sync.rs` | env_version bump → isolate swap. |
+| Process-wide env snapshot cache | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | — | Fail-closed 503 (ENV_UNAVAILABLE). |
+| App kernel namespace wiring | 🟢 | env.db/kv/storage/auth | `crates/zeroship-worker/src/cache.rs` | `AGENTS.md` | `crates/zeroship-worker/src/handler.rs` | KV=Redis multi-node; namespaces degrade independently. |
+| Worker gateway authentication | 🟢 | HTTP (gateway-facing) | `crates/zeroship-worker/src/handler.rs` | — | — | Bearer + ZeroShip-User HMAC; ≥32B key. |
+| ZeroShip-User header forwarding | 🟢 | internal (env.auth.*) | `crates/zeroship-worker/src/handler.rs` | `docs/reference/auth.md` | — | Requires x-request-id; missing → no-user. |
+| Wall-clock timeout with cancellation | 🟢 | internal | `crates/zeroship-worker/src/handler.rs` | `docs/reference/runtime-limits.md` | — | Default 30s; CancelFlag + pump notify. |
+| Per-app runtime limits enforcement | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | `docs/reference/runtime-limits.md` | — | Limits change triggers reload. |
+| In-flight request abort on LRU eviction | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | — | — | Synchronous abort before drop. |
+| App console log capture + /logs endpoint | 🟢 | GET /logs/{app_id} | `crates/zeroship-worker/src/logs.rs` | — | `crates/zeroship-worker/src/handler.rs` | Ring buffer 1000 lines; no persistence. |
+| Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/zeroship-worker/src/metrics.rs` | — | — | 13 counters; no auth. |
+| Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
+| Config validation dry-run | 🟢 | --check-config [--format] | `crates/zeroship-worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
+| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_WORKER_KEY / ... | `crates/zeroship-core/src/config/secrets.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
+| Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/zeroship-worker/src/main.rs` | — | — | Stale socket removed at startup. |
+| Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/zeroship-worker/src/main.rs` | — | — | 0 skips the drain and drops in-flight work at once; use a large value to wait. |
+| mimalloc global allocator | 🟢 | internal | `crates/zeroship-worker/src/main.rs` | — | — | #[global_allocator]. |
+| Deleted-app cleanup | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | — | reconcile evict + version-poller env GC. |
+| LoadedMeta tracking | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | — | — | deploy hash + env version per isolate. |
+| Per-thread cyper HTTP client | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | — | SendWrapper; 5s control timeout. |
+| SSG-only deploy handling | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | — | Evicts/skips missing worker hash. |
 
 ---
 
@@ -915,32 +915,32 @@ observability, and OIDC/OAuth protocol primitives.
 | Redis cluster client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
 | Redis connection pool | 🟢 | internal | `libs/compio-redis/src/pool.rs` | — | `libs/compio-redis/src/pool.rs` | LIFO; test-on-borrow; no wait queue. |
 | Redis — no TLS | 🔵 | internal | `libs/compio-redis/src/lib.rs` | — | — | rediss:// not implemented; MITM possible. |
-| typed_id — UUIDv7 base62 IDs | 🟢 | internal | `crates/core/src/typed_id.rs` | — | `crates/core/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |
-| Wire types — AppRecord/RouteEntry/... | 🟢 | internal | `crates/core/src/types.rs` | `docs/architecture/gateway-routing.md` | — | env_version monotonic counter. |
-| Wire types — UsageReport/AppUsage/ControlEvent | 🟢 | internal | `crates/core/src/types.rs` | — | — | CommonError enum. |
-| AppRuntimeLimits | 🟢 | internal | `crates/core/src/types.rs` | `docs/reference/runtime-limits.md` | — | Defaults None. |
-| Crypto — AES-256-GCM secrets at rest | 🟢 | internal (plugin-db EnvStore) | `crates/core/src/crypto.rs` | — | `crates/core/src/crypto.rs` | Versioned AAD; per-app HKDF not yet done. |
-| Auth utils — constant-time key compare | 🟢 | internal | `crates/core/src/auth/mod.rs` | — | `crates/core/src/auth/mod.rs` | Constant iteration count. |
-| Auth utils — HMAC-SHA256 sign/verify | 🟢 | internal | `crates/core/src/auth/mod.rs` | — | `crates/core/src/auth/mod.rs` | RFC 4231 KAT. |
-| Auth utils — ZeroShip-User header sign/verify | 🟢 | internal | `crates/core/src/auth/mod.rs` | `docs/reference/auth.md` | `crates/core/src/auth/mod.rs` | 60s age, 5s skew, per-request bind. |
-| Auth utils — API key hash / validate | 🟢 | internal | `crates/core/src/auth/mod.rs` | — | `crates/core/src/auth/mod.rs` | SHA-256; constant-time. |
-| Auth utils — pairwise subject derivation | 🟢 | internal | `crates/core/src/auth/mod.rs` | `docs/reference/auth.md` | `crates/core/src/auth/mod.rs` | pws_; dedicated salt; UUID normalize. |
-| Auth utils — is_pairwise_subject check | 🟢 | internal | `crates/core/src/auth/mod.rs` | — | `crates/core/src/auth/mod.rs` | Shape check only, not a forgery gate. |
-| Auth utils — trusted OAuth client resolution | 🟢 | internal | `crates/core/src/auth/trusted_clients.rs` | — | — | Empty default (fail-closed). |
-| Config — FileConfig TOML overlay | 🟢 | internal (bootstrap_or_exit) | `crates/core/src/config/file.rs`, `source.rs`, `bootstrap.rs` | — | — | deny_unknown_fields; XDG discovery. |
-| Config — secret reference system | 🟡 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | env/file resolve; vault/awssm parse-but-unresolvable. |
-| Config - secret strength validation | green | internal | `crates/core/src/config/secrets.rs` | - | `crates/core/src/config/secrets.rs` | At least 32 bytes; enforced in every environment. |
-| Config — loopback URL check | 🟢 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | Literal-only; no DNS. |
-| Config — bootstrap_or_exit | 🟢 | internal | `crates/core/src/config/bootstrap.rs` | — | — | CheckConfigReport for --check-config. |
-| Observability — tracing subscriber init | 🟢 | ZEROSHIP_OBSERVABILITY_LOG_FORMAT / --observability-log-format | `crates/core/src/observability.rs` | — | `crates/core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |
-| OIDC — JWKS cache + ID token verifier | 🟢 | internal (gateway/control RP) | `crates/core/src/oidc_verify.rs` | `docs/reference/auth.md` | `crates/core/src/oidc_verify.rs` (inline `mod tests`) | 5-min TTL; stale-on-error; RS/ES algos. |
-| OIDC — BCL logout_token verifier | 🟢 | internal (auth BCL) | `crates/core/src/logout_token.rs` | — | — | events claim; nonce-absent. |
+| typed_id — UUIDv7 base62 IDs | 🟢 | internal | `crates/zeroship-core/src/typed_id.rs` | — | `crates/zeroship-core/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |
+| Wire types — AppRecord/RouteEntry/... | 🟢 | internal | `crates/zeroship-core/src/types.rs` | `docs/architecture/gateway-routing.md` | — | env_version monotonic counter. |
+| Wire types — UsageReport/AppUsage/ControlEvent | 🟢 | internal | `crates/zeroship-core/src/types.rs` | — | — | CommonError enum. |
+| AppRuntimeLimits | 🟢 | internal | `crates/zeroship-core/src/types.rs` | `docs/reference/runtime-limits.md` | — | Defaults None. |
+| Crypto — AES-256-GCM secrets at rest | 🟢 | internal (plugin-db EnvStore) | `crates/zeroship-core/src/crypto.rs` | — | `crates/zeroship-core/src/crypto.rs` | Versioned AAD; per-app HKDF not yet done. |
+| Auth utils — constant-time key compare | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | — | `crates/zeroship-core/src/auth/mod.rs` | Constant iteration count. |
+| Auth utils — HMAC-SHA256 sign/verify | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | — | `crates/zeroship-core/src/auth/mod.rs` | RFC 4231 KAT. |
+| Auth utils — ZeroShip-User header sign/verify | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | `docs/reference/auth.md` | `crates/zeroship-core/src/auth/mod.rs` | 60s age, 5s skew, per-request bind. |
+| Auth utils — API key hash / validate | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | — | `crates/zeroship-core/src/auth/mod.rs` | SHA-256; constant-time. |
+| Auth utils — pairwise subject derivation | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | `docs/reference/auth.md` | `crates/zeroship-core/src/auth/mod.rs` | pws_; dedicated salt; UUID normalize. |
+| Auth utils — is_pairwise_subject check | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | — | `crates/zeroship-core/src/auth/mod.rs` | Shape check only, not a forgery gate. |
+| Auth utils — trusted OAuth client resolution | 🟢 | internal | `crates/zeroship-core/src/auth/trusted_clients.rs` | — | — | Empty default (fail-closed). |
+| Config — FileConfig TOML overlay | 🟢 | internal (bootstrap_or_exit) | `crates/zeroship-core/src/config/file.rs`, `source.rs`, `bootstrap.rs` | — | — | deny_unknown_fields; XDG discovery. |
+| Config — secret reference system | 🟡 | internal | `crates/zeroship-core/src/config/secrets.rs` | — | `crates/zeroship-core/src/config/secrets.rs` | env/file resolve; vault/awssm parse-but-unresolvable. |
+| Config - secret strength validation | green | internal | `crates/zeroship-core/src/config/secrets.rs` | - | `crates/zeroship-core/src/config/secrets.rs` | At least 32 bytes; enforced in every environment. |
+| Config — loopback URL check | 🟢 | internal | `crates/zeroship-core/src/config/secrets.rs` | — | `crates/zeroship-core/src/config/secrets.rs` | Literal-only; no DNS. |
+| Config — bootstrap_or_exit | 🟢 | internal | `crates/zeroship-core/src/config/bootstrap.rs` | — | — | CheckConfigReport for --check-config. |
+| Observability — tracing subscriber init | 🟢 | ZEROSHIP_OBSERVABILITY_LOG_FORMAT / --observability-log-format | `crates/zeroship-core/src/observability.rs` | — | `crates/zeroship-core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |
+| OIDC — JWKS cache + ID token verifier | 🟢 | internal (gateway/control RP) | `crates/zeroship-core/src/oidc_verify.rs` | `docs/reference/auth.md` | `crates/zeroship-core/src/oidc_verify.rs` (inline `mod tests`) | 5-min TTL; stale-on-error; RS/ES algos. |
+| OIDC — BCL logout_token verifier | 🟢 | internal (auth BCL) | `crates/zeroship-core/src/logout_token.rs` | — | — | events claim; nonce-absent. |
 | DPoP — RFC 9449 proof verifier | ⚫ | none | — | — | — | Deleted with the gateway DPoP arm (P5e); the closed-world OP omits DPoP. |
-| PKCE — RFC 7636 verifier + S256 | 🟢 | internal | `crates/core/src/pkce.rs` | — | — | 43-char verifier. |
-| Native OP client + LRU cache | 🟢 | internal (gateway/control authz) | `crates/gateway/src/op_client.rs`, `crates/control/src/authz_guard.rs` | — | `crates/gateway/tests/op_breaker_test.rs` | SHA-256(token) cache key; 5-min TTL. |
-| Wrapper revocation — per-app family marker | 🟢 | internal (gateway/auth signout) | `crates/authz/src/wrapper_revocation.rs` | `docs/reference/auth.md` | — | Lives in `zeroship-authz` since the crate-boundary reorg, not `core`. Per-app scope; 24h retention. |
-| SuperJSON — wire-compatible encode/decode | 🟢 | internal (RPC) | `crates/core/src/superjson.rs` | `docs/reference/rpc.md` | `crates/core/tests/superjson_test.rs` | npm superjson@2 wire; 17 fixtures. |
-| Preview port allowlist / denylist | 🟢 | internal (sandbox) | `crates/core/src/preview_ports.rs` | — | `crates/core/src/preview_ports.rs` | HARDCODED_DENY + DEFAULT_DENY; shared. |
+| PKCE — RFC 7636 verifier + S256 | 🟢 | internal | `crates/zeroship-core/src/pkce.rs` | — | — | 43-char verifier. |
+| Native OP client + LRU cache | 🟢 | internal (gateway/control authz) | `crates/zeroship-gateway/src/op_client.rs`, `crates/zeroship-control/src/authz_guard.rs` | — | `crates/zeroship-gateway/tests/op_breaker_test.rs` | SHA-256(token) cache key; 5-min TTL. |
+| Wrapper revocation — per-app family marker | 🟢 | internal (gateway/auth signout) | `crates/zeroship-authz/src/wrapper_revocation.rs` | `docs/reference/auth.md` | — | Lives in `zeroship-authz` since the crate-boundary reorg, not `core`. Per-app scope; 24h retention. |
+| SuperJSON — wire-compatible encode/decode | 🟢 | internal (RPC) | `crates/zeroship-core/src/superjson.rs` | `docs/reference/rpc.md` | `crates/zeroship-core/tests/superjson_test.rs` | npm superjson@2 wire; 17 fixtures. |
+| Preview port allowlist / denylist | 🟢 | internal (sandbox) | `crates/zeroship-core/src/preview_ports.rs` | — | `crates/zeroship-core/src/preview_ports.rs` | HARDCODED_DENY + DEFAULT_DENY; shared. |
 
 ---
 
@@ -954,15 +954,15 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| zeroship serve | 🟢 | `zeroship serve <file> [--port] [...]` | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | `examples/http-handler.js` | .js path only; registers db/storage/auth/kv. |
-| zeroship deploy | 🟢 | `zeroship deploy [path.zship] [--app] [--control] [--env] [--config]` | `crates/cli/src/main.rs` | `docs/reference/project-config.md` | — | curl POST; prints deploy_hash and the provenance of app/control. Does NOT apply migrations. |
-| zeroship migrate | 🟢 | `zeroship migrate [migrations.ir.json] [--app] [--control] [--env] [--config] [--yes]` | `crates/cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `tests/e2e_db_app_end_to_end.sh` | POSTs to control, which forwards to migrated; required after deploy for env.db apps. `"protected": true` needs `--yes`. |
-| zeroship login (Device Grant) | 🟢 | `zeroship login [--auth-url]` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | RFC 8628; token.json mode 0600. |
-| zeroship logout | 🟢 | `zeroship logout` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | /oauth2/revoke; deletes creds. |
-| zeroship whoami | 🟢 | `zeroship whoami` | `crates/cli/src/auth.rs` | — | `crates/cli/tests/login_test.rs` | /userinfo; transparent refresh. |
-| zeroship secret set/list/rm | 🟢 | `zeroship secret set KEY=value \| list \| rm KEY` | `crates/cli/src/secrets.rs` | — | — | ls/del aliases; splits on first '='. |
-| zeroship var set/list/rm | 🟢 | `zeroship var set KEY=value \| list \| rm KEY` | `crates/cli/src/secrets.rs` | — | — | /vars endpoint. |
-| Bearer token resolution | 🟢 | internal | `crates/cli/src/main.rs` | `docs/runbooks/local-dev.md` | `crates/cli/src/main.rs` | flag > env > saved creds. |
+| zeroship serve | 🟢 | `zeroship serve <file> [--port] [...]` | `crates/zeroship-cli/src/main.rs` | `docs/runbooks/local-dev.md` | `examples/http-handler.js` | .js path only; registers db/storage/auth/kv. |
+| zeroship deploy | 🟢 | `zeroship deploy [path.zship] [--app] [--control] [--env] [--config]` | `crates/zeroship-cli/src/main.rs` | `docs/reference/project-config.md` | — | curl POST; prints deploy_hash and the provenance of app/control. Does NOT apply migrations. |
+| zeroship migrate | 🟢 | `zeroship migrate [migrations.ir.json] [--app] [--control] [--env] [--config] [--yes]` | `crates/zeroship-cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `tests/e2e_db_app_end_to_end.sh` | POSTs to control, which forwards to migrated; required after deploy for env.db apps. `"protected": true` needs `--yes`. |
+| zeroship login (Device Grant) | 🟢 | `zeroship login [--auth-url]` | `crates/zeroship-cli/src/auth.rs` | — | `crates/zeroship-cli/tests/login_test.rs` | RFC 8628; token.json mode 0600. |
+| zeroship logout | 🟢 | `zeroship logout` | `crates/zeroship-cli/src/auth.rs` | — | `crates/zeroship-cli/tests/login_test.rs` | /oauth2/revoke; deletes creds. |
+| zeroship whoami | 🟢 | `zeroship whoami` | `crates/zeroship-cli/src/auth.rs` | — | `crates/zeroship-cli/tests/login_test.rs` | /userinfo; transparent refresh. |
+| zeroship secret set/list/rm | 🟢 | `zeroship secret set KEY=value \| list \| rm KEY` | `crates/zeroship-cli/src/secrets.rs` | — | — | ls/del aliases; splits on first '='. |
+| zeroship var set/list/rm | 🟢 | `zeroship var set KEY=value \| list \| rm KEY` | `crates/zeroship-cli/src/secrets.rs` | — | — | /vars endpoint. |
+| Bearer token resolution | 🟢 | internal | `crates/zeroship-cli/src/main.rs` | `docs/runbooks/local-dev.md` | `crates/zeroship-cli/src/main.rs` | flag > env > saved creds. |
 | create-zeroship-app scaffolder | 🟢 | `npm create zeroship-app <name>` | `sdks/create-zeroship-app/bin/create.js` | — | `sdks/create-zeroship-app/template/` | _gitignore → .gitignore; private registry. |
 | create-zeroship-app template | 🟢 | @zeroship/vite-plugin + rpc/server | `sdks/create-zeroship-app/template/src/index.ts` | — | `sdks/create-zeroship-app/template/` | Notes CRUD + storage + kv + React. |
 | Vite plugin — zeroship() factory | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/vite.config.ts` | Five options: devServerPort, devAuth, configPath, env, config. Build shape lives in `zeroship.jsonc`. |
@@ -983,13 +983,13 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Vite plugin — static mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input then deleted. |
 | Vite plugin — client-manifest virtual module | 🟢 | `virtual:zeroship/client-manifest` | `sdks/vite-plugin/src/build.ts` | — | — | Graceful {} fallback. |
 | Vite plugin — dev-bootstrap | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | — | — | ModuleRunner; deps reoptimize rebuild. |
-| CLI serve — dev KV backend (redb/Redis) | 🟢 | ZEROSHIP_KV_URL / ZEROSHIP_KV_PATH | `crates/cli/src/main.rs` | — | — | URL→Redis, else redb. |
-| CLI serve — dev storage (LocalFs) | 🟢 | ZEROSHIP_STORAGE_ROOT | `crates/cli/src/main.rs` | — | — | Default .zeroship/storage. |
-| CLI serve — heap limit configuration | 🟢 | --heap-limit-mb / ZEROSHIP_HEAP_LIMIT_MB | `crates/cli/src/main.rs` | `docs/reference/runtime-limits.md` | — | Dev default 512MB vs prod 128MB. |
-| zeroship build | ⚫ | (removed) | `crates/cli/src/main.rs` | — | — | Build path is @zeroship/vite-plugin. |
-| zeroship inspect | ⚫ | (removed) | `crates/cli/src/main.rs` | — | — | Removed in artifact-layout redesign. |
-| zeroship config show / path | 🟢 | `zeroship config show [--env] [--config]` | `crates/cli/src/project_config/mod.rs` | `docs/reference/project-config.md` | `tests/project_config_gate.sh` | Canonical JSON of the resolved file; byte-compared against the TS reader's dump. |
-| zeroship.jsonc reader (CLI side) | 🟢 | `--config=<path>` / `ZEROSHIP_CONFIG` / auto-discovery | `crates/cli/src/project_config/` | `docs/reference/project-config.md` | `crates/cli/src/project_config/tests.rs` | No defaults on this side: a key the file omits is an error naming it. Writeback splices the root `app` only; `login` reads `control` softly. |
+| CLI serve — dev KV backend (redb/Redis) | 🟢 | ZEROSHIP_KV_URL / ZEROSHIP_KV_PATH | `crates/zeroship-cli/src/main.rs` | — | — | URL→Redis, else redb. |
+| CLI serve — dev storage (LocalFs) | 🟢 | ZEROSHIP_STORAGE_ROOT | `crates/zeroship-cli/src/main.rs` | — | — | Default .zeroship/storage. |
+| CLI serve — heap limit configuration | 🟢 | --heap-limit-mb / ZEROSHIP_HEAP_LIMIT_MB | `crates/zeroship-cli/src/main.rs` | `docs/reference/runtime-limits.md` | — | Dev default 512MB vs prod 128MB. |
+| zeroship build | ⚫ | (removed) | `crates/zeroship-cli/src/main.rs` | — | — | Build path is @zeroship/vite-plugin. |
+| zeroship inspect | ⚫ | (removed) | `crates/zeroship-cli/src/main.rs` | — | — | Removed in artifact-layout redesign. |
+| zeroship config show / path | 🟢 | `zeroship config show [--env] [--config]` | `crates/zeroship-cli/src/project_config/mod.rs` | `docs/reference/project-config.md` | `tests/project_config_gate.sh` | Canonical JSON of the resolved file; byte-compared against the TS reader's dump. |
+| zeroship.jsonc reader (CLI side) | 🟢 | `--config=<path>` / `ZEROSHIP_CONFIG` / auto-discovery | `crates/zeroship-cli/src/project_config/` | `docs/reference/project-config.md` | `crates/zeroship-cli/src/project_config/tests.rs` | No defaults on this side: a key the file omits is an error naming it. Writeback splices the root `app` only; `login` reads `control` softly. |
 | subscription procedures | 🟡 | `subscription(handler, config)` | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Server discovered; client UNIMPLEMENTED. |
 
 ---
@@ -1118,7 +1118,7 @@ recount and run low):
 
 **Metering & billing is the largest cluster of incomplete work:**
 - ⚫ `env.meter.*` native primitive - deliberately absent, not planned: AGENTS.md and `docs/reference/billing-metering.md` both state the billing signal is platform-measured, so no `env.meter` will be registered.
-- (resolved) Metering aggregation is no longer a stub - `crates/control/src/metering/mod.rs` + `metering/provider/` implement stream ingest and idempotent period snapshots.
+- (resolved) Metering aggregation is no longer a stub - `crates/zeroship-control/src/metering/mod.rs` + `metering/provider/` implement stream ingest and idempotent period snapshots.
 - 🟡 Worker → control usage pipeline — `POST /internal/usage` is implemented but **no worker ever calls it**; usage read returns empty maps in real deploys.
 - 🟠 Usage history snapshots (`app_usage_history`) — table exists; no code reads or writes it.
 - 🟡 Platform fee enforcement — the application fee is set by the SDK and read from the Stripe payload, never re-computed server-side.
@@ -1144,7 +1144,7 @@ recount and run low):
 - 🟡 `subscription()` procedures — transport works and is tested, but the public RPC client proxy is **UNIMPLEMENTED** (Vite stub fails at runtime); use `stream()` for shipped live feeds.
 
 **Other notable dead / partial:**
-- (gone) `crates/platform` (`zeroship-platform`) - the ~5,800-LOC tokio + axum + sqlx monolith that held a complete-but-unrunnable metering + billing + spending-limit implementation was **DELETED** from the tree (`chore(billing): PR7 — delete dead crates/platform tokio monolith`). Nothing in this repo depends on it and no path under `crates/platform` resolves; the live metering/billing implementation is `crates/metering` + `crates/control/src/metering/`.
+- (gone) `crates/platform` (`zeroship-platform`) - the ~5,800-LOC tokio + axum + sqlx monolith that held a complete-but-unrunnable metering + billing + spending-limit implementation was **DELETED** from the tree (`chore(billing): PR7 — delete dead crates/platform tokio monolith`). Nothing in this repo depends on it and no path under `crates/platform` resolves; the live metering/billing implementation is `crates/metering` + `crates/zeroship-control/src/metering/`.
 - ⚫ `zeroship build` / `zeroship inspect` CLI commands — removed in the artifact-layout redesign (build path is `@zeroship/vite-plugin`).
 - ⚫ `manifest.exports.schema` / `ManifestExports.handlers` — deprecated Stage 5c; kept on the wire for archive upgrade only.
 - ⚫ Worker WebSocket-upgrade-via-/dispatch — returns 500 (gateway uses a separate WS path).

@@ -80,7 +80,7 @@ PG: `TEXT`. SQLite: `TEXT`. No FK constraint to a users table — actors can be 
 
 ## 3. Reserved names
 
-`validate_field_name` (in `crates/plugin-db/src/query.rs`) refuses any creator-defined field whose name is in the system-field list. The error:
+`validate_field_name` (in `crates/zeroship-plugin-db/src/query.rs`) refuses any creator-defined field whose name is in the system-field list. The error:
 
 ```rust
 DbError::ValidationFailed {
@@ -283,7 +283,7 @@ This is a platform-wide feature; sequenced as its own phase (call it **P7** post
 ### PR 1 — Schema DSL + reserved-name validator + Cargo
 
 - `sdks/db/src/types.ts`: add `t.id()`, `t.timestamp()`, `t.actor()`, the `auto_now()` / `auto_now_on_update()` modifiers. Refuse field names colliding with `SYSTEM_FIELD_NAMES`.
-- `crates/plugin-db/src/query.rs`: add `SYSTEM_FIELD_NAMES` constant; `validate_field_name` rejects them.
+- `crates/zeroship-plugin-db/src/query.rs`: add `SYSTEM_FIELD_NAMES` constant; `validate_field_name` rejects them.
 - `Row<S>` type inference includes system fields automatically.
 - Gate: schema-validation tests refuse `t.string()` named `id`, `created_at`, etc.
 

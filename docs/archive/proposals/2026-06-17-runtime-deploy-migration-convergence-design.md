@@ -15,16 +15,16 @@ Today a creator app's Postgres schema is mutated in **two** places by **two** en
 know about each other:
 
 - **At runtime**, `db.registerModel(...)` (the four-phase pipeline in
-  `crates/plugin-db/src/register_model/{mod,bootstrap,plan,validate,apply}.rs`) introspects the live
+  `crates/zeroship-plugin-db/src/register_model/{mod,bootstrap,plan,validate,apply}.rs`) introspects the live
   schema, diffs it against the app's declared `export default { schema }`, classifies each change
   (Additive / Compatible / Destructive), **refuses destructive**, and **applies the rest as DDL** —
   on every cold start, under the privileged platform/login role, journaling into
   `"<app_id>".__zeroship_migrations`, serialised by `pg_advisory_lock(hashtext("<app_id>:register_model"))`.
 
-- **At deploy**, nothing. `POST /api/apps/{id}/deploy` (`crates/control/src/api.rs:394-620`) ingests the
+- **At deploy**, nothing. `POST /api/apps/{id}/deploy` (`crates/zeroship-control/src/api.rs:394-620`) ingests the
   `.zship`, stores blobs, commits the manifest + routes — and never touches the database schema. The
   `zeroship-migrate` crate (the security-first versioned engine) exists but is **depended on by nothing**
-  (`crates/control/Cargo.toml` has no `zeroship-migrate`).
+  (`crates/zeroship-control/Cargo.toml` has no `zeroship-migrate`).
 
 This is the wrong shape:
 
@@ -33,7 +33,7 @@ This is the wrong shape:
    operation; doing it as a side-effect of the first request is a consistency *and* security liability.
 2. **Two diff engines, two type maps.** `register_model` and `zeroship-migrate`'s declarative differ
    (`crates/zeroship-migrate/src/declarative.rs`) consume the *same* descriptor JSON and **duplicate**
-   the DSL→PG type map (`declarative.rs:208-229` mirrors `crates/plugin-db/src/query.rs:2043` `def_to_pg_type`
+   the DSL→PG type map (`declarative.rs:208-229` mirrors `crates/zeroship-plugin-db/src/query.rs:2043` `def_to_pg_type`
    + `query.rs:1827` `def_to_column_type_for_dialect`; `declarative.rs:242-253` mirrors `query.rs:856`
    `build_system_field_columns`). Divergence today is a latent fidelity bug; after convergence it becomes a
    **verify-vs-apply mismatch** (the engine applies one shape, the runtime verifies another) — so the
@@ -56,17 +56,17 @@ lock, one type map.
   `build_create_schema` → `CREATE SCHEMA IF NOT EXISTS "<app_id>"`; every name is fully schema-qualified
   (`query.rs:620` `"{schema}"."{table}"`), so there is **no `search_path` reliance**.
 - Per-app role `app_<app_id>_role`, `NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT`
-  (`crates/plugin-db/src/auth/bootstrap.rs` `create_role_if_missing`, the `APP_ROLE_TEMPLATE` arm);
+  (`crates/zeroship-plugin-db/src/auth/bootstrap.rs` `create_role_if_missing`, the `APP_ROLE_TEMPLATE` arm);
   granted CREATE-on-own-schema + DML + `ALTER DEFAULT PRIVILEGES`; applied via `SET LOCAL ROLE` for
-  CRUD/transactions (`crates/plugin-db/src/transaction::apply_per_app_role`). Provisioned today **at
+  CRUD/transactions (`crates/zeroship-plugin-db/src/transaction::apply_per_app_role`). Provisioned today **at
   runtime** inside `register_model` bootstrap (`register_model/bootstrap.rs:209` →
   `crate::auth::bootstrap::ensure_per_app_role`).
 - One shared DB; isolation by **schema + role**, NO RLS.
 - App identity is **server-injected** from the dispatch path → `APP_ID` env → stamped
-  (`crates/worker/src/cache.rs:273`, `crates/runtime/src/core/plugin.rs:225`), and JS overrides are refused.
+  (`crates/zeroship-worker/src/cache.rs:273`, `crates/zeroship-runtime/src/core/plugin.rs:225`), and JS overrides are refused.
 - `register_model` DDL runs under the privileged **platform/login** role; the per-app role is CRUD-only.
 - Plan-stage live introspection exists as `SchemaIntrospect::introspect_schema(app_id)`
-  (`crates/plugin-db/src/backend/postgres.rs:282`, trait at `backend/mod.rs:608`) producing
+  (`crates/zeroship-plugin-db/src/backend/postgres.rs:282`, trait at `backend/mod.rs:608`) producing
   `crate::diff::LiveSchema`, fed to `crate::diff::compute_diff` (`register_model/plan.rs:47,71`). These two
   are exactly what verify-only reuses.
 - Destructive refusal lives in `register_model/validate.rs`: `strict` (default) → `validation_refused`
@@ -105,12 +105,12 @@ lock, one type map.
 - `deploy` (`api.rs:394-620`): stream → tmp → mmap → `deploy::ingest` → blob + manifest + routes +
   per-app OAuth reconcile. **No migration step.**
 - A **single `--db` DSN**. **No `CREATEDB` admin DSN.** **No async-job infra** (only detached crons under
-  `crates/control/src/cron/`).
+  `crates/zeroship-control/src/cron/`).
 - TS client `@zeroship/control` (`sdks/control/src/index.ts`): `ControlClient` with namespaced groups
   (`apps`, `env`, …) on a shared `#fetch`.
 
 ### 2.4 The load-bearing gap nobody flagged: the manifest does not carry the schema
-The `.zship` manifest (`crates/bundle/src/manifest.rs`) carries RPC `schemas` (JSONSchema by sha256,
+The `.zship` manifest (`crates/zeroship-bundle/src/manifest.rs`) carries RPC `schemas` (JSONSchema by sha256,
 `manifest.rs:61-65`) but **not** the DB collection descriptors. Schema discovery happens **at runtime**
 by reading `default.schema` off the loaded entry module (`manifest.rs:120-124, 240-256`; the old
 `schema` *path* field is dead). `installSchema(schema, env.db)` calls `registerModel` per collection
@@ -300,7 +300,7 @@ GET    /api/apps/{id}/migrations          # list journal (net-applied history)
 - **Async status table** (new, control schema):
   `migration_jobs(job_id pk, app_id, kind, status, outcome_json, error, submitted_by, created_at,
   updated_at)`, where `status ∈ {queued, running, approval_required, applied, denied, dry_run_failed,
-  failed}`. A control cron (the existing detached-cron mechanism under `crates/control/src/cron/`) drains
+  failed}`. A control cron (the existing detached-cron mechanism under `crates/zeroship-control/src/cron/`) drains
   `queued` jobs; the poll endpoint reads the row. This is the **minimal** async surface — one table, one
   drainer, no general queue.
 

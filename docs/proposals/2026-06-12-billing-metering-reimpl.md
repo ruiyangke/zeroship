@@ -59,7 +59,7 @@ on it**:
   db/kv/storage/auth). No worker emits a `UsageReport`. (ISS-18)
 - **Transport/sink exists but is trivial:** `UsageReport { worker_id, counters:
   {app_id → AppUsage{requests,cpu_us,wall_us,egress_bytes,ingress_bytes}} }`
-  (`crates/core/src/types.rs`) is POSTed to `control` `/internal/usage`
+  (`crates/zeroship-core/src/types.rs`) is POSTed to `control` `/internal/usage`
   (`internal.rs::report_usage`), which calls `registry.record_usage(app_id,
   resource, delta)` — a raw additive write. **No idempotency** (at-least-once
   retries double-count), **no aggregation / period rollover / pricing /
@@ -228,9 +228,9 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
 ## Implementation plan: PR4–PR7 (build blueprint)
 
 > Implements the FINALIZED DESIGN (locked 2026-06-13). PR1–PR3 already landed:
-> `UsageReport{report_id,sequence,custom}` + `AppUsage.custom` (`crates/core/src/types.rs`),
+> `UsageReport{report_id,sequence,custom}` + `AppUsage.custom` (`crates/zeroship-core/src/types.rs`),
 > the `plugin-meter` producer + compio flush, and the idempotent aggregator
-> (`crates/control/src/metering.rs` — `IngestLedger`, `Metering`, `period_start_unix`,
+> (`crates/zeroship-control/src/metering.rs` — `IngestLedger`, `Metering`, `period_start_unix`,
 > `current_period_totals`) over `usage_aggregates`/`usage_reports_seen` (changeset 0037).
 > Latest changeset = `0037`; new ones start at `0038`.
 >
@@ -255,7 +255,7 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
   `AppVersionInfo.plan_id` stay `String` but now hold a `pln_…` id that must
   exist in the catalog. `runtime_limits_for_plan` (registry.rs:490) is deleted;
   limits come from the catalog row.
-  - **typed_id prefix is NOT yet registered.** `crates/core/src/typed_id.rs`
+  - **typed_id prefix is NOT yet registered.** `crates/zeroship-core/src/typed_id.rs`
     declares prefixes as `pub const` string constants (`USER_PREFIX="usr"`,
     `APP_PREFIX="app"`, `WAKE_PREFIX="wak"`, `APP_OAUTH_CLIENT_PREFIX="oac"`,
     …) and the `all_prefixes`/`*_prefix_is_three_chars` tests enumerate them.
@@ -310,7 +310,7 @@ operator-editable, server-side plan catalog. Per tier: `base_fee_cents`,
 `usage_aggregates`.
 
 #### (a) Files to create/modify
-- **NEW `crates/control/src/pricing.rs`** — ported, unit-pure, DB-free:
+- **NEW `crates/zeroship-control/src/pricing.rs`** — ported, unit-pure, DB-free:
   - `PricingRule::{Flat{rate_cents,per_units}, Tiered{tiers:Vec<PricingTier>}}`
     and `PricingTier{up_to:Option<u64>, rate_cents, per_units}` — ported from
     `crates/platform/src/billing/pricing.rs` (millicents→cents, D3).
@@ -323,14 +323,14 @@ operator-editable, server-side plan catalog. Per tier: `base_fee_cents`,
   - Keep/port existing `pricing.rs` unit tests (unit converted); ADD
     `overage_only_charges_above_included` and
     `included_quota_fully_covers_usage_yields_base_only`.
-- **NEW `crates/control/src/plan_catalog.rs`** — the PG-backed catalog:
+- **NEW `crates/zeroship-control/src/plan_catalog.rs`** — the PG-backed catalog:
   - `struct PlanCatalog { registry: Registry }`.
   - `struct Plan { id: String /* pln_… */, name: String, price: PlanPrice,
     runtime: AppRuntimeLimits, archived: bool }`.
   - `get/list/upsert/archive` (upsert/archive operator/master-key gated). JSON
     columns (`price_model_json`, `included_quota_json`, `runtime_limits_json`)
     deserialize into the pure types.
-- **MODIFY `crates/control/src/registry.rs`**
+- **MODIFY `crates/zeroship-control/src/registry.rs`**
   - DELETE `runtime_limits_for_plan` (~490–513). `get_versions` (~363–399) JOINs
     `plans` and builds `AppRuntimeLimits` from the plan row; missing plan ⇒
     conservative free-tier fallback (worker never gets `None,None,None`).
@@ -345,11 +345,11 @@ operator-editable, server-side plan catalog. Per tier: `base_fee_cents`,
   - DELETE the two doc-comment references to `runtime_limits_for_plan` in
     `registry.rs` callers (`bootstrap_console.rs:9–10,83–85`) so no dangling symbol
     reference remains after the fn is removed.
-- **MODIFY `crates/control/src/bootstrap_console.rs`** — change `CONSOLE_PLAN_ID`
+- **MODIFY `crates/zeroship-control/src/bootstrap_console.rs`** — change `CONSOLE_PLAN_ID`
   (line 85) from `"enterprise"` to the seeded unlimited-tier `pln_…` id, and add a
   `seed_plans()` call ahead of the console-app upsert (see "Seeding + console-app
   FK ordering" below). Update the file's doc comment (lines 8–10, 83–85).
-- **MODIFY `crates/control/src/api.rs`** + route registration: `GET /api/plans`
+- **MODIFY `crates/zeroship-control/src/api.rs`** + route registration: `GET /api/plans`
   (BillingRead), `GET /api/plans/:id`, `PUT/DELETE /api/plans/:id` (master-key /
   BillingWrite on Resource::Any). DELETE has no DB DELETE — it archives
   (`archived=true`) so existing `apps.plan_id` FKs + historical `billing_runs`
@@ -388,7 +388,7 @@ BYPASSRLS). Grant `SELECT,INSERT,UPDATE` to `zeroship_control` (no DELETE —
 archive, never hard-delete, so historical `billing_runs` keep a resolvable plan).
 
 **Seeding + console-app FK ordering (verified against live bootstrap).** The
-console app row is upserted by **`crates/control/src/bootstrap_console.rs`** (the
+console app row is upserted by **`crates/zeroship-control/src/bootstrap_console.rs`** (the
 `INSERT INTO zeroship.apps … ON CONFLICT` at ~line 381), NOT `bootstrap_builder.rs`,
 and it uses the free-text `CONSOLE_PLAN_ID = "enterprise"` const
 (`bootstrap_console.rs:85`). Under the PR4 FK (`apps.plan_id → plans.id`) two
@@ -433,11 +433,11 @@ the pulled `RouteEntry`; gateway throttles (Degrade) or 402s (Block) pre-dispatc
 Hysteresis on recovery.
 
 #### (a) Files to create/modify
-- **MODIFY `crates/core/src/types.rs`** — ADD `enum SpendState { Allow, Warn,
+- **MODIFY `crates/zeroship-core/src/types.rs`** — ADD `enum SpendState { Allow, Warn,
   Degrade, Block }` (snake_case, Default=Allow) — folds the ported `SpendAction`
   (delete it, no alias); ADD `ControlEvent::SpendState { app_id, state }`; ADD
   `#[serde(default)] RouteEntry.spend_state` (update the gateway/worker fixtures).
-- **NEW `crates/control/src/spend.rs`** — PURE
+- **NEW `crates/zeroship-control/src/spend.rs`** — PURE
   `derive_state(spend_cents: u64, limit_cents: u64, &SpendThresholds, prev: SpendState) -> SpendState`.
   `SpendThresholds { warn_pct: 80, degrade_pct: 95, block_pct: 100, deadband_pct: 5 }`.
   The state machine is defined on `pct = if limit==0 { u64::MAX } else { spend*100/limit }`
@@ -472,13 +472,13 @@ Hysteresis on recovery.
       `spend_state_history` row. Returns only the apps that transitioned.
     - `set_limit(app_id, Option<u64>)` — upsert `app_spend_state.spend_limit_cents`
       (`None` clears the override → plan default). Used by the PR-A4 endpoint.
-- **NEW `crates/control/src/cron/spend_reconcile.rs`** — compio interval (~60s):
+- **NEW `crates/zeroship-control/src/cron/spend_reconcile.rs`** — compio interval (~60s):
   `evaluate_all` → audit + construct `ControlEvent::SpendState` per transition.
   Registered in `cron/mod.rs::spawn_all` via `compio::runtime::spawn(...).detach()`
   (the established pattern — `spawn_all` currently spawns `audit_retention::run`
   and `orphaned_app_reaper::run` this way; add a third spawn for
   `spend_reconcile::run(Arc::clone(&state), DEFAULT_TICK_SECS)`).
-- **MODIFY `crates/control/src/api.rs`** + route registration — the creator-facing
+- **MODIFY `crates/zeroship-control/src/api.rs`** + route registration — the creator-facing
   override endpoint (M4): `PUT /api/apps/:id/spend-limit` body
   `{ "cents": <u64|null> }` → authz `app_owner` on `Resource::App(id)` (the same
   app-membership gate `set_plan`/env endpoints use) → `SpendEngine::set_limit(app,
@@ -613,7 +613,7 @@ append-only ⇒ `SELECT,INSERT`).
 (enforce unit tests incl. the new degrade-token-cost cases + the faithful
 dispatch e2e) + `cargo test -p zeroship-control` (spend engine + integration on
 :5440) + `cargo test -p zeroship-core` (RouteEntry/ControlEvent fixtures). Update
-the `crates/core/tests/types_test.rs` `ControlEvent`/`RouteEntry` round-trip
+the `crates/zeroship-core/tests/types_test.rs` `ControlEvent`/`RouteEntry` round-trip
 fixtures for the new `SpendState` variant + `spend_state` field. `clippy` clean.
 
 ---
@@ -626,7 +626,7 @@ on the platform's **Customer**. Idempotent per period. Card via Checkout
 setup-mode. NO Connect / application_fee (Path 2).
 
 #### (a) Files to create/modify
-- **NEW `crates/control/src/stripe_client.rs`** — thin `cyper`-based Stripe REST
+- **NEW `crates/zeroship-control/src/stripe_client.rs`** — thin `cyper`-based Stripe REST
   client. The `cyper::Client` + `compio::time::timeout` idiom is established in
   control today: GET in `api.rs::fetch_worker_logs:694` and **POST with a body +
   `content-type` header** in `bootstrap_builder.rs:263` and `oauth_handlers.rs:432`
@@ -639,7 +639,7 @@ setup-mode. NO Connect / application_fee (Path 2).
   `create_invoice_item`, `create_and_finalize_invoice`. Map non-2xx to a new
   `StripeError::Api{status,code}`. Base URL overridable (an `AppState.stripe_base_url`
   field defaulting to `https://api.stripe.com`) for the test mock.
-- **NEW `crates/control/src/cron/billing_reconcile.rs`** — **NOT a port.**
+- **NEW `crates/zeroship-control/src/cron/billing_reconcile.rs`** — **NOT a port.**
   `crates/platform/src/billing/reconciler.rs` is the *spend-limit* reconciler
   (computes `SpendAction` from usage-vs-limit — that logic ports to PR5's
   `spend.rs`, see PR7 checklist); there is **no Stripe invoice-item code in
@@ -889,7 +889,7 @@ once `env.meter` is deleted. So:
 Reuse the name `MeterHandle` for a plain Rust struct in `crates/metering`:
 
 ```rust
-// crates/metering/src/lib.rs  (design)
+// crates/zeroship-metering/src/lib.rs  (design)
 #[derive(Clone)]
 pub struct MeterHandle { meter: Arc<Meter>, app_id: String }
 impl MeterHandle {
@@ -905,10 +905,10 @@ applied to platform primitives instead of user code).
 **How it threads in — the live registration path (traced, named):**
 
 1. The worker owns the one process-wide `Arc<Meter>`. It is constructed in
-   `crates/worker/src/main.rs` (~line 489–502, where `spawn_flush_task` is
+   `crates/zeroship-worker/src/main.rs` (~line 489–502, where `spawn_flush_task` is
    called today) and stored in the `METER` thread-local on every ntex worker
    thread via `cache::init_cache(max_size, KernelConfig{ meter, .. })`
-   (`crates/worker/src/cache.rs:46,64,83`). **Unchanged** — `KernelConfig.meter`
+   (`crates/zeroship-worker/src/cache.rs:46,64,83`). **Unchanged** — `KernelConfig.meter`
    already carries it; `spawn_flush_task` now comes from `zeroship_metering`.
 2. `create_plugins()` (`cache.rs:112`) is the SINGLE construction site for all
    plugins on an isolate. It already reads `METER.with(|m| m.borrow().clone())`
@@ -917,7 +917,7 @@ applied to platform primitives instead of user code).
    `StoragePlugin` instead. The `MeterPlugin` push (`cache.rs:135-140`) is
    deleted.
 3. Each plugin's `build_instance(scope, app_id)` (runtime plugin trait,
-   `crates/runtime/src/core/plugin.rs:76`) **already receives `app_id`** —
+   `crates/zeroship-runtime/src/core/plugin.rs:76`) **already receives `app_id`** —
    resolved by the runtime from `SharedState.env_vars["APP_ID"]`
    (`plugin.rs:225-228`). At mint time the plugin combines its stored
    `Arc<Meter>` with that `app_id` into a `MeterHandle` and stamps it onto the
@@ -939,7 +939,7 @@ applied to platform primitives instead of user code).
   `DbPlugin::new(url, Arc<Meter>)`. `build_instance` (`lib.rs:272`) →
   `mint_db(scope, app_id, meter)`. The emit lives at the shared exec boundary
   (`exec.rs`, see A2), so the `MeterHandle` is most naturally placed in the
-  per-app `context` (`crates/plugin-db/src/context.rs`, the thread-local the
+  per-app `context` (`crates/zeroship-plugin-db/src/context.rs`, the thread-local the
   exec layer already uses for schema/tx-client lookups keyed by `app_id`) —
   registered once per app in `DbPlugin::register`/first-touch, read by
   `exec_query`/`exec_mutation`. This keeps the exec functions' signatures
@@ -1057,7 +1057,7 @@ charge_cents = base_fee_cents + round_ONCE( max(0, total_units − included_unit
 NEW shapes (replace `PricingRule`/`PricingTier`/`PlanPrice`/`LineItem` — pre-launch, DELETE the old ones, no alias):
 
 ```rust
-// crates/control/src/pricing.rs  (design)
+// crates/zeroship-control/src/pricing.rs  (design)
 pub struct MetricWeight { pub units: u64, pub per_units: u64 }   // per_units>0; CU per per_units ops
 pub type WeightTable = HashMap<String, MetricWeight>;            // GLOBAL cost model
 
@@ -1452,7 +1452,7 @@ Two contracts split the layers (both new, both in control):
 
 - **`UsageLedger`** — the READ contract over the local ledger (metering = fact):
   ```rust
-  // crates/control/src/metering/ledger.rs (or a method-trait on Metering)
+  // crates/zeroship-control/src/metering/ledger.rs (or a method-trait on Metering)
   trait UsageLedger {
       async fn period_totals(&self, app: Uuid, period_start: i64)
           -> Result<HashMap<String,i64>, RegistryError>;
@@ -1469,7 +1469,7 @@ Two contracts split the layers (both new, both in control):
 
 ### M1 — The `MeteringProvider` trait and its value types
 
-Home: **NEW `crates/control/src/metering/provider/mod.rs`** (a submodule tree
+Home: **NEW `crates/zeroship-control/src/metering/provider/mod.rs`** (a submodule tree
 under the existing `metering` module — `mod.rs`, `native.rs`, `stripe_meters.rs`,
 `openmeter.rs`, `types.rs`). Lives in `control` (not `core`): it is control-plane
 policy that pulls `cyper` + the catalog + `stripe_client`, none of which belong in
@@ -1477,7 +1477,7 @@ the foundational `core` crate (same reasoning that kept `crates/metering` out of
 `core`).
 
 ```rust
-// crates/control/src/metering/provider/types.rs (design)
+// crates/zeroship-control/src/metering/provider/types.rs (design)
 pub struct CustomerRef(pub String);          // Native/Stripe: "cus_…"; OpenMeter: the subject id
 pub struct InvoiceRef(pub Option<String>);   // "in_…" for Native; None when the provider self-invoices
 pub struct BillingPeriod { pub start: i64, pub end: i64 } // unix secs; == stripe_client::Period
@@ -1487,7 +1487,7 @@ pub struct CreatorBilling {                  // what ensure_customer needs/retur
     pub customer: Option<CustomerRef>,        // already-saved cus_… if any
 }
 
-// crates/control/src/metering/provider/mod.rs (design)
+// crates/zeroship-control/src/metering/provider/mod.rs (design)
 #[allow(async_fn_in_trait)]
 pub trait MeteringProvider {
     /// Ensure the provider knows this creator (Native/Stripe: a cus_…;
@@ -1636,7 +1636,7 @@ suite) run UNCHANGED and are the regression gate proving no behaviour drift.
 **Decision: a dedicated periodic EXPORT sweep, NOT the ingest tick and NOT the
 flush boundary.** Rationale, resolved against the live code:
 
-- The **flush boundary** is in the WORKER (`crates/metering/flush.rs`) — wrong
+- The **flush boundary** is in the WORKER (`crates/zeroship-metering/flush.rs`) — wrong
   layer: it has no provider config, no customer mapping, no catalog, and the
   worker must stay billing-agnostic. Rejected.
 - The **ingest/aggregation tick** is `internal.rs::report_usage` → `Metering::ingest`

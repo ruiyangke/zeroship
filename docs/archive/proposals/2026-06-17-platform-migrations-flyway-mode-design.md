@@ -869,7 +869,7 @@ human/identity key, alongside a deterministically-derived `MigrationId`.
 **only because `uuid_to_base62` is a fixed-22-char encoding of the 128-bit UUID as
 a single big-endian integer over an *ascending* alphabet** — `BASE62 =
 "0123456789ABC…xyz"`, sorted so lexicographic order matches numeric order
-(`crates/core/src/typed_id.rs:10–12,27–38`). Because the width is fixed (22) and
+(`crates/zeroship-core/src/typed_id.rs:10–12,27–38`). Because the width is fixed (22) and
 the alphabet ascends, `a < b` as 128-bit integers ⇒ `base62(a) < base62(b)`
 lexicographically, which is exactly the `migration.rs:30–35` `MigrationId` `Ord`
 (a `String` newtype, derived `Ord`). **If a future refactor swapped in a

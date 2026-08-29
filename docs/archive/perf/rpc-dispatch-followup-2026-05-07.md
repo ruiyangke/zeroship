@@ -101,10 +101,10 @@ The `GlobalHandles` traffic is driven by:
 - `mint_rpc_ctx` allocates 1 `Global` for the cached prototype handle, 1
   `Weak::with_guaranteed_finalizer` (= another `Global` slot via `v8__Global__NewWeak`),
   and the `External::New` for the boxed `RpcCtx` raw pointer
-  (`crates/runtime/src/rpc/ctx_holder.rs:303-313`).
+  (`crates/zeroship-runtime/src/rpc/ctx_holder.rs:303-313`).
 - `with_rpc_context_in_als` allocates 1 `Global` to snapshot the prior
   embedder-data slot before installing the ctx
-  (`crates/runtime/src/rpc/dispatch.rs:54`), and a fresh `v8::Map` per
+  (`crates/zeroship-runtime/src/rpc/dispatch.rs:54`), and a fresh `v8::Map` per
   request from `clone_map` (the bench has no prior ALS entries → the
   map walk does nothing, but the empty-Map allocation still happens
   `dispatch.rs:59` / `als.rs:295`).
@@ -174,7 +174,7 @@ were previously idle on this path).
   `String::write_char` (each push triggers `RawVec::reserve`/grow).
   Replace with a 16-iter `for shift in (0..64).rev().step_by(4)` loop
   writing into `String::with_capacity(20)` / `String::with_capacity(22)`.
-- **File:line.** `crates/runtime/src/core/runtime.rs:3179-3180`.
+- **File:line.** `crates/zeroship-runtime/src/core/runtime.rs:3179-3180`.
 - **Measured cost today.** Microbench `format_req_pair` = **189.91 ns/iter**.
   perf inclusive (LowerHex) = **9.22%** of process CPU.
 - **Savings if replaced.** Microbench `format_req_pair_hand` = **25.70 ns/iter**.
@@ -204,8 +204,8 @@ were previously idle on this path).
   (Alternative: keep a per-isolate "empty-map" cached `Global` and
   install it instead of allocating a fresh one — saves the V8 alloc but
   not the `set_continuation_preserved_embedder_data` round-trip.)
-- **File:line.** `crates/runtime/src/rpc/dispatch.rs:53-69`,
-  `crates/runtime/src/node/async_hooks/als.rs:300-323`.
+- **File:line.** `crates/zeroship-runtime/src/rpc/dispatch.rs:53-69`,
+  `crates/zeroship-runtime/src/node/async_hooks/als.rs:300-323`.
 - **Measured cost today.** perf inclusive = **5.85%** of process CPU
   for `with_rpc_context_in_als`; self of `v8::Map::Set` = 0.56%, self
   of `v8::Map::New` is folded into `v8__Local__New_FromMap`-style
@@ -221,7 +221,7 @@ were previously idle on this path).
 - **Risk.** medium-high. The `__zeroshipGetRpcCtx` reader expects a
   `v8::Map`; the patch must teach it about the bare-Local fallback
   without breaking `user_async_local_storage_does_not_collide`
-  (`crates/runtime/tests/rpc_ctx.rs:270`).
+  (`crates/zeroship-runtime/tests/rpc_ctx.rs:270`).
 - **Constraint.** Preserves ALS + `__zeroshipGetRpcCtx`.
 
 ### C3 — Skip the `prev_global` snapshot when prev is undefined
@@ -233,7 +233,7 @@ were previously idle on this path).
   restore can be a fixed `set_continuation_preserved_embedder_data(undefined)`.
   A simple `if prev_slot.is_undefined() || prev_slot.is_null()` short-circuit
   avoids `Global::New` + `Global::Drop` for every request.
-- **File:line.** `crates/runtime/src/rpc/dispatch.rs:53-67`.
+- **File:line.** `crates/zeroship-runtime/src/rpc/dispatch.rs:53-67`.
 - **Measured cost today.** `v8::internal::GlobalHandles::Create` self
   = **3.82%**, `Release` = **3.14%**. The call-graph at
   `mint_rpc_ctx`'s `--9.11%--` LowerHex frame attributes 0.97% of
@@ -259,8 +259,8 @@ were previously idle on this path).
   ownership transfer from the dispatcher) and let the lazy
   `cached_headers` accessor build the JS Headers wrapper on demand —
   same model as `cached_url`/`cached_signal`/`cached_user`.
-- **File:line.** `crates/runtime/src/core/runtime.rs:1569`,
-  `crates/runtime/src/rpc/ctx_holder.rs:267, 291`.
+- **File:line.** `crates/zeroship-runtime/src/core/runtime.rs:1569`,
+  `crates/zeroship-runtime/src/rpc/ctx_holder.rs:267, 291`.
 - **Measured cost today.** Microbench `headers_to_vec_3` = **76.13 ns/iter**.
   perf does not isolate this frame (folded into `mint_rpc_ctx`'s 4.21%
   inclusive); `box_rpcctx_filled` − `box_rpcctx_default` = 234.38 − 19.27
@@ -288,7 +288,7 @@ were previously idle on this path).
   zeroed/none init that mimalloc has to memset on each alloc. Splitting
   the holder into a small "always-needed" struct + a lazily-allocated
   "lazy fields" sidecar would shrink the per-request hot allocation.
-- **File:line.** `crates/runtime/src/rpc/ctx_holder.rs:37-65`.
+- **File:line.** `crates/zeroship-runtime/src/rpc/ctx_holder.rs:37-65`.
 - **Measured cost today.** `box_rpcctx_default` = **19.27 ns/iter**
   for the empty struct alone (mimalloc bin-allocation + memset).
   `_mi_page_malloc` self = 4.43%, `_mi_heap_realloc_zero` = 1.16%, and
@@ -314,7 +314,7 @@ were previously idle on this path).
   a per-isolate slot (one `RpcCtx` per isolate, reset in-place on each
   request, lifetime tied to the isolate not the request) collapses all
   three into a per-isolate one-time setup.
-- **File:line.** `crates/runtime/src/rpc/ctx_holder.rs:300-313`.
+- **File:line.** `crates/zeroship-runtime/src/rpc/ctx_holder.rs:300-313`.
 - **Measured cost today.** Self of `RpcCtx::drop` + `Weak::second_pass`
   + `FinalizerMap::add` = **1.40 + 0.73 + 0.44 = 2.57%** of process CPU.
   Plus the `External::New` self-time which is folded into the
@@ -342,7 +342,7 @@ were previously idle on this path).
   and `if body == "{}" || body == "{\"json\":null}" { return Ok(null) }`
   short-circuits eliminate the V8 round-trip for the common no-arg
   shapes.
-- **File:line.** `crates/runtime/src/core/runtime.rs:3092-3134`.
+- **File:line.** `crates/zeroship-runtime/src/core/runtime.rs:3092-3134`.
 - **Measured cost today.** Inclusive of `parse_envelope_body` =
   **6.63%**, of which `v8__JSON__Parse` = 3.19%, `v8::Object::Get` =
   2.24%, the rest is V8 string allocation and the property-key lookup
@@ -352,7 +352,7 @@ were previously idle on this path).
   inclusive; the floor is 0 if zerobench's body is changed to
   `{"json":null}` (which the runner does for some scenarios — but the
   current `ping` rhai sends `{}` literally, see
-  `crates/runtime/benches/zeroship-bench.rhai:51`).
+  `crates/zeroship-runtime/benches/zeroship-bench.rhai:51`).
 - **Effort.** small.
 - **Risk.** Low — confined to a wire-format edge case.
 - **Constraint.** Preserves ALS + `__zeroshipGetRpcCtx`.
@@ -387,7 +387,7 @@ that this round did not produce.
    `mint_rpc_ctx`, and `parse_envelope_body` were not produced.
    Criterion can't link v8-rs cleanly without depending on the runtime
    crate's test harness. Would need to add bench targets in
-   `crates/runtime/benches/` rather than `/tmp/perf-microbench/`.
+   `crates/zeroship-runtime/benches/` rather than `/tmp/perf-microbench/`.
 2. **Per-frame time within `with_rpc_context_in_als`** — the 5.85%
    inclusive bundles `Global::New(prev)` + `read_context_map` + empty
    `clone_map` + `v8::Map::new` + `v8::Map::Set` + the

@@ -631,13 +631,13 @@ All 6 must-have capabilities (sibling-column emission, alias SELECT, backfill, r
 - Built-in mask kinds: "full", "last4", "first4", "email", "name", "date-year", "date-decade", "none". Built-in classifications: "public" / "pii" / "spi" / "phi" / "pci" / "internal".
 - Default mask = `"full"` + classification = `"pii"` when `t.encrypted()` declared without explicit mask.
 - **Reserved-name validator** (`validate_field_name`): refuse creator-defined fields ending in `_masked` (whether or not a parent column exists with that prefix). Reserve the `_masked` suffix globally on encrypted apps. Reserve all six default classifications as reserved column names (`pii`, `spi`, `phi`, `pci`, `internal`, `public`). Both fence the namespace.
-- `crates/plugin-db/src/diff.rs::ColumnInfo`: add `mask: Option<MaskMeta>` field alongside the existing `encryption` field. `MaskMeta` carries `{ kind, classification, sibling_column: String }`.
+- `crates/zeroship-plugin-db/src/diff.rs::ColumnInfo`: add `mask: Option<MaskMeta>` field alongside the existing `encryption` field. `MaskMeta` carries `{ kind, classification, sibling_column: String }`.
 
 ### PR 2 — DDL emission for sibling column + Path B INSERT/UPDATE rewrite
 
 - `query.rs::build_create_table_with_fks`: when a column has `def.mask = Some(_)`, emit TWO physical columns: the parent (BYTEA if encrypted, TEXT/INT/BYTEA otherwise) + the sibling `<col>_masked` (TEXT or BYTEA depending on mask kind).
 - Auto-emit `CREATE INDEX <coll>__<col>_masked_idx ON <coll>(<col>_masked)` ONLY when the parent column is declared with `.index()` or `.uniqueIndex()`. Avoid auto-indexing every masked column — would balloon storage on collections with many masked columns.
-- New `crates/plugin-db/src/crud/mask_pass.rs`:
+- New `crates/zeroship-plugin-db/src/crud/mask_pass.rs`:
   - `apply_mask_on_write(schema, row)`: walks schema, for every field with `mask`, computes the masked representation from the plaintext value and writes `row["<col>_masked"]`.
   - 8 mask transforms (one per `MaskKind`).
 - `query.rs::build_insert` + `build_update_one`: bind BOTH columns. Single-row atomic write.
@@ -808,7 +808,7 @@ dashboard, per-collection mask policies (Q-MASK-H, → P9+).
 
 Two P9 (API/ABI alignment) changes touch this design:
 
-- **`MaskedValue` is now a native `#[v8_class]`** (`crates/plugin-db/src/v8_classes/masked_value.rs`), minted directly by the row serializer (P9 PR 2). The old `{sentinel: "__zsmask__", ...}` JSON sentinel + the SDK's `mapResultDoc` JS rehydration loop are gone — Rust hands V8 a real `MaskedValue` instance on the first hop. Public surface (getters `masked`/`classification`/`_meta`; methods `unmask`/`canUnmask`/`toString`/`toJSON`/`[Symbol.toPrimitive]`) is byte-identical to the old TS class, so `Row<S>['ssn']`'s observable type is unchanged. The published `.d.ts` ships a hand-maintained `declare class MaskedValue<Value>` preserving the `_plaintext` phantom.
+- **`MaskedValue` is now a native `#[v8_class]`** (`crates/zeroship-plugin-db/src/v8_classes/masked_value.rs`), minted directly by the row serializer (P9 PR 2). The old `{sentinel: "__zsmask__", ...}` JSON sentinel + the SDK's `mapResultDoc` JS rehydration loop are gone — Rust hands V8 a real `MaskedValue` instance on the first hop. Public surface (getters `masked`/`classification`/`_meta`; methods `unmask`/`canUnmask`/`toString`/`toJSON`/`[Symbol.toPrimitive]`) is byte-identical to the old TS class, so `Row<S>['ssn']`'s observable type is unchanged. The published `.d.ts` ships a hand-maintained `declare class MaskedValue<Value>` preserving the `_plaintext` phantom.
 
 - **`unmaskField` / `bulkUnmaskFields` moved off `Db` to `Collection`** (P9 PR 2): `Collection.unmaskField(rowPk, col, opts)` + `Collection.bulkUnmask(items, opts)` (collection name inherited from the receiver, not spoofable) and `MaskedValue.unmask(...)` (dispatches from the instance's own bound `_meta`).
 

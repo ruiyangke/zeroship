@@ -280,7 +280,7 @@ override is a flag so a gate cannot be redirected by a variable left in a shell
 nobody remembers exporting it in.
 
 `tests/run_billing_suite.sh` still takes a private database per run.
-`crates/control/tests/workflow_engine_test.rs` clones a whole database per test
+`crates/zeroship-control/tests/workflow_engine_test.rs` clones a whole database per test
 from whatever DSN it is handed, and `CREATE DATABASE ... WITH TEMPLATE`
 requires exclusive access to the source — so that suite cannot share one until
 it clones from a quiescent template instead. See
@@ -294,7 +294,7 @@ Build the fixture binary with:
 cargo build --release -p zeroship-runtime --bin zeroship-bench-server
 ```
 
-The runner script is `./crates/runtime/benches/run_zerobench.sh`. Read that script before using it; it shells out to an external `zerobench` binary and `nix`.
+The runner script is `./crates/zeroship-runtime/benches/run_zerobench.sh`. Read that script before using it; it shells out to an external `zerobench` binary and `nix`.
 
 ## Related docs
 

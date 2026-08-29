@@ -3,7 +3,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-stre
 # Native WHATWG Streams design
 
 **Date:** 2026-05-01
-**Status:** **Shipped** — `crates/runtime/src/web/streams/` (~25 files: readable, writable, transform, controllers, readers, byte/BYOB, queues, strategies, tee, pipe, compression, async-iter). Document retained as canonical design spec; no equivalent reference doc exists.
+**Status:** **Shipped** — `crates/zeroship-runtime/src/web/streams/` (~25 files: readable, writable, transform, controllers, readers, byte/BYOB, queues, strategies, tee, pipe, compression, async-iter). Document retained as canonical design spec; no equivalent reference doc exists.
 **Spec:** WHATWG Streams Standard — https://streams.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/streams/blob/main/index.bs
 **Reference impl:** https://github.com/whatwg/streams/tree/main/reference-implementation
@@ -22,9 +22,9 @@ encoder hand-off, WPT regression for the streams suite.
 - **v1 (2026-05-01)** — Initial design covering the entire
   WHATWG spec surface (every IDL interface, every named
   algorithm). Replaces the value-preserving JS skeleton in
-  `crates/runtime/src/embed/streams.js` and the vendored
+  `crates/zeroship-runtime/src/embed/streams.js` and the vendored
   web-streams-polyfill v3.3.3 (3700 LOC) at
-  `crates/runtime/src/embed/streams-polyfill.js`. Designed
+  `crates/zeroship-runtime/src/embed/streams-polyfill.js`. Designed
   pure-native on V8 + Rust + compio with **zero tokio**.
 - **v2 (2026-05-01, this revision)** — Critic-driven revision
   addressing 14 CRITICAL findings, 20 MAJOR findings, 18 MINOR
@@ -38,7 +38,7 @@ encoder hand-off, WPT regression for the streams suite.
     claim with a new `OpResult::JsValue` variant carrying
     `v8::Global<v8::Value>` (since the existing
     `OpResult::Completed.value: String` cannot carry V8 chunks).
-    Verified: `crates/runtime/src/core/state.rs:592-596` confirms the
+    Verified: `crates/zeroship-runtime/src/core/state.rs:592-596` confirms the
     String-only field.
   - **D-12 / microtask** — fictitious `scope.enqueue_microtask`
     API replaced with the real `Isolate::enqueue_microtask(&mut self, Local<Function>)`
@@ -98,9 +98,9 @@ encoder hand-off, WPT regression for the streams suite.
    no "v1 subset". Pass the entire WPT `streams/` suite minus
    the transferable subdirectory (D-7 below).
 2. **Replace web-streams-polyfill.** Delete the 3700-LOC vendored
-   polyfill at `crates/runtime/src/embed/streams-polyfill.js`
+   polyfill at `crates/zeroship-runtime/src/embed/streams-polyfill.js`
    and the value-path JS skeleton at
-   `crates/runtime/src/embed/streams.js`. The runtime ships one
+   `crates/zeroship-runtime/src/embed/streams.js`. The runtime ships one
    streams implementation, in Rust, with per-isolate native
    classes installed during `setup_globals`.
 3. **Back compression and fetch.** Honour the explicit
@@ -243,7 +243,7 @@ contract; everything else is illustrative.
 |---|----------|-----------|---------|
 | **D-1** | Pure native: every spec interface (ReadableStream, WritableStream, TransformStream, all controllers, all readers, BYOBRequest, queuing strategies) is a `#[v8_class]` Rust struct. No JS shim, no web-streams-polyfill fallback. | Single source of truth; eliminates the value-path/byte-path duality the JS skeleton accumulated; one GC graph; no "spec checks reject foreign stream class" hazards. | §I |
 | **D-2** | Internal-slot storage rule, sharpened (was inconsistent in v1): **each spec slot lives in exactly ONE location.** A slot lives in a Rust struct field if and only if (a) its value is purely Rust-side data the spec never requires JS-identity preservation for AND (b) no Rust callsite needs to read it as a `v8::Local`. Otherwise the slot lives in a V8 private symbol. Slots that need both (e.g. `[[controller]]` — the wrapper IS observably `===`-comparable, but the controller's *state* is heavy Rust data) live as a **wrapper-in-priv-sym + state-in-Rc<RefCell>** pair, with the priv sym as the canonical identity store and the Rc<RefCell> reachable only via `controller_state(wrapper) -> &RefCell<State>`. There is no "mirror" — exactly one location per slot. | Spec algorithms must be observably indistinguishable from "directly modify `[[…]]`". The single-source rule, audited slot-by-slot in §XV, is the entire consistency model. | §V, §XV |
-| **D-3** | Promise plumbing: `v8::PromiseResolver::new(scope)` for every spec promise. Async resolution from compio tasks uses a NEW `OpResult::JsValue` variant carrying `{ resolver: v8::Global<v8::PromiseResolver>, value: ResolveValue }` (where `ResolveValue` is an enum: Bytes, JsGlobal, Undefined, Reject). Verified: existing `OpResult::Completed.value: String` at `crates/runtime/src/core/state.rs:594-596` cannot carry V8 chunks. Stream chunks are arbitrary V8 values; new infrastructure is required. | The existing String channel is wrong for streams (it round-trips chunks through UTF-8). Either we add `OpResult::JsValue` or an out-of-band registry keyed by op id; the variant is simpler and reuses the existing dispatch loop in `runtime.rs`. | §VII.5 |
+| **D-3** | Promise plumbing: `v8::PromiseResolver::new(scope)` for every spec promise. Async resolution from compio tasks uses a NEW `OpResult::JsValue` variant carrying `{ resolver: v8::Global<v8::PromiseResolver>, value: ResolveValue }` (where `ResolveValue` is an enum: Bytes, JsGlobal, Undefined, Reject). Verified: existing `OpResult::Completed.value: String` at `crates/zeroship-runtime/src/core/state.rs:594-596` cannot carry V8 chunks. Stream chunks are arbitrary V8 values; new infrastructure is required. | The existing String channel is wrong for streams (it round-trips chunks through UTF-8). Either we add `OpResult::JsValue` or an out-of-band registry keyed by op id; the variant is simpler and reuses the existing dispatch loop in `runtime.rs`. | §VII.5 |
 | **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock` anywhere. Inter-class references use `Rc<RefCell<…>>`. | AGENTS.md "V8 per thread, one isolate per app". A `Send` constraint would force `Arc<Mutex<…>>` and slow the read fast-path. workerd takes the same `kj::Own` (RAII single-thread) approach. | §V |
 | **D-5** | Queue storage: `VecDeque<QueueEntry>` with size tracking in a separate `f64` field for `[[queueTotalSize]]`. NOT a multi-consumer ring buffer. Each tee branch has its OWN queue (see D-11). | The spec's queue is single-consumer; tee creates *new* streams with their own queues fed from a shared source-side reader. Workerd's multi-consumer optimisation breaks observable `desiredSize` after partial-tee consumption (its own bug tracker mentions this; we don't reproduce). | §VI |
 | **D-6** | Byte stream / BYOB (§3.7): full implementation in v1, including `pendingPullIntos`, `respondWithNewView`, `min` parameter on `read({…min})`, auto-allocate-chunk-size, ArrayBuffer detachment via `TransferArrayBuffer`. | Compression's lenient-deflate path and fetch's HTTP body forwarding both want byte streams; deferring BYOB would force the body bridge to keep the legacy slot path alive indefinitely. | §III, §VI |
@@ -259,8 +259,8 @@ contract; everything else is illustrative.
 | **D-16** | Detached buffer handling: every BYOB path checks `buffer.is_detached()` (V8 API: `ArrayBuffer::was_detached`) before use. **Every** chunk path — including the WritableStream `write(chunk)` and TransformStream input — also checks `chunk.buffer.was_detached()` per missing-concept #7. | WPT `readable-byte-streams/non-transferable-buffers.any.js` plus enqueue-with-detached-buffer.any.js. | §III.4 |
 | **D-17** | Strategies: `ByteLengthQueuingStrategy` and `CountQueuingStrategy` are full `#[v8_class]` types. Their `size` is a *per-realm* function (one shared function reused across instances), per WPT `queuing-strategies-size-function-per-global.window.js`. The QueuingStrategyInit dictionary is required-when-present (`new ByteLengthQueuingStrategy()` throws because `init.highWaterMark` is required); see fix to critic #33. | WPT requires `Object.is(s1.size, s2.size) === true` for same-realm strategies. | §XI |
 | **D-18** | Per-isolate concurrent stream cap: 65,536 streams. Excess constructions throw `RangeError("too many concurrent streams")`. **Justification (was thin air in v1):** target 200K req/s × 32-thread worker = ~6,250 req/s/thread, with mean lifecycle 50ms = 312 streams in flight per thread; 65,536 is 200× headroom. Cap is per-thread per-isolate. If creator apps grow streaming chains (e.g. tee × N branches × pipeThrough × M transforms) and approach this, raise to u32::MAX with a `track_alloc/free` instrumentation pass instead of a fixed cap. | The cap is a guard against runaway construction; it is NOT a perf limit. | §XII |
-| **D-19** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_streams`, polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill JS files entirely. The native cutover (step 2) ALSO deletes `crates/runtime/src/embed/streams.js` (the JS-side bridge skeleton, NOT the polyfill). The polyfill at `streams-polyfill.js` is deleted in step 3 only. (v1 conflated these — fixed.) | Risk control. Identical pattern to headers-native.md. | §XIII |
-| **D-20** | Spec algorithm naming in Rust: every spec abstract operation gets a Rust function with the same name in `snake_case`. Lives in `crates/runtime/src/web/streams/algorithms.rs` for cross-class operations (`ReadableStreamFulfillReadRequest`, `ReadableStreamCancel`, etc.) and in the relevant class file for class-local operations (e.g. `ReadableStreamDefaultControllerEnqueue` in `readable_default_controller.rs`). The split rule: an algorithm named after a class (e.g. `ReadableStreamDefaultController…`) lives in that class's file; an algorithm named after a stream operation (e.g. `ReadableStream…`, `TransformStream…`) that doesn't operate on a single class's state lives in `algorithms.rs`. | Reduces the cognitive load of cross-referencing the spec; reviewer can grep for the exact spec name. | §III–VI |
+| **D-19** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_streams`, polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill JS files entirely. The native cutover (step 2) ALSO deletes `crates/zeroship-runtime/src/embed/streams.js` (the JS-side bridge skeleton, NOT the polyfill). The polyfill at `streams-polyfill.js` is deleted in step 3 only. (v1 conflated these — fixed.) | Risk control. Identical pattern to headers-native.md. | §XIII |
+| **D-20** | Spec algorithm naming in Rust: every spec abstract operation gets a Rust function with the same name in `snake_case`. Lives in `crates/zeroship-runtime/src/web/streams/algorithms.rs` for cross-class operations (`ReadableStreamFulfillReadRequest`, `ReadableStreamCancel`, etc.) and in the relevant class file for class-local operations (e.g. `ReadableStreamDefaultControllerEnqueue` in `readable_default_controller.rs`). The split rule: an algorithm named after a class (e.g. `ReadableStreamDefaultController…`) lives in that class's file; an algorithm named after a stream operation (e.g. `ReadableStream…`, `TransformStream…`) that doesn't operate on a single class's state lives in `algorithms.rs`. | Reduces the cognitive load of cross-referencing the spec; reviewer can grep for the exact spec name. | §III–VI |
 
 
 ## I. Architecture overview
@@ -270,8 +270,8 @@ Two systems share no state at the V8 level:
 1. **Public IDL surface.** Each interface listed below installs
    a `#[v8_class]` on the global object. The class wrapper holds
    a `Box<{Class}State>` in V8 internal field 0 (existing macro
-   pattern from `crates/runtime/src/web/encoding.rs` and
-   `crates/runtime/src/web/headers.rs`).
+   pattern from `crates/zeroship-runtime/src/web/encoding.rs` and
+   `crates/zeroship-runtime/src/web/headers.rs`).
 2. **Internal slot map.** Every spec internal slot (`[[state]]`,
    `[[storedError]]`, `[[reader]]`, `[[controller]]`, `[[queue]]`,
    `[[strategyHWM]]`, `[[strategySizeAlgorithm]]`,
@@ -391,7 +391,7 @@ invariant.
 ### I.2. File layout
 
 ```
-crates/runtime/src/web/streams/
+crates/zeroship-runtime/src/web/streams/
 ├── mod.rs                       (new) module root, public exports
 ├── readable.rs                  (new) ReadableStream class + methods
 ├── readable_default_controller.rs   (new) DefaultController class
@@ -422,20 +422,20 @@ crates/runtime/src/web/streams/
 └── promise_resolve.rs           (new) D-3 resolve-from-Rust helpers
                                        (uses OpResult::JsValue)
 
-crates/runtime/src/lib.rs        (modified) +pub mod streams;
-crates/runtime/src/core/init.rs       (modified) install all classes
-crates/runtime/src/core/state.rs      (modified) add OpResult::JsValue
+crates/zeroship-runtime/src/lib.rs        (modified) +pub mod streams;
+crates/zeroship-runtime/src/core/init.rs       (modified) install all classes
+crates/zeroship-runtime/src/core/state.rs      (modified) add OpResult::JsValue
                                             variant (D-3)
 
-crates/runtime/src/embed/streams.js
+crates/zeroship-runtime/src/embed/streams.js
                                   (deleted in D-19 step 2 — JS bridge)
-crates/runtime/src/embed/streams-polyfill.js
+crates/zeroship-runtime/src/embed/streams-polyfill.js
                                   (deleted in D-19 step 3 — polyfill)
 
-crates/runtime-macros/src/v8_class.rs  (modified) §XIV
-crates/runtime-macros/src/lib.rs       (modified) §XIV
+crates/zeroship-runtime-macros/src/v8_class.rs  (modified) §XIV
+crates/zeroship-runtime-macros/src/lib.rs       (modified) §XIV
 
-crates/runtime/tests/
+crates/zeroship-runtime/tests/
 ├── streams.rs                    (new) hand-written smoke tests
 ├── streams_native.rs             (new) internal-API tests
 ├── wpt_streams.rs                (new) WPT runner
@@ -896,7 +896,7 @@ interface WritableStreamDefaultController {
 `[[stream]]`, `[[writeAlgorithm]]`.
 
 `AbortController` / `AbortSignal` are already provided by the
-existing native runtime (see `crates/runtime/src/embed/events.js`
+existing native runtime (see `crates/zeroship-runtime/src/embed/events.js`
 + `runtime-macros`'s AbortSignal hook). v1 doesn't add new
 abort infrastructure; the controller calls
 `abortController.abort(reason)` on the existing class.
@@ -1711,11 +1711,11 @@ the user's synchronous loop.
 - compio is single-threaded per isolate (per AGENTS.md "V8 per
   thread, one isolate per app").
 - The runtime drives an event loop in
-  `crates/runtime/src/core/runtime.rs` that pumps `state.spawned_ops`
+  `crates/zeroship-runtime/src/core/runtime.rs` that pumps `state.spawned_ops`
   futures against compio's executor.
 - Promise resolution from Rust is wired via
   `state.pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>`
-  + `OpResult` enum in `crates/runtime/src/core/state.rs:592`. We
+  + `OpResult` enum in `crates/zeroship-runtime/src/core/state.rs:592`. We
   ADD an `OpResult::JsValue` variant (D-3) for stream chunks.
 
 ### VII.2. What "in parallel" means for streams (critic #31 fix)
@@ -1835,7 +1835,7 @@ Critic C-2 fix: the existing `OpResult::Completed.value: String`
 field cannot carry V8 chunks. We add:
 
 ```rust
-// In crates/runtime/src/core/state.rs:
+// In crates/zeroship-runtime/src/core/state.rs:
 pub enum OpResult {
     Completed { op_id: u32, value: String, request_id: Option<u64> },
     Failed { op_id: u32, error: String, request_id: Option<u64> },
@@ -1895,7 +1895,7 @@ resolver is either:
 V8's microtask checkpoint runs between callback returns; the
 runtime's main loop also performs `perform_microtask_checkpoint`
 after each compio task posts an OpResult (existing behaviour
-in `crates/runtime/src/core/runtime.rs`).
+in `crates/zeroship-runtime/src/core/runtime.rs`).
 
 ## VIII. Native traits (D-9)
 
@@ -2162,7 +2162,7 @@ wins.
 The spec calls `signal.addEventListener('abort', abortAlgorithm)`
 and `signal.removeEventListener('abort', abortAlgorithm)` at
 shutdown. The runtime already provides AbortSignal natively
-via existing `crates/runtime/src/embed/events.js`. Rust calls
+via existing `crates/zeroship-runtime/src/embed/events.js`. Rust calls
 through V8: get `signal.addEventListener` from the prototype,
 call it with `("abort", listener_fn)`. The listener installs and
 fires synchronously upon `signal.abort(reason)`.
@@ -2563,7 +2563,7 @@ near state" intent. See §XVII row #5.
 ## XIV. Macro extensions required
 
 The existing `#[v8_class]` macro
-(`crates/runtime-macros/src/v8_class.rs`) supports:
+(`crates/zeroship-runtime-macros/src/v8_class.rs`) supports:
 - Method/getter/setter/constructor classification
 - Internal-field 0 with weak-finalizer reclamation
 - `Vec<u8>` from ArrayBufferView
@@ -2571,7 +2571,7 @@ The existing `#[v8_class]` macro
   returns (recently added by headers/codec landings)
 - `#[v8_name]`, `#[v8_to_string_tag]`, `#[v8_inherit_intrinsic]`,
   `#[reject_shared]` (verified against current
-  `crates/runtime-macros/src/v8_class.rs:111-244`)
+  `crates/zeroship-runtime-macros/src/v8_class.rs:111-244`)
 - Lifetime-tied `Local<'s, _>` returns (via the headers/codec
   iterator landing)
 
@@ -2664,7 +2664,7 @@ the upgrade-or-error pattern. ~50 LOC of helpers,  ~1h.
 ### XIV.6. Promise return from sync method
 
 Critic finding #1 (unverifiable) — verified: `gen_call_return`
-in `crates/runtime-macros/src/lib.rs:524-650` (NOT lines
+in `crates/zeroship-runtime-macros/src/lib.rs:524-650` (NOT lines
 530-533 as v1 cited; the actual `Local` arm is at line 644).
 Promise is a subtype of `v8::Local<v8::Value>`; the existing
 `Local` arm handles `v8::Local<v8::Promise>` returns. No

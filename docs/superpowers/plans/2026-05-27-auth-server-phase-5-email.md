@@ -4,7 +4,7 @@
 
 **Goal:** Ship the email-side of the auth surface. Mailer abstraction with three drivers (stdout / lettre-SMTP / Resend), magic-link login (with same-device + cross-device CSRF binding), email verification, password reset, and bounce-webhook handling. By end of Phase 5 every login method the proposal promises is in place.
 
-**Architecture:** `Mailer` trait lives in `crates/auth/src/mailer/`. Templates via `askama` (separate dir for emails because `.html` + `.txt` pairs). All email-triggering flows (`magic_link`, `verification`, `reset`) use the same opaque-token primitive (32 bytes CSPRNG, SHA-256 stored, single-use atomic redeem). Tables already exist from Phase 1 (`auth.magic_links`, `auth.email_verifications`, `auth.email_suppressions`).
+**Architecture:** `Mailer` trait lives in `crates/zeroship-auth/src/mailer/`. Templates via `askama` (separate dir for emails because `.html` + `.txt` pairs). All email-triggering flows (`magic_link`, `verification`, `reset`) use the same opaque-token primitive (32 bytes CSPRNG, SHA-256 stored, single-use atomic redeem). Tables already exist from Phase 1 (`auth.magic_links`, `auth.email_verifications`, `auth.email_suppressions`).
 
 **Tech Stack:** Continuing — compio, ntex, cyper, compio-postgres. New: `lettre` (SMTP), maybe `mail-builder` for MIME assembly. Templates remain `askama`.
 
@@ -41,14 +41,14 @@ Total: ~6h, ~12 commits.
 ## Task U1.1 · Mailer trait + Email type
 
 Files:
-- Create `crates/auth/src/mailer/mod.rs` (declares submodules + the trait)
-- Create `crates/auth/src/mailer/types.rs` — `Email`, `Address`, `MessageId`, `MailerError`
-- Create `crates/auth/src/mailer/stdout.rs` — `StdoutMailer` impl
-- Create `crates/auth/src/store/suppressions.rs` — `auth.email_suppressions` CRUD (`is_suppressed(email)`, `add(email, reason)`)
-- Modify `crates/auth/src/lib.rs` and `crates/auth/src/store/mod.rs` to export
+- Create `crates/zeroship-auth/src/mailer/mod.rs` (declares submodules + the trait)
+- Create `crates/zeroship-auth/src/mailer/types.rs` — `Email`, `Address`, `MessageId`, `MailerError`
+- Create `crates/zeroship-auth/src/mailer/stdout.rs` — `StdoutMailer` impl
+- Create `crates/zeroship-auth/src/store/suppressions.rs` — `auth.email_suppressions` CRUD (`is_suppressed(email)`, `add(email, reason)`)
+- Modify `crates/zeroship-auth/src/lib.rs` and `crates/zeroship-auth/src/store/mod.rs` to export
 
 ```rust
-//! crates/auth/src/mailer/types.rs
+//! crates/zeroship-auth/src/mailer/types.rs
 
 use thiserror::Error;
 
@@ -84,7 +84,7 @@ pub enum MailerError {
 ```
 
 ```rust
-//! crates/auth/src/mailer/mod.rs
+//! crates/zeroship-auth/src/mailer/mod.rs
 
 pub mod stdout;
 pub mod types;
@@ -118,7 +118,7 @@ pub async fn check_suppression(db: &Client, email: &str) -> std::result::Result<
 ```
 
 ```rust
-//! crates/auth/src/mailer/stdout.rs
+//! crates/zeroship-auth/src/mailer/stdout.rs
 
 use async_trait::async_trait;
 use compio_postgres::Client;
@@ -152,7 +152,7 @@ impl Mailer for StdoutMailer {
 ## Task U1.2 · Suppressions CRUD
 
 ```rust
-//! crates/auth/src/store/suppressions.rs
+//! crates/zeroship-auth/src/store/suppressions.rs
 
 use compio_postgres::Client;
 use crate::error::{AuthError, Result};
@@ -193,7 +193,7 @@ auth: mailer/{mod,types,stdout} + store/suppressions — Mailer trait + suppress
 
 ## Task U2.1 · `lettre`-based SMTP driver
 
-File: `crates/auth/src/mailer/smtp.rs`.
+File: `crates/zeroship-auth/src/mailer/smtp.rs`.
 
 ```rust
 //! SMTP transport via `lettre`. Configurable host/port/credentials/tls.
@@ -260,7 +260,7 @@ let response = compio::runtime::spawn_blocking(move || {
 
 ## Task U2.2 · Resend driver (HTTP API via cyper)
 
-File: `crates/auth/src/mailer/resend.rs`.
+File: `crates/zeroship-auth/src/mailer/resend.rs`.
 
 ```rust
 //! Resend transactional-email API (https://resend.com).
@@ -339,7 +339,7 @@ fn format_address(a: &Address) -> String {
 
 ## Task U2.3 · Config + driver selection
 
-Modify `crates/auth/src/config.rs::AuthConfig`:
+Modify `crates/zeroship-auth/src/config.rs::AuthConfig`:
 
 ```rust
 #[arg(long, env = "AUTH_MAILER", default_value = "stdout")]
@@ -399,7 +399,7 @@ auth: mailer — SMTP (lettre) + Resend (cyper) drivers + driver factory
 
 # Unit U3 · Email templates
 
-Files (all under `crates/auth/src/mailer/templates/`):
+Files (all under `crates/zeroship-auth/src/mailer/templates/`):
 - `verify_email.html` + `.txt`
 - `magic_link.html` + `.txt`
 - `password_reset.html` + `.txt`
@@ -458,7 +458,7 @@ The headline Phase 5 feature. Three sub-commits.
 
 ## Task U4.1 · `identity::magic_link` — issue + redeem (atomic single-use)
 
-File: `crates/auth/src/identity/magic_link.rs`.
+File: `crates/zeroship-auth/src/identity/magic_link.rs`.
 
 ```rust
 //! Magic-link login. 32-byte opaque CSPRNG token, SHA-256-stored, 15min TTL,
@@ -557,8 +557,8 @@ User submits email on the login page (or a dedicated /magic-link entry point). S
 Wire `/login` POST to handle a magic-link path: if the form has `intent=magic` (no password), branch to magic-link issuance instead of password verify.
 
 Files:
-- Modify `crates/auth/src/ui/login.rs` — branch on `intent=magic`
-- Or create `crates/auth/src/ui/magic.rs` for the dedicated handlers
+- Modify `crates/zeroship-auth/src/ui/login.rs` — branch on `intent=magic`
+- Or create `crates/zeroship-auth/src/ui/magic.rs` for the dedicated handlers
 - Update `login.html` to add a "Email me a sign-in link" button
 
 ```rust
@@ -590,7 +590,7 @@ pub async fn issue_magic_link(
 
 ## Task U4.3 · `/magic/verify` GET + redeem (same-device + cross-device)
 
-File: `crates/auth/src/ui/magic.rs::verify`.
+File: `crates/zeroship-auth/src/ui/magic.rs::verify`.
 
 ```rust
 pub async fn verify(
@@ -666,9 +666,9 @@ auth: /login — "Email me a sign-in link" entry point
 Same primitive as magic-link, different `purpose='verification'`, 24h TTL.
 
 Files:
-- Create `crates/auth/src/identity/verification.rs` (issue + redeem)
-- Modify `crates/auth/src/ui/signup.rs` — on signup success, issue verification token + send email
-- Create `crates/auth/src/ui/verify.rs` — `/verify?t=...` GET handler that redeems + sets `auth.users.email_verified_at = NOW()`
+- Create `crates/zeroship-auth/src/identity/verification.rs` (issue + redeem)
+- Modify `crates/zeroship-auth/src/ui/signup.rs` — on signup success, issue verification token + send email
+- Create `crates/zeroship-auth/src/ui/verify.rs` — `/verify?t=...` GET handler that redeems + sets `auth.users.email_verified_at = NOW()`
 
 The 24h TTL means a NEW table is overkill — reuse `auth.email_verifications` (already exists from Phase 1). The primitive in `verification.rs` is a thin wrapper around the same hash-and-redeem pattern from `magic_link.rs`. **Extract** the shared core if the duplication is too painful — but per the user-facing scope (different purpose, different TTL, different table), keeping them separate is fine.
 
@@ -685,9 +685,9 @@ auth: identity/verification + /verify — signup-time email verification (24h TT
 # Unit U6 · Password reset
 
 Files:
-- Create `crates/auth/src/identity/password_reset.rs` (issue + redeem)
-- Create `crates/auth/src/ui/forgot.rs` (`/forgot` GET + POST — always returns 200)
-- Create `crates/auth/src/ui/reset.rs` (`/reset?t=...` GET + POST — set new password)
+- Create `crates/zeroship-auth/src/identity/password_reset.rs` (issue + redeem)
+- Create `crates/zeroship-auth/src/ui/forgot.rs` (`/forgot` GET + POST — always returns 200)
+- Create `crates/zeroship-auth/src/ui/reset.rs` (`/reset?t=...` GET + POST — set new password)
 
 Same primitive (hash-and-redeem), 1h TTL, `purpose='reset'`. Reuses `auth.magic_links` (different purpose).
 
@@ -714,8 +714,8 @@ auth: identity/password_reset + /forgot + /reset — 1h reset token, NIST-policy
 # Unit U7 · Bounce / complaint webhooks
 
 Files:
-- Create `crates/auth/src/mailer/bounce.rs` (HMAC-signature verification for Postmark + SNS message-signing for SES)
-- Create webhook handlers in `crates/auth/src/ui/webhooks.rs`
+- Create `crates/zeroship-auth/src/mailer/bounce.rs` (HMAC-signature verification for Postmark + SNS message-signing for SES)
+- Create webhook handlers in `crates/zeroship-auth/src/ui/webhooks.rs`
 
 Endpoints:
 - `POST /webhooks/postmark` — Postmark signs with `X-Postmark-Webhook-Signature` (HMAC-SHA1 over body with shared secret)

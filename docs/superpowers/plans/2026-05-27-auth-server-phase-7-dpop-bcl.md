@@ -65,7 +65,7 @@ The token **MUST NOT** contain a `nonce` claim (the spec forbids it).
 
 ## Task U1.1 · `core::logout_token` verifier
 
-File: `crates/core/src/logout_token.rs`.
+File: `crates/zeroship-core/src/logout_token.rs`.
 
 ```rust
 //! OIDC Back-Channel Logout 1.0 `logout_token` JWT verifier.
@@ -147,7 +147,7 @@ Commit: `core: logout_token — OIDC BCL verifier (events check + nonce-must-be-
 
 ## Task U1.2 · Gateway integration
 
-File: `crates/gateway/src/ui/backchannel_logout.rs` (new) or add a handler to existing routes.
+File: `crates/zeroship-gateway/src/ui/backchannel_logout.rs` (new) or add a handler to existing routes.
 
 ```rust
 //! POST /oidc/backchannel-logout — receives hydra's logout_token JWT,
@@ -210,7 +210,7 @@ pub async fn handle(
 }
 ```
 
-Add `sessions::revoke_all_for_user(db, user_id)` to `crates/gateway/src/sessions.rs`:
+Add `sessions::revoke_all_for_user(db, user_id)` to `crates/zeroship-gateway/src/sessions.rs`:
 
 ```rust
 pub async fn revoke_all_for_user(db: &Client, user_id: &str) -> Result<u64> {
@@ -236,7 +236,7 @@ Commit: `gateway: /oidc/backchannel-logout — verify logout_token + revoke gate
 Same pattern as U1 but for `console_sessions` instead of `gateway_sessions`.
 
 Files:
-- Create `crates/control/src/oidc_rp.rs::backchannel_logout` handler
+- Create `crates/zeroship-control/src/oidc_rp.rs::backchannel_logout` handler
 - Add `console_sessions::revoke_all_for_user`
 - Register `POST /oidc/backchannel-logout` route
 - Update `ops/auth-clients.example.toml` console client with the backchannel URI
@@ -261,7 +261,7 @@ Optional claims:
 
 ## File
 
-- Create `crates/core/src/dpop.rs`
+- Create `crates/zeroship-core/src/dpop.rs`
 
 ```rust
 //! DPoP (RFC 9449) proof JWT verifier.
@@ -480,7 +480,7 @@ Commit: `core: dpop — RFC 9449 proof JWT verifier (signature, htu/htm/iat, ath
 
 `jti` must not repeat within the freshness window. Maintain a bounded in-memory set in the gateway:
 
-File: extend `crates/core/src/dpop.rs` with:
+File: extend `crates/zeroship-core/src/dpop.rs` with:
 
 ```rust
 use std::collections::HashMap;
@@ -537,7 +537,7 @@ Phase 7 v1 keeps DPoP **optional** — clients that don't send DPoP-Auth keep wo
 
 Note: hydra's tokens don't carry `cnf.jkt`. So Phase 7's DPoP verifies the proof JWT's signature + freshness, but can't verify token binding. The thumbprint (`jkt`) is returned for inspection; calling code that wants binding enforces `proof.jkt == access_token.cnf.jkt` itself — which requires us to issue our own bound tokens, a Phase 8+ item.
 
-File: extend `crates/gateway/src/router/dispatch.rs::resolve_auth_or_redirect`:
+File: extend `crates/zeroship-gateway/src/router/dispatch.rs::resolve_auth_or_redirect`:
 
 ```rust
 // At the top of the function, before session-cookie validation:

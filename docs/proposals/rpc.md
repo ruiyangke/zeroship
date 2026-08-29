@@ -224,7 +224,7 @@ Two procedures resolving to the same wireId is an **unrecoverable build error**.
 
 ## 3. Ambient context — `ctx`, ALS-backed
 
-The seamless model needs per-request context without threading it through every signature. The platform shipped native `AsyncLocalStorage` (ISS-01, `crates/runtime/src/node/async_hooks/als.rs`) backed by V8's `ContinuationPreservedEmbedderData`. ALS propagates **automatically** across `await`, microtasks, `.then`, `setTimeout`, generator yields — no `bind()`, no `executing_request_id` repaint, no per-callback ceremony.
+The seamless model needs per-request context without threading it through every signature. The platform shipped native `AsyncLocalStorage` (ISS-01, `crates/zeroship-runtime/src/node/async_hooks/als.rs`) backed by V8's `ContinuationPreservedEmbedderData`. ALS propagates **automatically** across `await`, microtasks, `.then`, `setTimeout`, generator yields — no `bind()`, no `executing_request_id` repaint, no per-callback ceremony.
 
 This proposal rests on ALS as the foundation primitive. The v1 draft's "no AsyncLocalStorage gymnastics; the slot is keyed by the kernel's in-flight request id" rationale is replaced: ALS *is* the gymnastics-free version, and using anything else is a worse design.
 
@@ -262,7 +262,7 @@ The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 | `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` HMAC-signed header → exposed via `env.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anon"`; throws `UNAUTHENTICATED` if read by an `auth: "user"`/`"admin"` procedure that didn't authenticate (defense-in-depth). |
 | `ctx.requestId` | `TypedId<"req">` | Gateway generates UUIDv7 typed_id | Echoed in `X-Request-Id` response header; matches `typed_id` invariant. |
 | `ctx.traceId` | `string` (32-char hex) | W3C `traceparent` header (gateway creates if absent) | Used for OTel correlation. |
-| `ctx.signal` | `AbortSignal` | `AbortSignal.any([clientDisconnect, gatewayDeadline, isolateEviction])` (native, `crates/runtime/src/web/dom/abort_signal.rs`) | Aborts on any of the three (see "Abort source plumbing" below). Auto-passed to `fetch`, `db.*`, `kv.*`, `storage.*`. |
+| `ctx.signal` | `AbortSignal` | `AbortSignal.any([clientDisconnect, gatewayDeadline, isolateEviction])` (native, `crates/zeroship-runtime/src/web/dom/abort_signal.rs`) | Aborts on any of the three (see "Abort source plumbing" below). Auto-passed to `fetch`, `db.*`, `kv.*`, `storage.*`. |
 | `ctx.idempotencyKey` | `string \| undefined` | Client's `Idempotency-Key` header, validated by gateway | `undefined` for queries and mutations without `idempotent: true`. |
 | `ctx.headers` | `Headers` (native, mutable per-request) | The procedure's request | The kernel constructs the `Headers` instance lazily on first `ctx.headers` read and caches the same wrapper for the request's lifetime. Mutations (`headers.set(...)`, `headers.append(...)`, `headers.delete(...)`) succeed but vanish at request end — the kernel never re-reads `ctx.headers` after dispatching to the user procedure. Aligns with the WHATWG default for `new Headers(...)`. To pin an immutable copy, the procedure constructs `new Headers(ctx.headers)` and freezes it itself. |
 | `ctx.method` | `"GET" \| "HEAD" \| "POST" \| "PUT" \| "DELETE" \| "PATCH" \| "OPTIONS"` | The wire request | For non-raw procedures, the gateway pre-rejects bad methods (§7); for `kind: "raw"`, the procedure handles whatever the gateway forwards. |
@@ -276,7 +276,7 @@ The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 
 `ctx.signal` aborts when any of three sources fire. Each has a defined plumbing path:
 
-- **`clientDisconnect`** — the gateway holds the worker request connection open until the response is fully drained. On client disconnect (TCP close, HTTP/2 RST_STREAM, browser tab close), the gateway immediately closes the worker-side request stream. The runtime's `Request.body` `ReadableStream` emits an `error` event on close; the runtime's request-tracking layer (in `crates/runtime/src/rpc/dispatch.rs`) wires this to abort the per-request `AbortController` backing `ctx.signal`. For raw procedures (`kind: "raw"`) that read the body lazily, the abort fires when the next `body.getReader().read()` call encounters the stream error.
+- **`clientDisconnect`** — the gateway holds the worker request connection open until the response is fully drained. On client disconnect (TCP close, HTTP/2 RST_STREAM, browser tab close), the gateway immediately closes the worker-side request stream. The runtime's `Request.body` `ReadableStream` emits an `error` event on close; the runtime's request-tracking layer (in `crates/zeroship-runtime/src/rpc/dispatch.rs`) wires this to abort the per-request `AbortController` backing `ctx.signal`. For raw procedures (`kind: "raw"`) that read the body lazily, the abort fires when the next `body.getReader().read()` call encounters the stream error.
 - **`gatewayDeadline`** — the gateway sets a hard timeout per request based on the resource's `policy.timeout` (or `defineApp.rpc.defaults.timeout`). When the timer fires, the gateway sends 504 to the client (if the response hasn't started) and closes the worker connection (which triggers the `clientDisconnect` path on the worker side).
 - **`isolateEviction`** — the worker's LRU cache evicts an isolate when it exceeds the per-thread cap. Evictions during in-flight procedures: the worker first calls `entered_for_eviction()` on the isolate, which fires the per-request `AbortController` for every in-flight procedure (a 30-second drain window starts; see §15 OQ-2). Procedures that finish within the window respond normally; those that don't are aborted hard at window end. After the drain, the isolate enters `Disposed` state.
 
@@ -318,7 +318,7 @@ async fn dispatch_rpc(req: &RpcRequest) -> Response {
 }
 ```
 
-The `executing_request_id` slot used by the v1 draft (`crates/runtime/src/auth.rs:55-59`) is removed. Auth context, idempotency key, signal — all live in ALS, all propagate automatically.
+The `executing_request_id` slot used by the v1 draft (`crates/zeroship-runtime/src/auth.rs:55-59`) is removed. Auth context, idempotency key, signal — all live in ALS, all propagate automatically.
 
 ### Why this is strictly better than v1's request-id slot
 
@@ -341,7 +341,7 @@ The round-01 critic flagged the v1 sketch as "auto-stub strips meta; manual clie
 - `json` — the value with `Date`/`BigInt`/`Map`/`Set`/`URL`/`Uint8Array`/`RegExp` stringified into superjson's compact representation.
 - `meta` — a superjson `meta.values` map keyed by JSON path. **Omitted when empty** (i.e., when the payload is JSON-native). Saves bytes for the 80% case.
 
-The gateway and runtime decode-encode pair are both Rust; superjson is implemented natively in `crates/core/src/superjson.rs` (new). Cost on the hot path: one allocation for the meta map (empty in the common case → single `null` write), one walk of the value tree on encode.
+The gateway and runtime decode-encode pair are both Rust; superjson is implemented natively in `crates/zeroship-core/src/superjson.rs` (new). Cost on the hot path: one allocation for the meta map (empty in the common case → single `null` write), one walk of the value tree on encode.
 
 #### Gateway / worker decode contract
 
@@ -395,7 +395,7 @@ Tree-shaken; no runtime cost beyond the call site.
 
 ## 4b. Binary, FormData, File — first-class
 
-Native `FormData`, `Blob`, `File`, `ReadableStream` ship as `#[v8_class]` primitives (`crates/runtime/src/web/dom/form_data.rs`, etc.). Procedures can take them as args and return them as values. The wire **does not base64-encode** them.
+Native `FormData`, `Blob`, `File`, `ReadableStream` ship as `#[v8_class]` primitives (`crates/zeroship-runtime/src/web/dom/form_data.rs`, etc.). Procedures can take them as args and return them as values. The wire **does not base64-encode** them.
 
 ### How the wire mode is chosen
 
@@ -688,7 +688,7 @@ local function.
 The gateway-to-worker boundary uses `#[v8_method(fastcall)]` for the dispatch entry. The kernel exposes:
 
 ```rust
-// crates/runtime/src/rpc/dispatch.rs
+// crates/zeroship-runtime/src/rpc/dispatch.rs
 #[v8_class]
 impl RpcDispatcher {
     /// Synchronous fastcall — decodes the envelope, validates,
@@ -736,7 +736,7 @@ The fastcall enqueue is hot-path; the slow-path `awaitDispatch` is invoked once 
 - Best case: hot path is enqueue-dominated (small input, fast handler). Fastcall saves 30-100 ns on enqueue per RPC vs. `v8::Function::call`. The `awaitDispatch` adds back one normal V8 boundary crossing (~50-150 ns). Net per RPC: −20 ns to +50 ns vs. a single `v8::Function::call`. At 200K req/s, ≤10 ms/s saved across the whole worker.
 - Realistic case: hot path is dominated by superjson decode, ALS write, and JS-side `_procedures[name]` lookup. The fastcall savings are <5% of total dispatch cost.
 
-Implementation rule: phase 1 ships the two-step pattern only after a microbenchmark in `crates/runtime/benches/rpc_dispatch.rs` confirms a positive win at p50 and p99 with realistic procedure shapes (small JSON in/out; FormData multipart). If the benchmark shows a wash or negative, phase 1 ships the simpler single `v8::Function::call` path and the proposal is amended.
+Implementation rule: phase 1 ships the two-step pattern only after a microbenchmark in `crates/zeroship-runtime/benches/rpc_dispatch.rs` confirms a positive win at p50 and p99 with realistic procedure shapes (small JSON in/out; FormData multipart). If the benchmark shows a wash or negative, phase 1 ships the simpler single `v8::Function::call` path and the proposal is amended.
 
 The synthetic entry's `default.rpc` is the JS-side wrapper that fans out to `_procedures[name]`. Most of the work happens before that — superjson decode, validation, metering — and that work runs in Rust at fastcall speed regardless of which dispatch ABI we land on.
 
@@ -775,11 +775,11 @@ list returns parsed Todo[]  ←  superjson decode
 | `sdks/vite-plugin/src/reference-graph.ts` | Module-graph walk for transitive marking |
 | `sdks/vite-plugin/src/synthetic-entry.ts` | Generates the bundle entry |
 | `sdks/vite-plugin/src/manifest.ts` | Emits `manifest.resources` at `closeBundle` |
-| `crates/runtime/src/rpc/dispatch.rs` | NEW: fastcall dispatch entries |
-| `crates/runtime/src/rpc/error.rs` | NEW: native `RpcError` `#[v8_class]` (§6) |
-| `crates/runtime/src/rpc/superjson.rs` | NEW: superjson encode/decode |
-| `crates/core/src/superjson.rs` | NEW: shared superjson logic (gateway + worker) |
-| `crates/gateway/src/idempotency.rs` | EXTENDED: distributed lock primitive (§8) |
+| `crates/zeroship-runtime/src/rpc/dispatch.rs` | NEW: fastcall dispatch entries |
+| `crates/zeroship-runtime/src/rpc/error.rs` | NEW: native `RpcError` `#[v8_class]` (§6) |
+| `crates/zeroship-runtime/src/rpc/superjson.rs` | NEW: superjson encode/decode |
+| `crates/zeroship-core/src/superjson.rs` | NEW: shared superjson logic (gateway + worker) |
+| `crates/zeroship-gateway/src/idempotency.rs` | EXTENDED: distributed lock primitive (§8) |
 
 ---
 
@@ -1045,10 +1045,10 @@ gRPC-inspired, fixed:
 
 #### `RpcError` is a native `#[v8_class]`
 
-The v1 draft's `RpcError` was a 9-line JS stub with `instanceof` brand checks, which doesn't survive realm boundaries. The platform pattern for branded native classes is `DOMException` (`crates/runtime/src/web/dom/exception.rs`). `RpcError` follows the same shape:
+The v1 draft's `RpcError` was a 9-line JS stub with `instanceof` brand checks, which doesn't survive realm boundaries. The platform pattern for branded native classes is `DOMException` (`crates/zeroship-runtime/src/web/dom/exception.rs`). `RpcError` follows the same shape:
 
 ```rust
-// crates/runtime/src/rpc/error.rs
+// crates/zeroship-runtime/src/rpc/error.rs
 
 #[derive(WebIdlEnum)]
 #[webidl(name = "ZsErrorCode")]
@@ -1453,7 +1453,7 @@ Build-time and gateway-load-time checks:
 - **Anonymous mutation idempotency** — when a procedure has both `auth: "anon"` and `idempotent: true`, the build emits a warning naming the high-entropy-key requirement (gateway-enforced at runtime, but caught early at build time).
 - **`breakingOk: true` attestation** — when a wire-compat check would otherwise fail, the wrapper's `breakingOk: true` field bypasses the check with a warning (recorded in the audit log). Without it, a wire-breaking change is a build error in `--mode production`.
 
-The existing `Manifest::validate()` in `crates/core/src/types.rs` absorbs these.
+The existing `Manifest::validate()` in `crates/zeroship-core/src/types.rs` absorbs these.
 
 ### Literal-only `defineApp` — dev mode parity
 
@@ -1522,7 +1522,7 @@ All ops go through `compio-redis` (the platform's Redis driver — zero-tokio, c
 
 The `{idem:<key-hash>}` hash-tag wrapper (Redis Cluster keyspace notation) ensures `:lock` and `:meta` keys hash to the same Cluster slot, which is required for `EVAL` to operate on both atomically. Without the tag, Cluster mode would split the keys across slots and the script would fail.
 
-We add a thin `crates/gateway/src/idempotency.rs` extension for the SETNX flow with the Lua release script.
+We add a thin `crates/zeroship-gateway/src/idempotency.rs` extension for the SETNX flow with the Lua release script.
 
 #### Failure modes (documented)
 
@@ -2141,7 +2141,7 @@ export const add = mutation(async ({ text }) => { /* ... */ }, {
 Every `breakingOk` attestation is written to the control plane's `app_deploy_audit` table on deploy, with row shape:
 
 ```sql
--- crates/control/src/migrations/<n>_app_deploy_audit.sql (sketch)
+-- crates/zeroship-control/src/migrations/<n>_app_deploy_audit.sql (sketch)
 create table app_deploy_audit (
   id              uuid primary key,
   app_id          text not null,
@@ -2206,7 +2206,7 @@ Where `payload` is JSON:
 }
 ```
 
-The worker verifies HMAC on receipt — see `crates/gateway/src/proxy.rs:378` and `crates/gateway/src/user_auth.rs`. On verification:
+The worker verifies HMAC on receipt — see `crates/zeroship-gateway/src/proxy.rs:378` and `crates/zeroship-gateway/src/user_auth.rs`. On verification:
 
 - Verified payload → `ctx.user = User { id, email, role, scopes, sessionId }`.
 - HMAC mismatch → connection drop + log (gateway misconfigured or attempted spoof).
@@ -2282,11 +2282,11 @@ The intent of the layered check: in the common case (browser; same origin), chec
 
 | Phase | Scope | LOC (rough) | Dependencies |
 | --- | --- | --- | --- |
-| **1** | Native foundation: (a) `RpcError` `#[v8_class]` (mirroring DOMException) at `crates/runtime/src/rpc/error.rs` — class registration on every isolate, brand check, exposed as `globalThis.RpcError`. (b) `crates/runtime/src/rpc/dispatch.rs` with `#[v8_method(fastcall)]` entries. (c) Native superjson encode/decode at `crates/core/src/superjson.rs` (gateway) and `crates/runtime/src/rpc/superjson.rs` (worker, V8-aware). (d) ALS-based ctx population — kernel writes the `ContinuationPreservedEmbedderData` slot before invoking the user procedure. (e) `ctx.headers` / `ctx.url` `Object.freeze` wrapping. (f) Extend `crates/worker/src/cache.rs` with `entered_for_eviction()` to fire per-request `AbortController`s on isolate eviction (§3 abort plumbing). (g) Microbenchmark gate at `crates/runtime/benches/rpc_dispatch.rs` deciding single-call vs. two-step fastcall ABI before phase 1 commits. | ~950 (Rust) | `#[v8_class]`, `#[v8_state_marker]`, `#[v8_method(fastcall)]`, native ALS — all shipped |
+| **1** | Native foundation: (a) `RpcError` `#[v8_class]` (mirroring DOMException) at `crates/zeroship-runtime/src/rpc/error.rs` — class registration on every isolate, brand check, exposed as `globalThis.RpcError`. (b) `crates/zeroship-runtime/src/rpc/dispatch.rs` with `#[v8_method(fastcall)]` entries. (c) Native superjson encode/decode at `crates/zeroship-core/src/superjson.rs` (gateway) and `crates/zeroship-runtime/src/rpc/superjson.rs` (worker, V8-aware). (d) ALS-based ctx population — kernel writes the `ContinuationPreservedEmbedderData` slot before invoking the user procedure. (e) `ctx.headers` / `ctx.url` `Object.freeze` wrapping. (f) Extend `crates/zeroship-worker/src/cache.rs` with `entered_for_eviction()` to fire per-request `AbortController`s on isolate eviction (§3 abort plumbing). (g) Microbenchmark gate at `crates/zeroship-runtime/benches/rpc_dispatch.rs` deciding single-call vs. two-step fastcall ABI before phase 1 commits. | ~950 (Rust) | `#[v8_class]`, `#[v8_state_marker]`, `#[v8_method(fastcall)]`, native ALS — all shipped |
 | **2** | Vite plugin: AST scan for file-level + function-level `"use server"`; reference-graph walk; transform-client / transform-server emission; synthetic entry generation. Strict-mode gate. | ~700 (TS) | Phase 1 |
 | **3** | Build: `manifest.artifact` + `manifest.resources` emission; literal-only `defineApp` AST extraction; reserved `_zs.*` field-name check; live-version cap (3 max); `breakingOk` attestation surface. | ~400 (TS) | Phase 2 |
 | **4** | Gateway: load `manifest.resources`, precompute `EffectivePolicy`, route + enforce per request. New `/__zeroship/v1/` prefix. CHWBL routing. CSRF (Origin → Sec-Fetch-Site → double-submit). ETag/304. Meter event emission. traceparent injection. | ~700 (Rust) | Phase 3 |
-| **5** | Idempotency: gateway-side SETNX flow with Lua-script release (`crates/gateway/src/idempotency.rs`). KV-backed dedupe table. UUIDv4/v7 entropy check for anonymous mutations. | ~400 (Rust) | Phase 4 |
+| **5** | Idempotency: gateway-side SETNX flow with Lua-script release (`crates/zeroship-gateway/src/idempotency.rs`). KV-backed dedupe table. UUIDv4/v7 entropy check for anonymous mutations. | ~400 (Rust) | Phase 4 |
 | **6** | Streaming: `function*` detection + content-negotiated wires (NDJSON, SSE, octet-stream). AI SDK 5 UI Message Stream emitter. Mid-stream error frames per §6 (NDJSON / SSE / AI SDK 5 / octet-stream-trailers). Heartbeats. **Acceptance**: the `wire: "ai-ui-v1"` byte stream is byte-identical to `streamText({...}).toUIMessageStreamResponse()` for a representative input set (verified against the upstream `ai/react` lib in CI). | ~500 (Rust+TS) | Phase 4 |
 | **7** | Multipart / FormData / Blob / File first-class on the dispatch path. `_zs.json` envelope spec. Native multipart parser already exists; we wire it in. | ~350 (Rust+TS) | Phase 4 |
 | **8** | Client: typed `createRpcClient<App>()` with seamless surface, branded server-reference callables, batching link. Auto-emitted `virtual:zeroship/server-api.d.ts`. | ~500 (TS) | Phase 2 |

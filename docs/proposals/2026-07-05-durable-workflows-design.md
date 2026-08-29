@@ -1004,7 +1004,7 @@ the sole owner, reader, and writer of `zeroship.workflow_*`.** No other componen
 - **Signal ingress (§18).** The gateway forwards the public `POST /__zeroship/signals/v1/{run|topic}/{addr}`
   route to the **control-plane ingress terminus** — it does not run app code and does not touch the journal.
   The control plane verifies the inbound signature/token (it holds the ingress keys, reusing the shipped
-  `crates/control/src/stripe_handlers.rs` verifier), enforces the `externalSignals` allowlist + caps, **writes
+  `crates/zeroship-control/src/stripe_handlers.rs` verifier), enforces the `externalSignals` allowlist + caps, **writes
   the `workflow_signals`/`workflow_broadcasts` row**, arms `wake_at`, and emits the accept-arm ingress meter.
 - **Gateway's only edge role** for these routes is the cheap, stateless rate-limit token bucket (`env.kv`/redis)
   and forwarding — shedding floods before they reach the control plane. It verifies no signatures and writes
@@ -1669,7 +1669,7 @@ The external ingress rail (§18) verifies inbound signatures/tokens against **ap
 **never** the control credential (§18.1). Secrets are stored **encrypted at rest** (envelope-encrypted with
 the platform data key — the same P5 machinery `zeroship.signing_keys` uses) and decrypted only in the
 control-plane ingress terminus to verify (§4 — the gateway holds no secret); HMAC is symmetric, so the platform must hold the secret (mirroring how the Stripe verifier in
-`crates/control/src/stripe_handlers.rs` already works):
+`crates/zeroship-control/src/stripe_handlers.rs` already works):
 
 ```sql
 CREATE TABLE zeroship.workflow_signal_keys (
@@ -1773,7 +1773,7 @@ one of the two primitive `kind`s stored here; the control-plane schedule sweep (
 Scheduled runs are **ordinary** `workflow_runs` rows — this table adds **no** run/step/signal structure; a
 schedule is a run-*producer*, nothing more. It reuses `workflow_runs.dedup_key` +
 `UNIQUE (app_id, workflow_name, dedup_key)` (§7.1) as the at-most-one-run-per-fire mechanism (§12); no new dedup
-path is introduced. The typed-id prefix is `sch_` (`SCHEDULE_PREFIX = "sch"` in `crates/core/src/typed_id.rs`,
+path is introduced. The typed-id prefix is `sch_` (`SCHEDULE_PREFIX = "sch"` in `crates/zeroship-core/src/typed_id.rs`,
 pairwise-disjoint from existing 3-char prefixes).
 
 ```sql
@@ -2582,7 +2582,7 @@ seeded from the plan catalog — no numbers are claimed here.
   threads, no data races, no parallel CPU (§6.5).
 - **typed_id everywhere.** Creator-visible prefixes stay settled: `run_…` (run), `sig_…` (signal), `sch_…`
   (schedule, §7.9), integer `ordinal`. Internal workflow prefixes use a **`w`-family** rule (added to
-  `crates/core/src/typed_id.rs`) so they never collide with existing 3-char prefixes on this Stripe-centric
+  `crates/zeroship-core/src/typed_id.rs`) so they never collide with existing 3-char prefixes on this Stripe-centric
   platform: `wfd_…` (dispatch/batch — not `dsp_`, the billing-dispute prefix), `wsk_…` (signal key),
   `wbc_…` (broadcast), `wsb_…` (subscription — not `sub_`, Stripe's subscription prefix). All 3-char,
   pairwise-disjoint;
@@ -2615,7 +2615,7 @@ and §3 scope bullets **cross-reference this section** rather than restating it.
 - **Child orchestration (§3.7, §20).** **No new typed_id prefix** (children are `run_…`, join signals `sig_…`);
   a child pins to the **parent's** `deploy_id` (§20.7); spawn/hook/cascade ride the existing §7.4 txn / sweep.
 - **External ingress & broadcast (§18).** Three fresh prefixes (`wsk_`/`wbc_`/`wsb_`) + the stateless `wst_`
-  token, all pairwise-disjoint (`crates/core/src/typed_id.rs`); `externalSignals`/`inbound`/`topicFrom`/topic
+  token, all pairwise-disjoint (`crates/zeroship-core/src/typed_id.rs`); `externalSignals`/`inbound`/`topicFrom`/topic
   defs are deploy-pinned (§18.5); the ingress terminus is control-plane, the gateway forwards (§4).
 - **Compensation (§3.8, §21).** **No new table, typed_id, or suspension reason** — annotation columns on
   `workflow_steps` + two on `workflow_runs` + a `compensating` state; compensator closures are the run's
@@ -2666,7 +2666,7 @@ day-1, so it is threaded through from the first journal-schema PR, not bolted on
 7. **`env.workflows` namespace + `@zeroship/workflows` package** (client wrapper over the control-plane API).
 8. **Metering integration (§10)** — per-dispatch counter emission, spend enforcement parity.
 9. **`cron` + schedule DSL (§3.4, §7.9, §12).** The `zeroship.workflow_schedules` create script (§7.9,
-   landing in the PR 1 scripts) + `SCHEDULE_PREFIX = "sch"` (`crates/core/src/typed_id.rs`). The SDK
+   landing in the PR 1 scripts) + `SCHEDULE_PREFIX = "sch"` (`crates/zeroship-core/src/typed_id.rs`). The SDK
    `@zeroship/workflows/schedule`: the `every` fluent builder + `cronExpr` + `compileSchedule` (the one pure
    build-time function) + `InvalidScheduleError` + the typed `cron(...)` registration (`ScheduleInput`,
    `overlap`, `catchUp`, `input` required-iff-non-void). Vite-plugin `schedules[]` manifest discovery
@@ -2879,7 +2879,7 @@ double-commit, and wall-budget rollover cases; every fix carries a regression te
 
 - **Dispatch/batch id prefix — RESOLVED.** The workflow dispatch/batch id is `wfd_` (a w-family prefix),
   **not** `dsp_` — `dsp_` is already the billing-**dispute** typed-id prefix
-  (`crates/core/src/typed_id.rs`), so reusing it would collide the disjointness assertions. `wfd_` lands in
+  (`crates/zeroship-core/src/typed_id.rs`), so reusing it would collide the disjointness assertions. `wfd_` lands in
   the PR 1 create scripts alongside the other w-family workflow prefixes (`wsk_`/`wbc_`/`wsb_`). No open
   question remains.
 - **Terminal-run retention / GC** of `workflow_steps` / `workflow_signals` (operator policy) — and, on
@@ -2925,7 +2925,7 @@ double-commit, and wall-budget rollover cases; every fix carries a regression te
 *Day-1 scope. The engine mechanics behind the developer surface in §3.5. This rail changes only the
 **representation** of a recorded output — it adds **no** new frontier state, **no** new suspension reason
 (§8 is untouched), and **no** new creator-facing `env.*` primitive. It reuses the existing
-content-addressed blob machinery (`crates/bundle/src/blob.rs`: SHA-256 hex addressing,
+content-addressed blob machinery (`crates/zeroship-bundle/src/blob.rs`: SHA-256 hex addressing,
 `put_blob_stream(hash, size, reader)` with verified writes + partial cleanup, `has_blob`,
 `get_blob_to_file` verifying SHA-256 before handback, the sharded `<hash[0..2]>/<hash[2..]>` layout, and
 the `s3://`-vs-local store resolver).*
@@ -3094,7 +3094,7 @@ control credential, and (b) **broadcast / topics** — one signal fanned out to 
 alongside today's point-to-point `(run, type)` delivery. **Non-negotiable:** neither half touches the
 single-frontier replay core (§5/§6) or `wake_at`-unified suspension (§8). Both only produce journal rows;
 the replay engine is unchanged and every run stays individually deterministic off its own journaled
-bindings. The HMAC verify reuses the shipped logic in `crates/control/src/stripe_handlers.rs` — constant-
+bindings. The HMAC verify reuses the shipped logic in `crates/zeroship-control/src/stripe_handlers.rs` — constant-
 time compare, `t=<unix>,v1=<hex>` scheme, timestamp tolerance, hard cap on `v1=` entries.*
 
 ### 18.1 Auth model — three inbound verifiers, none the control credential

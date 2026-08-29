@@ -23,10 +23,10 @@
 
 | # | Unit | Files | Time |
 |---|---|---|---|
-| U1 | JWK rotation cron (90-day prepend + 31-day retire) | crates/auth/src/cron/{mod,jwk_rotation}.rs | 60 min |
-| U2 | Audit-log retention sweeper | crates/auth/src/cron/audit_retention.rs | 40 min |
-| U3 | SES-SNS webhook signature verification (+ `/webhooks/ses-sns` handler) | crates/auth/src/{ui/webhooks.rs, mailer/sns.rs} | 60 min |
-| U4 | Load test for `/login` and code-exchange | crates/auth/tests/load_test.rs (manual; behind env flag) | 50 min |
+| U1 | JWK rotation cron (90-day prepend + 31-day retire) | crates/zeroship-auth/src/cron/{mod,jwk_rotation}.rs | 60 min |
+| U2 | Audit-log retention sweeper | crates/zeroship-auth/src/cron/audit_retention.rs | 40 min |
+| U3 | SES-SNS webhook signature verification (+ `/webhooks/ses-sns` handler) | crates/zeroship-auth/src/{ui/webhooks.rs, mailer/sns.rs} | 60 min |
+| U4 | Load test for `/login` and code-exchange | crates/zeroship-auth/tests/load_test.rs (manual; behind env flag) | 50 min |
 | U5 | `docs/runbooks/auth-deploy.md` operator deploy guide | docs/runbooks/auth-deploy.md | 30 min |
 | U6 | Phase 6 close-out + `auth-phase-6` tag | – | 10 min |
 
@@ -40,15 +40,15 @@ Total: ~4h, ~9 commits.
 
 ## Files
 
-- Create `crates/auth/src/cron/mod.rs` (declares submodules + the `spawn_all` orchestrator)
-- Create `crates/auth/src/cron/jwk_rotation.rs`
-- Modify `crates/auth/src/main.rs` (spawn the cron tasks after server boot)
-- Modify `crates/auth/src/config.rs` (add `--jwk-rotation-days` with default 90, `--jwk-retain-days` with default 31)
+- Create `crates/zeroship-auth/src/cron/mod.rs` (declares submodules + the `spawn_all` orchestrator)
+- Create `crates/zeroship-auth/src/cron/jwk_rotation.rs`
+- Modify `crates/zeroship-auth/src/main.rs` (spawn the cron tasks after server boot)
+- Modify `crates/zeroship-auth/src/config.rs` (add `--jwk-rotation-days` with default 90, `--jwk-retain-days` with default 31)
 
 ## Implementation
 
 ```rust
-//! crates/auth/src/cron/jwk_rotation.rs
+//! crates/zeroship-auth/src/cron/jwk_rotation.rs
 //!
 //! Daily check: if the active signing key in either key set is older than
 //! `rotation_days`, prepend a new key (which becomes the active signer per
@@ -114,7 +114,7 @@ Tests:
 ## Cron orchestrator
 
 ```rust
-// crates/auth/src/cron/mod.rs
+// crates/zeroship-auth/src/cron/mod.rs
 pub mod jwk_rotation;
 pub mod audit_retention;
 
@@ -151,7 +151,7 @@ For v1 simplicity, ship just the **hot-retention sweeper** (delete rows past the
 
 ## File
 
-- Create `crates/auth/src/cron/audit_retention.rs`
+- Create `crates/zeroship-auth/src/cron/audit_retention.rs`
 
 ## Implementation
 
@@ -240,10 +240,10 @@ Postmark webhooks are Basic-auth-protected (Phase 5). SES delivers via SNS; SNS 
 
 ## Files
 
-- Create `crates/auth/src/mailer/sns.rs` (signature verify + cert fetching)
-- Modify `crates/auth/src/ui/webhooks.rs` (`POST /webhooks/ses-sns` handler)
-- Modify `crates/auth/src/mailer/mod.rs` (`pub mod sns;`)
-- Modify `crates/auth/src/server.rs` (register route)
+- Create `crates/zeroship-auth/src/mailer/sns.rs` (signature verify + cert fetching)
+- Modify `crates/zeroship-auth/src/ui/webhooks.rs` (`POST /webhooks/ses-sns` handler)
+- Modify `crates/zeroship-auth/src/mailer/mod.rs` (`pub mod sns;`)
+- Modify `crates/zeroship-auth/src/server.rs` (register route)
 
 ## SNS verification algorithm
 
@@ -287,7 +287,7 @@ Behind `cfg(feature = "load-test")` or env-gated to skip in normal `cargo test` 
 
 ## File
 
-- Create `crates/auth/tests/load_test.rs`
+- Create `crates/zeroship-auth/tests/load_test.rs`
 
 ```rust
 //! Auth server load test. Behind AUTH_LOAD_TEST=1 env (off in normal test runs).

@@ -3,7 +3,7 @@ Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-01-comp
 # Native `CompressionStream` / `DecompressionStream` design
 
 **Date:** 2026-05-01
-**Status:** **Shipped** — `crates/runtime/src/web/streams/compression.rs` (commit `ed3125e` "EventSource + CompressionStream/DecompressionStream"). Document retained as design spec.
+**Status:** **Shipped** — `crates/zeroship-runtime/src/web/streams/compression.rs` (commit `ed3125e` "EventSource + CompressionStream/DecompressionStream"). Document retained as design spec.
 **Spec:** WHATWG Compression Standard — https://compression.spec.whatwg.org/
 **Depends on:** native-streams proposal (TransformStream / ReadableStream / WritableStream as Rust classes); native-fetch proposal (response-body construction in Rust)
 
@@ -99,7 +99,7 @@ are sibling projects that must land first or alongside.
 This compression design reads, but does not own, the following surface:
 
 ```rust
-// crates/runtime/src/web/streams.rs — sibling project
+// crates/zeroship-runtime/src/web/streams.rs — sibling project
 pub struct TransformStream { /* opaque */ }
 
 impl TransformStream {
@@ -178,7 +178,7 @@ This compression design needs an explicit hook in native-fetch's response-body
 construction:
 
 ```rust
-// crates/runtime/src/fetch/response.rs — sibling project
+// crates/zeroship-runtime/src/fetch/response.rs — sibling project
 pub struct ResponseBuilder<'a> {
     /* opaque */
 }
@@ -629,7 +629,7 @@ impl CompressionStream {
 The getter signature `fn readable<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value>`
 ties the return Local's lifetime to the *original* PinScope's `'s`
 parameter, not to a reborrow. The macro at
-`crates/runtime-macros/src/lib.rs:504` already handles the `Local`
+`crates/zeroship-runtime-macros/src/lib.rs:504` already handles the `Local`
 return type via `quote! { rv.set(#call.into()); }` — no intermediate
 `let` binding. To make the lifetime survive the callback's body, the
 macro's `gen_param_extractions` (currently emitting `let scope = &mut *scope;`
@@ -661,7 +661,7 @@ Borrow-checker reasoning: with reborrow skipped, the call
 `v8::PinScope` lifetime. `rv.set(__local.into())` consumes the Local
 in the same expression — no intermediate borrow that could outlive
 the scope. Compiles cleanly. (We can verify with a `compile_test`
-fixture in `crates/runtime-macros/tests/`.)
+fixture in `crates/zeroship-runtime-macros/tests/`.)
 
 ### F. SAB rejection at the IDL boundary (BLOCKER-5)
 
@@ -681,7 +681,7 @@ We extend the `#[v8_class]` macro's `Vec<u8>`-from-BufferSource
 extraction with an opt-in `#[reject_shared]` attribute:
 
 ```rust
-// crates/runtime-macros/src/lib.rs gen_extract_vec_u8 — extended.
+// crates/zeroship-runtime-macros/src/lib.rs gen_extract_vec_u8 — extended.
 fn gen_extract_vec_u8(reject_shared: bool) -> TokenStream2 {
     let sab_check = if reject_shared {
         quote! {
@@ -825,7 +825,7 @@ Brotli decoder context is ~8 MB worst case (per RFC 7932 LZ77 window
 of `1 << lgwin`); 1024 × 8 MB = 8 GB worst case, vs the 160 GB
 unbounded scenario. Excess constructions throw `TypeError("too many
 concurrent codecs")` synchronously. The cap is per-isolate, and one
-isolate hosts one app (per `crates/worker/src/cache.rs` invariant), so
+isolate hosts one app (per `crates/zeroship-worker/src/cache.rs` invariant), so
 this is also the per-app cap.
 
 ### Missing-4: Telemetry
@@ -931,7 +931,7 @@ that) plus their own backpressure and cancel handling.
 ## File layout
 
 ```
-crates/runtime/src/
+crates/zeroship-runtime/src/
 ├── compression/
 │   ├── mod.rs                  (new) public Codec trait + factory
 │   ├── codec_gzip.rs           (new) GzipEncoder/GzipDecoder
@@ -945,16 +945,16 @@ crates/runtime/src/
 └── init.rs                     (modified) install both classes; register
                                 fetch_hook with native-fetch builder.
 
-crates/runtime-macros/src/
+crates/zeroship-runtime-macros/src/
 └── lib.rs                      (modified) +#[reject_shared] arg attr,
                                 +lifetime-tied Local return handling.
 
-crates/runtime/Cargo.toml        flate2 = "1" (default features),
+crates/zeroship-runtime/Cargo.toml        flate2 = "1" (default features),
                                 brotli = { version = "8", default-features = false,
                                            features = ["std", "ffi-api"] }
                                                                     /* see MINOR-21 */
 
-crates/runtime/tests/
+crates/zeroship-runtime/tests/
 ├── compression.rs              (new) hand-written smoke tests
 ├── wpt_compression.rs          (new) WPT runner
 └── wpt/compression/            (vendored from web-platform-tests)

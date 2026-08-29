@@ -24,9 +24,9 @@
 
 ## 2. Summary — the worst / most-important findings
 
-1. **`zeroship.auth.getUser()` is structurally broken.** `crates/runtime/src/auth.rs:29` defines `set_request_user`, the `getUser/requireUser` callbacks read `per_request_user`, but **no caller in the live tree ever calls `set_request_user`**. The gateway HMAC-signs and forwards `ZeroShip-User` (`crates/gateway/src/proxy.rs:378`); the worker's dispatch handler (`crates/worker/src/handler.rs:107-200`) parses the envelope and calls `runtime.call_fetch_handler` without ever decoding the header or populating per-request user state. **Any procedure that calls the proposed `user()` helper will see `null`.** This is a production-reachable correctness hole — see Critical-2 for evidence.
+1. **`zeroship.auth.getUser()` is structurally broken.** `crates/zeroship-runtime/src/auth.rs:29` defines `set_request_user`, the `getUser/requireUser` callbacks read `per_request_user`, but **no caller in the live tree ever calls `set_request_user`**. The gateway HMAC-signs and forwards `ZeroShip-User` (`crates/zeroship-gateway/src/proxy.rs:378`); the worker's dispatch handler (`crates/zeroship-worker/src/handler.rs:107-200`) parses the envelope and calls `runtime.call_fetch_handler` without ever decoding the header or populating per-request user state. **Any procedure that calls the proposed `user()` helper will see `null`.** This is a production-reachable correctness hole — see Critical-2 for evidence.
 
-2. **The wire pretends to be superjson but is plain JSON.** The transform's emitted client stub (`sdks/vite-plugin/src/transform.ts:250`) calls `JSON.stringify({ json: input })`. The runtime fast-path parser (`crates/runtime/src/core/runtime.rs:2755-2797`) reads only the `.json` field and **silently discards `meta`**. The real `@zeroship/rpc-client` (`sdks/rpc-client/src/encoding.ts:68-79`) uses real superjson with `meta`, but the lazy chunks emitted by the vite-plugin's auto-stub-transform path do not. So `Date`, `BigInt`, `Map`, `Set`, `Uint8Array` round-trip as strings or `{}` for any user calling via the auto-emitted stubs (most users) — but as the correct types for users who manually wire `client<App>(...)`. The two paths have observably different behavior.
+2. **The wire pretends to be superjson but is plain JSON.** The transform's emitted client stub (`sdks/vite-plugin/src/transform.ts:250`) calls `JSON.stringify({ json: input })`. The runtime fast-path parser (`crates/zeroship-runtime/src/core/runtime.rs:2755-2797`) reads only the `.json` field and **silently discards `meta`**. The real `@zeroship/rpc-client` (`sdks/rpc-client/src/encoding.ts:68-79`) uses real superjson with `meta`, but the lazy chunks emitted by the vite-plugin's auto-stub-transform path do not. So `Date`, `BigInt`, `Map`, `Set`, `Uint8Array` round-trip as strings or `{}` for any user calling via the auto-emitted stubs (most users) — but as the correct types for users who manually wire `client<App>(...)`. The two paths have observably different behavior.
 
 3. **`buildServerEntrySource` API has drifted from its tests.** `sdks/vite-plugin/src/rpc-registry.ts:86` accepts only `{ userEntryRel }`, but four test files (`synthetic-entry-zod.test.ts`, `zod-output-dev-only.test.ts`, `zod-passthrough.test.ts`, `ai-sdk-stream.test.ts`) call it with `{ userEntryRel, procedures }`. The `procedures` arg is silently dropped — the runtime walks `Object.keys(_zsUser)` instead. Tests presumably "pass" because they exercise behavior that ignores the extra parameter, but the signature mismatch means the tests are not testing what their setup claims to test.
 
@@ -36,7 +36,7 @@
 
 6. **Errors lie about what they are.** The transform's emitted client stub (`transform.ts:259`) constructs `new Error()` and stamps `e.code`/`e.details` on it. The proposal (`docs/proposals/rpc-v2.md` §6) defines an `RpcError` class with a fixed code enum. The class exists in `sdks/server/src/index.ts:154` but is a bare-bones stub; the runtime never wraps thrown values into it; the dispatch path's `dispatch.rs::v8_exception_to_error_value` reads `.code`/`.details` off any thrown object and ships them. Result: the user can throw `new Error("oops")` and the wire receives `{ code: undefined, message: "oops" }` — production redaction (the spec's load-bearing `RpcError`-or-redact rule, §6 Error redaction) is **not implemented anywhere**. Plain errors leak full messages and stacks to clients in production.
 
-7. **AsyncLocalStorage has landed (ISS-01) but the RPC stack does not use it.** `crates/runtime/src/node/async_hooks/als.rs` is a real, V8-`ContinuationPreservedEmbedderData`-backed implementation. The `ctx` object passed to `rpc(name, input, ctx)` is the frozen-once singleton with `waitUntil` and `passThroughOnException` and **nothing else** (`runtime.rs:1007-1037`). No `ctx.user`, no `ctx.signal`, no `ctx.headers`, no `ctx.idempotencyKey`. The proposal's §3 "Ambient context" (`user()`, `requestStorage`, `idempotencyKey()`) is a complete design with zero implementation behind it. The pieces exist; nothing wires them together.
+7. **AsyncLocalStorage has landed (ISS-01) but the RPC stack does not use it.** `crates/zeroship-runtime/src/node/async_hooks/als.rs` is a real, V8-`ContinuationPreservedEmbedderData`-backed implementation. The `ctx` object passed to `rpc(name, input, ctx)` is the frozen-once singleton with `waitUntil` and `passThroughOnException` and **nothing else** (`runtime.rs:1007-1037`). No `ctx.user`, no `ctx.signal`, no `ctx.headers`, no `ctx.idempotencyKey`. The proposal's §3 "Ambient context" (`user()`, `requestStorage`, `idempotencyKey()`) is a complete design with zero implementation behind it. The pieces exist; nothing wires them together.
 
 8. **`/_zs/v1/<id>` does not percent-decode `<id>`.** `runtime.rs:2681-2691` extracts the id with raw `find` calls on the URL string; the synthetic entry at `rpc-registry.ts:245` does `url.pathname.slice(...)` with no `decodeURIComponent`. Spec §2 allows wireIds with dots only (`[a-zA-Z0-9._*-]`), so this happens to be safe IF the gateway enforces that constraint, BUT the gateway's `KEY_FORMAT_RE` (`manifest.ts:306`) is `/^(?:\*|rpc:[a-zA-Z0-9._*-]+|...)$/` — which the worker can't enforce, only validate at build time. Anyone calling the worker directly (the bench server does, every E2E test does) bypasses that gate. A wireId containing `%2e` would silently skip the lookup map. Low impact in production, but it's a soft mismatch.
 
@@ -51,15 +51,15 @@
 ### CRITICAL
 
 **Critical-1 — `auth.getUser()` always returns null in the deployed worker path.**
-- **Files:** `crates/runtime/src/auth.rs:29-46` (`set_request_user`, `clear_request_user`); `crates/worker/src/handler.rs:107-230` (dispatch; never calls them); `crates/gateway/src/proxy.rs:378` (forwards `ZeroShip-User`).
+- **Files:** `crates/zeroship-runtime/src/auth.rs:29-46` (`set_request_user`, `clear_request_user`); `crates/zeroship-worker/src/handler.rs:107-230` (dispatch; never calls them); `crates/zeroship-gateway/src/proxy.rs:378` (forwards `ZeroShip-User`).
 - **Why it matters:** the public `@zeroship/server` API includes `user()` and `requireRole()` (today they throw `Not implemented`, but ISS-01 was supposed to land them). The plumbing is half-built: HMAC sign, ship over the wire, store the function — but nothing reads the header, validates the HMAC, or calls `set_request_user`. A creator who follows the proposal will get `getUser() === null` for every request even though they're authenticated. The fact that the SDK stubs throw means it's caught at first use, but the moment those stubs become real (Phase 4 in the proposal), this latent bug surfaces immediately. **Fix before shipping `user()`.** Add an HMAC-verifying shim in `worker/src/handler.rs::dispatch` (between line 154 envelope parse and line 188 `enter_isolate`) that decodes `ZeroShip-User`, verifies signature, and calls `runtime::auth::set_request_user`.
 
 **Critical-2 — wire format silently strips superjson `meta`.**
-- **Files:** `crates/runtime/src/core/runtime.rs:2755-2797` (`parse_envelope_body`); `sdks/vite-plugin/src/transform.ts:250-303` (auto-stub uses `JSON.stringify({ json: input })`); `sdks/rpc-client/src/encoding.ts:68-107` (real client uses `sj.serialize` which yields `{ json, meta? }`).
+- **Files:** `crates/zeroship-runtime/src/core/runtime.rs:2755-2797` (`parse_envelope_body`); `sdks/vite-plugin/src/transform.ts:250-303` (auto-stub uses `JSON.stringify({ json: input })`); `sdks/rpc-client/src/encoding.ts:68-107` (real client uses `sj.serialize` which yields `{ json, meta? }`).
 - **Why it matters:** the proposal's §4 "Cross-boundary types" explicitly enumerates `Date / BigInt / Map / Set / URL / Uint8Array / RegExp` as types the platform preserves. With the current parser, the kernel reads `body.json` and discards `body.meta` — so any `Date` sent by the manual `client<App>()` arrives as the ISO string, never revived. Two clients (auto-stub and manual client) ship to the same wire, with different revival behavior. Worse: the runtime never returns `meta` either (`rpc-registry.ts:339` `JSON.stringify({ json: result })`), so the round-trip is asymmetric. **Fix:** decide whether superjson is the wire format. If yes, the runtime must parse `{ json, meta }` together and pass both to `_zsRpc` (or the synthetic entry must call superjson's `deserialize` before invoking the user fn). If no, drop the "transformer: superjson" claim from the manifest.
 
 **Critical-3 — production error redaction is missing.**
-- **Files:** `crates/runtime/src/core/dispatch.rs:285-349` (`v8_exception_to_error_value` reads `.code`, `.details`, `.retryable` off any thrown object verbatim); `sdks/server/src/index.ts:154-163` (`RpcError` class is a stub, no `name === "RpcError"` brand check anywhere).
+- **Files:** `crates/zeroship-runtime/src/core/dispatch.rs:285-349` (`v8_exception_to_error_value` reads `.code`, `.details`, `.retryable` off any thrown object verbatim); `sdks/server/src/index.ts:154-163` (`RpcError` class is a stub, no `name === "RpcError"` brand check anywhere).
 - **Why it matters:** spec §6 "Error redaction" is explicit — non-`RpcError` throws must redact to `{ code: "INTERNAL", message: "Internal server error" }` in production. Today, `throw new Error("DB connection refused: postgres://prod-db:5432/secret")` ships verbatim with stack trace via `v8_exception_to_stack`. This is a credential-leak class issue. **Fix:** brand `RpcError` (e.g., `Symbol.for("zeroship/RpcError")`) so the dispatch path can distinguish "user constructed for the wire" from "incidental throw". Add the redaction step in `build_error_body` keyed by `NODE_ENV !== "development"` and the brand.
 
 ### HIGH
@@ -79,7 +79,7 @@
 - **Fix direction:** plug into Vite's module graph in `closeBundle`. Walk every client-bundle chunk's imports; any node that resolves to a `"use server"` file becomes an RPC stub. Two passes: first collect, then rewrite. This is what `@vitejs/plugin-rsc` does.
 
 **High-4 — no idempotency at the worker.**
-- **Files:** `crates/gateway/src/idempotency.rs:1-300+` (full implementation of `IdempotencyStore`, in-memory + skeleton for distributed); `crates/runtime/src/core/runtime.rs::call_fetch_handler` (no idempotency-key threading).
+- **Files:** `crates/zeroship-gateway/src/idempotency.rs:1-300+` (full implementation of `IdempotencyStore`, in-memory + skeleton for distributed); `crates/zeroship-runtime/src/core/runtime.rs::call_fetch_handler` (no idempotency-key threading).
 - **Why it matters:** the gateway dedups via `(app_id, wireId, idempotency_key)`, but the worker handler never reads the `Idempotency-Key` header into the runtime context. Per-procedure `fn.config.idempotent: true` is detected at build time (manifest.ts) and enforced at the gateway (`dispatch.rs:441-468`), but the runtime has no way to surface the idempotency key to user code (`idempotencyKey()` from spec §3 is a phantom helper). Two consequences: (a) no stored body in the dedup table actually carries the response from a worker round-trip yet (the in-memory store has the surface, but the call site is a TODO — see `idempotency.rs:434+ capture_response_for_idempotency`); (b) user code that wants to write its own idempotency logic (e.g., dedupe at the DB layer) has no way to read the key.
 - **Fix:** thread `Idempotency-Key` through `RequestCtx` as a strongly-typed field; expose to JS via `ctx.idempotencyKey` on the singleton context object. Replace stub `idempotencyKey(): never` in `@zeroship/server` with `() => ctx.idempotencyKey`.
 
@@ -94,9 +94,9 @@
 - **Fix:** use `oxc` or `@babel/parser` to AST-parse the file (dev cost: 50 LOC), then literal-walk the `defineApp` arg the same way `literalize()` already does in `transform.ts`. `literalize()` is reusable; just rename and export it.
 
 **High-7 — `_zsRpc` is sync but the synthetic entry's `_zsRpcAndRespond` is async; the FallThrough/re-invoke pattern is benign for `async function*` but pathological for hand-rolled iterators.**
-- **File:** `crates/runtime/src/core/runtime.rs:2658-2675` (RpcCallResult::FallThrough doc); `rpc-registry.ts:230-275` (re-invokes via `_zsRpc` from `_zsFetch`).
+- **File:** `crates/zeroship-runtime/src/core/runtime.rs:2658-2675` (RpcCallResult::FallThrough doc); `rpc-registry.ts:230-275` (re-invokes via `_zsRpc` from `_zsFetch`).
 - **Why it matters:** the kernel can't encode an `AsyncIterator` inline (no native SSE encoder) so it returns FallThrough, which causes the slow path to **re-invoke the procedure** to get a fresh iterator that JS can wrap in a ReadableStream. The doc comment (`runtime.rs:2670-2674`) says: "Re-invocation is benign for `async function*` (the body only runs when iterated…)". That's correct ONLY if the user uses `async function*`. If they hand-roll an iterator factory (which is rare but legal — the spec allows any AsyncIterable), the synchronous setup work runs twice. More worryingly: the validation (`fn.config.input.parse(input)`) ALSO runs twice — first in the kernel fast path, then again in `_zsRpc` from `_zsRpcAndRespond`. For expensive validation (large Zod schemas) this is a 2x perf hit on streams.
-- **Fix:** when the kernel sees an `AsyncIterator`, hand the iterator handle to a Rust-side SSE encoder instead of re-invoking JS. The Rust runtime already has a stream forwarder in `crates/runtime/src/web/streams/response_forwarder.rs`; wire it for the `0:`/`2:`/`d:` AI-SDK Data Stream framing. ~150 LOC.
+- **Fix:** when the kernel sees an `AsyncIterator`, hand the iterator handle to a Rust-side SSE encoder instead of re-invoking JS. The Rust runtime already has a stream forwarder in `crates/zeroship-runtime/src/web/streams/response_forwarder.rs`; wire it for the `0:`/`2:`/`d:` AI-SDK Data Stream framing. ~150 LOC.
 
 ### MEDIUM
 
@@ -106,13 +106,13 @@
 - **Fix direction:** emit the virtual `.d.ts` from the manifest emitter at `closeBundle`. Each procedure's types come from the source file's signature — easiest path is to invoke `tsc --emitDeclarationOnly` on a synthetic surface module that re-exports each `<exportName>: typeof <real-export>`.
 
 **Medium-2 — the gateway and runtime each parse `_zs/v1/<id>` independently.**
-- **Files:** `crates/runtime/src/core/runtime.rs:2681-2691` (kernel slice); `sdks/vite-plugin/src/rpc-registry.ts:245` (synthetic entry slice); `crates/gateway/src/router/dispatch.rs:594-596` (gateway slice).
+- **Files:** `crates/zeroship-runtime/src/core/runtime.rs:2681-2691` (kernel slice); `sdks/vite-plugin/src/rpc-registry.ts:245` (synthetic entry slice); `crates/zeroship-gateway/src/router/dispatch.rs:594-596` (gateway slice).
 - **Why it matters:** three separate slice-the-prefix-off-the-URL implementations. Two are in JS (synthetic entry, dev-bootstrap); one in Rust (kernel). Each must agree on what's allowed in `<id>`. The gateway's `dispatch_path_wire_id` does no validation (just `strip_prefix`); the kernel does no decoding; the synthetic entry slices the path. None percent-decodes; none normalizes case; the kernel rejects non-POST/GET while the synthetic entry rejects non-POST/GET with a 405. **Risk:** kernel says "no `default.rpc` for `/_zs/v1/foo%2ebar`", synthetic entry says "yes for `/_zs/v1/foo.bar`". Same id, inconsistent dispatch. Build-time we never see this because the build emits raw ASCII ids.
 - **Fix:** centralize id parsing. Either reject `%` in URLs at the gateway (cheap) or decode once at the kernel.
 
 **Medium-3 — module-init dispatch table is build-once and ignores HMR.**
 - **File:** `rpc-registry.ts:99-106` — `_procedures` is built at the synthetic entry's module-evaluation time, by walking `_zsUser` once.
-- **Why it matters:** dev mode patches via `globalThis.__register` (transform.ts:847-852) so HMR works; production has no equivalent because the synthetic entry walks the namespace once and there's no re-walk on user-module update. For a long-running worker that hot-swaps the user bundle (the platform's deploy story), the procedure map can go stale. The current cache-eviction behavior in `crates/worker/src/cache.rs` (LRU eviction → re-init isolate) sidesteps this, but only because eviction triggers a fresh module load. A per-app long-lived worker that doesn't evict would observe stale dispatch.
+- **Why it matters:** dev mode patches via `globalThis.__register` (transform.ts:847-852) so HMR works; production has no equivalent because the synthetic entry walks the namespace once and there's no re-walk on user-module update. For a long-running worker that hot-swaps the user bundle (the platform's deploy story), the procedure map can go stale. The current cache-eviction behavior in `crates/zeroship-worker/src/cache.rs` (LRU eviction → re-init isolate) sidesteps this, but only because eviction triggers a fresh module load. A per-app long-lived worker that doesn't evict would observe stale dispatch.
 - **Fix:** make `_procedures` a getter that re-reads the namespace on first call; OR re-walk on each `_zsRpc` call (cheap — `Object.keys` is O(n) where n ≤ ~50 typical). Per-call is fine; first-call-cached is faster.
 
 **Medium-4 — the dev-bootstrap and synthetic entry have parallel implementations of `_zsRpc`.**
@@ -349,7 +349,7 @@ In priority order:
 ### Observability holes
 
 - **No `trace_id`** propagated through the wire (spec §6 envelope includes `trace_id`; runtime never sets it).
-- **No per-procedure metrics** — the worker emits `DISPATCH_TOTAL` but not per-wireId histograms (`crates/worker/src/metrics.rs` does NOT key by procedure).
+- **No per-procedure metrics** — the worker emits `DISPATCH_TOTAL` but not per-wireId histograms (`crates/zeroship-worker/src/metrics.rs` does NOT key by procedure).
 - **No structured error log** linking `trace_id` to the redacted wire response, even though the spec calls for it.
 
 ### Performance traps
@@ -395,17 +395,17 @@ Net recommendation: do the foundations (F-1 through F-6) first, then ISS-02 Phas
 - `/home/ruiyang/Projects/appbase/sdks/rpc-client/src/client.ts`
 - `/home/ruiyang/Projects/appbase/sdks/rpc-client/src/error.ts`
 - `/home/ruiyang/Projects/appbase/sdks/rpc-client/src/idempotency.ts`
-- `/home/ruiyang/Projects/appbase/crates/runtime/src/core/runtime.rs` (lines 1100-1432, 2480-2929)
-- `/home/ruiyang/Projects/appbase/crates/runtime/src/core/dispatch.rs`
-- `/home/ruiyang/Projects/appbase/crates/runtime/src/core/serve.rs`
-- `/home/ruiyang/Projects/appbase/crates/runtime/src/transport/handler.rs`
-- `/home/ruiyang/Projects/appbase/crates/runtime/src/auth.rs`
-- `/home/ruiyang/Projects/appbase/crates/runtime/src/node/async_hooks/als.rs`
-- `/home/ruiyang/Projects/appbase/crates/runtime/tests/rpc.rs`
-- `/home/ruiyang/Projects/appbase/crates/runtime/tests/common/mod.rs`
-- `/home/ruiyang/Projects/appbase/crates/gateway/src/router/dispatch.rs`
-- `/home/ruiyang/Projects/appbase/crates/gateway/src/proxy.rs`
-- `/home/ruiyang/Projects/appbase/crates/gateway/src/idempotency.rs`
-- `/home/ruiyang/Projects/appbase/crates/gateway/src/user_auth.rs`
-- `/home/ruiyang/Projects/appbase/crates/worker/src/handler.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/core/runtime.rs` (lines 1100-1432, 2480-2929)
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/core/dispatch.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/core/serve.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/transport/handler.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/auth.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/src/node/async_hooks/als.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/tests/rpc.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-runtime/tests/common/mod.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-gateway/src/router/dispatch.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-gateway/src/proxy.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-gateway/src/idempotency.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-gateway/src/user_auth.rs`
+- `/home/ruiyang/Projects/appbase/crates/zeroship-worker/src/handler.rs`
 - `/home/ruiyang/Projects/appbase/docs/proposals/rpc-v2.md`

@@ -4,7 +4,7 @@ Zeroship supports a narrow set of Node APIs directly in the runtime and relies o
 
 ## Runtime-native `node:` modules
 
-The runtime currently registers these synthetic modules in [crates/runtime/src/core/native_modules.rs](../../crates/runtime/src/core/native_modules.rs):
+The runtime currently registers these synthetic modules in [crates/zeroship-runtime/src/core/native_modules.rs](../../crates/zeroship-runtime/src/core/native_modules.rs):
 
 - `node:async_hooks`
 - `node:buffer`
@@ -14,7 +14,7 @@ The runtime currently registers these synthetic modules in [crates/runtime/src/c
 - `node:path`
 - `node:util`
 
-Their implementations live under [crates/runtime/src/node/mod.rs](../../crates/runtime/src/node/mod.rs).
+Their implementations live under [crates/zeroship-runtime/src/node/mod.rs](../../crates/zeroship-runtime/src/node/mod.rs).
 
 ## Build-time compatibility
 

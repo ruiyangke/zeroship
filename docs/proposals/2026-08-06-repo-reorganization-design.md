@@ -43,7 +43,7 @@ No single place describes "how this is deployed/run."
 `dist/app.zship`, `design/REDESIGN*.md` scratch, and ignored `node_modules/`,
 `test-results/`, `playwright-report/`.
 
-**It is live, not orphaned:** `crates/control/src/main.rs:224` seeds it as a
+**It is live, not orphaned:** `crates/zeroship-control/src/main.rs:224` seeds it as a
 platform-owned regular app; the standalone builder Vite *service* was retired in the
 R5 cutover and "the AI app-builder IS the console." Extraction mirrors the deferred
 `zeroship-sandbox` split: the console is a standalone frontend that deploys *as an
@@ -69,7 +69,7 @@ can write online from app code. (Supersedes the earlier "rename to `@zeroship/
 backfill`" plan — deletion beats rename: the name collision disappears entirely.)
 
 **Coupling caveat (verified):** the retirement is a *surgical extraction*, not a bulk
-delete. `crates/plugin-db/src/audit.rs` + the `__zeroship_migrations` table are
+delete. `crates/zeroship-plugin-db/src/audit.rs` + the `__zeroship_migrations` table are
 **shared with the schema/DDL path** — `backend/postgres.rs:1074` and
 `register_model/validate.rs:86` write `Phase::Ddl` audit rows; `ensure_audit_table_
 exists`/`next_schema_version` back schema versioning. The advisory-lock lifecycle in
@@ -98,18 +98,18 @@ A full audit of all 24 crate dirs (the supplied dep graph was corrected: the fou
 `[[bin]]` targets inside existing crates; `core → bundle` is correct; the `auth ↔
 authz` cycle is a *dead* dev-dep). Three concrete issues are **in scope**:
 
-- **P8a — `core` is not actually a leaf.** `crates/core/src/wrapper_revocation.rs`
+- **P8a — `core` is not actually a leaf.** `crates/zeroship-core/src/wrapper_revocation.rs`
   runs async Postgres OAuth token-family revocation queries
   (`use compio_postgres::{Client,Error}`), pulling `compio-postgres` into the
   "wire-types leaf." This is the one genuine layering violation. → move the file into
   `zeroship-auth`, drop `compio-postgres` from `core`.
-- **P8b — dead dev-dep + phantom cycle.** `crates/authz/Cargo.toml` lists
+- **P8b — dead dev-dep + phantom cycle.** `crates/zeroship-authz/Cargo.toml` lists
   `zeroship-auth` in `[dev-dependencies]`, but no `.rs` under `authz` references it.
   → delete it; removes the only cycle in the graph and speeds authz test builds.
 - **P8c — bench bins in the prod runtime build.** `zeroship-bench-server` +
   `echo-server` are ungated `[[bin]]`s in the 144k-loc `runtime` crate, compiled by
   every `cargo build -p zeroship-runtime`. → gate behind
-  `required-features = ["bench-bins"]` (or move to `crates/runtime/examples/`).
+  `required-features = ["bench-bins"]` (or move to `crates/zeroship-runtime/examples/`).
 
 Two further findings are **out of scope for this branch** (see Non-goals / Appendix A):
 `authn` fold (declined — kept as-is) and the `control` → `control-billing` split
@@ -228,17 +228,17 @@ native + the `env.db` V8 surface + shared audit/lock infra), not a mechanical mo
 
 **Remove (backfill-specific):**
 - `sdks/migrations/` (whole package) + `examples/db-migrations-playground/`.
-- `crates/plugin-db/src/v8_classes/migration.rs` + `v8_classes/migrations.rs` (the
+- `crates/zeroship-plugin-db/src/v8_classes/migration.rs` + `v8_classes/migrations.rs` (the
   `env.db` backfill API) and their registration in `v8_classes/mod.rs`.
-- `crates/plugin-db/src/migration_sweeper.rs` (dead-letter sweeper) + its lib.rs wiring.
-- The `migrateOne` batched-transform loop in `crates/plugin-db/src/migrations.rs` —
+- `crates/zeroship-plugin-db/src/migration_sweeper.rs` (dead-letter sweeper) + its lib.rs wiring.
+- The `migrateOne` batched-transform loop in `crates/zeroship-plugin-db/src/migrations.rs` —
   the row-fetch/apply/dead-letter parts. Keep the advisory-lock lifecycle the schema
   path shares (`exec_begin`/`release_active_lock`).
 - Docs: the "Migrations (`@zeroship/migrations`)" section of `docs/reference/db.md`;
   the `@zeroship/migrations` line in `docs/runbooks/private-registry.md`; the comment
   in `sdks/bootstrap/src/internal.d.ts`; the `examples/README.md` row.
 
-**Explicitly KEEP:** `crates/plugin-db/src/audit.rs` + the `__zeroship_migrations`
+**Explicitly KEEP:** `crates/zeroship-plugin-db/src/audit.rs` + the `__zeroship_migrations`
 table + `next_schema_version` (shared schema-DDL provenance), and any lock machinery
 in `backend/mod.rs`/`owned_lock_guard.rs` the schema apply path uses.
 
@@ -254,15 +254,15 @@ the package gone; grep for dangling `@zeroship/migrations` / `migrateOne` /
   (they use `{ workspace = true }`). Verify `cargo metadata` resolves + full build.
 - **P7:** the members line above supersedes the old
   `["crates/*", "crates/authz", "crates/compio-s3"]` (compio-s3 now lives in `libs/`).
-- **P8b:** remove the dead `zeroship-auth` dev-dep from `crates/authz/Cargo.toml`.
+- **P8b:** remove the dead `zeroship-auth` dev-dep from `crates/zeroship-authz/Cargo.toml`.
 - **P8c:** gate `zeroship-bench-server` + `echo-server` bins behind
-  `required-features = ["bench-bins"]` in `crates/runtime/Cargo.toml`; add the
+  `required-features = ["bench-bins"]` in `crates/zeroship-runtime/Cargo.toml`; add the
   feature. Confirm `cargo build -p zeroship-runtime` no longer builds them; benches
   still build with `--features bench-bins`.
-- **P8a (the real fix):** `git mv crates/core/src/wrapper_revocation.rs
-  crates/auth/src/`; re-point its consumers (grep `wrapper_revocation` /
+- **P8a (the real fix):** `git mv crates/zeroship-core/src/wrapper_revocation.rs
+  crates/zeroship-auth/src/`; re-point its consumers (grep `wrapper_revocation` /
   `RevocationCache` / `family_revoked_at` across `auth`, `authn`, `control`,
-  `gateway`); remove `compio-postgres` from `crates/core/Cargo.toml`; confirm `core`
+  `gateway`); remove `compio-postgres` from `crates/zeroship-core/Cargo.toml`; confirm `core`
   no longer links a DB driver.
 - Verify: `cargo build --release`; per-crate tests for `core`, `auth`, `authz`,
   `authn`, `control`, `gateway`, `runtime`.

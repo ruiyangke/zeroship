@@ -8,7 +8,7 @@ it composed into a global-identity + PII harvest by any deployed creator app. Th
 re-derives the client model from the two gateway login flows and the shipped BFF session.
 
 **Context:** P5a re-homes the gateway's OIDC-RP verify + code-exchange arms off Hydra onto
-the platform OP (`crates/auth/src/oidc/`). The question this note answers is: *which OP
+the platform OP (`crates/zeroship-auth/src/oidc/`). The question this note answers is: *which OP
 client(s) does end-user login use, and how does that preserve pairwise isolation (OIDC
 §8.1), redirect exact-match (RFC 9700), per-app consent, and the shipped 30-day durable
 session?*

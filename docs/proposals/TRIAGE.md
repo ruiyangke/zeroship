@@ -97,11 +97,11 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 
 Six proposals accumulated since round 1; all triaged against code + git:
 
-- auth-server.md — SHIPPED (crates/auth/ extracted 0de2091f; living docs reference/auth.md + auth-dev-tier.md + runbooks/auth-deploy.md) — **archived**, 18 inbound refs repointed.
+- auth-server.md — SHIPPED (crates/zeroship-auth/ extracted 0de2091f; living docs reference/auth.md + auth-dev-tier.md + runbooks/auth-deploy.md) — **archived**, 18 inbound refs repointed.
 - server-config-unification.md — SHIPPED (merged 966266bf; ADR 2026-05-28) — **archived**, ADR refs repointed.
 - server-config-inventory.md — spent companion audit — **archived**.
 - rpc-client-inferred-contracts.md — shipped subset, self-declared design history — **archived**.
-- authorization.md — PARTIALLY SHIPPED: P9 platform RBAC live (crates/authz/, control integration); P12 end-user authz unbuilt — **kept** as the forward P12 spec.
+- authorization.md — PARTIALLY SHIPPED: P9 platform RBAC live (crates/zeroship-authz/, control integration); P12 end-user authz unbuilt — **kept** as the forward P12 spec.
 - zeroship-builder-roadmap.md — LIVING — **kept** (broken specs/ paths fixed).
 
 Standing residents of docs/proposals/: feature-roadmap.md (living), zeroship-builder-roadmap.md (living), rpc.md (active), plugins-workers-distributed.md (active; kv leg shipped 5b17dc39), authorization.md (P12 active), TRIAGE.md (this worklist).

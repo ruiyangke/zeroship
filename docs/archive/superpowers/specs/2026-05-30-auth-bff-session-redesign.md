@@ -66,21 +66,21 @@ The model below is anchored in three sources, all read in full before writing:
   relay alias.
 
 - **The real code seams** (read directly):
-  - `crates/gateway/src/auth_token.rs` — `POST /__zeroship/auth/token` mints the per-app **wrapper** (the
+  - `crates/zeroship-gateway/src/auth_token.rs` — `POST /__zeroship/auth/token` mints the per-app **wrapper** (the
     capability) and **returns it in the JSON body** (`"access_token": wrapper`, line 519);
     `GET /__zeroship/auth/session?mint=1` re-mints and returns a wrapper (`mint`/`do_refresh`,
     lines 633–865). This is one of the "power token to the browser" surfaces to remove.
-  - `crates/gateway/src/anchors.rs` — `auth.app_session_anchors` custody: encrypted server-held
+  - `crates/zeroship-gateway/src/anchors.rs` — `auth.app_session_anchors` custody: encrypted server-held
     refresh family, `WRAPPER_TTL_SECS = 600`, `ANCHOR_ABS_DAYS = 30`, `ANCHOR_MINT_CACHE_TTL_SECS = 5`,
     `__Host-zeroship_app_anchor` cookie (`HttpOnly; Secure; SameSite=Strict`, 30d no-idle), a **single**
     `cached_access_token`/`cached_access_exp` column pair, `granted_scopes`, the breadcrumb cookie.
     The custody half **stays**; it becomes the BFF's server-side token store. `anchors.rs:62-68`
     + its test (`anchors.rs:583-588`) assert the anchor is a SEPARATE store from `gateway_sessions`
     that must NEVER be cross-validated — "one cookie name ⇒ exactly one table."
-  - `crates/gateway/src/sessions.rs` — `auth.gateway_sessions`: the interactive OIDC cookie session
+  - `crates/zeroship-gateway/src/sessions.rs` — `auth.gateway_sessions`: the interactive OIDC cookie session
     (`__Host-zeroship_app_session`, `SameSite=Lax`, 12h/30-min idle), carrying its own `granted_scopes`
     column. **This is the store the live cookie arm reads today.**
-  - `crates/gateway/src/router/auth.rs` — TWO live request arms today:
+  - `crates/zeroship-gateway/src/router/auth.rs` — TWO live request arms today:
     - the **Bearer/DPoP arm** (`resolve_bearer_user_header`, line 1090) verifies the gateway wrapper
       (`state.wrapper_verifier`, the `iss == public_url` branch at line 1122), enforces `aud == host`,
       the `(client_id, sub)` family-marker revocation, and the `pws_` self-describing-subject
@@ -96,10 +96,10 @@ The model below is anchored in three sources, all read in full before writing:
     `WorkerUser.scopes` … from this column instead of a cross-schema `control.oauth_grants` join on the
     hot path." Any design that re-introduces that join on a per-request path reverses this decision and
     must justify it (see §4).
-  - `crates/gateway/src/dpop_exchange.rs` — `POST /__zeroship/auth/dpop-exchange` takes a **raw Hydra Bearer**
+  - `crates/zeroship-gateway/src/dpop_exchange.rs` — `POST /__zeroship/auth/dpop-exchange` takes a **raw Hydra Bearer**
     + an RFC 9449 DPoP proof and mints a `cnf.jkt`-bound wrapper. This is the **third** wrapper-mint
     surface and the ONLY one used by non-browser DPoP clients. Untouched by this redesign.
-  - `crates/runtime/src/auth.rs` + `crates/worker/src/cache.rs:52` — **`env.auth` is REGISTERED AND
+  - `crates/zeroship-runtime/src/auth.rs` + `crates/zeroship-worker/src/cache.rs:52` — **`env.auth` is REGISTERED AND
     LIVE today.** `AuthPlugin` registers `env.auth.getUser()` / `env.auth.requireUser()` and is pushed
     unconditionally on every worker. This redesign **builds on a live plugin** (its identity reads), it
     does not bootstrap a "planned" one (corrects the stale AGENTS.md note that calls `env.auth` "planned").
@@ -113,7 +113,7 @@ The model below is anchored in three sources, all read in full before writing:
          implemented in the **JS server SDK** (`@zeroship/auth/server`) as a `fetch()` to the mint endpoint
          (the runtime already exposes WinterCG `fetch`). The native plugin is left synchronous and
          untouched except for identity reads. This is the corrected §3.2 design. -->
-  - `crates/worker/src/main.rs:153-178` (`WorkerConfig`) — **the worker holds NO gateway URL.** Verified:
+  - `crates/zeroship-worker/src/main.rs:153-178` (`WorkerConfig`) — **the worker holds NO gateway URL.** Verified:
     its only outbound coordinates are `control_url` + `control_key` (+ optional `db_url`, `blob_store`).
     There is no `gateway_url`, no gateway client, and the dispatch direction is **gateway→worker** only
     (`proxy::forward_dispatch`; `ZeroShip-User` is pushed gateway→worker at `proxy.rs:~378`). A
@@ -121,12 +121,12 @@ The model below is anchored in three sources, all read in full before writing:
     client, new gateway listener, new re-entrancy into the gateway's in-flight dispatch). It does not
     exist today and is NOT "extending a live plugin." This is why §3.2 locates the mint in the **control
     plane**, which the worker already reaches (below).
-  - `crates/control/src/internal.rs` — **the worker→control internal channel already exists.** Workers
+  - `crates/zeroship-control/src/internal.rs` — **the worker→control internal channel already exists.** Workers
     call control-plane internal endpoints (env merge, versions, etc.) authenticating with the
     `control_key` shared secret (`check_auth`, `internal.rs:27-32`; "workers authenticate with the
     control-key shared secret and there is no user principal", `:68/:94/:111`). This is the established,
     documented worker→control link the power-token mint reuses — **no new inter-service link.**
-  - `crates/control/src/relay_revoke.rs:16` — **control reaches the `auth` schema over the same DB
+  - `crates/zeroship-control/src/relay_revoke.rs:16` — **control reaches the `auth` schema over the same DB
     client** ("`… auth.app_user_identities …` reaches both schemas over the same client"). It already
     writes `auth.app_user_identities` + `auth.token_revocations` (`:175/:213`). So control can read
     `auth.app_session_anchors` (the refresh-family custody) and `auth.oauth_grants`/the family marker
@@ -134,8 +134,8 @@ The model below is anchored in three sources, all read in full before writing:
     `zeroship_core::crypto::{derive_key,encrypt,decrypt}` (`anchors.rs:15`, `core/crypto.rs:61/73/87`) off
     a master secret — control decrypts it with the **same shared master** the platform already shares for
     `PAIRWISE_SALT` (AGENTS.md: "the SAME `PAIRWISE_SALT` value must be configured on gateway + control").
-    `crates/control/src/oidc_rp.rs` already speaks Hydra (token exchange / refresh).
-  - `crates/core/src/auth.rs:256` (`verify_zeroship_user_header_for_request`) + `oidc_rp.rs:1115-1135`
+    `crates/zeroship-control/src/oidc_rp.rs` already speaks Hydra (token exchange / refresh).
+  - `crates/zeroship-core/src/auth.rs:256` (`verify_zeroship_user_header_for_request`) + `oidc_rp.rs:1115-1135`
     (`encode_user_header` → `sign_zeroship_user_header`) — **the `ZeroShip-User` header is HMAC-signed
     with `worker_key`, bound to the request id, and time-bound.** Only the gateway can mint it. This is
     the stateless credential the power-token mint trusts to re-derive the user (§3.2), so **no
@@ -148,15 +148,15 @@ The model below is anchored in three sources, all read in full before writing:
     `isLoggedIn` and **deliberately has NO server-side `signOut`** (lines 74-79: the gateway owns the
     `Set-Cookie` on `POST /__zeroship/auth/signout`; a worker handler cannot emit it). This redesign
     **respects that decision** — see §3.2.
-  - `crates/control/src/authz_guard.rs` — `AuthzGuard` ALREADY authenticates OAuth callers: it
+  - `crates/zeroship-control/src/authz_guard.rs` — `AuthzGuard` ALREADY authenticates OAuth callers: it
     introspects the Bearer at Hydra (`hydra_introspector.introspect`, line 215), checks `result.aud`
     against `state.expected_oauth_audience` (lines 225-230, else `wrong_audience`), and resolves a
     principal (plus a PAT path). It carries an `mfa_verified` field that is **hardcoded `false` at
     every construction site** (lines 108, 181, 248) — there is no path that sets it true today.
-  - `crates/auth/src/ui/login.rs` — the login UI hardcodes `amr: vec!["pwd"]` / `acr:
+  - `crates/zeroship-auth/src/ui/login.rs` — the login UI hardcodes `amr: vec!["pwd"]` / `acr:
     Some("urn:zeroship:pwd")` (lines 426-427, 453-454). **No path stamps `amr` containing `"mfa"`.**
     Step-up that requires `amr=mfa` cannot be satisfied until MFA factors land (see §5.3).
-  - `crates/control/src/oauth_grants_handlers.rs` — `control.oauth_grants` is the grant ledger
+  - `crates/zeroship-control/src/oauth_grants_handlers.rs` — `control.oauth_grants` is the grant ledger
     (`GET/DELETE /me/oauth-grants`, revoke cascade). **Stays** as the source of truth for consented
     scopes.
   - `apps/zeroship-builder/src/server/{oauth.ts,session.ts}` — the console's bespoke confidential RP:
@@ -599,7 +599,7 @@ the same PR**, verified against the code:
      ZeroShip-User header (HMAC+request-id+time-bound, gateway-minted) — verified statelessly — so NO
      per-request registry is needed and a worker can never name a different user. -->
 
-**`env.auth` is a LIVE registered namespace** (`crates/runtime/src/auth.rs`; `AuthPlugin` pushed
+**`env.auth` is a LIVE registered namespace** (`crates/zeroship-runtime/src/auth.rs`; `AuthPlugin` pushed
 unconditionally in `worker/cache.rs:52`), today exposing `getUser()`/`requireUser()` as **synchronous**
 V8 callbacks that read the request's user from in-process `RuntimeState` (`auth.rs:95/123`). There is
 **no async-op (Promise-returning) machinery in this plugin.** `getAccessToken` is a network round-trip,
@@ -856,7 +856,7 @@ control-reachable wrapper issuer.
 `control.oauth_grants` is the **source of truth** for consented scopes — already keyed by
 `(user_id, client_id)`, where `user_id` is the global `auth.users(id)` UUID and `client_id` is the
 per-app `oac_<base62>` (1:1 with `(global_user, app)`). It is written once at `accept_consent`
-(`crates/auth/src/ui/consent.rs::upsert_oauth_grant`) and is the single ledger (the original `§5.2`
+(`crates/zeroship-auth/src/ui/consent.rs::upsert_oauth_grant`) and is the single ledger (the original `§5.2`
 already dropped the parallel `auth.app_grants`).
 
 <!-- Revised in round 1: addressing major #3. The original draft both (a) said the mint consults
@@ -972,7 +972,7 @@ audience-scoped. The client never makes the authz decision (UI gating is UX only
      precisely what the power token IS (a real Hydra down-scoped token, §3.4) so §3.3 + §5.1 compose. -->
 
 Every control-plane operation re-checks the caller's authority for *that* operation. **Most of this
-already exists and is NOT a redesign delta.** `AuthzGuard` (`crates/control/src/authz_guard.rs`):
+already exists and is NOT a redesign delta.** `AuthzGuard` (`crates/zeroship-control/src/authz_guard.rs`):
 - already authenticates OAuth callers — introspects the Bearer at Hydra
   (`hydra_introspector.introspect`, line 215) and checks `result.aud == state.expected_oauth_audience`
   (lines 225-230, else `wrong_audience`), in addition to a PAT path;
@@ -1053,8 +1053,8 @@ Gate the irreversible/money-moving control-plane operations behind **step-up aut
 **secret rotation**, **Stripe Connect onboarding**, **app deletion**.
 
 **v1 step-up = elevated scope present + fresh `auth_time` (NO `amr=mfa` requirement).** The MFA substrate
-does not exist yet — `crates/auth/src/ui/login.rs` hardcodes `amr: vec!["pwd"]` / `acr:
-Some("urn:zeroship:pwd")` (lines 426-427, 453-454) and `crates/control/src/authz_guard.rs` hardcodes
+does not exist yet — `crates/zeroship-auth/src/ui/login.rs` hardcodes `amr: vec!["pwd"]` / `acr:
+Some("urn:zeroship:pwd")` (lines 426-427, 453-454) and `crates/zeroship-control/src/authz_guard.rs` hardcodes
 `mfa_verified: false` (lines 108, 181, 248). A gate that required `amr` containing `"mfa"` could
 **never pass** today and would 403 every deploy/secret-rotation/Stripe-onboarding/delete forever — a
 denial of service on exactly the highest-value ops. So v1 enforces only what is producible:

@@ -1,14 +1,14 @@
 # `.zship`
 
-A `.zship` file is the deploy artifact handled by [crates/bundle/src/lib.rs](../../crates/bundle/src/lib.rs). The bundle crate treats it as the app package plus a JSON routing manifest.
+A `.zship` file is the deploy artifact handled by [crates/zeroship-bundle/src/lib.rs](../../crates/zeroship-bundle/src/lib.rs). The bundle crate treats it as the app package plus a JSON routing manifest.
 
 ## Manifest version
 
-The current manifest schema version is `1`. Validation is defined in [crates/bundle/src/manifest.rs](../../crates/bundle/src/manifest.rs); unknown versions are rejected there.
+The current manifest schema version is `1`. Validation is defined in [crates/zeroship-bundle/src/manifest.rs](../../crates/zeroship-bundle/src/manifest.rs); unknown versions are rejected there.
 
 ## Current manifest shape
 
-The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bundle/src/manifest.rs) includes:
+The top-level manifest struct in [crates/zeroship-bundle/src/manifest.rs](../../crates/zeroship-bundle/src/manifest.rs) includes:
 
 - `version`
 - `deploy_hash`
@@ -92,7 +92,7 @@ rules an app may hold, how many sockets it may open, and how much it may send.
 `exports` is still part of the wire struct, but the runtime no longer uses it
 for schema discovery. New code relies on committed migrations plus the generated
 `runtime_descriptor` blob (`schema.runtime.json`) instead. See
-`sdks/bootstrap/src/runtime-entry.ts` and `crates/bundle/src/manifest.rs`.
+`sdks/bootstrap/src/runtime-entry.ts` and `crates/zeroship-bundle/src/manifest.rs`.
 
 ## RPC resources
 

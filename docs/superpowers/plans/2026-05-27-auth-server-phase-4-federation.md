@@ -6,12 +6,12 @@
 
 **Architecture:** Federation runs at our auth host, NOT at hydra. Hydra knows nothing about Google/GitHub — those are OUR upstream identity providers. The flow: user clicks "Sign in with Google" on `/login` → we redirect to Google's `/o/oauth2/v2/auth` → Google returns to our `/oauth/google/callback` → we exchange the code, verify Google's ID token (using `core::oidc_verify`'s JwksCache pointed at Google's JWKS), find-or-create the local user, then accept_login on the pending hydra `login_challenge`.
 
-**Tech Stack:** Continuing from Phases 1-3: compio, ntex, cyper, compio-postgres, hydra v25.4, argon2, askama. New surfaces: `crates/auth/src/identity/oauth/{google,github}.rs`, `crates/auth/src/ui/{link,me,consent}.rs`, `auth.identities` CRUD.
+**Tech Stack:** Continuing from Phases 1-3: compio, ntex, cyper, compio-postgres, hydra v25.4, argon2, askama. New surfaces: `crates/zeroship-auth/src/identity/oauth/{google,github}.rs`, `crates/zeroship-auth/src/ui/{link,me,consent}.rs`, `auth.identities` CRUD.
 
 **Reference docs:**
 - `docs/archive/auth-server.md` §8.2 (Google), §8.3 (GitHub), §10.3 (third-party consent UI)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-3-oidc-rps.md` — pattern reference
-- Phase 1 deleted `crates/auth/src/oauth/{google,github}.rs` — those files can be raided for the Google PKCE shape (git log will recover them if needed)
+- Phase 1 deleted `crates/zeroship-auth/src/oauth/{google,github}.rs` — those files can be raided for the Google PKCE shape (git log will recover them if needed)
 
 **Pre-launch posture:** no back-compat. Federation lands as a single PR's worth of work.
 
@@ -43,7 +43,7 @@ The `auth.identities` table already exists (Phase 1 migration). We just need the
 
 ## Task U1.1 · Identities store
 
-- [ ] **Step U1.1.1:** Create `crates/auth/src/store/identities.rs`:
+- [ ] **Step U1.1.1:** Create `crates/zeroship-auth/src/store/identities.rs`:
 
 ```rust
 //! `auth.identities` CRUD — OAuth/OIDC provider linkages keyed on (provider, subject).
@@ -155,9 +155,9 @@ fn row_to_identity(row: &compio_postgres::Row) -> Identity {
 }
 ```
 
-- [ ] **Step U1.1.2:** Register `pub mod identities;` in `crates/auth/src/store/mod.rs`.
+- [ ] **Step U1.1.2:** Register `pub mod identities;` in `crates/zeroship-auth/src/store/mod.rs`.
 
-- [ ] **Step U1.1.3:** Add a live-PG test at `crates/auth/tests/identities_test.rs`:
+- [ ] **Step U1.1.3:** Add a live-PG test at `crates/zeroship-auth/tests/identities_test.rs`:
   - Skip if `AUTH_DB_URL` unset.
   - Seed a user. Link an identity. Find by (provider, subject) returns it. List for user returns it. Unlink. Find returns None.
 
@@ -165,7 +165,7 @@ fn row_to_identity(row: &compio_postgres::Row) -> Identity {
 
 ## Task U1.2 · OAuth provider config
 
-- [ ] **Step U1.2.1:** Extend `crates/auth/src/config.rs::AuthConfig` with optional Google + GitHub OAuth credentials:
+- [ ] **Step U1.2.1:** Extend `crates/zeroship-auth/src/config.rs::AuthConfig` with optional Google + GitHub OAuth credentials:
 
 ```rust
 #[arg(long, env = "AUTH_GOOGLE_CLIENT_ID")]
@@ -190,7 +190,7 @@ Each provider is optional — auth boots without them, just doesn't expose the f
 
 ## Task U2.1 · Google OAuth module
 
-- [ ] **Step U2.1.1:** Create `crates/auth/src/identity/oauth/mod.rs` (stub) and `crates/auth/src/identity/oauth/google.rs`.
+- [ ] **Step U2.1.1:** Create `crates/zeroship-auth/src/identity/oauth/mod.rs` (stub) and `crates/zeroship-auth/src/identity/oauth/google.rs`.
 
 The Google flow:
 1. `/oauth/google/start?login_challenge=<...>` — generate state + PKCE verifier + nonce, stash in short-lived cookie, redirect to Google's authorize endpoint with `scope=openid email profile`.
@@ -202,7 +202,7 @@ Provide:
 - `pub async fn start(query: &StartQuery, cfg: &AuthConfig) -> Result<(String, String)>` returning `(authorize_url, stash_cookie_value)`.
 - `pub async fn finish(query: &CallbackQuery, stash: &str, cfg: &AuthConfig, jwks: &JwksCache) -> Result<GoogleIdentity>` returning the verified profile (struct: `sub`, `email`, `email_verified`, `name`, `picture`, `hd` — for Workspace domain).
 
-The full plan source for this module is ~250 LOC; pattern off the deleted `crates/auth/src/oauth/google.rs` (recoverable from git) for the cyper-based code-exchange shape, but verify ID token via `core::oidc_verify` (NEW) rather than hand-rolling.
+The full plan source for this module is ~250 LOC; pattern off the deleted `crates/zeroship-auth/src/oauth/google.rs` (recoverable from git) for the cyper-based code-exchange shape, but verify ID token via `core::oidc_verify` (NEW) rather than hand-rolling.
 
 - [ ] **Step U2.1.2:** Unit-test the URL builder + stash round-trip (no live Google).
 
@@ -210,7 +210,7 @@ The full plan source for this module is ~250 LOC; pattern off the deleted `crate
 
 ## Task U2.2 · Wire `/oauth/google/{start,callback}` routes
 
-- [ ] **Step U2.2.1:** Create `crates/auth/src/ui/oauth_google.rs` — thin HTTP handlers that call into `identity::oauth::google`.
+- [ ] **Step U2.2.1:** Create `crates/zeroship-auth/src/ui/oauth_google.rs` — thin HTTP handlers that call into `identity::oauth::google`.
 
 - [ ] **Step U2.2.2:** Wire into `server::configure` only if `cfg.google_client_id.is_some()`.
 
@@ -229,7 +229,7 @@ Same shape as U2, but:
 
 ## Task U3.1 · GitHub OAuth module
 
-- [ ] **Step U3.1.1:** Create `crates/auth/src/identity/oauth/github.rs`.
+- [ ] **Step U3.1.1:** Create `crates/zeroship-auth/src/identity/oauth/github.rs`.
 
 ```rust
 pub struct GitHubIdentity {
@@ -276,7 +276,7 @@ The decision tree on every federation callback (per proposal §8.2 step 3):
 
 ## Task U4.1 · `linker::resolve_or_link`
 
-- [ ] **Step U4.1.1:** Create `crates/auth/src/identity/linker.rs`:
+- [ ] **Step U4.1.1:** Create `crates/zeroship-auth/src/identity/linker.rs`:
 
 ```rust
 pub enum LinkOutcome {
@@ -310,11 +310,11 @@ The `pending_token` for "needs confirmation" is a short-lived (10 min) signed to
 
 ## Task U4.2 · `/link` UI
 
-- [ ] **Step U4.2.1:** Create `crates/auth/src/ui/link.rs`:
+- [ ] **Step U4.2.1:** Create `crates/zeroship-auth/src/ui/link.rs`:
   - GET `/link?token=<pending>` — render a form: "An account with email X exists. Sign in with your password to link your <provider> account."
   - POST `/link` — verify password (Argon2id, dummy-hash defense), then `identities::link`, then accept_login.
 
-- [ ] **Step U4.2.2:** Create `crates/auth/src/ui/templates/link.html`.
+- [ ] **Step U4.2.2:** Create `crates/zeroship-auth/src/ui/templates/link.html`.
 
 - [ ] **Step U4.2.3:** Wire route, commit: `auth: /link — confirm account-link via password (collision path)`.
 
@@ -326,7 +326,7 @@ Currently `/consent` only handles `skip_consent=true` (first-party). U5 replaces
 
 ## Task U5.1 · Rewrite `/consent` handler
 
-- [ ] **Step U5.1.1:** In `crates/auth/src/ui/consent.rs`:
+- [ ] **Step U5.1.1:** In `crates/zeroship-auth/src/ui/consent.rs`:
   - If `info.client.skip_consent`: silent accept (P2 path, unchanged).
   - Else: render the consent form:
     - RP name + logo
@@ -341,7 +341,7 @@ Currently `/consent` only handles `skip_consent=true` (first-party). U5 replaces
 
 - [ ] **Step U5.1.3:** Honour `prompt=consent` (force the form even if already granted), `prompt=none` (no UI; return `interaction_required` to RP).
 
-- [ ] **Step U5.1.4:** Create `crates/auth/src/ui/templates/consent.html`.
+- [ ] **Step U5.1.4:** Create `crates/zeroship-auth/src/ui/templates/consent.html`.
 
 - [ ] **Step U5.1.5:** Commit: `auth: /consent — third-party consent UI (replaces skip-only)`.
 
@@ -353,12 +353,12 @@ A read-only page showing the logged-in user's email, name, and linked identities
 
 ## Task U6.1 · `/me` handler + template
 
-- [ ] **Step U6.1.1:** Create `crates/auth/src/ui/me.rs`:
+- [ ] **Step U6.1.1:** Create `crates/zeroship-auth/src/ui/me.rs`:
   - GET `/me` (requires `__Host-zsidp_session`): render profile page
   - POST `/me/link/<provider>`: start federation flow with a return-to-/me marker in the stash
   - POST `/me/unlink/<provider>`: unlink identity, refuse if it would leave the account credential-less (no password AND no other linked identities)
 
-- [ ] **Step U6.1.2:** Create `crates/auth/src/ui/templates/me.html`.
+- [ ] **Step U6.1.2:** Create `crates/zeroship-auth/src/ui/templates/me.html`.
 
 - [ ] **Step U6.1.3:** Commit: `auth: /me — profile + linked-identities management (link/unlink)`.
 
@@ -380,7 +380,7 @@ Tests run against a **mocked** Google + GitHub provider (a tiny in-process HTTP 
 
 ## Task U8.1 · Mock provider fixture
 
-- [ ] **Step U8.1.1:** Add to `crates/auth/tests/common/mock_provider.rs`:
+- [ ] **Step U8.1.1:** Add to `crates/zeroship-auth/tests/common/mock_provider.rs`:
 
 ```rust
 /// In-process mock OAuth/OIDC provider. Boots ntex server on a random port,

@@ -145,7 +145,9 @@ list `auto`" - and the shipped reference agrees
 (`docs/reference/db.md:1584-1586`). The one property that is genuinely special
 is that `auto` is **not forgeable from app JS**: `sanitize_app_actor` strips an
 app-supplied `kind == "auto"` before it reaches any of the three authorization
-entries (`crates/zeroship-plugin-db/src/crud/unmask.rs:277-289`).
+entries (`sanitize_app_actor`, `crates/zeroship-plugin-db/src/crud/unmask.rs:305-316`;
+applied in `parse_args`, `parse_bulk_args` and `crud/mod.rs`'s query-hint path,
+which is what makes "any of the three" true rather than two out of three).
 
 A role the ceiling does not name is not narrowed at all - it keeps its lattice
 default. That is the scope of the guarantee, and the acceptance arms below pin
@@ -211,7 +213,7 @@ right direction and the wrong outcome.
 ## Relationship to the migration ceiling
 
 The platform already has operator-ceiling machinery with meet semantics
-(`crates/zeroship-migrated/src/policy.rs`, `policies/confined.policy.toml`), and
+(`crates/zeroship-migrate-server/src/policy.rs`, `policies/confined.policy.toml`), and
 masking now uses the same delivery model, not merely the same vocabulary.
 `migrated`'s default ceiling is `CONFINED_CEILING_TOML` (`policy.rs:48-59`): a
 TOML document compiled into the binary with `include_str!` - operator

@@ -42,7 +42,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### C1. `readonly` default platform-role grants every authenticated creator fleet-wide cross-tenant read
 **Final severity: Critical — Confirmed (both lenses).**
 
-**Location:** `crates/authz/src/entities.rs:142-166` (`COALESCE(r.role,'readonly')`); `policies/platform/readonly.cedar:1-17`; `crates/control/src/authz_guard.rs`; `crates/control/src/api.rs:124-162,552,576`; `crates/control/src/env_handlers.rs:82,179,239`; `crates/control/src/registry.rs:192-202`; `crates/authz/src/scope.rs:162-172`.
+**Location:** `crates/zeroship-authz/src/entities.rs:142-166` (`COALESCE(r.role,'readonly')`); `policies/platform/readonly.cedar:1-17`; `crates/zeroship-control/src/authz_guard.rs`; `crates/zeroship-control/src/api.rs:124-162,552,576`; `crates/zeroship-control/src/env_handlers.rs:82,179,239`; `crates/zeroship-control/src/registry.rs:192-202`; `crates/zeroship-authz/src/scope.rs:162-172`.
 
 **Issue:** `load_user` computes the principal's platform role as `COALESCE(r.role, 'readonly')`. The only writer of `platform_admin_roles` is the admin-grant endpoint, so **every ordinary creator evaluates as `readonly`**. `readonly.cedar` permits `apps:read / env:read / secrets:read / billing:read / deployments:read / team:read / account:*` on an **unconstrained `resource`** — no `resource in principal.app_*_of` clause (contrast the creator policies). Cedar is permit-biased and runs schemaless, so the readonly permit fires for any `App`. The OAuth token-policy layer does not save it: `scopes_to_policy` emits the action on `Resource::Any`, not ownership-bound, so it AND-gates to Allow. The console/CLI clients legitimately carry platform read scopes, so a normal creator session satisfies the precondition.
 
@@ -61,7 +61,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### H1. Password reset does not terminate gateway app-sessions — attacker survives the victim's reset (and resurrects via `?mint=1`)
 **Final severity: High — Confirmed (both lenses, both finding-pairs). Merged from 0.0 and 3.0.**
 
-**Location:** `crates/auth/src/identity/password_reset.rs:196-237`; `crates/auth/src/ui/reset.rs:245-310`; `crates/auth/src/store/users.rs:109-125`; `crates/gateway/src/router/auth.rs:1229-1296`; `crates/gateway/src/auth_token.rs:637-855,909-1104` (`?mint=1` / `rotate_family` / `do_refresh`); `crates/gateway/src/anchors.rs:234-270`; `crates/auth/src/hydra_client/sessions.rs`.
+**Location:** `crates/zeroship-auth/src/identity/password_reset.rs:196-237`; `crates/zeroship-auth/src/ui/reset.rs:245-310`; `crates/zeroship-auth/src/store/users.rs:109-125`; `crates/zeroship-gateway/src/router/auth.rs:1229-1296`; `crates/zeroship-gateway/src/auth_token.rs:637-855,909-1104` (`?mint=1` / `rotate_family` / `do_refresh`); `crates/zeroship-gateway/src/anchors.rs:234-270`; `crates/zeroship-auth/src/hydra_client/sessions.rs`.
 
 **Issue:** The reset completion path (`password_reset::complete`) runs an inline `UPDATE zeroship.users SET password_hash, updated_at` — it does **not** bump `credential_version` (unlike the canonical `users::update_password_hash`). `complete_password_reset_tx` deletes only `idp_sessions` + `gateway_sessions` rows and calls Hydra `delete_login_sessions` (SSO login session only). But the gateway's live app-session cookie (`__Host-zeroship_app_session`) is validated **100% statelessly** (signature + iss + exp + app + pws_), never reading `gateway_sessions`; its only revocation gate is the per-app family marker `is_family_revoked_since(client_id, pws_, iat)` in `zeroship.token_revocations`. Reset **never calls `revoke_family`**, never deletes the 30-day `app_session_anchors` row, and never revokes the Hydra refresh grant. So: deleting `gateway_sessions` is inert; `credential_version` gates only the IdP leg, not the gateway cookie; and the anchor + refresh grant survive.
 
@@ -78,7 +78,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### H2. `load_principal_app_resources` reads UUID column `app_members.app_id` as `String` — guaranteed panic DoS on consent + PAT minting
 **Final severity: High — Confirmed exploit lens (high); mitigation lens corrected to medium. Final: High (down-weighted, see verdict).**
 
-**Location:** `crates/authz/src/eval.rs:81-133` (`load_principal_app_resources`, called unconditionally at :87 by `is_authorized_anywhere`); `crates/authz/src/resource.rs:8` (`Resource::App.id: String`); `db/changelog/changesets/0004_control.sql:220` (`app_members.app_id UUID`); `crates/compio-postgres/src/row.rs:148-187` (panics on type mismatch); `crates/auth/src/ui/consent.rs:875`; `crates/control/src/token_handlers.rs:464`. Already-fixed sibling: `crates/authz/src/entities.rs:179-184`.
+**Location:** `crates/zeroship-authz/src/eval.rs:81-133` (`load_principal_app_resources`, called unconditionally at :87 by `is_authorized_anywhere`); `crates/zeroship-authz/src/resource.rs:8` (`Resource::App.id: String`); `db/changelog/changesets/0004_control.sql:220` (`app_members.app_id UUID`); `crates/compio-postgres/src/row.rs:148-187` (panics on type mismatch); `crates/zeroship-auth/src/ui/consent.rs:875`; `crates/zeroship-control/src/token_handlers.rs:464`. Already-fixed sibling: `crates/zeroship-authz/src/entities.rs:179-184`.
 
 **Issue:** `load_principal_app_resources` builds `Resource::App { id: row.get("app_id") }` reading a `UUID` column into a `String`. compio-postgres `row.get::<String>` on a uuid column panics with `WrongType`. This is the identical bug just fixed in `entities.rs:183` (which reads `Uuid` then `.to_string()`s) — the eval.rs sibling was missed. `is_authorized_anywhere` calls it **unconditionally** before its probe loop, so the panic fires for any principal with ≥1 `app_members` row.
 
@@ -97,7 +97,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### M1. Backchannel logout revokes the family marker but never deletes the anchor — "sign out everywhere" is resurrectable via `?mint=1`
 **Final severity: Medium — Confirmed (both lenses).**
 
-**Location:** `crates/gateway/src/backchannel_logout.rs:163-253` (per-app branch: `revoke_family` + delete `gateway_sessions` only); `crates/gateway/src/anchors.rs:234-270` (`read_live` checks only `revoked_at`/`abs_expires_at`); `crates/gateway/src/auth_token.rs:909-1104` (`rotate_family`/`do_refresh`, no marker re-check); `crates/core/src/wrapper_revocation.rs:109` (`revoked_after > iat`).
+**Location:** `crates/zeroship-gateway/src/backchannel_logout.rs:163-253` (per-app branch: `revoke_family` + delete `gateway_sessions` only); `crates/zeroship-gateway/src/anchors.rs:234-270` (`read_live` checks only `revoked_at`/`abs_expires_at`); `crates/zeroship-gateway/src/auth_token.rs:909-1104` (`rotate_family`/`do_refresh`, no marker re-check); `crates/zeroship-core/src/wrapper_revocation.rs:109` (`revoked_after > iat`).
 
 **Issue:** The per-app BCL branch writes the `(client_id, pws_)` family marker and deletes `gateway_sessions`, but never deletes the `app_session_anchors` row and never revokes the Hydra refresh grant. The `?mint=1` reload-recovery path skips the family-revocation fast-path, `read_live` ignores the marker, and `do_refresh` only fails on a Hydra `invalid_grant`. Since the marker rejects only tokens with `iat < revoked_after`, a freshly re-minted cookie's `iat` post-dates it and is honored. The contrasting `/signout` handler (`browser_auth.rs:374-448`) does all three teardown steps, proving BCL is missing two of them.
 
@@ -114,7 +114,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### M2. Device Authorization Grant confirmation (`POST /device`) has no CSRF token
 **Final severity: Medium — Contested(needs-human). One lens confirmed/medium, one refuted (down to low).**
 
-**Location:** `crates/auth/src/ui/device.rs:25-28,40-136` (`DeviceForm` has only `user_code`; no `csrf_valid` call); `crates/auth/src/ui/templates/device.html:8-13` (no hidden CSRF field); `crates/auth/src/sessions/login.rs:33-35` (session cookie `SameSite=Lax`); `crates/auth/src/csrf.rs`.
+**Location:** `crates/zeroship-auth/src/ui/device.rs:25-28,40-136` (`DeviceForm` has only `user_code`; no `csrf_valid` call); `crates/zeroship-auth/src/ui/templates/device.html:8-13` (no hidden CSRF field); `crates/zeroship-auth/src/sessions/login.rs:33-35` (session cookie `SameSite=Lax`); `crates/zeroship-auth/src/csrf.rs`.
 
 **Issue:** `POST /device` verifies a `user_code` at Hydra and, if the browser carries a valid `__Host-zsidp_session`, calls `accept_device_user_code(...)` — an identity-conferring, state-changing action — with **no CSRF check**. It is the sole exception in the auth form surface (login/signup/consent/forgot/reset/link/magic/verify/me/logout all validate the `__Host-zsidp_csrf` double-submit token). Its only guard is the `SameSite=Lax` session cookie.
 
@@ -133,7 +133,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L1. `GET /session?mint=1` performs server-state-changing family rotation as a GET, Origin check intentionally disabled
 **Final severity: Low — Confirmed (defense-in-depth; both lenses uncertain).**
 
-**Location:** `crates/gateway/src/auth_token.rs:643-660,191-263,31-38`; `crates/gateway/src/main.rs:742-746`; `crates/gateway/src/router/dispatch.rs:415-426`.
+**Location:** `crates/zeroship-gateway/src/auth_token.rs:643-660,191-263,31-38`; `crates/zeroship-gateway/src/main.rs:742-746`; `crates/zeroship-gateway/src/router/dispatch.rs:415-426`.
 
 **Issue:** `GET /session?mint=1` rotates the server-held refresh family (Hydra refresh + rewrite of stored token + DB row) — a state-changing op served over GET, with `require_origin=false` so a missing Origin is tolerated and the custom `X-ZS-Auth` header is the sole CSRF barrier. Contrary to OWASP guidance, state-changing operations should not use GET nor rest on a single custom-header gate.
 
@@ -150,7 +150,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L2. Authorize `redirect_uri` override validated by prefix-match rather than exact-match
 **Final severity: Low — Confirmed (defense-in-depth).**
 
-**Location:** `crates/gateway/src/browser_auth.rs:116-130` (`supplied.starts_with("{scheme}://{host}/")`); `crates/control/src/app_oauth_client.rs:242-259` (Hydra exact-match registration).
+**Location:** `crates/zeroship-gateway/src/browser_auth.rs:116-130` (`supplied.starts_with("{scheme}://{host}/")`); `crates/zeroship-control/src/app_oauth_client.rs:242-259` (Hydra exact-match registration).
 
 **Issue:** The gateway uses a prefix check, not RFC-required exact-match, against the registered callback. The trailing slash blocks the sibling-domain bypass, and Hydra independently enforces exact-match against the two registered URIs, so the gateway check is a redundant early-reject, not the boundary.
 
@@ -167,7 +167,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L3. Token-redeem interstitial reuses the CSRF token verbatim as the CSP script-nonce
 **Final severity: Low — Confirmed (latent footgun; both lenses).**
 
-**Location:** `crates/auth/src/ui/mod.rs:207-224`; `crates/auth/src/ui/templates/token_redeem_interstitial.html:9-24`; `crates/auth/src/csrf.rs:5-6,38-42`; `crates/auth/src/headers.rs:169-184`.
+**Location:** `crates/zeroship-auth/src/ui/mod.rs:207-224`; `crates/zeroship-auth/src/ui/templates/token_redeem_interstitial.html:9-24`; `crates/zeroship-auth/src/csrf.rs:5-6,38-42`; `crates/zeroship-auth/src/headers.rs:169-184`.
 
 **Issue:** `render_token_interstitial` sets `script-src ... 'nonce-<csrf>'` and the template emits `<script nonce="{{ csrf }}">` — the CSP nonce **is** the CSRF token, which is simultaneously written to a non-HttpOnly cookie and rendered as plaintext form-field values. CSP L3 expects a single-purpose, unexposed nonce.
 
@@ -184,7 +184,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L4. Password-reset `complete` binds the new password by `users.email` JOIN, not the user_id captured at issue
 **Final severity: Low — Contested(needs-human) latent. Both lenses uncertain (one corrected to info).**
 
-**Location:** `crates/auth/src/identity/password_reset.rs:196-237` (`JOIN ... ON u.email = ml.email`); `:87-153` (issue persists email, no user_id); `db/changelog/changesets/0002_auth.sql:8-10` (`email CITEXT UNIQUE NOT NULL`).
+**Location:** `crates/zeroship-auth/src/identity/password_reset.rs:196-237` (`JOIN ... ON u.email = ml.email`); `:87-153` (issue persists email, no user_id); `db/changelog/changesets/0002_auth.sql:8-10` (`email CITEXT UNIQUE NOT NULL`).
 
 **Issue:** `complete()` re-resolves the target by email rather than an immutable user_id captured at issue time. Deviates from OWASP Forgot-Password guidance to bind recovery tokens to an immutable identifier.
 
@@ -201,7 +201,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L5. No account lockout — leaky-bucket rate limiting is the sole online-guessing defense; `locked_until` is never set
 **Final severity: Low — Contested(needs-human). Exploit lens corrected to low; mitigation lens held medium.**
 
-**Location:** `crates/auth/src/identity/credentials.rs:107-137`; `crates/auth/src/ratelimit.rs:21-36`; `crates/auth/src/identity/eligibility.rs:58-62`; `crates/auth/src/ui/signup.rs:104`, `reset.rs:105` (15-char minimum).
+**Location:** `crates/zeroship-auth/src/identity/credentials.rs:107-137`; `crates/zeroship-auth/src/ratelimit.rs:21-36`; `crates/zeroship-auth/src/identity/eligibility.rs:58-62`; `crates/zeroship-auth/src/ui/signup.rs:104`, `reset.rs:105` (15-char minimum).
 
 **Issue:** The login path enforces three leaky buckets (email+ip 5/15min, email 10/hr, IP 60/hr) but no progressive lockout. `locked_until` is read but **set only in a test fixture** — `LoginIneligible::Locked` is dead for automated brute force.
 
@@ -218,7 +218,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L6. Empty `worker_key` disables the bearer check and ZeroShip-User HMAC; no strength floor on a non-empty key
 **Final severity: Low — Confirmed (both lenses).**
 
-**Location:** `crates/worker/src/handler.rs:29-76`; `crates/worker/src/main.rs:285-298` (loopback-only bind guard); `crates/core/src/auth/mod.rs:81` (HMAC accepts any key length); `crates/core/src/config/secrets.rs:24-110` (no strength validator for worker_key, unlike stash_key/pairwise_salt).
+**Location:** `crates/zeroship-worker/src/handler.rs:29-76`; `crates/zeroship-worker/src/main.rs:285-298` (loopback-only bind guard); `crates/zeroship-core/src/auth/mod.rs:81` (HMAC accepts any key length); `crates/zeroship-core/src/config/secrets.rs:24-110` (no strength validator for worker_key, unlike stash_key/pairwise_salt).
 
 **Issue:** Empty `worker_key` → `check_worker_auth` returns None (auth disabled) and the `ZeroShip-User` HMAC is verified against an empty key any party can compute. No strength/length validation exists; only presence (`require_unless_dev`) + a fail-closed loopback-only bind guard.
 
@@ -235,7 +235,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### L7. Client-supplied headers (incl. forged `ZeroShip-User` / `Authorization`) forwarded verbatim in the worker dispatch envelope
 **Final severity: Low — Confirmed (both lenses; attractive-nuisance footgun).**
 
-**Location:** `crates/gateway/src/router/dispatch.rs:1160-1166` (no denylist); `crates/gateway/src/proxy.rs:221-227` (verbatim into envelope `headers`); `crates/worker/src/handler.rs:48-76,227-235` (authoritative identity from separate HMAC channel); `crates/runtime/src/auth.rs:58`.
+**Location:** `crates/zeroship-gateway/src/router/dispatch.rs:1160-1166` (no denylist); `crates/zeroship-gateway/src/proxy.rs:221-227` (verbatim into envelope `headers`); `crates/zeroship-worker/src/handler.rs:48-76,227-235` (authoritative identity from separate HMAC channel); `crates/zeroship-runtime/src/auth.rs:58`.
 
 **Issue:** The gateway forwards all inbound client headers verbatim into the envelope `headers` field exposed as app JS `request.headers`, with no scrubbing of `zeroship-user`, `authorization`, `x-request-id`, etc. The platform identity (`env.auth`) is safe — it comes from the separate request-bound HMAC `ZeroShip-User` channel and cannot be spoofed. Residual: a creator app reading identity from the raw `request.headers` instead of `env.auth` would trust attacker-controlled values.
 
@@ -305,7 +305,7 @@ The serious problems cluster in two places: (1) **a single Cedar default-role mi
 ### I4. (Confirmed assurance) ID-token / logout-token / DPoP alg-confusion + `alg:none` are structurally blocked
 **Final severity: Info — Confirmed (positive verification).** *(Merges 1.3 and 6.4.)*
 
-**Location:** `crates/core/src/oidc_verify.rs:291-348,446-517,551-561`; `crates/core/src/logout_token.rs:244-268`; `crates/core/src/dpop.rs:51-59`.
+**Location:** `crates/zeroship-core/src/oidc_verify.rs:291-348,446-517,551-561`; `crates/zeroship-core/src/logout_token.rs:244-268`; `crates/zeroship-core/src/dpop.rs:51-59`.
 
 The JWKS loader constructs only asymmetric DecodingKeys (RS*/ES*/EdDSA), skipping HS*/`none` with a warn; key lookup pins `(kid, alg)`, so a forged `alg=HS256` finds no key (no HMAC-with-RSA-pubkey confusion) and `alg:none` fails header decode/key match. iss/aud re-checked post-decode, aud pinned to the per-app client_id, iat ±300s, nbf honored, at_hash/c_hash constant-time. DPoP allowlist asymmetric-only with `typ=dpop+jwt` pinned. **No action required** (optionally pin an explicit allowed-alg list for belt-and-suspenders). Standard: RFC 8725 §3.1; OIDC Core §3.1.3.7; RFC 9449 §4.2.
 
@@ -314,7 +314,7 @@ The JWKS loader constructs only asymmetric DecodingKeys (RS*/ES*/EdDSA), skippin
 ### I5. (Confirmed assurance) Immersive-iframe clickjacking + postMessage defenses are fail-closed
 **Final severity: Info — Confirmed (positive verification).**
 
-**Location:** `crates/auth/src/headers.rs:88-146,205-296`; `crates/gateway/src/browser_auth.rs:53-55,226-256`; `sdks/auth/src/internal/relay.ts:113-148`.
+**Location:** `crates/zeroship-auth/src/headers.rs:88-146,205-296`; `crates/zeroship-gateway/src/browser_auth.rs:53-55,226-256`; `sdks/auth/src/internal/relay.ts:113-148`.
 
 Route-aware frame-ancestors fails closed (empty/poison allowlist keeps `XFO: DENY` + `'none'`; un-serializable CSP restores the full strict default incl. re-adding XFO); wildcard/injection bytes rejected at both config and header-builder layers; popup-callback reflects only the server-generated nonce (differential test); postMessage pinned to `location.origin`; SDK relay enforces `ev.origin === expectedOrigin` + per-flow `state`; popup CSP `default-src 'none'`; sensitive responses `cache-control: no-store`. **No action required.** Standard: CSP L3 frame-ancestors; OWASP Clickjacking; HTML5 postMessage origin validation; RFC 7234.
 
@@ -323,7 +323,7 @@ Route-aware frame-ancestors fails closed (empty/poison allowlist keeps `XFO: DEN
 ### I6. (Confirmed assurance) `/password` oracle + `auth_internal_key` fully removed; redirect sinks constrained
 **Final severity: Info — Confirmed (positive verification).** *(Merges 6.3 and 6.5.)*
 
-**Location:** `crates/core/src/config/file.rs:87,469-489` (`deny_unknown_fields` rejects `auth_internal_key`); `sdks/auth/tests/client.test.ts:440-442` (negative test for `/password`); `crates/gateway/src/main.rs:406-411` + `crates/worker/src/main.rs:285-297` (worker_key fail-closed); `crates/gateway/src/browser_auth.rs:114-130`; `crates/gateway/src/router/dispatch.rs:1479,1566-1596`; `crates/gateway/src/auth_token.rs:88-124`.
+**Location:** `crates/zeroship-core/src/config/file.rs:87,469-489` (`deny_unknown_fields` rejects `auth_internal_key`); `sdks/auth/tests/client.test.ts:440-442` (negative test for `/password`); `crates/zeroship-gateway/src/main.rs:406-411` + `crates/zeroship-worker/src/main.rs:285-297` (worker_key fail-closed); `crates/zeroship-gateway/src/browser_auth.rs:114-130`; `crates/zeroship-gateway/src/router/dispatch.rs:1479,1566-1596`; `crates/zeroship-gateway/src/auth_token.rs:88-124`.
 
 No code consumes an internal shared secret to bypass auth; gateway→worker trust is solely the HMAC `worker_key`. Redirect sinks are constrained (trailing-slash origin prefix + relative-path sanitizer re-applied at sink + Hydra registered-URI allowlist). **No action required.** *Caveat (worth tracking): the gateway's own redirect host-prefix check is Host-spoofable since `extract_app_name` validates only the first DNS label and no base-domain check exists — Hydra's registered-URI allowlist is the actual backstop; consider adding base-domain canonicalization as defense-in-depth.* Standard: RFC 9700 §4.1; OWASP unvalidated-redirects.
 
@@ -332,7 +332,7 @@ No code consumes an internal shared secret to bypass auth; gateway→worker trus
 ### I7. (Latent) SameSite=Strict CSRF cookie inside the immersive iframe is correct only because console + auth share `zeroship.ai`
 **Final severity: Info — Confirmed latent (both lenses).**
 
-**Location:** `crates/auth/src/csrf.rs:50-53`; `crates/auth/src/headers.rs:58,89-109`; `crates/auth/src/config.rs:447-507`.
+**Location:** `crates/zeroship-auth/src/csrf.rs:50-53`; `crates/zeroship-auth/src/headers.rs:58,89-109`; `crates/zeroship-auth/src/config.rs:447-507`.
 
 The framed login renders in a cross-origin iframe under the console; the `SameSite=Strict` CSRF cookie is delivered on the in-frame POST only because console + auth share eTLD+1. `is_concrete_frame_ancestor_origin` validates scheme/host shape only and accepts any https origin — including a cross-registrable-domain console. A future cross-site console would break login (Strict cookie withheld) or tempt a `Strict→None` downgrade that re-opens cross-site CSRF. No exploit in the current `*.zeroship.ai` topology. **Fix:** enforce/document that every `frame_ancestor_origins` entry MUST be same-site (eTLD+1) with the auth issuer host. Standard: RFC 6265bis SameSite; OWASP CSRF + SameSite.
 
@@ -341,7 +341,7 @@ The framed login renders in a cross-origin iframe under the console; the `SameSi
 ### I8. (Latent) `is_pairwise_subject` is a `pws_`-prefix shape check, not a forgery gate
 **Final severity: Info — Refuted as live issue; valid hardening note.**
 
-**Location:** `crates/core/src/auth/mod.rs:125-131,201-218`; call sites `crates/gateway/src/auth_token.rs:687-691`, `crates/gateway/src/router/auth.rs:1231,1243`.
+**Location:** `crates/zeroship-core/src/auth/mod.rs:125-131,201-218`; call sites `crates/zeroship-gateway/src/auth_token.rs:687-691`, `crates/zeroship-gateway/src/router/auth.rs:1231,1243`.
 
 The predicate returns true for any `pws_<non-empty>`; the real privacy guarantee is that the gateway always re-derives via HMAC `derive_pairwise` and never trusts an inbound `pws_`. Both production call sites run the predicate only **after** cryptographic signature verification, so it is a minter-bug containment check, not a trust gate — refuted as exploitable. **Fix (optional):** tighten the predicate to validate base62 alphabet + `PAIRWISE_SUB_BODY_LEN`, or doc-warn that it is shape-only and never a trust gate. Standard: OWASP ASVS V1.4.
 
@@ -350,7 +350,7 @@ The predicate returns true for any `pws_<non-empty>`; the real privacy guarantee
 ### I9. (Latent) Per-process backchannel-logout JTI cache leaves a multi-node replay window
 **Final severity: Info — Confirmed (both lenses).**
 
-**Location:** `crates/core/src/logout_token.rs:87-137`; `crates/gateway/src/backchannel_logout.rs:112-126`.
+**Location:** `crates/zeroship-core/src/logout_token.rs:87-137`; `crates/zeroship-gateway/src/backchannel_logout.rs:112-126`.
 
 `LogoutJtiCache` is an in-process `Mutex<HashMap>` with no shared store; a captured `logout_token` (no `exp`, ±300s iat) replayed against a different gateway node within 600s isn't deduped and re-triggers revocation. Impact is bounded — BCL only revokes (idempotent), so replay yields nuisance forced-logout, and capture requires a privileged internal vantage; current topology is single-node pre-launch. **Fix (track for multi-node cutover):** back the jti cache with the shared revocation/redis store, or tighten the iat window. Standard: OIDC BCL 1.0 §2.6; RFC 8725 §3.10.
 
@@ -359,7 +359,7 @@ The predicate returns true for any `pws_<non-empty>`; the real privacy guarantee
 ### I10. (Latent) `validate_control_key` XOR-fold iterates the shorter slice, leaking expected-length via timing
 **Final severity: Info — Confirmed (both lenses).**
 
-**Location:** `crates/core/src/auth/mod.rs:24-44,94-97`; `crates/worker/src/handler.rs:40`.
+**Location:** `crates/zeroship-core/src/auth/mod.rs:24-44,94-97`; `crates/zeroship-worker/src/handler.rs:40`.
 
 The comparator XOR-folds over `min_len`, so iteration count can leak the **expected** secret length (never byte content). The two hex-based callers (`validate_api_key`, `verify_hmac_sha256_hex`) compare fixed 64-char operands → no leak; only the raw worker bearer path has attacker-controlled length, leaking only the (non-secret) `worker_key` length against a CSPRNG key. **Fix (low priority):** use a fixed-iteration constant-time compare (`subtle::ConstantTimeEq` or `ring::constant_time::verify_slices_are_equal`). Standard: OWASP ASVS V6.2.x.
 

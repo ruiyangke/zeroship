@@ -433,7 +433,8 @@ framing and why it was locally sound are kept here, because "this was argued
 carefully and was answering the wrong question" is the part that transfers.)*
 
 **The tree already contained the proof.**
-`crates/zeroship-plugin-db/src/audit.rs:20-42` records this exact ceremony as a
+`crates/zeroship-plugin-db/src/audit.rs:20-42` (DELETED in `ac38fac0e` by this
+design's own implementation; read it there) records this exact ceremony as a
 proposal - "a tamper-evident `SECURITY DEFINER` write path mediated by an
 HMAC-signed `__zeroship_session_ctx` PID-keyed table living in a platform-wide
 `__zeroship_admin` schema" - and **refuses it**: "app code does not have raw SQL
@@ -595,7 +596,7 @@ today it runs before any SQL (`crud/unmask.rs:1235-1236`).
 
 **Costs, carried into the design:** revocation latency becomes worker-roll time;
 deploy-pinned workflow isolates keep the old ceiling until evicted
-(`PinnedWorkflowKey { app_id, deploy_hash }`, `crates/worker/src/cache.rs:28-32`),
+(`PinnedWorkflowKey { app_id, deploy_hash }`, `crates/zeroship-worker/src/cache.rs:28-32`),
 bounded by `max_pinned_isolates_per_app`; the creator half is frozen the same
 way, so force-eviction is the single lever; and the dev tier needs a named
 ceiling source that nothing specifies.
@@ -868,7 +869,8 @@ across clusters.
 `runtime_schema_for` missed the deploy-keyed cache, called
 `read_live_schema(pool, app_id)`, narrowed the result to the one collection, and
 cached **only that slice**
-(`crates/zeroship-plugin-db/src/crud/introspect_schema.rs:96-110`).
+(`crates/zeroship-plugin-db/src/crud/introspect_schema.rs:96-110`, DELETED in
+`632c1d1fa` when the descriptor became the sole schema authority; read it there).
 `read_live_schema` selected every column of every table in the app's schema -
 `WHERE n.nspname = $1`, no table predicate - over `pg_attribute` joined to
 `pg_class` and `pg_namespace`, `LEFT JOIN`ed to `pg_attrdef` and
@@ -1065,7 +1067,7 @@ shape does not deliver.)*
 **The transition also required a signature change in the migration boundary that
 nothing else in the design had noticed.** `apply_ir_documents` takes a **DSN**
 and opens its own session inside
-(`crates/zeroship-migrated/src/apply.rs:235-236`, connect at `:437`), so a
+(`crates/zeroship-migrate-server/src/apply.rs:235-236`, connect at `:437`), so a
 caller has nothing to take a session-scoped lease on. "The lease is taken in the
 caller" and "all on the same session" cannot both be true of that shape.
 Anything less than passing an already-connected session leaves the CAS fencing
@@ -1227,14 +1229,14 @@ this set replaces the signal.
 survive it.** The reason the epoch row needed a platform-owned schema rather
 than a table in the app's own schema was that a table in the app schema is
 tenant-writable by default: the live provisioner
-(`crates/zeroship-migrated/src/apply.rs:1694-1707`) contains **zero `REVOKE`
+(`crates/zeroship-migrate-server/src/apply.rs:1694-1707`) contains **zero `REVOKE`
 statements**, and its `ALTER DEFAULT PRIVILEGES` auto-grants full DML on every
 future migrator-created table, while the reserved-prefix revoke lives in
 `ensure_per_app_role`, which has **zero production callers**. That is a
 measurement about the provisioner, not about the epoch, and it still holds.
 
 **And restore's home was named but its machinery never existed.**
-`crates/zeroship-plugin-db/src/backend/postgres.rs:1667` is the site the design
+`restore` at `crates/zeroship-plugin-db/src/backend/postgres.rs:803` is the site the design
 moves out of the data-plane crate into the migration service - **which today has
 no restore machinery at all**, so the tooling (`pg_restore` invocation, snapshot
 handle, blob access) is named work rather than a move.

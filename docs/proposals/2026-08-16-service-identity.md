@@ -57,7 +57,7 @@ this document generalises.
 
 ### 2.2 What `control_key` authorizes
 
-`crates/control/src/internal.rs` exposes, all behind the same credential:
+`crates/zeroship-control/src/internal.rs` exposes, all behind the same credential:
 
 ```
 healthz, readyz              harmless
@@ -74,7 +74,7 @@ per-caller authorization; possession is the whole decision.
 
 ### 2.3 It travels in cleartext
 
-`crates/gateway/src/sync.rs:209-260` - route sync rejects schemes other than
+`crates/zeroship-gateway/src/sync.rs:209-260` - route sync rejects schemes other than
 `http`, states in its own comment that the key travels in clear, and writes the
 bearer into a hand-built TCP request. (VERIFIED by the auth-flows review; I read
 the finding, NOT the lines myself.)
@@ -84,20 +84,20 @@ the finding, NOT the lines myself.)
 Two mechanisms in the tree already do this correctly and are the model:
 
 - **App-scoped derivation.** `derive_app_scoped_control_token(control_key, app_id)`
-  = `HMAC-SHA256(control_key, app_id)` (`crates/core/src/auth/mod.rs:165`). The
+  = `HMAC-SHA256(control_key, app_id)` (`crates/zeroship-core/src/auth/mod.rs:165`). The
   raw key "must never enter V8" (`:160`); the runtime derives a token good for
   one app only. This is a capability, not ambient authority.
 - **Signed user assertion.** The gateway does not tell the worker who the end
   user is - it HMAC-signs a request-bound `ZeroShip-User` header which the worker
   verifies, and dispatch strips inbound copies as platform-reserved
-  (`crates/gateway/src/router/dispatch.rs:2425`, `:2537`).
+  (`crates/zeroship-gateway/src/router/dispatch.rs:2425`, `:2537`).
 
 ### 2.5 Pluggable-backend precedent
 
 The codebase already solves "one interface, environment-specific implementations"
-four times: `BlobStore` (`crates/bundle/src/blob.rs:55`), `StreamTransport`
-(`crates/stream/src/transport.rs:38`), `ConfiguredProvider`
-(`crates/core/src/auth_provider/mod.rs:40`), and `env.db` / `env.kv` dev tiers.
+four times: `BlobStore` (`crates/zeroship-bundle/src/blob.rs:55`), `StreamTransport`
+(`crates/zeroship-stream/src/transport.rs:38`), `ConfiguredProvider`
+(`crates/zeroship-core/src/auth_provider/mod.rs:40`), and `env.db` / `env.kv` dev tiers.
 
 ### 2.6 Dev-only-by-construction precedent
 
@@ -196,8 +196,8 @@ non-app-scoped need is `GET /internal/versions`.
 2. **The worker needs no broad control-plane credential in the target design** -
    but deleting `ZEROSHIP_CONTROL_KEY` from it TODAY breaks live paths. Its
    bytes are currently load-bearing for three raw bearer GETs, for deriving every
-   app workflow bearer (`crates/plugin-workflow/src/lib.rs:74`), and for the
-   runtime output-read token (`crates/worker/src/handler.rs:514`). Replacements
+   app workflow bearer (`crates/zeroship-plugin-workflow/src/lib.rs:74`), and for the
+   runtime output-read token (`crates/zeroship-worker/src/handler.rs:514`). Replacements
    must land first.
 3. **Control to gateway workflow advance is UNAUTHENTICATED.**
 4. **The gateway's auth-host reverse proxy forwards every path, including
@@ -257,7 +257,7 @@ Ranked, with the structural reasons first:
 2. **Zero infrastructure.** Decisive for OSS: a CA is not something every
    self-deployer can operate. 7523 needs a keypair per service.
 3. **It reuses machinery already owned** - `JwksCache`
-   (`crates/core/src/oidc_verify.rs`), JWT signing/verification, JWKS
+   (`crates/zeroship-core/src/oidc_verify.rs`), JWT signing/verification, JWKS
    publication, and key rotation with a retirement horizon (merged `adc8be620`).
 4. Cert expiry is the classic mTLS outage and takes out a fleet; a 60-second
    assertion minted per call fails one request.
@@ -718,7 +718,7 @@ worker_key}`; `gateway.{control_key, worker_key}`; `migrate_server.control_key`;
 | change | fields |
 | --- | --- |
 | deleted as auth credentials | 4 - `migrate_server.control_key` (measured unused), `worker.control_key`, `gateway.control_key`, `control.control_key` |
-| narrowed to derivation-only | 2 - `worker_key` and `control_key` remain HMAC keys for `derive_app_scoped_control_token` (`crates/core/src/auth/mod.rs:165`), app workflow bearers (`crates/plugin-workflow/src/client.rs:163`), the runtime output-read token (`crates/worker/src/handler.rs:516`) and the `ZeroShip-User` HMAC (`crates/gateway/src/router/auth.rs:264`) |
+| narrowed to derivation-only | 2 - `worker_key` and `control_key` remain HMAC keys for `derive_app_scoped_control_token` (`crates/zeroship-core/src/auth/mod.rs:165`), app workflow bearers (`crates/zeroship-plugin-workflow/src/client.rs:163`), the runtime output-read token (`crates/zeroship-worker/src/handler.rs:516`) and the `ZeroShip-User` HMAC (`crates/zeroship-gateway/src/router/auth.rs:264`) |
 | added | 5 signing keypair paths (one per service) + 1 trust-anchor location |
 | **net** | **about 9 to 11 declared fields** |
 
@@ -1006,10 +1006,10 @@ in would have made this one unreviewable.
 
 | Piece | Where |
 | --- | --- |
-| Issuer identifiers, minter, verifier, `ReplayStore` trait, in-memory store | `crates/core/src/service_assertion.rs` |
-| Postgres `jti` store | `crates/authn/src/service_replay.rs` |
+| Issuer identifiers, minter, verifier, `ReplayStore` trait, in-memory store | `crates/zeroship-core/src/service_assertion.rs` |
+| Postgres `jti` store | `crates/zeroship-authn/src/service_replay.rs` |
 | The replay table and its grants, in the `service_authn` schema | `db/migrations-ts/20260816000100_service_assertion_replay.ts` |
-| Security-property tests | `crates/core/tests/service_assertion_test.rs` (27), `crates/authn/tests/service_replay_pg_test.rs` (4, live PG) |
+| Security-property tests | `crates/zeroship-core/tests/service_assertion_test.rs` (27), `crates/zeroship-authn/tests/service_replay_pg_test.rs` (4, live PG) |
 
 ### 14.0 CORRECTED 2026-08-17: the replay table is not in the `zeroship` schema
 
@@ -1057,7 +1057,7 @@ way. The four reasons, in the order they matter:
    convenience.
 4. **`JwksCache` would not have given issuer binding for free.** It is keyed on
    one URL and `keys()` returns a flat `Vec<CachedKey>` with no issuer attached
-   (`crates/core/src/oidc_verify.rs:203`). Using it would have required one
+   (`crates/zeroship-core/src/oidc_verify.rs:203`). Using it would have required one
    cache instance per issuer anyway - and using it as-is would have produced
    precisely the flat pool RFC 8725 section 3.8 forbids.
 
@@ -1099,7 +1099,7 @@ Named sentinel `CHANGE_ME_ZEROSHIP_SERVICE_KEY`, empty and sentinel as one
 branch, refuse-to-boot with a banner, a build-profile dev escape, per-subsystem
 scope, and the posture in `CheckConfigReport` and `/readyz`. Wired into
 gateway, worker, control and migrated.
-`crates/core/src/config/credential_gate.rs` is the whole policy;
+`crates/zeroship-core/src/config/credential_gate.rs` is the whole policy;
 `tests/service_credential_boot_gate.sh` drives the real binaries.
 
 **Four things it fixed that were not in the plan**, each measured rather than
@@ -1146,7 +1146,7 @@ has one credential, a DSN, and no rows.
 ### 14.3 One divergence from 6.6
 
 `IdentityVerifier::verify` is now asynchronous, returning a boxed future rather
-than a `Result` (`crates/core/src/service_identity.rs`). 6.6's sketch is
+than a `Result` (`crates/zeroship-core/src/service_identity.rs`). 6.6's sketch is
 synchronous. It had to change: the `jti` claim is I/O and it must happen INSIDE
 the seam, because a claim made by the caller after `verify` returned would mean
 a `ServiceIdentity` exists for a replayed assertion. The future is boxed rather

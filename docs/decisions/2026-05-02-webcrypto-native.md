@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-02
 **Long-form design:** [`docs/archive/webcrypto-native.md`](../archive/webcrypto-native.md)
-**Implementation:** [`crates/runtime/src/web/crypto/`](../../crates/runtime/src/web/crypto/) (~8,200 LOC: aes, ec, rsa, okp, hmac, digest, derive, jwk, subtle, …)
+**Implementation:** [`crates/zeroship-runtime/src/web/crypto/`](../../crates/zeroship-runtime/src/web/crypto/) (~8,200 LOC: aes, ec, rsa, okp, hmac, digest, derive, jwk, subtle, …)
 
 ## Context
 

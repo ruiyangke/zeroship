@@ -6,8 +6,8 @@
 - **Status:** Draft v2 — proposal (do **not** commit until the implementing PR lands; per `feedback_proposal_workflow`)
 - **v2 changelog:** addresses critic-round R1 (panic safety, serde divergence, PoC, in-crate facade decision, Slot type compile error, PR sequencing for Wave 5, property-test plan, diff classifier, deprecation policy timeline, KnownType context split, Wave 4↔5 dependency unbundling, fastcall arg/return non-overlap)
 - **v1 → v2 score progression target:** R0 self-score 88.6% → R1 critic 71/100 → v2 target ≥85/100
-- **Tracking:** `crates/runtime-macros/TODO.md` "Critique findings (2026-05-05)"
-- **Owner / scope:** `crates/runtime-macros/` end-to-end. No consumer-side migrations land in this proposal — `crates/runtime/` follow-ups are tracked in §3.5 and §4 only as targets for the new public API.
+- **Tracking:** `crates/zeroship-runtime-macros/TODO.md` "Critique findings (2026-05-05)"
+- **Owner / scope:** `crates/zeroship-runtime-macros/` end-to-end. No consumer-side migrations land in this proposal — `crates/zeroship-runtime/` follow-ups are tracked in §3.5 and §4 only as targets for the new public API.
 - **LOC delta when fully landed:** approximately **-450 LOC net** in `runtime-macros` itself (mod.rs -1,150; method.rs -150; lib.rs -120; webidl_dict.rs -40; webidl_enum.rs -10; offset by +1,000 LOC of new files in `shared/`, `v8_class/emit/`, `v8_class/fastcall/`, `v8_iterable/`, `webidl_dict/`, and `webidl_enum/`). Cognitive-load delta is the headline number, not LOC: every file ≤ 250 LOC, every codegen helper ≤ 60 LOC, one parameter object instead of 10 args, one trait family instead of 12 ad-hoc parsers.
 - **References:**
   - `docs/reviews/runtime-macros-code-critique-2026-05-05-v3.md` — line-level findings (8 critical, 17 high, 13 medium, 10 low). v1 and v2 review iterations were dropped; v3 is the final post-Wave-9 closeout.
@@ -33,13 +33,13 @@ Concrete impact numbers, gathered against `master @ 4c41db3`:
 
 | Metric | Count | Source |
 |---|---|---|
-| `#[v8_class]`-driven classes shipped | **18** | `grep -rl '#\[v8_class\]' crates/runtime/src/` |
-| `WebIdlDict` derives | **24** | `grep -rl 'derive(WebIdlDict' crates/runtime/src/` |
-| `WebIdlEnum` derives | **9** | `grep -rl 'derive(WebIdlEnum' crates/runtime/src/` |
-| Smoke tests gated on macro behavior | **254+** | `crates/runtime/tests/v8_*_smoke.rs` |
-| Trybuild compile-fail snapshots | **6** | `crates/runtime-macros/tests/compile_fail/` |
-| Insta snapshots | **3** | `crates/runtime-macros/src/v8_class/snapshots/` |
-| Macro source LOC | **~6,800** | `wc -l crates/runtime-macros/src/**/*.rs` |
+| `#[v8_class]`-driven classes shipped | **18** | `grep -rl '#\[v8_class\]' crates/zeroship-runtime/src/` |
+| `WebIdlDict` derives | **24** | `grep -rl 'derive(WebIdlDict' crates/zeroship-runtime/src/` |
+| `WebIdlEnum` derives | **9** | `grep -rl 'derive(WebIdlEnum' crates/zeroship-runtime/src/` |
+| Smoke tests gated on macro behavior | **254+** | `crates/zeroship-runtime/tests/v8_*_smoke.rs` |
+| Trybuild compile-fail snapshots | **6** | `crates/zeroship-runtime-macros/tests/compile_fail/` |
+| Insta snapshots | **3** | `crates/zeroship-runtime-macros/src/v8_class/snapshots/` |
+| Macro source LOC | **~6,800** | `wc -l crates/zeroship-runtime-macros/src/**/*.rs` |
 | Avg. emit per class (estimated) | **~700 LOC** | proxy: `cargo-expand` on Headers.rs ≈ 680 LOC |
 | Symbol-leak consumer sites | **4** distinct files | request.rs:230,924; als.rs:259; event_target.rs:125-178 |
 | Hand-rolled `__InstallSlot_*` mimics | **1** (`event_target.rs`) | the F2 escape hatch |
@@ -70,26 +70,26 @@ Listed in priority order, with status of each:
 
 #### Debt 1 — 4× OpError-throw duplication (C1 + C2 + F1)
 
-Status: **Wave 1 partially closed.** Commit `22ab81c` factored `gen_throw_op_error_arms()` in `lib.rs:722-749` and migrated the two `lib.rs` sites (`gen_extract_throw` and `gen_throw_error`). The two remaining sites in `crates/runtime-macros/src/v8_class/method.rs:760-789` (constructor's `make_instance` Result arm) and `crates/runtime-macros/src/v8_class/method.rs:829-857` (post_init OpError arm) **still hand-roll the dispatch verbatim** — a comment at `method.rs:825-828` openly admits the duplication. Wave 2 closes them.
+Status: **Wave 1 partially closed.** Commit `22ab81c` factored `gen_throw_op_error_arms()` in `lib.rs:722-749` and migrated the two `lib.rs` sites (`gen_extract_throw` and `gen_throw_error`). The two remaining sites in `crates/zeroship-runtime-macros/src/v8_class/method.rs:760-789` (constructor's `make_instance` Result arm) and `crates/zeroship-runtime-macros/src/v8_class/method.rs:829-857` (post_init OpError arm) **still hand-roll the dispatch verbatim** — a comment at `method.rs:825-828` openly admits the duplication. Wave 2 closes them.
 
 #### Debt 2 — `__zs_*` / `__InstallSlot_*` symbol-name leak (F2)
 
 Status: **Open.** Consumers reach into the macro's emit by literal symbol name:
 
-- `crates/runtime/src/web/fetch/request.rs:230` calls `__zs_is_Request(scope, input_v)`
-- `crates/runtime/src/web/fetch/request.rs:924` reads `scope.get_slot::<__InstallSlot_Request>()`
-- `crates/runtime/src/node/async_hooks/als.rs:259` calls `__zs_is_AsyncLocalStorage(scope, this_v)`
-- `crates/runtime/src/web/dom/event_target.rs:125-178` **hand-rolls** `pub struct __InstallSlot_EventTarget(...)` to mimic the macro's slot type so that `#[v8_inherit(EventTarget)]` derives find a compatible cache slot.
+- `crates/zeroship-runtime/src/web/fetch/request.rs:230` calls `__zs_is_Request(scope, input_v)`
+- `crates/zeroship-runtime/src/web/fetch/request.rs:924` reads `scope.get_slot::<__InstallSlot_Request>()`
+- `crates/zeroship-runtime/src/node/async_hooks/als.rs:259` calls `__zs_is_AsyncLocalStorage(scope, this_v)`
+- `crates/zeroship-runtime/src/web/dom/event_target.rs:125-178` **hand-rolls** `pub struct __InstallSlot_EventTarget(...)` to mimic the macro's slot type so that `#[v8_inherit(EventTarget)]` derives find a compatible cache slot.
 
 The double-underscore says private; the consumer code disagrees. Renaming any of these is a breaking change. There is no `STABILITY.md` documenting the contract. Wave 5 closes this with a `runtime/` facade + `STABILITY.md` + a re-exported `<Class>::is_instance` / `<Class>::Slot` public API.
 
 #### Debt 3 — mod.rs at 1,409 LOC + 195-line megaquote (F3)
 
-Status: **Open.** `crates/runtime-macros/src/v8_class/mod.rs:507-700` is one `quote! { ... }` invocation that emits the user's stripped impl, the install slot, the brand slot, the brand-check fn (61 LOC of inline body), the `__zs_is_<Class>` fn, the `impl <Class> { #install }` block, the constructor callback, all method/getter/setter/async-method callbacks, all fastcall callbacks, AND the iterable codegen — 195 lines of tokens with deeply nested doc comments inside the templating expression. Modifying anything in this block requires reading 195 lines to understand the emission order. Wave 6 splits this into per-fragment helpers (`gen_brand_check_helpers`, `gen_install_slot_types`, `gen_public_is_fn`).
+Status: **Open.** `crates/zeroship-runtime-macros/src/v8_class/mod.rs:507-700` is one `quote! { ... }` invocation that emits the user's stripped impl, the install slot, the brand slot, the brand-check fn (61 LOC of inline body), the `__zs_is_<Class>` fn, the `impl <Class> { #install }` block, the constructor callback, all method/getter/setter/async-method callbacks, all fastcall callbacks, AND the iterable codegen — 195 lines of tokens with deeply nested doc comments inside the templating expression. Modifying anything in this block requires reading 195 lines to understand the emission order. Wave 6 splits this into per-fragment helpers (`gen_brand_check_helpers`, `gen_install_slot_types`, `gen_public_is_fn`).
 
 #### Debt 4 — `gen_install` 10-parameter signature (F4)
 
-Status: **Open.** `crates/runtime-macros/src/v8_class/mod.rs:739-750`:
+Status: **Open.** `crates/zeroship-runtime-macros/src/v8_class/mod.rs:739-750`:
 
 ```rust
 fn gen_install(
@@ -132,9 +132,9 @@ Composite **≥85/100** on the same 7-dimension rubric after Waves 2-8 land. Re-
 Constraints — items that **must not change**:
 
 - 14 `pub` proc-macro entries (`v8_class`, `v8_method`, `v8_async_method`, `v8_getter`, `v8_setter`, `v8_constructor`, `v8_static_method`, `v8_static_getter`, `v8_inherit`, `v8_inherit_intrinsic`, `v8_state_marker`, `v8_const`, `v8_async_iterable`, `v8_name`, `v8_to_string_tag`, `reject_shared`) and the 2 derives (`WebIdlDict`, `WebIdlEnum`).
-- All 254+ `v8_*_smoke` tests in `crates/runtime/tests/` continue to pass.
+- All 254+ `v8_*_smoke` tests in `crates/zeroship-runtime/tests/` continue to pass.
 - All trybuild compile-fail snapshots continue to pass with byte-identical wording.
-- `httpGet 16w` benchmark within ±5% of the 314,753 req/s baseline (`crates/runtime/benches/results-2026-05-04-after-fastcall.txt`).
+- `httpGet 16w` benchmark within ±5% of the 314,753 req/s baseline (`crates/zeroship-runtime/benches/results-2026-05-04-after-fastcall.txt`).
 - The recently-shipped extensions (post_init, fastcall, value_marshal, value_pairs `&mut self`, paired accessors, v8_const, v8_async_iterable) keep their behavior contracts byte-for-byte.
 
 ---
@@ -144,7 +144,7 @@ Constraints — items that **must not change**:
 ### §2.1 Final-state file layout
 
 ```
-crates/runtime-macros/
+crates/zeroship-runtime-macros/
 ├── Cargo.toml
 ├── STABILITY.md                              ← NEW (Wave 5)
 ├── README.md                                 ← NEW (Wave 5; module map, attribute-add walkthrough)
@@ -642,7 +642,7 @@ This section documents each load-bearing pattern with a before/after sketch. Eac
 
 ### §3.1 `ClassConfig` parameter object — closes F4
 
-**Before** (`crates/runtime-macros/src/v8_class/mod.rs:739-750`):
+**Before** (`crates/zeroship-runtime-macros/src/v8_class/mod.rs:739-750`):
 
 ```rust
 fn gen_install(
@@ -673,7 +673,7 @@ Wave 3.
 
 ### §3.2 `MarkerAttr` trait — closes F5 / H5-H7
 
-**Before** (`crates/runtime-macros/src/v8_class/parse.rs:124-139`):
+**Before** (`crates/zeroship-runtime-macros/src/v8_class/parse.rs:124-139`):
 
 ```rust
 pub(super) fn extract_v8_name(attrs: &[Attribute]) -> Option<String> {
@@ -693,7 +693,7 @@ pub(super) fn extract_v8_name(attrs: &[Attribute]) -> Option<String> {
 
 Plus 11 more siblings, each with subtly different return shape and error policy.
 
-**After** (`crates/runtime-macros/src/v8_class/parse/marker_attr.rs`):
+**After** (`crates/zeroship-runtime-macros/src/v8_class/parse/marker_attr.rs`):
 
 ```rust
 pub(crate) struct V8Name(pub String);
@@ -741,7 +741,7 @@ The hand-rolled 25-line block becomes a 3-line delegation. Same for `post_init`'
 
 ### §3.4 `Cell<Option<usize>>` re-entry guard — closes C5/H13
 
-**Before** (`crates/runtime-macros/src/v8_class/method.rs:99-104`):
+**Before** (`crates/zeroship-runtime-macros/src/v8_class/method.rs:99-104`):
 
 ```rust
 ::std::thread_local! {
@@ -750,7 +750,7 @@ The hand-rolled 25-line block becomes a 3-line delegation. Same for `post_init`'
 }
 ```
 
-**After** (`crates/runtime-macros/src/shared/reentry_guard.rs`):
+**After** (`crates/zeroship-runtime-macros/src/shared/reentry_guard.rs`):
 
 ```rust
 ::std::thread_local! {
@@ -818,13 +818,13 @@ fn inner() {
 **Before:** consumers grep for `__zs_is_<Class>` and `__InstallSlot_<Class>` strings:
 
 ```rust
-// crates/runtime/src/web/fetch/request.rs:230
+// crates/zeroship-runtime/src/web/fetch/request.rs:230
 input_v.is_object() && __zs_is_Request(scope, input_v);
 
-// crates/runtime/src/web/fetch/request.rs:924
+// crates/zeroship-runtime/src/web/fetch/request.rs:924
 let req_tmpl_g = scope.get_slot::<__InstallSlot_Request>()?.0.clone();
 
-// crates/runtime/src/web/dom/event_target.rs:125
+// crates/zeroship-runtime/src/web/dom/event_target.rs:125
 pub struct __InstallSlot_EventTarget(::v8::Global<::v8::FunctionTemplate>);
 ```
 
@@ -845,7 +845,7 @@ let req_tmpl_g = <Request as V8ClassInstance>::cloned_install_template(scope)?;
 Where:
 
 ```rust
-// crates/runtime/src/macro_runtime/v8_instance.rs (NEW, runtime-side)
+// crates/zeroship-runtime/src/macro_runtime/v8_instance.rs (NEW, runtime-side)
 //! Stable-API trait for macro-emitted V8 class instances.
 //!
 //! The trait is sealed: only `runtime-macros`'s emit and the
@@ -935,7 +935,7 @@ For `EventTarget` and other hand-rolled cases, the manually-rolled types impleme
 **Chosen pattern: convention-sealed.** A `pub mod __private { pub trait Sealed {} }` with documentation marking the path as do-not-use:
 
 ```rust
-// crates/runtime/src/macro_runtime/v8_instance.rs
+// crates/zeroship-runtime/src/macro_runtime/v8_instance.rs
 pub trait V8ClassInstance: __private::Sealed + 'static {
     // ... associated types + methods ...
 }
@@ -983,7 +983,7 @@ The `__zs_*` and `__InstallSlot_*` symbols stay emitted (back-compat) for the de
 
 ### §3.6 Single-scan attribute parser — closes F8
 
-**Before** (`crates/runtime-macros/src/v8_class/mod.rs:407-417`):
+**Before** (`crates/zeroship-runtime-macros/src/v8_class/mod.rs:407-417`):
 
 ```rust
 let to_string_tag_override = extract_to_string_tag(&input.attrs);
@@ -997,7 +997,7 @@ let state_marker_path = extract_state_marker(&input.attrs);    // l.198
 
 7 walks of the same attribute slice.
 
-**After** (`crates/runtime-macros/src/v8_class/parse/class_attrs.rs`):
+**After** (`crates/zeroship-runtime-macros/src/v8_class/parse/class_attrs.rs`):
 
 ```rust
 pub(crate) fn parse_class_attrs(attrs: &[syn::Attribute]) -> syn::Result<ParsedClassAttrs> {
@@ -1024,7 +1024,7 @@ One walk, structured output, fail-fast on conflicts. `validate()` (~30 LOC) chec
 
 ### §3.7 Table-driven type dispatch — closes anti-pattern §3 + F10 + L10
 
-**Before** (`crates/runtime-macros/src/lib.rs:489-595`): nine functions each doing `type_ident(ty).as_deref() == Some("X")`. Plus `gen_extract` at `lib.rs:655-931` does eight if-early-returns followed by a final match.
+**Before** (`crates/zeroship-runtime-macros/src/lib.rs:489-595`): nine functions each doing `type_ident(ty).as_deref() == Some("X")`. Plus `gen_extract` at `lib.rs:655-931` does eight if-early-returns followed by a final match.
 
 **After**: a single `KnownType` enum (§2.2 `shared/known_type.rs`) + a single `classify(ty: &Type) -> Option<KnownType>` dispatcher. Every existing predicate becomes a `matches!(classify(ty), Some(KnownType::X))` query. `gen_extract` becomes a single `match` on `KnownType`:
 
@@ -1055,7 +1055,7 @@ Compile-error replaces silent `Local<Value>` fall-through (Doc Gap §9 in arch c
 | **Fastcall return** (`fastcall::types::FastcallReturn::from_known(&kt)`) | Returns `Some(FastcallReturn)` for `Bool`, `I32`, `U32`, `I64`, `U64`, `F32`, `F64`, unit, AND `Result<<scalar>, OpError>` — NO `ByteString` (allocation forbidden), NO `Option`, NO `Vec`, NO `Local` | same as above |
 | **Setter arg** (which is the body of `gen_setter_callback`) | Subset of general extract that allows mutation receivers | inherits general extract rejection |
 
-Verified against the existing source at `crates/runtime-macros/src/v8_class/fastcall.rs:75-83` (arg whitelist) and `:122-145` (return whitelist) — they are NOT identical: arg includes `ByteString`, return excludes it; return includes `Result<T, OpError>`, arg excludes it.
+Verified against the existing source at `crates/zeroship-runtime-macros/src/v8_class/fastcall.rs:75-83` (arg whitelist) and `:122-145` (return whitelist) — they are NOT identical: arg includes `ByteString`, return excludes it; return includes `Result<T, OpError>`, arg excludes it.
 
 The Wave-4 implementation is therefore:
 
@@ -1128,7 +1128,7 @@ This collapses today's three hand-rolled match arms (`fastcall.rs:75-83`, `:122-
 - `v8_iterable.rs` forEach codegen
 - `v8_iterable.rs` next() codegen
 
-**After** (`crates/runtime-macros/src/shared/recover_box.rs`):
+**After** (`crates/zeroship-runtime-macros/src/shared/recover_box.rs`):
 
 ```rust
 /// Returns the prologue + the local binding name to use for `&[mut] Self`.
@@ -1217,9 +1217,9 @@ The runtime crate cannot move any of these without breaking compilation. The mac
 - Moving a runtime type is a 1-line update in `runtime/src/macro_runtime.rs`, not a 28-site refactor across `runtime-macros/`.
 
 ```rust
-// crates/runtime/src/macro_runtime.rs (NEW, runtime-side)
+// crates/zeroship-runtime/src/macro_runtime.rs (NEW, runtime-side)
 //! Stable re-exports for emit code from `runtime-macros`. See
-//! `crates/runtime-macros/STABILITY.md`. Renaming or relocating any
+//! `crates/zeroship-runtime-macros/STABILITY.md`. Renaming or relocating any
 //! item below is a breaking change for the macro's emit; coordinate with
 //! the macro maintainers.
 
@@ -1235,7 +1235,7 @@ The `runtime-macros/src/runtime/mod.rs` facade emits `::zeroship_runtime::macro_
 
 <!-- Added in v2 R1: addressing critic's MAJOR-6 — concrete deprecation policy timeline -->
 
-A new top-level `crates/runtime-macros/STABILITY.md` enumerates:
+A new top-level `crates/zeroship-runtime-macros/STABILITY.md` enumerates:
 
 - **Public proc-macro entries** (14 attributes + 2 derives) — semver-stable, follows zeroship's deprecation policy (below).
 - **Emitted symbols on the user impl** — `<Class>::install` (forwarder), `<Class>::is_instance` (forwarder to `V8ClassInstance::is_instance`), `<Class as V8ClassInstance>::InstallSlot` / `::BrandSlot` (associated types), `<Class>Iterator` (for iterable). Stable.
@@ -1263,15 +1263,15 @@ zeroship has no published `Cargo.toml` version cadence yet (single-tenant pre-la
 
 ```bash
 # Run at the moment of T+1 PR's merge, on the merged HEAD.
-SCOPE='crates/runtime/src/'  # excludes tests/, benches/, docs/, examples/
+SCOPE='crates/zeroship-runtime/src/'  # excludes tests/, benches/, docs/, examples/
 PATTERN='__zs_is_|__InstallSlot_|__BrandSlot_'
 COUNT=$(grep -rE "$PATTERN" $SCOPE 2>/dev/null | grep -v '^\s*//' | wc -l)
 [ "$COUNT" -eq 0 ] || { echo "consumer-migration incomplete: $COUNT remaining"; exit 1; }
 ```
 
 The predicate excludes:
-- `crates/runtime/tests/` (test fixtures may legitimately reference internal symbols).
-- `crates/runtime/benches/` (same).
+- `crates/zeroship-runtime/tests/` (test fixtures may legitimately reference internal symbols).
+- `crates/zeroship-runtime/benches/` (same).
 - Code comments (`//` lines).
 - Documentation rendered from doc-comments (handled separately by the doc-build step).
 
@@ -1303,11 +1303,11 @@ Total open work: **~46 hours** of focused effort. The score climbs steadily thro
 **Findings closed:** C1+C2+F1 (remaining sites), C5/H13, anti-pattern §3 row 4, parts of H10.
 
 **Files changed:**
-- `crates/runtime-macros/src/v8_class/method.rs` (most edits)
-- `crates/runtime-macros/src/shared/op_error.rs` (no change — already lands in Wave 1)
-- `crates/runtime-macros/src/shared/reentry_guard.rs` (NEW)
-- `crates/runtime-macros/src/shared/recover_box.rs` (NEW)
-- `crates/runtime-macros/src/shared/mod.rs` (NEW; re-exports)
+- `crates/zeroship-runtime-macros/src/v8_class/method.rs` (most edits)
+- `crates/zeroship-runtime-macros/src/shared/op_error.rs` (no change — already lands in Wave 1)
+- `crates/zeroship-runtime-macros/src/shared/reentry_guard.rs` (NEW)
+- `crates/zeroship-runtime-macros/src/shared/recover_box.rs` (NEW)
+- `crates/zeroship-runtime-macros/src/shared/mod.rs` (NEW; re-exports)
 
 **Acceptance criteria:**
 - All 254+ smoke tests green with no behavior change.
@@ -1320,11 +1320,11 @@ Total open work: **~46 hours** of focused effort. The score climbs steadily thro
 **Findings closed:** F4, F7, parts of F3.
 
 **Files changed:**
-- `crates/runtime-macros/src/v8_class/mod.rs` (1,409 → ~600 LOC after extraction)
-- `crates/runtime-macros/src/v8_class/analyze.rs` (NEW; ParsedClassAttrs → ClassConfig)
-- `crates/runtime-macros/src/v8_class/emit/` (NEW dir; one file per fragment)
-- `crates/runtime-macros/src/v8_class/parse/ast.rs` (NEW; MethodKind, ClassMethod, ConstDecl, ConstKind moved out of mod.rs)
-- `crates/runtime-macros/src/shared/class_config.rs` (NEW)
+- `crates/zeroship-runtime-macros/src/v8_class/mod.rs` (1,409 → ~600 LOC after extraction)
+- `crates/zeroship-runtime-macros/src/v8_class/analyze.rs` (NEW; ParsedClassAttrs → ClassConfig)
+- `crates/zeroship-runtime-macros/src/v8_class/emit/` (NEW dir; one file per fragment)
+- `crates/zeroship-runtime-macros/src/v8_class/parse/ast.rs` (NEW; MethodKind, ClassMethod, ConstDecl, ConstKind moved out of mod.rs)
+- `crates/zeroship-runtime-macros/src/shared/class_config.rs` (NEW)
 
 **Acceptance criteria:**
 - `gen_install`, `gen_constructor_callback`, `gen_method_callback`, `gen_async_method_callback`, `gen_setter_callback`, `gen_same_object_getter_callback`, `gen_static_callback` ALL take `&ClassConfig` as the first arg.
@@ -1336,12 +1336,12 @@ Total open work: **~46 hours** of focused effort. The score climbs steadily thro
 **Findings closed:** F5, F6, F8, F10, H5, H6, H7, anti-pattern §3 rows 5-7, parts of L10.
 
 **Files changed:**
-- `crates/runtime-macros/src/v8_class/parse/` (NEW dir; replaces parse.rs)
+- `crates/zeroship-runtime-macros/src/v8_class/parse/` (NEW dir; replaces parse.rs)
   - `mod.rs`, `marker_attr.rs`, `class_attrs.rs`, `method_attrs.rs`, `ast.rs`, `resolve.rs`
-- `crates/runtime-macros/src/v8_class/fastcall/` (NEW dir; replaces fastcall.rs)
+- `crates/zeroship-runtime-macros/src/v8_class/fastcall/` (NEW dir; replaces fastcall.rs)
   - `mod.rs`, `types.rs`, `emit.rs`
-- `crates/runtime-macros/src/shared/known_type.rs` (NEW)
-- `crates/runtime-macros/src/lib.rs` (delete `gen_extract`, `is_byte_string`, `is_vec_u8`, etc; delegate to `shared::known_type::*`)
+- `crates/zeroship-runtime-macros/src/shared/known_type.rs` (NEW)
+- `crates/zeroship-runtime-macros/src/lib.rs` (delete `gen_extract`, `is_byte_string`, `is_vec_u8`, etc; delegate to `shared::known_type::*`)
 
 **Acceptance criteria:**
 - 12 `extract_*` functions collapse to 12 `MarkerAttr` impls + one driver.
@@ -1354,17 +1354,17 @@ Total open work: **~46 hours** of focused effort. The score climbs steadily thro
 **Findings closed:** F2 (both halves), §5 crate boundary.
 
 **Files changed:**
-- `crates/runtime-macros/src/runtime/mod.rs` (NEW)
-- `crates/runtime-macros/STABILITY.md` (NEW)
-- `crates/runtime-macros/README.md` (NEW; module map, attribute-add walkthrough)
-- `crates/runtime/src/macro_runtime.rs` (NEW, runtime-side; re-exports)
-- `crates/runtime-macros/src/v8_class/emit/brand.rs` (emit `<Class>::is_instance` + `<Class>::Slot` alongside the existing underscored symbols)
+- `crates/zeroship-runtime-macros/src/runtime/mod.rs` (NEW)
+- `crates/zeroship-runtime-macros/STABILITY.md` (NEW)
+- `crates/zeroship-runtime-macros/README.md` (NEW; module map, attribute-add walkthrough)
+- `crates/zeroship-runtime/src/macro_runtime.rs` (NEW, runtime-side; re-exports)
+- `crates/zeroship-runtime-macros/src/v8_class/emit/brand.rs` (emit `<Class>::is_instance` + `<Class>::Slot` alongside the existing underscored symbols)
 - All emit-time references switch from `::zeroship_runtime::*` to `::zeroship_runtime_macros::runtime::*` (or directly to `::zeroship_runtime::macro_runtime::*`).
 
 **Acceptance criteria:**
-- All consumer code in `crates/runtime/src/web/fetch/request.rs` etc. compiles unchanged (back-compat kept; new API is additive).
+- All consumer code in `crates/zeroship-runtime/src/web/fetch/request.rs` etc. compiles unchanged (back-compat kept; new API is additive).
 - `STABILITY.md` documents every emitted symbol with stability label.
-- 1 new smoke test in `crates/runtime/tests/v8_brand_pub_smoke.rs` exercises `<Class>::is_instance` API directly.
+- 1 new smoke test in `crates/zeroship-runtime/tests/v8_brand_pub_smoke.rs` exercises `<Class>::is_instance` API directly.
 - Snapshot diff: emit references go through the facade (paths change). No behavior diff.
 
 ### §4.5 Wave 6 — mod.rs further split
@@ -1372,8 +1372,8 @@ Total open work: **~46 hours** of focused effort. The score climbs steadily thro
 **Findings closed:** F3 (last LOC).
 
 **Files changed:**
-- `crates/runtime-macros/src/v8_class/mod.rs` (~600 → ~150 LOC)
-- `crates/runtime-macros/src/v8_class/emit/{brand,slot_types,install,assemble}.rs` (NEW; brand and slot_types extracted from the megaquote)
+- `crates/zeroship-runtime-macros/src/v8_class/mod.rs` (~600 → ~150 LOC)
+- `crates/zeroship-runtime-macros/src/v8_class/emit/{brand,slot_types,install,assemble}.rs` (NEW; brand and slot_types extracted from the megaquote)
 
 **Acceptance criteria:**
 - `mod.rs` orchestration only.
@@ -1385,12 +1385,12 @@ Total open work: **~46 hours** of focused effort. The score climbs steadily thro
 **Findings closed:** F9, H16, parts of F3 (v8_iterable god file).
 
 **Files changed:**
-- `crates/runtime-macros/src/v8_iterable/` (NEW dir; split 1,291-LOC monolith)
-- `crates/runtime-macros/src/webidl_dict/` (NEW dir; split 383-LOC file)
-- `crates/runtime-macros/src/webidl_enum/` (NEW dir; split 447-LOC file)
-- `crates/runtime-macros/src/{v8_iterable,webidl_dict,webidl_enum}/snapshots/` (NEW; 9 new snapshot files)
-- `crates/runtime/tests/compile_fail_fastcall/` (NEW; 3 trybuild fixtures locking compile-error wording)
-- `crates/runtime/tests/compile_fail_webidl_dict/reference_field/` (NEW; 1 trybuild fixture)
+- `crates/zeroship-runtime-macros/src/v8_iterable/` (NEW dir; split 1,291-LOC monolith)
+- `crates/zeroship-runtime-macros/src/webidl_dict/` (NEW dir; split 383-LOC file)
+- `crates/zeroship-runtime-macros/src/webidl_enum/` (NEW dir; split 447-LOC file)
+- `crates/zeroship-runtime-macros/src/{v8_iterable,webidl_dict,webidl_enum}/snapshots/` (NEW; 9 new snapshot files)
+- `crates/zeroship-runtime/tests/compile_fail_fastcall/` (NEW; 3 trybuild fixtures locking compile-error wording)
+- `crates/zeroship-runtime/tests/compile_fail_webidl_dict/reference_field/` (NEW; 1 trybuild fixture)
 
 **Acceptance criteria:**
 - 9 new insta snapshots committed; all green.
@@ -1417,7 +1417,7 @@ Three risk axes:
 
 ### §5.1 Public API stability — LOW risk
 
-**The 14 + 2 = 16 entry-point macros do not get renamed or removed.** Their behavior contract is locked by 254+ smoke tests in `crates/runtime/tests/v8_*_smoke.rs` and 6 trybuild compile-fail snapshots.
+**The 14 + 2 = 16 entry-point macros do not get renamed or removed.** Their behavior contract is locked by 254+ smoke tests in `crates/zeroship-runtime/tests/v8_*_smoke.rs` and 6 trybuild compile-fail snapshots.
 
 The recently-shipped extensions (post_init, fastcall, value_marshal, value_pairs `&mut self`, paired accessors, v8_const, v8_async_iterable) are explicit in the test surface and have their own commits ([commit hashes in TODO.md "Done" section]). The refactor MUST preserve their behavior byte-for-byte.
 
@@ -1433,8 +1433,8 @@ Wave 5 touches **two crates** simultaneously (`runtime-macros` adds the facade m
 
 | PR | Crate | Change | Build state if rolled back independently |
 |---|---|---|---|
-| **5a** | `runtime` | Add `crates/runtime/src/macro_runtime.rs` with all 28 re-exports. Pure addition. No consumer code changes. | Green: file compiles cleanly with one top-level `#![allow(unused_imports)]` (see §5.1.1.1 below for the actual file skeleton). |
-| **5b** | `runtime-macros` | Add `crates/runtime-macros/src/runtime/mod.rs` facade. Switch macro emit-paths from `::zeroship_runtime::*` to `::zeroship_runtime_macros::runtime::*` (which resolves to the same runtime types via PR 5a's re-exports). Insta snapshots regen — diff is path-only, semantically equivalent. | Green ONLY IF 5a has landed. If 5a is reverted before 5b reverts, build breaks at user crate's compilation (paths reference `zeroship_runtime::macro_runtime::*` which no longer exists). **Rollback rule:** revert 5b BEFORE 5a; CI gates this via the dependency declaration in the PR description ("requires 5a"). |
+| **5a** | `runtime` | Add `crates/zeroship-runtime/src/macro_runtime.rs` with all 28 re-exports. Pure addition. No consumer code changes. | Green: file compiles cleanly with one top-level `#![allow(unused_imports)]` (see §5.1.1.1 below for the actual file skeleton). |
+| **5b** | `runtime-macros` | Add `crates/zeroship-runtime-macros/src/runtime/mod.rs` facade. Switch macro emit-paths from `::zeroship_runtime::*` to `::zeroship_runtime_macros::runtime::*` (which resolves to the same runtime types via PR 5a's re-exports). Insta snapshots regen — diff is path-only, semantically equivalent. | Green ONLY IF 5a has landed. If 5a is reverted before 5b reverts, build breaks at user crate's compilation (paths reference `zeroship_runtime::macro_runtime::*` which no longer exists). **Rollback rule:** revert 5b BEFORE 5a; CI gates this via the dependency declaration in the PR description ("requires 5a"). |
 | **5c** | `runtime-macros` + `runtime` | Emit `<Class>::is_instance` as additional inherent-impl method (alongside the existing `__zs_is_<Class>` symbol). Add `STABILITY.md` and `README.md`. Add 1 smoke test (`v8_brand_pub_smoke.rs`). No consumer migrations. | Green: pure addition (new method on the user impl, new files). |
 
 After 5a, 5b, 5c land in order, **consumer migrations are a follow-up PR** outside Wave 5 (see §7.3). The underscored symbols stay emitted; consumers can migrate at any time. Wave 8 only adds `#[deprecated]` once §7.3's consumer migrations close.
@@ -1455,9 +1455,9 @@ After 5a, 5b, 5c land in order, **consumer migrations are a follow-up PR** outsi
 #### §5.1.1.1 Wave 5a `macro_runtime.rs` skeleton
 
 ```rust
-// crates/runtime/src/macro_runtime.rs
+// crates/zeroship-runtime/src/macro_runtime.rs
 //! Stable re-exports consumed by `runtime-macros`'s emit. See
-//! `crates/runtime-macros/STABILITY.md`. Renaming or relocating any
+//! `crates/zeroship-runtime-macros/STABILITY.md`. Renaming or relocating any
 //! item below is a wire-format break for the macro's emit; coordinate
 //! with the macro maintainers.
 //!
@@ -1531,7 +1531,7 @@ Per-category rule for accepting `cargo insta accept` diffs in Wave-N PRs:
 | **Structural change** (HashSet → Cell; gen_install N-arg → 1-arg ClassConfig) | NO | reviewer (a) confirms `cargo test --workspace -p zeroship-runtime` passes (smoke + behavior); (b) confirms `./tests/bench_platform.sh` passes (perf within ±5%); (c) leaves a PR comment naming the structural change |
 | **Whitespace-only** (prettyplease re-format, brace placement, etc.) | YES | nothing extra; `prettyplease::unparse` is deterministic |
 | **New emission** (Wave 5's `<Class>::is_instance` impl, STABILITY.md) | YES | the addition itself IS the PR; reviewing the emit shape IS the review |
-| **Deletion** (Wave 8 deprecation removes `__zs_*` after consumer migration) | NO | reviewer confirms ALL consumers migrated (greps `__zs_is_` in `crates/runtime/src/`) before accepting |
+| **Deletion** (Wave 8 deprecation removes `__zs_*` after consumer migration) | NO | reviewer confirms ALL consumers migrated (greps `__zs_is_` in `crates/zeroship-runtime/src/`) before accepting |
 
 PR template instruction (Wave 2+): "Diff category for snapshot changes: [path-swap | helper-call | structural | whitespace | addition | deletion]. If structural, name the structural change."
 
@@ -1555,7 +1555,7 @@ set -euo pipefail
 BASELINE_SHA="${1:?need baseline sha}"
 HEAD_SHA="${2:?need head sha}"
 
-SNAPSHOT_GLOB='crates/runtime-macros/src/**/snapshots/*.snap'
+SNAPSHOT_GLOB='crates/zeroship-runtime-macros/src/**/snapshots/*.snap'
 
 # Get the diff for snapshot files only.
 DIFF=$(git diff "$BASELINE_SHA" "$HEAD_SHA" -- $SNAPSHOT_GLOB)
@@ -1601,8 +1601,8 @@ CI gates: `tools/snapshot_classify.sh "$GITHUB_BASE_SHA" "$GITHUB_HEAD_SHA"`. If
 **Worked example diff** (Wave-5b path-swap; expected to auto-accept):
 
 ```diff
---- a/crates/runtime-macros/src/v8_class/snapshots/class_basic.snap
-+++ b/crates/runtime-macros/src/v8_class/snapshots/class_basic.snap
+--- a/crates/zeroship-runtime-macros/src/v8_class/snapshots/class_basic.snap
++++ b/crates/zeroship-runtime-macros/src/v8_class/snapshots/class_basic.snap
 @@ -123,7 +123,7 @@
                  if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
 -                    let __exc = v8::Local::new(scope, __global);
@@ -1752,7 +1752,7 @@ Bench is in CI per `tests/bench_platform.sh`.
 | Bench duration per sample | 60 seconds (steady-state per `tests/bench_platform.sh`'s `--duration 60`) |
 | Hardware | CI's bench-class box (a dedicated runner labelled `zerobench` with isolated CPUs and disabled hyperthreading; pinned via the runner label) |
 | Decision rule | mean delta ≤ 5% of baseline AND no individual sample deviates by >10% |
-| Tool | `crates/runtime/benches/zerobench-runner` (the existing `httpGet 16w` test) |
+| Tool | `crates/zeroship-runtime/benches/zerobench-runner` (the existing `httpGet 16w` test) |
 | Workflow | `cargo bench -p zeroship-runtime --bench httpGet --release` against the post-wave-N branch |
 
 If the runtime-perf gate fails, the gating wave is BISECTED via the per-wave snapshot lock-in: each wave's PR ran the bench at merge; deviation from the per-wave-baseline pinpoints the regressing wave. This is implementable today via `tests/bench_platform.sh`'s log artifact retained in CI per-PR.
@@ -1786,7 +1786,7 @@ If the runtime-perf gate fails, the gating wave is BISECTED via the per-wave sna
 
 After all waves:
 
-- **All 254+ `v8_*_smoke` tests** in `crates/runtime/tests/` continue to pass.
+- **All 254+ `v8_*_smoke` tests** in `crates/zeroship-runtime/tests/` continue to pass.
 - **All trybuild compile-fail** snapshots green (existing 6 + new 8 = 14).
 - **All 12 insta snapshots** green (existing 3 + new 9).
 - **`httpGet 16w` benchmark** within ±5% of 314,753 req/s baseline.
@@ -1797,7 +1797,7 @@ After all waves:
 
 ### §6.4 Property test plan (Wave 7)
 
-Wave 7 adds a `proptest!` harness in `crates/runtime-macros/tests/proptest_emit.rs` that asserts emit-shape stability across the Wave-2-through-7 refactor. The strategy:
+Wave 7 adds a `proptest!` harness in `crates/zeroship-runtime-macros/tests/proptest_emit.rs` that asserts emit-shape stability across the Wave-2-through-7 refactor. The strategy:
 
 **Tooling:** `proptest = "1.4"` (workspace dep, already in `Cargo.toml` for `gateway` benchmarks).
 
@@ -2037,10 +2037,10 @@ So Wave 6 is dependency-correct in any of these orderings. Conservative ordering
 
 Wave 5's `<Class>::is_instance` API is **additive**, not a replacement. Existing consumer code (`request.rs:230` etc.) continues to work. A follow-up PR — outside this proposal — migrates each consumer:
 
-- `crates/runtime/src/node/async_hooks/als.rs:259` — 1-line change: `__zs_is_AsyncLocalStorage(scope, this_v)` → `AsyncLocalStorage::is_instance(scope, this_v)`.
-- `crates/runtime/src/web/fetch/request.rs:230` — 1-line.
-- `crates/runtime/src/web/fetch/request.rs:924` — 1-line: `<__InstallSlot_Request>` → `<Request::Slot>`.
-- `crates/runtime/src/web/dom/event_target.rs:125-178` — REWRITE: hand-rolled `__InstallSlot_EventTarget` → manual `impl V8ClassInstance for EventTarget`. ~30 LOC delta.
+- `crates/zeroship-runtime/src/node/async_hooks/als.rs:259` — 1-line change: `__zs_is_AsyncLocalStorage(scope, this_v)` → `AsyncLocalStorage::is_instance(scope, this_v)`.
+- `crates/zeroship-runtime/src/web/fetch/request.rs:230` — 1-line.
+- `crates/zeroship-runtime/src/web/fetch/request.rs:924` — 1-line: `<__InstallSlot_Request>` → `<Request::Slot>`.
+- `crates/zeroship-runtime/src/web/dom/event_target.rs:125-178` — REWRITE: hand-rolled `__InstallSlot_EventTarget` → manual `impl V8ClassInstance for EventTarget`. ~30 LOC delta.
 
 Once all consumers migrate, Wave 8 can add `#[deprecated]` to the underscored symbols.
 
@@ -2130,7 +2130,7 @@ Cell variant Option A (single-slot, restore-on-drop): `Cell<Option<usize>>` per 
 
 ### §9.4 Should we migrate `#[reject_shared]` from `lib.rs` to a per-class attribute?
 
-The marker is in `lib.rs:64-71` as a no-op proc-macro. It's consumed by `crates/runtime-macros/src/v8_class/parse.rs:174-200` for method-level use. The codegen wires it correctly today.
+The marker is in `lib.rs:64-71` as a no-op proc-macro. It's consumed by `crates/zeroship-runtime-macros/src/v8_class/parse.rs:174-200` for method-level use. The codegen wires it correctly today.
 
 **Question:** does the trait-based `MarkerAttr` refactor change the location?
 
@@ -2278,7 +2278,7 @@ This appendix demonstrates the Wave-3 `ClassConfig` pattern on a SMALL test clas
 ### B.1 Source (user-supplied)
 
 ```rust
-// crates/runtime-macros/tests/poc/counter_input.rs
+// crates/zeroship-runtime-macros/tests/poc/counter_input.rs
 #[v8_class]
 #[v8_state_marker(CounterState)]
 impl Counter {
@@ -2368,7 +2368,7 @@ pub(crate) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
 
 ### B.4 Lifetime parameterization (verified against existing source)
 
-Verified at `crates/runtime-macros/src/v8_class/mod.rs:107` — `ClassMethod<'a>` already carries a lifetime over the `&'a syn::ItemImpl`. The `ClassConfig<'a>` lifetime parameter is sound — it borrows the same `&'a syn::ItemImpl` the parse phase borrowed from. No ownership change required.
+Verified at `crates/zeroship-runtime-macros/src/v8_class/mod.rs:107` — `ClassMethod<'a>` already carries a lifetime over the `&'a syn::ItemImpl`. The `ClassConfig<'a>` lifetime parameter is sound — it borrows the same `&'a syn::ItemImpl` the parse phase borrowed from. No ownership change required.
 
 ```rust
 // existing in mod.rs:107 (verified, no change needed)
@@ -2402,7 +2402,7 @@ The PoC compiles in pseudo-form because:
 
 ```bash
 # STEP 1 (pre-Wave-3, on master): capture the baseline hash of the expand output for Counter.
-cd /home/ruiyang/Projects/appbase/crates/runtime/tests/poc
+cd /home/ruiyang/Projects/appbase/crates/zeroship-runtime/tests/poc
 cargo expand --tests --test counter_smoke 2>/dev/null | sha256sum > counter_expand.sha256.baseline
 # Result example (placeholder, real hash captured by Wave-3 PoC author):
 #   abcd1234ef5678901234567890abcdef0123456789abcdef0123456789abcdef counter_expand.sha256.baseline

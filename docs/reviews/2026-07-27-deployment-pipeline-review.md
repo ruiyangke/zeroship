@@ -1,9 +1,9 @@
 # Deployment Pipeline Security + Correctness Review — 2026-07-27
 
 Scope: the `.zship` artifact from CLI pack to live gateway routing.
-Files: `crates/bundle/src/{manifest,rule,unpack,blob,s3_blob,limits}.rs`,
-`crates/cli/src/{main,auth,secrets}.rs`, `crates/control/src/{api,registry,authz_guard,deploy}.rs`,
-`crates/gateway/src/sync.rs`.
+Files: `crates/zeroship-bundle/src/{manifest,rule,unpack,blob,s3_blob,limits}.rs`,
+`crates/zeroship-cli/src/{main,auth,secrets}.rs`, `crates/zeroship-control/src/{api,registry,authz_guard,deploy}.rs`,
+`crates/zeroship-gateway/src/sync.rs`.
 
 Context honored: pre-launch, no back-compat. No findings about migrations, deprecation shims,
 or old-format support. Zero-tokio is deliberate and not flagged.
@@ -28,7 +28,7 @@ reachable from a malicious manifest).
 ## HIGH
 
 ### H1 — CORS `allow_origins: ["*"]` + `allow_credentials: true` is accepted by `validate()`
-`crates/bundle/src/rule.rs:26-44` (`Cors`), `crates/bundle/src/manifest.rs:458-548` (`validate()`).
+`crates/zeroship-bundle/src/rule.rs:26-44` (`Cors`), `crates/zeroship-bundle/src/manifest.rs:458-548` (`validate()`).
 
 `Cors` allows the literal `"*"` origin and a separate `allow_credentials: bool`, and
 `Manifest::validate()` performs **no** cross-field check. A deployed manifest can therefore
@@ -51,8 +51,8 @@ gateway's CORS emitter also refuses to echo `*` with credentials as defense-in-d
 ## MEDIUM
 
 ### M1 — `RedirectAction.to` / `rewrite` / `redirect` targets are unvalidated (open redirect)
-`crates/bundle/src/rule.rs:189-196` (`RedirectAction`), `:263-270` (`Action::Redirect`/`Rewrite`),
-`crates/bundle/src/manifest.rs:552-583` (only the *status* is validated, not `to`).
+`crates/zeroship-bundle/src/rule.rs:189-196` (`RedirectAction`), `:263-270` (`Action::Redirect`/`Rewrite`),
+`crates/zeroship-bundle/src/manifest.rs:552-583` (only the *status* is validated, not `to`).
 
 `validate()` checks that `redirect.status` is 3xx but never inspects the destination. A manifest
 can set `to: "https://evil.example/phish"` on a resource. This is an app-scoped open redirect:
@@ -67,7 +67,7 @@ Fix direction: constrain `redirect.to`/`rewrite.to` to same-origin/relative path
 allowlist of external hosts), and verify the rewrite hop-limit is enforced in the compiled path.
 
 ### M2 — Passthrough fallback on manifest-validation failure can silently downgrade a deploy to public
-`crates/gateway/src/sync.rs:90-100` and `crates/control/src/registry.rs:644-659`.
+`crates/zeroship-gateway/src/sync.rs:90-100` and `crates/zeroship-control/src/registry.rs:644-659`.
 
 When a stored manifest fails `validate()` at route-sync time, both the gateway (`sync.rs:97`) and
 the control registry (`registry.rs:659`) substitute `Manifest::passthrough()`. `passthrough()`
@@ -83,7 +83,7 @@ anon-public passthrough. At minimum log at `error` (not `warn`) and emit a metri
 app is loud.
 
 ### M3 — Deploy pre-check TOCTOU: blobs are written before the app-existence commit
-`crates/control/src/api.rs:497` (ingest → writes blobs + manifest to the blob store) then
+`crates/zeroship-control/src/api.rs:497` (ingest → writes blobs + manifest to the blob store) then
 `:594-607` (`set_deploy_with_manifest` returns `Ok(false)` = "app not found").
 
 Authz runs first (good), but `ingest()` streams every blob and the manifest object into the blob
@@ -99,7 +99,7 @@ the manifest write conditional on the row update and GC orphaned `manifests/<app
 non-existent apps.
 
 ### M4 — `is_uuid` (CLI) accepts malformed UUIDs that the server must re-reject
-`crates/cli/src/main.rs:579-586`.
+`crates/zeroship-cli/src/main.rs:579-586`.
 
 `is_uuid` only checks length 36 and that positions 8/13/18/23 are `-` and the rest are hex — it
 does not validate the UUID version/variant and, more importantly, treats any 36-char hex-with-dashes
@@ -115,26 +115,26 @@ Fix direction: use the same `Uuid` parse the server uses, or drop the hand-rolle
 ## LOW
 
 ### L1 — `has_legacy_deploy_migration_query` substring parse is brittle
-`crates/control/src/api.rs:622-627`. Splits the raw query string on `&`/`=` by hand. Correct for
+`crates/zeroship-control/src/api.rs:622-627`. Splits the raw query string on `&`/`=` by hand. Correct for
 the two sentinel keys today, but a percent-encoded key (`approved%5Fversions`) slips past. Only
 matters as a guard that returns a helpful 400; not security-relevant. Consider parsing with the
 same querystring parser used elsewhere.
 
 ### L2 — `net.requests` wildcard host allows `*.` with an empty label suffix
-`crates/bundle/src/manifest.rs:257-278`. `NetRequest::validate` rejects bare `*` and requires the
+`crates/zeroship-bundle/src/manifest.rs:257-278`. `NetRequest::validate` rejects bare `*` and requires the
 `*.` prefix for any `*`, but `"*."` (prefix only, empty domain) passes: it is not `"*"`, has one
 `*`, and starts with `"*."`. These entries are inert hints (they never become grants without an
 operator writing `app_net_grants`), so impact is nil today, but a `"*."` hint is meaningless and
 should be rejected at the source. Fix: require at least one non-empty label after `*.`.
 
 ### L3 — Secret/var CLI interpolates `KEY` directly into the URL path
-`crates/cli/src/secrets.rs:109` (`{control_url}/api/apps/{app}/{resource}/{key}`). `key` comes from
+`crates/zeroship-cli/src/secrets.rs:109` (`{control_url}/api/apps/{app}/{resource}/{key}`). `key` comes from
 `args.get(3)` unencoded, so a key with `/`, `?`, or `#` produces a wrong request path. Client-side
 only (the server owns real validation), but a key like `a/b` deletes the wrong resource path
 silently. Fix: percent-encode the path segment (the auth module already pulls in `url`).
 
 ### L4 — Manifest `schemas` values are unbounded arbitrary JSON with no size ceiling beyond the 1 MB manifest cap
-`crates/bundle/src/manifest.rs:64-65`. `schemas: HashMap<String, serde_json::Value>` is parsed and
+`crates/zeroship-bundle/src/manifest.rs:64-65`. `schemas: HashMap<String, serde_json::Value>` is parsed and
 stored verbatim; only the overall 1 MB `MAX_MANIFEST_BYTES` bounds it. Deeply nested JSON within
 1 MB can still be a parser/validator CPU sink when the gateway compiles per-resource policy. Low
 because 1 MB caps the absolute size; note it if schema validation ever walks these recursively.

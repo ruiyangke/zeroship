@@ -15,7 +15,7 @@ the entry is labelled **needs microbench**.
   (release build at `deb9161`, current main).
 - Client: `zerobench` saturate mode, 300 conns, 16 threads.
 - Scenario: `GET /hello` against `default.fetch` slow path
-  (`crates/runtime/benches/scenarios.js:281-312`). Triggers
+  (`crates/zeroship-runtime/benches/scenarios.js:281-312`). Triggers
   `request.headers.get("upgrade")`, `new URL(request.url)`, four `url.pathname`
   checks (early-out on first match for `/hello`: none — falls through to the
   final `Response.json`), and `Response.json({ method, url })`.
@@ -48,7 +48,7 @@ removal in `f90e264`).
 
 ## 3. scenarios.js handler walk
 
-`crates/runtime/benches/scenarios.js:281-312`:
+`crates/zeroship-runtime/benches/scenarios.js:281-312`:
 
 ```js
 async fetch(request) {
@@ -92,10 +92,10 @@ without changing the fixture.
 
 Confirmed by reading code:
 
-- **Macro support**: `crates/runtime-macros/src/v8_class/fastcall/mod.rs`
+- **Macro support**: `crates/zeroship-runtime-macros/src/v8_class/fastcall/mod.rs`
   is fully wired. `validate_fastcall_signature` rejects unsupported
   shapes (`&mut self`, `String`/`Vec<u8>`/`Option<T>` returns,
-  unsupported arg types — `crates/runtime-macros/src/v8_class/fastcall/mod.rs:57-181`).
+  unsupported arg types — `crates/zeroship-runtime-macros/src/v8_class/fastcall/mod.rs:57-181`).
   Codegen emits an `extern "C"` shim, a static `CFunctionInfo`, and a
   static `CFunction` per fastcall-annotated method (`mod.rs:328-474`).
   The shim recovers `*const Self` from internal-field-1 via
@@ -104,8 +104,8 @@ Confirmed by reading code:
   (V8's CFunction signature enforces receiver shape at JIT time).
 
 - **Production sites**: exactly one — `Headers.has`
-  (`crates/runtime/src/web/headers.rs:689`). Verified by grep:
-  `grep -rn "v8_method(fastcall)" crates/runtime/src/` returns only this
+  (`crates/zeroship-runtime/src/web/headers.rs:689`). Verified by grep:
+  `grep -rn "v8_method(fastcall)" crates/zeroship-runtime/src/` returns only this
   one match. The 5/04 commit `9721a76` is the only Tier-1 candidate that
   actually shipped to production.
 
@@ -118,7 +118,7 @@ Confirmed by reading code:
   Not yet built.
 
 - **5f9cbad scope** (`runtime-macros: table-driven KnownType + FastcallType`):
-  per the commit message and `crates/runtime-macros/src/known_type.rs`,
+  per the commit message and `crates/zeroship-runtime-macros/src/known_type.rs`,
   this is a refactor of the per-type classifier dispatch into typed
   enum variants. It does **not** add new fastcall sites or relax the
   signature validator; it consolidates the existing dispatch tables.
@@ -222,7 +222,7 @@ symbol — see `/tmp/full-report.txt` for full output, summary below):
 
 ### Why brand check creates Globals
 
-Reading `crates/runtime-macros/src/v8_class/emit/brand.rs:97-99`:
+Reading `crates/zeroship-runtime-macros/src/v8_class/emit/brand.rs:97-99`:
 
 ```rust
 let cached_global: v8::Global<v8::Object> =
@@ -303,7 +303,7 @@ codegen pattern `slot.0.clone()`.
 
 ### Candidate A — eliminate `slot.0.clone()` in steady-state brand check
 
-**Mechanism**. `crates/runtime-macros/src/v8_class/emit/brand.rs:97-129`
+**Mechanism**. `crates/zeroship-runtime-macros/src/v8_class/emit/brand.rs:97-129`
 does `slot.0.clone()` (allocating a Global) every time a brand check
 runs, even though the cached prototype is constant after first install.
 The Local can be obtained with `v8::Local::new(scope, &slot.0)` directly
@@ -330,7 +330,7 @@ allocation goes away entirely. The cap on saving is ~9.3 % of CPU
 (~28 K req/s of the 303 K headline). Not yet measured.
 
 **Effort**. Small. One macro file change in
-`crates/runtime-macros/src/v8_class/emit/brand.rs`; rebuild propagates
+`crates/zeroship-runtime-macros/src/v8_class/emit/brand.rs`; rebuild propagates
 to every `#[v8_class]`. Care needed for the borrow checker (the
 `scope.get_slot()` borrow must drop before subsequent `&mut scope`
 calls in the chain walk).

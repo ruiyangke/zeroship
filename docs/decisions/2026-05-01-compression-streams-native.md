@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-01 (codec layer); CompressionStream/DecompressionStream classes landed 2026-05-05 in `ed3125e`
 **Long-form design:** [`docs/archive/compression-streams-native.md`](../archive/compression-streams-native.md)
-**Implementation:** [`crates/runtime/src/web/streams/compression.rs`](../../crates/runtime/src/web/streams/compression.rs)
+**Implementation:** [`crates/zeroship-runtime/src/web/streams/compression.rs`](../../crates/zeroship-runtime/src/web/streams/compression.rs)
 
 ## Context
 

@@ -71,7 +71,7 @@ A large fraction of `env::var` hits are test-gating (`PG_TEST_URL`, `REDIS_TEST_
 
 Ground-truth = a whole-tree grep for `env::var`/`env::var_os`/`std::env::var`, clap `env =`, `env!`/`option_env!`, plus the Go driver's `os.Getenv` (81 distinct names). Each was whole-word-matched against this document: **78 of 81 are tabled in the sections below.** The 3 not individually tabled are all test/stress-only and deliberately out of scope:
 
-- `CONTROL_TEST_DB` — test DSN selector in `crates/control/tests/stripe_webhook_test.rs` (test-only; alongside `PG_TEST_URL`/`AUTH_DB_URL`).
+- `CONTROL_TEST_DB` — test DSN selector in `crates/zeroship-control/tests/stripe_webhook_test.rs` (test-only; alongside `PG_TEST_URL`/`AUTH_DB_URL`).
 - `KUBECONFIG` — standard kubectl config path consumed by the k8s backend / its tests, not zeroship config.
 - `SBX_STRESS_NAMESPACE` — sandbox stress-harness namespace override (test/stress-only).
 
@@ -83,88 +83,88 @@ Ground-truth = a whole-tree grep for `env::var`/`env::var_os`/`std::env::var`, c
 | Name | Kind | Type | Default | Secret? | Refuses boot if unset? | Controls | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | **control** | | | | | | | |
-| `--port` / `CONTROL_PORT` | CLI+env | u16 (string) | `9090` | no | no | HTTP listen port (`0.0.0.0:{port}`) | `crates/control/src/main.rs:86` |
-| `--db` / `DATABASE_URL` | CLI+env | string (DSN) | `postgres://localhost/zeroship` | no (DSN may embed creds) | no | Control-plane Postgres connection (`Registry::new`); also dev fallback for auth DB | `crates/control/src/main.rs:87` |
-| `--bundles` / `BUNDLES_DIR` | CLI+env | path | `./bundles` | no | no | Root for both legacy `BundleStore` (`LocalFs`) and new `LocalDiskBlobStore` | `crates/control/src/main.rs:88` |
-| `--control-key` / `CONTROL_KEY` | CLI+env | string | `""` | **yes** | **yes** (unless `--dev-insecure`) | Bearer key for admin + internal API auth | `crates/control/src/main.rs:89`; guard `:179`, `:184-192` |
-| `--master-key` / `MASTER_KEY` | CLI+env | string (hex/base64url ≥32 B) | `""` | **yes** | **yes** (unless `--dev-insecure`); also rejected if decodes <32 B | Env-var encryption key (`EnvStore`) | `crates/control/src/main.rs:90`; validate `:193-197`; guard `:175-192` |
-| `--workers` / `WORKER_URLS` | CLI+env | CSV of URLs | `http://localhost:8080` | no | no | Worker dispatch URLs (split on `,`) | `crates/control/src/main.rs:91` |
-| `--worker-key` / `WORKER_KEY` | CLI+env | string | `""` | **yes** | no (silently empty) | Shared secret control uses when calling workers | `crates/control/src/main.rs:92` |
-| `--signing-key-file` / `SIGNING_KEY_FILE` | CLI+env | path | `""` | **yes** (path to key) | **yes** (unless `--dev-insecure`; else dev PAT key) | PAT (personal-access-token) signing key file | `crates/control/src/main.rs:93`; guard `:181-192`; load `:223-238` |
-| `--stripe-webhook-secret` / `STRIPE_WEBHOOK_SECRET` | CLI+env | string | `""` | **yes** | no (warns only; `/internal/webhooks/stripe` 500s) | Stripe webhook signature verification | `crates/control/src/main.rs:94`; warn `:208-217` |
-| `--legacy-master-keys` / `LEGACY_MASTER_KEYS` | CLI+env | CSV of keys | `""` | **yes** | no (but each entry validated ≥32 B when non-dev) | Previous master keys tried on decrypt failure during rotation grace | `crates/control/src/main.rs:97`; validate `:198-207` |
-| `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` | CLI+env | bool (`1` only for env) | `false` | no | n/a | Master switch disabling all secret-presence guards + admin/internal auth | `crates/control/src/main.rs:102-104` |
-| `--trust-proxy` / `TRUST_PROXY` | CLI+env | bool (`1` only for env) | `false` | no | no | Trust `X-Forwarded-For` for client IP | `crates/control/src/main.rs:113-115` |
-| `--bootstrap-builder-client` / `BOOTSTRAP_BUILDER_OAUTH_CLIENT` | CLI+env | bool (`1`/`true` for env) | `false` | no | no | Run auth migrations + bootstrap builder OAuth client at boot | `crates/control/src/main.rs:116-120`; use `:401-420` |
-| `--builder-redirect-uri` / `BUILDER_REDIRECT_URI` | CLI+env | URL | `http://localhost:3001/auth/callback` | no | no | Redirect URI for bootstrapped builder OAuth client | `crates/control/src/main.rs:121-126`; const `crates/control/src/bootstrap_builder.rs:17` |
-| `--builder-client-secret-file` / `BUILDER_CLIENT_SECRET_FILE` | CLI+env | path | `data/builder-client-secret` | **yes** (path to secret) | no | Where builder OAuth client secret is written/read | `crates/control/src/main.rs:127-132`; const `crates/control/src/bootstrap_builder.rs:18` |
-| `--deploy-tmp-dir` / `DEPLOY_TMP_DIR` | CLI+env | path | `""` → `std::env::temp_dir()` | no | **yes** (exits if dir not creatable/writable — probe at boot) | Scratch dir for deploy unpacking | `crates/control/src/main.rs:134-144`; probe `:150-171` |
-| `--auth-public` / `AUTH_PUBLIC` | CLI+env | URL | `""` → dev `http://localhost:4444` | no | **yes** (unless `--dev-insecure`) | Hydra public issuer URL for console OIDC RP | `crates/control/src/main.rs:280`; guard `:313-314`; dev fallback `:346-352` |
-| `--hydra-admin` / `AUTH_HYDRA_ADMIN` | CLI+env | URL | `""` | no | no directly (feeds `hydra_admin_url` fallback) | **Legacy** hydra-admin env name; used only if `--hydra-admin-url`/`HYDRA_ADMIN_URL` empty | `crates/control/src/main.rs:281-286`; fallback `:296-303` |
-| `--hydra-admin-url` / `HYDRA_ADMIN_URL` | CLI+env | URL | `""` → (falls back to `AUTH_HYDRA_ADMIN`) → dev `http://localhost:4445` | no | **yes** (effective value; unless `--dev-insecure`) | Hydra admin URL for OAuth bearer introspection + builder bootstrap | `crates/control/src/main.rs:296-303`; guard `:325-326`; dev fallback `:353-359` |
-| `--console-oidc-secret` / `CONSOLE_OIDC_SECRET` | CLI+env | string | `""` → dev `dev-console-oidc-secret` | **yes** | **yes** (unless `--dev-insecure`) | OIDC RP client secret for `console.zeroship.ai` | `crates/control/src/main.rs:287-288`; guard `:316-317`; dev fallback `:360-364` |
-| `--stash-signing-key` / `STASH_SIGNING_KEY` | CLI+env | string | `""` → dev `dev-stash-key-please-rotate` (literal `b"..."`) | **yes** | **yes** (unless `--dev-insecure`) | HMAC key for the OIDC RP login-stash cookie | `crates/control/src/main.rs:289-294`; guard `:319-320`; dev fallback `:338-345` |
-| `--auth-db` / `AUTH_DB_URL` | CLI+env | string (DSN) | `""` → dev falls back to `db_url` | no (DSN may embed creds) | **yes** (unless `--dev-insecure`) | Auth/console Postgres (`/auth/callback`, sessions) | `crates/control/src/main.rs:295`; guard `:322-323`; dev fallback `:379-387` |
-| `--oauth-audience` / `OAUTH_AUDIENCE` | CLI+env | string | `control.zeroship.ai` | no | no | Expected `aud` for OAuth bearer introspection | `crates/control/src/main.rs:304-309` |
+| `--port` / `CONTROL_PORT` | CLI+env | u16 (string) | `9090` | no | no | HTTP listen port (`0.0.0.0:{port}`) | `crates/zeroship-control/src/main.rs:86` |
+| `--db` / `DATABASE_URL` | CLI+env | string (DSN) | `postgres://localhost/zeroship` | no (DSN may embed creds) | no | Control-plane Postgres connection (`Registry::new`); also dev fallback for auth DB | `crates/zeroship-control/src/main.rs:87` |
+| `--bundles` / `BUNDLES_DIR` | CLI+env | path | `./bundles` | no | no | Root for both legacy `BundleStore` (`LocalFs`) and new `LocalDiskBlobStore` | `crates/zeroship-control/src/main.rs:88` |
+| `--control-key` / `CONTROL_KEY` | CLI+env | string | `""` | **yes** | **yes** (unless `--dev-insecure`) | Bearer key for admin + internal API auth | `crates/zeroship-control/src/main.rs:89`; guard `:179`, `:184-192` |
+| `--master-key` / `MASTER_KEY` | CLI+env | string (hex/base64url ≥32 B) | `""` | **yes** | **yes** (unless `--dev-insecure`); also rejected if decodes <32 B | Env-var encryption key (`EnvStore`) | `crates/zeroship-control/src/main.rs:90`; validate `:193-197`; guard `:175-192` |
+| `--workers` / `WORKER_URLS` | CLI+env | CSV of URLs | `http://localhost:8080` | no | no | Worker dispatch URLs (split on `,`) | `crates/zeroship-control/src/main.rs:91` |
+| `--worker-key` / `WORKER_KEY` | CLI+env | string | `""` | **yes** | no (silently empty) | Shared secret control uses when calling workers | `crates/zeroship-control/src/main.rs:92` |
+| `--signing-key-file` / `SIGNING_KEY_FILE` | CLI+env | path | `""` | **yes** (path to key) | **yes** (unless `--dev-insecure`; else dev PAT key) | PAT (personal-access-token) signing key file | `crates/zeroship-control/src/main.rs:93`; guard `:181-192`; load `:223-238` |
+| `--stripe-webhook-secret` / `STRIPE_WEBHOOK_SECRET` | CLI+env | string | `""` | **yes** | no (warns only; `/internal/webhooks/stripe` 500s) | Stripe webhook signature verification | `crates/zeroship-control/src/main.rs:94`; warn `:208-217` |
+| `--legacy-master-keys` / `LEGACY_MASTER_KEYS` | CLI+env | CSV of keys | `""` | **yes** | no (but each entry validated ≥32 B when non-dev) | Previous master keys tried on decrypt failure during rotation grace | `crates/zeroship-control/src/main.rs:97`; validate `:198-207` |
+| `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` | CLI+env | bool (`1` only for env) | `false` | no | n/a | Master switch disabling all secret-presence guards + admin/internal auth | `crates/zeroship-control/src/main.rs:102-104` |
+| `--trust-proxy` / `TRUST_PROXY` | CLI+env | bool (`1` only for env) | `false` | no | no | Trust `X-Forwarded-For` for client IP | `crates/zeroship-control/src/main.rs:113-115` |
+| `--bootstrap-builder-client` / `BOOTSTRAP_BUILDER_OAUTH_CLIENT` | CLI+env | bool (`1`/`true` for env) | `false` | no | no | Run auth migrations + bootstrap builder OAuth client at boot | `crates/zeroship-control/src/main.rs:116-120`; use `:401-420` |
+| `--builder-redirect-uri` / `BUILDER_REDIRECT_URI` | CLI+env | URL | `http://localhost:3001/auth/callback` | no | no | Redirect URI for bootstrapped builder OAuth client | `crates/zeroship-control/src/main.rs:121-126`; const `crates/zeroship-control/src/bootstrap_builder.rs:17` |
+| `--builder-client-secret-file` / `BUILDER_CLIENT_SECRET_FILE` | CLI+env | path | `data/builder-client-secret` | **yes** (path to secret) | no | Where builder OAuth client secret is written/read | `crates/zeroship-control/src/main.rs:127-132`; const `crates/zeroship-control/src/bootstrap_builder.rs:18` |
+| `--deploy-tmp-dir` / `DEPLOY_TMP_DIR` | CLI+env | path | `""` → `std::env::temp_dir()` | no | **yes** (exits if dir not creatable/writable — probe at boot) | Scratch dir for deploy unpacking | `crates/zeroship-control/src/main.rs:134-144`; probe `:150-171` |
+| `--auth-public` / `AUTH_PUBLIC` | CLI+env | URL | `""` → dev `http://localhost:4444` | no | **yes** (unless `--dev-insecure`) | Hydra public issuer URL for console OIDC RP | `crates/zeroship-control/src/main.rs:280`; guard `:313-314`; dev fallback `:346-352` |
+| `--hydra-admin` / `AUTH_HYDRA_ADMIN` | CLI+env | URL | `""` | no | no directly (feeds `hydra_admin_url` fallback) | **Legacy** hydra-admin env name; used only if `--hydra-admin-url`/`HYDRA_ADMIN_URL` empty | `crates/zeroship-control/src/main.rs:281-286`; fallback `:296-303` |
+| `--hydra-admin-url` / `HYDRA_ADMIN_URL` | CLI+env | URL | `""` → (falls back to `AUTH_HYDRA_ADMIN`) → dev `http://localhost:4445` | no | **yes** (effective value; unless `--dev-insecure`) | Hydra admin URL for OAuth bearer introspection + builder bootstrap | `crates/zeroship-control/src/main.rs:296-303`; guard `:325-326`; dev fallback `:353-359` |
+| `--console-oidc-secret` / `CONSOLE_OIDC_SECRET` | CLI+env | string | `""` → dev `dev-console-oidc-secret` | **yes** | **yes** (unless `--dev-insecure`) | OIDC RP client secret for `console.zeroship.ai` | `crates/zeroship-control/src/main.rs:287-288`; guard `:316-317`; dev fallback `:360-364` |
+| `--stash-signing-key` / `STASH_SIGNING_KEY` | CLI+env | string | `""` → dev `dev-stash-key-please-rotate` (literal `b"..."`) | **yes** | **yes** (unless `--dev-insecure`) | HMAC key for the OIDC RP login-stash cookie | `crates/zeroship-control/src/main.rs:289-294`; guard `:319-320`; dev fallback `:338-345` |
+| `--auth-db` / `AUTH_DB_URL` | CLI+env | string (DSN) | `""` → dev falls back to `db_url` | no (DSN may embed creds) | **yes** (unless `--dev-insecure`) | Auth/console Postgres (`/auth/callback`, sessions) | `crates/zeroship-control/src/main.rs:295`; guard `:322-323`; dev fallback `:379-387` |
+| `--oauth-audience` / `OAUTH_AUDIENCE` | CLI+env | string | `control.zeroship.ai` | no | no | Expected `aud` for OAuth bearer introspection | `crates/zeroship-control/src/main.rs:304-309` |
 | **gateway** | | | | | | | |
-| `--port` / `GATE_PORT` | CLI+env | u16 (string) | `80` | no | no | HTTP listen port (`0.0.0.0:{port}`) | `crates/gateway/src/main.rs:65` |
-| `--control` / `CONTROL_URL` | CLI+env | URL | `http://localhost:9090` | no | no | Control-plane base URL (route/version sync) | `crates/gateway/src/main.rs:66` |
-| `--control-key` / `CONTROL_KEY` | CLI+env | string | `""` | **yes** | **yes** (unless any dev-insecure form) | Bearer key for pulling routes from control | `crates/gateway/src/main.rs:67`; validate `:28-33`, `:113-116` |
-| `--workers` / `WORKER_URLS` | CLI+env | CSV of URLs | `http://localhost:8080` | no | no | Worker URLs for CHWBL hash ring (split on `,`) | `crates/gateway/src/main.rs:68` |
-| `--poll-interval` / `POLL_INTERVAL` | CLI+env | u64 secs (string) | `5` | no | no | Route/version poll cadence (`.parse().unwrap_or(5)`) | `crates/gateway/src/main.rs:69`; parse `:268` |
-| `--auth-secret` / `AUTH_SECRET` | CLI+env | string | `""` | **yes** | no | JWT validation secret (gateway auth) | `crates/gateway/src/main.rs:70` |
-| `--worker-key` / `WORKER_KEY` | CLI+env | string | `""` | **yes** | no (warns: worker endpoints unauthenticated) | Shared secret for `/dispatch` bearer + `ZeroShip-User` HMAC | `crates/gateway/src/main.rs:71`; warn `:128-132` |
-| `--blob-store` / `BLOB_STORE` | CLI+env | path | `./bundles` | no | no (panics if init fails) | Content-addressed blob store root (`LocalDiskBlobStore`) | `crates/gateway/src/main.rs:72`; init `:185-188` |
-| `--blob-cache-mem-mb` / `BLOB_CACHE_MEM_MB` | CLI+env | usize MB (string) | `256` | no | no | In-memory blob LRU size (`.parse().unwrap_or(256)` × 1 MiB) | `crates/gateway/src/main.rs:73`; parse `:177-180` |
-| `--blob-cache-disk-gb` / `BLOB_CACHE_DISK_GB` | CLI+env | u64 GB (string) | `20` | no | no | On-disk blob LRU size (`.parse().unwrap_or(20)` × 1 GiB) | `crates/gateway/src/main.rs:74`; parse `:181-184` |
-| `--blob-cache-disk-root` / `BLOB_CACHE_DISK_ROOT` | CLI+env | path | `./blob-cache` | no | no (panics if init fails) | On-disk blob cache directory | `crates/gateway/src/main.rs:75-80`; init `:189-193` |
-| `--hydra-public` / `HYDRA_PUBLIC` | CLI+env | URL | `http://hydra:4444` | no | no | Upstream Hydra public OIDC endpoints (proxied) | `crates/gateway/src/main.rs:81` |
-| `--auth-public` / `AUTH_PUBLIC` | CLI+env | URL | `http://auth:9092` | no | no | Upstream `crates/auth` UI/consent (proxied); also OIDC RP issuer | `crates/gateway/src/main.rs:82`; RP `:248` |
-| `--db` / `DATABASE_URL` | CLI+env | string (DSN) | `""` | no (DSN may embed creds) | no (warns: session validation disabled → 401) | Postgres for per-origin session store + PG DPoP jti cache | `crates/gateway/src/main.rs:83`; empty-path `:226-242` |
-| `--gateway-oidc-secret` / `GATEWAY_OIDC_SECRET` | CLI+env | string | `dev-secret-rotate-me-too` | **yes** | no (insecure default ships) | OIDC RP client secret for `{app}.zeroship.ai` hosts | `crates/gateway/src/main.rs:84-89` |
-| `--stash-signing-key` / `STASH_SIGNING_KEY` | CLI+env | string (≥32 B) | `""` → `dev-stash-key-please-rotate` | **yes** | **yes** (unless dev-insecure); rejects dev-default + <32 B | HMAC key for OIDC RP login-stash cookie | `crates/gateway/src/main.rs:90-95`; validate `:35-58`, `:118-126`; const `:18` |
-| `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` (=`1`) **or** `--insecure-dev` / `INSECURE_DEV` (=`true`) | CLI+env | bool | `false` | no | n/a | Dev mode: cookies without `Secure`, relaxes control-key + stash-key guards. **TWO distinct env names accepted** | `crates/gateway/src/main.rs:20-26` |
-| `--trust-proxy` / `TRUST_PROXY` | CLI+env | bool (`1` only for env) | `false` | no | no | Trust `Forwarded`/`X-Forwarded-For` for client IP | `crates/gateway/src/main.rs:97-99` |
-| `--signing-key-file` / `GATEWAY_SIGNING_KEY_FILE` | CLI+env | path (PKCS#8 PEM/DER) | `""` | **yes** (path to key) | no (warns: DPoP-exchange 503; panics if file load fails) | Wrapper-token Ed25519 signing key (DPoP exchange) | `crates/gateway/src/main.rs:100-105`; load `:138-153` |
-| `--gateway-public-url` / `GATEWAY_PUBLIC_URL` | CLI+env | URL | `https://api.zeroship.ai` | no | no | `iss` advertised in gateway wrapper tokens (must be stable) | `crates/gateway/src/main.rs:106-111` |
+| `--port` / `GATE_PORT` | CLI+env | u16 (string) | `80` | no | no | HTTP listen port (`0.0.0.0:{port}`) | `crates/zeroship-gateway/src/main.rs:65` |
+| `--control` / `CONTROL_URL` | CLI+env | URL | `http://localhost:9090` | no | no | Control-plane base URL (route/version sync) | `crates/zeroship-gateway/src/main.rs:66` |
+| `--control-key` / `CONTROL_KEY` | CLI+env | string | `""` | **yes** | **yes** (unless any dev-insecure form) | Bearer key for pulling routes from control | `crates/zeroship-gateway/src/main.rs:67`; validate `:28-33`, `:113-116` |
+| `--workers` / `WORKER_URLS` | CLI+env | CSV of URLs | `http://localhost:8080` | no | no | Worker URLs for CHWBL hash ring (split on `,`) | `crates/zeroship-gateway/src/main.rs:68` |
+| `--poll-interval` / `POLL_INTERVAL` | CLI+env | u64 secs (string) | `5` | no | no | Route/version poll cadence (`.parse().unwrap_or(5)`) | `crates/zeroship-gateway/src/main.rs:69`; parse `:268` |
+| `--auth-secret` / `AUTH_SECRET` | CLI+env | string | `""` | **yes** | no | JWT validation secret (gateway auth) | `crates/zeroship-gateway/src/main.rs:70` |
+| `--worker-key` / `WORKER_KEY` | CLI+env | string | `""` | **yes** | no (warns: worker endpoints unauthenticated) | Shared secret for `/dispatch` bearer + `ZeroShip-User` HMAC | `crates/zeroship-gateway/src/main.rs:71`; warn `:128-132` |
+| `--blob-store` / `BLOB_STORE` | CLI+env | path | `./bundles` | no | no (panics if init fails) | Content-addressed blob store root (`LocalDiskBlobStore`) | `crates/zeroship-gateway/src/main.rs:72`; init `:185-188` |
+| `--blob-cache-mem-mb` / `BLOB_CACHE_MEM_MB` | CLI+env | usize MB (string) | `256` | no | no | In-memory blob LRU size (`.parse().unwrap_or(256)` × 1 MiB) | `crates/zeroship-gateway/src/main.rs:73`; parse `:177-180` |
+| `--blob-cache-disk-gb` / `BLOB_CACHE_DISK_GB` | CLI+env | u64 GB (string) | `20` | no | no | On-disk blob LRU size (`.parse().unwrap_or(20)` × 1 GiB) | `crates/zeroship-gateway/src/main.rs:74`; parse `:181-184` |
+| `--blob-cache-disk-root` / `BLOB_CACHE_DISK_ROOT` | CLI+env | path | `./blob-cache` | no | no (panics if init fails) | On-disk blob cache directory | `crates/zeroship-gateway/src/main.rs:75-80`; init `:189-193` |
+| `--hydra-public` / `HYDRA_PUBLIC` | CLI+env | URL | `http://hydra:4444` | no | no | Upstream Hydra public OIDC endpoints (proxied) | `crates/zeroship-gateway/src/main.rs:81` |
+| `--auth-public` / `AUTH_PUBLIC` | CLI+env | URL | `http://auth:9092` | no | no | Upstream `crates/auth` UI/consent (proxied); also OIDC RP issuer | `crates/zeroship-gateway/src/main.rs:82`; RP `:248` |
+| `--db` / `DATABASE_URL` | CLI+env | string (DSN) | `""` | no (DSN may embed creds) | no (warns: session validation disabled → 401) | Postgres for per-origin session store + PG DPoP jti cache | `crates/zeroship-gateway/src/main.rs:83`; empty-path `:226-242` |
+| `--gateway-oidc-secret` / `GATEWAY_OIDC_SECRET` | CLI+env | string | `dev-secret-rotate-me-too` | **yes** | no (insecure default ships) | OIDC RP client secret for `{app}.zeroship.ai` hosts | `crates/zeroship-gateway/src/main.rs:84-89` |
+| `--stash-signing-key` / `STASH_SIGNING_KEY` | CLI+env | string (≥32 B) | `""` → `dev-stash-key-please-rotate` | **yes** | **yes** (unless dev-insecure); rejects dev-default + <32 B | HMAC key for OIDC RP login-stash cookie | `crates/zeroship-gateway/src/main.rs:90-95`; validate `:35-58`, `:118-126`; const `:18` |
+| `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` (=`1`) **or** `--insecure-dev` / `INSECURE_DEV` (=`true`) | CLI+env | bool | `false` | no | n/a | Dev mode: cookies without `Secure`, relaxes control-key + stash-key guards. **TWO distinct env names accepted** | `crates/zeroship-gateway/src/main.rs:20-26` |
+| `--trust-proxy` / `TRUST_PROXY` | CLI+env | bool (`1` only for env) | `false` | no | no | Trust `Forwarded`/`X-Forwarded-For` for client IP | `crates/zeroship-gateway/src/main.rs:97-99` |
+| `--signing-key-file` / `GATEWAY_SIGNING_KEY_FILE` | CLI+env | path (PKCS#8 PEM/DER) | `""` | **yes** (path to key) | no (warns: DPoP-exchange 503; panics if file load fails) | Wrapper-token Ed25519 signing key (DPoP exchange) | `crates/zeroship-gateway/src/main.rs:100-105`; load `:138-153` |
+| `--gateway-public-url` / `GATEWAY_PUBLIC_URL` | CLI+env | URL | `https://api.zeroship.ai` | no | no | `iss` advertised in gateway wrapper tokens (must be stable) | `crates/zeroship-gateway/src/main.rs:106-111` |
 | **worker** | | | | | | | |
-| `--port` / `WORKER_PORT` | CLI+env | u16 (string) | `8080` | no | no | HTTP listen port (`{bind_host}:{port}`) | `crates/worker/src/main.rs:65` |
-| `--workers` / `WORKER_THREADS` | CLI+env | usize (string) | `available_parallelism()` (else `1`) | no | no | ntex worker thread count (`.parse().unwrap_or(1)`) | `crates/worker/src/main.rs:66-74`; parse `:129` |
-| `--control` / `CONTROL_URL` | CLI+env | URL | `http://localhost:9090` | no | no | Control-plane base URL (version/env poll) | `crates/worker/src/main.rs:75` |
-| `--control-key` / `CONTROL_KEY` | CLI+env | string | `""` | **yes** | **yes** (unless `--dev-insecure`) | Bearer key for pulling versions/env from control | `crates/worker/src/main.rs:76`; validate `:25-30`, `:91-94` |
-| `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` | CLI+env | bool (`1` only for env) | `false` | no | n/a | Relaxes control-key guard | `crates/worker/src/main.rs:18-23`, `:77` |
-| `--max-isolates` / `MAX_ISOLATES` | CLI+env | usize (string) | `200` | no | no | LRU cap on V8 isolates (`.parse().unwrap_or(200)`) | `crates/worker/src/main.rs:78`; parse `:121` |
-| `--poll-interval` / `POLL_INTERVAL` | CLI+env | u64 secs (string) | `5` | no | no | Version/env poll cadence (`.parse().unwrap_or(5)`) | `crates/worker/src/main.rs:79`; parse `:122` |
-| `--db` / `DATABASE_URL` | CLI+env | string (DSN) | `""` → `None` | no (DSN may embed creds) | no | Per-app DB plugin connection (empty → `db_url: None`) | `crates/worker/src/main.rs:80`; map `:120` |
-| `--worker-key` / `WORKER_KEY` | CLI+env | string | `""` | **yes** | conditional: **yes if non-loopback bind**, else warns | `/dispatch` bearer + `ZeroShip-User` HMAC verification | `crates/worker/src/main.rs:81`; guard `:96-109` |
-| `--shutdown-timeout` / `SHUTDOWN_TIMEOUT` | CLI+env | u64 secs (string) | `30` | no | no | SIGTERM drain deadline (`.parse().unwrap_or(30)`; `0`=forever) | `crates/worker/src/main.rs:82`; parse `:124`; apply `:165-166`,`:198` |
-| `--blob-store` / `BLOB_STORE` | CLI+env | path | `./bundles` | no | no (panics if init fails) | Content-addressed blob store root | `crates/worker/src/main.rs:85`; init `:111-114` |
-| `--bind` / `WORKER_BIND` | CLI+env | host/IP | `127.0.0.1` | no | no (but gates the WORKER_KEY requirement) | Bind host; non-loopback requires WORKER_KEY | `crates/worker/src/main.rs:89`; guard `:96-109` |
-| `--socket` / `WORKER_SOCKET` | CLI+env | path | `""` (disabled) | no | no | Optional extra Unix-domain-socket bind | `crates/worker/src/main.rs:128`; bind `:150-154`,`:202-204` |
+| `--port` / `WORKER_PORT` | CLI+env | u16 (string) | `8080` | no | no | HTTP listen port (`{bind_host}:{port}`) | `crates/zeroship-worker/src/main.rs:65` |
+| `--workers` / `WORKER_THREADS` | CLI+env | usize (string) | `available_parallelism()` (else `1`) | no | no | ntex worker thread count (`.parse().unwrap_or(1)`) | `crates/zeroship-worker/src/main.rs:66-74`; parse `:129` |
+| `--control` / `CONTROL_URL` | CLI+env | URL | `http://localhost:9090` | no | no | Control-plane base URL (version/env poll) | `crates/zeroship-worker/src/main.rs:75` |
+| `--control-key` / `CONTROL_KEY` | CLI+env | string | `""` | **yes** | **yes** (unless `--dev-insecure`) | Bearer key for pulling versions/env from control | `crates/zeroship-worker/src/main.rs:76`; validate `:25-30`, `:91-94` |
+| `--dev-insecure` / `ZEROSHIP_DEV_INSECURE` | CLI+env | bool (`1` only for env) | `false` | no | n/a | Relaxes control-key guard | `crates/zeroship-worker/src/main.rs:18-23`, `:77` |
+| `--max-isolates` / `MAX_ISOLATES` | CLI+env | usize (string) | `200` | no | no | LRU cap on V8 isolates (`.parse().unwrap_or(200)`) | `crates/zeroship-worker/src/main.rs:78`; parse `:121` |
+| `--poll-interval` / `POLL_INTERVAL` | CLI+env | u64 secs (string) | `5` | no | no | Version/env poll cadence (`.parse().unwrap_or(5)`) | `crates/zeroship-worker/src/main.rs:79`; parse `:122` |
+| `--db` / `DATABASE_URL` | CLI+env | string (DSN) | `""` → `None` | no (DSN may embed creds) | no | Per-app DB plugin connection (empty → `db_url: None`) | `crates/zeroship-worker/src/main.rs:80`; map `:120` |
+| `--worker-key` / `WORKER_KEY` | CLI+env | string | `""` | **yes** | conditional: **yes if non-loopback bind**, else warns | `/dispatch` bearer + `ZeroShip-User` HMAC verification | `crates/zeroship-worker/src/main.rs:81`; guard `:96-109` |
+| `--shutdown-timeout` / `SHUTDOWN_TIMEOUT` | CLI+env | u64 secs (string) | `30` | no | no | SIGTERM drain deadline (`.parse().unwrap_or(30)`; `0`=forever) | `crates/zeroship-worker/src/main.rs:82`; parse `:124`; apply `:165-166`,`:198` |
+| `--blob-store` / `BLOB_STORE` | CLI+env | path | `./bundles` | no | no (panics if init fails) | Content-addressed blob store root | `crates/zeroship-worker/src/main.rs:85`; init `:111-114` |
+| `--bind` / `WORKER_BIND` | CLI+env | host/IP | `127.0.0.1` | no | no (but gates the WORKER_KEY requirement) | Bind host; non-loopback requires WORKER_KEY | `crates/zeroship-worker/src/main.rs:89`; guard `:96-109` |
+| `--socket` / `WORKER_SOCKET` | CLI+env | path | `""` (disabled) | no | no | Optional extra Unix-domain-socket bind | `crates/zeroship-worker/src/main.rs:128`; bind `:150-154`,`:202-204` |
 
 ### Config files
 
 None of the three binaries reads a structured config file (no TOML/YAML/JSON/dotenv loader). The only file *paths* they consume are individual key/secret files, all gated by the flags above:
 
-- **control**: `SIGNING_KEY_FILE` (PAT signing key, loaded via `token_handlers::load_signing_key_from_path`, `crates/control/src/main.rs:227`); `BUILDER_CLIENT_SECRET_FILE` (default `data/builder-client-secret`, `crates/control/src/main.rs:127-132`); `DEPLOY_TMP_DIR` (scratch dir, write-probed at boot, `:150-171`).
-- **gateway**: `GATEWAY_SIGNING_KEY_FILE` (Ed25519 PKCS#8 PEM/DER wrapper-token key, `signing::load_from_path`, `crates/gateway/src/main.rs:144`).
+- **control**: `SIGNING_KEY_FILE` (PAT signing key, loaded via `token_handlers::load_signing_key_from_path`, `crates/zeroship-control/src/main.rs:227`); `BUILDER_CLIENT_SECRET_FILE` (default `data/builder-client-secret`, `crates/zeroship-control/src/main.rs:127-132`); `DEPLOY_TMP_DIR` (scratch dir, write-probed at boot, `:150-171`).
+- **gateway**: `GATEWAY_SIGNING_KEY_FILE` (Ed25519 PKCS#8 PEM/DER wrapper-token key, `signing::load_from_path`, `crates/zeroship-gateway/src/main.rs:144`).
 - **worker**: none (only the `WORKER_SOCKET` UDS path, which is created/bound, not read).
-- Referenced-but-not-read-by-these-binaries: `ops/auth-clients.example.toml` is mentioned in comments (`crates/control/src/main.rs:543`, `crates/gateway/src/main.rs:247,326`) as the source of truth for OIDC client registration, but it is consumed by Hydra/ops tooling, not parsed by any of these three `main.rs` files.
+- Referenced-but-not-read-by-these-binaries: `ops/auth-clients.example.toml` is mentioned in comments (`crates/zeroship-control/src/main.rs:543`, `crates/zeroship-gateway/src/main.rs:247,326`) as the source of truth for OIDC client registration, but it is consumed by Hydra/ops tooling, not parsed by any of these three `main.rs` files.
 
 ### Notes
 
-**Hydra-admin double-name drift (control only).** Control accepts the hydra-admin URL under **two different env names**: `AUTH_HYDRA_ADMIN` (flag `--hydra-admin`, read into `legacy_hydra_admin_url`, `crates/control/src/main.rs:281-286`) and `HYDRA_ADMIN_URL` (flag `--hydra-admin-url`, `:297`). The fallback at `:296-303` prefers `HYDRA_ADMIN_URL`/`--hydra-admin-url`; only if that is empty does it fall back to `AUTH_HYDRA_ADMIN`/`--hydra-admin`. The boot guard (`:325`) checks the *resolved* value. So `AUTH_HYDRA_ADMIN` is a pure legacy alias kept alive solely by glue logic — a prime unification target.
+**Hydra-admin double-name drift (control only).** Control accepts the hydra-admin URL under **two different env names**: `AUTH_HYDRA_ADMIN` (flag `--hydra-admin`, read into `legacy_hydra_admin_url`, `crates/zeroship-control/src/main.rs:281-286`) and `HYDRA_ADMIN_URL` (flag `--hydra-admin-url`, `:297`). The fallback at `:296-303` prefers `HYDRA_ADMIN_URL`/`--hydra-admin-url`; only if that is empty does it fall back to `AUTH_HYDRA_ADMIN`/`--hydra-admin`. The boot guard (`:325`) checks the *resolved* value. So `AUTH_HYDRA_ADMIN` is a pure legacy alias kept alive solely by glue logic — a prime unification target.
 
 **Dev-insecure: three spellings, inconsistent across binaries.**
 - control: `--dev-insecure` or `ZEROSHIP_DEV_INSECURE=1` (`:102-104`).
 - worker: same two (`--dev-insecure` / `ZEROSHIP_DEV_INSECURE=1`, `:18-23`).
-- gateway: those two **plus** a third pair `--insecure-dev` / `INSECURE_DEV=true` (`crates/gateway/src/main.rs:20-26`). Env-value semantics also differ: `ZEROSHIP_DEV_INSECURE` matches only `"1"`, while `INSECURE_DEV` matches `"true"` (case-insensitive). control's `flag_or_env` helper accepts `"1"` *or* `"true"`, but the inline dev-insecure/trust-proxy checks accept only `"1"` — inconsistent truthy parsing even **within** control.
+- gateway: those two **plus** a third pair `--insecure-dev` / `INSECURE_DEV=true` (`crates/zeroship-gateway/src/main.rs:20-26`). Env-value semantics also differ: `ZEROSHIP_DEV_INSECURE` matches only `"1"`, while `INSECURE_DEV` matches `"true"` (case-insensitive). control's `flag_or_env` helper accepts `"1"` *or* `"true"`, but the inline dev-insecure/trust-proxy checks accept only `"1"` — inconsistent truthy parsing even **within** control.
 
 **`CONTROL_KEY` semantics differ by binary.** Same name everywhere, but: control *issues/validates* it for inbound admin+internal auth and **requires** it (non-dev); gateway and worker *present* it outbound to control and also **require** it (non-dev). All three default to `""` and gate on `insecure_dev`.
 
 **`WORKER_KEY` enforcement differs by binary.** Default `""` in all three. control: read, no guard (silently unauthenticated). gateway: warns only (`:128-132`). worker: **conditionally fatal** — empty allowed only on a loopback bind; a non-loopback bind with empty `WORKER_KEY` exits(1) (`:96-109`).
 
-**`--workers` is overloaded.** control/gateway: `--workers`/`WORKER_URLS` = CSV of worker URLs (default `http://localhost:8080`). worker: `--workers`/`WORKER_THREADS` = ntex thread count (`crates/worker/src/main.rs:66`). Same flag, completely different meaning. Sharp drift.
+**`--workers` is overloaded.** control/gateway: `--workers`/`WORKER_URLS` = CSV of worker URLs (default `http://localhost:8080`). worker: `--workers`/`WORKER_THREADS` = ntex thread count (`crates/zeroship-worker/src/main.rs:66`). Same flag, completely different meaning. Sharp drift.
 
 **`DATABASE_URL` default differs across binaries.** control → `postgres://localhost/zeroship` (live default); gateway/worker → `""` (degraded mode: gateway disables session validation, worker sets `db_url: None`). Same env name, three different empty/non-empty semantics.
 
@@ -185,7 +185,7 @@ None of the three binaries reads a structured config file (no TOML/YAML/JSON/dot
 **Completeness:** control 23, gateway 21, worker 13 distinct inputs; no rows skipped. Every `arg_or_env`/`flag_or_env`/`env_or`/`std::env::var` hit in the three files accounted for.
 ## Auth server (crates/auth)
 
-All non-test config is a single clap `#[derive(Parser)]` struct `AuthConfig` (`crates/auth/src/config.rs`). Every field is `CLI+env`: long flag (kebab-cased field name) + an `AUTH_*` env var. Parsed in `main.rs:30` via `AuthConfig::parse()`.
+All non-test config is a single clap `#[derive(Parser)]` struct `AuthConfig` (`crates/zeroship-auth/src/config.rs`). Every field is `CLI+env`: long flag (kebab-cased field name) + an `AUTH_*` env var. Parsed in `main.rs:30` via `AuthConfig::parse()`.
 
 | Name | Kind | Type | Default | Secret? | Refuses boot if unset? | Controls | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -233,7 +233,7 @@ All 40 fields of `AuthConfig`; no rows skipped.
 
 ### Config files
 
-**OIDC clients TOML** — path from `clients_config` / `AUTH_CLIENTS_CONFIG` (default `/etc/zeroship/auth-clients.toml`). Loaded by `ClientsConfig::from_path` (`crates/auth/src/bootstrap/clients_config.rs:65`), parsed with `toml::from_str`, reconciled against Hydra admin (upsert, never deletes) at every boot. Example: `ops/auth-clients.example.toml`.
+**OIDC clients TOML** — path from `clients_config` / `AUTH_CLIENTS_CONFIG` (default `/etc/zeroship/auth-clients.toml`). Loaded by `ClientsConfig::from_path` (`crates/zeroship-auth/src/bootstrap/clients_config.rs:65`), parsed with `toml::from_str`, reconciled against Hydra admin (upsert, never deletes) at every boot. Example: `ops/auth-clients.example.toml`.
 
 Schema — top-level is an array of `[[client]]` tables (`#[serde(rename = "client")]`), deserialized into `ClientEntry` (clients_config.rs:30-51):
 
@@ -268,7 +268,7 @@ Schema — top-level is an array of `[[client]]` tables (`#[serde(rename = "clie
 
 **Non-fatal gating:** missing google/github client_id ⇒ warn + routes unregistered; `mailer=smtp` needs `smtp_host`, `mailer=resend` needs `resend_api_key` (driver-construction-time); Postmark webhook 401 when creds unset.
 
-**Test-only env vars** (NOT read by the server binary; in `crates/auth/tests/` or `#[cfg(test)]`):
+**Test-only env vars** (NOT read by the server binary; in `crates/zeroship-auth/tests/` or `#[cfg(test)]`):
 - `AUTH_DB_URL` — skip-if-unset guard in most integration tests (same name as prod var).
 - `AUTH_HYDRA_ADMIN` — test skip-guard for hydra e2e (same name as prod var).
 - `AUTH_HYDRA_PUBLIC_URL` — **test-only, distinct name** (`_URL` suffix, unlike prod `AUTH_HYDRA_PUBLIC`). Name-collision trap.
@@ -406,38 +406,38 @@ No rows truncated — every distinct `env::var`/`parse_env`/`read_*_env` call si
 
 | Name | Kind | Type | Default | Secret? | Refuses boot if unset? | Controls | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `serve <file>` | CLI flag (positional) | path | required | no | exits if missing/not a file | `zeroship serve` entry JS file | crates/cli/src/main.rs:48 |
-| `--port=` | CLI flag | u16 | `3000` | no | no | dev server listen port | crates/cli/src/main.rs:51 |
-| `--workers=` | CLI flag | usize | `0` (auto) | no | no | dev worker-thread count | crates/cli/src/main.rs:52 |
-| `--cpu-limit=` | CLI flag | u64 ms | none | no | no | per-request CPU limit (ms) | crates/cli/src/main.rs:55 |
-| `--wall-timeout=` | CLI flag | u64 ms | none | no | no | per-request wall timeout (ms) | crates/cli/src/main.rs:58 |
-| `--heap-limit-mb=` | CLI flag | usize MB | `512` | no | no | V8 heap limit; overrides env | crates/cli/src/main.rs:65 |
-| `ZEROSHIP_HEAP_LIMIT_MB` | env | usize MB | `512` (if flag absent) | no | no | V8 heap limit fallback (CLI reads env; runtime takes it as a struct field, never reads env) | crates/cli/src/main.rs:66 |
-| `DATABASE_URL` | env | URL str | none (db plugin off if unset) | yes (DSN) | no | opt-in: registers `env.db.*` in dev `serve` | crates/cli/src/main.rs:106 |
-| `ZEROSHIP_STORAGE_ROOT` | env | path | `.zeroship/storage` | no | no | storage-plugin root dir (dev serve) | crates/cli/src/main.rs:117 |
-| `ZEROSHIP_KV_URL` | env | URL str | none (→redb) | yes (may carry creds) | no | KV backend select: Redis if set | crates/cli/src/main.rs:130 |
-| `ZEROSHIP_KV_PATH` | env | path | `.zeroship/kv.redb` | no | exits if redb open/dir-create fails | redb KV file path (when no KV_URL) | crates/cli/src/main.rs:138 |
-| process env (all vars) | env (bulk) | map | — | mixed | no | `std::env::vars()` forwarded into V8 `process.env` (so `OPENAI_API_KEY`, vite's `ZEROSHIP_ENTRY`/`ZEROSHIP_VITE_*` reach JS) | crates/cli/src/main.rs:170 |
-| `deploy <path>` | CLI flag (positional) | path | required | no | exits if missing | `.zship` archive to upload | crates/cli/src/main.rs:200 |
-| `--app=` | CLI flag | str | required | no | panics if missing | target app for deploy/secret/var | crates/cli/src/main.rs:203; secrets.rs:48 |
-| `--control=` | CLI flag | URL | `http://localhost:9090` | no | no | control-plane base URL | crates/cli/src/main.rs:204; secrets.rs:49 |
-| `ZEROSHIP_CONTROL_URL` | env | URL | `http://localhost:9090` | no | no | control-plane URL fallback when `--control=` absent | crates/cli/src/main.rs:205; secrets.rs:50 |
-| `--token=` | CLI flag | str (PAT) | — | yes (bearer) | no (falls through to env/creds) | deploy/secret/var bearer (1st precedence) | crates/cli/src/main.rs:349 |
-| `ZEROSHIP_TOKEN` | env | str (PAT) | — | yes (bearer) | no (falls through to creds file) | bearer fallback (2nd precedence) | crates/cli/src/main.rs:335 |
-| `--auth-url` / `--auth-url=` | CLI flag | URL | `https://auth.zeroship.ai` | no | no | `zeroship login` OAuth IdP base URL | crates/cli/src/auth.rs:59-61 |
-| `ZEROSHIP_CONFIG_HOME` | env | path | — (1st of config-dir chain) | no | no | overrides config dir for CLI token store | crates/cli/src/auth.rs:272 |
-| `XDG_CONFIG_HOME` | env | path | — (2nd of chain) | no | no | config dir for CLI token store | crates/cli/src/auth.rs:274 |
-| `HOME` | env | path | — (3rd; `$HOME/.config`) | no | login/token ops error "HOME is not set" if none of 3 set | base for CLI token store | crates/cli/src/auth.rs:276 |
-| `ZEROSHIP_LOG_FORMAT` | env | enum `pretty\|compact\|json\|logfmt\|bunyan` | TTY→`pretty`, else `json` | no | no | tracing subscriber output format (every binary) | crates/core/src/observability.rs:36 |
-| `RUST_LOG` | env | EnvFilter directive | per-binary `default_filter` | no | no | tracing log-level filter (via `EnvFilter::try_from_default_env`) | crates/core/src/observability.rs:33 |
-| `ZEROSHIP_DEV` | env | presence flag | unset (= secure prod) | no | no | dev mode: disables SSRF host/IP filtering for fetch + WS + cyper resolver | crates/runtime/src/transport/ssrf.rs:89,144; client.rs:26 |
-| `ZEROSHIP_STREAM_GLOBAL_CAP` | env | usize bytes | `DEFAULT_STREAM_GLOBAL_CAP` (cached via OnceLock) | no | no | process-wide stream buffer byte cap | crates/runtime/src/core/channel.rs:116 |
-| `ZEROSHIP_LOG` | env | presence flag | unset (logs only in debug) | no | no | mirrors app `console.*` to operator tracing in release builds | crates/runtime/src/core/init.rs:1189 |
-| `AUTH_INSECURE_DEV` | env | bool-ish (`1\|true\|yes\|on`) | unset (= internal 5xx bodies hidden) | no | no | exposes verbose internal dispatch-error bodies to clients (dev) | crates/runtime/src/core/dispatch.rs:143 |
-| `ZEROSHIP_DEPLOY_ID` | env | str | `cold_start` | no | no | deploy-id stamped into migration/mask-backfill audit rows | crates/plugin-db/src/register_model/mod.rs:148; migrations.rs:390; crud/mask_backfill.rs:644 |
-| `ZEROSHIP_COLUMN_KEY_<KEYID>` | env (dynamic name) | 64-hex (32 B) | required (per referenced key id) | yes (column-encryption root key) | no boot gate; first encrypted-column op fails `column_key_not_configured` if unset/malformed | per-key-id root key for `env.db` column encryption | crates/plugin-db/src/encryption/keys.rs:178-203 |
-| `CARGO_PKG_VERSION` | compile-time `env!` | str | build-time | no | n/a | stamps `compiler: zeroship-passthrough@<ver>` into passthrough Manifest | crates/bundle/src/manifest.rs:232 |
-| `ZEROSHIP_SESSION_SECRET` | env | hex (32 B) | required (for gated path) | yes (HMAC) | `from_env()` returns `not_configured`; backend boots, defers to first mint | **(test-helpers-gated)** SQLite session-minter active HMAC secret — NOT compiled into a normal release `plugin-db` | crates/plugin-db/src/backend/sqlite/session_minter.rs:62,106 |
+| `serve <file>` | CLI flag (positional) | path | required | no | exits if missing/not a file | `zeroship serve` entry JS file | crates/zeroship-cli/src/main.rs:48 |
+| `--port=` | CLI flag | u16 | `3000` | no | no | dev server listen port | crates/zeroship-cli/src/main.rs:51 |
+| `--workers=` | CLI flag | usize | `0` (auto) | no | no | dev worker-thread count | crates/zeroship-cli/src/main.rs:52 |
+| `--cpu-limit=` | CLI flag | u64 ms | none | no | no | per-request CPU limit (ms) | crates/zeroship-cli/src/main.rs:55 |
+| `--wall-timeout=` | CLI flag | u64 ms | none | no | no | per-request wall timeout (ms) | crates/zeroship-cli/src/main.rs:58 |
+| `--heap-limit-mb=` | CLI flag | usize MB | `512` | no | no | V8 heap limit; overrides env | crates/zeroship-cli/src/main.rs:65 |
+| `ZEROSHIP_HEAP_LIMIT_MB` | env | usize MB | `512` (if flag absent) | no | no | V8 heap limit fallback (CLI reads env; runtime takes it as a struct field, never reads env) | crates/zeroship-cli/src/main.rs:66 |
+| `DATABASE_URL` | env | URL str | none (db plugin off if unset) | yes (DSN) | no | opt-in: registers `env.db.*` in dev `serve` | crates/zeroship-cli/src/main.rs:106 |
+| `ZEROSHIP_STORAGE_ROOT` | env | path | `.zeroship/storage` | no | no | storage-plugin root dir (dev serve) | crates/zeroship-cli/src/main.rs:117 |
+| `ZEROSHIP_KV_URL` | env | URL str | none (→redb) | yes (may carry creds) | no | KV backend select: Redis if set | crates/zeroship-cli/src/main.rs:130 |
+| `ZEROSHIP_KV_PATH` | env | path | `.zeroship/kv.redb` | no | exits if redb open/dir-create fails | redb KV file path (when no KV_URL) | crates/zeroship-cli/src/main.rs:138 |
+| process env (all vars) | env (bulk) | map | — | mixed | no | `std::env::vars()` forwarded into V8 `process.env` (so `OPENAI_API_KEY`, vite's `ZEROSHIP_ENTRY`/`ZEROSHIP_VITE_*` reach JS) | crates/zeroship-cli/src/main.rs:170 |
+| `deploy <path>` | CLI flag (positional) | path | required | no | exits if missing | `.zship` archive to upload | crates/zeroship-cli/src/main.rs:200 |
+| `--app=` | CLI flag | str | required | no | panics if missing | target app for deploy/secret/var | crates/zeroship-cli/src/main.rs:203; secrets.rs:48 |
+| `--control=` | CLI flag | URL | `http://localhost:9090` | no | no | control-plane base URL | crates/zeroship-cli/src/main.rs:204; secrets.rs:49 |
+| `ZEROSHIP_CONTROL_URL` | env | URL | `http://localhost:9090` | no | no | control-plane URL fallback when `--control=` absent | crates/zeroship-cli/src/main.rs:205; secrets.rs:50 |
+| `--token=` | CLI flag | str (PAT) | — | yes (bearer) | no (falls through to env/creds) | deploy/secret/var bearer (1st precedence) | crates/zeroship-cli/src/main.rs:349 |
+| `ZEROSHIP_TOKEN` | env | str (PAT) | — | yes (bearer) | no (falls through to creds file) | bearer fallback (2nd precedence) | crates/zeroship-cli/src/main.rs:335 |
+| `--auth-url` / `--auth-url=` | CLI flag | URL | `https://auth.zeroship.ai` | no | no | `zeroship login` OAuth IdP base URL | crates/zeroship-cli/src/auth.rs:59-61 |
+| `ZEROSHIP_CONFIG_HOME` | env | path | — (1st of config-dir chain) | no | no | overrides config dir for CLI token store | crates/zeroship-cli/src/auth.rs:272 |
+| `XDG_CONFIG_HOME` | env | path | — (2nd of chain) | no | no | config dir for CLI token store | crates/zeroship-cli/src/auth.rs:274 |
+| `HOME` | env | path | — (3rd; `$HOME/.config`) | no | login/token ops error "HOME is not set" if none of 3 set | base for CLI token store | crates/zeroship-cli/src/auth.rs:276 |
+| `ZEROSHIP_LOG_FORMAT` | env | enum `pretty\|compact\|json\|logfmt\|bunyan` | TTY→`pretty`, else `json` | no | no | tracing subscriber output format (every binary) | crates/zeroship-core/src/observability.rs:36 |
+| `RUST_LOG` | env | EnvFilter directive | per-binary `default_filter` | no | no | tracing log-level filter (via `EnvFilter::try_from_default_env`) | crates/zeroship-core/src/observability.rs:33 |
+| `ZEROSHIP_DEV` | env | presence flag | unset (= secure prod) | no | no | dev mode: disables SSRF host/IP filtering for fetch + WS + cyper resolver | crates/zeroship-runtime/src/transport/ssrf.rs:89,144; client.rs:26 |
+| `ZEROSHIP_STREAM_GLOBAL_CAP` | env | usize bytes | `DEFAULT_STREAM_GLOBAL_CAP` (cached via OnceLock) | no | no | process-wide stream buffer byte cap | crates/zeroship-runtime/src/core/channel.rs:116 |
+| `ZEROSHIP_LOG` | env | presence flag | unset (logs only in debug) | no | no | mirrors app `console.*` to operator tracing in release builds | crates/zeroship-runtime/src/core/init.rs:1189 |
+| `AUTH_INSECURE_DEV` | env | bool-ish (`1\|true\|yes\|on`) | unset (= internal 5xx bodies hidden) | no | no | exposes verbose internal dispatch-error bodies to clients (dev) | crates/zeroship-runtime/src/core/dispatch.rs:143 |
+| `ZEROSHIP_DEPLOY_ID` | env | str | `cold_start` | no | no | deploy-id stamped into migration/mask-backfill audit rows | crates/zeroship-plugin-db/src/register_model/mod.rs:148; migrations.rs:390; crud/mask_backfill.rs:644 |
+| `ZEROSHIP_COLUMN_KEY_<KEYID>` | env (dynamic name) | 64-hex (32 B) | required (per referenced key id) | yes (column-encryption root key) | no boot gate; first encrypted-column op fails `column_key_not_configured` if unset/malformed | per-key-id root key for `env.db` column encryption | crates/zeroship-plugin-db/src/encryption/keys.rs:178-203 |
+| `CARGO_PKG_VERSION` | compile-time `env!` | str | build-time | no | n/a | stamps `compiler: zeroship-passthrough@<ver>` into passthrough Manifest | crates/zeroship-bundle/src/manifest.rs:232 |
+| `ZEROSHIP_SESSION_SECRET` | env | hex (32 B) | required (for gated path) | yes (HMAC) | `from_env()` returns `not_configured`; backend boots, defers to first mint | **(test-helpers-gated)** SQLite session-minter active HMAC secret — NOT compiled into a normal release `plugin-db` | crates/zeroship-plugin-db/src/backend/sqlite/session_minter.rs:62,106 |
 | `ZEROSHIP_SESSION_SECRET_PREV` | env | hex (32 B) | optional | yes (prev HMAC) | no | **(test-helpers-gated)** SQLite session-minter rotation grace secret | session_minter.rs:67,124 |
 | `ZEROSHIP_SESSION_NONCE_CAPACITY` | env | usize | `10_000` | no | no | **(test-helpers-gated)** SQLite session-minter nonce-LRU capacity | session_minter.rs:72,135 |
 | `PG_TEST_URL` | env | URL | skip test if unset | yes (DSN) | no | **(test-only)** gates PG integration tests | compio-postgres/tests/integration.rs:16; plugin-db/tests/* |
@@ -451,13 +451,13 @@ No rows truncated — every distinct `env::var`/`parse_env`/`read_*_env` call si
 
 ### Config files
 
-- **`zeroship` CLI credential/token file** — `<config-base>/zeroship/token.json`, where `<config-base>` = `$ZEROSHIP_CONFIG_HOME` → `$XDG_CONFIG_HOME` → `$HOME/.config` (error "HOME is not set" if none). Resolver `crates/cli/src/auth.rs:271-282`. JSON shape `Credentials { access_token, refresh_token, expires_at, auth_url, client_id }` (auth.rs:15-22). Written 0600 on Unix; written by `login`/refresh, read by `deploy`/`secret`/`var`/`whoami`, deleted by `logout`. **Only on-disk config the CLI owns — no TOML/dotfile; all CLI options are flags or env (manual `std::env::args()` parsing, no clap).**
+- **`zeroship` CLI credential/token file** — `<config-base>/zeroship/token.json`, where `<config-base>` = `$ZEROSHIP_CONFIG_HOME` → `$XDG_CONFIG_HOME` → `$HOME/.config` (error "HOME is not set" if none). Resolver `crates/zeroship-cli/src/auth.rs:271-282`. JSON shape `Credentials { access_token, refresh_token, expires_at, auth_url, client_id }` (auth.rs:15-22). Written 0600 on Unix; written by `login`/refresh, read by `deploy`/`secret`/`var`/`whoami`, deleted by `logout`. **Only on-disk config the CLI owns — no TOML/dotfile; all CLI options are flags or env (manual `std::env::args()` parsing, no clap).**
 - **No `.toml`/structured config files read by any crate in this slice.** `zeroship-platform` parses TOML via `metering/config.rs` + `core/config.rs`, but from caller-supplied `&str`/`toml::Value`, not from a config-file path or env (see Notes).
 - **`DATABASE_URL` / `ZEROSHIP_KV_URL`** are commonly sourced from a project `.env` by the vite-plugin, which forwards them into the `zeroship serve` child env; the CLI itself reads them only from the process environment (no `.env` parsing in-crate).
 
 ### Notes
 
-- **CLI uses no arg-parsing library.** `crates/cli/src/main.rs:28` does `std::env::args().collect()` + positional match; hand-parsed flags (`flag_str`/`flag_u16`/`flag_value`). Zero clap attributes in this slice.
+- **CLI uses no arg-parsing library.** `crates/zeroship-cli/src/main.rs:28` does `std::env::args().collect()` + positional match; hand-parsed flags (`flag_str`/`flag_u16`/`flag_value`). Zero clap attributes in this slice.
 - **`crates/platform` reads NO env vars and NO CLI flags.** Library (`zeroship-platform`, no main). `metering/config.rs` + `core/config.rs` deserialize TOML from in-memory `&str`/`toml::Value` passed by callers; `metering/store/sqlite.rs:28` parses a `database_url: &str` argument. If platform config is to be unified, its inputs arrive as constructor args/TOML blobs, not process config.
 - **`crates/runtime-macros` and `crates/authz` have zero production config inputs** (authz: only `AUTH_DB_URL` in a test file).
 - **`crates/plugin-storage`, `crates/plugin-kv`, `crates/compio-postgres`, `crates/compio-redis` read NO env in `src/`** — all env usage is in `tests/`. Backend URLs/paths are passed in as constructor args by the CLI/host (`KvPlugin::with_backend`, `DbPlugin::new(url)`, `StoragePlugin::new(root)`). `bundle`'s only config input is compile-time `CARGO_PKG_VERSION`.

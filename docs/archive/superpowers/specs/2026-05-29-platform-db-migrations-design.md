@@ -69,8 +69,8 @@ All object references **fully schema-qualified**. Every changeset reversible
 
 ## The 2 missing tables (cron bug fix)
 
-Inferred from `crates/core/src/wrapper_revocation.rs` and
-`crates/auth/src/cron/{token_sweep,jwk_rotation}.rs`:
+Inferred from `crates/zeroship-core/src/wrapper_revocation.rs` and
+`crates/zeroship-auth/src/cron/{token_sweep,jwk_rotation}.rs`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS auth.wrapper_revoked_subjects (
@@ -88,13 +88,13 @@ CREATE TABLE IF NOT EXISTS auth.jwk_key_state (
 ## Cutover
 
 Production entry points to replace (Liquibase now owns schema creation):
-- `crates/control/src/main.rs:657` — `Registry::new(&db_url)` → connect-only.
-- `crates/auth/src/main.rs:166` — `store::migrations::migrate(&client)` → remove.
-- `crates/control/src/main.rs:742` — conditional `zeroship_auth::store::
+- `crates/zeroship-control/src/main.rs:657` — `Registry::new(&db_url)` → connect-only.
+- `crates/zeroship-auth/src/main.rs:166` — `store::migrations::migrate(&client)` → remove.
+- `crates/zeroship-control/src/main.rs:742` — conditional `zeroship_auth::store::
   migrations::migrate(&auth_pg)` (gated on `bootstrap_builder_client`) → remove.
 
 Delete the migration DDL bodies: `Registry::new` keeps only the connect; delete
-`crates/auth/src/store/migrations.rs`'s statement array + `migrate`.
+`crates/zeroship-auth/src/store/migrations.rs`'s statement array + `migrate`.
 
 **Tests** (~38 `Registry::new` + ~37 `migrate` callers, almost all in
 `crates/{control,auth}/tests/` + the two `#[cfg(test)]` `pg()` helpers in
