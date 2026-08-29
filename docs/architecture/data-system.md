@@ -403,7 +403,59 @@ rationed.** Measured on PostgreSQL 18.4:
   slot per (datastore, worker) and fans out in process rather than one slot per database.
 - **`max_slot_wal_keep_size` measures as `-1`** - unbounded retention - on a stock server, so one
   abandoned slot can grow `pg_wal` until the cluster dies. It is `context = sighup`, so bounding it
-  is a reload rather than a restart.
+  is a reload rather than a restart. The worker now refuses to boot against a cluster where it is
+  unlimited (`crates/zeroship-worker/src/db_posture.rs`, landed 2026-08-29). The finite VALUE is not
+  chosen here: too small and a legitimately slow consumer loses its slot and must resynchronise, too
+  large and the protection is theoretical. It belongs with the CDC relay, whose lag characteristics
+  set the floor.
+
+**SLOT CARDINALITY IS ONE PER CLUSTER, VIA THE RELAY, AND THE DECOUPLING SEQUENCES BEHIND IT.**
+Settled 2026-08-29 by the measurements above rather than by preference. Three cardinalities were
+live across the document set - per (app, worker) in code today, per (datastore, worker) in this
+design, and one per cluster in the CDC relay design - against a hard ceiling of 10 that only a
+restart moves. The relay's number is the only one that fits stock configuration with headroom, and
+the binding term in the other two is the WORKER count: the documented deployment scales workers to
+10, so one datastore times ten workers already exhausts the cluster.
+
+Two consequences follow, and both are load-bearing:
+
+- **No creator-reachable operation may mint a cluster-scoped object.** Opening a subscription
+  attaches to the datastore's existing stream; creating a database creates schema and publication,
+  which are datastore-scoped and therefore free. Nothing a creator does may create a slot, a WAL
+  sender, or WAL retention. Roles are the one deliberate exception - the enforcement model IS
+  cluster-global rows - so they are quota'd rather than multiplexed.
+- **A publication is not decoded unless the running stream NAMES it.** Measured: one slot, one data
+  set, two decodes differing only in `publication_names` - 4 change records vs 8. PostgreSQL's own
+  warning explains the mechanism: "The publication does not exist at this point in the WAL." The name
+  list is fixed when the stream starts (`libs/compio-postgres/src/replication.rs` interpolates it into
+  START_REPLICATION once), so a per-database publication under one shared slot strands every database
+  created after the stream began, silently. That is why the relay must own the slot: adding a database
+  is then a fan-out change in one process, not a stream restart every co-tenant feels.
+
+## The reserved-column collision the database will not refuse
+
+`REPLICA IDENTITY FULL` and a publication column list are individually valid and jointly broken.
+PostgreSQL accepts both DDL steps in either order and then fails at **DML** time with "column list
+used by the publication does not cover the replica identity", which silently makes the table
+append-only. The migration service must refuse the combination at authoring, because the database
+will not. This is a forced refusal rule rather than a design choice: there is no configuration in
+which the pair is correct, and the failure surfaces arbitrarily later, on a write rather than on the
+DDL that caused it.
+
+## Physical names are opaque, not descriptive
+
+The database id is internal (above), and that claim is only as strong as the number of channels that
+can leak it. Three were found: a creator migration persisting `currentUser()` into an ordinary column
+it then reads back; the worker `env_vars` map, every entry of which the runtime copies into
+`process.env`; and `DbResourceKey`, a deterministic unsalted digest of the database URL that lets two
+creators compare values and learn they are co-tenants.
+
+**So the schema and role names are derived from the id by a keyed one-way function rather than
+embedding it.** Settled 2026-08-29. The alternative considered was refusing `currentUser()` in
+managed migrations, which closes exactly one channel and leaves the class open; opaque names make
+every channel - including any found later - leak a value that means nothing. A fix that does not
+require enumerating the leaks first is the correct shape when the enumeration is the part nobody can
+guarantee.
 
 **The publication column list is the only server-side fence on the decode path** - grants and RLS
 are executor-side and logical decoding consults neither. That fence collides with something the
