@@ -12,9 +12,6 @@ entities, and datastore placement. Everything else describes code in the tree. T
 matters - a reader who cannot tell them apart will look for a `Database` row that does not exist
 yet, or rebuild something that does.
 
-Provisioning was in that list until it was checked: the service exists and runs at the wrong time.
-See below - it is the difference between "build this" and "invert this", and it changes what the
-work is.
 
 ---
 
@@ -87,8 +84,8 @@ secret "cannot reach `Debug` or a log line"
 
 ### Where the word "namespace" is still correct
 
-The entity is called **Database**. It was called `Namespace` until 2026-08-29, and the rename is
-deliberate: "namespace" is PostgreSQL schema jargon, and what a creator has is a database.
+The entity is called **Database**. "Namespace" is PostgreSQL schema jargon, and what a creator
+has is a database.
 
 **Do not sweep the word out of the code.** It is still the right word in two places, and a
 half-applied rename would be worse than none:
@@ -163,8 +160,7 @@ This belongs to the decoupling rather than sitting beside it. As long as a deplo
 database, app identity and database identity are still welded together at the moment that matters
 most - the moment of creation.
 
-**THE SERVICE ALREADY EXISTS. It runs at the wrong time.** An earlier revision of this section
-marked the whole thing *(designed)*, which was wrong.
+**The service already exists; it runs at the wrong time.**
 `crates/zeroship-migrate-server/src/provisioning.rs` already issues `CREATE SCHEMA` (`:232`,
 `:255`), `CREATE ROLE` (`:121`) and `ALTER SCHEMA ... OWNER` (`:143`, `:233`), from a service that
 already does not execute creator code - which is the boundary that matters, and the reason
@@ -350,10 +346,6 @@ Two costs remain, and both are PostgreSQL constraints rather than choices:
 2. **Every apply must regenerate explicit per-column grants inside the DDL transaction.** A
    migration that fails to do so leaves the database *unreadable* rather than *over-readable* - the
    right failure direction, but a new way for a deploy to break.
-
-Two costs that earlier drafts carried have been **withdrawn**: `env.db.users` survives (one database
-per app removed the binding level), and owner-migration-breaks-co-tenant was never a cost once the
-creator, not an app, owns the schema.
 
 **One scope limit ships with it:** `readwrite`/`readonly` grants are restricted to apps under the
 same creator - which the workspace model satisfies by construction. Cross-creator sharing is blocked

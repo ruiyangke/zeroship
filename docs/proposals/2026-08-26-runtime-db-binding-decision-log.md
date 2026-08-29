@@ -27,6 +27,69 @@ measurements age.
 
 ---
 
+## 2026-08-29
+
+### Six operator decisions that reshaped the decoupling, and what they superseded
+
+Taken in conversation, applied to `2026-08-28-app-database-decoupling.md` and
+`docs/architecture/data-system.md`. Recorded here because the design pages now
+carry only the outcome.
+
+1. **The creator owns the database; no app does.** Superseded:
+   `Namespace.owner_app_id`, not null, with the migrate policy "principal may
+   migrate N iff principal is an owner of `N.owner_app_id`". Schema authority no
+   longer passes through an app identity. The document already contradicted
+   itself here - the very next bullet said the migrator role was "named by no
+   app" - which is the tell that the column was vestigial.
+
+2. **Migrations are not coupled to an app; the model is a monorepo.** Several
+   apps in one workspace share one migration source and one set of generated
+   types. Superseded the claim that an owner's migration "can break a co-tenant's
+   deploy" as a COST: it is ordinary shared-dependency mechanics, and the creator
+   owns the risk. The deploy gate survives for a different reason than was
+   given - an app built against v1 must not be SERVED against v2.
+
+3. **One `zeroship.jsonc` for the whole workspace.** So a Database hangs off the
+   project row. Consequence the proposal had not stated: `app` is a single
+   string today (`schema/project-v1.json:30-34`) and must go plural, and
+   environments make `app` non-inheritable specifically to prevent silent
+   cross-targeting (`:66-67`) - a property the plural shape has to preserve.
+
+4. **An app sees exactly ONE database.** The "one app, many databases" half of
+   the original ask is dropped; "many apps, one database" is delivered.
+   Superseded the entire binding level: `env.db.<binding>.<collection>`, the
+   `binding_name` column with `UNIQUE (app_id, binding_name)`, the
+   conjunction-over-bindings deploy gate, and the manifest becoming a map. Two
+   consequences: `env.db.users` survives unchanged, and database resolution stays
+   `f(app_id)` rather than becoming `f(app_id, binding_name)` with the binding
+   coming from creator code - so a mismatched-pair bug class never comes into
+   existence rather than being bounded by an argument.
+
+5. **Databases are provisioned, never auto-created**, on the D1 model. NOT a new
+   service: `crates/zeroship-migrate-server/src/provisioning.rs` already issues
+   `CREATE SCHEMA`, `CREATE ROLE` and `ALTER SCHEMA ... OWNER`, from a process
+   that does not execute creator code. What is wrong is the trigger -
+   provisioning is a side effect of applying a migration, keyed
+   `format!("app_{schema}")` at `apply.rs:1178`. The work is inversion and
+   placement, not construction.
+
+6. **`Namespace` is renamed `Database`, and its id is internal.** Creators
+   address a database by its workspace-local name. Superseded a route that took
+   the id in its URL, which a creator could not have called without holding it.
+   The word `namespace` stays where it names PostgreSQL's own object
+   (`pg_namespace`, `drop_namespace.rs`) - a full sweep would have made those
+   say the wrong thing.
+
+**The class of mistake, and it is this file's own subject.** Applying these, I
+annotated each superseded claim in place - "an earlier revision said", `WITHDRAWN`,
+struck-through prose - and accumulated twenty-one such markers in a day. That is
+the same failure this document was created to end, at one twentieth the scale and
+in a third of the time. An inline correction is legible to whoever writes it and
+is sediment to everyone after. The markers are gone from the design pages; what
+they said is above.
+
+---
+
 ## 2026-08-28
 
 ### The masking flip's write path, and three numbers that were wrong

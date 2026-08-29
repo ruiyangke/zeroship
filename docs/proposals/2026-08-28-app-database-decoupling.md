@@ -1,48 +1,36 @@
 # Decoupling app identity from database identity
 
-## The decision this needs, before anything is built
+## What this delivers, and what it costs
 
-**The design fork is already taken and is not what is being asked.** "Multiple apps reach one
-database" is served as **the creator owning the database and authoring its schema, with apps
-holding graded DML grants on it** (section 3). The model is a monorepo: one `zeroship.jsonc`,
-several apps, one migration source and one set of generated types per database. No app holds DDL
-authority, so there is no owner-app to transfer and no multi-writer schema ownership - which
-section 13 treats as a different project. Nothing below asks which of those to pick.
+**"Many apps, one database" is what this design serves.** The creator owns the database and authors
+its schema; apps hold graded DML grants on it. No app holds DDL authority, so there is no
+owner-app to transfer and no multi-writer schema ownership - section 13 treats that as a different
+project.
 
-**AN APP SEES EXACTLY ONE DATABASE** (operator decision, 2026-08-29). A schema *is* the app's
-database. The "one app, many databases" half of the original ask is dropped; the "many apps, one
-database" half is what this design delivers. That single decision removes the largest cost the
-proposal carried, because a per-app binding level was the only thing that forced it.
+**An app sees exactly ONE database.** A schema *is* the app's database. The model is a monorepo:
+one `zeroship.jsonc`, several apps, one migration source and one set of generated types per
+database.
 
-**Two of the original four costs are now withdrawn, so it is two:**
+**Databases are provisioned, never auto-created**, on the D1-to-Workers model: create a database,
+then bind an app to it. Deploying an app does not conjure one. This belongs to the decoupling
+rather than sitting beside it - while `zeroship deploy` can bring a schema into existence, app
+identity and database identity are still welded together at the moment that matters most.
 
-1. ~~`env.db.users` dies.~~ **WITHDRAWN 2026-08-29 - it survives.** The break existed only because
-   several bindings had to sit between `env.db` and a collection, and a binding named `analytics`
-   would collide with a collection named `analytics` on the same key
-   (`sdks/bootstrap/src/install-schema.ts:1508`). With one database per app there is no binding
-   level, no collision, and `env.db.users.find(...)` keeps working unchanged. This was the largest
-   creator-facing break in the proposal and it is gone.
-2. ~~A database owner's migration can break a co-tenant's deploy.~~ **WITHDRAWN 2026-08-29** - this
-   was never a cost, and listing it as one came from modelling the database as owned by an app.
-   The creator owns the schema; apps in a workspace share one migration source and one
-   generated-types artifact, so a schema change means rebuild the workspace. The deploy gate stays,
-   because an app built against v1 must not be served against v2, but that is correctness and the
-   remedy is an ordinary rebuild. See section 4.
-3. **Classified columns lose plaintext reactivity for everyone, including the owner** (13.2).
-   One published column set per table per decode stream is a PostgreSQL constraint, not a choice.
-4. **Blanket table grants and prospective default privileges are deleted** (13.5), so every apply
-   must regenerate explicit per-column grants inside the DDL transaction.
+**Two costs, both PostgreSQL constraints rather than choices:**
 
-**Databases are PROVISIONED, never auto-created** (operator decision, 2026-08-29). A dedicated
-provisioning service owns their lifecycle, on the D1-to-Workers model: you create a database, then
-bind an app to it. Deploying an app does NOT conjure one. This is part of the decoupling, not an
-adjacent convenience - as long as `zeroship deploy` can bring a schema into existence, app identity
-and database identity are still welded together at the moment that matters most.
+1. **Classified columns lose plaintext reactivity for everyone, including the owner** (13.2).
+   One published column set per table per decode stream.
+2. **Blanket table grants and prospective default privileges are deleted** (13.5), so every apply
+   must regenerate explicit per-column grants inside the DDL transaction. A migration that fails to
+   do so leaves the database unreadable rather than over-readable.
 
 **Scope limit that ships with it:** `readwrite` and `readonly` grants are restricted to apps under
-the same creator. Cross-creator co-grants are blocked on O1 (section 14) - the unmask policy is
-authored by the READING app, and no server-side mechanism reaches it. The same-creator restriction
-ships without O1 resolved.
+the same creator - which the workspace model satisfies by construction. Cross-creator co-grants are
+blocked on O1 (section 14): the unmask policy is authored by the READING app, and no server-side
+mechanism reaches it. The same-creator restriction ships without O1 resolved.
+
+*(How this shape was arrived at, and what it replaced, is in
+`2026-08-26-runtime-db-binding-decision-log.md` under 2026-08-29.)*
 
 **Four consequences are measured, not assumed**, and each is recorded with its measurement: the
 role fence works per grant with `WITH SET FALSE`; ctid narrowing blocks four write verbs under
@@ -257,11 +245,8 @@ lowercase letters, as `app`, `crd`, `mig` and every other prefix in `typed_id.rs
 and would not parse. The physical schema is `db_<dbsid>`, which is a PostgreSQL identifier and is
 under no such constraint.
 
-**This entity was called `Namespace` until 2026-08-29.** Renamed at the operator's request:
-"namespace" is PostgreSQL schema jargon, and what a creator has is a database - especially now that
-an app sees exactly one. `Datastore` keeps its name and is a different thing: the physical
-PostgreSQL database a Database is *placed on*, operator-owned and never named by a creator. Many
-Databases sit on one Datastore.
+`Datastore` is a different thing: the physical PostgreSQL database a Database is *placed on*,
+operator-owned and never named by a creator. Many Databases sit on one Datastore.
 
 **The database id is INTERNAL and is never exposed to creators** (operator decision, 2026-08-29).
 It is an implementation identity. What a creator names, sees and types is the database's
@@ -283,11 +268,10 @@ That is a requirement with two sharp edges, both easy to violate by accident:
    cannot call without holding the id. Either that route is control-plane-internal and the
    creator-facing surface addresses the database by name, or the decision above is not being kept.
 
-**The grant key is `(app_id)`, not `(app_id, database_id)`.** An app binds to exactly one
-database (operator decision, 2026-08-29), so the app id alone identifies the row and the database
-cannot be ambiguous at any call site. An earlier revision keyed on the pair and carried a
-`binding_name` with `UNIQUE (app_id, binding_name)`; both are gone, because a binding name only
-exists to disambiguate between several databases an app can see.
+**The grant key is `(app_id)`.** An app binds to exactly one database, so the app id alone
+identifies the row and the database cannot be ambiguous at any call site. There is no
+`binding_name`: a binding name exists only to disambiguate between several databases an app can
+see.
 
 The relationship is still many-to-many in the direction that matters: **many apps may point at one
 database**, which is what "multiple apps share a database" means. Only the reverse - one app,
@@ -328,18 +312,12 @@ the role fences is a *mismatched pair* - right role, wrong schema. A *consistent
 resolution executes cleanly. That bug class does not exist today only because resolution is the
 identity function.
 
-An earlier revision made resolution `f(app_id, binding_name)` with `binding_name` coming from
-creator code (`env.db.analytics.users`), and called that the security delta.
-
-**The single-database decision removes it.** With one database per app there is no binding name in
-creator code and nothing for the creator to select with: resolution is `f(app_id)` again, the
-identity-like function it is today, and the mismatched-pair bug class it introduced never comes
-into existence. This is the second thing that decision bought - the first was keeping
-`env.db.users` - and it is worth stating because a security property that is absent by construction
-is stronger than one that is bounded by an argument.
+**Resolution stays `f(app_id)`.** With one database per app there is no binding name in creator
+code and nothing for the creator to select with, so that bug class never comes into existence. A
+security property absent by construction is stronger than one bounded by an argument.
 
 What remains is the ordinary requirement that the app-to-database mapping be server-injected and
-never creator-supplied, which 2.2(a) already covers.
+never creator-supplied, which 2.2(a) covers.
 
 ### 2.2 The mechanism, in three parts, all required
 
@@ -348,18 +326,19 @@ grants at deploy time and injects a binding table into the isolate on the same p
 (the worker-internal `env_vars` map):
 
 ```
-ZEROSHIP_DB_BINDINGS = {
-  "main":      { ns: "ns_01J...", schema: "ns_01J...", ds: <DbResourceKey>, cap: "owner"    },
-  "analytics": { ns: "ns_01K...", schema: "ns_01K...", ds: <DbResourceKey>, cap: "readonly" }
-}
+ZEROSHIP_DB_BINDING = { db: "dbs_01J...", schema: "db_01J...",
+                        ds: <DbResourceKey>, cap: "readwrite" }
 ```
 
-The creator's string indexes this table and **never reaches SQL**. An unknown binding is a hard
-refusal with the same shape as `collection_not_declared`
+**One binding, not a map**, because an app sees one database. Nothing creator-supplied selects it -
+there is no name for creator code to pass, so the injected value is the whole of the resolution.
+Creator `vars` shadowing does not apply: user vars override `process.env` on collision, but this
+path reads the worker-internal map, which is the same reason metering is unforgeable.
+
+An app whose binding is absent is a hard refusal with the same shape as `collection_not_declared`
 (`crates/zeroship-plugin-db/src/descriptor.rs:1-31`, whose comment on why there is deliberately no
-`Option` applies verbatim one axis up). Creator `vars` shadowing does not apply: user vars override
-`process.env` on collision, but this path reads the worker-internal map, which is the same reason
-metering is unforgeable.
+`Option` applies verbatim one axis up). `cap` is `readwrite` or `readonly`; there is no `owner`
+capability an app can hold.
 
 **(b) The grant is a PostgreSQL role membership, and the session narrows to exactly one database.**
 
@@ -553,10 +532,9 @@ It is void on the CDC path, which is section 5.
 - `readwrite` - DML on granted columns. No DDL.
 - `readonly` - SELECT on granted columns.
 
-**There is no `owner` app capability.** An earlier revision listed one ("`owner` - migrates it, sole
-author of its schema"), which contradicted section 4 once the creator became the owner. Migration
-authority is not something an app can hold: it belongs to the workspace, and the migrator role
-`zs_db_<dbsid>_mig` is named by no app. An app's grant only ever says what DML it may do.
+**There is no `owner` app capability.** Migration authority is not something an app can hold: it
+belongs to the workspace, and the migrator role `zs_db_<dbsid>_mig` is named by no app. An app's
+grant only ever says what DML it may do.
 
 That removes a class of problem rather than solving one. With no app holding DDL authority there is
 no ownership transfer, no ping-pong between apps, and no question of what happens to a database
@@ -610,10 +588,8 @@ creators it is, and no role fixes it.
   risk; the db migration is not coupled with app."* The model is a monorepo - several apps in one
   workspace sharing one migration source and one set of generated types.
 
-  So there is **no `Database.owner_app_id`**. An earlier revision of this section made that column
-  not-null and routed migrate authority through it; that was wrong, and it contradicted the very
-  next bullet, which already says the migrator role is "named by no app". Schema authority never
-  passes through an app identity.
+  So there is **no `Database.owner_app_id`**: schema authority never passes through an app
+  identity, and the migrator role is named by no app.
 - **Two routes, because the database id must not reach a creator** (see section 1). The
   creator-facing one addresses the database by its **workspace-local name**; the id-bearing one is
   control-plane-internal.
@@ -623,9 +599,7 @@ creators it is, and no role fixes it.
   internal ->  POST /v1/databases/{database_id}/migrations/apply
   ```
 
-  An earlier revision named only the second and described it as the new route, which would have
-  required every creator to hold an `ns_...` id to migrate anything - the exposure the decision
-  forbids. The control plane resolves name to id and forwards.
+  The control plane resolves name to id and forwards.
 
   `crates/zeroship-authz/src/resource.rs:14-16` gains `Resource::Database { id }` - it is `App { id }`
   and `Any` today - with the policy **"principal may migrate N iff principal owns N"**, checked
@@ -647,13 +621,11 @@ creators it is, and no role fixes it.
   `SchemaScope::Allowlist(Vec<String>)` already exists with a working case-insensitive `permits`
   (`crates/zeroship-migrate-ir/src/policy.rs:36`, `:64`), so multi-schema confinement is representable
   today and only the binder is scalar.
-- **The deploy gate stays SCALAR.** An earlier revision made it "a conjunction over every binding in
-  the manifest", with `Manifest.runtime_descriptor`
-  (`crates/zeroship-bundle/src/manifest.rs:172`) becoming a map keyed by binding name. One database
-  per app removes all of that: `crates/zeroship-control/src/registry.rs:460-486` keeps predicating
-  the deploy UPDATE on ONE `descriptor_sha256` matching the newest `applied` row, and the manifest
-  field keeps its present shape. Only the row it matches against is re-keyed -
-  `zeroship.app_schema_applies` gains `database_id` and keys `(app_id, database_id, migration_id)`.
+- **The deploy gate is SCALAR.** `crates/zeroship-control/src/registry.rs:460-486` predicates the
+  deploy UPDATE on ONE `descriptor_sha256` matching the newest `applied` row, and
+  `Manifest.runtime_descriptor` (`crates/zeroship-bundle/src/manifest.rs:172`) keeps its present
+  shape. Only the row it matches against is re-keyed - `zeroship.app_schema_applies` gains
+  `database_id` and keys `(app_id, database_id, migration_id)`.
 
   **The bundle carries a hash, never a database id.** That is deliberate and it is also what keeps
   the id off the creator surface: a `.zship` is an artifact a creator builds and can open. The
@@ -664,9 +636,8 @@ creators it is, and no role fixes it.
   generated-types artifact, so a schema change means *rebuild the workspace* - the same mechanics as
   changing a shared library, with the creator owning the risk.
 
-  The gate still has to exist, for a reason worth stating plainly because an earlier revision of
-  this document gave the wrong one: an app built against schema v1 must not be SERVED against
-  schema v2, or it reads columns that have moved. That is correctness, not politics between apps.
+  The gate exists because an app built against schema v1 must not be SERVED against schema v2, or
+  it reads columns that have moved. That is correctness, not politics between apps.
   The creator resolves it by rebuilding and redeploying, which is the expected workflow rather than
   a cost to be weighed.
 
@@ -1052,13 +1023,11 @@ await env.db.transaction(async (tx) => {                 // UNCHANGED
 });
 ```
 
-**`env.db.users` survives, and the single-database decision is what saves it.** An earlier revision
-of this section required `env.db.<binding>.<collection>` and called the loss of the shortcut the
-largest creator-facing break in the proposal. The reason was real but conditional: `installSchema`
-plants collections directly on the target with `Object.defineProperty`
-(`sdks/bootstrap/src/install-schema.ts:1508`), alongside `transaction` (`:1515`) and `live` (`:1521`),
-so with several bindings a binding named `analytics` and a collection named `analytics` are the
-same key. **With one database per app there is no binding level and no collision.** The creator
+**`env.db.users` survives, and one-database-per-app is what saves it.** `installSchema` plants
+collections directly on the target with `Object.defineProperty`
+(`sdks/bootstrap/src/install-schema.ts:1508`), alongside `transaction` (`:1515`) and `live`
+(`:1521`), so with several bindings a binding named `analytics` and a collection named `analytics`
+would be the same key. With one database there is no binding level and no collision. The creator
 surface does not change at all: no call-site sweep, no regenerated types, no edits to
 `docs/reference/db.md`, `examples/starter/` or `tests/golden_path.sh`.
 
