@@ -721,7 +721,7 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > conditional. On `SatisfiedNoop` the version still lands (a journaled completed row)
 > so a re-deploy skips it via normal pending computation; on `FailDrift` the txn is
 > rolled back and nothing is applied or journaled.
-> (`third_party/zero-migrate/crates/zeroship-migrate/src/render/existence_probe.rs`,
+> (`crates/zeroship-migrate-backend/src/existence_probe.rs`,
 > `executor.rs` PG `apply_transactional`, `backend_sqlite/mod.rs` SQLite
 > `apply_up_transactional`.)
 >
@@ -1077,7 +1077,7 @@ lowers to a dual-dialect online change:
 
 Both lowerings are implemented and covered by tests (the PG expand-contract and
 the SQLite rebuild apply end-to-end in
-`third_party/zero-migrate/crates/zeroship-migrate/tests/pg_scenarios.rs` /
+`crates/zeroship-migrate/tests/pg_engine/pg_scenarios.rs` /
 `ir_rename_sqlite_basic.rs`).
 
 **What is not yet wired for routine production deploy.** Creator-app Postgres
@@ -1207,8 +1207,9 @@ for the build/watch wiring.
 
 The former in-workspace operator CLI exposed an offline `plan` verb that rendered
 the exact per-dialect SQL a pending migration set would execute. That binary was
-removed when the engine moved to `third_party/zero-migrate`; the appbase Cargo
-workspace currently exposes no replacement preview command.
+removed when the engine was extracted out of the workspace; the engine has since
+been in-sourced as the `crates/zeroship-migrate*` crates, but the workspace still
+exposes no replacement preview command.
 
 `zeroship-platform-migrate` is deliberately apply-only and must not be used as a
 substitute for preview or validation. Engine-level preview remains a surfacing

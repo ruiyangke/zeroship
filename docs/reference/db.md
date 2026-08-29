@@ -470,7 +470,7 @@ answer lives. Four things hold there, in order:
 1. A dot-qualified target on a COLUMN-level ref (`t.ref("other.users")`, or
    `.references("other.users", ...)`) is refused at author time by
    `reject_cross_app_ref`
-   (`third_party/zero-migrate/crates/zeroship-migrate/src/render/declarative.rs:4606`,
+   (`crates/zeroship-migrate-core/src/render/declarative.rs:4606`,
    reached from the op-DSL lower path at `declarative.rs:3491`), which raises
    `CrossAppFkForbidden`.
 2. A TABLE-level foreign-key constraint gets no such prefix check. It does not
@@ -483,10 +483,10 @@ answer lives. Four things hold there, in order:
    rather than as a boundary violation.
 3. An op-level `schema:` qualifier naming another schema is refused
    fail-closed under `SchemaScope::Single`
-   (`third_party/zero-migrate/crates/zeroship-migrate/src/model/validate.rs`,
+   (`crates/zeroship-migrate-core/src/model/validate.rs`,
    `CODE_CROSS_SCHEMA`), and the rendered SQL is swept again by the guard's
    `check_cross_schema`
-   (`third_party/zero-migrate/crates/zero-migrate-guard/src/guard/mod.rs:2288`).
+   (`crates/zeroship-migrate-postgres/src/guard/mod.rs:2288`).
 4. Underneath all of it, `crates/zeroship-migrate-server` derives the target schema from the
    app id server-side (`src/apply.rs:413`) -- no author input reaches it -- and
    applies under a `NOLOGIN`/`NOSUPERUSER` per-app role whose `search_path` and
