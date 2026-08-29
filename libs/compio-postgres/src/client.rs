@@ -272,7 +272,7 @@ impl QueryObservation {
         match message {
             Message::DataRow(_) => state.data_rows = state.data_rows.saturating_add(1),
             Message::CommandComplete(body) => {
-                state.command_rows = query::extract_row_affected(body).ok();
+                state.command_rows = crate::command_tag::extract_row_affected(body).ok();
             }
             Message::PortalSuspended => state.portal_suspended = true,
             Message::ErrorResponse(body) => {

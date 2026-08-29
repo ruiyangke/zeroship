@@ -36,6 +36,8 @@ mod cancel_token;
 pub(crate) mod client;
 #[path = "../src/codec.rs"]
 mod codec;
+#[path = "../src/command_tag.rs"]
+mod command_tag;
 #[path = "../src/config.rs"]
 pub mod config;
 #[path = "../src/connect.rs"]

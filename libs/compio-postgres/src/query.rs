@@ -7,6 +7,7 @@
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
+use crate::command_tag::extract_row_affected;
 use crate::connection::RequestMessages;
 use crate::copy_in::CopyInReceiver;
 use crate::prepare::get_type;
@@ -18,7 +19,7 @@ use fallible_iterator::FallibleIterator;
 use futures_util::Stream;
 use log::{Level, debug, log_enabled};
 use pin_project_lite::pin_project;
-use postgres_protocol::message::backend::{CommandCompleteBody, Message};
+use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use postgres_types::Type;
 use std::fmt;
@@ -467,19 +468,6 @@ pub async fn query_portal(
             copy_out_refused: false,
         })
     })
-}
-
-/// Extract the number of rows affected from [`CommandCompleteBody`].
-pub fn extract_row_affected(body: &CommandCompleteBody) -> Result<u64, Error> {
-    let rows = body
-        .tag()
-        .map_err(Error::parse)?
-        .rsplit(' ')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap_or(0);
-    Ok(rows)
 }
 
 pub async fn execute<P, I>(
