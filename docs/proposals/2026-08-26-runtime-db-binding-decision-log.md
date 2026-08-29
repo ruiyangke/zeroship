@@ -29,6 +29,49 @@ measurements age.
 
 ## 2026-08-29
 
+### The four-reviewer round on the revised design, and the verdict it forces
+
+Four independent reviews of `data-system.md` + `2026-08-28-app-database-decoupling.md`: two
+agents (14 findings each) and two codex runs (10 and 6). Twelve survived my own
+check against the tree and became tasks #45-#58. **Ten of them are marked "blocks
+implementation" by their reporter, and I agree with that reading on eight.**
+
+**The design does not yet settle.** The operator directive is to implement once it
+does, so this is the gate, and it is not passed. The blockers are not polish; each
+one changes a shape:
+
+| What breaks | Where | Task |
+| --- | --- | --- |
+| unmask returns 42501 under column grants | `crates/zeroship-plugin-db/src/crud/unmask.rs:497` | #45 |
+| the id leaks by three channels, incl. persisted `currentUser()` rows | `crates/zeroship-migrate-postgres/src/backend/session.rs:935` | #52 |
+| an app editor can read a sibling app's classified rows | `deploy/policies/creator/app_editor.cedar` | #53 |
+| cost accrues to one app, throttling hits it, the causer is unthrottled | `crates/zeroship-metering/src/meter.rs:1` | #57 |
+| binding a 2nd app refuses its first deploy | `crates/zeroship-control/src/registry.rs:469` | #49 |
+| an apply with no deploy strands running isolates | same | #51 |
+| SQLite CDC + transaction lanes key on alias==app_id | `crates/zeroship-plugin-db/src/backend/sqlite/cdc.rs:121` | #54 |
+| teardown is app-keyed end to end | `crates/zeroship-plugin-db/src/drop_namespace.rs:69` | #55 |
+
+Every path above is a full repo path on purpose: `tests/doc_citation_gate.sh` only
+extracts citations it can resolve, so an abbreviated `meter.rs:1` would have been
+skipped in silence rather than checked. The first draft of this table was written
+that way and the gate's count did not move.
+
+**The single root under most of them:** the design re-keyed the SCHEMA from app to
+database and did not re-key the things that hang off it - the ledger, the deploy
+gate, the meter, teardown, the SQLite alias, the publication. Each of those still
+answers `f(app_id)`. #49, #51, #54, #55, #56 and #57 are six faces of that one
+omission, and fixing them individually will produce six inconsistent keys.
+
+**What the reviewers were each uniquely good for**, worth remembering when
+composing the next round: the two agents converged on document-level contradiction
+(both independently found the same four off-by-one citations and the same role-fence
+conflict); codex found what only reading CODE finds - the `currentUser()`
+persistence path, and, when its brief was bounded to 12 files and told to write
+early, six findings from subsystems the agents never opened. **The bounded brief was
+the change that made the second codex run productive**; the first read until it was
+killed. It also, contrary to my own reading of it, finished - see
+`reference_pgrep_codex_returns_zero_while_it_runs`.
+
 ### Six operator decisions that reshaped the decoupling, and what they superseded
 
 Taken in conversation, applied to `2026-08-28-app-database-decoupling.md` and
