@@ -806,6 +806,62 @@ struct RecordedBatchPeer {
     flushed_writes: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
 }
 
+/// An in-memory `PostgreSQL` peer whose read granularity is exact rather than a
+/// property of TCP coalescing. It can either refuse splitting or return two
+/// handles over the same script, so one fixture drives both buffered paths.
+struct ScriptedChunkPeer {
+    state: std::rc::Rc<std::cell::RefCell<ScriptedChunkState>>,
+    allow_split: bool,
+    response_chunk: usize,
+    current_write: Vec<u8>,
+}
+
+struct ScriptedChunkState {
+    startup: std::collections::VecDeque<u8>,
+    response: std::collections::VecDeque<u8>,
+    response_enabled: bool,
+    closed: bool,
+    startup_read_sizes: Vec<usize>,
+    response_read_sizes: Vec<usize>,
+    reader_waker: Option<std::task::Waker>,
+    split_attempts: usize,
+    split_succeeded: bool,
+}
+
+impl ScriptedChunkPeer {
+    fn new(
+        startup: Vec<u8>,
+        response: Vec<u8>,
+        allow_split: bool,
+        response_chunk: usize,
+    ) -> (Self, std::rc::Rc<std::cell::RefCell<ScriptedChunkState>>) {
+        assert!(
+            response_chunk > 0,
+            "a scripted response chunk must make progress"
+        );
+        let state = std::rc::Rc::new(std::cell::RefCell::new(ScriptedChunkState {
+            startup: startup.into(),
+            response: response.into(),
+            response_enabled: false,
+            closed: false,
+            startup_read_sizes: Vec::new(),
+            response_read_sizes: Vec::new(),
+            reader_waker: None,
+            split_attempts: 0,
+            split_succeeded: false,
+        }));
+        (
+            Self {
+                state: std::rc::Rc::clone(&state),
+                allow_split,
+                response_chunk,
+                current_write: Vec::new(),
+            },
+            state,
+        )
+    }
+}
+
 async fn copy_scripted_read<B: compio::buf::IoBufMut>(
     bytes: Vec<u8>,
     buf: B,
@@ -1014,6 +1070,117 @@ impl compio_postgres::SplitStream for RecordedBatchPeer {
 
     fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
         Err(self)
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncRead for ScriptedChunkPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, mut buf: B) -> compio::BufResult<usize, B> {
+        let capacity = buf.buf_capacity();
+        assert!(capacity > 0, "the driver submitted a zero-capacity read");
+        let next = std::future::poll_fn(|cx| {
+            let mut state = self.state.borrow_mut();
+            if state.closed {
+                return std::task::Poll::Ready(Vec::new());
+            }
+            if !state.startup.is_empty() {
+                let take = capacity.min(state.startup.len());
+                let bytes = state.startup.drain(..take).collect::<Vec<_>>();
+                state.startup_read_sizes.push(take);
+                return std::task::Poll::Ready(bytes);
+            }
+            if state.response_enabled {
+                if state.response.is_empty() {
+                    state.reader_waker = Some(cx.waker().clone());
+                    return std::task::Poll::Pending;
+                }
+                let take = self.response_chunk.min(capacity).min(state.response.len());
+                let bytes = state.response.drain(..take).collect::<Vec<_>>();
+                state.response_read_sizes.push(take);
+                return std::task::Poll::Ready(bytes);
+            }
+            state.reader_waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        })
+        .await;
+
+        copy_scripted_read(next, buf).await
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncWrite for ScriptedChunkPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        self.current_write.extend_from_slice(&buf.as_init()[..len]);
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        let enables_response = self.current_write.first() == Some(&b'Q');
+        let closes = self.current_write.first() == Some(&b'X');
+        self.current_write.clear();
+        let waker = if enables_response || closes {
+            let mut state = self.state.borrow_mut();
+            state.response_enabled |= enables_response;
+            state.closed |= closes;
+            state.reader_waker.take()
+        } else {
+            None
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        let waker = {
+            let mut state = self.state.borrow_mut();
+            state.closed = true;
+            state.reader_waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for ScriptedChunkPeer {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        {
+            let mut state = self.state.borrow_mut();
+            state.split_attempts += 1;
+            state.split_succeeded = self.allow_split;
+        }
+        if !self.allow_split {
+            return Err(self);
+        }
+
+        let Self {
+            state,
+            response_chunk,
+            current_write,
+            ..
+        } = self;
+        Ok((
+            Self {
+                state: std::rc::Rc::clone(&state),
+                allow_split: false,
+                response_chunk,
+                current_write: Vec::new(),
+            },
+            Self {
+                state,
+                allow_split: false,
+                response_chunk,
+                current_write,
+            },
+        ))
     }
 }
 
@@ -2936,6 +3103,200 @@ async fn an_oversized_application_header_is_refused_without_its_body() {
     }))
     .await
     .expect("application-header limit test exceeded its outer watchdog");
+}
+
+/// Run one exact-boundary frame through the post-startup reader. The four-byte
+/// first read is deliberately one byte short of a backend header, so this also
+/// proves that `fill(5)` cannot report success after a single short read.
+#[allow(clippy::future_not_send)]
+async fn exact_limit_frame_survives_short_header_reads(allow_split: bool) {
+    use futures_util::StreamExt;
+
+    const LIMIT: usize = 64;
+    let startup = successful_startup_frames(407, &1234i32.to_be_bytes());
+    let startup_len = startup.len();
+    let notice_message = format!(
+        "budget notice{}",
+        "x".repeat(LIMIT - notice_frame("budget notice").len())
+    );
+    let notice = notice_frame(&notice_message);
+    assert_eq!(notice.len(), LIMIT);
+    let mut response = notice;
+    response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+    let (peer, state) = ScriptedChunkPeer::new(startup, response, allow_split, 4);
+    let mut config: Config = "user=scripted-user sslmode=disable"
+        .parse()
+        .expect("parse exact-limit scripted config");
+    config.max_message_size(LIMIT);
+    let (client, mut connection) = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        config.connect_raw(peer, compio_postgres::NoTls),
+    )
+    .await
+    .expect("exact-limit scripted startup hung")
+    .expect("connect exact-limit scripted transport");
+    let mut async_messages = connection.notifications();
+    let mut driver = Some(compio::runtime::spawn(
+        async move { connection.run().await },
+    ));
+
+    let query = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+        .await
+        .expect("short reads made the exact-limit query hang");
+    let messages = match query {
+        Ok(messages) => messages,
+        Err(error) => {
+            let driver_result = compio::time::timeout(
+                OPERATION_WATCHDOG,
+                driver.take().expect("exact-limit driver handle"),
+            )
+            .await;
+            panic!(
+                "an exact-limit frame was rejected; query: {}; driver: {driver_result:?}; reads: \
+                 {:?}",
+                common::error_chain(&error),
+                state.borrow().response_read_sizes
+            );
+        }
+    };
+    assert_eq!(
+        messages.len(),
+        1,
+        "the exact-limit response returned extra query messages"
+    );
+    assert!(
+        matches!(
+            messages.first(),
+            Some(compio_postgres::SimpleQueryMessage::CommandComplete(1))
+        ),
+        "the exact-limit response lost its CommandComplete: {messages:?}"
+    );
+
+    let notice = compio::time::timeout(OPERATION_WATCHDOG, async_messages.next())
+        .await
+        .expect("the exact-limit notice was not delivered before the watchdog");
+    match notice {
+        Some(compio_postgres::AsyncMessage::Notice(notice)) => {
+            assert_eq!(notice.severity(), "NOTICE");
+            assert_eq!(notice.message(), notice_message);
+        }
+        other => panic!("the exact-limit frame did not decode as its notice: {other:?}"),
+    }
+
+    {
+        let state = state.borrow();
+        assert_eq!(state.startup_read_sizes, [startup_len]);
+        assert!(
+            state.response_read_sizes.len() > 1,
+            "the framing control did not exercise repeated short reads"
+        );
+        assert!(
+            state.response_read_sizes.iter().all(|read| *read == 4),
+            "the application response was not read in exact four-byte chunks: {:?}",
+            state.response_read_sizes
+        );
+        assert_eq!(state.split_attempts, 1);
+        assert_eq!(state.split_succeeded, allow_split);
+        assert!(state.response.is_empty(), "the response was not consumed");
+    }
+
+    drop(async_messages);
+    drop(client);
+    compio::time::timeout(
+        OPERATION_WATCHDOG,
+        driver.take().expect("exact-limit driver handle"),
+    )
+    .await
+    .expect("the exact-limit connection did not shut down")
+    .expect("the exact-limit connection task panicked")
+    .expect("the exact-limit connection did not close cleanly");
+}
+
+/// The configured ceiling counts the one-byte tag. Refusing the stream split
+/// also proves that reconstructing the serialized `BufStream` retains the
+/// configured ceiling, and the unread body proves rejection happened from the
+/// five-byte header rather than after buffering the whole frame.
+#[compio::test]
+async fn a_serialized_frame_one_byte_over_the_limit_is_refused_from_its_header() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        const LIMIT: usize = 64;
+        let startup = successful_startup_frames(406, &1234i32.to_be_bytes());
+        let startup_len = startup.len();
+        let notice_message = format!(
+            "budget notice{}",
+            "x".repeat(LIMIT + 1 - notice_frame("budget notice").len())
+        );
+        let oversized = notice_frame(&notice_message);
+        assert_eq!(oversized.len(), LIMIT + 1);
+        let mut response = oversized;
+        response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let response_len = response.len();
+
+        let (peer, state) = ScriptedChunkPeer::new(startup, response, false, 5);
+        let mut config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse over-limit scripted config");
+        config.max_message_size(LIMIT);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("over-limit scripted startup hung")
+        .expect("connect over-limit scripted transport");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let query = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the over-limit header made the query hang")
+            .expect_err("the driver accepted a frame one byte above its ceiling");
+        let query_chain = common::error_chain(&query);
+        let driver_error = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the over-limit connection did not retire")
+            .expect("the over-limit connection task panicked")
+            .expect_err("the over-limit connection closed without its framing error");
+        let driver_chain = common::error_chain(&driver_error);
+        let expected = "message too large: 65 bytes (max 64)";
+        assert!(
+            query_chain.contains(expected) || driver_chain.contains(expected),
+            "the tag-inclusive ceiling lost its diagnosis; query: {query_chain}; driver: \
+             {driver_chain}"
+        );
+
+        {
+            let state = state.borrow();
+            assert_eq!(state.startup_read_sizes, [startup_len]);
+            assert_eq!(state.response_read_sizes, [5]);
+            assert_eq!(state.response.len(), response_len - 5);
+            assert_eq!(state.split_attempts, 1);
+            assert!(!state.split_succeeded);
+        }
+        drop(client);
+    }))
+    .await
+    .expect("serialized over-limit test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_serialized_frame_at_the_exact_limit_survives_short_reads() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        exact_limit_frame_survives_short_header_reads(false).await;
+    }))
+    .await
+    .expect("serialized exact-limit test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_split_frame_at_the_exact_limit_survives_short_reads() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        exact_limit_frame_survives_short_header_reads(true).await;
+    }))
+    .await
+    .expect("split exact-limit test exceeded its outer watchdog");
 }
 
 /// `ReadyForQuery` has exactly one status byte. A longer, otherwise complete
