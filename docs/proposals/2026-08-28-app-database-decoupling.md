@@ -1,5 +1,38 @@
 # Decoupling app identity from database identity
 
+## The decision this needs, before anything is built
+
+**The design fork is already taken and is not what is being asked.** "Multiple apps reach one
+database" is served as **one owner app per namespace plus graded DML grants to others**
+(section 3) - NOT as multi-writer schema ownership, which section 13 treats as a different
+project. Nothing below asks which of those to pick.
+
+**What is being asked is whether four costs are acceptable.** They are the whole decision:
+
+1. **`env.db.users` dies** (13.4). Every creator call site, every generated type,
+   `docs/reference/db.md`, `examples/starter/` and `tests/golden_path.sh` change together.
+   This is the largest creator-facing break in the proposal.
+2. **A namespace owner's migration can break a co-tenant's deploy** (13.3). The reader's deploy
+   gate checks the owner's applied descriptor hash; until the reader rebuilds, its deploy fails.
+   There is no way around it that keeps the ordering guarantee the masking story rests on.
+3. **Classified columns lose plaintext reactivity for everyone, including the owner** (13.2).
+   One published column set per table per decode stream is a PostgreSQL constraint, not a choice.
+4. **Blanket table grants and prospective default privileges are deleted** (13.5), so every apply
+   must regenerate explicit per-column grants inside the DDL transaction.
+
+**Scope limit that ships with it:** `readwrite` and `readonly` grants are restricted to apps under
+the same creator. Cross-creator co-grants are blocked on O1 (section 14) - the unmask policy is
+authored by the READING app, and no server-side mechanism reaches it. The same-creator restriction
+ships without O1 resolved.
+
+**Four consequences are measured, not assumed**, and each is recorded with its measurement: the
+role fence works per grant with `WITH SET FALSE`; ctid narrowing blocks four write verbs under
+column grants and a primary-key predicate fixes it; the CDC stream is per-app today and platform
+journals are already excluded; and the table-level grants that would defeat column grants are
+latent, not live, because no column grants exist yet.
+
+---
+
 An app id is a tenant. It is not a schema name, not a role name, not an encryption salt, and
 not a publication key. Today it is all five, by string identity, and that is what makes
 "one app, many databases" unrepresentable.
