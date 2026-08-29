@@ -108,6 +108,27 @@ pub const fn ir_version() -> u32 {
     api::current_ir_version()
 }
 
+/// Turn engine diagnostics on or off, and report what was decided.
+///
+/// The addon does NOT read the process environment to find this out - see the header of
+/// [`crate::runtime`] for why. A host that wants the old `ZERO_MIGRATE_LOG` behaviour
+/// forwards the variable it already has:
+///
+/// ```js
+/// setEngineDiagnostics(process.env.ZERO_MIGRATE_LOG ?? null)
+/// ```
+///
+/// The RAW string crosses rather than a boolean, so the truthiness rule (unset, empty,
+/// `0`, `false`, `no` are off; anything else is on) is stated once, in Rust, under test -
+/// not restated by every host that calls this.
+///
+/// Off until called. Diagnostics go to STDERR, never stdout, because `lint`/`plan`/
+/// `status`/`history` each write one JSON document to stdout that callers parse.
+#[napi(js_name = "setEngineDiagnostics", catch_unwind)]
+pub fn set_engine_diagnostics(value: Option<String>) -> bool {
+    crate::runtime::set_diagnostics(value.as_deref())
+}
+
 /// The loaded addon's build identity: crate version, IR floor, and the workspace
 /// source digest. A host that resolves the `.node` by path can log this to prove
 /// WHICH artifact it loaded, which the filename alone cannot say. Reproducible

@@ -6540,7 +6540,7 @@ mod snapshot_builder_refactor_safety_tests {
     //! dialect-parameterized [`super::build_table_snapshot`].
     //!
     //! **What this golden proves - and what it does NOT.** The golden `.txt` files
-    //! were captured (via `UPDATE_SNAPSHOT_GOLDENS=1`) from the POST-extraction
+    //! were captured (via the `#[ignore]`d `capture_goldens` below) from the POST-extraction
     //! `build_table_snapshot`, so they pin the post-extraction output against
     //! ITSELF - a FORWARD REGRESSION PIN, not a literal pre/post byte-diff. The
     //! actual pre/post byte-preservation guarantee of the extraction rests on the
@@ -6632,12 +6632,19 @@ mod snapshot_builder_refactor_safety_tests {
     const GOLDEN_PG: &str = include_str!("../../tests/goldens/refactor_safety_pg.txt");
     const GOLDEN_SQLITE: &str = include_str!("../../tests/goldens/refactor_safety_sqlite.txt");
 
+    /// One-off golden capture, run explicitly and never by default.
+    ///
+    /// `#[ignore]` rather than an env-var early return: a `std::env::var` read takes a
+    /// `&str`, so the name it reads is one nothing has declared, which is what
+    /// `clippy.toml`'s `disallowed-methods` ban exists to remove. The two forms are not
+    /// equivalent in strength either - the env-var form RAN on every default `cargo test`
+    /// and returned immediately, so it reported a pass having executed one comparison.
+    /// `#[ignore]` reports it as ignored, which is what it is.
     #[test]
+    #[ignore = "recaptures tests/goldens/refactor_safety_{pg,sqlite}.txt; run explicitly \
+                with `cargo test -p zeroship-migrate-core --lib -- --ignored \
+                capture_goldens`, then commit the files"]
     fn capture_goldens() {
-        // One-off golden capture; gated on UPDATE_SNAPSHOT_GOLDENS=1.
-        if std::env::var("UPDATE_SNAPSHOT_GOLDENS").as_deref() != Ok("1") {
-            return;
-        }
         let d = rich_descriptor();
         let effective = confined_policy();
         let pg = build_table_snapshot(

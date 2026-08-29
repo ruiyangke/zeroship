@@ -20,38 +20,83 @@
 //! engine emits `tracing` events for the secondary failures its reply cannot carry
 //! (a release that failed, a `RESET ROLE` that failed), and a `tracing` event with
 //! no subscriber installed reaches nobody. `with_diagnostics` installs one for
-//! the length of the verb, on the thread that runs it, when the operator opts in
-//! through `ZERO_MIGRATE_LOG`.
+//! the length of the verb, on the thread that runs it, when the HOST has opted in
+//! through [`set_diagnostics`].
+//!
+//! # Why the host states this instead of the addon reading it
+//!
+//! This used to be `std::env::var("ZERO_MIGRATE_LOG")`, read here, on the Rust side.
+//! `clippy.toml` bans that, and the ban is right on its own terms - a read that takes a
+//! `&str` is a read of a name nothing has declared, so the population of the process's
+//! configuration is not enumerable. `ZERO_MIGRATE_LOG` was the proof: it appeared in
+//! this one file and NOWHERE else in the tree - not in `docs/reference/env-vars.md`,
+//! not in any JS, not in any test.
+//!
+//! The fix is not a suppression, because the same argument this module already makes
+//! about the SUBSCRIBER applies one level up to the SWITCH. `with_diagnostics` refuses
+//! `set_global_default` on the grounds that "this crate is a library first ... a global
+//! install would mutate process-wide logging state for anyone who merely imports it".
+//! An ambient environment read is that same defect at the decision: a process that
+//! happens to carry the variable turned on stderr diagnostics inside a caller - the Vite
+//! plugin, say - that never asked for them and cannot see why.
+//!
+//! So the value is GIVEN to the addon rather than taken from the process. The host is a
+//! Node CLI, `process.env` is ordinary and visible there, and the raw value crosses the
+//! N-API boundary unparsed so that the truthiness contract below stays here, in Rust,
+//! under the test that already covers it.
+//!
+//! The `zeroship-core` typed-key macro `clippy.toml` points at is not reachable from
+//! this crate for the reason `build.rs` records: it would be a NORMAL dependency here,
+//! and `zeroship-core` reaches tokio through `cyper -> hyper`, which `AGENTS.md` permits
+//! only for `kind == "dev"`. That constraint is why the value is passed in rather than
+//! re-read through a typed key.
 
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use tracing::{Level, Subscriber};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 
-/// The opt-in switch for engine diagnostics, named for the `ZERO_MIGRATE_*` family
-/// every other knob in this tree belongs to. `RUST_LOG` is deliberately not read:
-/// it is a Rust-ecosystem name reaching an operator who runs a Node CLI, and it is
-/// set incidentally in environments that have nothing to do with migrations.
-const LOG_ENV: &str = "ZERO_MIGRATE_LOG";
-
 /// The one target the switch turns on. Every event the engine emits is a `warn`
 /// (each one is a secondary failure the reply cannot carry), so the switch itself
 /// is the real control and this only keeps a future dependency's events out.
 const LOG_TARGET: &str = "zero_migrate";
 
-/// Whether this run asked for engine diagnostics.
+/// Whether the host has asked for engine diagnostics. OFF until it says otherwise.
 ///
-/// Same asymmetry the live-database gate uses: anything but unset, empty, `0`,
-/// `false` or `no` is a yes, so `ZERO_MIGRATE_LOG=0` reads as off rather than as a
-/// non-empty value that happens to spell a falsehood.
-fn diagnostics_requested() -> bool {
-    diagnostics_requested_from(std::env::var(LOG_ENV).ok().as_deref())
+/// `Relaxed` is the right ordering and not a shortcut: this is a lone `bool` that
+/// publishes no other memory, and it is set by the host thread before any verb is
+/// dispatched. Nothing reads it expecting to see writes that were ordered against it.
+static DIAGNOSTICS: AtomicBool = AtomicBool::new(false);
+
+/// Turn engine diagnostics on or off for this process, from the raw value the host
+/// holds - typically its own `process.env.ZERO_MIGRATE_LOG`.
+///
+/// The RAW value crosses, not a pre-parsed boolean, so the truthiness contract stays in
+/// [`diagnostics_requested_from`] where a Rust test covers it rather than being restated
+/// in every host that ever calls this.
+///
+/// Returns what it decided, so a caller can surface the setting it just made instead of
+/// having to reimplement the rule to find out.
+pub fn set_diagnostics(raw: Option<&str>) -> bool {
+    let enabled = diagnostics_requested_from(raw);
+    DIAGNOSTICS.store(enabled, Ordering::Relaxed);
+    enabled
 }
 
-/// The decision alone, split from the read so it is testable without mutating
-/// process-wide environment state from a parallel test binary.
+/// Whether this run asked for engine diagnostics.
+fn diagnostics_requested() -> bool {
+    DIAGNOSTICS.load(Ordering::Relaxed)
+}
+
+/// The decision alone, split from the switch so it is testable without touching the
+/// process-wide flag from a parallel test binary.
+///
+/// Same asymmetry the live-database gate uses: anything but unset, empty, `0`,
+/// `false` or `no` is a yes, so a host that forwards `ZERO_MIGRATE_LOG=0` gets "off"
+/// rather than "a non-empty value that happens to spell a falsehood".
 fn diagnostics_requested_from(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| {
         let flag = value.trim().to_ascii_lowercase();
@@ -261,6 +306,39 @@ mod tests {
             got, 42,
             "cross-thread oneshot woke the reactor-less block_on"
         );
+    }
+
+    /// The switch the host sets is the switch `with_diagnostics` reads.
+    ///
+    /// Without this, `set_diagnostics` could store into a flag nothing consults and every
+    /// other test here would still pass: `diagnostics_requested_from` is pure, and the two
+    /// `run_engine_blocking` cases assert on their RESULT, not on whether a subscriber was
+    /// installed. That is the shape the env-var version had - a read on one side, a
+    /// decision on the other, and no test joining them.
+    ///
+    /// It restores the flag before returning, because this is the one piece of
+    /// process-global state in the crate and leaving it on would put engine diagnostics on
+    /// stderr for whichever test in this binary runs next.
+    #[test]
+    fn the_host_switch_is_the_one_the_engine_reads() {
+        let restore = diagnostics_requested();
+
+        assert!(set_diagnostics(Some("1")), "an on value decides on");
+        assert!(
+            diagnostics_requested(),
+            "set_diagnostics must store into the flag with_diagnostics consults"
+        );
+
+        assert!(!set_diagnostics(Some("0")), "an off value decides off");
+        assert!(
+            !diagnostics_requested(),
+            "the switch turns back off; it is not one-way"
+        );
+
+        assert!(!set_diagnostics(None), "absent decides off");
+        assert!(!diagnostics_requested(), "and absent stores off");
+
+        DIAGNOSTICS.store(restore, Ordering::Relaxed);
     }
 
     #[test]

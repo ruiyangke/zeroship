@@ -9,7 +9,13 @@ use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
 use crate::model::support::{Feature, SupportDecision};
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
-const REGENERATE_COMMAND: &str = "ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zeroship-migrate-core --lib model::support_matrix::committed_support_matrix_is_current -- --exact";
+/// The one command that rewrites `docs/support-matrix.md`.
+///
+/// An `#[ignore]`d test rather than an env var: a `std::env::var` read takes a `&str`,
+/// so the name it reads is one nothing has declared, which is what `clippy.toml`'s
+/// `disallowed-methods` ban exists to remove. This const is quoted in both the panic and
+/// the staleness assertion, so the two can never name different commands.
+const REGENERATE_COMMAND: &str = "cargo test -p zeroship-migrate-core --lib -- --ignored --exact model::support_matrix::update_committed_support_matrix";
 
 fn feature_label(feature: Feature) -> &'static str {
     match feature {
@@ -144,16 +150,6 @@ fn committed_support_matrix_is_current() {
     let rendered = render_support_matrix(crate::test_fixtures::VENDORS);
     let path = support_matrix_path();
 
-    if std::env::var("ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX").as_deref() == Ok("1") {
-        std::fs::write(&path, rendered).unwrap_or_else(|error| {
-            panic!(
-                "failed to write generated support matrix at {}: {error}",
-                path.display()
-            )
-        });
-        return;
-    }
-
     let committed = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "failed to read committed support matrix at {}: {error}; regenerate it with `{REGENERATE_COMMAND}`",
@@ -164,6 +160,28 @@ fn committed_support_matrix_is_current() {
         committed, rendered,
         "docs/support-matrix.md is stale; regenerate it with `{REGENERATE_COMMAND}`"
     );
+}
+
+/// Rewrites `docs/support-matrix.md` from the current support registry.
+///
+/// Not run by default - [`committed_support_matrix_is_current`] above is the gate; this
+/// is the developer affordance that keeps it green after an intentional capability
+/// change. Keeping them as two tests is what lets the gate assert unconditionally: the
+/// env-var form had the gate and the regen path in one function, so the assertion was
+/// skipped entirely on the run that rewrote the file.
+#[test]
+#[ignore = "rewrites docs/support-matrix.md; run explicitly with \
+            `cargo test -p zeroship-migrate-core --lib -- --ignored --exact \
+            model::support_matrix::update_committed_support_matrix`, then commit the file"]
+fn update_committed_support_matrix() {
+    let rendered = render_support_matrix(crate::test_fixtures::VENDORS);
+    let path = support_matrix_path();
+    std::fs::write(&path, rendered).unwrap_or_else(|error| {
+        panic!(
+            "failed to write generated support matrix at {}: {error}",
+            path.display()
+        )
+    });
 }
 
 /// Every `Feature` variant, so the guard below can find the ones that never

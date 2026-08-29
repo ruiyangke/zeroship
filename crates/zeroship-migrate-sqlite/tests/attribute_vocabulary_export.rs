@@ -17,10 +17,16 @@
 //!
 //! # Regenerating
 //!
-//! `UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-sqlite --test attribute_vocabulary_export`
-//! rewrites the file; commit it, then re-run the package's generator. A default run
-//! ASSERTS the on-disk file matches, so adding a knob without regenerating fails rather
-//! than shipping a TypeScript surface that silently lacks it.
+//! `cargo test -p zeroship-migrate-sqlite --test attribute_vocabulary_export -- --ignored
+//! update_attribute_vocabulary` rewrites the file; commit it, then re-run the package's
+//! generator. A default run ASSERTS the on-disk file matches, so adding a knob without
+//! regenerating fails rather than shipping a TypeScript surface that silently lacks it.
+//!
+//! The regen switch is an `#[ignore]`d test rather than an env var. This crate's tests
+//! take no input from their own process environment (`clippy.toml`'s `disallowed-methods`
+//! ban on `std::env::var`: a name read with a `&str` is a name nothing has declared), and
+//! `#[ignore]` + `cargo test -- --ignored <name>` is the idiom `33a9c59a1` already applied
+//! to this engine's other golden-regen switches.
 
 use std::path::PathBuf;
 
@@ -48,24 +54,36 @@ fn generated() -> String {
 fn emit_attribute_vocabulary() {
     let path = artifact_path();
     let generated = generated();
-    if std::env::var("UPDATE_VOCABULARY").is_ok() {
-        std::fs::write(&path, generated.as_bytes()).expect("write attribute-vocabulary.json");
-        return;
-    }
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "attribute-vocabulary.json missing or unreadable at {}: {e}. Run \
-             `UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-sqlite --test \
-             attribute_vocabulary_export` to generate it.",
+             `cargo test -p zeroship-migrate-sqlite --test attribute_vocabulary_export \
+             -- --ignored update_attribute_vocabulary` to generate it.",
             path.display()
         )
     });
     assert_eq!(
         on_disk, generated,
-        "attribute-vocabulary.json is stale. Regenerate with `UPDATE_VOCABULARY=1 cargo \
-         test -p zeroship-migrate-sqlite --test attribute_vocabulary_export` and commit it, then \
-         re-run the TypeScript generator."
+        "attribute-vocabulary.json is stale. Regenerate with `cargo test -p \
+         zeroship-migrate-sqlite --test attribute_vocabulary_export -- --ignored \
+         update_attribute_vocabulary` and commit it, then re-run the TypeScript generator."
     );
+}
+
+/// Rewrites `attribute-vocabulary.json` from this backend's current vocabulary.
+///
+/// Not run by default - [`emit_attribute_vocabulary`] above is the gate; this is the
+/// developer affordance that keeps it green after an intentional knob change. Splitting
+/// the two is what lets the gate keep asserting while the regen path stays one explicit
+/// command, with no environment read in either.
+#[test]
+#[ignore = "regenerates attribute-vocabulary.json; run explicitly with \
+            `cargo test -p zeroship-migrate-sqlite --test attribute_vocabulary_export \
+            -- --ignored update_attribute_vocabulary`, then commit the file"]
+fn update_attribute_vocabulary() {
+    let path = artifact_path();
+    std::fs::write(&path, generated().as_bytes())
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 #[test]
