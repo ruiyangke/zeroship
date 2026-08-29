@@ -45,9 +45,9 @@ const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// which it did until 2026-08-28: the creator of a Postgres table is its owner,
 /// and an owner's rights are implicit and survive `REVOKE ... FROM <owner>`, so
 /// the loop below swept the name and changed nothing. Now that the migration
-/// service creates it, the worker is an ordinary grantee and the sweep would
-/// take its INSERT with it — turning every unmask into `permission denied for
-/// table __zeroship_audit_unmask`, on the privileged read path, at runtime.
+/// service creates it, the worker is an ordinary grantee. The reserved sweep
+/// leaves this exact name for its dedicated recipe, which clears the blanket
+/// grants before adding only INSERT and serial-sequence USAGE.
 ///
 /// Losing ownership is a GAIN, not a regression: a process that owns its own
 /// audit log can `TRUNCATE` or `DROP` it, and privilege follows the process.
@@ -254,9 +254,10 @@ pub struct PerAppRoleOutcome {
 /// 2. `GRANT USAGE, CREATE ON SCHEMA "<app_id>"` — the role may use and
 ///    add objects to its own schema.
 /// 3. `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA
-///    "<app_id>"`, immediately followed by a revoke on reserved
-///    `__zeroship_*` tables, plus matching `GRANT USAGE ON ALL SEQUENCES`
-///    — CRUD on existing creator tables only.
+///    "<app_id>"`, plus matching sequence grants, then revoke every other
+///    reserved `__zeroship_*` table and replace the audit table's blanket
+///    privileges with exactly INSERT and serial-sequence USAGE - CRUD on
+///    existing creator tables only.
 /// 4. `ALTER DEFAULT PRIVILEGES IN SCHEMA "<app_id>" GRANT … ON
 ///    TABLES/SEQUENCES` — so tables/sequences the role (or the platform
 ///    migrator) creates LATER are auto-granted, no re-run needed.
@@ -307,20 +308,23 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     .await
     .map_err(|e| coded_sql(&format!("GRANT USAGE,CREATE ON SCHEMA {app_id}"), e))?;
 
-    // 3. existing tables + sequences.
+    // 3. Existing tables + sequences. The blanket snapshots run first, the
+    //    reserved sweep strips every non-audit system table, and the exact
+    //    audit recipe is the final word on its table and sequence.
     pool.execute(
         &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {qrole}"),
         &[],
     )
     .await
     .map_err(|e| coded_sql(&format!("GRANT table CRUD ON SCHEMA {app_id}"), e))?;
-    revoke_reserved_system_table_privileges(pool, app_id, &role).await?;
     pool.execute(
         &format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {qrole}"),
         &[],
     )
     .await
     .map_err(|e| coded_sql(&format!("GRANT sequence usage ON SCHEMA {app_id}"), e))?;
+    revoke_reserved_system_table_privileges(pool, app_id, &role).await?;
+    set_worker_unmask_audit_append_privileges(pool, app_id, &role).await?;
 
     // 4. default privileges for FUTURE objects in this schema. Without
     //    this, a table the platform migrator creates next deploy would
@@ -386,6 +390,137 @@ fn revoke_reserved_system_table_privileges_sql(app_id: &str, role: &str) -> Stri
          $$",
         prefix_len = RESERVED_SYSTEM_TABLE_PREFIX.len(),
     )
+}
+
+/// Remove the blanket snapshots from the exact unmask audit objects.
+///
+/// This runs as its own statement before the narrow grants. If a malformed
+/// audit table makes the grant step fail, this deny remains committed instead
+/// of rolling back with that failure. ACL-bearing objects of the wrong kind at
+/// the reserved name also lose their blanket privileges and get nothing back.
+fn revoke_worker_unmask_audit_privileges_sql(app_id: &str, role: &str) -> String {
+    let schema_literal = sql_string_literal(app_id);
+    let role_literal = sql_string_literal(role);
+    let audit_literal = sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE);
+    format!(
+        "DO $$ \
+         DECLARE \
+           audit_rel record; \
+           sequence_rel record; \
+         BEGIN \
+           SELECT n.nspname, c.relname, c.relkind \
+             INTO audit_rel \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE n.nspname = {schema_literal} \
+              AND c.relname = {audit_literal} \
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S'); \
+           IF FOUND THEN \
+             IF audit_rel.relkind = 'S' THEN \
+               EXECUTE format( \
+                 'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
+                 audit_rel.nspname, audit_rel.relname, {role_literal} \
+               ); \
+             ELSE \
+               EXECUTE format( \
+                 'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
+                 audit_rel.nspname, audit_rel.relname, {role_literal} \
+               ); \
+               IF audit_rel.relkind IN ('r', 'p') THEN \
+                 SELECT n.nspname, c.relname \
+                   INTO sequence_rel \
+                   FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE c.oid = pg_get_serial_sequence( \
+                          format('%I.%I', audit_rel.nspname, audit_rel.relname), \
+                          'id' \
+                        )::regclass \
+                    AND c.relkind = 'S'; \
+                 IF FOUND THEN \
+                   EXECUTE format( \
+                     'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
+                     sequence_rel.nspname, sequence_rel.relname, {role_literal} \
+                   ); \
+                 END IF; \
+               END IF; \
+             END IF; \
+           END IF; \
+         END \
+         $$"
+    )
+}
+
+/// Grant the unmask audit table its exact append-only recipe.
+///
+/// PostgreSQL grants are additive, so this runs only after
+/// [`revoke_worker_unmask_audit_privileges_sql`] has cleared the blanket table
+/// and sequence grants. The lookup is a no-op when the audit table has not been
+/// provisioned yet, preserving [`ensure_per_app_role`]'s schema-only
+/// precondition. A real audit table without its contractually required
+/// `BIGSERIAL` sequence is rejected after the deny has committed.
+fn grant_worker_unmask_audit_append_privileges_sql(app_id: &str, role: &str) -> String {
+    let schema_literal = sql_string_literal(app_id);
+    let role_literal = sql_string_literal(role);
+    let audit_literal = sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE);
+    format!(
+        "DO $$ \
+         DECLARE \
+           audit_rel record; \
+           sequence_rel record; \
+         BEGIN \
+           SELECT n.nspname, c.relname \
+             INTO audit_rel \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE n.nspname = {schema_literal} \
+              AND c.relname = {audit_literal} \
+              AND c.relkind IN ('r', 'p'); \
+           IF FOUND THEN \
+             SELECT n.nspname, c.relname \
+               INTO sequence_rel \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE c.oid = pg_get_serial_sequence( \
+                      format('%I.%I', audit_rel.nspname, audit_rel.relname), \
+                      'id' \
+                    )::regclass \
+                AND c.relkind = 'S'; \
+             IF NOT FOUND THEN \
+               RAISE EXCEPTION 'serial sequence missing for %.%.id', \
+                 audit_rel.nspname, audit_rel.relname; \
+             END IF; \
+             EXECUTE format( \
+               'GRANT USAGE ON SEQUENCE %I.%I TO %I', \
+               sequence_rel.nspname, sequence_rel.relname, {role_literal} \
+             ); \
+             EXECUTE format( \
+               'GRANT INSERT ON TABLE %I.%I TO %I', \
+               audit_rel.nspname, audit_rel.relname, {role_literal} \
+             ); \
+           END IF; \
+         END \
+         $$"
+    )
+}
+
+async fn set_worker_unmask_audit_append_privileges(
+    pool: &Pool,
+    app_id: &str,
+    role: &str,
+) -> Result<(), DbError> {
+    pool.execute(
+        &revoke_worker_unmask_audit_privileges_sql(app_id, role),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("revoke unmask audit privileges {app_id}"), e))?;
+    pool.execute(
+        &grant_worker_unmask_audit_append_privileges_sql(app_id, role),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("set unmask audit append privileges {app_id}"), e))?;
+    Ok(())
 }
 
 async fn revoke_reserved_system_table_privileges(
@@ -727,6 +862,124 @@ mod live_reserved_sweep_tests {
         err.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
     }
 
+    async fn assert_audit_verb_refused(what: &str, statement: impl FnOnce(&str) -> String) {
+        let admin = admin_client().await;
+        let app = scratch_app();
+        teardown(&admin, &app).await;
+        provision_scratch_app(&admin, &app).await;
+
+        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+            .await
+            .expect("pool for ensure_per_app_role");
+        ensure_per_app_role(&pool, &app)
+            .await
+            .expect("provision the per-app role (this is what runs the sweep)");
+
+        let outcome = as_runtime_role(&admin, &app, &statement(&app)).await;
+        teardown(&admin, &app).await;
+
+        let err = outcome.expect_err(&format!(
+            "the runtime role must not be able to {what} the unmask audit table"
+        ));
+        assert!(
+            denied(&err),
+            "expected insufficient_privilege for audit {what}, got {:?}: {err}",
+            err.code()
+        );
+    }
+
+    #[compio::test]
+    async fn a_wrong_kind_audit_relation_keeps_no_runtime_privileges() {
+        let admin = admin_client().await;
+        let app = scratch_app();
+        teardown(&admin, &app).await;
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA {}; \
+                 CREATE VIEW {} AS SELECT 1::bigint AS id",
+                crate::query::quote_ident(&app),
+                audit_ref(&app),
+            ))
+            .await
+            .expect("create a wrong-kind relation at the reserved audit name");
+
+        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+            .await
+            .expect("pool for ensure_per_app_role");
+        ensure_per_app_role(&pool, &app)
+            .await
+            .expect("provision the per-app role over the wrong-kind relation");
+        let role = per_app_role_name(&app);
+        let privileges = admin
+            .query_text_params(
+                "SELECT privilege_type \
+                   FROM information_schema.table_privileges \
+                  WHERE grantee = $1 \
+                    AND table_schema = $2 \
+                    AND table_name = $3 \
+                  ORDER BY privilege_type",
+                &[role.as_str(), app.as_str(), WORKER_WRITABLE_RESERVED_TABLE],
+            )
+            .await
+            .expect("query wrong-kind audit privileges")
+            .into_iter()
+            .map(|row| row.get::<_, String>("privilege_type"))
+            .collect::<Vec<_>>();
+        teardown(&admin, &app).await;
+
+        assert!(
+            privileges.is_empty(),
+            "a non-table at the audit name must keep no worker privileges: {privileges:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn a_malformed_audit_table_fails_closed_without_runtime_privileges() {
+        let admin = admin_client().await;
+        let app = scratch_app();
+        teardown(&admin, &app).await;
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA {}; \
+                 CREATE TABLE {} (id BIGINT PRIMARY KEY)",
+                crate::query::quote_ident(&app),
+                audit_ref(&app),
+            ))
+            .await
+            .expect("create an audit table without its required serial sequence");
+
+        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+            .await
+            .expect("pool for ensure_per_app_role");
+        let outcome = ensure_per_app_role(&pool, &app).await;
+        let role = per_app_role_name(&app);
+        let privileges = admin
+            .query_text_params(
+                "SELECT privilege_type \
+                   FROM information_schema.table_privileges \
+                  WHERE grantee = $1 \
+                    AND table_schema = $2 \
+                    AND table_name = $3 \
+                  ORDER BY privilege_type",
+                &[role.as_str(), app.as_str(), WORKER_WRITABLE_RESERVED_TABLE],
+            )
+            .await
+            .expect("query malformed audit table privileges")
+            .into_iter()
+            .map(|row| row.get::<_, String>("privilege_type"))
+            .collect::<Vec<_>>();
+        teardown(&admin, &app).await;
+
+        assert!(
+            outcome.is_err(),
+            "a malformed audit table must be rejected after its privileges are denied"
+        );
+        assert!(
+            privileges.is_empty(),
+            "a malformed audit table must keep no worker privileges: {privileges:?}"
+        );
+    }
+
     /// THE ONE THAT MATTERS. The worker must still be able to append to its own
     /// audit log after the reserved-prefix sweep has run over the schema.
     ///
@@ -761,6 +1014,55 @@ mod live_reserved_sweep_tests {
             .await
             .expect("read audit table owner");
         assert_ne!(owner, role, "the worker must not own its own audit log");
+
+        let table_privileges = admin
+            .query_text_params(
+                "SELECT privilege_type \
+                   FROM information_schema.table_privileges \
+                  WHERE grantee = $1 \
+                    AND table_schema = $2 \
+                    AND table_name = $3 \
+                  ORDER BY privilege_type",
+                &[role.as_str(), app.as_str(), WORKER_WRITABLE_RESERVED_TABLE],
+            )
+            .await
+            .expect("query the audit table's exact grants")
+            .into_iter()
+            .map(|row| row.get::<_, String>("privilege_type"))
+            .collect::<Vec<_>>();
+        println!(
+            "information_schema.table_privileges for {role}: {table_privileges:?}"
+        );
+        assert_eq!(
+            table_privileges,
+            vec!["INSERT"],
+            "the runtime role must hold exactly INSERT on its audit table"
+        );
+
+        let audit = audit_ref(&app);
+        let sequence_privileges = admin
+            .query_text_params(
+                "SELECT \
+                    has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'USAGE') AS usage, \
+                    has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'SELECT') AS sel, \
+                    has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'UPDATE') AS upd",
+                &[role.as_str(), audit.as_str()],
+            )
+            .await
+            .expect("query the audit serial sequence's exact grants");
+        let sequence_privileges = &sequence_privileges[0];
+        assert!(
+            sequence_privileges.get::<_, bool>("usage"),
+            "the audit serial sequence needs USAGE for nextval"
+        );
+        assert!(
+            !sequence_privileges.get::<_, bool>("sel"),
+            "the audit serial sequence must not grant SELECT"
+        );
+        assert!(
+            !sequence_privileges.get::<_, bool>("upd"),
+            "the audit serial sequence must not grant UPDATE"
+        );
 
         // POSITIVE HALF - a real INSERT, as the real role.
         as_runtime_role(&admin, &app, &audit_insert_sql(&app))
@@ -797,6 +1099,30 @@ mod live_reserved_sweep_tests {
         assert_eq!(rows, 1, "no denied statement may have changed the log");
 
         teardown(&admin, &app).await;
+    }
+
+    #[compio::test]
+    async fn the_runtime_role_cannot_select_the_unmask_audit_log() {
+        assert_audit_verb_refused("SELECT", |app| {
+            format!("SELECT 1 FROM {} LIMIT 0", audit_ref(app))
+        })
+        .await;
+    }
+
+    #[compio::test]
+    async fn the_runtime_role_cannot_update_the_unmask_audit_log() {
+        assert_audit_verb_refused("UPDATE", |app| {
+            format!("UPDATE {} SET reason = NULL WHERE false", audit_ref(app))
+        })
+        .await;
+    }
+
+    #[compio::test]
+    async fn the_runtime_role_cannot_delete_from_the_unmask_audit_log() {
+        assert_audit_verb_refused("DELETE FROM", |app| {
+            format!("DELETE FROM {} WHERE false", audit_ref(app))
+        })
+        .await;
     }
 
     /// THE CONTROL, differing in exactly one variable: the exemption clause.
