@@ -707,3 +707,46 @@ green with the other still broken. Two tests, or one test per assertion with
 both asserted separately.
 
 That distinction is the agent's own, reached while sweeping, and it is right.
+
+## The whole uncertain-cancel retirement chain is unbound, end to end
+
+Sweep complete enough to conclude: 25 mutations adjudicated in the pool's
+retirement machinery, **8 SURVIVED**. They are not eight unrelated gaps. They
+are the four stages of ONE mechanism, plus two adjacent ones:
+
+**The uncertainty chain - every stage unbound:**
+
+     6  the WRITE   - uncertain flag set in `PoolCancelAttempt::drop`
+     4  the READ    - `is_uncertain()` forced false
+    21  the BRANCH  - return-time "escaped or uncertain cancel authority" eviction disabled
+    22  the ACTION  - that branch's explicit `force_close` removed
+
+Set the flag, read it, act on it, retire the session: no test binds any of the
+four. This is the mechanism `ae8ba17f4` added this session so a possibly-sent
+cancel cannot reach the next borrower. It works - and nothing would notice if it
+stopped.
+
+**Permit accounting on a failed refill, both halves:**
+
+    15  the armed WeakPermitGuard drop DECREMENT
+    19  that same path's WAKE (decrement preserved, to separate them)
+
+**Synchronous retirement, in a second guard:**
+
+     8  `CommandRecoveryGuard::drop` without `force_close` - and the sweep found
+        WHY it survives: "the existing recovery test is indeed masked by
+        independent cancel abandonment", the same masking shape as the
+        `Arc::strong_count > 1 ||` disjunction.
+
+**One that is probably NOT a gap:**
+
+     3  `begin_cancel`'s post-`Arc` recheck - brackets an `Arc::clone` with no
+        await point, so unreachable on a single-threaded runtime. No test plus a
+        note is the right outcome; see the section above.
+
+**The pattern across all of them is masking.** Three separate survivors were
+traced to a stronger condition standing in front of a weaker one -
+`strong_count > 1 ||`, independent cancel abandonment, an eviction that happens
+anyway. Each guard is correct; each is invisible because something else covers
+its case in every scenario the suite builds. That is what a mutation sweep finds
+and coverage cannot: these lines all execute.
