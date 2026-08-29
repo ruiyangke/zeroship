@@ -213,7 +213,7 @@ right direction and the wrong outcome.
 ## Relationship to the migration ceiling
 
 The platform already has operator-ceiling machinery with meet semantics
-(`crates/zeroship-migrate-server/src/policy.rs`, `policies/confined.policy.toml`), and
+(`crates/zeroship-migrate-server/src/policy.rs`, `crates/zeroship-migrate-server/policies/confined.policy.toml`), and
 masking now uses the same delivery model, not merely the same vocabulary.
 `migrated`'s default ceiling is `CONFINED_CEILING_TOML` (`policy.rs:48-59`): a
 TOML document compiled into the binary with `include_str!` - operator

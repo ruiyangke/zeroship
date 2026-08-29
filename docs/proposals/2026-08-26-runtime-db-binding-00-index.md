@@ -241,8 +241,8 @@ raw column named with a leading underscore is therefore already unrepresentable
 on every path a creator can reach, and the entire inbound half of the flip
 disappears: no new reservation, no filter-builder change, no schema hint threaded
 through. Adding a `_raw` suffix reservation instead would have to land in **two**
-independent tables (`zeroship-schema/src/query.rs:754` and
-`migrate-core/src/schema/query.rs:379`) with no dependency edge to keep them
+independent tables (`crates/zeroship-schema/src/query.rs:754` and
+`crates/zeroship-migrate-core/src/schema/query.rs:379`) with no dependency edge to keep them
 agreeing. Choosing a name no existing gate admits is strictly better than adding
 a fence, because a fence protects only the surfaces someone remembered to fence.
 
