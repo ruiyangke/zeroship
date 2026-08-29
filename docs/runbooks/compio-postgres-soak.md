@@ -673,3 +673,52 @@ trips is well shaped to catch.
 Read the workload list under "What the run does" as the boundary of what a
 green result means, and add a shape to the harness rather than stretching a
 claim to reach it. That is what this entry is a worked example of.
+
+### Re-measured 2026-08-29 at `463191209`, and one trap in the setup
+
+```text
+max_connections=15 (verified before probing)
+SLOTS held=15 then refused: db error | FATAL: sorry, too many clients already
+SLOTS connect refused after 1.266915ms: db error | FATAL: sorry, too many clients already
+SLOTS pool build refused after 504.959382ms: db error | FATAL: sorry, too many clients already
+SLOTS recovered: SELECT 42 = 42, live=1
+```
+
+Pool-build refusal at 504.96ms against 504.74ms and 505.33ms on the two earlier
+dates, the FATAL still reachable through the chain, and recovery once the slots
+freed. `live=1` here and `live=2` on 2026-08-27 with the same `max_size(2)`
+probe - the count depends on how many idle connections are up at the recovery
+check, so quote what the probe ASKED for, as the note above says.
+
+**THE PREFIX IN THE OLDER TRANSCRIPTS IS NOT WHAT THE PROBE PRINTS.** The
+2026-08-26 and 2026-08-27 blocks above show `EX` and `EX2`; the committed
+`examples/chaos_slots.rs` prints `SLOTS`. Grepping for the documented prefix
+matches nothing, which looks exactly like a probe that produced no output.
+
+**`pg_isready` IS NOT A READY GATE FOR A FRESHLY CREATED CONTAINER.** The
+postgres image runs a TEMPORARY init server and then restarts it. `pg_isready`
+passes against that transient server, so a probe started on it meets a socket
+being torn down. Measured 2026-08-29, first attempt:
+
+```text
+max_connections=
+SLOTS held=0 then refused: error communicating with the server | Connection reset by peer (os error 104)
+SLOTS pool build SUCCEEDED after 528.157676ms - not exhausted
+```
+
+Zero connections held, a reset reported as a refusal, the pool build SUCCEEDING,
+no FATAL anywhere - and the probe still exited 0. The run measured container
+startup and read like a result. Gate on the SETTING instead, and refuse to probe
+if it is not there:
+
+```bash
+for i in $(seq 1 90); do
+  mc=$(docker exec $CT psql -U postgres -tAc "show max_connections" 2>/dev/null | tr -d " \r")
+  [ "$mc" = "15" ] && break
+  sleep 1
+done
+[ "$mc" = "15" ] || { echo "REFUSING: got ${mc:-empty}"; exit 4; }
+```
+
+The empty `max_connections=` line is what exposed it. Echo the value you are
+depending on, not just the fact that you waited.
