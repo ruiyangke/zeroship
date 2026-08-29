@@ -387,3 +387,40 @@ until the walsender releases, on a deadline, and then FAIL if it never does. A
 retry converts a race into a wait; a warning converts a race into a slow leak.
 
 Anything consolidating these teardowns must keep the failure loud.
+
+### CORRECTION: warn-on-teardown is safe here, because a global sweep reclaims the leak
+
+The section above says a teardown that warns instead of failing "makes the run
+green and the slot immortal", and that anything consolidating these teardowns
+"must keep the failure loud". **That is wrong, and I wrote it before reading
+what constrains the leak.**
+
+`tests/common/mod.rs` has `sweep_stale_replication_slots`, which predates this
+work (its doc cites a 2026-08-24 measurement). Its query is GLOBAL:
+
+    SELECT slot_name FROM pg_replication_slots
+      WHERE NOT active AND slot_type = 'logical'
+
+and it drops only those whose `test_object_name`-embedded PID is no longer
+running - so it is safe under concurrent test binaries, and it reclaims a slot
+leaked by ANY fixture, not just its own. It runs via `sweep_stale_test_objects`
+at 8 fixture-setup sites across `pgoutput_options`, `pgoutput_streaming`,
+`pgoutput_live_decode` (3), `pgoutput_subtransactions` (2) and
+`replication_live`, plus directly in `pgoutput_two_phase` (2).
+
+So the orphan I found - `cpg_subtxn_2398063_...`, inactive, owning PID dead - is
+precisely what the next run's sweep collects. The cap of 20 is not approached by
+warn-on-teardown; it would only be approached if the sweep did not exist.
+
+`replication_publication_names.rs` is the one file that warns and does not sweep
+itself, and even its leaks are collected by any other fixture's sweep.
+
+The consolidation also KEEPS the retry: `drop_replication_slot` still loops on
+55006 with a 10s deadline before giving up, which is the part that actually
+fixes the flake.
+
+**What I got wrong, and it is the same error this document keeps recording in
+other people's findings.** I judged a change by the shape of one line -
+`eprintln!` where an `expect` used to be - and reasoned from a resource cap to a
+failure mode without checking whether anything reclaimed the resource. The
+sweep was two files away. Read what bounds the damage before ranking it.
