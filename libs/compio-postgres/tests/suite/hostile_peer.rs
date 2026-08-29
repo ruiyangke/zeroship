@@ -102,7 +102,8 @@
 
 use compio_postgres::Config;
 use compio_postgres::config::{
-    ChannelBinding as ChannelBindingPolicy, ProtocolVersion, SslMode, TargetSessionAttrs,
+    AuthMethod, AuthMethods, ChannelBinding as ChannelBindingPolicy, ProtocolVersion, RequireAuth,
+    SslMode, TargetSessionAttrs,
 };
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -234,6 +235,24 @@ fn notice_frame(message: &str) -> Vec<u8> {
     backend_frame(b'N', &body)
 }
 
+/// A syntactically valid notice padded after its field terminator to retain
+/// exactly `frame_len` bytes. The parser ignores that padding, but the delayed
+/// queue owns it and therefore has to charge it.
+fn padded_notice_frame(frame_len: usize) -> Vec<u8> {
+    let mut body = b"SNOTICE\0VNOTICE\0C00000\0Mbudget notice\0\0".to_vec();
+    let body_len = frame_len
+        .checked_sub(5)
+        .expect("notice wire length includes its five-byte header");
+    assert!(
+        body.len() <= body_len,
+        "padded notice target is shorter than its required fields"
+    );
+    body.resize(body_len, b'x');
+    let frame = backend_frame(b'N', &body);
+    assert_eq!(frame.len(), frame_len);
+    frame
+}
+
 fn parameter_status_frame(name: &str, value: &str) -> Vec<u8> {
     let mut body = name.as_bytes().to_vec();
     body.push(0);
@@ -257,6 +276,15 @@ fn error_response_frame(severity: &str, code: &str, message: &str) -> Vec<u8> {
     body.extend_from_slice(message.as_bytes());
     body.extend_from_slice(&[0, 0]);
     backend_frame(b'E', &body)
+}
+
+fn successful_startup_frames(process_id: i32, secret_key: &[u8]) -> Vec<u8> {
+    let mut response = backend_frame(b'R', &0i32.to_be_bytes());
+    let mut key_data = process_id.to_be_bytes().to_vec();
+    key_data.extend_from_slice(secret_key);
+    response.extend_from_slice(&backend_frame(b'K', &key_data));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    response
 }
 
 fn expect_frontend_frame_from(stream: &mut (impl Read + Write), expected_tag: u8) -> Vec<u8> {
@@ -1165,6 +1193,168 @@ fn assert_sasl_initial_response(body: &[u8], mechanism: &str, gs2_prefix: &[u8])
     );
 }
 
+fn sasl_initial_payload(body: &[u8]) -> &[u8] {
+    let mechanism_end = body
+        .iter()
+        .position(|byte| *byte == 0)
+        .expect("SASL mechanism is not terminated");
+    let length_start = mechanism_end + 1;
+    let payload_start = length_start + 4;
+    let declared = i32::from_be_bytes(
+        body.get(length_start..payload_start)
+            .expect("SASL response length")
+            .try_into()
+            .unwrap(),
+    );
+    let payload = body
+        .get(payload_start..)
+        .expect("SASL initial response payload");
+    assert_eq!(
+        usize::try_from(declared).expect("nonnegative SASL response length"),
+        payload.len(),
+        "SASL initial response length disagrees with its payload"
+    );
+    payload
+}
+
+#[derive(Clone, Copy)]
+enum ScramTerminalFrame {
+    InvalidVerifier,
+    AuthenticationOkBeforeFinal,
+}
+
+/// Drive a valid bare-SCRAM exchange through the client's proof, then replace
+/// the server-final frame. The otherwise-valid startup tail makes either
+/// mutation become connection success rather than merely a different error.
+fn scram_server_through_client_final(terminal: ScramTerminalFrame) -> StubServer {
+    StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+        stream
+            .write_all(&authentication_sasl_frame(b"SCRAM-SHA-256\0\0"))
+            .expect("offer scripted SCRAM");
+        stream.flush().expect("flush scripted SCRAM offer");
+
+        let initial = expect_frontend_frame_from(&mut stream, b'p');
+        assert_sasl_initial_response(&initial, "SCRAM-SHA-256", b"n,,n=");
+        let client_first = std::str::from_utf8(sasl_initial_payload(&initial))
+            .expect("SCRAM client-first is not UTF-8");
+        let client_nonce = client_first
+            .strip_prefix("n,,n=,r=")
+            .expect("SCRAM client-first did not carry its nonce");
+
+        let server_first = format!("r={client_nonce}scripted-server,s=c2FsdA==,i=4096");
+        let mut auth_continue = 11i32.to_be_bytes().to_vec();
+        auth_continue.extend_from_slice(server_first.as_bytes());
+        stream
+            .write_all(&backend_frame(b'R', &auth_continue))
+            .expect("write AuthenticationSaslContinue");
+        stream.flush().expect("flush AuthenticationSaslContinue");
+
+        let client_final = expect_frontend_frame_from(&mut stream, b'p');
+        let client_final =
+            std::str::from_utf8(&client_final).expect("SCRAM client-final is not UTF-8");
+        assert!(
+            client_final.starts_with("c=biws,r=") && client_final.contains(",p="),
+            "client did not send a complete SCRAM proof: {client_final}"
+        );
+
+        let mut response = Vec::new();
+        match terminal {
+            ScramTerminalFrame::InvalidVerifier => {
+                // Correct base64 width for a 32-byte verifier, but deliberately
+                // unrelated to the exchange above.
+                let mut final_body = 12i32.to_be_bytes().to_vec();
+                final_body.extend_from_slice(b"v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+                response.extend_from_slice(&backend_frame(b'R', &final_body));
+            }
+            ScramTerminalFrame::AuthenticationOkBeforeFinal => {
+                response.extend_from_slice(&backend_frame(b'R', &0i32.to_be_bytes()));
+            }
+        }
+
+        // For the early-Ok case this is a second AuthenticationOk. An
+        // accepting mutant consumes the first in the server-final slot and
+        // this one in authenticate's ordinary completion slot.
+        response.extend_from_slice(&backend_frame(b'R', &0i32.to_be_bytes()));
+        let mut key = 915i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1234i32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &key));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        stream
+            .write_all(&response)
+            .expect("write scripted SCRAM terminal sequence");
+        stream
+            .flush()
+            .expect("flush scripted SCRAM terminal sequence");
+        thread::sleep(Duration::from_millis(100));
+    })
+}
+
+#[compio::test]
+async fn an_invalid_scram_server_verifier_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = scram_server_through_client_final(ScramTerminalFrame::InvalidVerifier);
+        let mut config = stub_config(server.addr);
+        config.password("scripted-password");
+
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("invalid-verifier SCRAM exchange hung");
+        server.finish();
+        let error = match result {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("the driver accepted an invalid SCRAM server verifier")
+            }
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("SCRAM verification error"),
+            "invalid SCRAM verifier reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("invalid SCRAM verifier test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn authentication_ok_cannot_replace_scram_final() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server =
+            scram_server_through_client_final(ScramTerminalFrame::AuthenticationOkBeforeFinal);
+        let mut config = stub_config(server.addr);
+        config
+            .password("scripted-password")
+            .require_auth(RequireAuth::Require(AuthMethods::new(
+                AuthMethod::ScramSha256,
+            )));
+
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("early AuthenticationOk SCRAM exchange hung");
+        server.finish();
+        let error = match result {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("AuthenticationOk completed SCRAM without a server-final proof")
+            }
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("scram-sha-256") && chain.contains("did not complete authentication"),
+            "early AuthenticationOk reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("post-continue AuthenticationOk test exceeded its outer watchdog");
+}
+
 #[compio::test]
 async fn duplicate_scram_plus_over_plaintext_is_refused_without_a_response() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -1356,6 +1546,102 @@ async fn tls_without_endpoint_bare_scram_sends_the_y_downgrade_sentinel() {
     .expect("TLS-without-endpoint sentinel test exceeded its outer watchdog");
 }
 
+/// The endpoint-backed `prefer` selector must take PLUS even when the server
+/// lists bare SCRAM first. This asserts only the selected mechanism; the full
+/// channel-binding exchange remains the live TLS suite's responsibility.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn tls_endpoint_prefers_scram_plus_when_both_mechanisms_are_offered() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read PostgreSQL SSLRequest");
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+                8,
+                "SSLRequest length"
+            );
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+                80_877_103,
+                "SSLRequest code"
+            );
+            socket.write_all(b"S").expect("accept TLS negotiation");
+            socket.flush().expect("flush TLS negotiation acceptance");
+
+            let mut tls =
+                rustls::ServerConnection::new(server_config).expect("build TLS server session");
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+            stream
+                .write_all(&authentication_sasl_frame(
+                    b"SCRAM-SHA-256\0SCRAM-SHA-256-PLUS\0\0",
+                ))
+                .expect("offer bare SCRAM and SCRAM-PLUS");
+            stream.flush().expect("flush TLS SASL offer");
+
+            let initial = expect_frontend_frame_from(&mut stream, b'p');
+            let mechanism_end = initial
+                .iter()
+                .position(|byte| *byte == 0)
+                .expect("SASL mechanism is not terminated");
+            assert_eq!(
+                &initial[..mechanism_end],
+                b"SCRAM-SHA-256-PLUS",
+                "endpoint-backed channel_binding=prefer selected the weaker mechanism"
+            );
+
+            stream
+                .write_all(&error_response_frame(
+                    "FATAL",
+                    "28P01",
+                    "scripted stop after SCRAM-PLUS selection",
+                ))
+                .expect("stop endpoint-backed SCRAM exchange");
+            stream.flush().expect("flush endpoint-backed SCRAM stop");
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let mut config = dsn.parse::<Config>().expect("parse TLS SCRAM config");
+        config
+            .password("scripted-password")
+            .channel_binding(ChannelBindingPolicy::Prefer);
+        let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build unverified rustls connector");
+
+        let result = Box::pin(compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect(tls),
+        ))
+        .await;
+        server.finish();
+        let error = match result.expect("endpoint-backed SCRAM selection hung") {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("the scripted endpoint-backed peer never completed SCRAM")
+            }
+        };
+        assert_eq!(
+            error.code().map(compio_postgres::error::SqlState::code),
+            Some("28P01"),
+            "the scripted FATAL did not end the selected SCRAM exchange"
+        );
+    }))
+    .await
+    .expect("endpoint-backed SCRAM-PLUS test exceeded its outer watchdog");
+}
+
 async fn protocol_negotiation_rejection(requested: ProtocolVersion, response: Vec<u8>) -> String {
     let expected_wire = match requested {
         ProtocolVersion::V3_0 => 0x0003_0000,
@@ -1381,6 +1667,289 @@ async fn protocol_negotiation_rejection(requested: ProtocolVersion, response: Ve
     };
     server.finish();
     common::error_chain(&error)
+}
+
+#[compio::test]
+async fn the_first_delayed_frame_crossing_the_byte_budget_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        // Literal contract values: two frames total exactly 1 MiB in the
+        // control and one byte more in the hostile case.
+        let cases = [
+            ("exact budget", 524_288usize, 916i32, true),
+            ("one byte over", 524_289usize, 917i32, false),
+        ];
+        let mut ruled_on = 0;
+
+        for (label, second_len, process_id, accepted) in cases {
+            let server = StubServer::spawn(move |listener| {
+                let mut stream = accept_bounded(&listener);
+                assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+                let mut response = padded_notice_frame(524_288);
+                response.extend_from_slice(&padded_notice_frame(second_len));
+                response.extend_from_slice(&successful_startup_frames(
+                    process_id,
+                    &1234i32.to_be_bytes(),
+                ));
+                stream
+                    .write_all(&response)
+                    .expect("write byte-budget startup response");
+                stream.flush().expect("flush byte-budget startup response");
+                thread::sleep(Duration::from_millis(100));
+            });
+
+            let result = compio::time::timeout(
+                OPERATION_WATCHDOG,
+                stub_config(server.addr).connect(compio_postgres::NoTls),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{label} handshake hung"));
+            server.finish();
+
+            match (accepted, result) {
+                (true, Ok((client, connection))) => {
+                    assert_eq!(client.process_id(), process_id);
+                    drop((client, connection));
+                }
+                (true, Err(error)) => {
+                    panic!("messages totaling exactly 1 MiB were refused: {error}")
+                }
+                (false, Err(error)) => {
+                    let chain = common::error_chain(&error);
+                    assert!(
+                        chain.contains("exceed 1048576 bytes"),
+                        "the first crossing frame reported the wrong error: {chain}"
+                    );
+                }
+                (false, Ok(pair)) => {
+                    drop(pair);
+                    panic!("the handshake retained byte 1048577")
+                }
+            }
+            ruled_on += 1;
+        }
+
+        assert_eq!(ruled_on, 2, "the byte-budget boundary ruled on no cases");
+    }))
+    .await
+    .expect("delayed-byte boundary test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn duplicate_backend_key_data_during_startup_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut first = 918i32.to_be_bytes().to_vec();
+        first.extend_from_slice(&1111i32.to_be_bytes());
+        let mut second = 919i32.to_be_bytes().to_vec();
+        second.extend_from_slice(&2222i32.to_be_bytes());
+
+        let mut response = backend_frame(b'R', &0i32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &first));
+        response.extend_from_slice(&backend_frame(b'K', &second));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let chain = protocol_negotiation_rejection(ProtocolVersion::V3_2, response).await;
+        assert!(
+            chain.contains("BackendKeyData more than once"),
+            "duplicate BackendKeyData reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("duplicate BackendKeyData test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn backend_key_data_after_keyless_startup_completion_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+            // Deliberately keyless: if the phase check is removed, the late
+            // key cannot be rejected by the independent duplicate-key guard.
+            let mut startup = backend_frame(b'R', &0i32.to_be_bytes());
+            startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream.write_all(&startup).expect("write keyless startup");
+            stream.flush().expect("flush keyless startup");
+
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"SHOW transaction_read_only\0"
+            );
+            let mut late_key = 920i32.to_be_bytes().to_vec();
+            late_key.extend_from_slice(&4321i32.to_be_bytes());
+            let mut response = backend_frame(b'K', &late_key);
+
+            let mut row = 1u16.to_be_bytes().to_vec();
+            row.extend_from_slice(&3i32.to_be_bytes());
+            row.extend_from_slice(b"off");
+            response.extend_from_slice(&backend_frame(
+                b'T',
+                &row_description(&["transaction_read_only"]),
+            ));
+            response.extend_from_slice(&backend_frame(b'D', &row));
+            response.extend_from_slice(&backend_frame(b'C', b"SHOW\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write late key and target-session response");
+            stream
+                .flush()
+                .expect("flush late key and target-session response");
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let mut config = stub_config(server.addr);
+        config.target_session_attrs(TargetSessionAttrs::ReadWrite);
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("post-startup BackendKeyData hung");
+        server.finish();
+        let error = match result {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("BackendKeyData after ReadyForQuery was accepted")
+            }
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("BackendKeyData after startup completed"),
+            "late BackendKeyData reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("post-startup BackendKeyData test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn malformed_protocol_negotiations_are_refused_before_the_valid_tail() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let cases = [
+            (
+                "negative option count",
+                protocol_negotiation_frame(0x0003_0000, -1, b""),
+                "negative unsupported-option count",
+                921i32,
+            ),
+            (
+                "unknown protocol 3.1",
+                protocol_negotiation_frame(0x0003_0001, 0, b""),
+                "unsupported protocol version 3.1",
+                922i32,
+            ),
+        ];
+        let mut ruled_on = 0;
+
+        for (label, mut response, expected, process_id) in cases {
+            response.extend_from_slice(&successful_startup_frames(
+                process_id,
+                &1234i32.to_be_bytes(),
+            ));
+            let chain = protocol_negotiation_rejection(ProtocolVersion::V3_2, response).await;
+            assert!(
+                chain.contains(expected),
+                "{label} reported the wrong error: {chain}"
+            );
+            ruled_on += 1;
+        }
+
+        assert_eq!(
+            ruled_on, 2,
+            "the malformed-negotiation matrix ruled on no cases"
+        );
+    }))
+    .await
+    .expect("malformed negotiation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_without_backend_key_data_is_usable_but_not_cancellable() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+            let mut startup = backend_frame(b'R', &0i32.to_be_bytes());
+            startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream.write_all(&startup).expect("write keyless startup");
+            stream.flush().expect("flush keyless startup");
+
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            let mut query = backend_frame(b'C', b"SELECT 1\0");
+            query.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream.write_all(&query).expect("answer keyless query");
+            stream.flush().expect("flush keyless query");
+
+            assert!(
+                expect_frontend_frame_from(&mut stream, b'X').is_empty(),
+                "Terminate declared a body instead of PostgreSQL's exact length 4"
+            );
+        });
+
+        // Use the caller-owned-stream path so dropping `Client` does not race
+        // the connection task's Terminate write with the normal socket-release
+        // guard's synchronous shutdown.
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting to the keyless peer hung")
+        .expect("connect to the keyless peer");
+        let config = stub_config(server.addr);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("keyless startup hung")
+        .unwrap_or_else(|error| panic!("keyless startup was refused: {error}"));
+        assert_eq!(client.process_id(), 0);
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        compio::time::timeout(OPERATION_WATCHDOG, client.batch_execute("SELECT 1"))
+            .await
+            .expect("query on keyless connection hung")
+            .expect("keyless connection was unusable");
+
+        let cancellation = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.cancel_token().cancel_query(compio_postgres::NoTls),
+        )
+        .await
+        .expect("missing-key cancellation hung")
+        .expect_err("a cancellation request was fabricated without a key");
+        let chain = common::error_chain(&cancellation);
+        assert!(
+            chain.contains("did not provide BackendKeyData"),
+            "missing-key cancellation reported the wrong error: {chain}"
+        );
+
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("keyless connection did not shut down after Terminate")
+            .expect("keyless connection task panicked")
+            .expect("keyless connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("keyless-startup test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn protocol_3_0_refuses_a_variable_cancel_key_without_negotiation() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let response = successful_startup_frames(923, &[0x5a; 32]);
+        let chain = protocol_negotiation_rejection(ProtocolVersion::V3_0, response).await;
+        assert!(
+            chain.contains("32-byte cancel key") && chain.contains("protocol 3.0"),
+            "protocol 3.0 variable key reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("protocol 3.0 cancel-key test exceeded its outer watchdog");
 }
 
 #[compio::test]
