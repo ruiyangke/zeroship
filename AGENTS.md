@@ -192,9 +192,19 @@ These don't change. If you're about to violate one, stop and ask.
 
   **THAT SCHEMA DOES NOT EXIST TODAY, AND THIS PARAGRAPH SAID IT DID UNTIL 2026-08-29.** The sentence above describes the END STATE the invariant permits, not the tree. `__zeroship_admin`, its six tables and its 32 definer-rights routines were deleted on 2026-08-27 under this very invariant, and `crates/zeroship-plugin-db/src/auth/bootstrap.rs:15-18` records that **nothing replaced them**. `db/migrations-ts/` provisions no such schema - zero occurrences. One live statement still names it and therefore fails on every database: the PITR placeholder at `crates/zeroship-plugin-db/src/backend/postgres.rs:1286`, whose own comment at `:770-776` says the schema "NO LONGER EXISTS" and "the INSERT below therefore fails on every database", left in place because rehoming PITR targets is a design decision rather than a deletion.
 
-  The schema epoch does not exist either - but **its consumer does, fully built**. `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, `:313-315` compares observed against expected and returns `Verdict::ReResolve`, and that becomes the wire's only retryable protocol error. What is missing is the producer: `crates/zeroship-plugin-db/src/transaction/driver.rs:106` mints `SchemaEpoch::new(0)` on both sides, and says so - "The wiring is real; the *input* is not yet... the day a record exists, this is the one function that has to change."
+  The schema epoch does not exist either - but **a comparison for it is built**. `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:313-315` compares observed against expected and returns `Verdict::ReResolve`. The producer is missing: `crates/zeroship-plugin-db/src/transaction/driver.rs:106` mints `SchemaEpoch::new(0)` on both sides, and says so - "The wiring is real; the *input* is not yet... the day a record exists, this is the one function that has to change."
 
-  So: the invariant is live and binding, the schema is a reservation rather than a fact, and anyone building the epoch is supplying one input to a classifier that already ships - not building a subsystem. Read the two sentences above as a design permission, never as a description of what you will find.
+  **THAT COMMENT, AND AN EARLIER VERSION OF THIS PARAGRAPH, UNDERSTATE THE WORK - corrected 2026-08-29.** Supplying the input is necessary and not sufficient, because the comparison cannot see the fence it is supposed to react to. `classify` runs on a synthetic observation BEFORE the session opens, and a real `SET LOCAL ROLE` failure - which is how a role-name-borne epoch fence fires - arrives as `BeginCompleted { opened: false }` and is routed straight to cleanup at `crates/zeroship-plugin-db/src/transaction/reducer/mod.rs:966-972`:
+
+  ```rust
+  if !opened {
+      return self.force(CleanupCause::BeginFailed, now).1;
+  }
+  ```
+
+  It never reaches `classify`. So an epoch mechanism enforced by PostgreSQL needs a third piece nobody had named: an adapter from the session-setup outcome into `Verdict::ReResolve`. This is the same seam that discards a classified `GRANT_REVOKED` into a generic `begin_failed` - `BeginFailed` is where classified setup errors go to die, and any fix should treat the two as one defect.
+
+  So: the invariant is live and binding, the schema is a reservation rather than a fact, and the epoch needs a producer AND a setup-outcome adapter. Read the two sentences above as a design permission, never as a description of what you will find.
 
   **The counter-example is live in the tree.** DB-3: app JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to read its own PII, PHI and PCI at will. It is patched by `sanitize_app_actor`, which strips an actor claiming a reserved system kind to `None` (defined in `crates/zeroship-plugin-db/src/crud/unmask.rs`, applied at all three sites that reach `check_unmask_authorization`: `parse_args`, `parse_bulk_args`, and `crud/mod.rs`'s query-hint path) - but the bug is not an accident of that implementation. It is what the shape produces, and a privileged call the worker can make will keep producing it.
 
