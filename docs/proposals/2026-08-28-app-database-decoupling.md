@@ -31,7 +31,31 @@ replication plane is not fenced at all - see 5.1, and the boot posture *requires
 
 So the accurate claim is narrower than the one this paragraph used to make: **role membership fences
 the SQL executor plane, and nothing else.** Anyone reading it as "the worker cannot reach another
-tenant's bytes" is wrong on two paths. Revoking a grant is one `REVOKE`; the next transaction on
+tenant's bytes" is wrong on two paths.
+
+**AND THE REVOCATION CLAIM BELOW IS FALSE AS SOON AS TWO APPS SHARE A NAMESPACE. Measured on
+17.11.** `SET ROLE` authorizes against the membership of the role that *connected*, and in this
+design that is always the single shared worker login - never the app. Revoking the app's grant is a
+control-plane fact with no database consequence:
+
+| step | result |
+| --- | --- |
+| worker `SET ROLE zs_ns_1_rw`, then `SELECT` | 1 row |
+| `REVOKE zs_ns_1_rw FROM zs_app_a` | applied - `pg_auth_members` for that pair drops to **0** |
+| worker `SET ROLE zs_ns_1_rw`, then `SELECT` again | **1 row - unchanged** |
+
+The app's membership is genuinely gone and the worker's reach is untouched, because the worker's own
+membership is what the check reads. **So revocation is fenced by the in-process binding table and by
+nothing else** - which is exactly the property this section opens by disclaiming ("Enforcement is
+PostgreSQL role membership, not an in-process check").
+
+This is load-bearing for the whole shared shape. Either app principals must be what connects or
+assumes - a role per app with its own membership, at the cost of the connection model - or the
+design must state plainly that a revoked co-grant is enforced in process, and price that against the
+CDC fan-out map which has the same property. The paragraph below describes the single-app case,
+where the app and the connection are the same principal.
+
+Revoking a grant is one `REVOKE`; the next transaction on
 the same already-pooled connection fails with SQLSTATE 42501 and no eviction, restart or cache
 flush. There is no incarnation token, no version counter, and no pre-query lookup that the
 worker could be wrong about.
