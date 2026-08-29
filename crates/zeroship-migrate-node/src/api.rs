@@ -394,6 +394,96 @@ mod tests {
     }
 
     #[test]
+    fn load_verify_rejects_reserved_zeroship_collection() {
+        let envelope = serde_json::json!({
+            "ir_version": current_ir_version(),
+            "name": "reserved_collection",
+            "ops": [{
+                "op": "createTable",
+                "name": "__zeroship_probe",
+                "columns": [{ "name": "id", "type": "int" }],
+                "primaryKey": null
+            }]
+        });
+
+        let r = load_verify(
+            &envelope.to_string(),
+            "app_x",
+            "postgres",
+            &empty_registry(),
+            "app_x",
+        );
+
+        assert!(!r.ok, "reserved collection must fail authoring validation");
+        assert_eq!(r.ir_version, None);
+        assert_eq!(r.op_count, None);
+        assert!(
+            r.error.as_deref().is_some_and(|message| {
+                message.contains("__zeroship_probe")
+                    && message.contains("reserved prefix '__zeroship'")
+            }),
+            "error should identify the reserved collection: {:?}",
+            r.error
+        );
+    }
+
+    #[test]
+    fn load_verify_rejects_reserved_relation_destinations() {
+        let registry = HashMap::from([
+            ("events".to_string(), "app_x".to_string()),
+            ("widgets".to_string(), "app_x".to_string()),
+        ]);
+        let cases = [
+            (
+                "partition",
+                serde_json::json!({
+                    "op": "createPartition",
+                    "name": "__zeroship_probe",
+                    "of": "events",
+                    "bounds": {
+                        "kind": "range",
+                        "from": [{ "kind": "string", "value": "2026-01-01T00:00:00Z" }],
+                        "to": [{ "kind": "string", "value": "2026-02-01T00:00:00Z" }]
+                    }
+                }),
+            ),
+            (
+                "rename",
+                serde_json::json!({
+                    "op": "renameTable",
+                    "table": "widgets",
+                    "to": "__zeroship_probe"
+                }),
+            ),
+        ];
+
+        for (label, op) in cases {
+            let envelope = serde_json::json!({
+                "ir_version": current_ir_version(),
+                "name": format!("reserved_{label}"),
+                "ops": [op]
+            });
+            let r = load_verify(
+                &envelope.to_string(),
+                "app_x",
+                "postgres",
+                &registry,
+                "app_x",
+            );
+
+            assert!(!r.ok, "{label} destination must fail authoring validation");
+            assert!(
+                r.error.as_deref().is_some_and(|message| {
+                    message.contains("__zeroship_probe")
+                        && message.contains("reserved prefix '__zeroship'")
+                }),
+                "{label} destination did not reach the reserved-name gate: {:?}",
+                r.error
+            );
+        }
+    }
+
+    #[test]
     fn gen_artifacts_from_envelopes_renders_both_files() {
         // A minimal generated source: one create-table envelope carrying ONLY the
         // author column - exactly the RAW shape the pure-JS recorder emits (no system

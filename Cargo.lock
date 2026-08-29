@@ -7874,6 +7874,8 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "zeroship-core",
+ "zeroship-data-plan",
+ "zeroship-migrate-core",
 ]
 
 [[package]]

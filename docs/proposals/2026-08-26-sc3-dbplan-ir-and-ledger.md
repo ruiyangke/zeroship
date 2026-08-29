@@ -71,14 +71,14 @@ source is worse than no ledger, because it reports completeness it never
 measured.
 
 Two of the preamble entries are security-critical and are **a pair, not a single
-guardian**: `validate_collection`'s reserved-prefix check (`query.rs:650-653`,
-`__zeroship` and `pg_`) fences *table* names, and a separate reservation list
-(`RESERVED_NAMES`, `query.rs:738-766` - `ReservedName::Prefix("__zeroship_")`,
+guardian**: `validate_collection`'s reserved-prefix check (`pg_`,
+`__zero_migrate`, and `__zeroship`) fences *table* names, and a separate
+reservation list (`RESERVED_NAMES` - `ReservedName::Prefix("__zeroship_")`,
 `"__zs_"`, `"sqlite_"`, `"_"`, plus the `_masked` sibling suffix and the
-classification names) fences *column* names. Moving one without the other is the
-more dangerous half of a bulk move, because the survivor makes the namespace
-look defended. Both move to `shared/identifier.rs`, together, each with its own
-gate arm and its own vectors.
+classification names) fences *column* names. Moving one without the other is
+the more dangerous half of a bulk move, because the survivor makes the
+namespace look defended. Both move to `shared/identifier.rs`, together, each
+with its own gate arm and its own vectors.
 
 ## The IR, at the altitude that matters
 

@@ -5,12 +5,11 @@
 //! `crates/zeroship-schema/src/query.rs` builds SQL by string concatenation.
 //! A caller-supplied name reaches a `format!` and correctness rests on a
 //! validator having been called first, on a path that is not the one doing the
-//! formatting. The validators are good ones - `validate_collection`
-//! (`query.rs:626-664`) and `validate_field_name` (`query.rs:793-849`) both
-//! refuse NUL bytes, over-long names, non-ASCII, and a table of reserved
-//! shapes - but they are *functions someone remembered to call*, and the type
-//! that reaches the renderer afterwards is `&str`, which is also the type of
-//! everything they refused.
+//! formatting. The validators are good ones - `validate_collection` and
+//! `validate_field_name` both refuse NUL bytes, over-long names, non-ASCII, and
+//! a table of reserved shapes - but they are *functions someone remembered to
+//! call*, and the type that reaches the renderer afterwards is `&str`, which is
+//! also the type of everything they refused.
 //!
 //! [`Ident`] closes that gap by construction. It has exactly one constructor,
 //! [`Ident::parse_as`]. Its field is private, so it cannot be built by struct
@@ -56,19 +55,16 @@
 //! `__zs_`, `__zeroship_`, `sqlite_`, the `_masked` sibling suffix, and the six
 //! classification names).
 //!
-//! **`validate_collection` is FORKED, and the two forks reserve different
-//! prefixes.** The data plane's
-//! (`zeroship-schema/src/query.rs`) fences `__zeroship`; the migration
-//! authoring path's (`zeroship-migrate-core/src/schema/query.rs`) fences
-//! `__zero_migrate` and does NOT fence `__zeroship`. A creator's `createTable`
-//! passes through the authoring fork, so a `__zeroship`-prefixed table name is
-//! not refused there. Do not restate either fork's list as "the" reserved set:
-//! an earlier version of this comment did, citing line numbers that no longer
-//! exist, and that is a claim that reads as protection.
+//! **`validate_collection` is FORKED.** The data plane and migration engine
+//! once reserved different platform prefixes. They now execute matching
+//! `PLATFORM_RESERVED_COLLECTION_PREFIXES` slices, and the data-plane suite
+//! compares every copy. This crate is the third copy because its zero-dependency
+//! boundary forbids importing either validator.
 //!
-//! Moving one without the other is the dangerous half of the move, because the survivor
-//! makes the namespace look defended. Both are re-stated below, together, each
-//! with its own arm in `tests/ident_refusals.rs`.
+//! Normal declarative migration loading now calls the migration engine's
+//! `validate_collection`, so a creator `createTable` is fenced before lowering.
+//! Code paths that do not load migration IR must still invoke their own copy;
+//! matching slices do nothing by themselves.
 //!
 //! Three role-specific decisions are deliberate departures from the shapes in
 //! `query.rs`, and each is called out on the table that carries it:
@@ -79,9 +75,9 @@
 //!   `validate_field_name` does not. See [`ALIAS_RESERVATIONS`].
 //! * No role fences the seven platform system-field names. That reservation
 //!   fires only at schema-declaration time
-//!   (`validate_field_name_for_declaration`, `query.rs:867-878`), and this
-//!   crate plans no DDL - `db.users.find({ id: "..." })` is the canonical query
-//!   shape and must keep working.
+//!   (`validate_field_name_for_declaration`), and this crate plans no DDL -
+//!   `db.users.find({ id: "..." })` is the canonical query shape and must keep
+//!   working.
 
 use core::fmt;
 
@@ -94,6 +90,13 @@ use core::fmt;
 /// is why `zeroship_schema::ident::cap_ident_name` caps rather than refuses;
 /// this crate never derives a name.
 pub const MAX_IDENT_BYTES: usize = 63;
+
+/// Platform-owned collection prefixes mirrored by both query validators.
+///
+/// Public only so the data-plane suite can enforce exact parity without adding
+/// a production dependency to this zero-dependency crate.
+#[doc(hidden)]
+pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
 
 /// Where an identifier is about to be used. The fences differ per role, so the
 /// role is a required argument to [`Ident::parse_as`] rather than something a
@@ -147,9 +150,8 @@ impl fmt::Display for IdentRole {
     }
 }
 
-/// The shape of a reservation. Mirrors `query.rs`'s `ReservedName`
-/// (`query.rs:694-701`) so the fences can be compared row by row when the port
-/// moves them.
+/// The shape of a reservation. Mirrors `query.rs`'s `ReservedName` so the
+/// fences can be compared row by row when the port moves them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reservation {
     /// Refuse a name spelled exactly this.
@@ -199,24 +201,22 @@ const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Table-name fences. `pg_` and `__zeroship` are `validate_collection`'s two
-/// reserved prefixes verbatim (`query.rs:645-653`).
+/// Additional table-name fences beyond the shared platform prefix slice.
 ///
 /// `sqlite_` is **added**, and its absence from `validate_collection` looks
 /// like a straightforward inversion rather than a decision: `SQLite` reserves the
 /// `sqlite_` prefix for *table* names specifically, yet in `query.rs` it is
-/// fenced only on columns (`RESERVED_NAMES`, `query.rs:738-766`) - the one
-/// place `SQLite` does not reserve it. The dev tier is `SQLite`, so the fence
-/// belongs on both roles here.
+/// fenced only on columns (`RESERVED_NAMES`) - the one place `SQLite` does not
+/// reserve it. The dev tier is `SQLite`, so the fence belongs on both roles
+/// here.
 const COLLECTION_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
-    Reservation::Prefix("__zeroship"),
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Column-name fences, in `RESERVED_NAMES` order (`query.rs:738-766`) so the
-/// error a given name produces is the same one it produces today.
+/// Column-name fences, in `RESERVED_NAMES` order so the error a given name
+/// produces is the same one it produces today.
 ///
 /// `Prefix("_")` subsumes `__zs_` and `__zeroship_`; both are kept anyway,
 /// because the port SC-3 describes is a *move* of this table and a move that
@@ -282,9 +282,9 @@ pub enum IdentError {
     ///
     /// The offending character is reported escaped, and the *name* is not
     /// echoed at all. This is a deliberate departure from
-    /// `validate_field_name`, whose message interpolates the raw name
-    /// (`query.rs:814`) and so can carry control characters or a broken
-    /// escape into whatever reads the error.
+    /// `validate_field_name`, whose message interpolates the raw name and so
+    /// can carry control characters or a broken escape into whatever reads the
+    /// error.
     IllegalCharacter { role: IdentRole, character: char },
     /// The name hit the role's reservation table. Safe to echo: the charset
     /// check runs first, so `name` here is always `[A-Za-z0-9_]`.
@@ -368,6 +368,18 @@ impl Ident {
                 role,
                 character: bad,
             });
+        }
+        if role == IdentRole::Collection {
+            for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
+                let reservation = Reservation::Prefix(prefix);
+                if reservation.matches(raw) {
+                    return Err(IdentError::Reserved {
+                        role,
+                        name: raw.to_string(),
+                        reservation: reservation.describe(),
+                    });
+                }
+            }
         }
         for reservation in role.reservations() {
             if reservation.matches(raw) {

@@ -1454,37 +1454,23 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
     cleanup_user(&conn, &owner_id).await;
 }
 
-/// WHAT ACTUALLY STOPS A CREATOR MIGRATION THAT NAMES THE PLATFORM JOURNAL, and
-/// it is NOT the `__zeroship_` prefix.
+/// WHAT ACTUALLY STOPS A CREATOR MIGRATION THAT NAMES THE PLATFORM JOURNAL.
 ///
-/// This case exists because the obvious claim - "the prefix is reserved, so the
-/// name is refused" - is false, and a test that only asserted "the request is
-/// refused" would let it keep reading as true. `validate_collection`
-/// (`crates/zeroship-migrate-core/src/schema/query.rs`) reserves the prefix
-/// `__zero_migrate`, NOT `__zeroship`; a name starting `__zeroship_` passes it
-/// cleanly, and that validator is on the CRUD path, not the migration-authoring
-/// path. Nothing on the authoring path fences the name at all.
+/// The exact refusal matters. A generic 4xx assertion cannot distinguish the
+/// authoring fence from the independent apply-time and destructive guards:
 ///
-/// MEASURED 2026-08-28 against live PostgreSQL 16, with the refusal each op
-/// actually gets:
-///
-/// * `createTable "__zeroship_schema_migrations"` -> *"relation
-///   `__zeroship_schema_migrations` already exists"*. That is an ORDERING
-///   guarantee, not a name check: `ensure_journal` bootstraps the journal before
-///   any creator DDL runs, so the name is always taken by the time the creator's
-///   op executes. It holds for every app, including one migrating for the first
-///   time - the second arm below is what checks that.
+/// * `createTable "__zeroship_schema_migrations"` -> the declarative load gate's
+///   reserved-prefix refusal, before SQL is emitted. Provision-before-apply and
+///   journal bootstrap ordering still prevent silent adoption if an unchecked
+///   artifact reaches execution, but this HTTP path should not need that fallback.
 /// * `dropTable "__zeroship_schema_migrations"` -> *"plan requires approval
 ///   (destructive) but none was given"*. That is the ENGINE's destructive gate,
 ///   reached because this host passes `Approval::None`. **A change that made the
 ///   host assert approval on the creator's behalf would hand them their own
 ///   journal**, and this assertion is the tripwire for it.
 ///
-/// So the prefix's real value is that it moves the journal off the name a creator
-/// would plausibly pick by accident (`schema_migrations`) - which was a live
-/// silent-adoption hazard - and leaves only the deliberate case. Closing the
-/// deliberate case needs a name reservation on the authoring path; there is not
-/// one today, and this test says so rather than implying otherwise.
+/// The prefix still moves the journal off a plausible accidental name, while the
+/// authoring validator now closes the deliberate `createTable` case early.
 #[ntex::test]
 async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     let conn = admin_conn().await;
@@ -1528,7 +1514,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
         (
             "createTable",
             create_platform_journal_table_request(),
-            "already exists",
+            "reserved prefix '__zeroship'",
         ),
         (
             "dropTable",
@@ -1539,8 +1525,9 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
         let resp = test::call_service(&svc, post(request)).await;
         let status = resp.status();
         let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-        assert!(
-            status.is_client_error(),
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "{label} on the platform journal answered {status}: {body}"
         );
         let detail = body["detail"].as_str().unwrap_or_default();
@@ -1565,13 +1552,8 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
         "a refused migration must not have journalled anything"
     );
 
-    // ARM 2: THE APP THAT HAS NEVER MIGRATED, which is where the ordering
-    // guarantee above is actually load-bearing. On an app whose journal does not
-    // exist yet, a `createTable` naming it would be the FIRST writer - and the
-    // engine's `CREATE TABLE IF NOT EXISTS` bootstrap would then adopt the
-    // creator's table as the journal, so every migration in it would read as
-    // already applied. The arm above cannot see this: it ran against an app whose
-    // journal a previous request had already created.
+    // ARM 2: AN APP THAT HAS NEVER MIGRATED. The refusal must come from the name
+    // gate rather than from colliding with a journal an earlier request created.
     let fresh_id = Uuid::now_v7();
     let fresh_owner = Uuid::new_v4();
     seed_app(&conn, fresh_id, fresh_owner).await;
@@ -1599,14 +1581,17 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     .await;
     let status = resp.status();
     let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    assert!(
-        status.is_client_error(),
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
         "an app's FIRST migration shadowed the journal and was accepted ({status}): {body}"
     );
     assert!(
-        body["detail"].as_str().unwrap_or_default().contains("already exists"),
-        "the first-migration case was refused for a different reason than the \
-         journal bootstrap winning the race: {body}"
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reserved prefix '__zeroship'"),
+        "the first-migration case did not reach the authoring name fence: {body}"
     );
     let _ = std::fs::remove_dir_all(fresh_tmp);
     cleanup_app(&conn, &fresh_id).await;

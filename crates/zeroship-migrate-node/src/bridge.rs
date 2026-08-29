@@ -746,19 +746,15 @@ pub fn apply_ir_sqlite(
         // live DDL from the data plane; `zeroship-migrate-server`'s
         // `provision_audit_unmask_table` is the Postgres half.
         //
-        // BEFORE `deploy_envelopes`, and the order is the whole defence against
-        // a creator claiming the name. `validate_collection` is FORKED, and the
-        // engine's copy (`zeroship-migrate-core`'s `schema/query.rs`) fences
-        // `__zero_migrate` but NOT `__zeroship` - and the declarative path does
-        // not call it at all. So nothing in authoring refuses a creator
-        // migration that declares `__zeroship_audit_unmask`. What refuses it is
-        // that the platform table already exists by the time the creator's
-        // `createTable` runs, which turns the collision into a loud
-        // "table already exists" apply failure instead of a silent adoption of
-        // a creator-shaped table that the worker would then write PII reads
-        // into. Postgres gets the identical guarantee the identical way
-        // (`apply.rs` provisions before `apply_sealed`), and it is the same
-        // ordering argument the engine's own journal bootstrap relies on.
+        // BEFORE `deploy_envelopes`, so the apply-time ordering still prevents
+        // silent adoption if an unchecked artifact ever reaches execution.
+        // Normal declarative loading now calls the migration engine's
+        // `validate_collection` and refuses `__zeroship` before emitting SQL;
+        // the ordering remains an independent second defence rather than the
+        // creator-facing error path. Postgres gets the identical guarantee the
+        // identical way (`apply.rs` provisions before `apply_sealed`), and it is
+        // the same ordering argument the engine's own journal bootstrap relies
+        // on.
         backend
             .ensure_audit_unmask_table_sqlite()
             .await
