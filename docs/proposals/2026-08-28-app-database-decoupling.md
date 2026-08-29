@@ -203,7 +203,16 @@ reasoning holds exactly while one app owns the namespace exclusively. It is also
 link on a private namespace, because nothing below the descriptor objects.
 
 The migration service emits column-level grants from the **owner's own IR**, withholding every
-column whose classification is not `none` and granting its mask sibling instead. Measured on 18.4:
+column whose classification is not `none` and granting the column that holds the mask instead.
+
+*The transcripts in this section and in 5.2 use a probe table whose columns are literally
+`id, name, ssn, ssn_masked, dob`. **`ssn_masked` is that probe's own name, not a platform
+convention** - SC-6's storage flip (`3fd54f177`) deleted the `_masked` sibling entirely, and the
+field's own column now holds the mask while `__zs_raw__ssn` holds the plaintext. The measurements are
+about PostgreSQL grant and publication semantics, which do not depend on the names, so they stand as
+recorded; only read them for the semantics, not for the naming.*
+
+Measured on 18.4:
 
 | Grant state on `ns_t.patients` | `SELECT ssn` as `zs_ns_t_rw` |
 | --- | --- |
