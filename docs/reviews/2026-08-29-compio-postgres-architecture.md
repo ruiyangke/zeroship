@@ -522,3 +522,49 @@ byte of the suite through the TLS stream instead of a plain socket, and the
 default `cargo test` does not even BUILD it. A buffered-read change is exactly
 the kind that can behave differently there. Passing the default shape twice is
 not evidence about shapes that were never compiled.
+
+## RETRACTION: the TLS layer is already unified, and I claimed otherwise
+
+I wrote above that the split/whole duplication removed from `buf_stream.rs`
+"still exists in the TLS layer", called it "the one piece of real structural
+debt", and dispatched a job to fix it. **That was wrong.** The job measured
+first, as its brief required, and stopped without changing anything.
+
+The bodies are one line each:
+
+    impl<S> AsyncRead for TlsStreamCore<S> {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.reader.read_into(buf).await
+        }
+    }
+    impl<R> AsyncRead for TlsReadHalf<R> {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.reader.read_into(buf).await
+        }
+    }
+
+`TlsReader::read_into` IS the shared body; the two impls are adapters onto it.
+`MaybeTlsStream::read` is a two-arm match delegating to the inner stream. There
+is no second copy of any framing logic to unify.
+
+The write side is the same. Of the 11 `fn flush` in `tls_sansio.rs`:
+
+    2  shared free functions - flush_outgoing, flush_through (the implementation)
+    2  real impls, 3 and 4 lines, both delegating to those
+    7  test doubles nested in `mod tests`
+
+**How I got it wrong: I counted grep hits instead of reading bodies.** The
+evidence I used was `grep -c 'fn flush'` = 11 and `grep -c 'ReadHalf\|WriteHalf'`
+= 20 and 32. Those count occurrences, and an occurrence includes a one-line
+delegation and a test mock. `buf_stream.rs` really did have 26 character-
+identical lines - I measured that one properly, and then generalised the
+CONCLUSION to a neighbour without repeating the MEASUREMENT.
+
+This is the failure this document catalogues in carried findings - grep answers
+spelling, not behaviour - committed by me, on my own finding, after correcting
+two others for the same thing today.
+
+**What survives.** The `buf_stream` unifications were real and are landed. The
+mutation survivors in the TLS split halves were real and are now tested. What
+does not survive is the claim that TLS carries the same duplication: it does
+not, and the adapters there are the right shape already.
