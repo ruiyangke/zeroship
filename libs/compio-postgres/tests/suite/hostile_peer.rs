@@ -475,6 +475,16 @@ struct OrderedBatchReadHalf {
 
 struct OrderedBatchWriteHalf;
 
+/// An unsplittable scripted transport that records every nonempty frontend
+/// flush. Returning one backend vector per read lets a test force a protocol
+/// boundary into one decoder batch while still observing the next request.
+struct RecordedBatchPeer {
+    startup: Option<Vec<u8>>,
+    responses: std::collections::VecDeque<Vec<u8>>,
+    current_write: Vec<u8>,
+    flushed_writes: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
+}
+
 async fn copy_scripted_read<B: compio::buf::IoBufMut>(
     bytes: Vec<u8>,
     buf: B,
@@ -642,6 +652,50 @@ impl compio_postgres::SplitStream for OrderedBatchPeer {
     }
 }
 
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncRead for RecordedBatchPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        if let Some(startup) = self.startup.take() {
+            return copy_scripted_read(startup, buf).await;
+        }
+        match self.responses.pop_front() {
+            Some(response) => copy_scripted_read(response, buf).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncWrite for RecordedBatchPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        self.current_write.extend_from_slice(buf.as_init());
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        if !self.current_write.is_empty() {
+            self.flushed_writes
+                .borrow_mut()
+                .push(std::mem::take(&mut self.current_write));
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for RecordedBatchPeer {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Err(self)
+    }
+}
+
 impl compio::io::AsyncRead for OrderedBatchReadHalf {
     async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
         match self.responses.pop_front() {
@@ -675,6 +729,23 @@ fn lying_frame(tag: u8, body: &[u8], declared: u32) -> Vec<u8> {
     frame.extend_from_slice(&declared.to_be_bytes());
     frame.extend_from_slice(body);
     frame
+}
+
+fn frontend_batch_tags(mut batch: &[u8]) -> Vec<u8> {
+    let mut tags = Vec::new();
+    while !batch.is_empty() {
+        assert!(batch.len() >= 5, "frontend batch ended inside a header");
+        let length = u32::from_be_bytes(batch[1..5].try_into().unwrap()) as usize;
+        assert!(length >= 4, "frontend frame length is below its header");
+        let frame_len = length + 1;
+        assert!(
+            frame_len <= batch.len(),
+            "frontend batch ended inside a frame"
+        );
+        tags.push(batch[0]);
+        batch = &batch[frame_len..];
+    }
+    tags
 }
 
 fn complete_startup(stream: &mut (impl Read + Write), process_id: i32) {
@@ -842,6 +913,126 @@ async fn dropping_a_raw_client_sends_terminate_after_a_completed_query() {
     }))
     .await
     .expect("raw Terminate test exceeded its outer watchdog");
+}
+
+/// An execution error after `BindComplete` cannot prove that the named
+/// statement itself is stale. Force all three frames into one decoder read and
+/// then inspect the next frontend batch: retaining the cache sends Bind +
+/// Execute + Sync, while scanning past `BindComplete` evicts it and sends
+/// statement cleanup before a reprepare.
+#[compio::test]
+async fn an_error_after_coalesced_bind_complete_keeps_the_cached_statement() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        const SQL: &str = "UPDATE scripted_table SET value = 1";
+
+        let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+        let mut key = 404i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1234i32.to_be_bytes());
+        startup.extend_from_slice(&backend_frame(b'K', &key));
+        startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut prepared = backend_frame(b'1', b"");
+        prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        prepared.extend_from_slice(&backend_frame(b'n', b""));
+        prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let stale_body = b"SERROR\0VERROR\0C26000\0Mscripted failure after BindComplete\0\
+                           RFetchPreparedStatement\0\0";
+        let mut failed = backend_frame(b'2', b"");
+        failed.extend_from_slice(&backend_frame(b'E', stale_body));
+        failed.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut succeeded = backend_frame(b'2', b"");
+        succeeded.extend_from_slice(&backend_frame(b'C', b"UPDATE 1\0"));
+        succeeded.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let flushed_writes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let peer = RecordedBatchPeer {
+            startup: Some(startup),
+            responses: std::collections::VecDeque::from([
+                prepared.clone(),
+                prepared,
+                failed,
+                succeeded,
+            ]),
+            current_write: Vec::new(),
+            flushed_writes: std::rc::Rc::clone(&flushed_writes),
+        };
+        let mut config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse cache-boundary config");
+        config
+            .statement_cache_capacity(1)
+            .statement_cache_execution_threshold(std::num::NonZeroUsize::MIN);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("scripted cache-boundary startup hung")
+        .expect("connect scripted cache-boundary transport");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, client.execute(SQL, &[]))
+            .await
+            .expect("the coalesced post-BindComplete error hung")
+            .expect_err("the scripted post-BindComplete SQLSTATE became success");
+        assert_eq!(
+            first.code().map(compio_postgres::error::SqlState::code),
+            Some("26000"),
+            "the first execution lost its scripted SQLSTATE: {}",
+            common::error_chain(&first)
+        );
+
+        {
+            let writes = flushed_writes.borrow();
+            assert_eq!(
+                writes.len(),
+                4,
+                "cache setup emitted an unexpected number of frontend batches"
+            );
+            assert_eq!(frontend_batch_tags(&writes[1]), b"PDS");
+            assert_eq!(frontend_batch_tags(&writes[2]), b"PDS");
+            assert_eq!(frontend_batch_tags(&writes[3]), b"BES");
+        }
+
+        let second =
+            async { compio::time::timeout(OPERATION_WATCHDOG, client.execute(SQL, &[])).await };
+        let next_batch = async {
+            compio::time::timeout(OPERATION_WATCHDOG, async {
+                loop {
+                    if let Some(batch) = flushed_writes.borrow().get(4).cloned() {
+                        break batch;
+                    }
+                    compio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the second cached execution emitted no frontend batch")
+        };
+        let (second, next_batch) = futures_util::join!(second, next_batch);
+        assert_eq!(
+            frontend_batch_tags(&next_batch),
+            b"BES",
+            "an ErrorResponse after BindComplete evicted the cached statement"
+        );
+        assert_eq!(
+            second
+                .expect("the second cached execution hung")
+                .expect("the retained cached statement was not reusable"),
+            1,
+            "the retained cached statement returned the wrong command count"
+        );
+
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the cache-boundary connection did not shut down")
+            .expect("the cache-boundary connection task panicked")
+            .expect("the cache-boundary connection did not close cleanly");
+    }))
+    .await
+    .expect("coalesced BindComplete boundary test exceeded its outer watchdog");
 }
 
 /// A response sender has capacity one, so a burst of separately-read command
@@ -1241,6 +1432,56 @@ async fn a_huge_protocol_option_count_fails_on_the_bounded_payload() {
     })
     .await
     .expect("huge negotiation-count test exceeded its outer watchdog");
+}
+
+/// Startup-only frame limits must be decided from the five-byte header. A peer
+/// that declares an impossible body and then stays silent must not make the
+/// unauthenticated handshake wait for bytes `PostgreSQL` cannot legally send.
+///
+/// The literals are deliberate contract values. Deriving either side of these
+/// cases from the decoder's constants would let a changed limit move the test
+/// with it while ruling on nothing.
+#[compio::test]
+async fn startup_header_lengths_are_rejected_without_their_bodies() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let cases = [
+            (
+                "oversized negotiation",
+                b'v',
+                10_241,
+                "invalid NegotiateProtocolVersion length 10241; expected 12 to 10240",
+            ),
+            (
+                "short negotiation",
+                b'v',
+                11,
+                "invalid NegotiateProtocolVersion length 11; expected 12 to 10240",
+            ),
+            (
+                "short cancel key",
+                b'K',
+                11,
+                "invalid BackendKeyData length 11; expected 12 to 264",
+            ),
+        ];
+
+        let mut ruled_on = 0;
+        for (label, tag, declared, expected) in cases {
+            let chain = protocol_negotiation_rejection(
+                ProtocolVersion::V3_2,
+                lying_frame(tag, b"", declared),
+            )
+            .await;
+            assert!(
+                chain.contains(expected),
+                "the {label} header reported the wrong error: {chain}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 3, "the startup-header matrix ruled on no cases");
+    }))
+    .await
+    .expect("startup-header length test exceeded its outer watchdog");
 }
 
 #[compio::test]
@@ -1783,6 +2024,134 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
         query: common::error_chain(&error),
         connection,
     }
+}
+
+/// The application-data ceiling is enforced from the head frame's header,
+/// before the decoder waits for its body. Complete frames also encounter the
+/// batch-walk validator, so a header-only peer is what distinguishes this
+/// early bound from that later check.
+#[compio::test]
+async fn an_oversized_application_header_is_refused_without_its_body() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 401);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            stream
+                .write_all(&lying_frame(b'D', b"", 128))
+                .expect("write oversized application header");
+            stream.flush().expect("flush oversized application header");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let mut config = stub_config(server.addr);
+        config.max_message_size(64);
+        let (client, connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("startup for the application-limit test hung")
+                .expect("connect to the application-limit peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let query = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the oversized header made the query wait for its absent body")
+            .expect_err("the driver accepted a message above the configured ceiling");
+        let query_chain = common::error_chain(&query);
+        let driver_chain = match compio::time::timeout(OPERATION_WATCHDOG, driver).await {
+            Ok(Ok(Err(error))) => common::error_chain(&error),
+            other => panic!("the oversized header did not retire the connection: {other:?}"),
+        };
+        let expected = "message too large: 129 bytes (max 64)";
+        assert!(
+            query_chain.contains(expected) || driver_chain.contains(expected),
+            "the header ceiling lost its exact diagnosis; query: {query_chain}; driver: \
+             {driver_chain}"
+        );
+
+        drop(client);
+        server.finish();
+    }))
+    .await
+    .expect("application-header limit test exceeded its outer watchdog");
+}
+
+/// `ReadyForQuery` has exactly one status byte. A longer, otherwise complete
+/// frame must fail in the decoder instead of reaching the response state
+/// machine under a generic diagnosis.
+#[compio::test]
+async fn an_overlong_ready_for_query_is_rejected_before_dispatch() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'C', b"SELECT 1\0");
+        response.extend_from_slice(&backend_frame(b'Z', b"Ix"));
+        let outcome = hostile_response_retires_session(402, response).await;
+        outcome.names("invalid ReadyForQuery length 6; expected 5");
+    }))
+    .await
+    .expect("overlong ReadyForQuery test exceeded its outer watchdog");
+}
+
+/// Once an `ErrorResponse` has entered a coalesced batch, a later local framing
+/// failure is deferred even when a valid synchronous frame lies between them.
+/// The server's wire-earlier SQLSTATE belongs to the query; the malformed tail
+/// still belongs to the connection task and retires the session.
+#[compio::test]
+async fn a_server_error_remains_sticky_across_an_intervening_frame() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = error_response_frame("ERROR", "23505", "queued unique violation");
+        response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+        response.extend_from_slice(&lying_frame(b'D', b"", 3));
+
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 403);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            stream
+                .write_all(&response)
+                .expect("write coalesced server error and malformed tail");
+            stream
+                .flush()
+                .expect("flush coalesced server error and malformed tail");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(compio_postgres::NoTls),
+        )
+        .await
+        .expect("startup for the sticky-error test hung")
+        .expect("connect to the sticky-error peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the sticky-error query hung")
+            .expect_err("the peer's ErrorResponse unexpectedly became success");
+        assert_eq!(
+            error.code().map(compio_postgres::error::SqlState::code),
+            Some("23505"),
+            "the malformed tail replaced SQLSTATE 23505: {}",
+            common::error_chain(&error)
+        );
+
+        let driver_error = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the malformed tail did not retire the connection")
+            .expect("the sticky-error connection task panicked")
+            .expect_err("the malformed tail left the connection reusable");
+        assert!(
+            common::error_chain(&driver_error)
+                .contains("invalid message length: header length < 4"),
+            "the deferred malformed-tail diagnosis disappeared: {}",
+            common::error_chain(&driver_error)
+        );
+
+        drop(client);
+        server.finish();
+    }))
+    .await
+    .expect("sticky server-error test exceeded its outer watchdog");
 }
 
 /// A byte that is not any backend message type must be refused, not skipped.
