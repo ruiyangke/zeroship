@@ -7,10 +7,14 @@ How creator data is stored, reached, isolated and evolved.
 migration DSL, and `docs/proposals/2026-08-28-app-database-decoupling.md` for the decoupling
 design in full.
 
-**Two things here are DESIGNED AND NOT BUILT**, marked *(designed)* throughout: the
-Datastore/Database/Grant entities, and the provisioning service. Everything else describes code in
-the tree. The distinction matters - a reader who cannot tell them apart will look for a `Database`
-row that does not exist yet.
+**What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
+entities, and datastore placement. Everything else describes code in the tree. The distinction
+matters - a reader who cannot tell them apart will look for a `Database` row that does not exist
+yet, or rebuild something that does.
+
+Provisioning was in that list until it was checked: the service exists and runs at the wrong time.
+See below - it is the difference between "build this" and "invert this", and it changes what the
+work is.
 
 ---
 
@@ -150,7 +154,7 @@ preserve that property.)*
 
 ---
 
-## Provisioning: databases are created, never conjured *(designed)*
+## Provisioning: databases are created, never conjured
 
 **A dedicated service owns database lifecycle**, on the D1-to-Workers model: create a database,
 then bind an app to it. `zeroship deploy` does **not** bring a schema into existence.
@@ -158,6 +162,36 @@ then bind an app to it. `zeroship deploy` does **not** bring a schema into exist
 This belongs to the decoupling rather than sitting beside it. As long as a deploy can create a
 database, app identity and database identity are still welded together at the moment that matters
 most - the moment of creation.
+
+**THE SERVICE ALREADY EXISTS. It runs at the wrong time.** An earlier revision of this section
+marked the whole thing *(designed)*, which was wrong.
+`crates/zeroship-migrate-server/src/provisioning.rs` already issues `CREATE SCHEMA` (`:232`,
+`:255`), `CREATE ROLE` (`:121`) and `ALTER SCHEMA ... OWNER` (`:143`, `:233`), from a service that
+already does not execute creator code - which is the boundary that matters, and the reason
+provisioning can never live in the worker.
+
+What is wrong is the trigger. Provisioning is a **side effect of applying a migration**: `apply.rs`
+imports it and calls it on the apply path, keyed by app, literally `format!("app_{schema}")` at
+`apply.rs:1178`. That is the conflation this design removes, in executable form - **a database
+exists because an app deployed.**
+
+So the work is inversion, not construction:
+
+```
+  TODAY     deploy -> apply migration -> (side effect) CREATE SCHEMA app_<app_id>
+  DESIGNED  create database -> CREATE SCHEMA db_<dbsid>      explicit, first-class
+            bind app -> grant
+            deploy -> apply migration -> FAILS if the database does not exist
+```
+
+Genuinely new, as opposed to re-keyed: **placement**. Choosing which Datastore does not exist at
+all - the service holds one DSN, not a set - and neither does the grant table. That is where the
+new surface is.
+
+A fourth privileged service would be the wrong answer: it would hold datastore credentials and do
+DDL, which is what this one already does, with the policy machinery, apply lock and journal already
+built. "Dedicated" here means owning the lifecycle, not running a separate binary - Cloudflare
+provisions D1 through its control plane, not a fourth process.
 
 The control plane places a new Database on a Datastore. Bring-your-own-datastore is out of scope:
 "which physical database may an app reach" is privileged, and exposing it would hand a DSN to the
