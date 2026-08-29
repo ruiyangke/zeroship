@@ -750,3 +750,35 @@ traced to a stronger condition standing in front of a weaker one -
 anyway. Each guard is correct; each is invisible because something else covers
 its case in every scenario the suite builds. That is what a mutation sweep finds
 and coverage cannot: these lines all execute.
+
+## codec.rs swept: all five deferred-error producers were unbound
+
+Sweep of `codec.rs`, 2026-08-29, budget of 10 mutations honoured exactly:
+**5 KILLED, 5 SURVIVED**.
+
+    1  complete-frame check `<` -> `<=`            KILLED
+    2  bypass head startup-length validation       KILLED
+    3  `saw_error_response |=` -> `&=`             KILLED
+    4  header-parse deferred error -> None         SURVIVED
+    5  message-ceiling deferred error -> None      SURVIVED
+    6  startup-limit deferred error -> None        SURVIVED
+    7  COPY-metadata deferred error -> None        SURVIVED
+    8  ReadyForQuery deferred error -> None        SURVIVED
+    9  Detached async parsing -> shared parsing    KILLED
+    10 bare command-tag fallback `0` -> `1`        KILLED
+
+**All five survivors are the same behaviour at five sites**: a decode failure
+that follows an ErrorResponse must be ATTACHED to the batch already decoded,
+not dropped. One test now binds all five, with a distinct assertion per site so
+each fails alone - verified here on the header-parse and ReadyForQuery sites
+independently, plus the `saw_error_response` gate.
+
+**This matters for a downgrade recorded above.** `connect_raw.rs:302` was
+downgraded on the reasoning that a dropped `deferred_error` is recomputed by the
+next decode. That argument assumes the DEFERRAL ITSELF works - and until now
+nothing bound it at any of the five producers. The downgrade stands; its premise
+is now checked rather than assumed.
+
+Mutation 9 is worth noting as a KILL: replacing `Detached` async parsing with
+`Shared` was caught by an allocation test. That is the fix for the
+13-bytes-pinning-1-MiB measurement recorded earlier, and it is bound.
