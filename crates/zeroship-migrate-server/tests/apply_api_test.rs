@@ -882,6 +882,21 @@ async fn probe_bool(conn: &Client, sql: &str) -> bool {
     rows[0].get(0)
 }
 
+async fn table_privileges(conn: &Client, grantee: &str, schema: &str, table: &str) -> Vec<String> {
+    conn.query(
+        "SELECT privilege_type \
+           FROM information_schema.table_privileges \
+          WHERE grantee = $1 AND table_schema = $2 AND table_name = $3 \
+          ORDER BY privilege_type",
+        &[&grantee, &schema, &table],
+    )
+    .await
+    .expect("read exact table privileges")
+    .iter()
+    .map(|row| row.get(0))
+    .collect()
+}
+
 /// Run `sql` under the PRODUCTION runtime identity for `app_schema` and switch
 /// back, whatever happened.
 ///
@@ -925,15 +940,144 @@ async fn as_app_runtime_identity(
     out
 }
 
+/// A real apply must preserve column-level SELECT as the runtime authority.
+///
+/// The runtime role is granted only `title`; `body` differs in exactly that it
+/// is absent from the column grant. A table-level grant from either the
+/// pre-apply default privileges or the post-apply existing-table snapshot makes
+/// both reads succeed and therefore fails this case on the property itself.
+#[ntex::test]
+async fn a_real_apply_preserves_the_column_level_read_fence_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer good-token")
+        .set_json(&create_notes_request())
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let schema = app_id.to_string();
+    let table = format!("{}.{}", quote_ident(&schema), quote_ident("notes"));
+    let runtime_role =
+        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
+    conn.batch_execute(&format!(
+        "GRANT SELECT (title) ON {table} TO {}; \
+         INSERT INTO {table} (id, title, body) \
+         VALUES ('note-1', 'readable', 'must stay fenced')",
+        quote_ident(&runtime_role),
+    ))
+    .await
+    .expect("grant one readable column and seed the control row");
+
+    let app_table_privileges = table_privileges(&conn, &runtime_role, &schema, "notes").await;
+    let audit_name = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
+    let audit_table_privileges = table_privileges(&conn, &runtime_role, &schema, audit_name).await;
+    let audit = format!("{}.{}", quote_ident(&schema), quote_ident(audit_name));
+    let sequence_privileges = conn
+        .query(
+            "SELECT \
+                has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'USAGE'), \
+                has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'SELECT'), \
+                has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'UPDATE')",
+            &[&runtime_role, &audit],
+        )
+        .await
+        .expect("read exact audit sequence privileges");
+    let sequence_privileges = (
+        sequence_privileges[0].get::<_, bool>(0),
+        sequence_privileges[0].get::<_, bool>(1),
+        sequence_privileges[0].get::<_, bool>(2),
+    );
+    let schema_privileges = conn
+        .query(
+            "SELECT has_schema_privilege($1, $2, 'USAGE'), \
+                    has_schema_privilege($1, $2, 'CREATE')",
+            &[&runtime_role, &schema],
+        )
+        .await
+        .expect("read exact runtime schema privileges");
+    let schema_privileges = (
+        schema_privileges[0].get::<_, bool>(0),
+        schema_privileges[0].get::<_, bool>(1),
+    );
+    println!(
+        "information_schema.table_privileges for {runtime_role}: \
+         notes={app_table_privileges:?}, {audit_name}={audit_table_privileges:?}"
+    );
+    println!(
+        "audit sequence privileges for {runtime_role}: \
+         USAGE={}, SELECT={}, UPDATE={}",
+        sequence_privileges.0, sequence_privileges.1, sequence_privileges.2
+    );
+    println!(
+        "schema privileges for {runtime_role}: USAGE={}, CREATE={}",
+        schema_privileges.0, schema_privileges.1
+    );
+
+    let granted =
+        as_app_runtime_identity(&conn, &schema, &format!("SELECT title FROM {table}")).await;
+    let ungranted =
+        as_app_runtime_identity(&conn, &schema, &format!("SELECT body FROM {table}")).await;
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    assert!(
+        granted.is_ok(),
+        "the explicitly granted title column must remain readable: {granted:?}"
+    );
+    assert_eq!(
+        app_table_privileges,
+        Vec::<String>::new(),
+        "creator tables must receive no table-level privilege from runtime provisioning"
+    );
+    assert_eq!(
+        audit_table_privileges,
+        vec!["INSERT"],
+        "the runtime role must hold exactly INSERT on its audit table"
+    );
+    assert_eq!(
+        sequence_privileges,
+        (true, false, false),
+        "the audit serial sequence must grant only USAGE"
+    );
+    assert_eq!(
+        schema_privileges,
+        (true, false),
+        "the runtime role must enter its schema but cannot author objects"
+    );
+    let err = ungranted
+        .expect_err("the runtime role read body even though it was granted SELECT only on title");
+    assert_eq!(
+        err.code(),
+        Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+        "the ungranted column must be refused by PostgreSQL: {err}"
+    );
+}
+
 /// THE APPLY PATH'S OWN CALL ORDER, BOUND - not the constraint re-proved.
 ///
 /// `provision_audit_unmask_table` has to run BEFORE THE LAST
-/// `apply::provision_runtime_app_role`, because that function grants the runtime
-/// role `INSERT` and sequence `USAGE` through `GRANT ... ON ALL TABLES/SEQUENCES
-/// IN SCHEMA` - snapshots over what exists when they run. Get it wrong and the
-/// audit table and its `BIGSERIAL` sequence are both unreachable to the only
-/// process that writes them, so every `unmask()` answers `permission denied` and
-/// the record of who read plaintext is lost.
+/// `apply::provision_runtime_app_role`, because that function explicitly finds
+/// the table and its `BIGSERIAL` sequence before granting only INSERT and USAGE.
+/// Get it wrong and both lookups are no-ops, so every `unmask()` answers
+/// `permission denied` and the record of who read plaintext is lost.
 ///
 /// WHY THIS CASE EXISTS AT ALL. `apply::live_audit_unmask_provisioning::
 /// the_audit_table_must_be_provisioned_before_the_runtime_role` already proves
@@ -1011,7 +1155,7 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
          so if this is absent the creation is gone rather than misplaced"
     );
 
-    // Diagnosis: which of the two snapshot grants was missed.
+    // Diagnosis: which half of the explicit append recipe was missed.
     let lit = |s: &str| s.replace('\'', "''");
     assert!(
         probe_bool(
@@ -1023,9 +1167,9 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
             ),
         )
         .await,
-        "the runtime role must hold INSERT on {audit}. GRANT ... ON ALL TABLES \
-         IN SCHEMA is a snapshot, so this is false exactly when apply_ir_request \
-         creates the table AFTER its last provision_runtime_app_role"
+        "the runtime role must hold INSERT on {audit}; this is false when \
+         apply_ir_request creates the table after its last \
+         provision_runtime_app_role"
     );
     assert!(
         probe_bool(

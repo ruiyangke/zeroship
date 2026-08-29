@@ -266,11 +266,11 @@ Two exceptions exist today and are deliberate, not oversights:
 A column a grant withholds is unreadable at the database, not merely absent from a descriptor.
 Two consequences measured on live PostgreSQL:
 
-- **Blanket table grants must go.** A table-level grant subsumes any column list, so column-level
-  access control is impossible while `GRANT ... ON ALL TABLES` and the prospective
-  `ALTER DEFAULT PRIVILEGES` rules stand. The default-privileges half is the easy one to miss:
-  revoking existing grants leaves the standing rule, and every table created afterwards is
-  re-granted in full.
+- **The runtime role receives no blanket table grants.** A table-level grant subsumes any column
+  list, so neither production provisioning nor the plugin-db test provisioner grants DML on all
+  tables or installs prospective table default privileges. Bindings grant their columns
+  explicitly. The sole reserved-table exception is `__zeroship_audit_unmask`: the runtime role
+  receives table `INSERT` plus `USAGE` on its owned serial sequence, and nothing else.
 - **`ctid` narrowing breaks four write verbs.** The single-row verbs narrow with
   `WHERE ctid = (SELECT ctid ...)`, and `ctid` is a system column that column-level `SELECT` does
   not cover. Narrowing on the primary key instead works - measured - and every collection carries

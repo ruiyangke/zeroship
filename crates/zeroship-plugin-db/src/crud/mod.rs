@@ -1315,8 +1315,14 @@ pub(crate) fn dispatch_update_many<'s>(
                     if let Some(expected_version) = cas_version {
                         row_filter["version"] = Value::from(expected_version);
                     }
+                    // The probe resolved this row by its primary-key `id`, so
+                    // the per-row statement does not need updateOne's `ctid`
+                    // narrowing. PostgreSQL cannot grant SELECT on `ctid` at
+                    // column scope; using the many builder here preserves the
+                    // column fence while the primary key still bounds the
+                    // statement to this exact row.
                     row_queries.push(
-                        query::build_update_one_with_system_fields(
+                        query::build_update_many_with_system_fields(
                             &app,
                             &coll,
                             &schema,

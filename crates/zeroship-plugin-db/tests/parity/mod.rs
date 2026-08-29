@@ -258,15 +258,12 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
         // server log, surfacing to the caller as a bare `500 internal error`.
         //
         // Provisioning that role is part of the deploy-time apply, not an
-        // afterthought: `crates/zeroship-migrate-server` grants exactly this
-        // (`GRANT USAGE ON SCHEMA ... TO <role>` + table/sequence privileges,
-        // `apply.rs`) immediately after its own apply, for the same reason. Here
-        // the equivalent step is plugin-db's own `ensure_per_app_role`, which
-        // must run AFTER the table exists because it grants `ON ALL TABLES IN
-        // SCHEMA`.
+        // afterthought. The role recipe supplies schema and sequence reach; the
+        // binding supplies explicit column grants.
         zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, MATRIX_APP_ID)
             .await
             .expect("provision the matrix app's runtime role");
+        super::support::grant_all_runtime_table_columns(&pool, MATRIX_APP_ID, collection).await;
     });
 }
 

@@ -538,8 +538,8 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 /// plugin-db reports as `schema_not_provisioned`
 /// (crates/zeroship-plugin-db/src/error.rs:216-243).
 ///
-/// The grants are re-issued on every call because `ON ALL TABLES IN SCHEMA` is a
-/// point-in-time snapshot and this function drops and recreates the tables.
+/// The explicit column grants are re-issued on every call because this function
+/// drops and recreates the tables.
 async fn prepare_side_effect_table(pg: &TestPg) {
     let app_schema = quote_ident(&pg.app_id.to_string());
     let app_role_name = zeroship_core::database_role::per_app_role_name(&pg.app_id.to_string())
@@ -599,7 +599,24 @@ async fn prepare_side_effect_table(pg: &TestPg) {
             step_name text NOT NULL, \
             idempotency_key text NOT NULL UNIQUE \
          ); \
-         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {app_schema} TO {app_role}; \
+         GRANT \
+            SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name), \
+            INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name), \
+            UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name), \
+            DELETE \
+           ON TABLE {app_schema}.workflow_e2e_side_effects TO {app_role}; \
+         GRANT \
+            SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
+            INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
+            UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
+            DELETE \
+           ON TABLE {app_schema}.workflow_e2e_effect_attempts TO {app_role}; \
+         GRANT \
+            SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
+            INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
+            UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
+            DELETE \
+           ON TABLE {app_schema}.workflow_e2e_effect_commits TO {app_role}; \
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {app_schema} TO {app_role};",
     ))
     .await
