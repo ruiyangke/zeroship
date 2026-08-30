@@ -860,3 +860,37 @@ oscillation periods to be trustworthy.
 
 Three soaks this session, all with exact acquire/release equality: 35408 at
 180s, 82346 and 82581 at 420s.
+
+## copy_in's "own close read as a lost connection": premise true, conclusion false
+
+The carried finding said `poll_ready`/`poll_flush` treat the sink's OWN close as
+a lost connection and drain away `CommandComplete` + `ReadyForQuery`. It shipped
+with its own open question - is `poll_flush`'s `sender.is_closed()` even
+reachable from our `poll_close`? - and said to answer that before fixing.
+
+**It is reachable.** `poll_close` delegates to `poll_finish`, and `poll_finish`
+calls `poll_flush`. So the chain `poll_close -> poll_finish -> poll_flush ->
+sender.is_closed()` is real, and closing our own sender does make that load
+report `true`. Anyone re-deriving this will reach the same point and it looks
+alarming.
+
+**The misdiagnosis it predicts cannot happen, because the guard is already
+there.** `poll_finish` sets `SinkState::ReadingAfterClose` on the arm where our
+own `sender.poll_close` returned `Ok`. `poll_flush` captures that state into
+`closed_by_sink` BEFORE doing any work, and the disconnect arm requires
+`disconnected && !closed_by_sink`. Our own close therefore takes the plain
+`Poll::Ready(Ok(()))` arm and the response stream keeps being read - which is
+exactly what preserves `CommandComplete` + `ReadyForQuery`.
+
+**And it is bound.** `flush_after_cancelled_close_preserves_copy_completion`
+drives a close poll to `Pending`, asserts the state has left
+`Active | Closing | Finished`, and asserts `sender.is_closed()` is true - i.e.
+it stands in precisely the state the finding describes and then checks the
+completion still arrives.
+
+**Why this one is worth writing down.** The finding is not wrong about the
+mechanism; it is wrong about the outcome, and the difference is one `&&` term
+that a reader scanning for `is_closed()` will not see. A finding whose premise
+survives re-derivation is the most dangerous kind, because confirming the
+premise feels like confirming the finding. Cite
+`flush_after_cancelled_close_preserves_copy_completion` when this resurfaces.
