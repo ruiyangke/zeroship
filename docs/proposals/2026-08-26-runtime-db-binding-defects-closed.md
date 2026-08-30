@@ -386,7 +386,8 @@ SQL error about a missing function, forever.
 **Why no suite caught it: there is no PostgreSQL mask-policy test at all.**
 Every `dispatch_set_mask_policy` / `load_pg` / `persist_pg` exercise in the tree
 is in `crates/zeroship-plugin-db/tests/sqlite_integration.rs` (`:6656`, `:6740`, `:6829`, `:6845`,
-`:6896`, `:7686`, ...). `tests/integration.rs` - the live-PG suite - has none.
+`:6896`, `:7686`, ...). `crates/zeroship-plugin-db/tests/integration.rs` - the
+live-PG suite - has none.
 The feature is tested only on the backend where it works and untested on the
 backend that ships, so the arm is green and the product is broken.
 
@@ -544,9 +545,9 @@ publication its own CDC path requires.**
 publication itself (`2a44ea8ef^:replication.rs:184`); after it,
 `ensure_worker_slot` treats the publication as a hard precondition
 (`replication.rs:175`) because ownership moved to `zeroship-migrated`. That
-commit updated `tests/integration.rs` (+98/-44, adding
+commit updated `crates/zeroship-plugin-db/tests/integration.rs` (+98/-44, adding
 `c1_create_publication_for_tables`) and **did not touch
-`tests/distributed_live.rs`**. `git log -S "replication_publication_missing"`
+`crates/zeroship-plugin-db/tests/distributed_live.rs`**. `git log -S "replication_publication_missing"`
 returns exactly one commit, and nothing since has touched it. **The target was
 silently red for eleven days.**
 
@@ -775,11 +776,11 @@ configuration"), and SQLite full-text still works because plugin-db's runtime
 creates the FTS5 table itself (`backend/sqlite/fts.rs`) on a path that never
 touches the engine. So the divergence table describes a comparison between a
 working backend and a non-existent one. The removal's stated rationale cites
-`docs/proposals/fts-macro.md` - **which is not in the tree**.
+`docs/proposals/fts-macro.md` - **DELETED or never landed; it is not in the tree**.
 
 **Evidence:** `zeroship-migrate-core/src/render/declarative.rs:1823-1830,2971-2976`;
 `sdks/db/src/types.ts:1172`; `docs/reference/sqlite-divergences.md:14-15`;
-`backend/sqlite/fts.rs`; absent: `docs/proposals/fts-macro.md`
+`backend/sqlite/fts.rs`; DELETED or never landed: `docs/proposals/fts-macro.md`
 
 L11 is listed here because it was found by implementation work on this design
 and because it is a live user-facing gap, not because this design causes or
@@ -1151,4 +1152,3 @@ The V8 decoder elides a filter key whose getter throws, so `updateMany` can lose
 its tenant predicate.
 
 **Evidence:** `v8_bridge.rs:250`
-

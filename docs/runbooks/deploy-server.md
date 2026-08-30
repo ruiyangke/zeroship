@@ -36,8 +36,8 @@ Every base host publication except Caddy's `:80` binds to loopback. Control has
 no host publication in the base file. Caddy reaches gateway and auth by compose
 service name over the internal network, so publishing their ports would only
 add a second entrance that bypasses the edge (and therefore bypasses TLS).
-Nothing enforces this: `tests/compose_port_exposure_gate.sh` did until
-2026-08-21, when it was deleted. Check it by reading the file.
+Nothing enforces this: `tests/compose_port_exposure_gate.sh` was DELETED on
+2026-08-21. Check the compose file directly.
 
 ## One-time: build and push
 

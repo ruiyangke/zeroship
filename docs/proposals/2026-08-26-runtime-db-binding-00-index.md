@@ -253,7 +253,7 @@ integration target, 6 prose):
 | crate | production sites |
 | --- | --- |
 | `zeroship-schema` | 9 - `query.rs:754`, `:2160`, `:3414`; `diff.rs:582`, `:671`, `:716`, `:1203`, `:1286`, `:1308` |
-| `zeroship-migrate-core` | 9 - `schema/query.rs:379`; `schema/diff.rs:410`, `:747`, `:825`, `:847`; `render/fold.rs:3678`; `render/lower.rs:4803`, `:7185`; `render/declarative.rs:2223` |
+| `zeroship-migrate-core` | 9 - `crates/zeroship-migrate-core/src/schema/query.rs:379`; `crates/zeroship-migrate-core/src/schema/diff.rs:410`, `:747`, `:825`, `:847`; `render/fold.rs:3678`; `render/lower.rs:4803`, `:7185`; `render/declarative.rs:2223` |
 | `zeroship-plugin-db` | 3 - `crud/mask_pass.rs:150`, `:469`; `crud/encryption_pass.rs:295` |
 | `zeroship-migrate-backend` | 1 - `schema.rs:566` |
 

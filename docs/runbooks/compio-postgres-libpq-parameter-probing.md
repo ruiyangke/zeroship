@@ -299,6 +299,6 @@ per service-file row above. The conninfo rows are pinned in
 `src/config.rs`, in the `empty_parameter_values` test module. The live
 end-to-end case is
 `a_service_written_in_libpq_s_awkward_forms_still_connects` in
-`tests/service_live.rs`, which writes a working service in the awkward forms and
+`libs/compio-postgres/tests/suite/service_live.rs`, which writes a working service in the awkward forms and
 requires it to connect; it fails with `Undefined` on a parser that only accepts
 the tidy shape.

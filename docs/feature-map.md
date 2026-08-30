@@ -178,7 +178,7 @@ but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall throu
 The platform's structured database layer. Creators declare schema through committed
 op.* migrations; the generated runtime descriptor installs collection wrappers on
 `env.db` at boot, and all CRUD/search/transaction/migration/reactive operations go
-through that typed surface — no raw SQL. The Rust plugin (`crates/plugin-db`)
+through that typed surface &mdash; no raw SQL. The Rust plugin (`crates/zeroship-plugin-db`)
 provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postgres
 (prod) and SQLite (dev/test) are supported.
 
@@ -187,8 +187,8 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | t.encrypted/vector/geoPoint/id; no t.date(). |
 | Schema refinements (.required/.unique/.index/...) | &#x1F7E2; | chained on t.*() | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | |
 | Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
-| registerModel DDL pipeline | 🟢 | internal (via bootstrap) | `crates/zeroship-plugin-db/src/register_model/` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/integration.rs` | PG advisory-lock + CONCURRENTLY; SQLite skips mask ops. |
-| Per-app Postgres schema isolation | 🟢 | internal | `crates/zeroship-plugin-db/src/register_model/bootstrap.rs` | `docs/reference/db.md` | — | app_id runtime-injected; SQLite is one file/app. |
+| registerModel descriptor registration | &#x1F7E2; | internal (via bootstrap) | `crates/zeroship-plugin-db/src/register_model/mod.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/integration.rs` | PostgreSQL caches the descriptor only; SQLite also attaches the already-migrated app file. |
+| Per-app Postgres schema isolation | &#x1F7E2; | internal | `crates/zeroship-migrate-server/src/apply.rs` | `docs/reference/db.md` | &mdash; | The migration service derives the schema from app_id; SQLite uses one file per app. |
 | System fields (id, created_at, ..., deleted_at) | 🟢 | internal (on every Row<S>) | `crates/zeroship-schema/src/query.rs`, `crates/zeroship-plugin-db/src/crud/system_fields_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | 7 columns; names reserved at deploy. |
 | Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
 | Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
@@ -206,8 +206,8 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Filter operators | &#x1F7E2; | Filter<S> on read/write | `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized. |
 | Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/zeroship-plugin-db/src/crud/system_fields_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
 | Relations — with: { fk: true } | 🟢 | `find(filter, { with })` / `Query.with(spec)` | `sdks/db/src/collection/relations.ts` | `docs/reference/db.md` | `sdks/db/tests/relations.test.ts` | v1 single-level; no nested with. |
-| Foreign keys (t.ref) | 🟢 | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `third_party/zero-migrate/crates/zeroship-migrate/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` + server-derived schema), NOT `plugin-db/src/cross_app_fk.rs`, which has no production call site as of 2026-08-20. See db.md. |
-| Named multi-column indexes | 🟢 | `schema({...}).index('name', [...])` | `sdks/db/src/types.ts`, `crates/zeroship-plugin-db/src/register_model/apply.rs` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Field-list change is currently a no-op. |
+| Foreign keys (t.ref) | &#x1F7E2; | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` plus server-derived schema), not `crates/zeroship-plugin-db/src/cross_app_fk.rs`, which has no production call site as of 2026-08-20. See db.md. |
+| Named multi-column indexes | &#x1F7E2; | `schema({...}).index('name', [...])` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Declared indexes are emitted by the migration engine. |
 | Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-plugin-db/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `sdks/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
 | Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `backend/sqlite/vector.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
 | Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/zeroship-plugin-db/src/crud/mod.rs`, `backend/sqlite/spatial.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan; polygon PG-only. |
@@ -223,7 +223,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
 | WAL replication consumer | green | `Subscription.ready()` auto-start | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `wal_consumer.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | One slot per app per worker process; starts on first live subscription and stops on last close. |
 | Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close and app-delete teardown. |
-| DDL audit log (__zeroship_migrations) | 🟢 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/audit.rs`, `register_model/apply.rs` | — | — | Per-app schema. |
+| Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | internal (SQL-readable) | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Admin-written append-only events in the per-app schema. |
 | Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
 | Mask drift audit log (__zeroship_audit_mask_drift) | 🟡 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Drift cron not scheduled. |
 | App namespace drop (drop_namespace) | 🟢 | internal (control-plane) | `crates/zeroship-plugin-db/src/drop_namespace.rs` | — | — | DROP SCHEMA CASCADE; PG-only. |
@@ -232,7 +232,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
 | env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `sdks/vite-plugin/src/gen-types/` | `docs/reference/db.md` | `sdks/vite-plugin/test/gen-types/` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
-| Schema strictness (strict/lenient/off) | 🟢 | `schema({...}).strictness(...)` | `crates/zeroship-plugin-db/src/register_model/validate.rs` | `docs/reference/db.md` | — | Default strict; refuses destructive. |
+| Schema strictness (strict/lenient/off) | &#x1F7E1; | `schema({...}).strictness(...)` | `crates/zeroship-migrate-ir/src/ir.rs`, `crates/zeroship-migrate-core/src/render/fold.rs` | `docs/reference/db.md` | &mdash; | Defaults to strict and survives in folded runtime metadata; no deploy-time refusal consumer is wired. |
 | Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
 | Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/zeroship-plugin-db/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
 | Unindexed query runtime warnings | 🟢 | automatic (dev) | `sdks/db/src/collection/index-warnings.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Suppressed in production. |
@@ -894,19 +894,19 @@ observability, and OIDC/OAuth protocol primitives.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| PG client — connect + Client/Connection split | 🟢 | internal | `libs/compio-postgres/src/connect.rs`, `client.rs`, `connection.rs` | — | `libs/compio-postgres/tests/integration.rs` | tokio-postgres port; NoTls only. |
-| PG client — query/execute/query_* variants | 🟢 | internal | `libs/compio-postgres/src/client.rs`, `query.rs` | — | `libs/compio-postgres/tests/integration.rs` | query_text_params for JSON builders. |
-| PG client — prepared statements | 🟢 | internal | `libs/compio-postgres/src/prepare.rs`, `statement.rs` | — | `libs/compio-postgres/tests/integration.rs` | CachedTypeInfo per connection. |
-| PG client — transactions + savepoints | 🟢 | internal | `libs/compio-postgres/src/transaction.rs`, `transaction_builder.rs` | — | `libs/compio-postgres/tests/integration.rs` | Drop fires ROLLBACK; dirty-flag barrier. |
-| PG client — simple_query / batch_execute | 🟢 | internal | `libs/compio-postgres/src/simple_query.rs` | — | `libs/compio-postgres/tests/integration.rs` | Text protocol; pool dirty barrier. |
-| PG client — COPY IN / COPY OUT | 🟢 | internal | `libs/compio-postgres/src/copy_in.rs`, `copy_out.rs`, `binary_copy.rs` | — | `libs/compio-postgres/tests/integration.rs` | Binary copy helper port. |
-| PG client — portals (bind-execute) | 🟢 | internal | `libs/compio-postgres/src/portal.rs`, `bind.rs` | — | `libs/compio-postgres/tests/integration.rs` | Cursor-like partial fetch. |
-| PG client — async LISTEN/NOTIFY | 🟢 | internal | `libs/compio-postgres/src/connection.rs`, `lib.rs` | — | `libs/compio-postgres/tests/integration.rs` | AsyncMessage Notification/Notice. |
+| PG client &mdash; connect + Client/Connection split | &#x1F7E2; | internal | `libs/compio-postgres/src/connect.rs`, `client.rs`, `connection.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | tokio-postgres port; NoTls only. |
+| PG client &mdash; query/execute/query_* variants | &#x1F7E2; | internal | `libs/compio-postgres/src/client.rs`, `query.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | query_text_params for JSON builders. |
+| PG client &mdash; prepared statements | &#x1F7E2; | internal | `libs/compio-postgres/src/prepare.rs`, `statement.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | CachedTypeInfo per connection. |
+| PG client &mdash; transactions + savepoints | &#x1F7E2; | internal | `libs/compio-postgres/src/transaction.rs`, `transaction_builder.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | Drop fires ROLLBACK; dirty-flag barrier. |
+| PG client &mdash; simple_query / batch_execute | &#x1F7E2; | internal | `libs/compio-postgres/src/simple_query.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | Text protocol; pool dirty barrier. |
+| PG client &mdash; COPY IN / COPY OUT | &#x1F7E2; | internal | `libs/compio-postgres/src/copy_in.rs`, `copy_out.rs`, `binary_copy.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | Binary copy helper port. |
+| PG client &mdash; portals (bind-execute) | &#x1F7E2; | internal | `libs/compio-postgres/src/portal.rs`, `bind.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | Cursor-like partial fetch. |
+| PG client &mdash; async LISTEN/NOTIFY | &#x1F7E2; | internal | `libs/compio-postgres/src/connection.rs`, `lib.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | AsyncMessage Notification/Notice. |
 | PG client — cancel token | 🟢 | internal | `libs/compio-postgres/src/cancel_token.rs`, `cancel_query.rs` | — | — | Deprecated wrappers delegate. |
 | PG client — TLS negotiation | 🟡 | internal | `libs/compio-postgres/src/connect_tls.rs`, `tls.rs`, `config.rs` | — | — | Full code exists; only NoTls exported. |
 | PG client — pipelining | 🟢 | internal | `libs/compio-postgres/src/connection.rs`, `client.rs` | — | — | Unbounded channel FIFO. |
 | PG client — logical replication (pgoutput) | 🟢 | internal | `libs/compio-postgres/src/replication.rs` | — | — | Own CopyBoth framer; single-host. |
-| PG connection pool | 🟢 | internal | `libs/compio-postgres/src/pool.rs` | — | `libs/compio-postgres/tests/integration.rs` | !Send; FIFO-fair; dirty barrier on checkout. |
+| PG connection pool | &#x1F7E2; | internal | `libs/compio-postgres/src/pool.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | !Send; FIFO-fair; dirty barrier on checkout. |
 | PG test-utils feature | 🟢 | internal (feature=test-utils) | `libs/compio-postgres/src/test_utils.rs` | — | — | Excluded from prod builds. |
 | PG config — connection string parser | 🟢 | internal | `libs/compio-postgres/src/config.rs` | — | — | DSN parser; Unix socket support. |
 | Redis single-node client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
@@ -1102,13 +1102,13 @@ completeness critic).
 ## Cross-cutting status rollup
 
 Totals across **20** areas, counted by table row across sections 1-20 (recounted 2026-08-10, when the
-citation repair changed several statuses; the per-area counts in the Index above predate this
-recount and run low):
+citation repair changed several statuses, and adjusted 2026-08-29 when strictness enforcement was
+found unwired; the per-area counts in the Index above predate this recount and run low):
 
 | Status | Count | Share |
 | --- | --- | --- |
-| 🟢 shipped | 676 | 87.7% |
-| 🟡 partial | 46 | 6.0% |
+| &#x1F7E2; shipped | 675 | 87.5% |
+| &#x1F7E1; partial | 47 | 6.1% |
 | 🟠 stub | 15 | 1.9% |
 | 🔵 planned | 20 | 2.6% |
 | ⚫ dead | 14 | 1.8% |

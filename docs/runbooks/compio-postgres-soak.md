@@ -354,7 +354,7 @@ were returned rather than merely stable.
 The workload kills individual backends with `pg_terminate_backend`, which is
 NOT the same event as the server going away. A restart drops every connection
 at once, refuses new ones for several seconds, and returns with different
-backend PIDs. `tests/connection_churn.rs` and the pool's mass-termination test
+backend PIDs. `libs/compio-postgres/tests/suite/connection_churn.rs` and the pool's mass-termination test
 cover the first; nothing covers the second, because a suite test cannot restart
 a server other tests are using.
 
