@@ -522,6 +522,21 @@ All three signals hold: 0.5ms past the bound, no descriptor outliving the
 failure, and the poisoned session refused on reuse. `is_closed=false` on the
 timeout error is the CORRECT value per the 2026-08-28 note above.
 
+RE-MEASURED again after the read-framing unification, at `c856afc62`:
+
+```text
+PROBE query ended after 5.000526215s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+0.53ms past the bound against 0.50ms before the refactor. This run is the
+reason the section is worth re-running rather than trusting: `fill_read_buffer`
+now serves BOTH the whole-stream and split read paths, and a frozen server is
+the ONLY scenario that drives a real `read_timeout` on a live connection. The
+suite never freezes anything, so a regression here would not have shown up in
+1375 passing tests.
+
 ## Chaos: a healthy server with no connection slots left
 
 The third shape, and the one a platform running many apps against one
