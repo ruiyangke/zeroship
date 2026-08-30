@@ -110,6 +110,20 @@ looks lossy: "A non-empty `write_buf` does NOT force the serialized fallback -
 those bytes are simply carried onto the new write half and flushed with the next
 frame."
 
+**Third pass, 2026-08-30: what KEEPS it correct.** The two passes above both
+established that the carry-over is right, and neither named a guard - so a
+reader learns the code is correct today but not what would catch it regressing.
+Two tests bind the property directly, by name:
+
+    tls_rustls.rs  tls_split_preserves_ciphertext_already_read_from_socket
+    tls_sansio.rs  tls_split_preserves_the_plain_scratch_buffer
+
+They split the two halves of the claim between them - ciphertext already pulled
+off the socket, and decrypted bytes not yet handed to the caller. A change to
+`TlsStreamCore::try_into_split` that drops a field fails one of these, so cite
+them rather than re-deriving the field list a fourth time. Named by symbol, not
+line: the citation that started this entry rotted because it was a line number.
+
 **A stale line number is not a weak citation, it is a different claim.** Point it
 at the current code before judging it.
 
