@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Every code path a document points at must exist, and every `path:line`
-# citation must land inside its file.
+# Every code path a document points at must exist, and every cited line must
+# land inside its file.
 #
 # WHAT THIS GATE DOES NOT CATCH, measured 2026-08-29. It rules on the PATH and
 # on the line being within the file, never on the line being the RIGHT one. Two
@@ -41,16 +41,17 @@
 # in the tree read documentation as if it made checkable claims. This gate
 # does, so the next rename cannot be half-applied in silence.
 #
-# WHY THE SCOPE IS AGENTS.md PLUS THE 2026-08-26 PROPOSAL SET, AND NOT ALL DOCS.
-# 564 paths under docs/ still do not resolve after that repair, and running arm 2
-# over every proposal reports about 30 more across a dozen older documents (both
-# measured the same day). They are NOT the rename: the sandbox moved to its own
-# repository, gatekit and migrate-adapter were deleted outright, the auth crate
-# was restructured, and the compio-* drivers live under libs/ rather than crates/.
-# Widening this gate before that work is done would commit it RED, and a gate
-# that is red on arrival gets disabled rather than fixed - which is how the tree
-# ended up with four gates examining nothing in the first place. Widen it when
-# those are cleared; both arms are written so adding a glob is a one-line change.
+# CURRENT SCOPE AND EXPLICIT HISTORICAL EXEMPTIONS. This gate covers AGENTS.md,
+# the named proposal/design set, docs/feature-map.md, docs/runbooks/*.md,
+# docs/build-and-deploy-golden-path.md, and docs/reference/*.md. It does not
+# silently treat every other document as live.
+#
+# `docs/decisions/` is an immutable record of what was true when each ADR
+# landed. `docs/archive/` is superseded material retained deliberately. A dead
+# path in either directory may be historically correct, so both are EXEMPT by
+# policy. `check_citations` enforces that exemption even if a future caller
+# hands it a broad glob. Other documents remain outside this gate's declared
+# scope until they are deliberately cleaned and added.
 #
 # THE `DELETED` ESCAPE. A document may legitimately cite a file that the change
 # it describes went on to delete - a design doc naming the code it replaced.
@@ -101,32 +102,53 @@ gate_arm agents_md_paths "$agents_examined" 40 || FAILED=1
 [ "$agents_bad" -eq 0 ] || FAILED=1
 
 # ---------------------------------------------------------------------------
-# Arm 2 - every `path:line` citation in the proposals resolves, and the line is
+# Arm 2 - every file citation in the proposals resolves, and a cited line is
 # inside the file. A past-EOF citation is the quieter half: the path looks
 # right, so a reader who does not open it believes the claim is anchored.
 # ---------------------------------------------------------------------------
 
 # Sets `cites_examined` and `cites_bad` for the documents passed in.
 #
-# `tsx`/`jsx` come FIRST so the longer extension wins the alternation. Listing
-# `ts` first truncates `Foo.tsx:12` to `Foo.ts`, which then fails to match the
-# `:line` and is silently SKIPPED - a blind spot, not a false alarm, and the
-# quieter of the two failure modes. The same truncation in a measurement script
-# invented 143 missing paths under sdks/ui that were never wrong.
+# Longer extensions come FIRST so the alternation cannot truncate `Foo.tsx` to
+# `Foo.ts` or `config.jsonc` to `config.json`. The former blind spot silently
+# skipped line citations; the same truncation in a measurement script invented
+# 143 missing paths under sdks/ui that were never wrong.
+#
+# Extract the whole path-shaped token before selecting repository roots. A
+# regex that begins at `schema/` also finds that suffix inside the shorthand
+# `zeroship-schema/src/query.rs`; that is not a repository-root citation.
 check_citations() {
   cites_examined=0
   cites_bad=0
   local f cite path line eof
   for f in "$@"; do
+    # Historical documents preserve their contemporary citations. Keep this
+    # executable exemption beside the scope policy above so a broad future
+    # glob cannot silently turn either directory into a live-doc arm.
+    case "$f" in
+      docs/decisions/*|docs/archive/*) continue ;;
+    esac
     [ -f "$f" ] || continue
-    for cite in $(grep -oE '(crates|libs|sdks|tests|db)/[A-Za-z0-9_./-]+\.(tsx|jsx|mjs|cjs|rs|ts|js|sh|toml):[0-9]+' "$f" \
+    for cite in $(grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+(:[0-9]+)?' "$f" \
+                  | sed -E 's#^((\.\.?)/)+##' \
+                  | grep -E '^(crates|libs|sdks|tests|db|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./-]+\.(tsx|jsx|jsonc|mjs|cjs|json|rs|ts|js|sh|toml|md)(:[0-9]+)?$' \
                   | sort -u); do
-      path="${cite%%:*}"
-      line="${cite##*:}"
+      case "$cite" in
+        *:[0-9]*)
+          path="${cite%:*}"
+          line="${cite##*:}"
+          ;;
+        *)
+          path="$cite"
+          line=""
+          ;;
+      esac
       cites_examined=$((cites_examined + 1))
 
-      # A citation whose own line says DELETED is stating history on purpose.
-      if grep -F "$cite" "$f" | grep -q 'DELETED'; then
+      # Every occurrence must say DELETED on its own line. One historical use
+      # must not exempt a second, live use of the same path elsewhere in a doc.
+      if grep -F "$cite" "$f" >/dev/null \
+          && ! grep -F "$cite" "$f" | grep -qv 'DELETED'; then
         continue
       fi
 
@@ -136,8 +158,10 @@ check_citations() {
         cites_bad=$((cites_bad + 1))
         continue
       fi
-      eof=$(wc -l < "$path")
-      if [ "$line" -gt "$eof" ]; then
+      if [ -n "$line" ]; then
+        eof=$(wc -l < "$path")
+      fi
+      if [ -n "$line" ] && [ "$line" -gt "$eof" ]; then
         echo "$f cites $cite but that file has only $eof lines" >&2
         cites_bad=$((cites_bad + 1))
       fi
@@ -179,18 +203,41 @@ gate_arm design_set_citations "$cites_examined" 40 || FAILED=1
 design_cites=$cites_examined
 
 # ---------------------------------------------------------------------------
-# Arm 3 - docs/reference, the stable-contract set AGENTS.md sends readers to.
+# Arm 3 - the live feature inventory.
+# ---------------------------------------------------------------------------
+check_citations docs/feature-map.md
+gate_arm feature_map_citations "$cites_examined" 200 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+feature_map_cites=$cites_examined
+
+# ---------------------------------------------------------------------------
+# Arm 4 - operational runbooks.
+# ---------------------------------------------------------------------------
+check_citations docs/runbooks/*.md
+gate_arm runbook_citations "$cites_examined" 20 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+runbook_cites=$cites_examined
+
+# ---------------------------------------------------------------------------
+# Arm 5 - the primary creator build-and-deploy path.
+# ---------------------------------------------------------------------------
+check_citations docs/build-and-deploy-golden-path.md
+gate_arm golden_path_citations "$cites_examined" 5 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+golden_path_cites=$cites_examined
+
+# ---------------------------------------------------------------------------
+# Arm 6 - docs/reference, the stable-contract set AGENTS.md sends readers to.
 # It reached zero broken paths on 2026-08-29 and nothing was stopping it drifting
 # back; every one of its 15 citations had pointed into `third_party/zero-migrate/`
-# for as long as the engine had been in-sourced out of it. The floor is low on
-# purpose - this arm exists to catch a BROKEN citation, and a reference doc that
-# legitimately loses citations should not redden it.
+# for as long as the engine had been in-sourced out of it. The widened extractor
+# now rules on bare paths and document/schema citations too, so its floor rises
+# with that materially larger population while retaining ample deletion room.
 # ---------------------------------------------------------------------------
 check_citations docs/reference/*.md
-gate_arm reference_citations "$cites_examined" 5 || FAILED=1
+gate_arm reference_citations "$cites_examined" 50 || FAILED=1
 [ "$cites_bad" -eq 0 ] || FAILED=1
 reference_cites=$cites_examined
-cites_examined=$proposal_cites
 
 gate_arms_finish || FAILED=1
 
@@ -200,4 +247,4 @@ if [ "$FAILED" -ne 0 ]; then
   exit 1
 fi
 
-echo "doc citations: $agents_examined AGENTS.md paths, $proposal_cites proposal citations, $design_cites design-set citations, $reference_cites reference citations, all resolve"
+echo "doc citations: $agents_examined AGENTS.md paths, $proposal_cites proposal citations, $design_cites design-set citations, $feature_map_cites feature-map citations, $runbook_cites runbook citations, $golden_path_cites golden-path citations, $reference_cites reference citations, all resolve"

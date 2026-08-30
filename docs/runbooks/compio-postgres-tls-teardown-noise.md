@@ -112,7 +112,7 @@ prints.
 
 ## Where the automated coverage lives
 
-`tests/hostile_peer.rs`, three tests, each driving a scripted in-process TLS
+`libs/compio-postgres/tests/suite/hostile_peer.rs`, three tests, each driving a scripted in-process TLS
 server that waits for the alert and asserts `peer_has_closed()`:
 `dropping_a_tls_client_sends_close_notify`,
 `dropping_an_unrun_tls_connection_sends_close_notify`, and

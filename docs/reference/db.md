@@ -336,10 +336,12 @@ export default {
   flag currently controls the higher-level `OptimisticLockError`
   mapping for wrapper-side CAS helpers while this pre-launch surface is
   being simplified.
-- `strictness: "strict" | "lenient" | "off"` — deploy-time data-validation
-  policy. The default is `strict`; set this in the migration if you need
-  `lenient` or `off`. The authoring types live in `sdks/migrate/src/types.ts`
-  and the deploy-time gate lives in the migration engine and DB plugin.
+- `strictness: "strict" | "lenient" | "off"` - metadata for deploy-time
+  data-validation policy. The default is `strict`, and the migration fold
+  preserves the selected value in the runtime descriptor. No deploy-time
+  refusal consumer is wired in this repository today, so the three values do
+  not yet change deployment behavior. The authoring types live in
+  `sdks/migrate/src/types.ts`.
 
 ### Named indexes
 

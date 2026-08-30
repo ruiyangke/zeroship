@@ -324,12 +324,12 @@ and the same SSI-predicate-lock amplification.
 
 ### 3.5 Descriptor contract and transport
 
-`schema/runtime-db-descriptor-v1.json` is the language-neutral wire contract;
-the TypeScript declaration is generated from it; the Rust serde representation
-and semantic validator live in `frontend/runtime_descriptor.rs`. Conformance
-fixtures prove the emitter, parser and binder accept and reject the same
-documents. A present but invalid descriptor is an isolate load error and never
-degrades to schema-less mode.
+`sdks/bootstrap/src/install-schema.ts` defines and validates the v2 wire shape.
+`crates/zeroship-bundle/src/manifest.rs` carries its content-addressed blob
+reference, and `crates/zeroship-bundle/tests/runtime_descriptor_ingest_test.rs`
+proves the emitted JSON round-trips through bundle ingestion. A present but
+invalid descriptor is an isolate load error and never degrades to schema-less
+mode.
 
 The worker does **not** recompute the descriptor hash: both `BlobStore` impls
 already recompute SHA-256 and return `HashMismatch` (`blob.rs:245-251`,

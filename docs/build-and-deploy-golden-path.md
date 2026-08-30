@@ -62,10 +62,11 @@ the only route a creator has to it (`deploy/compose/docker-compose.yml`, the
   `step.run`, `step.sleep`, `step.waitForSignal`, a child workflow, and
   compensators. It is NOT on the deploy path, and the Build/Deploy bullets below
   do not apply to it: its `build` is `tsc -p tsconfig.json`, it declares no
-  `@zeroship/vite-plugin` and has no `vite.config.*`, and it emits
-  `dist/index.js` rather than a `.zship`. Its own README is correct and says the
-  right thing — `zeroship serve examples/workflows-order/dist/index.js` — so it
-  is a SINGLE-TENANT serve example, not a copyable counterpart to the starter.
+  `@zeroship/vite-plugin` and has no `vite.config.*`, and it emits a generated
+  entry under `dist` rather than a `.zship`.
+  `examples/workflows-order/README.md` documents the required build before
+  serving that generated entry, so this is a SINGLE-TENANT serve example, not a
+  copyable counterpart to the starter.
   Copying it and following the two bullets below produces `tsc` output and then a
   deploy pointed at a `dist/app.zship` that was never written; `zeroship deploy`
   accepts only a `.zship` and answers by telling you to run `vite build` with a
@@ -161,7 +162,7 @@ harness's platform OP and passes it on `--token=`.
 > took a dependency on `zero-migrate` + `zeroship-migrate-node`, which are published
 > to no registry, so `npm install` in a scaffolded app now dies with `E404`
 > before the build step this section claims to have proven. Measured 2026-08-10;
-> see task #265 and `docs/pilot/e2e-scenarios.md`. Nothing in CI runs this
+> see task #265 and `tests/golden_path.sh:2786`. Nothing in CI runs this
 > script, which is why the regression sat for weeks.
 
 The claim below, as originally written: an app **outside the monorepo** installs `@zeroship/*` **from a registry** and
