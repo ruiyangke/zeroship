@@ -125,6 +125,10 @@ mysql = { version = "28", default-features = false, features = ["minimal"] }
 # (`schemars`).
 serde_json = { workspace = true }
 toml = { workspace = true }
+# Compile the migration service's exact policy module into the byte-identity test;
+# a dev-dependency on the service package itself would form a package cycle.
+thiserror = { workspace = true }
+uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 futures = { workspace = true }

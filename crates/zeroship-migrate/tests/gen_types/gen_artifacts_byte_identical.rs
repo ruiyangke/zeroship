@@ -1,6 +1,6 @@
-//! **`genArtifacts` byte-identical-by-construction + v2-shape pins.**
+//! **`genArtifacts` byte identity across build, manual, and migration-service inputs.**
 //!
-//! The schema-artifact emitter (`gen-types`) has two front-doors:
+//! The core schema-artifact emitter has two front doors:
 //!   - `render_artifacts(ops, dialect, schema, effective)` - the GENERATED source
 //!     (op.* migrations).
 //!   - `render_artifacts_from_descriptors(descriptors, dialect, schema, effective)` -
@@ -8,45 +8,75 @@
 //!     `descriptors_to_create_ops` (which injects the confined system shape under
 //!     `effective`) and then the SAME renderer tail.
 //!
-//! Both arms pin Postgres. The byte-identical guarantee is per-dialect and these
-//! fixtures carry no dialectal leg, so this file does not cover cross-dialect
-//! artifact divergence - `gen-artifacts-dialect.test.ts` does, against live servers.
+//! The Vite/NAPI generated build reaches the richer `render_schema_export` sibling,
+//! not `render_artifacts` literally, but `render_artifacts` is a thin wrapper over that
+//! same function. The migration service has IR documents, so its render belongs on
+//! this generated/op path, not the descriptor path.
 //!
-//! This test constructs the SAME logical schema two independent ways — a
-//! **RAW author-only** `op.*` `CreateTable` (the exact shape the pure-JS recorder
-//! emits — NO system columns/indexes) resolved through the create-table policy
-//! (`resolve_create_table_policy` under the confined charter
-//! `support::confined_charter()`), EXACTLY as the `gen_artifacts_from_envelopes` napi
-//! path now does before folding — AND an equivalent `CollectionDescriptor` (which
-//! `descriptors_to_create_ops` resolves under the SAME charter) — and pins:
+//! The production contexts are deliberately different. The build uses `public` and
+//! the generated TypeScript copy of the schema-emit inject charter. The service uses
+//! the app UUID as its schema and the exact app-bound default confined policy composed
+//! by `zeroship-migrate-server`. This test feeds each side only the inputs it actually
+//! owns. It also reverses the request's document vector so the service arm has to
+//! restore the filename order that its apply loop uses.
 //!
-//! The injection is POLICY-DRIVEN (the engine bakes in no confined preset), so BOTH
-//! sides are driven by the SAME composed `EffectivePolicy` — which is what preserves
-//! the byte-identical guarantee now that the shape comes from the charter.
+//! The fixture includes a foreign key because FK definitions embed `project_schema`.
+//! A one-table fixture with no schema-sensitive carrier would let the two schema inputs
+//! differ without proving that the difference is artifact-neutral.
 //!
-//! This is the TRUE byte-identical guarantee: the generated side feeds RAW,
-//! UNRESOLVED envelope ops (author columns only) and the resolution injects the 7
-//! policy-injected fields + PK + indexes, so the descriptor path (which
-//! resolves the same way) still matches byte-for-byte. Earlier this test resolved
-//! and compared, but did not START from the recorder's raw author-only shape.
-//!   1. the two produce BYTE-IDENTICAL `schema.runtime.json` (the byte-identical
-//!      guarantee: one renderer, not two);
-//!   2. the emitted `schema.runtime.json` parses + satisfies the v2 contract the
-//!      runtime validates (version==2, snake_case fields incl. the 7 system fields,
-//!      each field's read-surface flags and physical-storage block, options, indexes);
-//!   3. the emitted `env.db.ts` is a passive schema map whose current
-//!      `zero-migrate` builder calls satisfy `CreateTableArgs`.
+//! Only `schema.runtime.json` is a build-versus-service byte claim. Vite deliberately
+//! discards the core emitter's `env_db_ts` and renders its own creator-facing file from
+//! `runtime_json`; the existing generated-versus-manual core `env_db_ts` assertion is
+//! retained as a separate renderer property.
 
 use crate::support;
 
 use serde_json::Value;
 
 use zeroship_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
-use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zeroship_migrate::{render_artifacts, render_artifacts_from_descriptors, ResolvedInject};
+use zeroship_migrate::render::declarative::{
+    CollectionDescriptor, FieldDescriptor, IndexDescriptor,
+};
+use zeroship_migrate::{
+    effective_policy_from_charter_toml, render_artifacts, render_artifacts_from_descriptors,
+    EffectivePolicy, GeneratedArtifacts, ResolvedInject,
+};
+
+// Compile the production policy module into this integration-test target instead of
+// copying its app-schema binding. A dev-dependency on zeroship-migrate-server would
+// form a package cycle because that service depends on zeroship-migrate. The source
+// inclusion keeps this arm on the exact ManagedPolicyConfig code and exact embedded
+// policy files the service binary uses.
+#[allow(dead_code)]
+#[path = "../../../zeroship-migrate-server/src/policy.rs"]
+mod migrate_server_policy;
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
+const SERVER_APP_ID: &str = "018f0c34-7c76-7a3c-8b93-1f7ad785c321";
+const BUILD_SHAPE_MODULE: &str =
+    include_str!("../../../../sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts");
+
+#[derive(Clone)]
+struct IrDocumentFixture {
+    filename: &'static str,
+    body: Value,
+}
+
+/// Compose the exact charter text the Vite generated-source build supplies to NAPI.
+/// Reading the committed generated module, rather than the source TOML it mirrors,
+/// makes this arm fail on the bytes the build actually imports if that mirror drifts.
+fn build_effective_policy() -> EffectivePolicy {
+    const START: &str = "export const CONFINED_SYSTEM_SHAPE_INJECT_TOML = `";
+    let (_, tail) = BUILD_SHAPE_MODULE
+        .split_once(START)
+        .expect("generated build-policy module exports the inject template");
+    let fragment = tail
+        .strip_suffix("`;\n")
+        .expect("generated build-policy template has its exact closing delimiter");
+    effective_policy_from_charter_toml(&format!("policy_version = 1\n\n{fragment}"))
+        .expect("the production build schema-emit charter composes")
+}
 
 fn confined_injected_column_names() -> Vec<String> {
     let effective = support::confined_charter();
@@ -88,17 +118,67 @@ fn people_descriptor() -> CollectionDescriptor {
     }
 }
 
+fn teams_descriptor() -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: "teams".to_string(),
+        owner_app: OWNER.to_string(),
+        fields: vec![FieldDescriptor {
+            name: "label".to_string(),
+            ty: "string".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: Vec::new(),
+        runtime_options: TableRuntimeOptions::default(),
+    }
+}
+
+fn people_with_team_descriptor() -> CollectionDescriptor {
+    let mut descriptor = people_descriptor();
+    descriptor.fields.push(FieldDescriptor {
+        name: "teamId".to_string(),
+        ty: "ref".to_string(),
+        references: Some("teams".to_string()),
+        ..Default::default()
+    });
+    descriptor
+}
+
+fn teams_raw_envelope() -> MigrationIr {
+    let create: Op = serde_json::from_value(serde_json::json!({
+        "op": "createTable",
+        "name": "teams",
+        "columns": [{ "name": "label", "type": "text", "nullable": false }],
+        "primaryKey": null
+    }))
+    .expect("raw teams createTable envelope deserializes");
+    MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
+        ir_version: zeroship_migrate::model::ir::CURRENT_IR_VERSION,
+        name: "create_teams".to_string(),
+        owner_app: OWNER.to_string(),
+        ops: vec![create],
+        flags: Default::default(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        checksum: None,
+    }
+}
+
 /// The RAW `people` `createTable` envelope EXACTLY as the pure-JS recorder emits it:
-/// author columns ONLY (no system fields), no top-level primary key, plus the ONE
-/// author-declared index. This is the UNRESOLVED shape — [`people_ops_generated`]
-/// resolves it through the confined profile, mirroring `gen_artifacts_from_envelopes`.
+/// author columns only (no system fields), no top-level primary key, one reference,
+/// plus the one author-declared index. The reference makes `project_schema` reach the
+/// folded FK definition before the artifact projections discard its qualifier.
 fn people_raw_envelope() -> MigrationIr {
     let create: Op = serde_json::from_value(serde_json::json!({
         "op": "createTable",
         "name": "people",
         "columns": [
             { "name": "name", "type": "text" },
-            { "name": "email", "type": "text", "nullable": false }
+            { "name": "email", "type": "text", "nullable": false },
+            { "name": "teamId", "type": { "ref": { "references": "teams" } } }
         ],
         "primaryKey": null,
         "indexes": [
@@ -121,24 +201,23 @@ fn people_raw_envelope() -> MigrationIr {
     }
 }
 
-/// The GENERATED source: the RAW author-only recorder envelope. `render_artifacts`
-/// must resolve it through its explicit policy before folding, exactly as the Node
-/// envelope entry point does. The raw side carries no injected columns or PK.
-fn people_ops_generated() -> Vec<Op> {
-    let raw = people_raw_envelope();
-    // Sanity: the raw recorder shape has ONLY the two author columns — no system
-    // fields, no top-level PK. If this ever grows system columns the test is no
-    // longer exercising the resolution path.
+/// The exact generated build order. The service arm receives this vector reversed and
+/// must restore this order from the filenames, matching `discover_ir_files`.
+fn production_documents() -> Vec<IrDocumentFixture> {
+    let people = people_raw_envelope();
+    // Sanity: the raw recorder shape has only the three author columns, no system
+    // fields, and no top-level PK. If this grows injected fields, the test stops
+    // exercising either production policy-resolution path.
     if let Op::CreateTable {
         columns,
         primary_key,
         ..
-    } = &raw.ops[0]
+    } = &people.ops[0]
     {
         assert_eq!(
             columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-            vec!["name", "email"],
-            "the raw recorder envelope carries author columns ONLY (pre-resolution)"
+            vec!["name", "email", "teamId"],
+            "the raw recorder envelope carries author columns only"
         );
         assert!(
             primary_key.is_none(),
@@ -147,39 +226,149 @@ fn people_ops_generated() -> Vec<Op> {
     } else {
         panic!("expected a createTable");
     }
-    raw.ops
+
+    vec![
+        IrDocumentFixture {
+            filename: "20260829000100_create_teams.ir.json",
+            body: serde_json::to_value(teams_raw_envelope())
+                .expect("teams envelope serializes like the request body"),
+        },
+        IrDocumentFixture {
+            filename: "20260829000200_create_people.ir.json",
+            body: serde_json::to_value(people)
+                .expect("people envelope serializes like the request body"),
+        },
+    ]
+}
+
+fn raw_ops(documents: &[IrDocumentFixture]) -> Vec<Op> {
+    documents
+        .iter()
+        .flat_map(|document| {
+            serde_json::from_value::<MigrationIr>(document.body.clone())
+                .unwrap_or_else(|error| panic!("{} deserializes: {error}", document.filename))
+                .ops
+        })
+        .collect()
+}
+
+/// Render the request as the migration service can immediately after apply.
+///
+/// This follows the service's real seams: filename order, app UUID schema, exact
+/// app-bound default confined policy, then the op renderer's production policy-
+/// resolution seam. A normal Vite-produced migrations.ir.json has no optional policy
+/// draft, so the default/no-draft branch is the production build-to-server path.
+fn render_as_migration_service(
+    mut documents: Vec<IrDocumentFixture>,
+) -> (String, GeneratedArtifacts) {
+    documents.sort_by(|left, right| left.filename.cmp(right.filename));
+    assert_eq!(
+        documents
+            .iter()
+            .map(|document| document.filename)
+            .collect::<Vec<_>>(),
+        vec![
+            "20260829000100_create_teams.ir.json",
+            "20260829000200_create_people.ir.json"
+        ],
+        "the server render consumes the same filename order as apply"
+    );
+
+    let app_id = SERVER_APP_ID.parse().expect("fixture app id is a UUID");
+    let policy_config =
+        migrate_server_policy::ManagedPolicyConfig::default_confined(vec![0_u8; 32], 1)
+            .expect("the production default confined policy loads");
+    let effective = policy_config
+        .compose_effective_for_app(&app_id, None, None)
+        .expect("the service composes its no-draft app policy");
+    let project_schema = app_id.to_string();
+
+    let ops = raw_ops(&documents);
+
+    let artifacts = render_artifacts(
+        zeroship_migrate::shipping_vendors(),
+        &ops,
+        &zeroship_migrate_postgres::DIALECT,
+        &project_schema,
+        &effective.policy,
+    )
+    .expect("the migration service renders its applied documents");
+    (project_schema, artifacts)
+}
+
+fn assert_byte_identical(left_name: &str, left: &str, right_name: &str, right: &str) {
+    if left == right {
+        return;
+    }
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    let offset = left_bytes
+        .iter()
+        .zip(right_bytes)
+        .position(|(left, right)| left != right)
+        .unwrap_or_else(|| left_bytes.len().min(right_bytes.len()));
+    panic!(
+        "{left_name} and {right_name} are not byte-identical: first mismatch at byte \
+         {offset}, {left_name}={:?}, {right_name}={:?}; lengths are {} and {}",
+        left_bytes.get(offset),
+        right_bytes.get(offset),
+        left_bytes.len(),
+        right_bytes.len()
+    );
 }
 
 #[test]
-fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
-    let effective = support::confined_charter();
+fn build_manual_and_migration_service_emit_byte_identical_runtime_json() {
+    let build_documents = production_documents();
+    let build_effective = build_effective_policy();
     let generated = render_artifacts(
         zeroship_migrate::shipping_vendors(),
-        &people_ops_generated(),
+        &raw_ops(&build_documents),
         &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
-        &effective,
+        &build_effective,
     )
-    .expect("generated render");
+    .expect("generated build render");
     let manual = render_artifacts_from_descriptors(
         zeroship_migrate::shipping_vendors(),
-        &[people_descriptor()],
+        &[teams_descriptor(), people_with_team_descriptor()],
         &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
-        &effective,
+        &build_effective,
     )
     .expect("manual render");
+    let (server_schema, server) =
+        render_as_migration_service(build_documents.into_iter().rev().collect());
 
+    let generated_value: Value =
+        serde_json::from_str(&generated.runtime_json).expect("generated runtime JSON parses");
     assert_eq!(
-        generated.runtime_json, manual.runtime_json,
-        "the generated (op.*) and manual (descriptor) sources must emit BYTE-IDENTICAL \
-         schema.runtime.json — one renderer, not two.\n--- generated ---\n{}\n--- manual ---\n{}",
-        generated.runtime_json, manual.runtime_json
+        generated_value["collections"]["people"]["fields"]["teamId"]["refTarget"], "teams",
+        "the fixture must retain its project-schema-sensitive foreign key"
     );
-    // env.db.ts is likewise identical (same fold, same renderer).
+
+    assert_ne!(
+        SCHEMA, server_schema,
+        "the gate must not quietly give the service the build's project_schema"
+    );
+
+    assert_byte_identical(
+        "generated build runtime_json",
+        &generated.runtime_json,
+        "manual build runtime_json",
+        &manual.runtime_json,
+    );
+    assert_byte_identical(
+        "generated build runtime_json",
+        &generated.runtime_json,
+        "migration-service runtime_json",
+        &server.runtime_json,
+    );
+    // This is only a core generated-versus-manual property. Vite does not consume
+    // either string; it renders the creator-facing env.db.ts from runtime_json.
     assert_eq!(
         generated.env_db_ts, manual.env_db_ts,
-        "the two sources must emit byte-identical env.db.ts too"
+        "the two core renderer sources must emit byte-identical env_db_ts"
     );
 }
 
