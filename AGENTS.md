@@ -194,17 +194,19 @@ These don't change. If you're about to violate one, stop and ask.
 
   The schema epoch does not exist either - but **a comparison for it is built**. `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:313-315` compares observed against expected and returns `Verdict::ReResolve`. The producer is missing: `crates/zeroship-plugin-db/src/transaction/driver.rs:106` mints `SchemaEpoch::new(0)` on both sides, and says so - "The wiring is real; the *input* is not yet... the day a record exists, this is the one function that has to change."
 
-  **THAT COMMENT, AND AN EARLIER VERSION OF THIS PARAGRAPH, UNDERSTATE THE WORK - corrected 2026-08-29.** Supplying the input is necessary and not sufficient, because the comparison cannot see the fence it is supposed to react to. `classify` runs on a synthetic observation BEFORE the session opens, and a real `SET LOCAL ROLE` failure - which is how a role-name-borne epoch fence fires - arrives as `BeginCompleted { opened: false }` and is routed straight to cleanup at `crates/zeroship-plugin-db/src/transaction/reducer/mod.rs:966-972`:
+  **THIS PARAGRAPH HAS NOW BEEN WRONG IN BOTH DIRECTIONS WITHIN ONE DAY, AND THE SECOND ERROR IS THE MORE INSTRUCTIVE ONE.** Earlier on 2026-08-29 it said the producer was the only missing piece. That was corrected the same morning to "necessary and not sufficient", on the grounds that a real `SET LOCAL ROLE` failure arrived as `BeginCompleted { opened: false }` and was routed to cleanup before `classify` ever saw it, so an epoch fence enforced by PostgreSQL needed a third piece nobody had named: an adapter from the session-setup outcome into `Verdict::ReResolve`.
+
+  **That correction was itself outdated hours later, by a fix that landed the same day.** `8e191f650` replaced the `opened: bool` with a typed `BeginOutcome`, and the adapter now exists (`crates/zeroship-plugin-db/src/transaction/reducer/mod.rs:1005-1016`):
 
   ```rust
-  if !opened {
-      return self.force(CleanupCause::BeginFailed, now).1;
-  }
+  BeginOutcome::SetupFailed => self.force(CleanupCause::SessionSetupFailed, now).1,
+  BeginOutcome::ReResolve => self.on_verdict(Verdict::ReResolve, now),
+  BeginOutcome::Denied(reason) => self.on_verdict(Verdict::Deny(reason), now),
   ```
 
-  It never reaches `classify`. So an epoch mechanism enforced by PostgreSQL needs a third piece nobody had named: an adapter from the session-setup outcome into `Verdict::ReResolve`. This is the same seam that discards a classified `GRANT_REVOKED` into a generic `begin_failed` - `BeginFailed` is where classified setup errors go to die, and any fix should treat the two as one defect.
+  It is reachable, not merely spelled: `crates/zeroship-plugin-db/src/transaction/driver.rs:460-462` maps `SessionSetupDisposition::ReResolve` and its denial arm onto those outcomes, and both are covered at `crates/zeroship-plugin-db/src/transaction/reducer/tests.rs:1679` and `:1698`. `CleanupCause::BeginFailed` survives at `:1015` for a BEGIN that genuinely failed, which is what it was always for; it is no longer where classified setup errors go to die.
 
-  So: the invariant is live and binding, the schema is a reservation rather than a fact, and the epoch needs a producer AND a setup-outcome adapter. Read the two sentences above as a design permission, never as a description of what you will find.
+  So: the invariant is live and binding, the schema is a reservation rather than a fact, and **the epoch again needs only its producer** - the classifier, the adapter, the retryable verdict and both rotation directions all ship. Read the two sentences above as a design permission, never as a description of what you will find. And read the history of this paragraph as the standing warning it has earned: it has been rewritten twice in a day, each time correctly against the tree as it stood, and both times the tree moved underneath it. Verify these line numbers before you rely on them.
 
   **The counter-example is live in the tree.** DB-3: app JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to read its own PII, PHI and PCI at will. It is patched by `sanitize_app_actor`, which strips an actor claiming a reserved system kind to `None` (defined in `crates/zeroship-plugin-db/src/crud/unmask.rs`, applied at all three sites that reach `check_unmask_authorization`: `parse_args`, `parse_bulk_args`, and `crud/mod.rs`'s query-hint path) - but the bug is not an accident of that implementation. It is what the shape produces, and a privileged call the worker can make will keep producing it.
 
