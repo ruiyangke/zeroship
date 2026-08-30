@@ -38,8 +38,8 @@ it. Section 6 has the mechanism, the rejected alternative and the two measuremen
 `2026-08-26-runtime-db-binding-decision-log.md` under 2026-08-29.)*
 
 **Five consequences are measured, not assumed**, and each is recorded with its measurement: the
-role fence works per grant with `WITH SET FALSE`; ctid narrowing blocks four write verbs under
-column grants and a primary-key predicate fixes it; the CDC stream is per-app today and platform
+role fence works per grant with `WITH SET FALSE`; primary-key narrowing makes all four single-row
+write verbs work with column-scoped read authority; the CDC stream is per-app today and platform
 journals are already excluded; the table-level grants that would defeat column grants are
 latent, not live, because no column grants exist yet; and the two costs an epoch-bearing role name
 was suspected of - cross-database apply serialization and superlinear `SET ROLE` - both measure at
@@ -476,15 +476,18 @@ Three consequences, all load-bearing:
   descriptor's `readable` set and `storage.valueColumn`, so the v2 payload is load-bearing in Rust
   rather than a version tag nothing reads. `SELECT *` was already gone. The decisive test mints a
   role holding `INSERT`/`UPDATE` on the raw column and **not** `SELECT` - a grant `*` cannot express -
-  and runs seven verbs under pure column grants, with a control substituting `RETURNING *` back and
-  getting `42501` on each.
+  and runs seven verbs under column-scoped SELECT/INSERT/UPDATE, plus PostgreSQL's necessarily
+  table-scoped DELETE privilege, with a control substituting `RETURNING *` back and getting `42501`
+  on each. DELETE grants no read access to the withheld column.
 
-  **But it is necessary, not sufficient, and the remainder bounds 2.4.** Four single-row verbs narrow
-  with `WHERE ctid = (SELECT ctid FROM ... LIMIT 1)`, and `ctid` is a **system column that
+  **The remainder is now closed.** Four single-row verbs narrowed with
+  `WHERE ctid = (SELECT ctid FROM ... LIMIT 1)`, and `ctid` is a **system column that
   column-level `SELECT` does not cover** - measured, the same role is refused `SELECT ctid` (42501)
-  while served `SELECT id`. Those four remain unusable under pure column grants. Either the narrowing
-  becomes a primary-key predicate the grant can cover, or co-granted databases exclude those verbs
-  and the exclusion is stated. A test asserts the refusal today and reddens the day it is fixed.
+  while served `SELECT id`. They now narrow through the immutable `id TEXT PRIMARY KEY` and lock the
+  selected row with `FOR UPDATE`. The live column-grant test keeps the direct `ctid` refusal as its
+  control, then executes update, soft-delete, restore and purge successfully; purge also carries
+  the table DELETE privilege PostgreSQL requires because that verb has no column form. A second
+  live arm executes the replacement data-plan's bounded update and delete.
 
   **A shipping defect surfaced on the way, and it is worth reading as evidence about the tests rather
   than about upsert.** Every PostgreSQL upsert was already broken: `DO UPDATE SET "version" =
@@ -1564,7 +1567,8 @@ role DDL must never be run against `:5455`, `:5440` or any shared instance.
    column-list grant denies the withheld column with 42501 and permits the granted ones. A column
    added after the grant is denied - fail-closed on schema evolution by a PostgreSQL property.
    **`RETURNING *` is incompatible with column grants**, which is why all twelve emitting sites now
-   build an explicit projection (2.4); the four `ctid`-narrowed verbs are the remainder.
+   build an explicit projection (2.4). The four single-row verbs also narrow through the readable
+   primary key rather than `ctid`, so the projection and target selection both respect the grant.
 6. **`BYPASSRLS` does not follow through `SET ROLE`.** The same login sees 1 row as itself and 0 rows
    after narrowing to a `NOBYPASSRLS` role.
 7. **Logical decoding consults no column ACL**: a role denied `SELECT ssn` receives the plaintext in
