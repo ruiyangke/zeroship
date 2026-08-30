@@ -426,6 +426,25 @@ This run is the check on `ae8ba17f4`, which changed when a cancel retires a
 session: a defect there surfaces here as a non-zero live count or a hang, and
 the ordinary suite would not notice because it never restarts a server.
 
+RE-MEASURED again after the read-framing unification, at `0c06e95f5`:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+No watchdog fired, no panic, no hang; 63 `pool_` tests passed against the
+restarted server on the FIRST attempt. This run targets the EOF guard: the
+framing unification made `if n == 0` a SINGLE site in `fill_read_buffer`
+serving both the whole-stream and split read paths, where it used to be two
+copies. Mutating that guard wedges the entire suite rather than failing it, so
+it is load-bearing and worth re-measuring after any change to the read path.
+
+**A trap in the harness itself.** If the last command of a wrapper is
+`grep -c` for watchdog firings, a count of ZERO exits 1 and the job is
+reported as FAILED - the good outcome looks like a broken run. Put the
+command whose status you want last, or end with `|| true`.
+
 ## Chaos: freezing the server without closing anything
 
 A restart makes the server CLOSE, which surfaces as an error at once. The
