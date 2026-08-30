@@ -903,3 +903,33 @@ that a reader scanning for `is_closed()` will not see. A finding whose premise
 survives re-derivation is the most dangerous kind, because confirming the
 premise feels like confirming the finding. Cite
 `flush_after_cancelled_close_preserves_copy_completion` when this resurfaces.
+
+## Finding 4 (binary_copy split-before-await), now mutation-proved and named
+
+Section 4 above called the claim FALSE AND INVERTED and quoted the source
+comment. It named no test, so a reader learned the code is right today without
+learning what catches it regressing - the same omission corrected for the TLS
+split and for `copy_in` elsewhere in this document.
+
+**Two tests bind it**, both calling `send_buffered_rows` directly:
+
+    binary_copy.rs  cancelling_a_backpressured_flush_keeps_completed_rows
+    binary_copy.rs  cancelling_binary_copy_finish_before_readiness_keeps_buffered_rows
+
+**Mutation-proved, 2026-08-30.** Moving `let row = buf.split_off(row_start);`
+from BEFORE the `poll_ready` await to AFTER it - which is precisely the shape
+the finding alleged - turns the first test RED:
+
+    assertion `left == right` failed:
+      cancelling one write discarded rows whose write_raw calls returned Ok
+      left:  "rows whose writes returned Ok" + "row whose write is pending"
+      right: "rows whose writes returned Ok"
+
+The second test passed under that mutation; it covers the `finish()` path, not
+the backpressured-flush path. So the two are not redundant, and the disconnect
+arm each one guards is different. 1 passed / 1 failed is the correct signature
+of this mutation, not a partial result.
+
+Cite these two by symbol. The finding will resurface, because the `split_off`
+call genuinely does sit next to an await and reads alarming out of context - the
+comment above it, and these tests, are the answer.
