@@ -933,3 +933,37 @@ of this mutation, not a partial result.
 Cite these two by symbol. The finding will resurface, because the `split_off`
 call genuinely does sit next to an await and reads alarming out of context - the
 comment above it, and these tests, are the answer.
+
+## Closing the one CONFIRMED finding's open question (2026-08-30)
+
+The `connect_raw.rs:302` entry above ended with "Under investigation: which of
+the five sites are reachable before `ReadyForQuery`, and what the handshake does
+after dropping the error." Both halves are now answered mechanically.
+
+**Which sites are reachable: all five, but only behind an ErrorResponse.** Every
+assignment is guarded - `codec.rs:379` by `Err(error) if saw_error_response`,
+and 418 / 431 / 448 / 462 each by a bare `if saw_error_response`. The flag has
+exactly one producer, `codec.rs:498`:
+
+    saw_error_response |= header.tag() == backend::ERROR_RESPONSE_TAG;
+
+So `deferred_error` cannot be `Some(_)` unless an ErrorResponse frame was parsed
+in the SAME batch. There is no path that defers an error without one.
+
+**What the handshake does after dropping it: it surfaces the better error.**
+`BackendMessage::Normal { messages, .. }` drops the field but RETAINS
+`messages` into `self.pending` - and the ErrorResponse that armed
+`deferred_error` is inside that iterator. `take_available_server_error_if`
+(`connect_raw.rs:166`) then turns it into `Error::db(body)` at line 189. Its own
+doc states the intent: "Prefer an ErrorResponse which a previous handshake read
+already put in memory over the local write symptom which made us look for it."
+
+**The dropped field IS that local write symptom.** So the finding is literally
+true - the field is discarded - and benign by explicit design: what is discarded
+is the framing or IO error that followed the server's diagnosis in the same
+batch, and what is kept is the diagnosis. Dropping it loses strictly less
+information than surfacing it would cost in precedence.
+
+This does not make the `..` pattern good style; a named `deferred_error: _`
+would say "deliberately ignored" where `..` says nothing. But there is no defect
+here, and this entry should stop being carried as one.
