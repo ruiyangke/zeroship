@@ -19,19 +19,30 @@
 //! data plane's sole schema authority, and a collection with no entry is
 //! refused with `collection_not_declared` on every read and every write.
 //!
-//! # The ATTACH is in the wrong place, and that is a known item
+//! # The ATTACH MOVED to the data plane, and this arm is now redundant
 //!
-//! This module holding the only production `attach_app_file` call means SQLite
-//! CRUD depends on registerModel having run first. A session that
-//! never registered has no alias attached, and nothing re-attaches on its own -
-//! `sqlite::session`'s recovery error says as much in plain text.
+//! **This section said the opposite until 2026-08-30, and it cost a wrong
+//! answer.** It claimed this module holds "the only production
+//! `attach_app_file` call", that SQLite CRUD therefore depends on registerModel
+//! having run first, and that moving it was blocked because `exec.rs` has no
+//! single chokepoint. All three were true when written and none is true now.
 //!
-//! It belongs in the data plane, which is where the file is used. It is not
-//! there yet because there is no single chokepoint to put it: `exec.rs`
-//! resolves `route.app_id()` per operation and the backend's exec methods never
-//! receive an `app_id` (it is interpolated into the SQL). The contained fix is
-//! attach-and-retry inside `SqliteSession` on an "unknown database" error,
-//! which touches no signature and no PG path.
+//! `exec.rs:372` calls `backend.attach_app_file(route.app_id())` before
+//! addressing any table, and its comment names this module as where the call
+//! used to live. That is the sole PRODUCTION caller besides the arm below -
+//! `mod tests` begins at `exec.rs:687`, so the three other occurrences in that
+//! file (`:1110`, `:1221`, `:1408`) and the one in
+//! `crud/write_pipeline.rs:806` are all test-side.
+//!
+//! So a row read no longer depends on a METADATA call having run first on this
+//! thread. The SQLite arm below is now a redundant warm-up, not a
+//! prerequisite: `attach_app_file` returns on a cache hit before issuing any
+//! SQL, so the second call is a set lookup. It is kept because deleting it is
+//! part of deleting this module, not a separate change.
+//!
+//! Read this as the standing warning it earned: a doc comment describing a
+//! blocker is a claim about code that can be fixed out from under it, and
+//! nothing re-runs prose. Check `exec.rs` before repeating any of it.
 //!
 //! # A four-phase pipeline used to live here
 //!
