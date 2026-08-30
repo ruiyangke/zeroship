@@ -398,12 +398,25 @@ rationed.** Measured on PostgreSQL 18.4:
   `relisshared = f`, and the same publication name created in two databases of one cluster coexists,
   each database's `pg_publication` showing only its own. One publication per database therefore
   costs nothing cluster-wide and no name can collide across datastores.
-- **A replication slot is CLUSTER-scoped, and the stock ceiling is 10.** `max_replication_slots`
-  defaults to 10 and is `context = postmaster`, so raising it is a restart. Ten slots created in one
-  database are all visible from another database of the same cluster, and the eleventh - created
-  **from that other database** - fails `SQLSTATE 53400`, "all replication slots are in use". Slot
-  cardinality is a cluster budget shared by every datastore tenant, which is why the design takes one
-  slot per (datastore, worker) and fans out in process rather than one slot per database.
+- **A replication slot's NAMESPACE and BUDGET are cluster-scoped; its DECODE is not.**
+  `max_replication_slots` defaults to 10 and is `context = postmaster`, so raising it is a restart.
+  Ten slots created in one database are all visible from another database of the same cluster, and
+  the eleventh - created **from that other database** - fails `SQLSTATE 53400`, "all replication
+  slots are in use". Slot cardinality is therefore a cluster budget shared by every datastore tenant.
+
+  **BUT A LOGICAL SLOT DECODES EXACTLY ONE DATABASE, AND CONFLATING THOSE TWO SCOPES IS HOW THE
+  DECISION BELOW WAS FIRST WRITTEN WRONG.** Measured 2026-08-30 on PostgreSQL 18.4, two databases in
+  one cluster, one slot created from A, rows written to both:
+  `pg_replication_slots.database` reads `slotprobe_a`; draining from A returns A's two INSERTs and
+  **not one row written in B**; draining that same slot while connected to B fails outright -
+  `ERROR: replication slot "probe_a" was not created in this database`. The namespace is still
+  cluster-wide: creating the same NAME from B fails `already exists`.
+
+  So a slot is cheap to name across the cluster and impossible to share across databases. The
+  consequence is a capacity ceiling nobody had stated: at one slot minimum per datastore against a
+  stock budget of 10, **a cluster holds at most 10 datastores**, fewer once anything else takes a
+  slot. That is a hard architectural bound, not a tuning knob - `context = postmaster` means raising
+  it restarts the cluster every tenant on it shares.
 - **`max_slot_wal_keep_size` measures as `-1`** - unbounded retention - on a stock server, so one
   abandoned slot can grow `pg_wal` until the cluster dies. It is `context = sighup`, so bounding it
   is a reload rather than a restart. The worker now refuses to boot against a cluster where it is
@@ -412,13 +425,25 @@ rationed.** Measured on PostgreSQL 18.4:
   large and the protection is theoretical. It belongs with the CDC relay, whose lag characteristics
   set the floor.
 
-**SLOT CARDINALITY IS ONE PER CLUSTER, VIA THE RELAY, AND THE DECOUPLING SEQUENCES BEHIND IT.**
-Settled 2026-08-29 by the measurements above rather than by preference. Three cardinalities were
-live across the document set - per (app, worker) in code today, per (datastore, worker) in this
-design, and one per cluster in the CDC relay design - against a hard ceiling of 10 that only a
-restart moves. The relay's number is the only one that fits stock configuration with headroom, and
-the binding term in the other two is the WORKER count: the documented deployment scales workers to
-10, so one datastore times ten workers already exhausts the cluster.
+**SLOT CARDINALITY IS ONE PER DATASTORE, OWNED BY THE RELAY, AND THE DECOUPLING SEQUENCES BEHIND
+IT.** Settled 2026-08-29, and **corrected 2026-08-30 after this heading read "ONE PER CLUSTER" for a
+day.** Three cardinalities were live across the document set - per (app, worker) in code today, per
+(datastore, worker) in this design, and one per cluster in the CDC relay design - against a hard
+ceiling of 10 that only a restart moves. What settled it is that the binding term in the first two is
+the WORKER count: the documented deployment scales workers to 10, so one datastore times ten workers
+already exhausts the cluster. Moving ownership to the relay removes the worker from the term. That
+part was right and still is.
+
+**The number attached to it was not.** "One per cluster" was read off the cluster-scoped BUDGET and
+NAMESPACE without checking whether one slot can decode more than one database. It cannot - measured
+above - so one-per-cluster is not a target the relay can hit at all once a second datastore exists.
+The floor is one slot per datastore, which the relay owns rather than the worker. Today's deployment
+has a single datastore, so the two numbers coincide and nothing in the tree distinguishes them; the
+error was invisible for exactly that reason and will stay invisible until the second datastore.
+
+This is the second time a decision on this page has been settled from a real measurement of the wrong
+property. Ask what a scope claim is a claim ABOUT - a name, a quota, or the data - before building on
+it.
 
 Two consequences follow, and both are load-bearing:
 
