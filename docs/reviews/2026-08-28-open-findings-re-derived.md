@@ -816,3 +816,33 @@ while doing it.
 Line numbers here are a convenience for the day they were written. When a claim
 in this file matters, re-resolve it by symbol before acting - the same rule the
 sections above apply to everyone else's findings.
+
+## Soak on the final tree, with the ownership check on the query path
+
+Re-run at `c575e9680`, 420s, dedicated container (5470), 0 pre-existing
+connections:
+
+    soak result=ok   SOAK_EXIT=0   elapsed_ms=455453
+    pool_acquires  82581
+    pool_releases  82581            exact
+    rss_rule  samples=85 rises=9 falls=7 delta_kib=60
+              preceding_sum_kib=209564  tail_sum_kib=209044  verdict=stable
+
+**Why re-run it.** Two production commits landed after the previous soak: the
+write-framing unification, and `33a60076f`, which put an `Arc::ptr_eq` owner
+check on EVERY query's statement path. That is the hottest path in the driver
+and had only been exercised by short suite runs. A refusal path added there
+could plausibly leak a lease or a descriptor; the acquire/release equality is
+the instrument that would show it.
+
+It does not. 82581 pairs, exact, and the tail window sum came in BELOW the
+preceding window - the opposite of drift.
+
+**Reading the trend arm correctly.** `delta_kib=60` looks like growth and is
+not: the quartile comparison is what decides, and `tail_sum < preceding_sum`
+here. This is the same arm that produced a false "growing" verdict at the 180s
+default earlier, measured and explained above - at 420s the window spans enough
+oscillation periods to be trustworthy.
+
+Three soaks this session, all with exact acquire/release equality: 35408 at
+180s, 82346 and 82581 at 420s.
