@@ -53,9 +53,18 @@ and nothing else. The comment above it states this.
 
 ## 5. `copy_in.rs` poll_flush treats the sink's OWN close as a lost connection
 
-**FALSE, proved by an induced hang.** `poll_close` is
-`self.poll_finish(cx).map_ok(|_| ())` and never closes the sender, so
-`sender.is_closed()` reports a genuine receiver drop.
+**FALSE, proved by an induced hang** - but the reason given here was wrong, and
+is corrected at the end of this document (2026-08-30). This paragraph originally
+read: "`poll_close` is `self.poll_finish(cx).map_ok(|_| ())` and never closes the
+sender, so `sender.is_closed()` reports a genuine receiver drop."
+
+**`poll_finish` DOES close the sender**, at `copy_in.rs:357`
+(`this.sender.poll_close(cx)`), inside the 306-421 body. The crate asserts it:
+`flush_after_cancelled_close_preserves_copy_completion` fails with "the pending
+close poll did not close its own sender" if it does not. What actually keeps our
+own close out of the disconnect arm is the `!closed_by_sink` term - see the
+closing section. The induced-hang evidence below is real and still stands; only
+the explanation was wrong.
 
 Mutating `let disconnected = this.sender.is_closed();` to `= true;`
 (`copy_in.rs:487`) makes the suite HANG at
