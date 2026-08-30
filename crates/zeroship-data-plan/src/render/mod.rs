@@ -104,7 +104,7 @@ use crate::literal::Literal;
 ///     fn bytes_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn vector_placeholder(&self, slot: usize) -> String { format!("${slot}::vector") }
 ///     fn current_timestamp_expr(&self) -> &'static str { "NOW()" }
-///     fn row_identity_column(&self) -> &'static str { "ctid" }
+///     fn row_identity_column(&self) -> &'static str { "id" }
 /// }
 /// ```
 ///
@@ -154,7 +154,7 @@ use crate::literal::Literal;
 ///     fn text_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn bytes_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn current_timestamp_expr(&self) -> &'static str { "NOW()" }
-///     fn row_identity_column(&self) -> &'static str { "ctid" }
+///     fn row_identity_column(&self) -> &'static str { "id" }
 /// }
 /// ```
 pub trait ValueFormat {
@@ -202,10 +202,11 @@ pub trait ValueFormat {
     /// text cast sidesteps the binary type-discovery handshake - and that cast
     /// is a spelling, which is why it is here rather than in the plan.
     fn vector_placeholder(&self, slot: usize) -> String;
-    /// The column that names one physical row, for a bounded write's subquery.
+    /// The column that stably names one row for a bounded write's subquery.
     ///
-    /// `ctid` on `PostgreSQL`, `rowid` on `SQLite` - the same per-dialect choice
-    /// `query.rs:3999-4003` and `:4284-4288` make, twice each, inline.
+    /// PostgreSQL uses the platform-injected `id TEXT PRIMARY KEY`. A physical
+    /// locator such as `ctid` is outside ordinary column grants and can be
+    /// reused after its tuple dies.
     ///
     /// It is emitted quoted like any other identifier, and it never comes from a
     /// caller: no [`crate::Ident`] a caller holds reaches this position.

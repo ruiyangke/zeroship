@@ -169,11 +169,23 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #   this comment block exists to stop, so the number above is a fresh
 #   measurement rather than 118 minus arithmetic.
 #
+# MOVED 100 -> 114 on 2026-08-29 after re-running every target in this loop on
+# a fresh dedicated `pgvector/pgvector:pg16` cluster with logical WAL:
+#   integration         81  (0 failed, 6 ignored)
+#   native_transaction  24  (0 failed)
+#   distributed_live     1  (0 failed)
+#   missing_role         3  (0 failed)
+#   column_grants        5  (0 failed)
+#   SUM                114
+# The supplied `zs-dbbind-pg-5490` image has no pgvector package. The same run
+# there measured 112 passed / 2 failed: both failures were the known missing-
+# pgvector arms. `column_grants` itself passed 5 / 0 on that server.
+#
 # WHY THE INSTRUMENT CHANGED TOO: roles are cluster-scoped, so a fresh database
 # on a shared server is not isolation. A leftover `p6a_unmask_login` produced
 # `CREATE ROLE ... 42710` and masked a real defect behind a collision error.
 # Re-measure on a dedicated cluster or this number will not reproduce.
-PLUGIN_DB_MIN_PASSED=100
+PLUGIN_DB_MIN_PASSED=114
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
@@ -185,7 +197,8 @@ PLUGIN_DB_SKIP_ALLOWLIST="postgis"
 echo "==> zeroship-plugin-db live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
-# ALL live-Postgres targets. `integration` and `native_transaction` are the two
+# The live-Postgres targets this gate owns. `integration` and
+# `native_transaction` are the two
 # siblings ci.yml names together as belonging "with the other live-database
 # gates"; running only the first would leave the second in exactly the limbo
 # this script exists to end. `distributed_live` joined them on 2026-08-12 for
@@ -202,8 +215,8 @@ suite_rc=0
 # `required-features = ["live-db-tests"]`, and `missing_role` declares
 # `required-features = ["test-helpers"]`. Passing the narrower feature makes
 # cargo REFUSE the distributed target with "requires the features", while the
-# superset lets all four targets build.
-for target in integration native_transaction distributed_live missing_role; do
+# superset lets all five targets build.
+for target in integration native_transaction distributed_live missing_role column_grants; do
   echo "--- cargo test --test ${target} ---" | tee -a "$SUITE_LOG"
   cargo test -p zeroship-plugin-db --features live-db-tests --test "$target" \
     -- --test-threads=1 2>&1 | tee -a "$SUITE_LOG"

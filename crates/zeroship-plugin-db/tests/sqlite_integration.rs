@@ -9278,11 +9278,9 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 // Delete becomes soft-delete; add purge + restore; find auto-filters
 // deleted_at
 //
-// We use the `_many` builders on the SQLite arm because the `_one`
-// builders narrow via the PG-flavoured `ctid` subquery (SQLite doesn't
-// carry `ctid`); the UPDATE e2e tests above follow the same convention.
-// Filter is narrowed to a single id so the multi-row builder still
-// touches exactly one row in practice.
+// We use the `_many` builders in these fixtures because their filters are
+// already narrowed to one id. The `_one` builders have their own SQLite
+// `rowid` coverage elsewhere in this target.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -11184,5 +11182,4 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
         );
     });
 }
-
 

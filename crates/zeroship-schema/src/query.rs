@@ -4155,7 +4155,7 @@ pub fn build_set_clauses_with_system_fields(
 }
 
 /// Build an UPDATE query:
-/// `UPDATE "app_id"."collection" SET ... WHERE ctid = (...) RETURNING "id", ...`
+/// `UPDATE "app_id"."collection" SET ... WHERE id = (...) RETURNING "id", ...`
 ///
 /// PG-flavour wrapper — every existing call site goes through Postgres.
 pub fn build_update_one(
@@ -4177,10 +4177,9 @@ pub fn build_update_one(
 
 /// Dialect-aware `updateOne` builder. Encrypted-column
 /// binds follow the dialect's
-/// [`SqlDialect::binary_bind_placeholder`]. The `ctid` subquery
-/// shape is PG-specific (`SqlDialect::Sqlite` callers should rebuild
-/// the LIMIT 1 narrowing differently — out of scope here; the
-/// builder body remains PG-shaped here).
+/// [`SqlDialect::binary_bind_placeholder`]. PostgreSQL narrows through
+/// the platform primary key and locks the selected row. SQLite keeps its
+/// `rowid` target because it has no column-grant boundary.
 pub fn build_update_one_with_dialect(
     app_id: &str,
     collection: &str,
@@ -4232,13 +4231,9 @@ pub fn build_update_one_with_system_fields(
     } else {
         format!(" WHERE {where_clause}")
     };
-    let target_col = match dialect {
-        SqlDialect::Postgres => "ctid",
-        SqlDialect::Sqlite => "rowid",
-        SqlDialect::Mysql => "id",
-    };
+    let (target_col, lock_clause) = single_row_write_target(dialect);
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -4540,13 +4535,9 @@ pub fn build_delete_one_with_dialect(
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where(filter, &mut params)?;
 
-    let target_col = match dialect {
-        SqlDialect::Postgres => "ctid",
-        SqlDialect::Sqlite => "rowid",
-        SqlDialect::Mysql => "id",
-    };
+    let (target_col, lock_clause) = single_row_write_target(dialect);
     let sql = format!(
-        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1) RETURNING {returning}",
+        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1{lock_clause}) RETURNING {returning}",
         if where_clause.is_empty() {
             String::new()
         } else {
@@ -4584,6 +4575,21 @@ pub fn build_delete_one_with_dialect(
 /// [`build_set_clauses_with_system_fields`] does for `updated_at`.
 fn now_expr(dialect: SqlDialect) -> &'static str {
     renderer(dialect).current_timestamp_expr()
+}
+
+/// The stable identity and lock suffix for a single-row write.
+///
+/// The binding's ordinary PostgreSQL column grants omit `ctid`, while every
+/// creator table has an immutable, readable `id TEXT PRIMARY KEY`. Locking that
+/// logical row inside the selecting subquery keeps selection and mutation in
+/// one statement. The SQLite dev tier has no column-grant boundary and retains
+/// its native `rowid`.
+fn single_row_write_target(dialect: SqlDialect) -> (&'static str, &'static str) {
+    match dialect {
+        SqlDialect::Postgres => ("id", " FOR UPDATE"),
+        SqlDialect::Sqlite => ("rowid", ""),
+        SqlDialect::Mysql => ("id", ""),
+    }
 }
 
 /// Compose the SET clauses for a soft-delete: the
@@ -4656,8 +4662,8 @@ fn build_restore_set_clauses(
 /// ```sql
 /// UPDATE "app1"."posts"
 /// SET "deleted_at" = NOW(), "version" = "version" + 1, "updated_at" = NOW(), "updated_by" = $2
-/// WHERE ctid = (
-///   SELECT ctid FROM "app1"."posts" WHERE "id" = $1 AND "deleted_at" IS NULL LIMIT 1
+/// WHERE id = (
+///   SELECT id FROM "app1"."posts" WHERE "id" = $1 AND "deleted_at" IS NULL LIMIT 1 FOR UPDATE
 /// )
 /// RETURNING "id", "created_at", ...
 /// ```
@@ -4697,13 +4703,9 @@ pub fn build_soft_delete_one_with_system_fields(
         format!(" WHERE {where_clause} AND \"deleted_at\" IS NULL")
     };
 
-    let target_col = match dialect {
-        SqlDialect::Postgres => "ctid",
-        SqlDialect::Sqlite => "rowid",
-        SqlDialect::Mysql => "id",
-    };
+    let (target_col, lock_clause) = single_row_write_target(dialect);
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -4711,7 +4713,7 @@ pub fn build_soft_delete_one_with_system_fields(
 }
 
 /// Dialect-aware `soft_delete_many` builder. Same shape
-/// as [`build_soft_delete_one_with_system_fields`] minus the `ctid`
+/// as [`build_soft_delete_one_with_system_fields`] minus the single-row
 /// LIMIT 1 narrowing — every live row matching `filter` flips
 /// `deleted_at` to the dialect's `NOW()`-equivalent.
 ///
@@ -4781,13 +4783,9 @@ pub fn build_restore_one_with_system_fields(
         format!(" WHERE {where_clause} AND \"deleted_at\" IS NOT NULL")
     };
 
-    let target_col = match dialect {
-        SqlDialect::Postgres => "ctid",
-        SqlDialect::Sqlite => "rowid",
-        SqlDialect::Mysql => "id",
-    };
+    let (target_col, lock_clause) = single_row_write_target(dialect);
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -6988,8 +6986,8 @@ mod tests {
         let q = build_update_many("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.starts_with(r#"UPDATE "app1"."users" SET"#), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
-        // Must NOT contain ctid subquery (that's updateOne's approach)
-        assert!(!q.sql.contains("ctid"), "sql should not contain ctid: {}", q.sql);
+        // Must NOT contain updateOne's primary-key LIMIT 1 subquery.
+        assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
     }
 
     #[test]
@@ -6998,7 +6996,7 @@ mod tests {
         let q = build_delete_many("app1", "users", &tschema(), &filter).unwrap();
         assert!(q.sql.starts_with(r#"DELETE FROM "app1"."users""#), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
-        assert!(!q.sql.contains("ctid"), "sql should not contain ctid: {}", q.sql);
+        assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["false"]);
     }
 
@@ -7265,8 +7263,12 @@ mod tests {
         let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         // Plain field: value → SET "name" = $1
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
-        // ctid subquery for LIMIT 1
-        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(
+            q.sql.contains("WHERE id = (SELECT id FROM")
+                && q.sql.contains("LIMIT 1 FOR UPDATE)"),
+            "sql: {}",
+            q.sql
+        );
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params[0], "bob");
     }
@@ -7277,7 +7279,7 @@ mod tests {
         let update = json!({"$set": {"name": "carol"}});
         let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
-        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(q.sql.contains("WHERE id = (SELECT id FROM"), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params[0], "carol");
     }
@@ -7286,8 +7288,12 @@ mod tests {
     fn test_delete_one() {
         let filter = json!({});
         let q = build_delete_one("app1", "users", &tschema(), &filter).unwrap();
-        // ctid subquery for LIMIT 1
-        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(
+            q.sql.contains("WHERE id = (SELECT id FROM")
+                && q.sql.contains("LIMIT 1 FOR UPDATE)"),
+            "sql: {}",
+            q.sql
+        );
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         // No WHERE in the outer DELETE (empty filter → no inner WHERE either)
         assert!(
@@ -7301,7 +7307,7 @@ mod tests {
     fn test_delete_one_with_filter() {
         let filter = json!({"role": "guest"});
         let q = build_delete_one("app1", "users", &tschema(), &filter).unwrap();
-        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(q.sql.contains("WHERE id = (SELECT id FROM"), "sql: {}", q.sql);
         // Filter should appear in the subquery
         assert!(q.sql.contains(r#""role" = $1"#), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
@@ -8193,8 +8199,7 @@ mod tests {
         let update = json!({"status": "published"});
         let q = build_update_many("app1", "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
-        // updateMany must NOT wrap the WHERE in a ctid LIMIT 1 subquery —
-        // that would only touch one row.
+        // updateMany must not wrap the WHERE in a LIMIT 1 subquery.
         assert!(!q.sql.contains("LIMIT 1"), "sql: {}", q.sql);
     }
 
@@ -12319,7 +12324,8 @@ mod tests {
         assert!(q.sql.contains("\"updated_at\" = NOW()"));
         assert!(q.sql.contains("\"updated_by\" ="));
         assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
-        assert!(q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+        assert!(q.sql.contains("WHERE id = (SELECT id FROM"));
+        assert!(q.sql.contains("LIMIT 1 FOR UPDATE)"));
     }
 
     #[test]
@@ -12347,7 +12353,7 @@ mod tests {
     }
 
     #[test]
-    fn build_soft_delete_many_omits_ctid_narrowing() {
+    fn build_soft_delete_many_omits_single_row_narrowing() {
         let filter = serde_json::json!({ "author": "usr_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -12362,11 +12368,7 @@ mod tests {
             &autobump,
         )
         .unwrap();
-        assert!(
-            !q.sql.contains("WHERE ctid ="),
-            "bulk soft-delete must not narrow via ctid: {}",
-            q.sql
-        );
+        assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
         assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
         assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
     }
@@ -12416,7 +12418,7 @@ mod tests {
     }
 
     #[test]
-    fn build_restore_many_omits_ctid_narrowing() {
+    fn build_restore_many_omits_single_row_narrowing() {
         let filter = serde_json::json!({ "author": "usr_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -12431,7 +12433,7 @@ mod tests {
             &autobump,
         )
         .unwrap();
-        assert!(!q.sql.contains("WHERE ctid ="));
+        assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"));
         assert!(q.sql.contains("AND \"deleted_at\" IS NOT NULL"));
         assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
     }
@@ -12532,7 +12534,7 @@ mod tests {
         )
         .unwrap();
         assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
-        assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+        assert!(!q.sql.contains("FOR UPDATE"));
     }
 
     #[test]
@@ -12541,7 +12543,7 @@ mod tests {
         let q = build_delete_one_with_dialect("app1", "posts", &tschema(), &filter, SqlDialect::Sqlite)
             .unwrap();
         assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
-        assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+        assert!(!q.sql.contains("FOR UPDATE"));
     }
 
     #[test]
@@ -12557,7 +12559,7 @@ mod tests {
         )
         .unwrap();
         assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
-        assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+        assert!(!q.sql.contains("FOR UPDATE"));
     }
 
     // -----------------------------------------------------------------------

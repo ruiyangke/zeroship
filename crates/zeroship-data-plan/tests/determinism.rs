@@ -272,7 +272,7 @@ fn permuted_update_assignments_render_to_one_canonical_fixture() {
     let canonical = format!(
         concat!(
             r#"UPDATE "app_1"."users" SET "name" = $1, "version" = "version" + $2 "#,
-            r#"WHERE "ctid" IN (SELECT "ctid" FROM "app_1"."users" "#,
+            r#"WHERE "id" IN (SELECT "id" FROM "app_1"."users" "#,
             r#"WHERE ("age" = $3 AND "score" = $4) LIMIT $5 FOR UPDATE){}"#
         ),
         RETURNING_LIST

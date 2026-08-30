@@ -413,7 +413,7 @@ fn no_update_or_delete_is_unbounded() {
             postgres::render_delete(&delete).expect("renders").sql().to_string(),
         ] {
             assert!(
-                sql.contains(r#"WHERE "ctid" IN (SELECT "ctid" FROM"#),
+                sql.contains(r#"WHERE "id" IN (SELECT "id" FROM"#),
                 "the bounded-target subquery is missing: {sql}"
             );
             assert!(

@@ -204,17 +204,17 @@ pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
 ///
 /// ```text
 /// UPDATE "ns"."t" SET "a" = $1, "v" = "v" + $2
-///   WHERE "ctid" IN (SELECT "ctid" FROM "ns"."t" WHERE .. LIMIT $3 FOR UPDATE)
+///   WHERE "id" IN (SELECT "id" FROM "ns"."t" WHERE .. LIMIT $3 FOR UPDATE)
 ///   RETURNING ...
 /// ```
 ///
-/// # Why the bound is a subquery over `ctid` and not a `LIMIT` on the `UPDATE`
+/// # Why the bound is a subquery over `id` and not a `LIMIT` on the `UPDATE`
 ///
 /// `PostgreSQL` has no `LIMIT` on `UPDATE`, so the bound has to be expressed as
-/// a set of rows chosen by a subquery. That is the shape `query.rs` already uses
-/// for the single-row case (`WHERE ctid = (SELECT ctid ... LIMIT 1)`,
-/// `query.rs:4004-4007`); this generalises it from one row to `n` and makes it
-/// unconditional, so there is no arm where the clause is absent.
+/// a set of rows chosen by a subquery. Every creator collection carries an
+/// immutable `id TEXT PRIMARY KEY`, so this generalises the single-row shape
+/// from one logical row to `n` and makes the bound unconditional: there is no
+/// arm where the clause is absent.
 ///
 /// Doing it in **one statement** rather than as a probe followed by a write is
 /// the other half. The encrypted branch of `dispatch_update_many` reads the
@@ -225,16 +225,16 @@ pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
 ///
 /// # `FOR UPDATE` is load-bearing, not decoration
 ///
-/// A `ctid` names a physical tuple, not a row: once a tuple is dead and `VACUUM`
-/// has reclaimed the line pointer, the same `ctid` can name a **different** row.
-/// Without a lock, the tuples the subquery chose could be replaced between the
-/// scan and the update. `FOR UPDATE` locks them, which is exactly why
-/// `build_write_target_probe` appends it on the `PostgreSQL` arm
-/// (`query.rs:2876-2878`).
+/// A logical key removes `ctid`'s line-pointer reuse hazard, but it does not
+/// make the lock optional. Without a lock, a concurrent update can change a
+/// selected row so it no longer satisfies the original filter before the outer
+/// write reaches it; the outer predicate names only `id` and would still match.
+/// `FOR UPDATE` keeps selection and mutation tied to the same row. The shipped
+/// encrypted-write probe uses the same lock for this reason.
 ///
 /// The clause goes after `LIMIT`, which is where `PostgreSQL`'s `SELECT` grammar
-/// puts a locking clause, and where `query.rs:2877` puts it - it appends to a
-/// statement that already ends in `LIMIT $n OFFSET $n`.
+/// puts a locking clause. The shipped probe likewise appends it to a statement
+/// that already ends in `LIMIT $n OFFSET $n`.
 ///
 /// One property is worth stating rather than leaving to be discovered: the
 /// subquery has no `ORDER BY`, so the lock order is the scan order. Two
@@ -646,10 +646,10 @@ impl ValueFormat for PostgresValueFormat {
         "NOW()"
     }
 
-    /// `ctid`. `PostgreSQL`'s physical row locator, the same one
-    /// `query.rs:4000` and `:4285` reach for on the `SqlDialect::Postgres` arm.
+    /// The platform-injected `id TEXT PRIMARY KEY`. It is stable across tuple
+    /// versions and belongs to the ordinary column-grant surface.
     fn row_identity_column(&self) -> &'static str {
-        "ctid"
+        "id"
     }
 }
 
@@ -666,11 +666,9 @@ fn quote(ident: &Ident) -> String {
 /// Quote a name this backend chose itself.
 ///
 /// The **only** callers are [`ValueFormat::row_identity_column`]'s result and
-/// [`quote`]. It deliberately does not take an [`Ident`], because `ctid` is not
-/// an identifier a caller may name - it is a spelling the backend owns - and
-/// deliberately does not take a caller string either, because nothing in this
-/// crate has one to give it: no public function accepts a `&str` that reaches
-/// statement text.
+/// [`quote`]. It deliberately does not take an [`Ident`], because the bounded
+/// write identity is a spelling the backend owns, not an identifier a caller
+/// may choose. No public function accepts a `&str` that reaches statement text.
 fn quote_raw(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push('"');
@@ -754,7 +752,7 @@ fn write_assignments(out: &mut Writer, assignments: &[ColumnAssignment]) {
     }
 }
 
-/// ` WHERE "ctid" IN (SELECT "ctid" FROM <table>[ WHERE ..] LIMIT $n FOR UPDATE)`
+/// ` WHERE "id" IN (SELECT "id" FROM <table>[ WHERE ..] LIMIT $n FOR UPDATE)`
 ///
 /// Emitted **unconditionally**, which is what makes an unbounded write
 /// unrepresentable: the filter may simplify to `TRUE` and vanish, but the bound

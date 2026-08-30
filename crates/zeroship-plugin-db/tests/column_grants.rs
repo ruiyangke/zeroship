@@ -51,6 +51,14 @@ use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
 use serde_json::{Value, json};
+use zeroship_data_plan::render::postgres::{render_delete, render_update};
+use zeroship_data_plan::{
+    Assignment as PlanAssignment, ColumnAssignment as PlanColumnAssignment,
+    CompareOp as PlanCompareOp, Delete as PlanDelete, Ident as PlanIdent, IdentRole as PlanIdentRole,
+    Literal as PlanLiteral, Operand as PlanOperand, Predicate as PlanPredicate,
+    ProjectedField as PlanProjectedField, Projection as PlanProjection,
+    Returning as PlanReturning, RowLimit as PlanRowLimit, Update as PlanUpdate,
+};
 use zeroship_plugin_db::query::{
     FkEmission, SYSTEM_FIELD_NAMES, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks,
     build_delete_many, build_delete_one, build_insert, build_insert_many,
@@ -126,8 +134,12 @@ fn projected_columns(schema: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Stand the app schema and table up, and mint a role holding COLUMN grants
-/// only.
+/// Stand the app schema and table up, and mint a role holding column-scoped
+/// SELECT, INSERT and UPDATE grants.
+///
+/// PostgreSQL exposes DELETE only as a table privilege, so a readwrite binding
+/// must also grant table DELETE. That does not grant SELECT on any column and
+/// therefore does not weaken the withheld raw-column control this suite owns.
 ///
 /// Returns `(app_schema, role_name)`.
 async fn fixture(admin: &Client, suffix: &str) -> (String, String) {
@@ -185,6 +197,25 @@ async fn fixture(admin: &Client, suffix: &str) -> (String, String) {
         .await
         .unwrap_or_else(|e| panic!("issue the column grants: {e}"));
 
+    let table_privilege_rows = admin
+        .query_text_params(
+            "SELECT privilege_type FROM information_schema.table_privileges \
+               WHERE grantee = $1 AND table_schema = $2 AND table_name = $3 \
+               ORDER BY privilege_type",
+            &[&role, &app, COLLECTION],
+        )
+        .await
+        .expect("read the fixture's exact table privileges");
+    let table_privileges = table_privilege_rows
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        table_privileges,
+        vec!["DELETE"],
+        "DELETE is the sole table privilege; read authority must stay column-scoped"
+    );
+
     (app, role)
 }
 
@@ -213,6 +244,27 @@ async fn server_version_num(client: &Client) -> String {
         .await
         .expect("read server_version_num");
     rows[0].get::<_, String>(0)
+}
+
+/// Begin one role-scoped test arm and prove `SET LOCAL ROLE` took effect.
+async fn begin_as_role(session: &Client, role: &str) {
+    session
+        .batch_execute(&format!(
+            "BEGIN; SET LOCAL ROLE {}",
+            quote_ident(role)
+        ))
+        .await
+        .expect("begin the role-scoped arm");
+    let rows = session
+        .query_text_params("SELECT current_user", &[])
+        .await
+        .expect("read the effective role");
+    let current_user = rows[0].get::<_, String>(0);
+    println!("column_grants role-scoped arm: current_user={current_user}");
+    assert_eq!(
+        current_user, role,
+        "SET LOCAL ROLE must take effect inside the explicit transaction"
+    );
 }
 
 type Statement = (&'static str, String, Vec<String>);
@@ -292,12 +344,9 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
     ]
 }
 
-/// The four single-row verbs, which narrow through `ctid`.
-///
-/// Kept apart from the list above and asserted SEPARATELY, because they are
-/// still refused for a column-granted role and NOT because of their projection.
-/// See [`the_single_row_verbs_are_still_blocked_by_their_ctid_narrowing`].
-fn ctid_narrowed_statements(app: &str, schema: &Value) -> Vec<Statement> {
+/// The four single-row verbs, kept together so the live privilege test rules
+/// on every production builder that shares the bounded target shape.
+fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let ab = autobump();
     let d = SqlDialect::Postgres;
     let filter = json!({ "id": "psn_seed" });
@@ -326,20 +375,94 @@ fn ctid_narrowed_statements(app: &str, schema: &Value) -> Vec<Statement> {
     ]
 }
 
-/// Seven of the twelve builders reach the server here.
+/// Render the replacement data-plan's two bounded PostgreSQL writes against
+/// the same physical fixture as the shipped builders.
+fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_plan::RenderedSql)> {
+    let namespace = PlanIdent::parse_as(app, PlanIdentRole::Namespace).expect("namespace");
+    let collection =
+        PlanIdent::parse_as(COLLECTION, PlanIdentRole::Collection).expect("collection");
+    let id = || PlanIdent::parse_as("id", PlanIdentRole::Column).expect("id column");
+    let returning = || {
+        PlanReturning::rows(
+            PlanProjection::rows(vec![
+                PlanProjectedField::column(
+                    PlanIdent::parse_as("ssn", PlanIdentRole::Column).expect("ssn column"),
+                )
+                .expect("project ssn"),
+                PlanProjectedField::column(
+                    PlanIdent::parse_as("nickname", PlanIdentRole::Column)
+                        .expect("nickname column"),
+                )
+                .expect("project nickname"),
+            ])
+            .expect("row projection"),
+        )
+        .expect("return rows")
+    };
+    let filter = || {
+        PlanPredicate::compare(
+            PlanOperand::column(id()),
+            PlanCompareOp::Eq,
+            PlanOperand::Lit(PlanLiteral::text("psn_seed").expect("id literal")),
+        )
+    };
+    let limit = PlanRowLimit::new(1).expect("single-row bound");
+
+    let update = PlanUpdate::builder(collection.clone(), limit, returning())
+        .namespace(namespace.clone())
+        .set(PlanColumnAssignment::new(
+            PlanIdent::parse_as("nickname", PlanIdentRole::Column).expect("nickname column"),
+            PlanAssignment::bind(PlanLiteral::text("updated-by-plan").expect("update literal")),
+        ))
+        .filter(filter())
+        .build()
+        .expect("bounded update plan");
+    let delete = PlanDelete::builder(collection, limit, returning())
+        .namespace(namespace)
+        .filter(filter())
+        .build()
+        .expect("bounded delete plan");
+
+    vec![
+        (
+            "data-plan update",
+            render_update(&update).expect("render bounded update"),
+        ),
+        (
+            "data-plan delete",
+            render_delete(&delete).expect("render bounded delete"),
+        ),
+    ]
+}
+
+/// Convert the two literal kinds this fixture emits to the shipped driver's
+/// text-inference channel. An unexpected kind is a test construction error.
+fn bounded_data_plan_params(params: &[PlanLiteral]) -> Vec<String> {
+    params
+        .iter()
+        .map(|value| match value {
+            PlanLiteral::Int(value) => value.to_string(),
+            PlanLiteral::Text(value) => value.clone(),
+            unexpected => panic!("unexpected bounded-write literal: {unexpected:?}"),
+        })
+        .collect()
+}
+
+/// Seven of the twelve builders reach the server in the projection test.
 ///
-/// The other five: four narrow through `ctid` and are ruled on by their own
-/// test; `build_find_or_create` has no production caller (`crud/mod.rs` says so
-/// where `dispatch_find_or_create` used to be) and its projection is
+/// Four single-row builders are ruled on by their own primary-key narrowing
+/// test. `build_find_or_create` has no production caller (`crud/mod.rs` says so
+/// where `dispatch_find_or_create` used to be), and its projection is
 /// `build_upsert`'s plus one computed column, pinned by the unit tests.
 const WRITE_VERBS_EXERCISED: usize = 7;
 
-/// The four that are not.
-const CTID_NARROWED_VERBS: usize = 4;
+/// The four live builders that share the single-row target shape.
+const SINGLE_ROW_VERBS: usize = 4;
 
-/// **THE TEST.** A role holding only column grants completes every write verb.
+/// **THE TEST.** A role with column-scoped read/write grants completes every
+/// projected verb. Its sole table privilege is the unavoidable DELETE grant.
 #[compio::test]
-async fn a_role_with_only_column_grants_completes_every_write_verb() {
+async fn column_scoped_reads_complete_every_projected_write_verb() {
     let url = test_url();
     let admin = connect(&url).await;
     println!(
@@ -353,10 +476,7 @@ async fn a_role_with_only_column_grants_completes_every_write_verb() {
     // The role must not be able to read the raw column even by naming it -
     // otherwise the grant is not what this suite claims it is.
     let session = connect(&url).await;
-    session
-        .batch_execute(&format!("SET ROLE {}", quote_ident(&role)))
-        .await
-        .expect("assume the role");
+    begin_as_role(&session, &role).await;
 
     let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
     let raw = raw_column_name("ssn");
@@ -368,8 +488,13 @@ async fn a_role_with_only_column_grants_completes_every_write_verb() {
         format!("{denied:?}").contains("42501"),
         "expected a privilege refusal on the raw column, got {denied:?}",
     );
+    session
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("close the refused raw-column arm");
 
     // Seed one row the update / delete / restore verbs act on, as the ROLE.
+    begin_as_role(&session, &role).await;
     let seed = build_insert(
         &app,
         COLLECTION,
@@ -401,7 +526,7 @@ async fn a_role_with_only_column_grants_completes_every_write_verb() {
             .query_text_params(sql, &refs)
             .await
             .unwrap_or_else(|e| {
-                panic!("{verb} must be executable by a column-granted role: {e}\n{sql}")
+                panic!("{verb} must be executable with column-scoped reads: {e}\n{sql}")
             });
         ruled_on += 1;
     }
@@ -409,6 +534,10 @@ async fn a_role_with_only_column_grants_completes_every_write_verb() {
         ruled_on, WRITE_VERBS_EXERCISED,
         "every verb must have reached the server",
     );
+    session
+        .batch_execute("COMMIT")
+        .await
+        .expect("commit the projected write verbs");
 
     // The raw column really is in the table and really did receive the value -
     // so "the role cannot read it" is about the grant, not about a write that
@@ -447,11 +576,7 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
     let schema = people_schema();
 
     let session = connect(&url).await;
-    session
-        .batch_execute(&format!("SET ROLE {}", quote_ident(&role)))
-        .await
-        .expect("assume the role");
-
+    begin_as_role(&session, &role).await;
     let seed = build_insert(
         &app,
         COLLECTION,
@@ -464,6 +589,10 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
         .query_text_params(&seed.sql, &seed_params)
         .await
         .expect("seed insert");
+    session
+        .batch_execute("COMMIT")
+        .await
+        .expect("commit the control seed");
 
     let returning = build_returning_expr(&schema).expect("projection");
     let mut ruled_on = 0usize;
@@ -474,6 +603,7 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
             "{verb}: the mutation must have applied, or this control proves nothing: {sql}",
         );
         let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+        begin_as_role(&session, &role).await;
         let err = session
             .query_text_params(&starred, &refs)
             .await
@@ -484,6 +614,10 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
             format!("{err:?}").contains("42501"),
             "{verb}: expected 42501 permission denied, got {err:?}",
         );
+        session
+            .batch_execute("ROLLBACK")
+            .await
+            .expect("close the refused RETURNING star arm");
         ruled_on += 1;
     }
     assert_eq!(
@@ -494,25 +628,17 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
     teardown(&admin, &app, &role).await;
 }
 
-/// **THE SECOND BLOCKER, and it is not the projection.**
+/// The four single-row verbs must execute without SELECT access to `ctid`.
 ///
-/// The four single-row verbs narrow with `WHERE ctid = (SELECT ctid FROM ...
-/// LIMIT 1)`. `ctid` is a SYSTEM column, and a column-level `SELECT (a, b, ...)`
-/// grant does not cover system columns - reading one needs table-level `SELECT`.
-/// Measured on this server: `SELECT ctid FROM t` is refused `42501 permission
-/// denied for table t` for the same role whose `SELECT id FROM t` succeeds.
-///
-/// So replacing `RETURNING *` is NECESSARY and NOT SUFFICIENT for a
-/// column-granted role. This test exists so that fact is executable rather than
-/// a paragraph someone has to remember: it will go red the day the narrowing
-/// stops naming `ctid`, and the fix is then to move these four verbs into
-/// [`column_grant_ready_statements`].
-///
-/// It is careful about attribution. A bare "these are refused" would also pass
-/// if the projection were broken, so the arms below isolate the cause: the same
-/// role, on the same table, is refused `SELECT ctid` and served `SELECT id`.
+/// The control first proves that this exact role still receives `42501` when it
+/// names `ctid`. A fresh transaction then proves the role can read the ordinary
+/// granted primary key and executes the actual production statements. This is
+/// behavioural: changing a SQL string without making all four statements run
+/// on PostgreSQL cannot make the test pass. Hard DELETE also needs the fixture's
+/// table DELETE privilege because PostgreSQL has no column form of that verb;
+/// that privilege grants no read access to `ctid` or to the withheld column.
 #[compio::test]
-async fn the_single_row_verbs_are_still_blocked_by_their_ctid_narrowing() {
+async fn the_single_row_verbs_succeed_without_ctid_access() {
     let url = test_url();
     let admin = connect(&url).await;
     let suffix = unique_suffix();
@@ -520,53 +646,120 @@ async fn the_single_row_verbs_are_still_blocked_by_their_ctid_narrowing() {
     let schema = people_schema();
 
     let session = connect(&url).await;
-    session
-        .batch_execute(&format!("SET ROLE {}", quote_ident(&role)))
-        .await
-        .expect("assume the role");
-
     let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
 
-    // The cause, isolated. Two statements differing in ONE variable: which
-    // column the subquery selects.
+    // The control is its own explicit transaction because PostgreSQL aborts a
+    // transaction after the expected privilege error.
+    begin_as_role(&session, &role).await;
     let ctid_err = session
         .query_text_params(&format!("SELECT ctid FROM {table}"), &[])
         .await
-        .expect_err("a column-granted role must not be able to read ctid");
+        .expect_err("the column-scoped role must not be able to read ctid");
     assert!(
         format!("{ctid_err:?}").contains("42501"),
         "expected 42501 on the system column, got {ctid_err:?}",
     );
     session
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("close the refused ctid arm");
+
+    begin_as_role(&session, &role).await;
+    session
         .query_text_params(&format!("SELECT \"id\" FROM {table}"), &[])
         .await
         .expect("the same role reads an ordinary granted column");
 
-    // And therefore the four verbs that name it.
-    let statements = ctid_narrowed_statements(&app, &schema);
-    assert_eq!(statements.len(), CTID_NARROWED_VERBS);
+    let raw = raw_column_name("ssn");
+    let seed = build_insert(
+        &app,
+        COLLECTION,
+        &schema,
+        &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
+    )
+    .expect("seed insert builds");
+    let seed_refs: Vec<&str> = seed.params.iter().map(String::as_str).collect();
+    session
+        .query_text_params(&seed.sql, &seed_refs)
+        .await
+        .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
+
+    let statements = single_row_statements(&app, &schema);
+    assert_eq!(statements.len(), SINGLE_ROW_VERBS);
     let mut ruled_on = 0usize;
     for (verb, sql, params) in &statements {
         assert!(
-            sql.contains("ctid"),
-            "{verb} is in this list because it narrows through ctid: {sql}",
-        );
-        assert!(
             !sql.contains("RETURNING *"),
-            "{verb}: the refusal below must be about ctid, not about a star: {sql}",
+            "{verb}: the behavioural arm must retain its column projection: {sql}",
         );
         let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        let err = session
+        let rows = session
             .query_text_params(sql, &refs)
             .await
-            .expect_err(&format!("{verb} is expected to be refused today: {sql}"));
-        assert!(
-            format!("{err:?}").contains("42501"),
-            "{verb}: expected 42501 from the ctid read, got {err:?}",
-        );
+            .unwrap_or_else(|e| {
+                panic!("{verb} must execute under column grants: {e}\n{sql}")
+            });
+        assert_eq!(rows.len(), 1, "{verb} must affect exactly the seeded row");
         ruled_on += 1;
     }
-    assert_eq!(ruled_on, CTID_NARROWED_VERBS);
+    assert_eq!(ruled_on, SINGLE_ROW_VERBS);
+    session
+        .batch_execute("COMMIT")
+        .await
+        .expect("commit the successful single-row verbs");
+
+    teardown(&admin, &app, &role).await;
+}
+
+/// The replacement data-plan renderer must obey the same live grant boundary.
+///
+/// Both statements execute on PostgreSQL. A renderer-only assertion would let
+/// a different privilege mistake pass while the SQL merely stopped spelling
+/// `ctid`.
+#[compio::test]
+async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
+    let url = test_url();
+    let admin = connect(&url).await;
+    let suffix = unique_suffix();
+    let (app, role) = fixture(&admin, &suffix).await;
+    let schema = people_schema();
+    let session = connect(&url).await;
+
+    begin_as_role(&session, &role).await;
+    let raw = raw_column_name("ssn");
+    let seed = build_insert(
+        &app,
+        COLLECTION,
+        &schema,
+        &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
+    )
+    .expect("seed insert builds");
+    let seed_refs: Vec<&str> = seed.params.iter().map(String::as_str).collect();
+    session
+        .query_text_params(&seed.sql, &seed_refs)
+        .await
+        .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
+
+    let statements = bounded_data_plan_statements(&app);
+    assert_eq!(statements.len(), 2, "update and delete must both be ruled on");
+    let mut ruled_on = 0usize;
+    for (verb, rendered) in statements {
+        let owned = bounded_data_plan_params(rendered.params());
+        let params: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let rows = session
+            .query_text_params(rendered.sql(), &params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{verb} must execute under column grants: {e}\n{}", rendered.sql())
+            });
+        assert_eq!(rows.len(), 1, "{verb} must affect exactly the bounded row");
+        ruled_on += 1;
+    }
+    assert_eq!(ruled_on, 2, "both bounded writes must reach PostgreSQL");
+    session
+        .batch_execute("COMMIT")
+        .await
+        .expect("commit the successful data-plan writes");
 
     teardown(&admin, &app, &role).await;
 }
