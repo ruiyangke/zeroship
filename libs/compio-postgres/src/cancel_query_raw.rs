@@ -230,3 +230,195 @@ where
         Err(error) => Err(Error::io(error)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CancelDeliveryTracker, send_cancel_request, wait_for_server_close};
+    use crate::NoTls;
+    use crate::cancel_token::CancelKey;
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::encryption::Encryption;
+    use crate::error::CancelDelivery;
+    use crate::maybe_tls_stream::MaybeTlsStream;
+    use bytes::Bytes;
+    use compio::buf::{BufResult, IoBuf, IoBufMut};
+    use compio::io::{AsyncRead, AsyncWrite};
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const PROCESS_ID: i32 = 0x1020_3040;
+
+    fn cancel_key(bytes: &'static [u8]) -> CancelKey {
+        CancelKey::new(Bytes::from_static(bytes)).expect("valid scripted cancel key")
+    }
+
+    struct PartialWriteStream {
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for PartialWriteStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut eof: &[u8] = &[];
+            eof.read(buf).await
+        }
+    }
+
+    impl AsyncWrite for PartialWriteStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let attempt = self.writes.fetch_add(1, Ordering::Relaxed) + 1;
+            match attempt {
+                1 => {
+                    assert!(buf.buf_len() > 1, "cancel packet fixture is too short");
+                    BufResult(Ok(1), buf)
+                }
+                2 => BufResult(
+                    Err(io::Error::other("scripted error after a partial write")),
+                    buf,
+                ),
+                _ => panic!("write_all retried after its scripted error"),
+            }
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            panic!("a failed write must not be flushed")
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            panic!("a failed write must not be shut down")
+        }
+    }
+
+    #[compio::test]
+    async fn a_partial_cancel_write_is_tracked_as_possibly_sent() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let delivery = CancelDeliveryTracker::default();
+        let result = send_cancel_request(
+            PartialWriteStream {
+                writes: Arc::clone(&writes),
+            },
+            Encryption::Plaintext,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            NoTls,
+            false,
+            PROCESS_ID,
+            cancel_key(b"key!"),
+            true,
+            &delivery,
+        )
+        .await;
+
+        assert!(result.is_err(), "the scripted partial write did not fail");
+        assert_eq!(
+            writes.load(Ordering::Relaxed),
+            2,
+            "the fixture did not make progress before returning its error"
+        );
+        assert_eq!(
+            delivery.delivery(),
+            CancelDelivery::PossiblySent,
+            "a cancel that reached the write boundary was reported as unsent"
+        );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum WriteEvent {
+        Write(Vec<u8>),
+        Flush,
+        Shutdown,
+    }
+
+    struct RecordingStream {
+        events: Arc<parking_lot::Mutex<Vec<WriteEvent>>>,
+    }
+
+    impl AsyncRead for RecordingStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut eof: &[u8] = &[];
+            eof.read(buf).await
+        }
+    }
+
+    impl AsyncWrite for RecordingStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            self.events
+                .lock()
+                .push(WriteEvent::Write(buf.as_init().to_vec()));
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.events.lock().push(WriteEvent::Flush);
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            self.events.lock().push(WriteEvent::Shutdown);
+            Ok(())
+        }
+    }
+
+    #[compio::test]
+    async fn a_variable_key_packet_is_flushed_then_shutdown() {
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let delivery = CancelDeliveryTracker::default();
+        let result = send_cancel_request(
+            RecordingStream {
+                events: Arc::clone(&events),
+            },
+            Encryption::Plaintext,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            NoTls,
+            false,
+            PROCESS_ID,
+            cancel_key(b"eightkey"),
+            true,
+            &delivery,
+        )
+        .await;
+        if let Err(error) = result {
+            panic!("recording the cancel request failed: {error}");
+        }
+
+        assert_eq!(
+            *events.lock(),
+            vec![
+                WriteEvent::Write(vec![
+                    0, 0, 0, 20, 4, 210, 22, 46, 16, 32, 48, 64, b'e', b'i', b'g', b'h', b't',
+                    b'k', b'e', b'y',
+                ]),
+                WriteEvent::Flush,
+                WriteEvent::Shutdown,
+            ],
+            "the variable-key CancelRequest write/flush/shutdown sequence changed"
+        );
+    }
+
+    struct OneByteResponse;
+
+    impl AsyncRead for OneByteResponse {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut response: &[u8] = b"X";
+            response.read(buf).await
+        }
+    }
+
+    #[compio::test]
+    async fn server_data_is_not_an_eof_delivery_barrier() {
+        let result = wait_for_server_close(
+            MaybeTlsStream::<OneByteResponse, OneByteResponse>::Raw(OneByteResponse),
+        )
+        .await;
+        let error = match result {
+            Ok(()) => panic!("server data was accepted as CancelRequest EOF"),
+            Err(error) => error,
+        };
+        let io_error = std::error::Error::source(&error)
+            .and_then(|cause| cause.downcast_ref::<io::Error>())
+            .expect("unexpected CancelRequest data did not produce an I/O error");
+        assert_eq!(io_error.kind(), io::ErrorKind::InvalidData);
+    }
+}
