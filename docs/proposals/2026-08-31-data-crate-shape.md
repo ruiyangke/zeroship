@@ -137,38 +137,29 @@ dev backend" is a 13-file relocation, not a `#[cfg]`.
 **This block names crates. It does NOT enumerate modules** - that is Track B's table, and holding the
 inventory in two places is what produced two contradictions in two rounds.
 
-**The `zeroship-data-*` prefix is DROPPED - corrected 2026-08-31 by review.** Once `plugin-db` kept
-its name, the two remaining `data-*` members shared no production dependency edge, no type, no trait
-and no process. Measured: across `wal_consumer.rs`, `replication.rs` and `slot_reaper.rs` there is
-exactly ONE reference to any query-building symbol, `replication.rs:674`, and it is inside the
-`#[cfg(test)]` module opened at `:598`. Zero references to `DbPlan` in any of the three.
+**Why the prefix survives, having briefly been dropped.** An intermediate revision of this document
+DELETED the `data-*` prefix, on the argument that a prefix must denote something you can CHECK.
+That argument is right and still stands: `plugin-*` means "implements `NativePlugin`
+(`zeroship-runtime/src/core/plugin.rs:36`) and is composed at `zeroship-worker/src/cache.rs:246`";
+`migrate-*` names a dependency-closed stack in which every member declares `zeroship-migrate-ir`.
+At that moment `data-*` had no such predicate - its two members shared no production edge at all
+(measured: across `wal_consumer.rs`, `replication.rs` and `slot_reaper.rs` there is exactly ONE
+reference to any query-building symbol, `replication.rs:674`, inside the `#[cfg(test)]` module opened
+at `:598`).
 
-Every other prefix in this workspace denotes something checkable. `plugin-*` means "implements
-`NativePlugin` (`zeroship-runtime/src/core/plugin.rs:36`) and is composed at
-`zeroship-worker/src/cache.rs:246`" - you can ask and get a yes. `migrate-*` names a
-dependency-closed stack: every member declares `zeroship-migrate-ir`. Ask the same of `data-*` and
-there is no predicate to ask. A prefix worn by two of roughly ten members of the data system, with
-the four largest excluded by this very plan, tells a reader "these two are related to each other" -
-the one thing that is false.
+**`data-core` supplies the missing predicate, which is why the five-crate shape restores the family
+the three-crate shape could not justify.** The question is now askable and has the same answer
+`migrate-*` gives: *every member depends on the contract crate.*
 
-**Two names follow from that, and both come from precedent already in the tree:**
+**One naming argument from that revision survives and is why `data-query-builder` beats
+`data-query-ir`.** `-ir` is already taken in this workspace and means the OPPOSITE:
+`zeroship-migrate-ir` is "the zeroship-migrate **wire contract**" (`Cargo.toml:6`), whose
+`MigrationIr` derives `Serialize, Deserialize, JsonSchema` and whose first dependency is serde. The
+data-plane leaf is defined by forbidding exactly that. Naming it `-ir` would hand a reader that
+expectation and then ban it.
 
-- **`zeroship-db-relay`, not `zeroship-data-cdc`.** The repo has spelled worker-tier plus service-tier
-  of one domain twice already: `zeroship-plugin-workflow` beside `zeroship-workflow-scheduler`
-  (whose `src/lib.rs:1-10` describes "the standalone process is a deferred extraction target" - the
-  same situation Track B is in), and `zeroship-migrate-server`. `data-cdc` invents a third axis and
-  reads like a library when the thing is a process tier - exactly the distinction the "privilege
-  follows the PROCESS" invariant turns on.
-- **`zeroship-query-plan`, not `zeroship-data-query-ir`.** `-ir` is already taken in this workspace
-  and means the OPPOSITE: `zeroship-migrate-ir` is "the zeroship-migrate **wire contract**"
-  (`Cargo.toml:6`), whose `MigrationIr` derives `Serialize, Deserialize, JsonSchema` and whose first
-  dependency is serde. The data-plane crate is defined by forbidding exactly that. Naming it `-ir`
-  hands a reader that expectation and then bans it. "Plan" is the crate's own word (`DbPlan`), it
-  matches the repo's shape for shared leaves (`zeroship-core`, `zeroship-bundle`, `zeroship-schema`),
-  and it is a smaller rename than the one this plan proposed.
-
-`zeroship-schema` still DISSOLVES: its live query building is replaced by the IR rather than moved,
-its `MaskKind` and sentinel codec go to `plugin-db`, and its dead regions are deleted (below).
+`zeroship-schema` DISSOLVES: its live query building is replaced by the typed grammar rather than
+moved, its `MaskKind` and sentinel codec go to `data-core`, and its dead regions are deleted (below).
 
 ### Three changes the review forced, each with the evidence that forced it
 
@@ -224,7 +215,18 @@ Measured 2026-08-31. The data plane's backend layer is 13,560 lines:
 | `backend/mod.rs` (trait + shared) | 2,201 | both |
 | `backend/postgres.rs` | 1,477 | production |
 
-**The dev-only backend is 6.4x the production one, and the production worker compiles all of it.**
+Those three rows total **13,163**. A `find`-over-`backend/` gives 13,560; the 397-line gap is
+`backend/lock_guard.rs`, which is `#[cfg(any(test, feature = "test-helpers"))]` (`backend/mod.rs:72`)
+and so is not in a production build at all. **An earlier version of this section printed the 13,560
+total above a table that adds to 13,163** - a table and its own total disagreeing, which is the
+cheapest kind of error to catch and the easiest to skim past.
+
+**The dev-only backend is 6.4x the production one, and the production worker compiles all of it -
+but state that claim carefully.** 9,485 is TOTAL SQLite SOURCE lines, and it includes test regions of
+its own (e.g. `backend/sqlite/mod.rs:2355-2369`, `session.rs:2692-2707`). The defensible claim is
+that a feature-off build stops compiling the production-reachable SQLite module; **how many linked
+bytes or symbols that removes is unmeasured, and this document should not imply it has been
+measured.**
 `zeroship-plugin-db` declares exactly two features, `test-helpers` and `live-db-tests`
 (`Cargo.toml:180-188`); neither gates a backend. The `cfg(feature = "test-helpers")` at
 `backend/mod.rs:85` only widens `pub(crate) mod sqlite` to `pub mod sqlite` - it changes visibility,
@@ -247,7 +249,7 @@ strengthens exactly the guard that already exists rather than duplicating it.
 
 The target is the engine's own shape - `zeroship-migrate-backend` is a contract that
 `-postgres`/`-sqlite`/`-mysql` implement without depending on the engine or each other. The data
-plane should match it: `zeroship-data-backend` + `zeroship-data-postgres` + `zeroship-data-sqlite`.
+plane should match it: `zeroship-data-core` + `zeroship-data-postgres` + `zeroship-data-sqlite`.
 
 **It cannot be done by moving files today, because the backends reach back up into the plugin.**
 Counting `crate::<module>` references out of each backend, **with comment lines stripped**:
@@ -415,8 +417,16 @@ source but stayed reachable through `zeroship-schema`, which plugin-db depends o
 
 ## Track A - one query builder
 
-Merge `zeroship-schema` + `zeroship-data-plan` into `zeroship-data-query`, then replace the string
-builder from inside one crate.
+Rename `zeroship-data-plan` to `zeroship-data-query-builder`, keeping its empty manifest, then
+replace the string builder from OUTSIDE it - the callers move to the typed grammar, and
+`zeroship-schema`'s builder is deleted rather than merged in.
+
+**This instruction used to read "merge `zeroship-schema` + `zeroship-data-plan` into
+`zeroship-data-query`", which the same document then refuted two sections earlier and left standing
+here for three revisions.** The merge is refused by
+`serialize_derive_is_structurally_impossible`: `zeroship-schema` declares `compio-postgres`,
+`zeroship-core` and `tracing`, and the test fails on ANY declared dependency. There is no version of
+that merge that keeps the fence.
 
 The real port is **~3,420 lines** of string building (`query.rs` regions 3023-6442: query builders,
 soft-delete, HAVING, WHERE) - not 13,814.
@@ -583,10 +593,16 @@ at the relay and enforcing a revision barrier on both sides
 in that chain, not the design. Any estimate of Track B that prices it as "move three modules" is
 pricing the wrong work.
 
-## The rename
+## The rename that is NOT happening, and what its cost bought
 
-`zeroship-plugin-db` -> `zeroship-data-binding`. Re-measured 2026-08-31 with the pattern stated, so
-the next reader can reproduce it rather than inherit it:
+**`zeroship-plugin-db` KEEPS ITS NAME.** This section proposed renaming it to
+`zeroship-data-binding`; that was withdrawn (the target block and its correction 2 carry the
+reasons). **The section is kept for one reason only: the measurement below is the cost of ANY
+whole-crate rename in this repository, and it is the argument for not doing one casually.** Read
+every number here as "what a rename costs", not as "what we are about to do."
+
+Re-measured 2026-08-31 with the pattern stated, so the next reader can reproduce it rather than
+inherit it:
 
 ```
 grep -rIoP 'zeroship[-_]plugin[-_]db' crates libs sdks tests docs deploy db schema | wc -l   # 1520
@@ -620,8 +636,12 @@ exact; the occurrence count drifted by 53 - and the drift is self-inflicted, bec
 DOCUMENT added `crates/zeroship-plugin-db/...` citations to the corpus being counted. A measurement
 of a corpus you are actively writing into goes stale as you write.
 
-**Ride it with Track B's extraction, never alone.** Renaming first means 1,520 edits to a crate you
-are about to reshape.
+**The rule this leaves behind, now that the rename itself is withdrawn:** a whole-crate rename in
+this repository costs ~1,520 edits across 159 files, 97 of them prose that no compiler checks. Never
+do one on its own; ride it with a change that was already reshaping the crate. That is why
+`plugin-db` keeping its name is worth more than the tidiness the rename would have bought, and why
+the four NEW crates are the place to spend naming effort - they cost nothing, because nothing cites
+them yet.
 
 ## Not decided
 
