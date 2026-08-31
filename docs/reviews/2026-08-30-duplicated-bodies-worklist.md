@@ -69,6 +69,8 @@ below was re-run by the pilot against the FULL seven-target gate
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
 | 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
+| 31 Pool acquisition arms | **9**, not 2 | UNRULED - largest family after `remember_server_error` | - |
+| 32 Pool return/handoff | 2 | 1 covered by 5 `pool_close` tests; 1 REACHED but its wake unobservable | see note |
 | 34 Row-range decoding | 2 | NOT independently bound (3 overlap on one copy) | see agent table |
 | 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
 | 36 Binary COPY rejection | 2 | BOUND | `bytes_after_the_binary_copy_trailer_are_refused` + sibling |
@@ -76,7 +78,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
 | 40 Request COPY flags | 2 | UNRULED - the mutation HANGS rather than fails, see note | - |
-| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 UNBOUND** | the `CopyFrame(None)` reset at the multiplexed arm is uncovered |
+| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 EXECUTED BY NOTHING** - see open item | - |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
 | 45 Streaming COPY refusal | 2 | BOUND each | agent table |
@@ -87,12 +89,13 @@ below was re-run by the pilot against the FULL seven-target gate
 | 50 COPY format validation | 2 | NOT independently bound (2 overlap on one copy) | agent table |
 
 **The worklist's copy COUNTS are unreliable, and that is the most reusable
-finding here.** Six groups so far had more copies than claimed:
+finding here.** Seven groups so far had more copies than claimed:
 
     17  said two   had three   the uncounted copy was the ONLY unbound one
     28  said two   had five    the uncounted copies included the only unbound one
     18  said three had four    extra copy was bound
     38  said four  had five    the fifth is a guard arm in different syntax
+    31  said two   had NINE    `if !entry.is_pool_eligible()` across acquire/return/housekeeping
     44  said two   had three   third copy is the `Weak` variant - probed, BOUND
     remember_server_error  said two  had EIGHT
 
@@ -144,6 +147,53 @@ targets, not seven.
 Worth copying: the two tests use distinct parameter sentinels (`[1101101]` and
 `[2202202]`), so a mutation's failure message names which copy was hit rather
 than only that something failed.
+
+### OPEN: the `CopyFrame(None)` COPY-state reset, and the ordering question behind it
+
+`panic!` at the `MuxEvent::CopyFrame(None)` arm's `copy_in = None` leaves all
+1453 tests green, so nothing executes it. Whether it is REACHABLE turns on one
+ordering question that must be answered before writing a test:
+
+The multiplexed loop resets the same four COPY variables in two places. The
+top-of-loop check fires when `copy_initial_flushed && copy_producer_finished`,
+and clears `copy_in`. The event producer only yields `CopyFrame(_)` while
+`copy_in` is `Some`:
+
+    if accept_copy
+        && let Some(rx) = copy_in.as_mut()
+        && let Poll::Ready(frame) = rx.poll_next_unpin(cx)
+
+So if `copy_producer_finished` latches BEFORE the receiver's stream yields
+`None`, the top-of-loop reset clears `copy_in` first and the `CopyFrame(None)`
+arm can never be entered - dead by construction, like the step C arm. If the
+stream ends FIRST, the arm is live and simply untested.
+
+Answer that before building a fixture. Do not write a test that asserts COPY
+state is cleared without checking WHICH reset cleared it - the other one runs on
+every loop iteration and would make such a test pass regardless.
+
+### "Reached" and "observable" are different, and only two probes separate them
+
+Group 32's post-hook close re-check is the clearest case in this document.
+
+    delete the `wake_close_waiters_if_drained()` call  -> 0 failures
+    `panic!` on the same line                          -> exactly 1 failure,
+        `reentrant_close_from_after_release_cannot_redeposit_after_shutdown`
+
+The mutation alone says "unbound", and I nearly filed it as defensive dead code
+on the strength of the source comment beside it. The panic says the arm is
+REACHED - by a test that deliberately simulates the forbidden hook re-entry.
+
+Both are true. The arm runs; the wake inside it does nothing there, because
+`close()` calls `begin_close()` BEFORE awaiting `CloseWaiter`, so a parked close
+waiter implies the pool was already closed when the return began - and then the
+PRE-hook arm fires instead. Observing this wake needs a hook that re-enters AND
+leaves its own close parked: two stacked contract violations.
+
+**Run both probes before classifying anything.** A mutation that changes nothing
+does not distinguish "never executed" from "executed but nothing depends on this
+part of it", and the right response differs: the first is dead code, the second
+is a live path with an unobservable sub-effect.
 
 ### A mutation that HANGS is not a verdict either
 
