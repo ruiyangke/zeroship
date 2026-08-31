@@ -296,9 +296,12 @@ At that moment `data-*` had no such predicate - its two members shared no produc
 reference to any query-building symbol, `replication.rs:674`, inside the `#[cfg(test)]` module opened
 at `:598`).
 
-**`data-core` supplies the missing predicate, which is why the five-crate shape restores the family
-the three-crate shape could not justify.** The question is now askable and has the same answer
-`migrate-*` gives: *every member depends on the contract crate.*
+**`data-core` was proposed as the missing predicate. It does not supply one yet, and this paragraph
+asserted that it did for several revisions after the target block had already withdrawn the claim.**
+See the target block: the edge `data-core -> data-query-builder` does not exist in the tree, the
+grammar is a zero-dependency leaf that by construction depends on NOTHING including the core, and
+"every member depends on the contract crate" is false of `migrate-*` as well. The predicate arrives
+with Track A or not at all.
 
 **One naming argument from that revision survives and is why `data-query-builder` beats
 `data-query-ir`.** `-ir` is already taken in this workspace and means the OPPOSITE:
@@ -308,7 +311,13 @@ data-plane leaf is defined by forbidding exactly that. Naming it `-ir` would han
 expectation and then ban it.
 
 `zeroship-schema` DISSOLVES: its live query building is replaced by the typed grammar rather than
-moved, its `MaskKind` and sentinel codec go to `data-core`, and its dead regions are deleted (below).
+moved, **`MaskKind` alone** is rehomed, and its dead regions are deleted (below).
+
+*This sentence used to send "`MaskKind` and the sentinel codec" to `data-core`.* Both halves were
+wrong by the time it was written: only `MaskKind` of the five mask types is live, and `mask_codec.rs`
+is a dead fork of `zeroship-migrate-backend`'s copy with zero callers - it is DELETED, not moved. A
+destination for a file the same document proves should not exist is the most confusing kind of stale
+instruction, because it reads as a decision rather than an oversight.
 
 ### Three changes the review forced, each with the evidence that forced it
 
