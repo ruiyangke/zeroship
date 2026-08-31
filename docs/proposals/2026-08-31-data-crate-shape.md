@@ -73,7 +73,8 @@ zeroship-data-core              the contract every backend implements, PLUS the 
 zeroship-data-postgres          impl of the core contract.   -> data-core, compio-postgres
 zeroship-data-sqlite            impl of the core contract.   -> data-core, rusqlite
 zeroship-data-cdc-server        service tier: WAL stream, slot authority, reaper. Peer of
-                                zeroship-migrate-server.     -> data-core, data-postgres
+                                zeroship-migrate-server.
+                                -> compio-postgres, zeroship-core. NOT data-core, NOT data-postgres.
 zeroship-plugin-db              env.db surface, worker tier. impl NativePlugin. KEEPS ITS NAME.
                                 V8, crud, broker, subscription lifecycle. -> all of the above
 
@@ -84,13 +85,33 @@ zeroship-migrate-*              the engine, dialect-complete, untouched
 zeroship-migrate-server         the migration service host
 ```
 
-**This replaces the three-crate target, on an operator proposal of 2026-08-31, and it is better for a
-reason worth recording: `data-core` restores the predicate the prefix had lost.** The previous
-revision DROPPED the `data-*` prefix because its two members shared no edge, and a prefix you cannot
-ask a question about is decoration. With a core, the question exists again and has the same answer
-`migrate-*` gives: *every member depends on the contract crate.* That is exactly what makes
-`migrate-*` a family - every one of `migrate-{backend,postgres,sqlite,mysql}` declares
-`zeroship-migrate-ir`.
+**The five crates above are the DESTINATION. Only three of them should be built now, and the
+justification this document originally gave for the family is WRONG - corrected 2026-08-31 by review,
+verified twice.**
+
+The original justification was: "`data-core` restores the predicate the prefix had lost - every
+member depends on the contract crate, exactly what makes `migrate-*` a family." **Both halves fail.**
+
+- **The edge `data-core -> data-query-builder` does not exist and is not a relocation away.** Nothing
+  in `crates/zeroship-plugin-db/src/` references `zeroship_data_plan` at all - the only references in
+  the workspace are two integration tests and `#[cfg(test)]` code in `zeroship-schema`. So NONE of
+  `data-core`'s proposed contents names the query grammar. The edge appears only after Track A
+  retypes the executor on `DbPlan` - which is ~3,420 lines across 205 call sites, with writes gated
+  on #45. **A justification may not rest on a fact the plan's own sequencing places after the work
+  being justified.** On the day `data-core` is created in this plan's order, the family still has no
+  predicate.
+- **"Every member declares `zeroship-migrate-ir`" is FALSE of the engine too.**
+  `zeroship-migrate-policy` declares no migrate dependency at all, and `zeroship-migrate-node`
+  declares the facade and three vendors but not `-ir`. The unqualified claim was mine and it is
+  wrong. What IS true of `migrate-*` - and is the honest predicate to import - is: *a single spine
+  with the contract at the waist; every member is above it, or is the one leaf below it.* Note the
+  arrow: `migrate-ir/Cargo.toml:33` declares `zeroship-migrate-policy`, so the engine's CONTRACT
+  depends on its LEAF, which is the same direction proposed here. The exemption is not the problem.
+  **The missing spine is.**
+
+So the honest statement is: **`data-*` becomes a family when Track A lands. Until then it is
+unrelated crates and a prefix.** That is much weaker than "a core restores the predicate", and the
+weaker sentence is the true one.
 
 **And a core is not merely tidy here - it is REQUIRED, because four production call sites already run
 the wrong way.** Backend-agnostic and PostgreSQL-path code calls *into* the SQLite module today:
@@ -140,6 +161,65 @@ gating the dev backend therefore reaches into the transaction reducer, not just 
 Sites in type position naming `SqliteBackend` itself are expected to gate WITH the backend; the ones
 that block are the type and helper imports in neutral code. Either way the honest cost of "gate the
 dev backend" is a 13-file relocation, not a `#[cfg]`.
+
+### What to build NOW: three moves, not five crates
+
+**`data-cdc-server` needs neither `data-core` nor `data-postgres`, and that is measured, not
+argued.** Counting `crate::<module>` reach out of the three modules that move (`wal_consumer.rs`,
+`replication.rs`, `slot_reaper.rs`), comment lines stripped:
+
+| reaches | count | note |
+| --- | --- | --- |
+| `crate::broker` | 30 | becomes the wire this plan already prices |
+| `crate::replication` | 5 | intra-group; moves with them |
+| `crate::error` | 3 | a service that never crosses V8 should define its own |
+| `crate::query` | 1 | `replication.rs:674`, inside `#[cfg(test)]` |
+
+**Zero `crate::backend`. Zero `crate::encryption`. Zero `crate::descriptor`. Zero `crate::crud`.**
+Their top-level imports are `compio_postgres`, `sha2`, `zeroship_core::replication_names` and the
+error type - nothing else. So the CDC tier can be extracted TODAY, independently of Step 0, Track A,
+the encryption relocation, the driver-neutral sub-traits and the `v8_bridge` cycle.
+
+And it buys the whole measured security payoff: `zeroship-worker/src/db_posture.rs:123-126`
+currently REQUIRES the worker role to hold `REPLICATION`, and full extraction is what lets that
+requirement be deleted.
+
+So the executable plan is:
+
+1. **`zeroship-data-query-builder`** - rename `data-plan`, keep the empty manifest. Rename only.
+2. **`zeroship-data-cdc-server`** - one new crate, no new prerequisites.
+3. **SQLite feature-gated inside today's `plugin-db`** - after the 29-site relocation.
+
+`data-core`, `data-postgres` and `data-sqlite` are the DESTINATION and should not be minted until the
+two things that would make `data-core` a contract crate exist: driver-neutral sub-traits
+(`backend/mod.rs:755`, `:786`) and a `DbPlan`-typed executor (Track A). **Created earlier,
+`data-core` would name two vendors and V8 and depend on nothing below it - which is `plugin-db` with
+a smaller line count.**
+
+### Why `data-core` cannot hold three of its four proposed contents yet
+
+The repo's actual standard for a contract crate is not "only traits" - `zeroship-migrate-backend` is
+21,968 lines and holds shared implementation, a codec and value formatting. Its standard is stated on
+its own manifest line: *"Sits between zeroship-migrate-ir and the per-vendor crates; **names no
+dialect and ships no vendor**."* Mechanically checkable, and it holds - no driver in its
+dependencies. Judged against THAT, `data-core` as specified fails on three contents:
+
+- **Row-to-JSON is not a shared layer.** It is two vendor converters in one V8 file:
+  `rows_to_json_value`/`row_to_json`/`column_to_json` take `compio_postgres::Row`, while
+  `typed_rows_to_json_value`/`typed_cell_to_json` take the SQLite `TypedRows`/`TypedCell`. Moving it
+  makes `data-core` declare `compio-postgres` AND own the SQLite cell enum. This document treated
+  `PgSqlExecutor`'s driver-typed bound as a blocker while waving this one through; they are two
+  instances of one defect.
+- **Everything proposed transitively links V8.** `error.rs:67` imports
+  `zeroship_runtime::state::OpError`, `zeroship-runtime` declares `v8`, the encryption modules all
+  use `crate::error::DbError`, and `backend/mod.rs` names `DbError` 48 times. So `data-core` would
+  link V8, and `data-cdc-server` would inherit it - **the relay whose entire justification is that it
+  does not execute creator code would link the V8 runtime.** Solvable, but unnamed work.
+- **Even `encryption`, the one genuinely neutral content, carries a plugin identity.**
+  `encryption/keys.rs:318` declares its column-key env family against `crate::PluginDbConsumer`,
+  whose `target` is bound to the cargo package name at `lib.rs:74`. Moving it either drags a
+  plugin-identity type into the contract crate or changes a declared-env identity that
+  `docs/reference/env-vars.md` documents by service.
 
 **Two corrections to the proposed shape:**
 
