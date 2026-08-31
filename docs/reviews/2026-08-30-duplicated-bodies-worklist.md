@@ -127,3 +127,44 @@ behaviourally different: 542 is a send failure that may have left PostgreSQL
 holding a frontend fragment, 528 is a timeout that leaves the read boundary
 unknown. Both poison and shut down, for unrelated reasons, and the comments
 above each say so.
+
+## Line 528 is UNBINDABLE by peer observation, and here is what masks it
+
+2026-08-31. An agent wrote `identify_system_read_timeout_shuts_down_its_release_handle`
+for the last unbound copy. It compiles, it passes, it is named correctly - and
+it binds NOTHING. Mutating each of the six `release.shutdown()` call sites to
+`/* mutated */` in turn leaves it green every time:
+
+    line 528 -> 0 of 1 failed      line 1154 -> 0
+    line 542 -> 0                  line 1297 -> 0
+    line 588 -> 0                  line 1322 -> 0
+
+**The mask is `Drop`.** `release.rs:362`:
+
+    impl Drop for ConnectionDropRelease {
+        fn drop(&mut self) {
+            // Drop cannot report an error, and a concurrent client release or
+            // peer close can legitimately win this shutdown race.
+            self.shutdown();
+        }
+    }
+
+The handle shuts down unconditionally when it goes out of scope, and
+`ConnectionDropRelease::shutdown`'s own doc adds that a socket-read timeout may
+not promptly release the descriptor. So "the peer saw a shutdown" is reachable
+on the timeout path without the explicit call ever running. A test asserting on
+the peer cannot separate the two.
+
+**Why the other five copies ARE bindable.** Their tests observe the shutdown at
+a point where the explicit call is the only thing that could have produced it
+yet - the write-failure and read-failure arms shut down and then keep the
+connection alive, so the peer observation happens strictly before Drop. The
+timeout arm does not offer that window.
+
+**So the correct outcome for 528 is option (b): a comment, not a test.** Name
+the mask at the call site. Do not merge a test whose name claims a binding it
+does not have - that is worse than no test, because the next person reading the
+group will believe all six are covered.
+
+**Group B final: 5 of 6 bound, 1 unbindable-by-construction with the mask
+named.** That is a complete result, not a partial one.
