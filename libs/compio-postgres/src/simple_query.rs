@@ -1,13 +1,9 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Near-verbatim translation. The simple query protocol is a single `Query`
-// frontend message producing a mixed stream of RowDescription / DataRow /
-// CommandComplete terminated by ReadyForQuery.
-//
-// ONE DELIBERATE DIVERGENCE from upstream: a `CopyInResponse` is answered with
-// `CopyFail` rather than reported as an unexpected message and abandoned.
-// Upstream abandons it, and abandoning it leaves the SESSION in copy mode,
-// which costs the connection. See `producerless_request`.
+// The simple-query framing remains upstream-derived, but request handling has
+// diverged: COPY IN is aborted by a connection-owned producer and COPY OUT is
+// drained before refusal. Transaction cleanup/tag helpers, bounded column
+// reservation, and type-OID/format metadata are local extensions.
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
