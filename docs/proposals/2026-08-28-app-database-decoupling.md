@@ -1647,6 +1647,33 @@ vocabulary describes ACL authorship (`confined.policy.toml` grants `schema.creat
 today by absence rather than by rule. *Blocks:* nothing now. It becomes load-bearing the moment any
 `access.*` key is granted to a creator draft.
 
+**O7. What identity scope does a shared database imply, and what derives `sector_identifier` from
+it?**
+Two apps sharing one database write DIFFERENT pairwise subjects for the SAME human, because the
+sector is per-app: `zeroship.app_oauth_clients.sector_identifier` is `NOT NULL`
+(`db/migrations-ts/20260702000200_control_tables.ts:56`) and there is one row per app
+(`db/migrations-ts/20260812000100` upserts `ON CONFLICT (app_id)`). A shared `users` table therefore
+gets two rows per person, and a foreign key written by app A does not join to a row app B created.
+Nothing raises; the data is simply wrong.
+
+This document did not previously mention it. "Identity" in the title and in section 1 means APP
+identity versus DATABASE identity - system entities, not people - and none of the fifteen sections
+covers end users. O5 is the nearest and is about the CREATOR holding the grant.
+
+**The window is open now and closes at the first post-launch login.** The sector is immutable by a
+PostgreSQL trigger (`db/migrations-ts/20260702000700_functions_triggers_comments.ts:7` and `:25`,
+raw SQL because the DSL cannot express `UPDATE OF <column>`), and `:43`/`:45` record why:
+`oauth_refresh_tokens.sub` stores a SNAPSHOT of the derived subject for refresh-family kill markers,
+so changing the sector de-aligns stored markers from live access-token subjects and revocation
+silently stops matching. That failure needs stored refresh tokens, and there are none - no tenants,
+no end users, no rows. Today this is a derivation change plus a schema move with no data migration;
+after launch it is a re-key of every refresh family whose failure mode is silent.
+
+*Blocks:* the delivered row of the table at `:196` - N apps reaching the same tables under one
+creator. That is the headline this design exists to deliver, so this is not a late-binding detail. It
+is entangled with the workspace/team container decision, because "project", "workspace" and
+"explicit grant" are three different answers to what the sector should key on.
+
 ---
 
 ## 15. What must be true before implementation starts
