@@ -1,7 +1,7 @@
 //! Token-bucket rate-limit smoke test (live PG).
 
 use compio_postgres::{connect, NoTls};
-use zeroship_auth::ratelimit::{consume, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{consume, Quota, RateLimitDecision};
 
 // compio-postgres's `Client` is `!Send` (it owns an io_uring submission
 // handle). All async helpers that touch it inherit that.
@@ -32,7 +32,7 @@ async fn consumes_until_throttled() {
     };
 
     let key = format!("test:{}", uuid::Uuid::new_v4().simple());
-    let bucket = Bucket {
+    let bucket = Quota {
         capacity: 3.0,
         refill_per_sec: 0.0,
     }; // no refill for the test
@@ -75,7 +75,7 @@ async fn concurrent_consumes_are_atomic() {
         .await
         .expect("seed full bucket");
 
-    let bucket = Bucket {
+    let bucket = Quota {
         capacity: 5.0,
         refill_per_sec: 0.0,
     };

@@ -165,3 +165,5 @@ kv_url = "urn:zeroship:file:/etc/zeroship/secrets/kv_url"
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/migrated_database_url"
 provision_database_url = "urn:zeroship:file:/etc/zeroship/secrets/provision_database_url"
 policy_seal_key = "urn:zeroship:file:/etc/zeroship/secrets/policy_seal_key"
+mutation_rate_limit_burst = 2
+mutation_rate_limit_per_minute = 3

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_core::config::{Secret, SourceKind};
-use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_auth::store::{users};
 use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
@@ -320,7 +320,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     let signup_ip_key = format!("signup_ip:{}", peer.ip());
     for i in 0..10 {
         let decision =
-            ratelimit::consume_or_throttle(pg.as_ref(), &signup_ip_key, Bucket::SIGNUP_IP)
+            rate_limit::consume(pg.as_ref(), &signup_ip_key, Quota::SIGNUP_IP)
                 .await
                 .expect("pre-drain signup rate-limit bucket");
         assert!(

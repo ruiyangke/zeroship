@@ -54,7 +54,7 @@ use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::magic_link;
 use crate::oidc::auth_request::AuthRequest;
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
@@ -231,12 +231,12 @@ pub async fn start(
     //    leftmost X-Forwarded-For token.
     let ip = crate::headers::client_ip(&req);
     let buckets = [
-        (format!("magic:email:{email_norm}"), Bucket::LOGIN_EMAIL),
-        (format!("magic:ip:{ip}"), Bucket::LOGIN_IP),
+        (format!("magic:email:{email_norm}"), Quota::LOGIN_EMAIL),
+        (format!("magic:ip:{ip}"), Quota::LOGIN_IP),
     ];
     let mut throttled = false;
     for (key, bucket) in &buckets {
-        match ratelimit::consume(db.as_ref(), key, *bucket).await {
+        match rate_limit::consume(db.as_ref(), key, *bucket).await {
             Ok(RateLimitDecision::Allowed) => {}
             Ok(RateLimitDecision::Throttled(_)) => {
                 throttled = true;
@@ -996,7 +996,7 @@ pub async fn complete(
     //    Trusted, gateway-authored client IP (SEC-3).
     let ip = crate::headers::client_ip(&req);
     let rate_key = format!("magic_complete:{ip}");
-    match ratelimit::consume_or_throttle(db.as_ref(), &rate_key, Bucket::MAGIC_COMPLETE).await {
+    match rate_limit::consume(db.as_ref(), &rate_key, Quota::MAGIC_COMPLETE).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
             audit::emit(

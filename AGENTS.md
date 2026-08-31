@@ -97,7 +97,8 @@ DNS                 control · auth · api · {app} .zeroship.ai   (console is c
 ```
 
 The authority is `deploy/ops/Caddyfile`, which declares five host blocks and nothing else:
-`auth` -> `auth:9092`, `control` -> `control:9090`, `console` -> a console **this image does not
+`auth` -> `auth:9092`, `control` -> `/v1/databases/*` to `migrate-server:9091` and everything else
+to `control:9090`, `console` -> a console **this image does not
 ship** (extracted in `8dbe4a8d4`), `api` -> `gateway:8000`, and `*` -> `gateway:8000` for creator-app
 subdomains. A name appearing there is one a creator app may not register, and
 `crates/zeroship-control/src/reserved_names.rs` is pinned to that file's sha256, so editing the edge

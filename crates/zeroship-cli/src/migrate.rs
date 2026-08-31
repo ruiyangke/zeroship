@@ -28,10 +28,10 @@
 //! `{"message":"internal error"}`. Before this command there was no supported
 //! way for a creator to run the step at all.
 //!
-//! The request goes to the CONTROL PLANE, not to `migrated` directly:
-//! `migrated` holds the superuser provisioning DSN and binds loopback in every
-//! deployment we ship, so control is the only route a creator has to it. See
-//! `crates/control/src/migrations_api.rs` for why that hop adds no authority.
+//! The request uses the configured control URL, but the edge sends the
+//! migration-service path directly to `zeroship-migrate-server`. Control is not
+//! in the request path. Reusing one creator-facing URL keeps project config from
+//! needing a second endpoint for the same deployment.
 
 use std::path::PathBuf;
 
@@ -215,6 +215,10 @@ pub(crate) trait MigrateClient {
 
 struct CurlMigrateClient;
 
+fn migration_apply_url(control_url: &str, app_id: &str) -> String {
+    format!("{control_url}/v1/apps/{app_id}/migrations/apply")
+}
+
 impl MigrateClient for CurlMigrateClient {
     fn apply(
         &mut self,
@@ -223,7 +227,7 @@ impl MigrateClient for CurlMigrateClient {
         token: &str,
         body: &str,
     ) -> Result<ControlResponse, String> {
-        let url = format!("{control_url}/api/apps/{app_id}/migrations/apply");
+        let url = migration_apply_url(control_url, app_id);
         let auth = format!("Authorization: Bearer {token}");
         let mut command = std::process::Command::new("curl");
         command.args([
@@ -418,6 +422,17 @@ mod tests {
         assert_eq!(outcome.applied, 1);
         assert_eq!(outcome.skipped, 0);
         assert_eq!(client.calls, vec![FakeCall::Apply(app.to_string())]);
+    }
+
+    #[test]
+    fn apply_url_uses_the_migration_service_route_on_the_control_origin() {
+        assert_eq!(
+            migration_apply_url(
+                "https://control.zeroship.ai",
+                "11111111-1111-4111-8111-111111111111",
+            ),
+            "https://control.zeroship.ai/v1/apps/11111111-1111-4111-8111-111111111111/migrations/apply",
+        );
     }
 
     /// A name is resolved through the app list before the apply.

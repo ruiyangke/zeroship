@@ -118,7 +118,7 @@ fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 # run. It just ran over an empty set. Everything the floor at the bottom of this
 # file counts is assertions; everything declared below is ITEMS.
 #
-# The arms are the seven places this file enumerates something DERIVED - from
+# The arms are the places this file enumerates something DERIVED - from
 # the sourced deploy-remote.sh, from the shipped compose, from .gitmodules - as
 # opposed to the fixtures it writes itself, which cannot silently shrink.
 # shellcheck source=tests/lib/gate_arms.sh
@@ -548,6 +548,102 @@ else
   # which it cannot see. The gate went on printing `arms=5 refusals=0` while the
   # deploy path it guards could not complete a single roll.
   fail "the edge-vs-reserved check did not run: missing $( [ -f "$EDGE_ART" ] || echo "$EDGE_ART" ) $( [ -f "$EDGE_RS" ] || echo "$EDGE_RS" ). Two arms are declared inside it, so a skip here removes them from the census rather than showing them as empty."
+fi
+
+# The control host is path-split at the edge: /v1/* never reaches control. A
+# control route under that prefix would compile and test clean while
+# being unreachable in every deployment that ships the Caddy rule.
+#
+# This is a registration STYLE boundary as well as a prefix search. Every
+# resource must carry one full absolute literal, except the two audited constants
+# pinned below, and scopes are forbidden. Without those restrictions a source
+# grep misses `scope("/v1") + resource("/databases/x")`, an imported constant, or
+# a dynamic catch-all while still reporting that it inspected every route.
+CONTROL_SRC="$ROOT/crates/zeroship-control/src"
+MIGRATE_V1_EDGE_HANDLERS="$(
+  jq '[
+        .config.apps.http.servers[].routes[]
+        | select(any(.match[]?.host[]?; . == "control.zsdomain.invalid"))
+        | .handle[]?.routes[]?
+        | select(any(.match[]?.path[]?; . == "/v1/*"))
+        | select(any(.. | objects | .upstreams?[]?.dial?; . == "migrate-server:9091"))
+      ] | length' "$EDGE_ART" 2>/dev/null \
+    || printf '0\n'
+)"
+MIGRATE_V1_EDGE_HANDLERS="${MIGRATE_V1_EDGE_HANDLERS:-0}"
+if gate_arm migrate_v1_edge_handler "$MIGRATE_V1_EDGE_HANDLERS" 1 \
+  && [ "$MIGRATE_V1_EDGE_HANDLERS" -eq 1 ]; then
+  pass "the control host sends the complete /v1/* namespace directly to migrate-server"
+else
+  fail "the adapted control host must declare exactly one /v1/* handler for migrate-server; found $MIGRATE_V1_EDGE_HANDLERS"
+fi
+
+N_CONTROL_RESOURCES="$(
+  rg -U --pcre2 -o 'web::resource\s*\(' "$CONTROL_SRC" 2>/dev/null | wc -l
+)"
+N_CONTROL_SCOPES="$(
+  rg -U --pcre2 -o 'web::scope\s*\(' "$CONTROL_SRC" 2>/dev/null | wc -l
+)"
+N_CONTROL_ROUTE_DECLS=$((N_CONTROL_RESOURCES + N_CONTROL_SCOPES))
+
+# MEASURED 2026-08-30 after deleting control's migration forward: 56 source
+# constructors. Two are test-only workflow resources, leaving 54 production
+# resources: 26 /api, 23 /internal, two /me, health, readiness, and the OAuth
+# protected-resource metadata route. Floor 40 leaves room for real endpoint
+# deletion while refusing the extractor-collapse failure where a clean tree and
+# zero inspected routes would otherwise print the same result.
+if ! gate_arm control_v1_route_collision "$N_CONTROL_ROUTE_DECLS" 40; then
+  fail "control route enumeration found only $N_CONTROL_ROUTE_DECLS declaration(s); it cannot prove the edge prefix is collision-free"
+fi
+
+CONTROL_SCOPES="$(
+  rg -n -U --pcre2 'web::scope\s*\(' "$CONTROL_SRC" 2>/dev/null || true
+)"
+if [ -n "$CONTROL_SCOPES" ]; then
+  fail "control route scope(s) defeat the full-path collision check:"
+  printf '%s\n' "$CONTROL_SCOPES" | sed 's/^/    /'
+else
+  pass "control declares no route scopes, so every resource carries its full path"
+fi
+
+CONTROL_ADMITTED_RESOURCES="$(
+  rg -U --pcre2 -o \
+    'web::resource\s*\(\s*(?:"/[^"\\]*"|device_grant::PROTECTED_RESOURCE_METADATA_PATH|WORKFLOW_ADVANCE_PATH)(?=\s*\))' \
+    "$CONTROL_SRC" 2>/dev/null \
+    | wc -l
+)"
+if [ "$CONTROL_ADMITTED_RESOURCES" = "$N_CONTROL_RESOURCES" ]; then
+  pass "all $N_CONTROL_RESOURCES control resources use a full literal or an audited constant"
+else
+  fail "only $CONTROL_ADMITTED_RESOURCES of $N_CONTROL_RESOURCES control resources use an auditable full path:"
+  rg -n -U --pcre2 \
+    'web::resource\s*\(\s*(?!(?:"/[^"\\]*"|device_grant::PROTECTED_RESOURCE_METADATA_PATH|WORKFLOW_ADVANCE_PATH)(?=\s*\)))[^\n)]*' \
+    "$CONTROL_SRC" 2>/dev/null \
+    | sed 's/^/    /'
+fi
+
+grep -Fqx \
+  'pub const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";' \
+  "$ROOT/crates/zeroship-core/src/device_grant.rs" \
+  && pass "the allowed device-grant route constant is pinned outside /v1" \
+  || fail "the allowed device-grant route constant changed; audit it before admitting the new path"
+grep -Fqx \
+  'pub const WORKFLOW_ADVANCE_PATH: &str = "/__zeroship/internal/workflow-advance";' \
+  "$ROOT/crates/zeroship-workflow-scheduler/src/lib.rs" \
+  && pass "the allowed workflow route constant is pinned outside /v1" \
+  || fail "the allowed workflow route constant changed; audit it before admitting the new path"
+
+CONTROL_V1_ROUTES="$(
+  rg -n -U --pcre2 \
+    'web::resource\s*\(\s*"/v1(?:/[^"\\]*)?"' \
+    "$CONTROL_SRC" 2>/dev/null \
+    || true
+)"
+if [ -z "$CONTROL_V1_ROUTES" ]; then
+  pass "control declares no route shadowed by the edge's /v1/* handler"
+else
+  fail "control route(s) collide with the edge's /v1/* handler:"
+  printf '%s\n' "$CONTROL_V1_ROUTES" | sed 's/^/    /'
 fi
 
 # THE FAILING ARM, one variable from its control. Both fixtures are real `caddy

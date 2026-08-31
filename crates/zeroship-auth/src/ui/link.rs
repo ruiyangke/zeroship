@@ -40,7 +40,7 @@ use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::oidc::auth_request::AuthRequest;
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
@@ -169,7 +169,7 @@ pub async fn post(
     // leftmost X-Forwarded-For token.
     let ip = crate::headers::client_ip(&req);
     let link_attempt_key = format!("link_attempt:{}:{ip}", pending.user_id);
-    match ratelimit::consume(db.as_ref(), &link_attempt_key, Bucket::LINK_ATTEMPT).await {
+    match rate_limit::consume(db.as_ref(), &link_attempt_key, Quota::LINK_ATTEMPT).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
             audit::emit(

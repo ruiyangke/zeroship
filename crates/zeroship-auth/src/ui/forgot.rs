@@ -24,7 +24,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password_reset};
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::store::users;
 use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
 use zeroship_mailer::{Address, Mailer};
@@ -88,13 +88,13 @@ pub async fn post(
     let buckets = [
         (
             format!("forgot_email:{email_hash}"),
-            Bucket::FORGOT_EMAIL,
+            Quota::FORGOT_EMAIL,
             "forgot_per_email",
         ),
-        (format!("forgot_ip:{ip}"), Bucket::FORGOT_IP, "forgot_per_ip"),
+        (format!("forgot_ip:{ip}"), Quota::FORGOT_IP, "forgot_per_ip"),
     ];
     for (key, bucket, bucket_name) in &buckets {
-        match ratelimit::consume_or_throttle(db.as_ref(), key, *bucket).await {
+        match rate_limit::consume(db.as_ref(), key, *bucket).await {
             Ok(RateLimitDecision::Allowed) => {}
             Ok(RateLimitDecision::Throttled(_)) => {
                 audit::emit(

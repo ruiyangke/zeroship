@@ -7,22 +7,14 @@
 #   deploy/scripts/deploy-app.sh --host root@1.2.3.4 --app <app-id> --zship dist/app.zship
 #                                --probe-script examples/db-todos/scripts/probe-live.mjs
 #
-# WHY THIS EXISTS, 2026-08-12. `zeroship deploy` needs to reach the control
-# plane, and on a correctly configured host it CANNOT:
+# WHY THIS EXISTS, 2026-08-12. The public control hostname is the normal
+# creator path. This helper is the operator's SSH fallback when that edge is
+# unavailable. It reaches the two loopback publications separately: control
+# for deploy and migrate-server for migration apply. Control no longer proxies
+# migration requests.
 #
-#     control publishes 127.0.0.1:9090 only, and Caddy has no control route.
-#     Measured from a remote machine: `control.<domain>` -> 404 (it falls
-#     through to the creator-app wildcard), direct :9090 -> refused.
-#
-# That is the right posture -- the control plane is the whole platform's
-# authority and does not belong on the internet -- but it left app deploys
-# with no supported path at all. The golden path still lists "smooth one-step
-# deploy" as an open box.
-#
-# The fix is an SSH port-forward: the control plane stays loopback-only and
-# gains no public surface, and the deploy borrows the authentication that is
-# already there (key-based ssh). Nothing new is exposed and no new secret is
-# introduced.
+# Both forwards borrow the authentication already present (key-based ssh).
+# Nothing new is exposed and no new secret is introduced.
 #
 # TEARDOWN IS BY PID, NOT BY PATTERN. Killing the forward with `pkill -f`
 # matching the port silently missed it during development and left a listener
@@ -33,10 +25,11 @@
 # passed to the CLI through the environment, so it cannot be read out of `ps`
 # by any other user on this machine.
 #
-# WHAT THIS DOES NOT DO: it does not create the app, run migrations, or manage
-# DNS. `--probe` alone asserts only liveness -- a 200 from an SPA shell says
-# the asset route works and nothing about the app. Add `--probe-script` for a
-# real behavioural check, and it is only as good as the script you point at.
+# WHAT THIS DOES NOT DO: it does not create the app or manage DNS. With --dir,
+# it applies a committed migration artifact when one exists. `--probe` alone
+# asserts only liveness -- a 200 from an SPA shell says the asset route works
+# and nothing about the app. Add `--probe-script` for a real behavioural check,
+# and it is only as good as the script you point at.
 
 set -euo pipefail
 
@@ -47,10 +40,11 @@ ZSHIP=""
 PROBE_URL=""
 TOKEN_FILE=""
 REMOTE_CONTROL_PORT=9090
+REMOTE_MIGRATE_PORT=9091
 SKIP_BUILD=0
 PROBE_SCRIPT=""
 
-usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -130,25 +124,31 @@ fi
 echo "ok  artifact $ZSHIP ($(du -h "$ZSHIP" | cut -f1))"
 
 # ------------------------------------------------------------------- tunnel
-# Bind the local end to 127.0.0.1 explicitly. A bare `-L port:` would listen on
-# all interfaces and hand this machine's network a route to the remote control
-# plane, which is the exact exposure the forward exists to avoid.
-LOCAL_PORT="$(( 20000 + RANDOM % 20000 ))"
+# Bind both local ends to 127.0.0.1 explicitly. A bare `-L port:` would listen
+# on all interfaces and hand this machine's network routes to privileged
+# services, which is the exact exposure the forwards exist to avoid. Disjoint
+# ranges keep the two randomly selected ports from colliding with each other.
+LOCAL_CONTROL_PORT="$(( 20000 + RANDOM % 20000 ))"
+LOCAL_MIGRATE_PORT="$(( 40000 + RANDOM % 10000 ))"
 TUNNEL_PID=""
 cleanup() {
   if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
     kill "$TUNNEL_PID" 2>/dev/null || true
     wait "$TUNNEL_PID" 2>/dev/null || true
-    echo "ok  tunnel closed (pid $TUNNEL_PID)"
+    echo "ok  tunnels closed (pid $TUNNEL_PID)"
   fi
 }
 trap cleanup EXIT INT TERM
 
-say "opening a control-plane forward on 127.0.0.1:$LOCAL_PORT"
-ssh "${TUNNEL_SSH_OPTS[@]}" -N -L "127.0.0.1:$LOCAL_PORT:127.0.0.1:$REMOTE_CONTROL_PORT" "$HOST" &
+say "opening control and migrate-server forwards"
+ssh "${TUNNEL_SSH_OPTS[@]}" -N \
+  -L "127.0.0.1:$LOCAL_CONTROL_PORT:127.0.0.1:$REMOTE_CONTROL_PORT" \
+  -L "127.0.0.1:$LOCAL_MIGRATE_PORT:127.0.0.1:$REMOTE_MIGRATE_PORT" \
+  "$HOST" &
 TUNNEL_PID=$!
 
-CONTROL="http://127.0.0.1:$LOCAL_PORT"
+CONTROL="http://127.0.0.1:$LOCAL_CONTROL_PORT"
+MIGRATE="http://127.0.0.1:$LOCAL_MIGRATE_PORT"
 ready=0
 for _ in $(seq 1 30); do
   # Liveness first: a dead forward and a slow one both look like a failed
@@ -159,6 +159,15 @@ for _ in $(seq 1 30); do
 done
 [ "$ready" = 1 ] || fail "control plane did not answer /readyz through the forward within 30s"
 echo "ok  control plane answered /readyz through the forward"
+
+ready=0
+for _ in $(seq 1 30); do
+  kill -0 "$TUNNEL_PID" 2>/dev/null || fail "the ssh forwards exited before migrate-server was ready"
+  if curl -fsS -o /dev/null --max-time 3 "$MIGRATE/readyz" 2>/dev/null; then ready=1; break; fi
+  sleep 1
+done
+[ "$ready" = 1 ] || fail "migrate-server did not answer /readyz through the forward within 30s"
+echo "ok  migrate-server answered /readyz through the forward"
 
 # ------------------------------------------------------------------- deploy
 say "deploying app $APP_ID"
@@ -184,7 +193,7 @@ IR_JSON=""
 [ -n "$APP_DIR" ] && IR_JSON="$APP_DIR/generated/zeroship/migrations.ir.json"
 if [ -n "$IR_JSON" ] && [ -f "$IR_JSON" ]; then
   say "applying migrations for app $APP_ID"
-  "$CLI" migrate "$IR_JSON" --app="$APP_ID" --control="$CONTROL" \
+  "$CLI" migrate "$IR_JSON" --app="$APP_ID" --control="$MIGRATE" \
     || fail "zeroship migrate failed - the app is deployed but its schema is not applied, so every env.db call will fail"
   echo "ok  migrations applied"
 elif [ -n "$APP_DIR" ]; then
@@ -194,7 +203,7 @@ else
   # Say so rather than printing nothing, or a db-backed app deployed this way
   # goes out unmigrated and silent.
   echo "note: --zship was used without --dir, so migrations were NOT applied."
-  echo "      If this app uses env.db, run:  $CLI migrate <path-to-migrations.ir.json> --app=$APP_ID --control=$CONTROL"
+  echo "      If this app uses env.db, run:  $CLI migrate <path-to-migrations.ir.json> --app=$APP_ID --control=$MIGRATE"
 fi
 
 # ------------------------------------------------------------------- verify
