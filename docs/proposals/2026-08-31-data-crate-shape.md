@@ -222,6 +222,30 @@ two things that would make `data-core` a contract crate exist: driver-neutral su
 `data-core` would name two vendors and V8 and depend on nothing below it - which is `plugin-db` with
 a smaller line count.**
 
+### Three independent answers on the count, and what they agree on
+
+Reviewed 2026-08-31 by three reviewers with different lenses. They landed on three different numbers
+- and the disagreement is entirely about the DESTINATION, not about what to build first.
+
+| lens | lands on | the difference |
+| --- | --- | --- |
+| operator | five | as proposed |
+| architecture | **three** | `data-core`/`-postgres`/`-sqlite` are a destination, not a plan; build the rename, the CDC tier, and the in-place feature gate |
+| dependency graph | **six** | splits `data-encryption` out of `data-core`, so the core stays comparable to `migrate-backend` and the CDC tier never inherits crypto |
+
+**All three agree on the two things that decide the first move:**
+
+1. **`data-cdc-server` needs neither `data-core` nor `data-postgres`** - independently measured by
+   two of them and re-derived here. The proposed `cdc-server -> data-postgres` edge is unsupported by
+   any code in the tree.
+2. **The CDC tier is extractable first and alone**, and it carries the whole measured security
+   payoff (the worker's `REPLICATION` requirement at `db_posture.rs:123-126` becomes deletable).
+
+The six-crate variant's argument is worth keeping even if the count is not settled: `encryption/` is
+already a cohesive security subsystem - AEAD, key derivation and cache, AAD, versioned wire framing -
+and folding it into a contract crate is what would force `data-cdc-server` to link crypto it never
+uses. If `data-core` is ever built, build `data-encryption` beside it rather than inside it.
+
 ### Why `data-core` cannot hold three of its four proposed contents yet
 
 The repo's actual standard for a contract crate is not "only traits" - `zeroship-migrate-backend` is
