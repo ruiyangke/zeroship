@@ -6447,6 +6447,112 @@ fn validate_declared_collection_name(
     })
 }
 
+/// Every creator-declared physical table column name carried by one op.
+///
+/// The no-declaration arm is exhaustive on purpose. A catch-all would let the
+/// next column-declaring variant compile without joining the declaration gate,
+/// repeating the failure mode documented by [`plain_column_references`]. View
+/// output names are a separate alias role and are not table column declarations.
+fn declared_table_column_names(op: &crate::model::ir::Op) -> Vec<&str> {
+    use crate::model::ir::Op;
+
+    match op {
+        Op::CreateTable { columns, .. } => {
+            columns.iter().map(|column| column.name.as_str()).collect()
+        }
+        Op::AddColumn { column, .. } => vec![column],
+        Op::RenameColumn { to, .. } => vec![to],
+        // A dialectal op is only a container. validate_dialectal_op invokes the
+        // ordinary op validator for every present registered leg.
+        Op::Dialectal { .. } => Vec::new(),
+        Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. }
+        | Op::SetTableOptions { .. }
+        | Op::DropTable { .. }
+        | Op::RenameTable { .. }
+        | Op::DropColumn { .. }
+        | Op::CreateIndex { .. }
+        | Op::Comment { .. }
+        | Op::DropIndex { .. }
+        | Op::SetColumnType { .. }
+        | Op::SetColumnNotNull { .. }
+        | Op::DropColumnNotNull { .. }
+        | Op::SetColumnDefault { .. }
+        | Op::DropColumnDefault { .. }
+        | Op::AlterPrimaryKey { .. }
+        | Op::SynchronizeIdentity { .. }
+        | Op::AddConstraint { .. }
+        | Op::ValidateConstraint { .. }
+        | Op::DropConstraint { .. }
+        | Op::Insert { .. }
+        | Op::Update { .. }
+        | Op::Delete { .. }
+        | Op::Backfill { .. }
+        | Op::CreateView { .. }
+        | Op::DropView { .. }
+        | Op::CreateEnum { .. }
+        | Op::DropEnum { .. }
+        | Op::CreateDomain { .. }
+        | Op::DropDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
+        | Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. }
+        | Op::CreateRole { .. }
+        | Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::SetRls { .. }
+        | Op::CreatePolicy { .. }
+        | Op::DropPolicy { .. }
+        | Op::CreateTrigger { .. }
+        | Op::DropTrigger { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::Raw { .. } => Vec::new(),
+    }
+}
+
+/// Refuse creator-declared table column names before the IR lowerer sees them.
+///
+/// Normal IR lowering builds snapshots directly and does not call the schema
+/// query DDL helpers. Without this structural gate, createTable, addColumn, and
+/// renameColumn destinations could reach quoted SQL without passing the engine's
+/// reserved-name policy. Quoting still prevented injection; the reachable bug
+/// was a reservation-policy bypass.
+fn validate_declared_table_column_names(
+    vendors: VendorSet,
+    op: &crate::model::ir::Op,
+    target_dialect: &DialectId,
+    op_index: usize,
+) -> Result<(), AuthoringError> {
+    let validate = |name: &str| {
+        crate::schema::query::validate_field_name(vendors, name).map_err(|error| AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            dialect: target_dialect.clone(),
+            reason: error.to_string(),
+            suggested_fix: Some(
+                "rename the declared table column so it uses only the portable identifier \
+                 shape and no platform- or backend-reserved name"
+                    .to_string(),
+            ),
+        })
+    };
+
+    declared_table_column_names(op)
+        .into_iter()
+        .try_for_each(validate)
+}
+
 /// [`validate_op_scoped`] threaded with the charter that answers vendor authority.
 ///
 /// # Errors
@@ -6480,6 +6586,7 @@ pub fn validate_op_authorized(
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, schema_scope)?;
     validate_declared_collection_name(vendors, op, target_dialect, op_index)?;
+    validate_declared_table_column_names(vendors, op, target_dialect, op_index)?;
 
     // **VENDOR (`zero-migrate`)** - the capability gate, BEFORE any expression walk. A
     // privileged vendor op is refused fail-closed when (a) the target does not render
@@ -10929,6 +11036,50 @@ mod tests {
             schema: None,
             existence_guard: None,
         }
+    }
+
+    #[test]
+    fn creator_column_declarations_are_validated_before_lower() {
+        let cases = [
+            (
+                "createTable",
+                create_with_column("pg_created", ColType::Text),
+            ),
+            (
+                "addColumn",
+                op_json(
+                    r#"{"op":"addColumn","table":"things","column":"pg_added","type":"text"}"#,
+                ),
+            ),
+            (
+                "renameColumn",
+                op_json(
+                    r#"{"op":"renameColumn","table":"things","from":"old","to":"pg_renamed","type":"text"}"#,
+                ),
+            ),
+        ];
+        let accepted = cases
+            .into_iter()
+            .filter_map(|(kind, op)| {
+                validate_ir(crate::test_fixtures::VENDORS, &ir_with(vec![op]), &POSTGRES)
+                    .is_ok()
+                    .then_some(kind)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            accepted.is_empty(),
+            "creator column declarations reached lower without the reserved-name gate: {accepted:?}"
+        );
+
+        let reference =
+            op_json(r#"{"op":"dropColumn","table":"things","column":"pg_existing"}"#);
+        validate_ir(
+            crate::test_fixtures::VENDORS,
+            &ir_with(vec![reference]),
+            &POSTGRES,
+        )
+        .expect("the reservation gate applies to new names, not references to existing columns");
     }
 
     fn idx_col(name: &str) -> IndexElement {
