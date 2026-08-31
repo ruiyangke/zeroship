@@ -18,8 +18,16 @@ Three choices, taken by the operator on 2026-08-31:
    - measured 2026-08-31.** `zeroship-migrate/Cargo.toml` declares no `[features]` section and no
    optional dependencies, so all three dialects compile unconditionally and 20,018 lines of MySQL are
    built by every dependant. Nothing in zeroship selects that dialect: the addon's only two callers
-   hardcode `dialect: "postgres"` (`sdks/vite-plugin/src/gen-types/index.ts:271`, `:326`), and every
-   `mysql` occurrence in `crates/zeroship-migrate-node/src/` is a doc comment, never a dispatch. The
+   hardcode `dialect: "postgres"` (`sdks/vite-plugin/src/gen-types/index.ts:271`, `:326`).
+
+   *This sentence used to continue "and every `mysql` occurrence in `crates/zeroship-migrate-node/src/`
+   is a doc comment, never a dispatch." That is FALSE, and the correction below has said so for
+   several revisions without anyone reconciling the two.* `bridge.rs` carries FIVE live
+   `ApplyDialect::Mysql =>` dispatch arms (`:658`, `:921`, `:1134`, `:1255`, `:1332`), each
+   constructing a `MysqlBackend`, plus a `use zeroship_migrate_mysql::DIALECT` at `lower.rs:35`. My
+   original grep matched only the doc comments because I searched for the lowercase string and the
+   dispatch spells it `Mysql`. **The claim the argument actually needs is the narrow one - nothing
+   PASSES "mysql" - and that one is true.** The
    dialect string resolves through a *registry* - `preview_dialect` searches `shipping_backends()`
    and returns `Err("unknown dialect …")` at `crates/zeroship-migrate-node/src/verbs.rs:105` - so a
    default-off `mysql` feature degrades to a runtime rejection, not a compile error, and
@@ -283,8 +291,24 @@ dependencies. Judged against THAT, `data-core` as specified fails on three conte
    the crate boundary is defence in depth, not the fence.** The fence is the role attribute - a
    worker holding `REPLICATION` can drop ANY slot regardless of which crate the code sits in.
 
-**This block names crates. It does NOT enumerate modules** - that is Track B's table, and holding the
-inventory in two places is what produced two contradictions in two rounds.
+**THIS BLOCK DOES ENUMERATE MODULES, AND THE CLAIM THAT IT DOES NOT WAS FALSE FOR SEVERAL
+REVISIONS.** It said "This block names crates. It does NOT enumerate modules - that is Track B's
+table." Then it listed "V8, crud, broker, subscription lifecycle" for `plugin-db` and "WAL stream,
+slot authority, reaper" for the relay. `broker` is *precisely* the module whose double-listing was
+correction instances five and six.
+
+So the structural fix this document congratulated itself on was never in force. Two rules now, and
+they are rules rather than descriptions:
+
+1. **Track B's table is the module inventory.** The lines above are a reading aid; where they and the
+   table differ, the table wins.
+2. **The CDC rows in both places are conditional on the Full/Partial decision, which is STILL OPEN**
+   (see "Not decided"). Under Partial only `slot_reaper` moves and the worker keeps decoding, which
+   makes "WAL stream, slot authority" above wrong. An implementer must settle Full-vs-Partial before
+   reading either list as an instruction.
+
+A self-congratulating claim is worse than the defect it claims to have fixed, because it tells the
+next reader not to look.
 
 **Why the prefix survives, having briefly been dropped.** An intermediate revision of this document
 DELETED the `data-*` prefix, on the argument that a prefix must denote something you can CHECK.
@@ -346,7 +370,7 @@ Cargo.toml comment has been read as a dependency edge.**
 **2. `zeroship-data-binding` is the wrong name, and the argument I gave for it was factually false.**
 I wrote that the reading "holds only because CDC leaves - change streams are not something an app
 gets through its binding". `Collection` holds `pub(crate) binding: DbBinding`
-(`v8_classes/collection.rs:32`) and mints its change stream through it (`:565`). A change stream is
+(`v8_classes/collection.rs:36`) and mints its change stream through it (`:565`). A change stream is
 *exactly* something an app gets through its binding.
 
 And `DbBinding` is not the crate's public concept: it is private in release and carries no behaviour
@@ -668,7 +692,7 @@ reduction" framing below is right, and understated.
 
 **The security property that pays for it is concrete, not abstract.** Today's update and delete
 builders omit `WHERE` entirely for an empty filter (`query.rs:4528`, `:4562`), and ordinary update and
-purge paths call them with no mandatory bound (`crud/mod.rs:1372`, `:1617`). The typed `Update` and
+purge paths call them with no mandatory bound (`crud/mod.rs:1386`, `:1631`). The typed `Update` and
 `Delete` require a `RowLimit` to construct (`data-plan/src/write.rs:602`, `:754`). That is the whole
 argument for the port in one line: an unbounded write is currently expressible and would become
 unrepresentable.
@@ -724,8 +748,12 @@ owns the `broker::Subscription` directly in its V8 [slot]" - with `:316` minting
 `broker::try_subscribe`. A registry whose handles live in V8 slots cannot leave the process that
 runs V8. That argument holds regardless of which side publishes.
 
-So the seam is one module lower. **THIS TABLE IS THE ONE MODULE INVENTORY. The target block at the
-top of this document does not enumerate modules, by rule** - see the correction below.
+So the seam is one module lower. **THIS TABLE IS THE MODULE INVENTORY, AND IT WINS WHERE THE TARGET
+BLOCK DIFFERS.** The target block does enumerate some modules as a reading aid, contrary to what this
+document claimed for several revisions; see the correction there.
+
+**Every "moves to the relay" row below is conditional on Full**, which is still an open decision.
+Under Partial, only `slot_reaper.rs` moves and `wal_consumer.rs`/`replication.rs` stay.
 
 | stays in the worker | moves to the relay |
 | --- | --- |
@@ -741,7 +769,7 @@ top of this document does not enumerate modules, by rule** - see the correction 
   lease it hands out (`subscription.rs:42`).
 - **`change_stream_pg.rs` (315 lines) and `replication_ops.rs` (47 lines) were unassigned entirely**,
   and the boundary forces both. Moving `wal_consumer.rs` orphans `cdc_lifecycle`'s handle type
-  (`cdc_lifecycle.rs:22` imports `WalConsumerHandle` from `change_stream_pg`); moving `replication.rs`
+  (`cdc_lifecycle.rs:21` imports `WalConsumerHandle` from `change_stream_pg`); moving `replication.rs`
   orphans a V8 dispatch. Both become new cross-process calls this plan had not priced.
 - **`replication.rs` cannot be extracted, only rewritten.** It is keyed per app per worker (`:1`,
   `:96`), while the settled target is one slot and publication per Datastore with relay fan-out
