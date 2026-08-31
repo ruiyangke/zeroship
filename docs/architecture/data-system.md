@@ -394,10 +394,24 @@ journals never enter the worker-visible WAL feed.
 **Publications and slots sit at different scopes, and the difference decides what has to be
 rationed.** Measured on PostgreSQL 18.4:
 
-- **A publication is DATASTORE-scoped.** `pg_publication` and `pg_publication_rel` both carry
-  `relisshared = f`, and the same publication name created in two databases of one cluster coexists,
-  each database's `pg_publication` showing only its own. One publication per database therefore
-  costs nothing cluster-wide and no name can collide across datastores.
+- **A publication is DATASTORE-scoped.** `relisshared` is a column of **`pg_class`**, not of
+  `pg_publication`, and it says whether a CATALOG is shared across the cluster. Measured on 18.4:
+  `pg_class.relisshared` is `f` for both `pg_publication` and `pg_publication_rel`, so those catalogs
+  are per-database - against `pg_authid` and `pg_database`, which are `t`. That asymmetry is the whole
+  design: roles are cluster-shared, publications are not. The same publication name created in two
+  databases of one cluster therefore coexists, each seeing only its own.
+
+  **This bullet named `pg_publication.relisshared` until 2026-08-30 and the column does not exist
+  there** (`information_schema.columns` returns 0 rows for it, and 1 for `pg_class`). The conclusion
+  was right and the catalog was wrong, which is the harder error to notice: a false claim that
+  supports a true one gets repeated by everyone who trusts the conclusion. It reached the decision
+  log and two agent briefs before a reviewer caught it.
+
+  **CARDINALITY IS ONE SHARED PUBLICATION PER DATASTORE, NOT ONE PER DATABASE.** Locality makes a
+  per-Database publication *cheap*, which is why this bullet used to conclude one per Database - but
+  cheapness is not the constraint. `publication_names` is fixed at `START_REPLICATION`, so a
+  publication created after a stream starts is invisible to it, and the relay owns one stream per
+  Datastore. See the decoupling proposal and `2026-08-28-cdc-service.md`, which settle this.
 - **A replication slot's NAMESPACE and BUDGET are cluster-scoped; its DECODE is not.**
   `max_replication_slots` defaults to 10 and is `context = postmaster`, so raising it is a restart.
   Ten slots created in one database are all visible from another database of the same cluster, and
@@ -448,10 +462,16 @@ it.
 Two consequences follow, and both are load-bearing:
 
 - **No creator-reachable operation may mint a cluster-scoped object.** Opening a subscription
-  attaches to the datastore's existing stream; creating a database creates schema and publication,
-  which are datastore-scoped and therefore free. Nothing a creator does may create a slot, a WAL
-  sender, or WAL retention. Roles are the one deliberate exception - the enforcement model IS
-  cluster-global rows - so they are quota'd rather than multiplexed.
+  attaches to the datastore's existing stream; creating a database creates a SCHEMA, and its tables
+  join the Datastore's ALREADY-EXISTING shared publication. Nothing a creator does may create a slot,
+  a publication, a WAL sender, or WAL retention. Roles are the one deliberate exception - the
+  enforcement model IS cluster-global rows - so they are quota'd rather than multiplexed.
+
+  **This bullet said "creating a database creates schema and publication" until 2026-08-30.** That
+  was the per-Database cardinality this page has now abandoned, and it survived the first correction
+  because that pass fixed the SLOT conclusion and left the publication one standing. A half-applied
+  correction reads as a whole one; the publication and the slot moved for the same reason and had to
+  move together.
 - **A publication is not decoded unless the running stream NAMES it.** Measured: one slot, one data
   set, two decodes differing only in `publication_names` - 4 change records vs 8. PostgreSQL's own
   warning explains the mechanism: "The publication does not exist at this point in the WAL." The name
