@@ -632,6 +632,37 @@ creators it is, and no role fixes it.
   creator -> POST /v1/databases/{database_id}/migrations/apply    (on zeroship-migrate-server)
   ```
 
+  **The CLI reuses the control URL and the EDGE routes the path there** (operator decision 14,
+  2026-08-30). No new config key, flag or environment variable: `control` already resolves through a
+  four-step precedence with printed provenance, and a second endpoint is a second thing to omit.
+
+  This closes a gap the other decisions left open. **The migration service is not exposed at the edge
+  at all today** - `deploy/ops/Caddyfile` has blocks for `auth`, `control` and the gateway and none
+  for `migrate-server`, which `deploy/compose/docker-compose.yml:450-457` publishes on
+  `127.0.0.1:9091` as a loopback for operator tunnelling. Deleting the forward without this leaves the
+  CLI with no route, not merely no URL.
+
+  ```
+  http://control.{$ZEROSHIP_DOMAIN} {
+  	handle /v1/databases/* { reverse_proxy migrate-server:9091 }
+  	handle                 { reverse_proxy control:9090 }
+  }
+  ```
+
+  The shape is already used one block above it: `auth.<domain>` splits `/oauth2/*` and
+  `/.well-known/*` off before its catch-all.
+
+  **A shared hostname is not the control plane being in the path.** The request never reaches
+  control - Caddy hands it to `migrate-server` directly, no control code runs and no second
+  authorization happens. The deleted forward was a SERVICE in the path; this is a DNS name. The
+  distinction is written down because "migrations go to control.<domain>" invites exactly the proxy
+  that was just removed.
+
+  Two costs, taken deliberately: the edge config becomes load-bearing (a missing rule yields control's
+  404, and an apply that reaches nothing can still write a ledger row - see the empty-apply path), and
+  the control plane must never define a `/v1/databases/*` route. The second gets a gate arm rather
+  than a convention. `Caddyfile` is the LOCAL edge; a production ingress needs the same rule.
+
   **THIS REPLACES A TWO-ROUTE SPLIT** in which a creator-facing
   `POST /v1/projects/{project}/databases/{name}/migrations/apply` was resolved to an id and forwarded
   to a control-plane-internal id-bearing route. Both the split and the forward are deleted.

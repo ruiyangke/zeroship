@@ -94,6 +94,53 @@ iff principal owns N", so the project/ownership row is still required - it was t
 depended on `(project, name)`, not the authorization. Read this decision as unblocking the route
 shape, never as unblocking authz.
 
+**14. The CLI reuses the control URL; the EDGE routes `/v1/databases/*` to the migration service.**
+"can we reuse the control url?" Yes, and investigating it surfaced a gap decisions 11-13 had left
+open.
+
+**THE MIGRATION SERVICE IS NOT EXPOSED AT THE EDGE AT ALL.** `deploy/ops/Caddyfile` routes
+`auth.<domain>` to `auth:9092`, `control.<domain>` to `control:9090`, and three host blocks to
+`gateway:8000`. There is no `migrate-server` block. `deploy/compose/docker-compose.yml:450-457`
+publishes it on `127.0.0.1:9091`, which the comment at `:361` describes as the loopback "an operator
+tunnels to", while control reaches it on the compose network at `http://migrate-server:9091`
+(`:365`).
+
+So the CLI cannot reach the migration service today by any URL. Deleting the forward does not merely
+leave the CLI without a config key - it leaves it without a ROUTE. That gap was not in the task this
+page filed for decision 11, and would have shipped in the brief.
+
+**The fix is path routing at the edge, following the precedent one block above it.** `auth.<domain>`
+already splits by path - `handle /oauth2/*` and `handle /.well-known/*` before its catch-all - so the
+control host gains the same shape:
+
+```
+http://control.{$ZEROSHIP_DOMAIN} {
+	handle /v1/databases/* { reverse_proxy migrate-server:9091 }
+	handle                 { reverse_proxy control:9090 }
+}
+```
+
+The CLI then reuses `control_url` verbatim: no new key, no new flag, no new environment variable, no
+new absent-key error path, and nothing new for a `zeroship.jsonc` to omit.
+
+**A SHARED HOSTNAME IS NOT THE CONTROL PLANE BEING IN THE PATH, and this needs saying because it
+reads like the forward decision 11 just deleted.** The request never reaches control: Caddy hands it
+straight to `migrate-server`. No control code runs, no second authorization happens, nothing is
+re-issued. Decision 11 is about a SERVICE in the path, not a DNS name. Anyone who reads "migrations
+go to control.<domain>" and concludes control should proxy them is rebuilding what was deleted.
+
+**Two costs, accepted deliberately:**
+
+- **The edge config becomes load-bearing.** Deploy without that rule and `zeroship migrate` receives
+  control's 404. Combined with the empty-apply ledger write (task #74), a migrate that reaches nothing
+  can still look like it did something, so the two failure modes compound.
+- **A path-collision invariant appears.** The control plane must never define a `/v1/databases/*`
+  route, and nothing enforces that. It gets a gate arm rather than a convention.
+
+`deploy/ops/Caddyfile` is the LOCAL edge; production may be Kubernetes, so the same rule has to exist
+in whatever ingress ships there. That is a second place to get it wrong and is stated here so it is
+not discovered in production.
+
 ## 2026-08-29
 
 ### Three more operator decisions, two of which fix defects no review round found
