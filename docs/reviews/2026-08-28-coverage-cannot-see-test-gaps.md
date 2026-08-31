@@ -119,3 +119,33 @@ field by field:
 
 A test that pins the WRONG constant is worse than no test: it enshrines the bug
 and makes the eventual correction look like a regression.
+
+## The 2026-08-30 sweeps are the same class, so coverage stays the wrong instrument
+
+Between 2026-08-29 and 2026-08-30 roughly fifty tests were added across
+`cancel_query_raw.rs`, `generic_client.rs`, `copy_out.rs`, `buf_stream.rs`,
+`socket.rs`, `query.rs`, `connection.rs`, `pool.rs` and `codec.rs`. Every one
+binds a guard in code that **already ran on every suite invocation**:
+
+- a delegation that forwards `query_opt` rather than `query_one` - both arms
+  execute, only the cardinality differs;
+- a COPY OUT state arm (`ReadyForQuery if command_complete`) - the match runs
+  regardless, the guard decides whether a malformed sequence is refused;
+- `mark_possibly_sent()` sitting BEFORE rather than AFTER the `?` on a cancel
+  write - the same statement executes either way.
+
+Each was mutation-proved: remove the guard, a named test goes red. That is
+detection, and it is exactly what the experiment above showed line coverage
+cannot see. Predicting the coverage delta of this session at roughly zero is not
+a guess; it is the measured result of the same experiment on the same crate.
+
+**Practical note, 2026-08-30.** `cargo-llvm-cov` is NOT on PATH in this
+environment, so any coverage figure quoted for this crate today would require
+installing it and an instrumented rebuild first. The 990 MB `target-cov/` in the
+tree is leftover from the 2026-08-28 run above, not a current measurement -
+`target/` does not match it, which is why it is gitignored separately.
+
+**What to run instead** when asking "did the suite get better": re-run the
+mutation that motivated each test and confirm the named test still goes red.
+That is a direct measurement of detection. Coverage answers a different
+question, and answering it here has already been tried and reported.
