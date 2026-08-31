@@ -480,12 +480,19 @@ impl KeyProvider for ZeroizingAwsLcKeyProvider {
 static ZEROIZING_AWS_LC_KEY_PROVIDER: ZeroizingAwsLcKeyProvider = ZeroizingAwsLcKeyProvider;
 
 fn read_private_key_file(key_path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+    read_private_key_file_with_metadata(key_path, std::fs::File::metadata)
+}
+
+fn read_private_key_file_with_metadata(
+    key_path: &str,
+    inspect: impl FnOnce(&std::fs::File) -> io::Result<std::fs::Metadata>,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     use std::io::Read as _;
 
     let mut file = std::fs::File::open(key_path).map_err(|error| {
         Error::tls(format!("sslkey={key_path}: cannot read PEM: {error}").into())
     })?;
-    let metadata = file.metadata().map_err(|error| {
+    let metadata = inspect(&file).map_err(|error| {
         Error::tls(format!("sslkey={key_path}: cannot inspect private key file: {error}").into())
     })?;
     if !metadata.file_type().is_file() {
@@ -1847,6 +1854,89 @@ mod tests {
         assert!(
             key_log.file.lock().expect("lock key-log file").is_none(),
             "the fixture write did not fail, so the warning path never ran"
+        );
+    }
+
+    fn tls_error_source(error: &Error) -> String {
+        std::error::Error::source(error)
+            .expect("a TLS error must retain its specific source")
+            .to_string()
+    }
+
+    #[test]
+    fn sslkey_open_error_names_the_missing_temporary_path() {
+        let directory = tempfile::tempdir().expect("create an isolated sslkey directory");
+        let path = directory.path().join("missing.key");
+        assert!(
+            !path.exists(),
+            "the missing-file fixture unexpectedly exists"
+        );
+        let open_error = std::fs::File::open(&path)
+            .expect_err("the fixture path must independently fail to open");
+        let key_path = path.to_str().expect("temporary paths are valid UTF-8");
+
+        let error = read_private_key_file(key_path)
+            .expect_err("a missing sslkey cannot yield private key bytes");
+
+        assert_eq!(
+            tls_error_source(&error),
+            format!("sslkey={key_path}: cannot read PEM: {open_error}"),
+            "the open failure must be attributed to the exact sslkey path"
+        );
+    }
+
+    #[test]
+    fn sslkey_metadata_error_names_the_opened_temporary_path() {
+        let key = tempfile::NamedTempFile::new().expect("create a temporary regular sslkey");
+        let key_path = key
+            .path()
+            .to_str()
+            .expect("temporary paths are valid UTF-8");
+
+        let error = read_private_key_file_with_metadata(key_path, |file| {
+            assert!(
+                file.metadata()
+                    .expect("inspect the real fixture descriptor")
+                    .is_file(),
+                "the metadata-error fixture must first open a regular file"
+            );
+            Err(io::Error::other("forced metadata failure"))
+        })
+        .expect_err("an sslkey whose metadata cannot be inspected must be refused");
+
+        assert_eq!(
+            tls_error_source(&error),
+            format!("sslkey={key_path}: cannot inspect private key file: forced metadata failure"),
+            "the metadata failure must be attributed to the exact opened sslkey path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sslkey_directory_is_named_as_not_a_regular_file() {
+        let directory = tempfile::tempdir().expect("create a temporary sslkey directory");
+        assert!(
+            directory
+                .path()
+                .metadata()
+                .expect("inspect the directory fixture")
+                .is_dir(),
+            "the non-regular sslkey fixture must be a directory"
+        );
+        std::fs::File::open(directory.path())
+            .expect("Unix must open the directory so the regular-file check decides");
+        let key_path = directory
+            .path()
+            .to_str()
+            .expect("temporary paths are valid UTF-8");
+
+        let error = read_private_key_file(key_path)
+            .expect_err("a directory cannot supply private key bytes");
+
+        assert_eq!(
+            tls_error_source(&error),
+            format!("sslkey={key_path}: private key is not a regular file"),
+            "the regular-file refusal must name the exact sslkey directory"
         );
     }
 
