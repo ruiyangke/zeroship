@@ -79,7 +79,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
 | 40 Request COPY flags | 2 | UNRULED - the mutation HANGS rather than fails, see note | - |
-| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 EXECUTED BY NOTHING** - see open item | - |
+| 41 COPY state reset | 2 | CLOSED: 1 covered by 26; 1 was executed by nothing, now bound | `an_abort_before_bind_complete_releases_copy_input` |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
 | 45 Streaming COPY refusal | 2 | BOUND each | agent table |
@@ -149,7 +149,7 @@ Worth copying: the two tests use distinct parameter sentinels (`[1101101]` and
 `[2202202]`), so a mutation's failure message names which copy was hit rather
 than only that something failed.
 
-### OPEN: the `CopyFrame(None)` COPY-state reset, and the ordering question behind it
+### CLOSED: the `CopyFrame(None)` reset is LIVE - the abort path beats the loop head
 
 `panic!` at the `MuxEvent::CopyFrame(None)` arm's `copy_in = None` leaves all
 1453 tests green, so nothing executes it. Whether it is REACHABLE turns on one
@@ -169,9 +169,16 @@ So if `copy_producer_finished` latches BEFORE the receiver's stream yields
 arm can never be entered - dead by construction, like the step C arm. If the
 stream ends FIRST, the arm is live and simply untested.
 
-Answer that before building a fixture. Do not write a test that asserts COPY
-state is cleared without checking WHICH reset cleared it - the other one runs on
-every loop iteration and would make such a test pass regardless.
+**Answered: `copy_producer_finished` does NOT always latch first.** A
+`CopyInResponse` arriving before `BindComplete` pauses the read obligation;
+`copy_in_inner` then sends `CopyInMessage::Abort`, and that receiver returns
+`None` while `copy_producer_finished()` is still false. On the ordinary
+terminal-frame path the loop-head reset does win - which is why every existing
+COPY test misses this arm - but the abort path reaches it.
+
+Verified twice, and the first proof is the one that matters: a `panic!` in the
+arm fails ONLY the new test, so it genuinely enters this reset rather than the
+loop-head one that runs every iteration.
 
 ### "Reached" and "observable" are different, and only two probes separate them
 
