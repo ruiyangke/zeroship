@@ -198,3 +198,54 @@ which looked like it contradicted the agent. It did not: the binding test is
 `execute_raw_probationary_cache_winner_reprepares_after_deallocate`, which
 matches neither filter word. The full suite found it immediately. When checking
 whether a mutation is caught, filter by nothing.
+
+## `remember_server_error` is EIGHT copies, not two, and five are unbound
+
+The entry above recorded "terminal server-error recording - connection.rs
+1218-1229, 1248-1256" as a two-copy group. Re-derived 2026-08-31: there are
+EIGHT call sites. Each was mutated alone (the call replaced by a tuple binding
+that compiles and skips it), compile-checked, then measured with a FULL suite
+run:
+
+    line  979  SURVIVED
+    line  987  SURVIVED
+    line 1257  SURVIVED
+    line 1263  SURVIVED
+    line 1284  SURVIVED
+    line 1290  KILLED  client_encoding::encoding_retirement_preserves_a_pipelined_server_error
+    line 1447  KILLED  type_cache_residue::query_text_params_preserves_the_outer_error_when_type_resolution_fails
+                       type_cache_residue::query_typed_preserves_the_outer_error_when_type_resolution_fails
+    line 1605  KILLED  backend_termination::a_checked_out_idle_pool_backend_is_discarded_after_termination
+                       pool_hooks::{current,final,fresh_after_connect}_warmup_eligibility_preserves_idle_fatal
+
+Three bound, five not.
+
+### Why the five survive: the tests INJECT the stored error
+
+The read side is well covered - `client.rs:779` takes the request-local error to
+produce a better diagnosis, `connection.rs:561` gates on the terminal one. But
+the tests that exercise those readers set the slot directly rather than driving
+the code that fills it:
+
+    #[test]
+    fn enqueue_failure_preserves_terminal_server_diagnosis() {
+        let client = client(sender);
+        *client.inner.terminal_server_error.lock() = Some(admin_shutdown());
+
+So a regression that silently stopped RECORDING the server's FATAL would leave
+every injection-based test green. This is not "error handling is untested" - it
+is "the write side of a well-tested read side has no coverage", which is a
+narrower and more actionable statement.
+
+### Note the shape of the three that ARE bound
+
+They are the paths where the stored error changes an observable outcome:
+encoding retirement, type-resolution failure, and pool warmup eligibility.
+Line 1605 fails FOUR tests, which is weaker isolation than the one-copy-one-
+failure bar but still a genuine binding.
+
+**Do not treat the eight as interchangeable.** 1257 and 1263 are a pair writing
+to DIFFERENT slots (terminal vs request-local) in the same branch, as are 1284
+and 1290 - and within that second pair the request-local write is bound while
+the terminal one is not. Whatever fills these gaps has to distinguish the slot,
+not just the call site.
