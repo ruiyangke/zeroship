@@ -16,6 +16,21 @@ mod private {
         Uncached(&'a str),
     }
 
+    impl std::fmt::Debug for ToStatementType<'_> {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Statement(statement) => {
+                    formatter.debug_tuple("Statement").field(statement).finish()
+                }
+                Self::Query(_) => formatter.debug_tuple("Query").field(&"<redacted>").finish(),
+                Self::Uncached(_) => formatter
+                    .debug_tuple("Uncached")
+                    .field(&"<redacted>")
+                    .finish(),
+            }
+        }
+    }
+
     pub(crate) struct StatementExecution<'a> {
         pub(crate) statement: Statement,
         pub(crate) cache_sql: Option<&'a str>,

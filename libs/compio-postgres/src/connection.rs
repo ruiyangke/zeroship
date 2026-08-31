@@ -548,6 +548,40 @@ pub struct Connection<S, T> {
     _live: crate::live::LiveConnectionGuard,
 }
 
+impl<S, T> std::fmt::Debug for Connection<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let parameter_count = self.parameters.lock().len();
+        let transaction_status = match self.tx_status.load(Ordering::Relaxed) {
+            b'I' => "idle",
+            b'T' => "in_transaction",
+            b'E' => "failed",
+            READ_RETIRED_STATUS => "retired",
+            _ => "unknown",
+        };
+        let has_terminal_server_error = self.terminal_server_error.lock().is_some();
+
+        formatter
+            .debug_struct("Connection")
+            .field("parameter_count", &parameter_count)
+            .field("delayed_notice_count", &self.delayed_notices.len())
+            .field("response_count", &self.responses.len())
+            .field("pending_response_count", &self.pending_responses.len())
+            .field("notifications_enabled", &self.async_sender.is_some())
+            .field("transaction_status", &transaction_status)
+            .field(
+                "in_flight_request_count",
+                &self.in_flight_requests.load(Ordering::Relaxed),
+            )
+            .field("has_terminal_server_error", &has_terminal_server_error)
+            .field(
+                "copy_error_may_owe_extra_ready",
+                &self.copy_error_may_owe_extra_ready.get(),
+            )
+            .field("has_drop_release", &self.drop_release.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S, T> Connection<S, T>
 where
     S: AsyncRead + AsyncWrite + Unpin,

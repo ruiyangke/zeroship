@@ -475,6 +475,17 @@ pub struct BinaryCopyOutRow {
     types: Arc<Vec<Type>>,
 }
 
+impl std::fmt::Debug for BinaryCopyOutRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BinaryCopyOutRow")
+            .field("buf", &"<redacted>")
+            .field("ranges", &self.ranges)
+            .field("types", &self.types)
+            .finish()
+    }
+}
+
 impl BinaryCopyOutRow {
     /// Like `get`, but returns a `Result` rather than panicking.
     pub fn try_get<'a, T>(&'a self, idx: usize) -> Result<T, Error>

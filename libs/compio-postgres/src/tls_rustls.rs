@@ -1262,6 +1262,19 @@ pub struct RustlsConnect {
     server_verification: ServerVerification,
 }
 
+impl std::fmt::Debug for RustlsConnect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RustlsConnect")
+            .field("config", &"<redacted>")
+            .field("policy_identity", &self.policy_identity)
+            .field("domain", &self.domain)
+            .field("ssl_cert_mode", &self.ssl_cert_mode)
+            .field("server_verification", &self.server_verification)
+            .finish()
+    }
+}
+
 impl<S> TlsConnect<S> for RustlsConnect
 where
     S: AsyncRead + AsyncWrite + Unpin + crate::buf_stream::SplitStream + 'static,
@@ -1337,6 +1350,19 @@ pub struct RustlsStream<S> {
     tls_server_end_point: Option<Vec<u8>>,
     client_cert_status: ClientCertStatus,
     negotiated_alpn_protocol: Option<Vec<u8>>,
+}
+
+impl<S> std::fmt::Debug for RustlsStream<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tls_server_end_point = self.tls_server_end_point.as_ref().map(|_| "<redacted>");
+
+        formatter
+            .debug_struct("RustlsStream")
+            .field("tls_server_end_point", &tls_server_end_point)
+            .field("client_cert_status", &self.client_cert_status)
+            .field("negotiated_alpn_protocol", &self.negotiated_alpn_protocol)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + 'static> AsyncRead for RustlsStream<S> {

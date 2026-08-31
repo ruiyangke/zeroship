@@ -4384,8 +4384,7 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     // attestation instead, which asserts something else entirely.
     let err = compio_postgres::connect(&require, NoTls)
         .await
-        .err()
-        .expect("sslmode=require must not succeed over a plaintext connection");
+        .expect_err("sslmode=require must not succeed over a plaintext connection");
     // "could not be negotiated", NOT "handshake failed". The two are separate
     // error kinds because `sslmode=prefer` retries a failed HANDSHAKE in
     // plaintext and must retry nothing else; nothing was handshaken here, so
@@ -4931,8 +4930,7 @@ async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
 async fn nothing_listening_is_not_reported_as_a_server_answer() {
     let err = compio_postgres::connect("postgres://postgres:zeroship@127.0.0.1:1/zeroship", NoTls)
         .await
-        .err()
-        .expect("nothing listens on port 1");
+        .expect_err("nothing listens on port 1");
 
     assert!(
         !common::server_answered(&err),

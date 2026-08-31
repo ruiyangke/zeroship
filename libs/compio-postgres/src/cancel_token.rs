@@ -206,6 +206,42 @@ pub struct CancelToken {
     pub(crate) drop_target: Option<CancelDropTarget>,
 }
 
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let socket_config = self.socket_config.as_ref().map(|_| "<redacted>");
+        let secret_key = self.secret_key.as_ref().map(|_| "<redacted>");
+        let pool_lease_active = self
+            .pool_lease
+            .as_ref()
+            .map(|lease| lease.active.load(Ordering::Acquire));
+        let pool_cancel_uncertain = self
+            .pool_lease
+            .as_ref()
+            .map(|lease| lease.uncertain_cancel.load(Ordering::Acquire));
+        let drop_target = self.drop_target.as_ref().map(|target| match target {
+            CancelDropTarget::Client(_) => "client",
+            CancelDropTarget::Replication(_) => "replication",
+        });
+
+        formatter
+            .debug_struct("CancelToken")
+            .field("socket_config", &socket_config)
+            .field("encryption", &self.encryption)
+            .field("ssl_sni", &self.ssl_sni)
+            .field("ssl_cert_mode", &self.ssl_cert_mode)
+            .field("server_verification", &self.server_verification)
+            .field("tls_policy_identity", &self.tls_policy_identity)
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_negotiation", &self.ssl_negotiation)
+            .field("process_id", &self.process_id)
+            .field("secret_key", &secret_key)
+            .field("pool_lease_active", &pool_lease_active)
+            .field("pool_cancel_uncertain", &pool_cancel_uncertain)
+            .field("drop_target", &drop_target)
+            .finish()
+    }
+}
+
 impl CancelToken {
     pub(crate) fn target_was_abandoned(&self) -> bool {
         self.drop_target

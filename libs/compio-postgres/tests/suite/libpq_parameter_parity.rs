@@ -787,8 +787,7 @@ async fn url_shapes_parse_like_libpq_and_an_empty_host_is_refused_at_connect() {
         .expect("a hostless URL parses")
         .connect(common::suite_tls())
         .await
-        .err()
-        .expect("a hostless config must be refused rather than guessing a socket path");
+        .expect_err("a hostless config must be refused rather than guessing a socket path");
     let chain = common::error_chain(&error);
     assert!(
         chain.contains("host") && chain.contains("missing"),

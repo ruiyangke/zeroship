@@ -176,7 +176,6 @@
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]
-#![allow(missing_debug_implementations)]
 // No crate-wide dead_code allow: it hid an uncalled pub(crate) fn and an
 // unread field until a coverage run pointed at them. The one item that is
 // legitimately dead under some feature resolutions carries its own allow.
