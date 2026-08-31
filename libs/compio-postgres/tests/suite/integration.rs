@@ -5909,6 +5909,68 @@ async fn statement_cache_execution_threshold_applies_to_copy_out() {
     }
 }
 
+/// SQL-level `EXECUTE` can report `26000/FetchPreparedStatement` after the
+/// extended-protocol Bind succeeded. That diagnosis belongs to the inner SQL
+/// statement, so it must not evict the still-valid cached COPY API wrapper.
+#[compio::test]
+async fn post_bind_error_keeps_copy_out_statement_cached() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let target = common::test_object_name("cpg_copy_out_inner_execute");
+    let sql = format!("EXECUTE {target} /* cpg_copy_out_post_bind_cache */");
+
+    client
+        .batch_execute(&format!("PREPARE {target} AS SELECT 1::int4"))
+        .await
+        .expect("prepare the SQL-level target");
+
+    let initial = match client.copy_out(&sql).await {
+        Ok(_) => panic!("copy_out accepted a row-producing EXECUTE"),
+        Err(error) => error,
+    };
+    assert!(
+        initial.code().is_none(),
+        "the initial COPY refusal unexpectedly came from PostgreSQL: {}",
+        common::error_chain(&initial)
+    );
+    assert_eq!(
+        prepared_statement_names(&client, &sql).await.len(),
+        1,
+        "the COPY wrapper was not cached before the post-Bind error"
+    );
+
+    client
+        .batch_execute(&format!("DEALLOCATE {target}"))
+        .await
+        .expect("remove only the SQL-level target");
+    let error = match client.copy_out(&sql).await {
+        Ok(_) => panic!("copy_out accepted EXECUTE of a missing statement"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::INVALID_SQL_STATEMENT_NAME),
+        "the missing inner statement reported the wrong error: {}",
+        common::error_chain(&error)
+    );
+    assert_eq!(
+        error
+            .as_db_error()
+            .and_then(compio_postgres::error::DbError::routine),
+        Some("FetchPreparedStatement"),
+        "the fixture did not reach the stale-statement provenance"
+    );
+    client
+        .simple_query("")
+        .await
+        .expect("drain any statement-cache cleanup");
+    assert_eq!(
+        prepared_statement_names(&client, &sql).await.len(),
+        1,
+        "a post-Bind inner EXECUTE error evicted the valid COPY wrapper"
+    );
+}
+
 #[compio::test]
 async fn statement_cache_execution_count_resets_after_prepared_eviction() {
     let url = test_url();
