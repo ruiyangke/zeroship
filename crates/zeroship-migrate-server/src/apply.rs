@@ -1409,8 +1409,22 @@ pub fn runtime_role_provisioning_sql(
         // (tables, sequences) is the migrator role's job; plugin-db's
         // register_model is a no-op on Postgres. Granting CREATE here would let
         // app runtime code author schema objects, which it must not.
+        //
+        // INTERIM, NOT THE INTENDED END STATE. This deliberately re-widens the
+        // table authority that 6035c8601 narrowed. It exists because the
+        // replacement apply-time per-column grant producer was never built;
+        // without either producer, a successfully migrated app cannot use any
+        // creator table. This grants SELECT, INSERT, UPDATE, and DELETE on every
+        // existing table in the app schema and the same defaults on tables the
+        // migrator creates later. It does not exclude masked or encrypted raw
+        // columns, or migration-journal tables. The audit revoke/grant statements
+        // that follow narrow the unmask audit table back to INSERT only. Replace
+        // these two table statements with the real per-column producer.
         "GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
+         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema_q} TO {role_q};
+         ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_q};
          ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
              GRANT USAGE, SELECT ON SEQUENCES TO {role_q};"
     );
