@@ -721,6 +721,21 @@ where
                     Ok(msg) => self.dispatch_decoded_message(msg, true).await?,
                     Err(e) => {
                         self.record_terminal_read(&e);
+                        // THIS CLEAN-CLOSE ARM CANNOT FIRE, unlike its twin in
+                        // step D below. Step B already returned `Ok(())` for
+                        // `terminating && !has_awaited_response`, so reaching
+                        // step C means an awaited response EXISTS. The only
+                        // thing between that check and this one is the failed
+                        // read plus `record_terminal_read`, and
+                        // `publish_terminal_error` returns immediately on an
+                        // EOF rather than draining - so on the `is_eof` branch
+                        // the response deque is provably unchanged and the
+                        // second conjunct is still false. A non-EOF error may
+                        // drain, but then the FIRST conjunct is false.
+                        // Measured 2026-08-31: `panic!` here leaves all 1447
+                        // tests green. Kept as a structural mirror of step D,
+                        // whose identical arm IS reachable; a mutation report
+                        // calling it unbound is correct.
                         if is_eof(&e)
                             && !has_awaited_response(&self.responses, &self.pending_responses)
                         {
