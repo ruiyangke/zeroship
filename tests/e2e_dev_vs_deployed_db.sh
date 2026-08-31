@@ -1115,10 +1115,10 @@ wantre p1cur 'the cursor binds the orderBy it was minted under' '"orderBy":\{"id
 # carry its orderBy. The pages are a rich artifact and those assertions read a
 # narrow projection of it.
 #
-# That is not hypothetical here. The id column is where SQLite (BINARY) and
-# Postgres (en_US.utf8) order differently -- see #236/#255 and the ordering rows
-# this harness has already caught -- and keyset pagination filters on the SAME
-# column it sorts by. Measured on a throwaway Postgres 16 (en_US.utf8) with real
+# That is not hypothetical here. Before typed-id DDL pinned byte ordering,
+# SQLite (BINARY) and Postgres (en_US.utf8) ordered ids differently; see
+# #236/#255 and the ordering rows this harness caught. Keyset pagination filters
+# on the SAME column it sorts by. Measured on a throwaway Postgres 16 with real
 # minted ids: with the filter and the sort under the same collation the walk is
 # complete (6 rows, 6 emitted, 0 missing); with the filter forced to a different
 # collation than the sort, exactly one row VANISHES from the walk and every

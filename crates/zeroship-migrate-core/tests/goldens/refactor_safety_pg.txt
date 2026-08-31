@@ -28,6 +28,9 @@ TableSnapshot {
             data_type: "text",
             nullable: true,
             default: None,
+            ddl_type_override: Some(
+                "TEXT COLLATE \"C\"",
+            ),
             generated: None,
             generated_kind: Some(
                 NotGenerated,
@@ -37,7 +40,14 @@ TableSnapshot {
             value_format: None,
             id_default: None,
             case_sensitive: None,
-            collation: None,
+            collation: Some(
+                ColumnCollationSnapshot {
+                    schema: Some(
+                        "pg_catalog",
+                    ),
+                    name: "C",
+                },
+            ),
             encryption_sentinel: None,
             comment_sentinel: None,
             comment: None,
