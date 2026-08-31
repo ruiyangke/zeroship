@@ -176,20 +176,58 @@ The target is the engine's own shape - `zeroship-migrate-backend` is a contract 
 plane should match it: `zeroship-data-backend` + `zeroship-data-postgres` + `zeroship-data-sqlite`.
 
 **It cannot be done by moving files today, because the backends reach back up into the plugin.**
-Counting `crate::<module>` references out of each backend into non-backend modules:
+Counting `crate::<module>` references out of each backend, **with comment lines stripped**:
 
-| from | into `broker` | `crud` | `context` | `descriptor` | `exec` |
-| --- | --- | --- | --- | --- | --- |
-| `backend/sqlite/` | 6 | 3 | 2 | 2 | 0 |
-| `backend/postgres.rs` | 0 | 1 | 1 | 2 | 2 |
+| module reached | from `sqlite/` | from `postgres.rs` |
+| --- | --- | --- |
+| `encryption` | **7** | **7** |
+| `auth` | 5 | 0 |
+| `broker` | 3 | 0 |
+| `v8_bridge` | 3 | 2 |
+| `descriptor` | 2 | 2 |
+| `binding` | 2 | 2 |
+| `context` | 2 | 1 |
+| `exec` | 0 | 2 |
+| `wal_consumer` | 1 | 0 |
+| `crud` | 0 | 0 |
 
-Extracting either as a peer crate is circular: `plugin-db -> sqlite` for the backend, `sqlite ->
-plugin-db` for the broker. The `broker` edge is the load-bearing one and it is all in the CDC path
-(`sqlite/cdc.rs` publishes into the broker directly, `:646`).
+**THE PREVIOUS VERSION OF THIS TABLE WAS WRONG IN BOTH DIRECTIONS, AND SO WAS THE CONCLUSION DRAWN
+FROM IT - corrected 2026-08-31 by review, then re-derived independently to the same numbers.** It
+read `broker` 6, `crud` 3, and omitted `encryption`, `auth`, `v8_bridge`, `binding` and
+`wal_consumer` entirely. Half the broker hits were prose (`cdc.rs:7`, `:151`, `mod.rs:278`); ALL
+THREE `crud` hits were prose. The count used `grep -o` over raw source, which cannot tell code from a
+doc comment - the same instrument error that has now misread a Cargo.toml comment as a dependency
+edge three separate times in this document's history.
 
-**So the ORDER is: invert the broker edge, then split.** A backend must not know the broker; it
-should emit into a sink the plugin injects - the same contract-in-the-middle move the engine already
-made. Until that inversion exists, "extract the backends" is a rename that will not compile.
+**So "invert the broker edge, then split" was sequencing against the wrong edge.** The largest shared
+out-edge is `crate::encryption`, 7 from each backend, and it has nothing to do with CDC:
+`encryption/mod.rs:1-3` - "Cross-backend column encryption ... used by BOTH the Postgres and SQLite
+`crate::backend` impls." In the engine, the equivalent layer sits BELOW the vendors, in the contract
+crate. **`encryption` (1,591 lines) is what must move down first.**
+
+**And `v8_bridge` is a two-way edge that no injection fixes.** `v8_bridge.rs:34` imports
+`backend::sqlite::session::{TypedCell, TypedRows}` while both backends call back into it
+(`postgres.rs:476`, `:572`; `sqlite/mod.rs:232`, `:1440`, `:1571`). Its own header claims "nothing
+here knows about SQL or schema", contradicted at `:34` of the same file. Row-to-JSON conversion is
+the real backend/plugin seam, and it is legal only because it is all one crate today.
+
+**A shared contract crate is further away than "mirror the engine" implies.** Two of the would-be
+contract traits name a vendor driver in their bounds: `PgSqlExecutor: SqlExecutor<Client =
+compio_postgres::OwnedPooledClient>` (`backend/mod.rs:755`) and `PgLockManager` (`:786`). The
+engine's contract crate names NO driver - `zeroship-migrate-backend`'s entire dependency list is
+`zeroship-migrate-ir`, `zeroship-migrate-policy`, serde, serde_json, sha2, hex, uuid, base64,
+thiserror. Making the sub-traits driver-neutral is a bigger job than any edge inversion and is not
+otherwise in this plan.
+
+**Nor is there a production trait to split on.** `backend/mod.rs:1443`'s `Backend` trait is
+`#[cfg(any(test, feature = "test-helpers"))]` and says so itself at `:1438-1441`: "a **conformance
+marker, not the production abstraction** ... nothing takes `dyn Backend`." Production dispatch is
+`BackendHandle`, a closed enum. Of the 13 `pub trait` declarations in that file, exactly one -
+`EncryptedColumn` - is used as a generic bound outside `backend/`.
+
+**So the ORDER is longer than this plan claimed:** move `encryption` and row-to-JSON below the
+vendors, make the sub-traits driver-neutral, resolve the `v8_bridge` cycle, THEN invert the broker
+edge, THEN split. "Extract the backends" is not one move with one prerequisite.
 
 **The cheap win does not wait for any of it.** Feature-gating the SQLite backend inside today's
 `plugin-db` is a much smaller change than extraction and delivers the whole production-binary
