@@ -212,6 +212,80 @@ that performed the deletion, arguing against its own change:
 Exposure without those replacements is a downgrade, not a refactor. The rate limit in particular
 guards a superuser DDL path that is now publicly routable.
 
+### 2026-08-30, later: the lifecycle home, settled by two independent reviews rather than by a ruling
+
+**17. DATABASE LIFECYCLE LIVES ON THE MIGRATION SERVICE. CONTROL IS NEVER IN THE PATH AND HOLDS NO
+PROVISIONING DSN.** `create`, `list`, `delete` and `bind` are creator-facing routes under
+`/v1/databases/*` on `zeroship-migrate-server`, reached at the edge under the `control.<domain>`
+origin per decision 14. The migration service executes every piece of privileged DDL. Control's
+relationship to a database narrows to READING lifecycle state for the deploy gate and the runtime
+binding injection.
+
+This is not a new ruling. It is what decisions 11, 14 and 16 already imply taken together, and it was
+reached independently by two reviewers from different starting points, which is why it is recorded as
+settled rather than proposed.
+
+**THE ALTERNATIVE THAT WAS TESTED AND FAILED.** "Control owns the lifecycle API and calls the
+migration service to execute the DDL" was put to both reviews as the leading candidate, with the
+argument that it differs from the deleted forward because the payload is a database id rather than
+creator SQL. Both rejected it, and the argument that killed it is not about payloads:
+
+- The forward was deletable because *the migration service never trusted control's authorization in
+  the first place* (decision 11). The test is what the intermediate CONTRIBUTES, not what it carries.
+  Control forwarding a bearer contributes reachability and a cheap rejection and no authority - that
+  is the forward, whatever the body holds.
+- The other fork is worse. If control acts on its own behalf with `control_key`, it re-creates by
+  name the hazard decision 11 retired: an id-bearing internal route that hands platform authority to
+  whoever holds a `dbs_...`.
+- Of the four lifecycle verbs, three (`create`, `delete`, `list`) reduce to "authorize, write a row,
+  ask the migration service to run the DDL", and the rows live in a schema the migration service
+  already writes (`zeroship.app_schema_applies`).
+- The fourth, `bind`, must not be split from the apply's advisory-lock bracket. The apply reaps
+  epoch `E-1` roles and mints `E+1` roles under a per-database session lock; a `CREATE ROLE` issued
+  from another process between those points mints against an epoch about to advance, or creates a
+  role the reaper's enumeration missed. One writer under one lock removes the race by construction
+  instead of by a cross-service protocol.
+
+**WHAT WAS ALREADY WRITTEN DOWN AND SHOULD HAVE ENDED THIS SOONER.** `deploy/compose/docker-compose.yml`
+states in control's own environment block that it carries "NO provisioning DSN here. The privileged
+CREATE SCHEMA / CREATE ROLE work belongs to migrate-server, which is the only code that reads one;
+this service used to carry it and nothing consumed it." Option B is therefore not a candidate being
+weighed - it is the reversal of a landed cleanup, and it would put a cluster-superuser credential
+back in the service with 54 registered routes (27 `/api`, 23 `/internal`, 2 `/me`, `/healthz`,
+`/readyz` - measured 2026-08-30) including the Stripe webhook and the device-login flow. The
+migration service serves six.
+
+**THE NARROWED FIRST STEP SHIPS NO NEW ENTITY, AND ONE REVIEW'S PROPOSAL TO MINT IDS EARLY IS
+REFUSED.** The step that lands is: a `create` verb on the migration service under the
+`/v1/databases/{id}` shape with `{id}` still derived from the app id; apply REFUSES when the schema
+is absent instead of creating it; and no auto-create anywhere. The route shape, the service, the edge
+rule and the refusal semantics are all end-state, so nothing is built twice - only the id's
+derivation is interim, and decision 12 already schedules that as a mechanical re-key.
+
+Minting `dbs_` ids in that first step was proposed and is REFUSED, because it is not free: section 7
+of the decoupling proposal requires the encryption salt and AAD change to land "in the same change
+that makes database ids exist, not after", since changing the salt changes every derived key and
+changing the AAD changes every tag. Minting the id early drags wire version `0x02` in with it.
+
+**THE REFUSAL IS 409, NEVER 404.** `crates/zeroship-cli/src/main.rs:917`
+`should_resolve_or_create_after_deploy_failure` keys on 404 and auto-creates. A 404 on the database
+path feeds the auto-create-and-retry loop and reintroduces automatic creation one layer up - the
+exact thing this decision removes. It follows the shipped precedent of `schema_precondition_response`
+(`crates/zeroship-control/src/api.rs:167`): a `remedy` field the CLI prints raw. The refusal must also
+precede the ledger open, or a refused apply pollutes the head the deploy gate reads.
+
+**STILL OPEN, AND NAMED SO IT IS NOT DISCOVERED LATER.** The corpus does not assign the executor for
+bind DDL, and it points both ways: section 2.2b puts granting and revoking in "one control-plane
+transaction" and cost 6 says every bind, unbind and epoch rotation is "serialized through the control
+plane", while sections 4 and 9 put the same role minting inside the migration service's apply
+transaction. Cost 6 names the one service the compose file says holds no provisioning DSN. Both
+reviews found this independently. Whoever implements bind corrects 2.2b and cost 6 in the same change.
+
+Graceful delete is the second open seam: the teardown's subscription gate needs a cluster-wide count
+only control can aggregate today, so `delete` either consults a control-maintained aggregate (a read,
+consistent with this decision) or accepts force-shaped slot termination. Decide it explicitly rather
+than letting it pull the delete API back onto control.
+
 ## 2026-08-29
 
 ### Three more operator decisions, two of which fix defects no review round found
