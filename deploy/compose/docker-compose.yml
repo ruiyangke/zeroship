@@ -356,13 +356,6 @@ services:
       # service used to carry it and nothing consumed it.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_CONTROL_MASTER_KEY: ${ZEROSHIP_CONTROL_MASTER_KEY:?run zeroship dev init}
-      # Where `POST /api/apps/{id}/migrations/apply` forwards. This is the
-      # compose-network address of the `migrate-server` service below, NOT the
-      # loopback publish (`127.0.0.1:9091`) an operator tunnels to - control
-      # reaches it as a peer container. The compiled default is localhost, which
-      # is right for a single-host dev run and wrong inside a container, so it
-      # is spelled here rather than inherited.
-      ZEROSHIP_CONTROL_MIGRATE_SERVER_URL: ${ZEROSHIP_CONTROL_MIGRATE_SERVER_URL:-http://migrate-server:9091}
       # control ALSO needs the worker key: it refuses to start without one,
       # because it calls the worker's admin endpoints. MUST match the worker's
       # value - it is ONE setting with several consumers, which is why it has
@@ -444,9 +437,11 @@ services:
   # a provisioning DSN was set on `control`, and the ONLY code that reads one
   # is crates/zeroship-migrate-server/src/main.rs - a service that was not here.
   #
-  # LOOPBACK by default (ZEROSHIP_MIGRATE_SERVER_BIND): like gateway and auth, nothing outside
-  # the compose network should reach it. Creators drive it through control, and
-  # the operator drives it over an SSH tunnel.
+  # LOOPBACK at the host boundary: nothing outside the compose network reaches
+  # the raw port. Part B moves the creator route under the control hostname's
+  # /v1/databases/* edge rule, which sends requests straight here without
+  # passing through control. Operators can still reach the raw port over an SSH
+  # tunnel.
   migrate-server:
     build:
       context: ../..
@@ -885,13 +880,14 @@ services:
   # OIDC client + BUILDER_*/TOKEN_ENCRYPTION_KEY env are gone with it.
 
   # caddy - dev reverse proxy on :80 for the *.<domain> domain.
-  # Routes auth/console/api + the {app}.<domain> catch-all to the
-  # right upstream (see deploy/ops/Caddyfile). console.* now proxies to the GATEWAY
-  # (the console is a gateway-fronted app). The network ALIASES make those
-  # public hostnames ALSO resolve to Caddy from INSIDE the compose network, so
-  # server-side OIDC (control/gateway verifying tokens, fetching JWKS,
-  # exchanging codes against http://auth.<domain>) hits the same
-  # issuer the browser does.
+  # Routes auth/control/console/api + the {app}.<domain> catch-all to the right
+  # upstream (see deploy/ops/Caddyfile). The control host reserves
+  # /v1/databases/* for migrate-server before its control catch-all. console.*
+  # proxies to the GATEWAY (the console is a gateway-fronted app). The network
+  # aliases below make auth/console/api resolve to Caddy from INSIDE the compose
+  # network, so server-side OIDC (control/gateway verifying tokens, fetching
+  # JWKS, exchanging codes against http://auth.<domain>) hits the same issuer
+  # the browser does.
   caddy:
     image: caddy:2-alpine
     ports:
@@ -912,6 +908,8 @@ services:
           - api.${ZEROSHIP_DOMAIN:-zeroship.localhost}
     depends_on:
       control:
+        condition: service_started
+      migrate-server:
         condition: service_started
       gateway:
         condition: service_started

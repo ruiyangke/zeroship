@@ -1488,60 +1488,57 @@ Both arms therefore hand `authz::enforce` a wrapper policy built out of the
 closed OAuth scope vocabulary, and nothing else can now supply one. One Cedar
 action is outside that vocabulary; see Finding 30.
 
-### 4.2 Delegated creator bearer for migration apply
+### 4.2 Creator bearer for direct migration apply
 
 ```text
 +----------------------------------------------------------------+
-| Caller holds platform OAuth bearer or Supabase bearer          |
-| Auth signs the OAuth bearer; Supabase signs the GoTrue bearer  |
+| Caller holds a platform OAuth bearer                           |
+| Auth signs the bearer; the edge does not replace it            |
 +----------------------------------------------------------------+
                                 |
                                 v
 +----------------------------------------------------------------+
-| TRUST BOUNDARY: caller to Control migration route              |
+| TRUST BOUNDARY: caller to the control-host edge                |
 +----------------------------------------------------------------+
                                 |
                                 v
 +----------------------------------------------------------------+
-| Control verifies bearer lifecycle and AppsDeploy               |
-| Control forwards the same raw bearer                           |
+| Caddy selects migrate-server by path                           |
+| Control receives no request                                    |
 +----------------------------------------------------------------+
                                 |
                                 v
 +----------------------------------------------------------------+
-| TRUST BOUNDARY: Control to Migrated                            |
+| TRUST BOUNDARY: edge to Migrated                               |
 +----------------------------------------------------------------+
                                 |
                                 v
 +----------------------------------------------------------------+
 | Migrated holds no signing key of its own                       |
-| Migrated verifies the forwarded platform bearer                |
+| Migrated verifies the original platform bearer                 |
 | Cedar plus app-owner check decides; no new token signed        |
 +----------------------------------------------------------------+
 ```
 
 VERIFIED walk-through:
 
-1. Control rate limits the migration route, uses `AuthzGuard` to require
-   `AppsDeploy` for the app, then extracts the already accepted caller bearer
-   (`crates/zeroship-control/src/migrations_api.rs:70-118`).
-2. Control forwards that raw bearer and request ID to the configured Migrated
-   URL (`crates/zeroship-control/src/migrations_api.rs:147-196`). The shipped compose URL
-   is plain `http://migrate-server:9091`
-   (`deploy/compose/docker-compose.yml:305-316`).
-3. Migrated extracts the bearer and independently invokes the shared
+1. The CLI reuses its configured control URL. Caddy owns the path split and
+   sends the migration prefix to `migrate-server:9091`; its catch-all sends
+   everything else to control (`deploy/ops/Caddyfile`).
+2. Migrated extracts the bearer and independently invokes the shared
    `BearerVerifier`, preserving the caller's scope-derived wrapper policy and
    the owner lifecycle check, then requires Cedar `AppsDeploy` plus app
    ownership before applying (`crates/zeroship-migrate-server/src/api.rs:79-108`,
    `crates/zeroship-migrate-server/src/auth.rs`, `ControlPlaneAuthenticator::verify_action`).
-   Auth signs the platform OAuth JWTs and Supabase signs the GoTrue JWTs
-   (`crates/zeroship-auth/src/oidc/issuer.rs:453-473`,
-   `crates/zeroship-core/src/auth_provider/supabase.rs:312-390`); since the PAT class
-   was deleted (section 4.1) Migrated holds no signing key at all. Unlike
-   Control, Migrated configures a platform-only OAuth provider, so a Supabase
-   bearer accepted by Control fails here (`crates/zeroship-control/src/main.rs`,
-   `crates/zeroship-migrate-server/src/main.rs`); see Finding 17. It signs no replacement
+   Auth signs the platform OAuth JWTs
+   (`crates/zeroship-auth/src/oidc/issuer.rs:453-473`); since the PAT class was
+   deleted (section 4.1), Migrated holds no signing key and signs no replacement
    credential.
+
+Part A staging gap: the CLI and service still use `/v1/apps/{app_id}`, while
+the new edge split reserves `/v1/databases/*` for Part B. Until the route is
+re-keyed, the direct CLI request falls through to control and returns 404. This
+intermediate commit must not be deployed alone.
 
 ### 4.3 Workflow signal-capability issuance
 
@@ -2119,14 +2116,14 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Gateway | App route, cookie validity, OP JWT validity, pairwise projection, route auth level/scopes, request identity HMAC, public signal transport | Signature/type/issuer/expiry, app/client/audience, CSRF for cookie mutation, family marker when DB is configured, and route policy; it does not validate `wst_` (`crates/zeroship-gateway/src/router/auth.rs:142-460`, `crates/zeroship-gateway/src/router/auth.rs:654-1021`, `crates/zeroship-gateway/src/signal_ingress.rs:67-125`) |
 | Control plus authn/authz | Creator principal, OAuth provider result, current owner authority, the scope-derived wrapper policy | Bearer cryptography and DB state and principal lifecycle; owner/wrapper Cedar only where a handler calls `require`. Every accepted bearer now carries a wrapper built from the closed scope vocabulary, so one Cedar action is unreachable, Finding 30 (`crates/zeroship-authn/src/lib.rs`, `BearerVerifier::verify_bearer` and `oauth_guard_from_bearer`; `crates/zeroship-control/src/authz_guard.rs`, `AuthzGuard::require`) |
 | Control workflow API | App-scoped operations and signed `wst_` claims; master and per-app HMAC keys | Mint requires app-scoped HMAC and live target; ingress requires Gateway `control_key`, then capability HMAC, expiry, type, target, epoch, and replay (`crates/zeroship-control/src/workflow_instance_api.rs:326-405`, `crates/zeroship-control/src/workflow_instance_api.rs:2129-2266`, `crates/zeroship-control/src/workflow_instance_api.rs:2317-2587`) |
-| Migrated plus authn/authz | Independently verified creator principal and migration policy result | Reverify the forwarded raw bearer, active principal, app ownership, Cedar deploy action, and operator-ceiling intersection (`crates/zeroship-migrate-server/src/api.rs:79-108`; `crates/zeroship-migrate-server/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and `authorize`; `crates/zeroship-migrate-server/src/policy.rs:110-133`, `crates/zeroship-migrate-server/src/apply.rs:214-239`) |
+| Migrated plus authn/authz | Independently verified creator principal and migration policy result | Verify the original raw bearer, active principal, app ownership, Cedar deploy action, and operator-ceiling intersection (`crates/zeroship-migrate-server/src/api.rs:79-108`; `crates/zeroship-migrate-server/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and `authorize`; `crates/zeroship-migrate-server/src/policy.rs:110-133`, `crates/zeroship-migrate-server/src/apply.rs:214-239`) |
 | External signal caller | A plaintext `wst_` capability and its permitted payload | Present the capability in the JSON body; Gateway proves nothing about it and Control proves HMAC, expiry, type, target, epoch, and replay (`crates/zeroship-gateway/src/signal_ingress.rs:67-125`, `crates/zeroship-control/src/workflow_instance_api.rs:2317-2587`) |
 | Control scheduler | Workflow run and app IDs in the advance JSON body | It currently proves no caller identity to Gateway; see Finding 15 (`crates/zeroship-control/src/cron/workflow_engine.rs:194-232`, `crates/zeroship-gateway/src/router/dispatch.rs:99-160`) |
 | Worker | A `worker_key` holder and an optional fresh request-bound identity assertion; topology expects Gateway | Always prove shared bearer; only when a user header exists, prove HMAC, request UUID, and age before V8 entry (`crates/zeroship-worker/src/handler.rs:67-116`, `crates/zeroship-worker/src/handler.rs:205-220`, `crates/zeroship-worker/src/logs.rs:48-56`) |
 | Runtime and creator app | The identity JSON Worker bound to the current invocation | Only presence for `requireUser`; it does not revalidate upstream credentials (`crates/zeroship-runtime/src/auth.rs:75-109`, `crates/zeroship-runtime/src/auth.rs:115-204`) |
 | Postgres | Atomic one-time consumption, session/revocation state, grants, policies, and tenant RLS | Callers must use the correct row lock, owner predicate, or tenant GUC (`crates/zeroship-auth/src/oidc/authorization_code.rs:619-692`, `crates/zeroship-gateway/src/anchors.rs:26-40`) |
 | Compose container filesystem | Control, Migrated, Gateway, and Auth can each read the complete mounted secrets directory | No per-secret filesystem custody is enforced by the shipped root-run image; see Finding 6 (`deploy/compose/docker-compose.yml:367-373`, `deploy/compose/docker-compose.yml:447-449`, `deploy/compose/docker-compose.yml:497-500`, `deploy/compose/docker-compose.yml:758-761`, `deploy/Dockerfile:197-229`) |
-| Service network | No identity assertion beyond possession of bearer keys, the forwarded caller bearer, or a fetched JWKS | Peer identity, privacy, and trust-anchor integrity are external assumptions on application-permitted HTTP hops; see Finding 18 (`crates/zeroship-gateway/src/sync.rs:209-260`, `crates/zeroship-control/src/migrations_api.rs:162-196`, `crates/zeroship-core/src/auth_provider/platform.rs:197-230`) |
+| Service network | No identity assertion beyond possession of bearer keys, the edge-forwarded caller bearer, or a fetched JWKS | Peer identity, privacy, and trust-anchor integrity are external assumptions on application-permitted HTTP hops; see Finding 18 (`crates/zeroship-gateway/src/sync.rs:209-260`, `deploy/ops/Caddyfile`, `crates/zeroship-core/src/auth_provider/platform.rs:197-230`) |
 
 ## Known in-progress work
 
@@ -2541,20 +2538,16 @@ bearers through the OP's published JWKS (`crates/zeroship-migrate-server/src/mai
 that Gateway's identically named `--signing-key-file` is a different consumer -
 it signs app-session wrapper tokens - and is untouched.
 
-### 17. MEDIUM: Control and Migrated disagree on accepted OAuth issuers
+### 17. RESOLVED BY DELETION: Control and Migrated disagreed on one request
 
 VERIFIED: in Supabase mode Control constructs a verifier set containing
 Supabase and, when configured, the platform OP
-(`crates/zeroship-control/src/main.rs:118-160`). After Control authenticates and
-authorizes a migration apply, it forwards the caller's raw bearer unchanged
-(`crates/zeroship-control/src/migrations_api.rs:70-118`,
-`crates/zeroship-control/src/migrations_api.rs:147-196`). Migrated independently builds a
+(`crates/zeroship-control/src/main.rs:118-160`). Migrated independently builds a
 platform-only provider (`crates/zeroship-migrate-server/src/main.rs:217-237`).
 
-INFERRED impact: a Supabase bearer that is valid for general Control operations
-and passes `AppsDeploy` is rejected by Migrated, so the parallel verifier
-implementations disagree across one request. Reverification is the correct
-boundary; the accepted issuer set is the drift.
+The control migration forward is deleted, so one request no longer passes
+through both verifier sets. The creator migration CLI carries the platform
+bearer directly to Migrated through the edge.
 
 ### 18. MEDIUM: Service auth uses application-permitted plain HTTP
 
@@ -2564,10 +2557,9 @@ the key travels in clear, then writes the bearer in a hand-built TCP request
 decrypted app environment data and other broad internal Control endpoints
 (`crates/zeroship-control/src/internal.rs:82-263`).
 
-This is not isolated to `control_key`. Control also forwards the creator's
-raw OAuth bearer to Migrated over an HTTP-default service URL
-(`deploy/compose/docker-compose.yml:305-316`,
-`crates/zeroship-control/src/migrations_api.rs:147-196`).
+This is not isolated to `control_key`. Caddy sends the creator's raw OAuth
+bearer to Migrated over the compose network's plain HTTP upstream
+(`deploy/ops/Caddyfile`, `deploy/compose/docker-compose.yml`).
 
 Gateway sends raw `worker_key` and any signed identity over raw TCP to the
 Compose-generated HTTP worker URLs. Control sends the same key to worker log

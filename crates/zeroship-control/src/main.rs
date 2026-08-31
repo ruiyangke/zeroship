@@ -20,7 +20,7 @@ use zeroship_bundle::{
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
     api, device_handlers, env_handlers,
-    internal, migrations_api, oauth_grants_handlers, plan_catalog, stripe_handlers,
+    internal, oauth_grants_handlers, plan_catalog, stripe_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
@@ -382,7 +382,6 @@ fn main() -> std::io::Result<()> {
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
-    let migrate_server_url = settings.migrate_server_url.get().trim_end_matches('/').to_string();
     let worker_key = settings.worker_key.expose_str().to_owned();
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
@@ -581,7 +580,6 @@ fn main() -> std::io::Result<()> {
         );
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
-        report.field("migrate_server_url", CheckValue::Plain(migrate_server_url.clone()));
         report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
@@ -988,7 +986,6 @@ fn main() -> std::io::Result<()> {
         stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
         stripe_base_url,
         gateway_url,
-        migrate_server_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)
@@ -1123,17 +1120,6 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/api/apps/{id}/logs")
                     .route(web::get().to(api::get_app_logs)),
-            )
-            // The creator-facing entry to the migration service. `migrated`
-            // binds loopback (it holds the superuser provisioning DSN), so this
-            // is the only route a creator's `zeroship migrate` can take. See
-            // the module header for why the hop adds no authority.
-            .service(
-                web::resource("/api/apps/{id}/migrations/apply")
-                    .state(web::types::PayloadConfig::new(
-                        migrations_api::MIGRATIONS_APPLY_PAYLOAD_BYTES,
-                    ))
-                    .route(web::post().to(migrations_api::apply_migrations)),
             )
             .service(
                 web::resource("/api/apps/{id}/vars")

@@ -666,7 +666,7 @@ creators it is, and no role fixes it.
   **THIS REPLACES A TWO-ROUTE SPLIT** in which a creator-facing
   `POST /v1/projects/{project}/databases/{name}/migrations/apply` was resolved to an id and forwarded
   to a control-plane-internal id-bearing route. Both the split and the forward are deleted.
-  `crates/zeroship-control/src/migrations_api.rs` (214 lines) goes with them.
+  The DELETED `crates/zeroship-control/src/migrations_api.rs` (214 lines) went with them.
 
   **Deleting the forward costs nothing in authorization, because it was never the authorization.**
   `crates/zeroship-migrate-server/src/api.rs:98` already calls

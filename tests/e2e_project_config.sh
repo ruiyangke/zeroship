@@ -143,8 +143,7 @@ boot() {  # boot <label> <readyz-port> -- <cmd...>
 }
 
 boot control $ZEROSHIP_CONTROL_PORT -- "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
-  --blob-store "$WORK/blobs" \
-  --migrate-server-url "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
+  --blob-store "$WORK/blobs"
 boot migrated $ZEROSHIP_MIGRATE_SERVER_PORT -- "$BIN/zeroship-migrate-server" --port $ZEROSHIP_MIGRATE_SERVER_PORT \
   --tmp-dir "$WORK/migrated-tmp"
 boot worker $ZEROSHIP_WORKER_PORT -- "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
@@ -225,6 +224,11 @@ grep -q "\"out\":\"generated/elsewhere\"" "$WORK/config-show.txt" \
 
 echo ""
 echo "--- transcript: zeroship migrate (no flags) ---"
+# PART A STAGING GAP. This harness has one project-config control URL and no
+# edge. The CLI still posts /v1/apps/* while the new edge reservation is
+# /v1/databases/*, so this leg returns control's 404 until Part B re-keys the
+# route. A temporary test proxy or second config endpoint would hide the exact
+# production gap this sequencing deliberately leaves visible.
 MIG_OUT="$( cd "$APP_DIR" && "$BIN/zeroship" migrate 2>&1 )"; MIG_RC=$?
 echo "$MIG_OUT"
 if [ "$MIG_RC" = 0 ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG_OUT"; then

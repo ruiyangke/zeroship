@@ -6,8 +6,7 @@ use zeroship_core::service_identity::{
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
-const CATALOG: [ServiceEndpoint; 13] = [
-    endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
+const CATALOG: [ServiceEndpoint; 12] = [
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
@@ -70,12 +69,6 @@ fn assert_endpoint(
 #[test]
 fn endpoint_catalog_records_exact_measured_operations() {
     for (endpoint, destination, method, path_template) in [
-        (
-            endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
-            "migrate-server",
-            "POST",
-            "/v1/apps/{app_id}/migrations/apply",
-        ),
         (
             endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
             "gateway",
@@ -161,7 +154,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     assert_allowlist_row(
         "svc/control",
         &[
-            endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
             endpoints::GATEWAY_WORKFLOW_ADVANCE,
             endpoints::WORKER_APP_LOGS,
         ],
@@ -201,12 +193,12 @@ fn authorization_keys_on_individual_compound_identity() {
     let unknown = identity("zeroship.ai", "svc/unknown");
     let wrong_domain = identity("attacker.example", "svc/control");
 
-    assert!(authorize(&control, endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS));
-    assert!(!authorize(&auth, endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS));
-    assert!(!authorize(&unknown, endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS));
+    assert!(authorize(&control, endpoints::GATEWAY_WORKFLOW_ADVANCE));
+    assert!(!authorize(&auth, endpoints::GATEWAY_WORKFLOW_ADVANCE));
+    assert!(!authorize(&unknown, endpoints::GATEWAY_WORKFLOW_ADVANCE));
     assert!(!authorize(
         &wrong_domain,
-        endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS
+        endpoints::GATEWAY_WORKFLOW_ADVANCE
     ));
 }
 
