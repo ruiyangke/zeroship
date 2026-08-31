@@ -78,9 +78,8 @@ usage() {
 
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
-# MEASURED 2026-08-27 by `ls tests/*_gate.sh | wc -l`: 21. It was 25 before the
-# five compose_*_gate.sh shims were deleted with the gates behind them, then 20
-# before the database FTS deletion gate was added. Gates
+# MEASURED 2026-08-31 by `find tests -maxdepth 1 -name '*_gate.sh'`: 26. It was
+# 25 before compose_db_posture_gate.sh was added. Gates
 # are added and deleted by hand, so a drop is a decision somebody made and must
 # be recorded here in the same commit, not an accident to be absorbed. Set at
 # the observed count on purpose: a slack floor here would let the glob
@@ -88,7 +87,7 @@ usage() {
 # one level down. RAISE THIS WHEN YOU ADD A GATE - leaving it behind the real
 # count is how a floor stops meaning anything without ever going red. It sat at
 # 24 against 25 real files for exactly that reason.
-GATE_FILE_FLOOR=21
+GATE_FILE_FLOOR=26
 
 DIR=""
 RUN=()
