@@ -168,3 +168,33 @@ group will believe all six are covered.
 
 **Group B final: 5 of 6 bound, 1 unbindable-by-construction with the mask
 named.** That is a complete result, not a partial one.
+
+## CORRECTION: group A (client.rs replay family) was ALREADY fully bound
+
+This document said only the probationary-reprepare pair was bound, and a job was
+dispatched on that premise. **The premise was wrong.** Measured 2026-08-31 by
+mutating each of the six copies separately and running the FULL suite each time:
+every copy is killed by an existing test. No work was needed and none was done.
+
+Independently re-verified on main. Mutating the replay guard at `client.rs:3010`
+(`if !before_bind_complete` -> `if true`, which refuses the replay at that copy
+only and still compiles):
+
+    test result: FAILED. 714 passed; 1 failed
+    integration::execute_raw_probationary_cache_winner_reprepares_after_deallocate
+
+One copy, one failure. The group meets the acceptance bar already.
+
+### Two ways my own spot-check went wrong first, both instructive
+
+**A mutation that does not COMPILE proves nothing.** My first attempt renamed
+the call to `reprepare_cached_statement_once_DISABLED`. That is a build error,
+not a behaviour change - no test ran, so no verdict was possible. A mutation
+must compile and change behaviour.
+
+**A filtered run cannot refute a full one.** My second attempt compiled, and a
+run filtered to `statement_cache stale_cached` reported 38 passed, 0 failed -
+which looked like it contradicted the agent. It did not: the binding test is
+`execute_raw_probationary_cache_winner_reprepares_after_deallocate`, which
+matches neither filter word. The full suite found it immediately. When checking
+whether a mutation is caught, filter by nothing.
