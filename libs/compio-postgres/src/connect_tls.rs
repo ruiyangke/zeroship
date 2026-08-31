@@ -24,9 +24,10 @@ use postgres_protocol::message::frontend;
 /// Negotiate one attempt over an open socket, returning a stream ready for the
 /// Postgres startup message.
 ///
-/// `mode` is read for exactly one decision - what a server's `N` (refusal)
-/// means - and nothing else. Every other use of the mode has already happened
-/// in the caller.
+/// `mode` drives both what a server's `N` (refusal) means and whether
+/// `verify-full` without a hostname is refused before any bytes are written.
+/// The caller supplies `has_hostname` as a separate bit; it does not fold
+/// hostname presence into `mode`.
 ///
 /// # Errors
 ///
