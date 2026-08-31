@@ -69,6 +69,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
 | 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
+| 31 Pool acquisition arms | **9**, not 2 | UNRULED - largest family after `remember_server_error` | - |
 | 32 Pool return/handoff | 2 | 1 covered by 5 `pool_close` tests; 1 REACHED but its wake unobservable | see note |
 | 34 Row-range decoding | 2 | NOT independently bound (3 overlap on one copy) | see agent table |
 | 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
@@ -88,12 +89,13 @@ below was re-run by the pilot against the FULL seven-target gate
 | 50 COPY format validation | 2 | NOT independently bound (2 overlap on one copy) | agent table |
 
 **The worklist's copy COUNTS are unreliable, and that is the most reusable
-finding here.** Six groups so far had more copies than claimed:
+finding here.** Seven groups so far had more copies than claimed:
 
     17  said two   had three   the uncounted copy was the ONLY unbound one
     28  said two   had five    the uncounted copies included the only unbound one
     18  said three had four    extra copy was bound
     38  said four  had five    the fifth is a guard arm in different syntax
+    31  said two   had NINE    `if !entry.is_pool_eligible()` across acquire/return/housekeeping
     44  said two   had three   third copy is the `Weak` variant - probed, BOUND
     remember_server_error  said two  had EIGHT
 
