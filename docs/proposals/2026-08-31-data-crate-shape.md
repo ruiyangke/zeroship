@@ -130,9 +130,24 @@ may be deleted. Reads carry no such entanglement.
 
 ## Track B - CDC out of the worker
 
-Extract `broker`, `wal_consumer`, `replication`, `cdc_lifecycle`, `slot_reaper` into
-`zeroship-data-cdc`, hosted by a process that never executes creator code - plausibly the relay
-that #5 builds, which would make the extraction its prerequisite rather than a separate job.
+**THE BROKER STAYS. This corrects an earlier draft of this document**, which listed it among the
+modules to extract. `broker.rs` is a process-wide in-memory router that merges TWO sources - its own
+header: "local mutations within any isolate in this process, and pgoutput WAL frames decoded by the
+streaming consumer". `crates/zeroship-plugin-db/src/backend/sqlite/cdc.rs:646` calls
+`crate::broker::publish(&event)` directly. Moving it would turn every local `db.insert(...)` into a
+network round trip to observe your own write.
+
+So the seam is one module lower:
+
+| stays in the worker | moves to the relay |
+| --- | --- |
+| `broker.rs` (76 KB) - merges local writes with remote changes | `wal_consumer.rs` - decodes pgoutput |
+| | `replication.rs`, `cdc_lifecycle.rs` - slot and publication lifecycle |
+| | `slot_reaper.rs` - the privileged, destructive part |
+
+Extract those three-and-a-bit into `zeroship-data-cdc`, hosted by a process that never executes
+creator code - plausibly the relay that #5 builds, which would make the extraction its prerequisite
+rather than a separate job.
 
 Hazards this track inherits, all measured:
 
@@ -150,10 +165,22 @@ Hazards this track inherits, all measured:
 **Open, and not settled by the "own service" decision:** does the worker STOP DECODING WAL, or does
 it keep decoding its own stream while only the privileged and destructive parts move? Measured:
 `wal_consumer.rs:21-23` opens a `replication=database` connection and issues `START_REPLICATION SLOT
-... LOGICAL`, so REPLICATION is legitimately required today and moving the reaper alone does NOT let
-`db_posture.rs:123-126` narrow. Full extraction satisfies the invariant outright but adds a hop to
-every subscription; partial extraction leaves the worker holding a privilege PostgreSQL cannot
-distinguish from "drop anyone's slot", making the fence "which process issues the DROP".
+... LOGICAL`, so REPLICATION is legitimately required today and moving the reaper ALONE does NOT let
+`db_posture.rs:123-126` narrow.
+
+- **Partial** - only `slot_reaper` moves. The worker keeps REPLICATION and keeps decoding. It then
+  still holds a privilege PostgreSQL cannot distinguish from "drop anyone's slot", so the only fence
+  is WHICH PROCESS ISSUES THE DROP - defence in depth, not capability removal.
+- **Full** - the whole WAL side moves and the worker loses REPLICATION outright, satisfying the
+  invariant rather than approximating it.
+
+**Full is cheaper than an earlier draft of this document claimed.** That draft said full extraction
+"adds a hop to every subscription". It does not: the broker stays, so LOCAL writes still short-
+circuit in-process with no network at all. The hop lands only on changes originating in OTHER
+processes - which already travel through WAL today. And the worker needs no new client machinery,
+because the relay would feed `broker::publish` over a transport exactly where `wal_consumer` feeds it
+in-process now. The broker is already the merge point and does not care which side an event came
+from.
 
 ## The rename
 
