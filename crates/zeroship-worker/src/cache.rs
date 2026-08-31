@@ -439,6 +439,46 @@ pub fn get_workflow_runtime(app_id: &Uuid, deploy_hash: &str) -> Option<Runtime>
     })
 }
 
+/// The worker-internal environment handed to an isolate.
+///
+/// EVERY ENTRY OF THIS MAP IS READABLE BY APP JS. It is not a private channel:
+/// `zeroship_runtime::core::init` copies the whole map into `process.env` as
+/// the last-resort layer, so anything placed here is reachable through
+/// `process.env.NAME` or any npm package that walks `Object.keys(process.env)`.
+/// The `env.*` primitive surface deliberately excludes these vars;
+/// `process.env` does not, and that asymmetry is the trap.
+///
+/// The rule, therefore: THIS MAP MAY CARRY ONLY IDENTIFIERS THE APP ALREADY
+/// POSSESSES. An app knows its own id and its own deploy, so disclosing them
+/// costs nothing. An identifier naming a resource SHARED WITH ANOTHER TENANT -
+/// a datastore key, or a database id once databases are shared - must never
+/// enter it, because two apps under one actor that read equal values have
+/// confirmed co-residency. `docs/architecture/data-system.md:62` requires both
+/// of those ids stay internal.
+///
+/// Being unforgeable is NOT sufficient to qualify. Creator `vars` cannot shadow
+/// a worker-internal entry, which is why metering is trustworthy, but that is a
+/// forgery property; the concern here is disclosure, and the map is readable
+/// either way. `docs/proposals/2026-08-28-app-database-decoupling.md` section
+/// 2.2(a) records a binding design that was corrected for exactly this reason.
+///
+/// `worker_env_is_exactly_the_app_owned_ids` binds the key set. Widening it is
+/// a security decision, so it must be an edit to that test and not a silent
+/// insert here.
+fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<String, String> {
+    let mut env_vars = HashMap::new();
+    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    // **T6** - inject the per-app deploy/schema-version token so plugin-db's
+    // deploy-keyed DESCRIPTOR STORE keys off the real deploy hash: a worker
+    // thread holding a pinned and a current isolate of one app must not serve
+    // one deploy's schema to the other. Workflow replay also uses this slot,
+    // but with the run's pinned deploy hash.
+    if let Some(dh) = deploy_hash {
+        env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
+    }
+    env_vars
+}
+
 fn build_runtime(
     app_id: Uuid,
     bundle_bytes: &[u8],
@@ -463,16 +503,7 @@ fn build_runtime(
     let plugins = plugin_set();
     let meter = METER.with(|m| m.borrow().clone());
     let app_id_string = app_id.to_string();
-    let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id_string.clone());
-    // **T6** - inject the per-app deploy/schema-version token so plugin-db's
-    // deploy-keyed DESCRIPTOR STORE keys off the real deploy hash: a worker
-    // thread holding a pinned and a current isolate of one app must not serve
-    // one deploy's schema to the other. Workflow replay also uses this slot,
-    // but with the run's pinned deploy hash.
-    if let Some(dh) = deploy_hash {
-        env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
-    }
+    let env_vars = app_visible_env_vars(&app_id_string, deploy_hash);
 
     let limits = runtime_limits_from_app(&app_limits);
     let net_policy = net_policy_from_app(&app_id, &app_net_policy);
@@ -910,6 +941,49 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// Every entry of the worker-internal env map lands in `process.env` and is
+    /// therefore readable by app JS, so the key set is a security surface
+    /// rather than an implementation detail. Both ids below are the app's own.
+    ///
+    /// This asserts the EXACT set, not a subset, because the failure it guards
+    /// is an ADDITION: a datastore key or a shared database id inserted beside
+    /// `APP_ID` would be published to every tenant that holds it, turning the
+    /// map into a co-tenancy oracle. A `contains_key` assertion would pass
+    /// straight through that. If you are here because this test failed, the
+    /// question to answer is not "how do I make it pass" but "does the app
+    /// already possess the value I just added"; if it does not, it belongs in
+    /// `DbServiceConfig` or another channel that terminates before V8.
+    #[test]
+    fn worker_env_is_exactly_the_app_owned_ids() {
+        let with_deploy = app_visible_env_vars("app_abc", Some("deploy_xyz"));
+        let mut keys: Vec<&str> = with_deploy.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["APP_ID", "ZEROSHIP_DEPLOY_ID"],
+            "the worker env map is copied into process.env; it may carry only \
+             ids the app already possesses"
+        );
+        assert_eq!(
+            with_deploy.get("APP_ID").map(String::as_str),
+            Some("app_abc")
+        );
+        assert_eq!(
+            with_deploy.get("ZEROSHIP_DEPLOY_ID").map(String::as_str),
+            Some("deploy_xyz")
+        );
+
+        // A raw-JS deploy or local dev injects no deploy hash. That arm must
+        // narrow the set, never widen it.
+        let without_deploy = app_visible_env_vars("app_abc", None);
+        let keys: Vec<&str> = without_deploy.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["APP_ID"],
+            "with no deploy hash the map carries the app id alone"
+        );
+    }
 
     fn test_runtime() -> Runtime {
         let runtime = Runtime::builder().build();
