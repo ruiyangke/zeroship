@@ -162,9 +162,35 @@ Merge `zeroship-schema` + `zeroship-data-plan` into `zeroship-data-query`, then 
 builder from inside one crate.
 
 The real port is **~3,420 lines** of string building (`query.rs` regions 3023-6442: query builders,
-soft-delete, HAVING, WHERE) and **35 `build_*` call sites** in the data plane - not 13,814. Of the
-127 apparent `crate::query::` references, most are naming helpers: `quote_ident` (25),
-`raw_column_name` (21), `field_to_column` (3).
+soft-delete, HAVING, WHERE) - not 13,814.
+
+**The call-site count was re-measured on 2026-08-31 and the old figure did not survive.** This
+document said "35 `build_*` call sites in the data plane". That number is not reproducible under any
+definition, and "the data plane" was doing ambiguous work. The method that IS reproducible: take the
+58 `pub fn build_*` names `zeroship-schema/src/query.rs` exports, then count call sites of exactly
+those names per compiled root (a bare `build_*(` grep overcounts - plugin-db has builders of its own;
+a `crate::query::build_*` grep undercounts to 9, because most are imported unqualified via
+`use crate::query::{build_insert, …}`):
+
+| root | call sites |
+| --- | --- |
+| `crates/zeroship-plugin-db/src` | 26 |
+| `crates/zeroship-plugin-db/tests` | 177 |
+| `crates/zeroship-plugin-db/benches` | 2 |
+
+**205 total, and the tests outnumber the production sites 7:1.** That ratio, not the 26, is the cost
+of Track A: porting the data plane is a day of work whose bill is paid in the test suite. Any plan
+that costs this as "26 call sites" is off by an order of magnitude.
+
+Of the 100 `crate::query::` references (this document said 127), most are naming helpers rather than
+builders: `quote_ident`, `raw_column_name`, `field_to_column`.
+
+**One of those 26 refutes a Step 0 claim.** `crud/write_pipeline.rs:812` calls
+`build_create_table_with_fks_for_dialect` - a DDL builder the Step 0 table lists as having no callers
+outside `zeroship-schema`. It is inside `#[cfg(test)] mod tests` (opened at `:636`), so "no
+PRODUCTION caller" still holds, but "no caller outside the crate" is false. Deleting the DDL region
+breaks that test, in a different crate from the one being cut - so the "delete the tests that reach
+the dead code in the same change" instruction above is not confined to `zeroship-schema`.
 
 **Argue this as a correctness trade, not a simplification.** `data-plan` is 6,282 lines against
 ~3,420 replaced: the typed IR is LARGER, because `Ident`, `Literal`, `Predicate` and bounded depth
