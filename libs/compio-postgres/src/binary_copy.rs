@@ -535,6 +535,38 @@ mod tests {
     use std::future::Future;
     use std::task::Waker;
 
+    #[test]
+    fn binary_copy_out_row_debug_redacts_buffer() {
+        const BUFFER_SECRET: &str = "binary-copy-row-secret-7f3d91c2";
+
+        let secret = Bytes::copy_from_slice(BUFFER_SECRET.as_bytes());
+        let exposed = format!("{secret:?}");
+        let slice_exposed = format!("{:?}", secret.as_ref());
+        let secret_len = secret.len();
+        let row = BinaryCopyOutRow {
+            buf: secret,
+            ranges: vec![Some(0..secret_len)],
+            types: Arc::new(vec![Type::BYTEA]),
+        };
+
+        let debug = format!("{row:?}");
+
+        assert!(
+            debug.contains("BinaryCopyOutRow"),
+            "binary COPY row Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("buf: \"<redacted>\""),
+            "binary COPY row Debug did not mark the buffer redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&exposed)
+                && !debug.contains(&slice_exposed)
+                && !debug.contains(BUFFER_SECRET),
+            "binary COPY row Debug leaked its buffer: {debug}"
+        );
+    }
+
     struct BackpressuredSink {
         ready: bool,
         flush_ready: bool,
