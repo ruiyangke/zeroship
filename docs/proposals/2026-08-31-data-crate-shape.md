@@ -590,6 +590,19 @@ does merge two inputs. What it cannot tell you - what no module header can - is 
 still feeds one of them. **A module's documentation describes the module; questions about the SYSTEM
 are answered only at the call sites.**
 
+**THAT GENERALISATION IS INCOMPLETE, AND THE OMISSION IS FLATTERING - added 2026-08-31 after a
+second review.** Every row above is an EPISTEMIC failure: I believed a wrong thing because I asked a
+proxy. But two of this document's defects were not that at all. `broker.rs` was listed in the target
+block and contradicted in Track B; the round-one fix corrected Track B and left `cdc_lifecycle.rs`
+contradicting the target block the same way. Nothing was mis-believed there. **The document held one
+module inventory in two places and edited them independently**, so a correction applied to one copy
+left the other stale - and did so twice, for two different modules, in two consecutive rounds.
+
+A table of "how I reasoned badly" cannot catch that, because the cause is not reasoning. The fix is
+structural and now stated where it binds: **Track B's table is the only module inventory, and the
+target block names crates only.** Diagnosing every defect as a thinking error is its own bias - it
+implies the remedy is to think harder, when the remedy here was to keep one list.
+
 The practical rule: grep answers spelling, the compiler answers "is this named", and neither answers
 "does production reach this". Only walking outward from a real entry point does. Every correction
 above arrived when someone walked that path - which is the argument for doing it BEFORE writing the
