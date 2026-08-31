@@ -173,7 +173,11 @@ impl BackendMessages {
             let Some(header) = self.0.get(offset..header_end) else {
                 return None;
             };
-            let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+            let length = u32::from_be_bytes(
+                header[1..5]
+                    .try_into()
+                    .expect("the five-byte frame header has exactly four length bytes"),
+            ) as usize;
             let Some(next) = offset
                 .checked_add(1)
                 .and_then(|value| value.checked_add(length))
@@ -207,7 +211,11 @@ impl BackendMessages {
             let Some(header) = self.0.get(offset..header_end) else {
                 break;
             };
-            let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+            let length = u32::from_be_bytes(
+                header[1..5]
+                    .try_into()
+                    .expect("the five-byte frame header has exactly four length bytes"),
+            ) as usize;
             if length < 4 {
                 break;
             }
@@ -487,7 +495,9 @@ where
                             }
                         }
                         .map_err(Error::io)?
-                        .expect("async header implies full message is buffered");
+                        .expect(
+                            "the preceding frame-length check guarantees a complete async message",
+                        );
                         return Ok(BackendMessage::Async { message, frame_len });
                     } else {
                         // Normal batch terminates at this async boundary;
