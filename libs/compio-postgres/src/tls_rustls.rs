@@ -1964,6 +1964,71 @@ mod tests {
         config
     }
 
+    #[test]
+    fn rustls_connect_debug_redacts_config() {
+        const CONFIG_SECRET: &str = "rustls-connect-config-material-4a873f2c";
+
+        let secret = CONFIG_SECRET.as_bytes().to_vec();
+        let exposed = format!("{secret:?}");
+        let config = Arc::new(client_config(vec![secret]));
+        assert!(
+            format!("{config:?}").contains(&exposed),
+            "test sentinel is not exposed by raw ClientConfig Debug"
+        );
+        let connect = RustlsConnect {
+            config,
+            policy_identity: TlsPolicyIdentity::new(),
+            domain: "debug.example".to_owned(),
+            ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
+        };
+
+        let debug = format!("{connect:?}");
+
+        assert!(
+            debug.contains("RustlsConnect"),
+            "rustls connector Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("config: \"<redacted>\""),
+            "rustls connector Debug did not mark the config redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&exposed) && !debug.contains(CONFIG_SECRET),
+            "rustls connector Debug leaked its client config: {debug}"
+        );
+    }
+
+    #[test]
+    fn rustls_stream_debug_redacts_tls_server_end_point() {
+        const BINDING_SECRET: &str = "rustls-stream-binding-material-b1357eca";
+
+        let secret = BINDING_SECRET.as_bytes().to_vec();
+        let exposed = format!("{secret:?}");
+        let (client, _server) = handshaken_pair();
+        let stream = RustlsStream {
+            inner: TlsStreamCore::new((), share(client)),
+            tls_server_end_point: Some(secret),
+            client_cert_status: ClientCertStatus::NotApplicable,
+            negotiated_alpn_protocol: None,
+        };
+
+        let debug = format!("{stream:?}");
+
+        assert!(
+            debug.contains("RustlsStream"),
+            "rustls stream Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("tls_server_end_point: Some(\"<redacted>\")"),
+            "rustls stream Debug did not mark the channel binding redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&exposed) && !debug.contains(BINDING_SECRET),
+            "rustls stream Debug leaked TLS channel binding material: {debug}"
+        );
+    }
+
     /// Start a real rustls server, connect the driver's rustls client to it,
     /// and return the protocol list parsed from the serialized `ClientHello`.
     async fn alpn_offered_on_wire(client_config: ClientConfig) -> OfferedAlpn {
