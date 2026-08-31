@@ -442,8 +442,8 @@ top of this document does not enumerate modules, by rule** - see the correction 
 | --- | --- |
 | `broker.rs` - the subscriber registry V8 holds handles into | `wal_consumer.rs` - decodes pgoutput |
 | `cdc_lifecycle.rs` - bridges V8 subscription leases to one consumer per worker process (`:1`, `:69`) | `replication.rs` - slot and publication lifecycle, **rewritten not moved** (below) |
-| `replication_ops.rs` - V8 bridge for replication diagnostics; calls `replication::watchdog_query` (`:32`), which moves | `slot_reaper.rs` - the privileged, destructive part |
-| `change_stream_pg.rs` - "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" (`:1-4`); `backend/mod.rs` names it 7 times | |
+| `replication_ops.rs` (47 lines) - V8 bridge for replication diagnostics; calls `replication::watchdog_query` (`:33`), which moves | `slot_reaper.rs` - the privileged, destructive part |
+| `change_stream_pg.rs` (315 lines) - "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" (`:1-4`); `backend/mod.rs` names it 4 times in code | |
 
 **Corrected 2026-08-31 by review. Three defects in the previous version of this table:**
 
