@@ -659,6 +659,42 @@ mod tests {
     }
 
     #[compio::test]
+    async fn confirmed_cancel_success_keeps_pool_lease_reusable() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted confirmed-cancel peer");
+            let addr = listener
+                .local_addr()
+                .expect("scripted confirmed-cancel peer address");
+            let mut token = network_token(addr);
+            let lease = PoolCancelLease::active();
+            token.pool_lease = Some(Arc::clone(&lease));
+
+            let peer = compio::runtime::spawn(async move {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept confirmed cancellation");
+                assert_eq!(read_exact(&mut stream, 16).await, cancel_packet());
+                drop(stream);
+            });
+
+            token
+                .cancel_query_confirmed(NoTls)
+                .await
+                .expect("confirmed cancellation failed after peer EOF");
+            peer.await.expect("scripted confirmed-cancel peer panicked");
+            assert!(
+                !lease.is_uncertain(),
+                "a confirmed cancellation made the pool lease unsafe to reuse"
+            );
+        })
+        .await
+        .expect("pooled confirmed-cancel test exceeded its 5 second deadline");
+    }
+
+    #[compio::test]
     async fn public_and_internal_cancel_wait_for_eof() {
         compio::time::timeout(TEST_TIMEOUT, async {
             let listener = TcpListener::bind("127.0.0.1:0")
