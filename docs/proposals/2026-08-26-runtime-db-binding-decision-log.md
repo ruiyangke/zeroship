@@ -182,7 +182,7 @@ name - a token-identity change deserving its own task, never a line item inside 
 This confirms decisions 11 and 14 against the objection raised on 2026-08-30 and settles it.
 
 **THE OBJECTION, RECORDED BECAUSE IT WAS SERIOUS.** The deleted forward's own header
-(`crates/zeroship-control/src/migrations_api.rs`) states the opposite topology outright: "`migrated`
+(`crates/zeroship-control/src/migrations_api.rs`, now DELETED) stated the opposite topology outright: "`migrated`
 binds loopback in every deployment we ship (`ports: 127.0.0.1:9091:9091`) because it holds the
 SUPERUSER provisioning DSN - it is the one service that may `CREATE SCHEMA` and `CREATE ROLE`", and
 quotes the compose comment: "nothing outside the compose network should reach it. Creators drive it
