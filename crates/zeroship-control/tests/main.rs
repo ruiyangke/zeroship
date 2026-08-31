@@ -1,3 +1,13 @@
+// THIRD crate root in this crate to overflow rustc's layout query, after
+// bin/dev_provision.rs and src/main.rs: "query depth increased by 130 when
+// computing layout of {async fn body of
+// durable_workflows_keystone_e2e::reap_unclaimed_inflight_retry}".
+// `recursion_limit` is per crate ROOT and a test target is its own root, so the
+// two binary fixes do not cover this one. A bare `cargo test -p zeroship-control
+// --lib` does NOT build this target, which is why it compiled clean until an
+// `--all-targets` run.
+#![recursion_limit = "256"]
+
 //! The integration-test target a bare `cargo test -p zeroship-control` builds:
 //! the files that pass with NO database.
 //!
