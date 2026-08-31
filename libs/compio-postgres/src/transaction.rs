@@ -80,27 +80,6 @@ const ROLLBACK_TAG: &str = "ROLLBACK";
 
 use crate::escape::quote_identifier;
 
-/// The SQL that ends a savepoint's scope: undo its work, then take the name
-/// back off the server's savepoint stack.
-///
-/// `ROLLBACK TO SAVEPOINT` deliberately LEAVES the savepoint defined - that is
-/// what makes "roll back to it again later" possible, and it is the documented
-/// behaviour, not a quirk. But a `Transaction` whose `rollback` has been
-/// called is finished: its Rust value is consumed and no later call can name
-/// it. Leaving the name defined lets it outlive the scope that owned it, and
-/// PostgreSQL resolves a savepoint name to the MOST RECENTLY established one,
-/// so a leftover shadows an enclosing savepoint of the same name and sends the
-/// enclosing rollback to the wrong scope. It also leaves a subtransaction open
-/// per rolled-back savepoint, which a retry loop accumulates.
-///
-/// The order matters and is not interchangeable: after a failed statement the
-/// subtransaction is in an aborted state, where `RELEASE` is refused and
-/// `ROLLBACK TO` is the statement that recovers it.
-pub(crate) fn rollback_savepoint(name: &str) -> String {
-    let name = quote_identifier(name);
-    format!("ROLLBACK TO {name}; RELEASE {name}")
-}
-
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.done {
@@ -181,7 +160,7 @@ impl<'a> Transaction<'a> {
                 crate::simple_query::start_batch_execute_with_error_cleanup(
                     self.client.inner(),
                     &query,
-                    &rollback_savepoint(&sp.name),
+                    &crate::escape::rollback_savepoint(&sp.name),
                 )?
             } else {
                 crate::simple_query::start_batch_execute(self.client.inner(), &query)?
@@ -233,7 +212,7 @@ impl<'a> Transaction<'a> {
     /// provides any error encountered to the caller.
     pub async fn rollback(mut self) -> Result<(), Error> {
         let query = if let Some(sp) = self.savepoint.as_ref() {
-            rollback_savepoint(&sp.name)
+            crate::escape::rollback_savepoint(&sp.name)
         } else {
             "ROLLBACK".to_string()
         };
