@@ -32,7 +32,6 @@
 //! `DecodeError::UnknownTag` for these tags.
 
 use compio_postgres::Client;
-use compio_postgres::error::SqlState;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, Streaming};
 use std::collections::BTreeSet;
@@ -43,8 +42,6 @@ use crate::common;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
 const ABORT_OBSERVATION: Duration = Duration::from_secs(3);
-const SLOT_DETACH_ATTEMPTS: usize = 100;
-const SLOT_DETACH_RETRY: Duration = Duration::from_millis(10);
 
 /// Small enough that a few thousand rows spill, so the test does not have to
 /// write the 64 MB the default would demand. This is the server's minimum.
@@ -247,41 +244,9 @@ impl Fixture {
     }
 
     async fn drop_all(&self) {
-        // Dropping the client side of a replication stream closes its socket,
-        // but the walsender may remain attached to the slot for a few more
-        // scheduler turns. Retry that one expected race before dropping the
-        // publication and table; putting all three statements in one batch
-        // leaves every fixture object behind when the first attempt sees
-        // SQLSTATE 55006.
-        let mut last_error = None;
-        for _ in 0..SLOT_DETACH_ATTEMPTS {
-            match self
-                .setup
-                .batch_execute(&format!(
-                    "SELECT pg_drop_replication_slot(slot_name)
-                       FROM pg_replication_slots WHERE slot_name = '{s}';",
-                    s = self.slot,
-                ))
-                .await
-            {
-                Ok(()) => {
-                    last_error = None;
-                    break;
-                }
-                Err(error)
-                    if error
-                        .code()
-                        .is_some_and(|code| code == &SqlState::OBJECT_IN_USE) =>
-                {
-                    last_error = Some(error);
-                }
-                Err(error) => panic!("unexpected replication slot cleanup failure: {error}"),
-            }
-            compio::time::sleep(SLOT_DETACH_RETRY).await;
-        }
-        if let Some(error) = last_error {
-            panic!("replication slot did not detach for cleanup: {error}");
-        }
+        common::drop_replication_slot(&self.setup, &self.slot)
+            .await
+            .unwrap_or_else(|error| panic!("replication slot did not detach for cleanup: {error}"));
 
         self.setup
             .batch_execute(&format!(
@@ -610,8 +575,7 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
                 ..Default::default()
             })
             .await
-            .err()
-            .expect("an option the proto_version cannot carry must be refused");
+            .expect_err("an option the proto_version cannot carry must be refused");
 
         assert!(
             error.as_db_error().is_none(),
@@ -652,8 +616,7 @@ async fn protocol_above_four_is_refused_locally() {
             ..Default::default()
         })
         .await
-        .err()
-        .expect("proto_version 5 must be refused before START_REPLICATION");
+        .expect_err("proto_version 5 must be refused before START_REPLICATION");
     let chain = common::error_chain(&error);
 
     assert!(
@@ -685,8 +648,7 @@ async fn protocol_below_one_is_refused_locally() {
             ..Default::default()
         })
         .await
-        .err()
-        .expect("proto_version 0 must be refused before START_REPLICATION");
+        .expect_err("proto_version 0 must be refused before START_REPLICATION");
     let chain = common::error_chain(&error);
 
     assert!(

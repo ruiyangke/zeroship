@@ -23,7 +23,9 @@
 //! abandoned result makes its assertion fail, so its distinct ranges are load
 //! bearing rather than decoration.
 
+use compio_postgres::types::{ToSql, Type};
 use compio_postgres::{Client, error::SqlState};
+use std::time::Duration;
 
 #[allow(unused_imports)]
 use crate::common;
@@ -125,6 +127,81 @@ async fn query_typed_opt_prefers_a_later_server_error_to_row_count() {
         Some(&SqlState::DIVISION_BY_ZERO),
         "query_typed_opt discarded SQLSTATE 22012 after seeing a second row: {failure}"
     );
+}
+
+/// A clean multi-row result must reach the typed accessor's local row-count
+/// verdict. The existing later-error test cannot distinguish that verdict from
+/// an implementation which simply forgets that it saw the second row.
+#[compio::test]
+async fn query_typed_opt_refuses_a_clean_multirow_result() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+        let limit = 3i32;
+        let params: [(&(dyn ToSql + Sync), Type); 1] = [(&limit, Type::INT4)];
+        const SQL: &str = "SELECT g::int4 FROM generate_series(1, $1::int4) AS g";
+
+        let rows = client
+            .query_typed(SQL, &params)
+            .await
+            .expect("the control query must produce a clean result");
+        let values = rows
+            .iter()
+            .map(|row| row.get::<_, i32>(0))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![1, 2, 3],
+            "the fixture did not actually return multiple clean rows"
+        );
+
+        let failure = client
+            .query_typed_opt(SQL, &params)
+            .await
+            .expect_err("query_typed_opt accepted three rows as one");
+        assert!(
+            failure.code().is_none(),
+            "a clean multi-row result should produce the local row-count error: {failure}"
+        );
+    })
+    .await
+    .expect("typed optional row-count claim exceeded its 10 second deadline");
+}
+
+/// `query_one` delegates the multiplicity check to `query_opt`; checking only
+/// its zero-row arm would still let it silently return the first of many rows.
+#[compio::test]
+async fn query_one_refuses_a_clean_multirow_result() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+        const SQL: &str = "SELECT g::int4 FROM generate_series(41, 42) AS g";
+
+        let rows = client
+            .query(SQL, &[])
+            .await
+            .expect("the control query must produce a clean result");
+        let values = rows
+            .iter()
+            .map(|row| row.get::<_, i32>(0))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![41, 42],
+            "the fixture did not actually return two clean rows"
+        );
+
+        let failure = client
+            .query_one(SQL, &[])
+            .await
+            .expect_err("query_one accepted two rows and returned the first");
+        assert!(
+            failure.code().is_none(),
+            "a clean multi-row result should produce the local row-count error: {failure}"
+        );
+    })
+    .await
+    .expect("query_one row-count claim exceeded its 10 second deadline");
 }
 
 /// One variable away: exactly one row is not a refusal, and the session is

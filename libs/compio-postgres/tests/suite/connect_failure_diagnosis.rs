@@ -143,6 +143,12 @@ async fn a_refused_port_says_so_rather_than_blaming_credentials() {
 #[compio::test]
 async fn a_missing_database_is_named() {
     let s = server();
+    let probe_dsn = format!(
+        "host={} port={} user={} dbname={} password={}",
+        s.host, s.port, s.user, s.dbname, s.password
+    );
+    let transport = common::test_transport(&probe_dsn, NoTls).await;
+
     let chain = failure(format!(
         "host={} port={} user={} dbname=zz_no_such_database password={}",
         s.host, s.port, s.user, s.password
@@ -150,7 +156,14 @@ async fn a_missing_database_is_named() {
     .await;
 
     assert_says(&chain, "zz_no_such_database", "missing database");
-    assert_says(&chain, "does not exist", "missing database");
+    match transport {
+        common::TestTransport::Direct => assert_says(&chain, "does not exist", "missing database"),
+        common::TestTransport::TransactionPooler => assert_says(
+            &chain,
+            "no such database: zz_no_such_database",
+            "missing database",
+        ),
+    }
     assert_hides(&chain, &s.password, "missing database");
 }
 

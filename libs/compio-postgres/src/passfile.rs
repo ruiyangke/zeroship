@@ -152,8 +152,13 @@ fn unescape_password(buf: &[u8]) -> Vec<u8> {
 /// than mocked.
 pub(crate) fn lookup_in_contents(contents: &[u8], key: PassfileKey<'_>) -> Option<Vec<u8>> {
     for line in contents.split(|byte| *byte == b'\n') {
-        // Tolerate CRLF: the trailing CR is not part of the password.
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        // `pg_strip_crlf` removes every trailing CR/LF byte, not just one.
+        // `split` consumed the LFs; remove all CRs that immediately preceded
+        // them (or ended the final line) without trimming significant spaces.
+        let mut line = line;
+        while let Some(stripped) = line.strip_suffix(b"\r") {
+            line = stripped;
+        }
         if line.is_empty() || line.first() == Some(&b'#') {
             continue;
         }
@@ -185,13 +190,94 @@ pub(crate) fn lookup_in_contents(contents: &[u8], key: PassfileKey<'_>) -> Optio
 /// an absent, unreadable or too-permissive file as "no password here" and
 /// carries on to fail (or succeed) at authentication. Turning any of those
 /// into a connection error would reject setups libpq accepts.
+/// The file is opened ONCE and every check is made against that descriptor,
+/// which is what libpq does: `fopen` then `fstat(fileno(fp))` for both the
+/// regular-file and the permission test (`fe-connect.c:7936-7959`). Resolving
+/// the path a second time to read it would judge one file and read another -
+/// whatever the name points at after the check, which for a `.pgpass` under an
+/// attacker-writable directory is the difference between refusing a
+/// world-readable file and reading it.
 pub(crate) fn lookup(path: &Path, key: PassfileKey<'_>) -> Option<Vec<u8>> {
-    let metadata = std::fs::metadata(path).ok()?;
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
     if !permissions_allow_use(&metadata) {
         return None;
     }
-    let contents = std::fs::read(path).ok()?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).ok()?;
     lookup_in_contents(&contents, key)
+}
+
+#[cfg(all(test, unix))]
+mod file_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// `lookup` had NO test of its own until 2026-08-27 - every existing case
+    /// drove the pure `lookup_in_contents`. So the permission mask that decides
+    /// whether a password file may be read at all was unexercised.
+    ///
+    /// WHAT THESE DO NOT CATCH: the check and the read are now made against one
+    /// descriptor rather than two path resolutions, and that race has no
+    /// deterministic test - nothing here can swap the path between two syscalls
+    /// inside `lookup`. These pin the guards, not the window.
+    fn write_passfile(dir: &std::path::Path, mode: u32) -> std::path::PathBuf {
+        let path = dir.join("pgpass");
+        std::fs::write(&path, "10.0.0.1:5432:db:alice:secret\n").expect("write the passfile");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("set the mode");
+        path
+    }
+
+    fn alice() -> PassfileKey<'static> {
+        PassfileKey {
+            host: b"10.0.0.1",
+            port: "5432",
+            dbname: "db",
+            user: "alice",
+        }
+    }
+
+    #[test]
+    fn a_private_file_yields_its_password() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_passfile(dir.path(), 0o600);
+        assert_eq!(lookup(&path, alice()).as_deref(), Some(&b"secret"[..]));
+    }
+
+    #[test]
+    fn a_group_readable_file_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_passfile(dir.path(), 0o640);
+        assert_eq!(lookup(&path, alice()), None);
+    }
+
+    #[test]
+    fn a_world_readable_file_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = write_passfile(dir.path(), 0o604);
+        assert_eq!(lookup(&path, alice()), None);
+    }
+
+    /// libpq refuses anything that is not a plain file (`S_ISREG`).
+    ///
+    /// THIS DOES NOT PROVE THAT GUARD: measured 2026-08-27, the case still
+    /// passes with `permissions_allow_use` disabled, because `read_to_end` on
+    /// a directory fails with EISDIR regardless. It pins the OUTCOME - a
+    /// directory never yields a password - not the mechanism.
+    #[test]
+    fn a_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(lookup(dir.path(), alice()), None);
+    }
+
+    #[test]
+    fn an_absent_file_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(lookup(&dir.path().join("nope"), alice()), None);
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +410,15 @@ mod tests {
     fn a_crlf_line_ending_is_not_part_of_the_password() {
         let found = find(
             "10.0.0.1:5432:db:alice:secret\r\n",
+            key("10.0.0.1", "5432", "db", "alice"),
+        );
+        assert_eq!(found.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn every_trailing_carriage_return_is_stripped() {
+        let found = find(
+            "10.0.0.1:5432:db:alice:secret\r\r\n",
             key("10.0.0.1", "5432", "db", "alice"),
         );
         assert_eq!(found.as_deref(), Some("secret"));

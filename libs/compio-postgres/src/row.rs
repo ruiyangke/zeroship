@@ -3,7 +3,7 @@
 //! Rows.
 
 use crate::row::sealed::{AsName, Sealed};
-use crate::simple_query::SimpleColumn;
+use crate::simple_query::{SimpleColumn, SimpleQueryFormat};
 use crate::statement::Column;
 use crate::types::{FromSql, Type, WrongType};
 use crate::{Error, Statement};
@@ -398,6 +398,8 @@ impl SimpleQueryRow {
     /// Returns a value from the row.
     ///
     /// The value can be specified either by its numeric index in the row, or by its column name.
+    /// Binary values from `FETCH` on a `BINARY` cursor must be read with
+    /// [`SimpleQueryRow::raw_value`].
     ///
     /// # Panics
     ///
@@ -421,6 +423,8 @@ impl SimpleQueryRow {
     }
 
     /// Like `SimpleQueryRow::get`, but returns a `Result` rather than panicking.
+    /// A non-null binary value returns an error directing the caller to
+    /// [`SimpleQueryRow::raw_value`].
     pub fn try_get<I>(&self, idx: I) -> Result<Option<&str>, Error>
     where
         I: RowIndex + fmt::Display,
@@ -437,8 +441,45 @@ impl SimpleQueryRow {
             None => return Err(Error::column(idx.to_string())),
         };
 
-        let buf = self.ranges[idx].clone().map(|r| &self.body.buffer()[r]);
+        let range = self.ranges[idx].clone();
+        if range.is_some() && self.columns[idx].format() == SimpleQueryFormat::Binary {
+            return Err(Error::from_sql(
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "column is in binary format; use SimpleQueryRow::raw_value",
+                )
+                .into(),
+                idx,
+            ));
+        }
+
+        let buf = range.map(|range| &self.body.buffer()[range]);
         FromSql::from_sql_nullable(&Type::TEXT, buf).map_err(|e| Error::from_sql(e, idx))
+    }
+
+    /// Returns the raw wire bytes for a column.
+    ///
+    /// Use [`SimpleColumn::format`] and [`SimpleColumn::type_oid`] to interpret
+    /// a non-null value. Text values use PostgreSQL's UTF-8 text representation;
+    /// binary values use the type-specific representation identified by the OID.
+    ///
+    /// `Ok(None)` means the column is present and contains SQL `NULL`. An
+    /// unknown name or out-of-range index returns an invalid-column error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-column error when `idx` does not identify a column in
+    /// this row. A SQL `NULL` is not an error.
+    pub fn raw_value<I>(&self, idx: I) -> Result<Option<&[u8]>, Error>
+    where
+        I: RowIndex + fmt::Display,
+    {
+        match idx.__idx(&self.columns) {
+            Some(resolved) => Ok(self.ranges[resolved]
+                .clone()
+                .map(|range| &self.body.buffer()[range])),
+            None => Err(Error::column(idx.to_string())),
+        }
     }
 }
 
@@ -491,6 +532,20 @@ mod tests {
             .collect()
     }
 
+    fn text_simple_columns(names: &[&str]) -> Arc<[SimpleColumn]> {
+        names
+            .iter()
+            .map(|name| {
+                SimpleColumn::new(
+                    (*name).to_string(),
+                    Type::TEXT.oid(),
+                    SimpleQueryFormat::Text,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     /// A `DataRow` carrying fewer fields than its `RowDescription` declared
     /// columns must never panic a caller who asked for a `Result`.
     ///
@@ -529,11 +584,7 @@ mod tests {
     /// off a `RowDescription` it does not check against.
     #[test]
     fn a_short_simple_query_row_never_panics_a_try_get() {
-        let columns: Arc<[SimpleColumn]> = vec![
-            SimpleColumn::new("a".to_string()),
-            SimpleColumn::new("b".to_string()),
-        ]
-        .into();
+        let columns = text_simple_columns(&["a", "b"]);
         let body = data_row(&[Some(b"1")]);
 
         match SimpleQueryRow::new(columns, body) {
@@ -689,7 +740,7 @@ mod tests {
     /// renders that as `error deserializing column 0` too.
     #[test]
     fn a_simple_query_get_panic_names_the_decode_failure() {
-        let columns: Arc<[SimpleColumn]> = vec![SimpleColumn::new("a".to_string())].into();
+        let columns = text_simple_columns(&["a"]);
         let row = SimpleQueryRow::new(columns, data_row(&[Some(b"\xff")])).expect("well formed");
 
         let message = panic_message(|| {
@@ -704,11 +755,7 @@ mod tests {
     /// The control for the simple-query row.
     #[test]
     fn a_simple_query_row_matching_its_columns_reads_every_value() {
-        let columns: Arc<[SimpleColumn]> = vec![
-            SimpleColumn::new("a".to_string()),
-            SimpleColumn::new("b".to_string()),
-        ]
-        .into();
+        let columns = text_simple_columns(&["a", "b"]);
         let body = data_row(&[Some(b"hello"), None]);
 
         let row =

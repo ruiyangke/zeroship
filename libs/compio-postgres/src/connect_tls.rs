@@ -13,40 +13,13 @@
 
 use crate::Error;
 use crate::config::{SslMode, SslNegotiation};
+use crate::encryption::Encryption;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::private::ForcePrivateApi;
 use crate::tls::{POSTGRESQL_ALPN_PROTOCOL, TlsConnect, TlsStream};
 use bytes::BytesMut;
 use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use postgres_protocol::message::frontend;
-
-/// Which transport a single connection attempt should use.
-///
-/// libpq's `current_enc_method`. It is a decision, not a preference: by the
-/// time it reaches [`negotiate_tls`] the mode has already been consulted.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) enum Encryption {
-    /// Send the startup packet in the clear, with no `SSLRequest` at all.
-    Plaintext,
-    /// Ask for TLS and hand the startup packet to the encrypted stream.
-    Tls,
-}
-
-impl Encryption {
-    /// The transport this mode offers first.
-    ///
-    /// libpq's `select_next_encryption_method`, whose whole content is this
-    /// ordering swap: `allow` offers plaintext first, every other mode offers
-    /// TLS first (and `disable` has only plaintext to offer).
-    pub(crate) const fn first_for(mode: SslMode) -> Encryption {
-        match mode {
-            SslMode::Disable | SslMode::Allow => Encryption::Plaintext,
-            SslMode::Prefer | SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
-                Encryption::Tls
-            }
-        }
-    }
-}
 
 /// Negotiate one attempt over an open socket, returning a stream ready for the
 /// Postgres startup message.
@@ -159,6 +132,7 @@ where
         // don't need the buffer back, so discard via destructuring.
         let compio::BufResult(res, _) = stream.write_all(buf.to_vec()).await;
         res.map_err(Error::io)?;
+        stream.flush().await.map_err(Error::io)?;
 
         // Exactly one byte, never more. That is not an optimisation: reading
         // ahead here would buffer bytes received BEFORE the handshake, which by
@@ -277,6 +251,45 @@ mod tests {
         negotiated_alpn_protocol: Option<&'static [u8]>,
     }
 
+    /// A transport whose writes do not become readable by its peer until
+    /// `flush`, matching the contract `AsyncWrite` permits.
+    struct FlushRequiredStream {
+        response: &'static [u8],
+        pending: Vec<u8>,
+        flushed: Vec<u8>,
+    }
+
+    impl AsyncRead for FlushRequiredStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            if self.flushed.is_empty() {
+                return compio::BufResult(
+                    Err(std::io::Error::other(
+                        "SSLRequest response was read before the request was flushed",
+                    )),
+                    buf,
+                );
+            }
+            self.response.read(buf).await
+        }
+    }
+
+    impl AsyncWrite for FlushRequiredStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            self.pending.extend_from_slice(buf.as_init());
+            let written = buf.buf_len();
+            compio::BufResult(Ok(written), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed.append(&mut self.pending);
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Unsplittable on purpose: this fixture exercises the connector
     /// contract, not a run loop, so it takes the serialized path.
     impl<S: AsyncRead + AsyncWrite + Unpin + 'static> crate::buf_stream::SplitStream
@@ -337,6 +350,36 @@ mod tests {
         fn can_connect(&self, _: ForcePrivateApi) -> bool {
             true
         }
+    }
+
+    #[compio::test]
+    async fn ssl_request_is_flushed_before_reading_the_response() {
+        let negotiated = negotiate_tls(
+            FlushRequiredStream {
+                response: b"S",
+                pending: Vec::new(),
+                flushed: Vec::new(),
+            },
+            Encryption::Tls,
+            SslMode::Require,
+            SslNegotiation::Postgres,
+            PassthroughTls {
+                negotiated_alpn_protocol: None,
+            },
+            true,
+        )
+        .await
+        .expect("a flushed SSLRequest should receive its scripted response");
+
+        let stream = match negotiated {
+            MaybeTlsStream::Tls(stream) => stream,
+            MaybeTlsStream::Raw(_) => panic!("the scripted peer accepted TLS"),
+        };
+        assert_eq!(
+            stream.inner.flushed,
+            [0, 0, 0, 8, 4, 210, 22, 47],
+            "the transport did not receive the complete SSLRequest before the response read"
+        );
     }
 
     /// The `SSLRequest` response is read one byte at a time, so bytes a man in

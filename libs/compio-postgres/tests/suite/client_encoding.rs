@@ -162,10 +162,14 @@ async fn setting_the_encoding_to_utf8_changes_nothing() {
 /// the two apart: a value the CLIENT sent in its startup packet reports
 /// `client`, while an inherited default reports `default`. Measured on this
 /// server, a `psql` session does not report `client` for `client_encoding` at
-/// all, which is exactly the state this driver must not be in.
+/// all, which is exactly the state this driver must not be in when connected
+/// directly. A transaction pooler owns the backend session, so its provenance
+/// can be `default` or `session`; there the frontend `ParameterStatus` is the
+/// endpoint-visible UTF8 contract instead.
 #[compio::test]
 async fn the_startup_packet_announces_utf8_rather_than_inheriting_it() {
     let (client, _driver) = connect_keeping_driver().await;
+    let transport = common::test_transport(&test_url(), common::suite_tls()).await;
 
     let row = client
         .query_one(
@@ -178,10 +182,18 @@ async fn the_startup_packet_announces_utf8_rather_than_inheriting_it() {
     let source: String = row.get(1);
 
     assert_eq!(setting, "UTF8", "the session must be UTF8");
-    assert_eq!(
-        source, "client",
-        "client_encoding must come from the driver's STARTUP PACKET, not from \
-         the server's default -- if this reads `default`, the driver stopped \
-         announcing it and is merely lucky that this server agrees"
-    );
+    match transport {
+        common::TestTransport::Direct => assert_eq!(
+            source, "client",
+            "client_encoding must come from the driver's STARTUP PACKET, not from \
+             the server's default -- if this reads `default`, the driver stopped \
+             announcing it and is merely lucky that this server agrees"
+        ),
+        common::TestTransport::TransactionPooler => assert_eq!(
+            client.parameter("client_encoding"),
+            Some("UTF8".to_string()),
+            "the pooler must expose the UTF8 frontend setting it tracks independently of \
+             whichever backend session serves this query (backend source was {source:?})"
+        ),
+    }
 }

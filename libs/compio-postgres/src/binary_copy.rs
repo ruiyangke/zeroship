@@ -6,7 +6,7 @@ use crate::types::{FromSql, IsNull, ToSql, Type, WrongType};
 use crate::{CopyInSink, CopyOutStream, Error, slice_iter};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures_util::{SinkExt, Stream};
+use futures_util::{Sink, Stream};
 use pin_project_lite::pin_project;
 use postgres_types::BorrowToSql;
 use std::io;
@@ -19,6 +19,13 @@ use std::task::{Context, Poll, ready};
 const MAGIC: &[u8] = b"PGCOPY\n\xff\r\n\0";
 const HEADER_LEN: usize = MAGIC.len() + 4 + 4;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BinaryCopyFinishState {
+    Open,
+    FrameQueued,
+    FrameFlushed,
+}
+
 pin_project! {
     /// A type which serializes rows into the PostgreSQL binary copy format.
     ///
@@ -28,6 +35,7 @@ pin_project! {
         sink: CopyInSink<Bytes>,
         types: Vec<Type>,
         buf: BytesMut,
+        finish_state: BinaryCopyFinishState,
     }
 }
 
@@ -43,6 +51,7 @@ impl BinaryCopyInWriter {
             sink,
             types: types.to_vec(),
             buf,
+            finish_state: BinaryCopyFinishState::Open,
         }
     }
 
@@ -67,6 +76,7 @@ impl BinaryCopyInWriter {
         I::IntoIter: ExactSizeIterator,
     {
         let mut this = self.project();
+        ensure_binary_copy_writable(*this.finish_state)?;
 
         let values = values.into_iter();
         assert!(
@@ -93,7 +103,7 @@ impl BinaryCopyInWriter {
         }
 
         if this.buf.len() > 4096 {
-            this.sink.send(this.buf.split().freeze()).await?;
+            send_buffered_rows(this.sink.as_mut(), this.buf, checkpoint).await?;
         }
 
         Ok(())
@@ -105,10 +115,68 @@ impl BinaryCopyInWriter {
     pub async fn finish(self: Pin<&mut Self>) -> Result<u64, Error> {
         let mut this = self.project();
 
-        this.buf.put_i16(-1);
-        this.sink.send(this.buf.split().freeze()).await?;
+        send_binary_copy_end(this.sink.as_mut(), this.buf, this.finish_state).await?;
         this.sink.finish().await
     }
+}
+
+fn ensure_binary_copy_writable(state: BinaryCopyFinishState) -> Result<(), Error> {
+    if state == BinaryCopyFinishState::Open {
+        Ok(())
+    } else {
+        Err(Error::copy_in_finished())
+    }
+}
+
+async fn send_binary_copy_end<S>(
+    mut sink: Pin<&mut S>,
+    buf: &mut BytesMut,
+    finish_state: &mut BinaryCopyFinishState,
+) -> Result<(), S::Error>
+where
+    S: Sink<Bytes>,
+{
+    if *finish_state == BinaryCopyFinishState::Open {
+        std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx)).await?;
+
+        // Nothing can cancel between taking the buffered rows and recording
+        // that the sink now owns their frame. Record ownership before
+        // `start_send` as well: an error there does not return the item.
+        buf.put_i16(-1);
+        let frame = buf.split().freeze();
+        *finish_state = BinaryCopyFinishState::FrameQueued;
+        sink.as_mut().start_send(frame)?;
+    }
+
+    if *finish_state == BinaryCopyFinishState::FrameQueued {
+        std::future::poll_fn(|cx| sink.as_mut().poll_flush(cx)).await?;
+        *finish_state = BinaryCopyFinishState::FrameFlushed;
+    }
+
+    Ok(())
+}
+
+async fn send_buffered_rows<S>(
+    mut sink: Pin<&mut S>,
+    buf: &mut BytesMut,
+    row_start: usize,
+) -> Result<(), S::Error>
+where
+    S: Sink<Bytes>,
+{
+    // Keep rows whose calls already returned `Ok` in `buf` until the sink can
+    // accept their frame. The row which crossed the threshold stays local to
+    // this future, so cancellation while readiness is pending rolls back only
+    // that unfinished call.
+    let row = buf.split_off(row_start);
+    std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx)).await?;
+
+    // No cancellation point separates removing the completed prefix from
+    // transferring the combined frame into the sink. Once `start_send`
+    // succeeds, the sink owns the bytes while `poll_flush` is pending.
+    buf.unsplit(row);
+    sink.as_mut().start_send(buf.split().freeze())?;
+    std::future::poll_fn(|cx| sink.as_mut().poll_flush(cx)).await
 }
 
 /// Append one tuple -- field count, then a four-byte length and its payload per
@@ -176,6 +244,8 @@ pin_project! {
         header: Option<Header>,
         // Binary EOF is not clean stream EOF until CopyOut sees CopyDone.
         trailer_seen: bool,
+        // The underlying COPY protocol ended with EOF or ErrorResponse.
+        terminal: bool,
     }
 }
 
@@ -187,6 +257,7 @@ impl BinaryCopyOutStream {
             types: Arc::new(types.to_vec()),
             header: None,
             trailer_seen: false,
+            terminal: false,
         }
     }
 }
@@ -197,10 +268,13 @@ impl Stream for BinaryCopyOutStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
+        if *this.terminal {
+            return Poll::Ready(None);
+        }
+
         loop {
             if *this.trailer_seen {
                 match ready!(this.stream.as_mut().poll_next(cx)) {
-                    Some(Ok(chunk)) if chunk.is_empty() => continue,
                     Some(Ok(chunk)) => {
                         return Poll::Ready(Some(Err(Error::parse(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -210,14 +284,23 @@ impl Stream for BinaryCopyOutStream {
                             ),
                         )))));
                     }
-                    Some(Err(error)) => return Poll::Ready(Some(Err(error))),
-                    None => return Poll::Ready(None),
+                    Some(Err(error)) => {
+                        *this.terminal = true;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    None => {
+                        *this.terminal = true;
+                        return Poll::Ready(None);
+                    }
                 }
             }
 
             let chunk = match ready!(this.stream.as_mut().poll_next(cx)) {
                 Some(Ok(chunk)) => chunk,
-                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                Some(Err(e)) => {
+                    *this.terminal = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
                 // The protocol exchange ended cleanly - CopyDone reached
                 // CommandComplete - but the binary stream never produced its
                 // -1 trailer. That is malformed DATA on a healthy connection,
@@ -225,6 +308,7 @@ impl Stream for BinaryCopyOutStream {
                 // reads `is_closed()` to decide whether to discard a session,
                 // and would throw away one that is still perfectly usable.
                 None => {
+                    *this.terminal = true;
                     return Poll::Ready(Some(Err(Error::parse(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "binary COPY stream ended without its trailer",
@@ -391,6 +475,17 @@ pub struct BinaryCopyOutRow {
     types: Arc<Vec<Type>>,
 }
 
+impl std::fmt::Debug for BinaryCopyOutRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BinaryCopyOutRow")
+            .field("buf", &"<redacted>")
+            .field("ranges", &self.ranges)
+            .field("types", &self.types)
+            .finish()
+    }
+}
+
 impl BinaryCopyOutRow {
     /// Like `get`, but returns a `Result` rather than panicking.
     pub fn try_get<'a, T>(&'a self, idx: usize) -> Result<T, Error>
@@ -436,6 +531,196 @@ impl BinaryCopyOutRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::task::Waker;
+
+    struct BackpressuredSink {
+        ready: bool,
+        flush_ready: bool,
+        sent: Vec<Bytes>,
+    }
+
+    impl Sink<Bytes> for BackpressuredSink {
+        type Error = Infallible;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if self.ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
+            self.sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if self.flush_ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Rows from completed `write_raw` calls stay buffered if the call which
+    /// crosses the flush threshold is cancelled while the COPY sink applies
+    /// backpressure. The in-progress row has no completed result and is rolled
+    /// back, so retrying it cannot duplicate it later.
+    #[test]
+    fn cancelling_a_backpressured_flush_keeps_completed_rows() {
+        const COMPLETED: &[u8] = b"rows whose writes returned Ok";
+        const IN_PROGRESS: &[u8] = b"row whose write is pending";
+
+        let mut buf = BytesMut::from(COMPLETED);
+        let row_start = buf.len();
+        buf.extend_from_slice(IN_PROGRESS);
+        let mut sink = Box::pin(BackpressuredSink {
+            ready: false,
+            flush_ready: true,
+            sent: Vec::new(),
+        });
+
+        {
+            let mut sending = Box::pin(send_buffered_rows(sink.as_mut(), &mut buf, row_start));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                sending.as_mut().poll(&mut context).is_pending(),
+                "the control sink did not apply backpressure"
+            );
+        }
+
+        assert_eq!(
+            &buf[..],
+            COMPLETED,
+            "cancelling one write discarded rows whose write_raw calls returned Ok"
+        );
+        assert!(
+            sink.sent.is_empty(),
+            "a sink which never became ready accepted bytes"
+        );
+
+        let row_start = buf.len();
+        buf.extend_from_slice(IN_PROGRESS);
+        sink.as_mut().get_mut().ready = true;
+        {
+            let mut sending = Box::pin(send_buffered_rows(sink.as_mut(), &mut buf, row_start));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(sending.as_mut().poll(&mut context), Poll::Ready(Ok(()))),
+                "the control sink did not accept bytes after becoming ready"
+            );
+        }
+
+        let mut expected = COMPLETED.to_vec();
+        expected.extend_from_slice(IN_PROGRESS);
+        assert_eq!(sink.sent, [Bytes::from(expected)]);
+        assert!(buf.is_empty(), "a transferred frame remained buffered");
+    }
+
+    #[test]
+    fn a_queued_binary_copy_trailer_refuses_more_rows() {
+        assert!(
+            ensure_binary_copy_writable(BinaryCopyFinishState::FrameQueued).is_err(),
+            "binary COPY accepted a row after its trailer was queued"
+        );
+    }
+
+    #[test]
+    fn cancelling_binary_copy_finish_before_readiness_keeps_buffered_rows() {
+        const COMPLETED: &[u8] = b"rows whose writes returned Ok";
+
+        let mut buf = BytesMut::from(COMPLETED);
+        let mut finish_state = BinaryCopyFinishState::Open;
+        let mut sink = Box::pin(BackpressuredSink {
+            ready: false,
+            flush_ready: true,
+            sent: Vec::new(),
+        });
+
+        {
+            let mut sending = Box::pin(send_binary_copy_end(
+                sink.as_mut(),
+                &mut buf,
+                &mut finish_state,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                sending.as_mut().poll(&mut context).is_pending(),
+                "the binary COPY finish fixture did not apply readiness backpressure"
+            );
+        }
+
+        assert_eq!(
+            &buf[..],
+            COMPLETED,
+            "cancelling binary COPY finish discarded completed rows"
+        );
+        assert_eq!(finish_state, BinaryCopyFinishState::Open);
+        assert!(sink.sent.is_empty());
+    }
+
+    #[test]
+    fn retrying_binary_copy_finish_after_enqueue_does_not_duplicate_the_trailer() {
+        let mut buf = BytesMut::from(&b"completed rows"[..]);
+        let mut finish_state = BinaryCopyFinishState::Open;
+        let mut sink = Box::pin(BackpressuredSink {
+            ready: true,
+            flush_ready: false,
+            sent: Vec::new(),
+        });
+
+        {
+            let mut sending = Box::pin(send_binary_copy_end(
+                sink.as_mut(),
+                &mut buf,
+                &mut finish_state,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                sending.as_mut().poll(&mut context).is_pending(),
+                "the binary COPY finish fixture did not park while flushing"
+            );
+        }
+        assert_eq!(sink.sent.len(), 1, "the first trailer was not queued");
+
+        sink.as_mut().get_mut().flush_ready = true;
+        {
+            let mut sending = Box::pin(send_binary_copy_end(
+                sink.as_mut(),
+                &mut buf,
+                &mut finish_state,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                sending.as_mut().poll(&mut context),
+                Poll::Ready(Ok(()))
+            ));
+        }
+
+        assert_eq!(
+            sink.sent.len(),
+            1,
+            "retrying binary COPY finish duplicated its trailer frame"
+        );
+        assert_eq!(finish_state, BinaryCopyFinishState::FrameFlushed);
+    }
 
     /// Build a 19-byte binary-COPY file header: MAGIC + flags (BE i32) +
     /// header-extension-length 0 (BE u32), wrapped in a `Cursor<Bytes>`.

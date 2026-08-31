@@ -858,6 +858,7 @@ pub trait MigrationBackend {
     /// EXPAND backfill rides
     /// [`OnlineSchemaChange::run_online_backfill`](crate::capability::OnlineSchemaChange::run_online_backfill),
     /// NOT this method.
+    // The backend seam keeps execution identity, approval, actor, and lock state explicit.
     #[allow(clippy::too_many_arguments)]
     async fn run_backfill_step(
         &self,

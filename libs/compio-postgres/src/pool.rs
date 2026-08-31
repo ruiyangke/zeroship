@@ -213,7 +213,8 @@ impl PoolConfig {
     /// is discarded when it is returned, not only when background maintenance
     /// sweeps. So this setting takes effect on a pool that never called
     /// [`Pool::start_housekeeper`] - unlike [`PoolConfig::idle_timeout`], which
-    /// does not. Measured, and pinned by `tests/pool_lifetime.rs`.
+    /// does not. No-housekeeper checkout rotation is measured and pinned by
+    /// `tests/suite/pool_lifetime.rs`.
     pub fn max_lifetime(&mut self, max_lifetime: Duration) -> &mut Self {
         self.max_lifetime = max_lifetime;
         self
@@ -743,9 +744,11 @@ impl Transport {
         token.cancel_query_confirmed(NoTls).await
     }
 
-    /// Retry [`Transport::connect_one`] up to 3 times with 100ms, 400ms, 1.6s
-    /// backoff. Only used for pool warm-up - `get_inner`'s on-demand connect
-    /// stays single-shot to keep the latency budget tight.
+    /// Retry [`Transport::connect_one`] up to 3 times, sleeping 100ms and then
+    /// 400ms between failures. The third attempt is never followed by a sleep,
+    /// so the computed 1.6s delay is only ever discarded. Only used for pool
+    /// warm-up - `get_inner`'s on-demand connect stays single-shot to keep the
+    /// latency budget tight.
     async fn connect_with_retry(&self) -> Result<Client, Error> {
         let mut delay = Duration::from_millis(100);
         let mut last_err: Option<Error> = None;
@@ -901,9 +904,9 @@ impl Pool {
     ///
     /// Opens the configured minimum idle count upfront, or one connection when
     /// that count is zero, so the first burst of traffic does not pay full
-    /// connect latency. Each connection attempt is retried with exponential
-    /// backoff (3 attempts: 100ms, 400ms, 1.6s) to survive Docker ordering, DNS
-    /// blips, and brief PG restarts.
+    /// connect latency. Each warm-up connection gets up to three attempts,
+    /// with 100ms and 400ms delays between failures, to survive Docker
+    /// ordering, DNS blips, and brief PG restarts.
     ///
     /// # Errors
     ///
@@ -1531,8 +1534,10 @@ impl Pool {
         // session; closing it also rolls back any open transaction.
         let keep = self.config.run_after_release(&entry.client);
         // Re-check after arbitrary hook code. Re-entry is forbidden by the
-        // hook contract, but preserving shutdown accounting is cheap and keeps
-        // a violating hook from depositing an entry after close linearized.
+        // hook contract, and the synchronous hook cannot otherwise interleave
+        // a close on this single-threaded path. Only forbidden re-entry can
+        // make this arm observable; keeping it preserves shutdown accounting
+        // if a violating hook closes the pool before returning.
         if self.closed.get() {
             drop(entry);
             drop(permit);
@@ -1982,9 +1987,9 @@ impl Pool {
             .await
     }
 
-    /// Query with text-format string parameters. Parameters are bound as
-    /// `Type::TEXT`; the server performs implicit text-to-target conversion
-    /// on the first reference in the query.
+    /// Query with text-format string parameters. Parse is sent without type
+    /// hints, so the server infers each parameter's type from its SQL position;
+    /// Bind then sends each value in text format.
     pub async fn query_text_params(
         &self,
         sql: &str,
@@ -2881,6 +2886,8 @@ mod tests {
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
     use crate::connection::{Request, RequestMessages};
+    use compio::buf::{IoBuf, IoBufMut};
+    use compio::io::{AsyncRead, AsyncWrite};
     use futures_channel::mpsc;
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
@@ -2901,6 +2908,40 @@ mod tests {
             ),
             receiver,
         )
+    }
+
+    struct ResetAfterCancelWrite {
+        bytes_written: Rc<Cell<usize>>,
+    }
+
+    #[allow(clippy::future_not_send)]
+    impl AsyncRead for ResetAfterCancelWrite {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            compio::BufResult(
+                Err(std::io::Error::new(
+                    ErrorKind::ConnectionReset,
+                    "scripted post-write cancel reset",
+                )),
+                buf,
+            )
+        }
+    }
+
+    #[allow(clippy::future_not_send)]
+    impl AsyncWrite for ResetAfterCancelWrite {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            let len = buf.buf_len();
+            self.bytes_written.set(self.bytes_written.get() + len);
+            compio::BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     fn fake_postgres_server() -> (
@@ -3282,6 +3323,70 @@ mod tests {
     }
 
     #[compio::test]
+    async fn an_uncertain_cancel_retires_after_its_token_is_dropped() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(22);
+        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let inner = Arc::clone(held.inner());
+        let bytes_written = Rc::new(Cell::new(0));
+        let token = held.cancel_token();
+        let lease = Arc::downgrade(
+            token
+                .pool_lease
+                .as_ref()
+                .expect("pooled token omitted its cancellation lease"),
+        );
+
+        token
+            .cancel_query_raw(
+                ResetAfterCancelWrite {
+                    bytes_written: Rc::clone(&bytes_written),
+                },
+                NoTls,
+            )
+            .await
+            .expect_err("the scripted cancel reset unexpectedly confirmed delivery");
+        assert!(
+            bytes_written.get() > 0,
+            "the scripted reset happened before the CancelRequest write"
+        );
+        assert!(
+            !held.is_closed(),
+            "the returned raw-cancel error independently closed the pooled client"
+        );
+
+        drop(token);
+        assert_eq!(
+            lease.strong_count(),
+            1,
+            "the cancellation token did not release its lease authority"
+        );
+        assert!(
+            held.pool_cancel_lease_prevents_reuse(),
+            "the uncertain cancel was forgotten after its token was dropped"
+        );
+
+        drop(held);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0, "uncertain session became reusable");
+        assert_eq!(pool.total_count(), 0, "uncertain session kept its slot");
+        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert!(
+            inner
+                .send(RequestMessages::Single(FrontendMessage::Raw(
+                    bytes::Bytes::from_static(b"S\0\0\0\x04"),
+                )))
+                .is_err(),
+            "uncertain-session eviction did not synchronously close the client"
+        );
+    }
+
+    #[compio::test]
     async fn a_timeout_before_protocol_work_does_not_retire_an_idle_session() {
         let mut config = PoolConfig {
             max_size: 1,
@@ -3307,6 +3412,62 @@ mod tests {
         );
         assert_eq!(pool.total_count(), 1);
         assert_eq!(pool.metrics.evictions.get(), 0);
+    }
+
+    #[compio::test]
+    async fn a_missing_cancel_key_recovery_closes_the_held_session() {
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.command_timeout(Duration::from_millis(1));
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (sender, _receiver) = mpsc::unbounded();
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            25,
+            None,
+            None,
+        );
+        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let error = held
+            .command(async |client| {
+                client.__private_api_rollback(None);
+                std::future::pending::<Result<(), Error>>().await
+            })
+            .await
+            .expect_err("the unsettled operation beat its command deadline");
+        assert!(error.is_command_timeout());
+        let recovery_error = std::error::Error::source(&error)
+            .expect("command timeout omitted its recovery failure");
+        let missing_key = recovery_error
+            .source()
+            .expect("missing-key recovery error omitted its cause");
+        assert!(
+            missing_key
+                .to_string()
+                .contains("did not provide BackendKeyData"),
+            "command recovery took the wrong pre-attempt failure path: {missing_key}"
+        );
+        assert_eq!(
+            pool.active_count(),
+            1,
+            "test returned the lease before observing synchronous retirement"
+        );
+        assert!(
+            held.is_closed(),
+            "failed command recovery left the held session open"
+        );
+
+        drop(held);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -3769,6 +3930,52 @@ mod tests {
     }
 
     #[test]
+    fn panicking_borrower_returns_its_connection_exactly_once() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(34);
+        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = held;
+            panic!("borrower panicked while holding a pooled connection");
+        }));
+        assert!(panic.is_err(), "the borrower fixture did not panic");
+        assert_eq!(pool.active_count(), 0, "unwind leaked the active lease");
+        assert_eq!(pool.idle_count(), 1, "unwind did not return the connection");
+        assert_eq!(
+            pool.total_count(),
+            1,
+            "unwind discarded a reusable connection"
+        );
+        assert_eq!(pool.metrics.evictions.get(), 0);
+
+        let mut acquire = Box::pin(pool.get_inner());
+        let reused = match poll_once(acquire.as_mut()) {
+            Poll::Ready(Ok(client)) => client,
+            Poll::Ready(Err(error)) => panic!("reacquiring after unwind failed: {error}"),
+            Poll::Pending => panic!("reacquiring the returned connection unexpectedly waited"),
+        };
+        assert_eq!(
+            reused.process_id(),
+            34,
+            "unwind did not preserve the session"
+        );
+        assert_eq!(pool.active_count(), 1);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 1);
+        drop(reused);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(pool.total_count(), 1);
+    }
+
+    #[test]
     fn panicking_handoff_waker_does_not_unaccount_a_deposited_entry() {
         let config = PoolConfig {
             max_size: 1,
@@ -4031,6 +4238,54 @@ mod tests {
             "housekeeping claim hid remaining capacity from the next waiter"
         );
         claimed.disarm();
+    }
+
+    #[test]
+    fn failed_or_cancelled_housekeeping_refill_releases_its_permit() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
+
+        let refill = WeakPermitGuard::reserve(&pool);
+        assert_eq!(pool.total_count(), 1, "refill did not reserve capacity");
+
+        drop(refill);
+
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "failed or cancelled refill kept its reserved capacity"
+        );
+    }
+
+    #[test]
+    fn failed_or_cancelled_housekeeping_refill_wakes_fifo_head() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
+        let refill = WeakPermitGuard::reserve(&pool);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(&wake_count);
+        let mut waiter = Box::pin(Waiter::new(&pool));
+
+        assert_eq!(pool.total_count(), 1, "refill did not reserve capacity");
+        assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
+        assert_eq!(pool.pending_count(), 1);
+        assert_eq!(wake_count.load(Ordering::Relaxed), 0);
+
+        drop(refill);
+
+        assert_eq!(
+            wake_count.load(Ordering::Relaxed),
+            1,
+            "failed or cancelled refill did not wake the FIFO head"
+        );
     }
 
     #[test]

@@ -8,10 +8,10 @@
 use crate::cancel_token::{CancelKey, PoolCancelLease};
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{ProtocolVersion, SslCertMode, SslMode, SslNegotiation};
-use crate::connect_tls::Encryption;
 use crate::connection::{Request, RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInSink;
 use crate::copy_out::CopyOutStream;
+use crate::encryption::Encryption;
 use crate::keepalive::KeepaliveConfig;
 use crate::query::RowStream;
 use crate::release::ConnectionRelease;
@@ -35,7 +35,7 @@ use postgres_types::{BorrowToSql, FromSqlOwned};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::pin;
@@ -61,11 +61,12 @@ pub enum QueryOutcome {
         code: Option<crate::error::SqlState>,
     },
     /// The caller dropped the response future or stream before its terminal
-    /// protocol message, or PostgreSQL returned SQLSTATE `57014`.
+    /// protocol message, PostgreSQL returned SQLSTATE `57014`, or the
+    /// connection closed before that terminal message arrived.
     Cancelled,
 }
 
-/// A completed SQL execution.
+/// A terminal observation of one SQL execution.
 ///
 /// The SQL text is reported verbatim, including placeholders such as `$1`.
 /// Bound parameter values are never decoded, copied, or attached to the
@@ -86,13 +87,15 @@ impl QueryEvent {
         &self.sql
     }
 
-    /// Time from enqueueing the execution until its terminal server response.
+    /// Time from enqueueing the execution until its terminal server response,
+    /// or until the driver observed that the connection had closed.
     #[must_use]
     pub const fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
-    /// Whether the execution succeeded, failed, or was abandoned by its caller.
+    /// Whether the execution succeeded, failed, was abandoned by its caller,
+    /// or lost its connection before a terminal response.
     #[must_use]
     pub const fn outcome(&self) -> &QueryOutcome {
         &self.outcome
@@ -151,6 +154,7 @@ struct QueryObservationState {
     data_rows: u64,
     command_rows: Option<u64>,
     portal_suspended: bool,
+    saw_error_response: bool,
     error: Option<crate::error::SqlState>,
     server_completed_at: Option<Instant>,
     emitted: bool,
@@ -228,6 +232,7 @@ impl QueryObservation {
                 data_rows: 0,
                 command_rows: None,
                 portal_suspended: false,
+                saw_error_response: false,
                 error: None,
                 server_completed_at: None,
                 emitted: false,
@@ -267,10 +272,13 @@ impl QueryObservation {
         match message {
             Message::DataRow(_) => state.data_rows = state.data_rows.saturating_add(1),
             Message::CommandComplete(body) => {
-                state.command_rows = query::extract_row_affected(body).ok();
+                state.command_rows = crate::command_tag::extract_row_affected(body).ok();
             }
             Message::PortalSuspended => state.portal_suspended = true,
-            Message::ErrorResponse(body) => state.error = error_sqlstate(body),
+            Message::ErrorResponse(body) => {
+                state.saw_error_response = true;
+                state.error = error_sqlstate(body);
+            }
             _ => {}
         }
     }
@@ -370,7 +378,7 @@ impl QueryObservation {
                 || state.error.as_ref() == Some(&crate::error::SqlState::QUERY_CANCELED)
             {
                 QueryOutcome::Cancelled
-            } else if state.error.is_some() {
+            } else if state.saw_error_response {
                 QueryOutcome::DatabaseError {
                     code: state.error.clone(),
                 }
@@ -529,8 +537,9 @@ pub enum TransactionStatus {
     Idle,
     /// Inside a transaction block.
     InTransaction,
-    /// Inside a failed transaction block: the server rejects every statement
-    /// with `25P02` until the block is rolled back.
+    /// Inside a failed transaction block. Ordinary commands are rejected with
+    /// `25P02`; transaction-exit commands remain accepted, and `ROLLBACK TO`
+    /// can recover a failed subtransaction.
     Failed,
 }
 
@@ -904,6 +913,10 @@ mod type_cache_tests {
     }
 
     fn client_with_statement_cache() -> Client {
+        client_with_statement_cache_capacity(1)
+    }
+
+    fn client_with_statement_cache_capacity(capacity: usize) -> Client {
         let (sender, _receiver) = mpsc::unbounded();
         Client::new_with_statement_cache(
             sender,
@@ -913,8 +926,28 @@ mod type_cache_tests {
             Some(0.into()),
             None,
             ProtocolVersion::V3_0,
-            StatementCacheSettings::new(1, NonZeroUsize::MIN),
+            StatementCacheSettings::new(capacity, NonZeroUsize::MIN),
         )
+    }
+
+    fn install_cached_statement(client: &Client, query: &str, name: &str) -> Statement {
+        let statement = Statement::new(
+            client.inner(),
+            name.to_string(),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+        let winner = client.inner().cache_statement(
+            query,
+            statement.clone(),
+            client.inner().type_cache_generation(),
+        );
+        assert!(
+            winner.same_instance(&statement),
+            "a new cache entry did not keep its candidate"
+        );
+        winner
     }
 
     fn invalid_statement_name_error() -> Error {
@@ -1175,6 +1208,57 @@ mod type_cache_tests {
             StatementCacheAdmission::PrepareNamed
         ));
     }
+
+    #[test]
+    fn statement_cache_admission_hit_promotes_its_lru_entry() {
+        const SQL_A: &str = "SELECT admission_a";
+        const SQL_B: &str = "SELECT admission_b";
+
+        let client = client_with_statement_cache_capacity(2);
+        let cached_a = install_cached_statement(&client, SQL_A, "admission_a");
+        let _cached_b = install_cached_statement(&client, SQL_B, "admission_b");
+
+        let promoted = match client.inner().statement_cache_admission(SQL_A) {
+            StatementCacheAdmission::Cached(statement) => statement,
+            StatementCacheAdmission::PrepareNamed | StatementCacheAdmission::ExecuteUnnamed => {
+                panic!("the installed statement was not admitted as cached")
+            }
+        };
+        assert!(promoted.same_instance(&cached_a));
+
+        let cache = client.inner().statement_cache.lock();
+        let lru = cache.lru.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        assert_eq!(lru, [SQL_B, SQL_A]);
+    }
+
+    #[test]
+    fn cache_statement_existing_winner_promotes_its_lru_entry() {
+        const SQL_A: &str = "SELECT winner_a";
+        const SQL_B: &str = "SELECT winner_b";
+
+        let client = client_with_statement_cache_capacity(2);
+        let cached_a = install_cached_statement(&client, SQL_A, "winner_a");
+        let _cached_b = install_cached_statement(&client, SQL_B, "winner_b");
+        let loser = Statement::new(
+            client.inner(),
+            "winner_a_loser".to_string(),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+
+        let winner = client.inner().cache_statement(
+            SQL_A,
+            loser.clone(),
+            client.inner().type_cache_generation(),
+        );
+        assert!(winner.same_instance(&cached_a));
+        assert!(!winner.same_instance(&loser));
+
+        let cache = client.inner().statement_cache.lock();
+        let lru = cache.lru.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        assert_eq!(lru, [SQL_B, SQL_A]);
+    }
 }
 
 const COPY_MODE_IDLE: u8 = 0;
@@ -1321,6 +1405,14 @@ impl Drop for InnerClient {
 }
 
 impl InnerClient {
+    /// Retire this physical session without waiting for its connection task.
+    pub(crate) fn force_close(&self) {
+        self.sender.close_channel();
+        if let Some(release) = &self.release {
+            release.shutdown();
+        }
+    }
+
     /// Send a batch of frontend messages to the connection task. Returns
     /// a `Responses` stream the caller drains with `next().await`.
     ///
@@ -2053,9 +2145,49 @@ pub(crate) struct SocketConfig {
 /// directory. Used by `connect_socket.rs` to pick the right stream type.
 #[derive(Clone)]
 pub(crate) enum Addr {
-    Tcp(IpAddr),
+    /// `scope_id` is the IPv6 zone (`sin6_scope_id`), 0 when there is none.
+    ///
+    /// It is carried rather than dropped because a link-local destination is
+    /// UNDIALABLE without it: Linux `tcp_v6_connect` refuses an
+    /// `IPV6_ADDR_LINKLOCAL` address when `sk_bound_dev_if` is 0, and this
+    /// crate never binds and never sets `SO_BINDTODEVICE`. Measured here, one
+    /// variable apart, against a listener on `fe80::7eed:8dff:fec3:8315%eth0`:
+    /// scope 0 fails instantly with EINVAL before a packet leaves, while the
+    /// correct scope is accepted and the connection is attempted.
+    ///
+    /// libpq never narrows either - `store_conn_addrinfo` memcpy's the whole
+    /// `ai_addr` and keeps `salen` (fe-connect.c:5167), and that full sockaddr
+    /// reaches `connect(2)` at fe-connect.c:3481 with the zone intact.
+    Tcp { ip: IpAddr, scope_id: u32 },
     #[cfg(unix)]
     Unix(PathBuf),
+}
+
+impl Addr {
+    /// Keep the whole resolved address, zone included.
+    ///
+    /// Every site that used to write `Addr::Tcp(addr.ip())` threw the zone
+    /// away; this is the one conversion, so there is no second place to forget.
+    pub(crate) fn tcp(addr: SocketAddr) -> Self {
+        Self::Tcp {
+            ip: addr.ip(),
+            scope_id: match addr {
+                SocketAddr::V6(v6) => v6.scope_id(),
+                SocketAddr::V4(_) => 0,
+            },
+        }
+    }
+
+    /// Rebuild the dialable `SocketAddr`, putting the zone back.
+    ///
+    /// `SocketAddr::new` cannot do this: it produces `SocketAddrV6` with
+    /// scope 0, which is exactly the value that fails.
+    pub(crate) fn socket_addr(ip: IpAddr, port: u16, scope_id: u32) -> SocketAddr {
+        match ip {
+            IpAddr::V4(v4) => SocketAddr::from((v4, port)),
+            IpAddr::V6(v6) => SocketAddr::V6(std::net::SocketAddrV6::new(v6, port, 0, scope_id)),
+        }
+    }
 }
 
 /// An asynchronous PostgreSQL client handle.
@@ -2370,10 +2502,11 @@ impl Client {
     /// the observer for future requests; already in-flight requests retain the
     /// receiver that observed their start.
     ///
-    /// The driver only performs a non-blocking channel send. It never invokes
-    /// caller code from the connection task, so an async consumer may issue a
-    /// query on this client without re-entering that task. Because the channel
-    /// is unbounded, callers must keep draining it to bound memory use.
+    /// The driver only performs a non-blocking channel send and never polls the
+    /// receiver. Sending can synchronously invoke the receiver's waker on the
+    /// connection task, so observer locks are released before delivery. Because
+    /// the channel is unbounded, callers must keep draining it to bound memory
+    /// use.
     ///
     /// Install before preparing statements whose later executions need their
     /// SQL reported. Observation is intentionally disabled by default.
@@ -2390,8 +2523,8 @@ impl Client {
     /// `threshold` are reported. The cutoff applies equally to successful,
     /// failed, and cancelled executions. A zero threshold reports every
     /// execution and is equivalent to [`Client::query_events`].
-    /// Elapsed time has the same enqueue-to-terminal-server-response meaning
-    /// as [`QueryEvent::elapsed`]; it is not PostgreSQL execution time alone.
+    /// Elapsed time has the same enqueue-to-terminal-observation meaning as
+    /// [`QueryEvent::elapsed`]; it is not PostgreSQL execution time alone.
     ///
     /// Calling this method follows the same replacement and in-flight request
     /// semantics as [`Client::query_events`].
@@ -2739,8 +2872,10 @@ impl Client {
             .await
     }
 
-    /// Execute a non-row statement with NULL-aware **text-format** parameters,
-    /// returning the affected-row count. The `execute` peer of
+    /// Execute a statement with NULL-aware **text-format** parameters,
+    /// discarding any rows and returning the numeric count from `PostgreSQL`'s
+    /// command tag. For `SELECT` and `FETCH`, that is the number of rows
+    /// retrieved; a tag without a count returns zero. The `execute` peer of
     /// [`query_text_params`](Self::query_text_params): the server infers each
     /// parameter's type from its SQL position and a text value implicit-casts to
     /// the target column type - the coercion model a schema-blind DML assembler
@@ -2803,7 +2938,11 @@ impl Client {
         query::query_typed(&self.inner, query, params).await
     }
 
-    /// Executes a statement, returning the number of rows modified.
+    /// Executes a statement, discarding any rows and returning the numeric
+    /// count from `PostgreSQL`'s command tag.
+    ///
+    /// For `SELECT` and `FETCH`, this is the number of rows retrieved. A
+    /// command tag without a numeric count returns zero.
     pub async fn execute<T>(
         &self,
         statement: &T,
@@ -3023,8 +3162,11 @@ impl Client {
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
     ///
     /// Statements should be separated by semicolons. If an error occurs, execution of the sequence will stop at that
-    /// point. The simple query protocol returns the values in rows as strings rather than in their binary encodings,
-    /// so the associated row type doesn't work with the `FromSql` trait.
+    /// point. The simple query protocol normally returns row values as text, so
+    /// the associated row type doesn't work with the `FromSql` trait. PostgreSQL
+    /// returns binary values for `FETCH` from a `BINARY` cursor; inspect their
+    /// [`crate::SimpleColumn`] metadata and read them with
+    /// [`crate::SimpleQueryRow::raw_value`].
     pub async fn simple_query(&self, query: &str) -> Result<Vec<SimpleQueryMessage>, Error> {
         self.simple_query_raw(query).await?.try_collect().await
     }
@@ -3086,9 +3228,10 @@ impl Client {
     /// The wire protocol version this session SETTLED ON.
     ///
     /// Not the same as [`crate::Config::max_protocol_version`], which is only
-    /// what was requested: a server that cannot speak it answers
-    /// `NegotiateProtocolVersion` and the session continues one version down,
-    /// so a connection asking for 3.2 reports 3.0 against PostgreSQL 15 or 16.
+    /// what was requested. A peer with minor-version negotiation support can
+    /// answer `NegotiateProtocolVersion` and continue one version down, so a
+    /// connection asking for 3.2 reports 3.0 against PostgreSQL 15 or 16. A
+    /// peer without that support may reject the connection instead.
     ///
     /// This is the only way to find out. PostgreSQL exposes NO server-side view
     /// of the negotiated version - `pg_stat_activity` has no such column and
@@ -3120,6 +3263,9 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key.clone(),
             pool_lease: self.pool_cancel_lease.clone(),
+            drop_target: Some(crate::cancel_token::CancelDropTarget::Client(
+                Arc::downgrade(&self.inner),
+            )),
         }
     }
 
@@ -3215,7 +3361,7 @@ impl Client {
             // the server in the same state the explicit call would, or which
             // exit a caller took would decide whether a savepoint outlives it.
             let sql = match name {
-                Some(name) => crate::transaction::rollback_savepoint(name),
+                Some(name) => crate::escape::rollback_savepoint(name),
                 None => "ROLLBACK".to_string(),
             };
             // H6: Don't panic on NUL in savepoint names. `frontend::query`
@@ -3268,10 +3414,7 @@ impl Client {
     /// trailing `ReadyForQuery` was drained. The synchronous socket shutdown
     /// prevents the still-running backend from outliving the poisoned lease.
     pub(crate) fn force_close(&self) {
-        self.inner.sender.close_channel();
-        if let Some(release) = &self.inner.release {
-            release.shutdown();
-        }
+        self.inner.force_close();
     }
 }
 
@@ -3283,18 +3426,22 @@ impl fmt::Debug for Client {
 
 #[cfg(test)]
 mod query_observer_reentrancy_tests {
-    use super::{Client, InnerClient, QueryObservation, QueryObserver, StatementCacheSettings};
+    use super::{
+        Client, InnerClient, QueryObservation, QueryObserver, QueryOutcome, QueryProtocol,
+        StatementCacheSettings,
+    };
     use crate::codec::FrontendMessage;
     use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
     use bytes::BytesMut;
     use futures_channel::mpsc;
     use futures_util::Stream;
-    use postgres_protocol::message::frontend;
+    use postgres_protocol::message::{backend::Message, frontend};
     use std::cell::{Cell, RefCell};
     use std::num::NonZeroUsize;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
+    use std::time::Instant;
 
     thread_local! {
         /// The client whose observer lock the probe interrogates.
@@ -3443,6 +3590,39 @@ mod query_observer_reentrancy_tests {
             "query event delivery ran while the frontend registry was locked \
              (None means the event waker never ran at all)"
         );
+    }
+
+    /// The public outcome keeps SQLSTATE optional because a peer can send an
+    /// `ErrorResponse` whose fields do not form a valid `PostgreSQL` diagnosis.
+    /// Seeing that frame is still a database rejection, never a success.
+    #[test]
+    fn malformed_error_response_is_observed_as_database_error_without_sqlstate() {
+        let (sender, mut events) = mpsc::unbounded();
+        let observation = QueryObservation::new(QueryObserver::new(sender, None));
+        observation.set_execution(Arc::from("SELECT broken"), QueryProtocol::Extended);
+        observation.mark_enqueued();
+
+        let body = b"SERROR\0Mscripted missing code\0\0";
+        let mut frame = BytesMut::new();
+        frame.extend_from_slice(b"E");
+        frame.extend_from_slice(
+            &i32::try_from(body.len() + 4)
+                .expect("the test frame length fits")
+                .to_be_bytes(),
+        );
+        frame.extend_from_slice(body);
+        let message = Message::parse(&mut frame)
+            .expect("the ErrorResponse frame parses structurally")
+            .expect("the complete frame yields a message");
+
+        observation.observe_server_message(&message);
+        observation.observe_consumer_message(&message);
+        observation.server_complete(Instant::now());
+
+        let event = events
+            .try_recv()
+            .expect("the terminal response emits an event");
+        assert_eq!(event.outcome(), &QueryOutcome::DatabaseError { code: None });
     }
 }
 

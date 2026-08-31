@@ -115,9 +115,18 @@ use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rustls::ClientConnection;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
 use parking_lot::{Condvar, Mutex};
+
+use crate::buf_stream::SplitStream;
+
+#[cfg(test)]
+thread_local! {
+    static CLOSE_NOTIFY_SERIALIZED_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Bytes requested per socket read while handshaking.
 ///
@@ -155,6 +164,7 @@ where
         // has not been allowed to send, and the server will not answer one it
         // has not received, so reading before writing deadlocks the handshake
         // rather than merely delaying it.
+        let mut wrote = false;
         while connection.wants_write() {
             let mut out = Vec::new();
             connection.write_tls(&mut out)?;
@@ -163,6 +173,10 @@ where
             }
             let BufResult(written, _) = socket.write_all(out).await;
             written?;
+            wrote = true;
+        }
+        if wrote {
+            socket.flush().await?;
         }
 
         if !connection.is_handshaking() {
@@ -354,8 +368,42 @@ impl TlsSession {
                 ));
             }
         }
+        #[cfg(test)]
+        CLOSE_NOTIFY_SERIALIZED_PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow_mut().take() {
+                probe();
+            }
+        });
         Ok(outgoing)
     }
+}
+
+const CLOSE_NOTIFY_SENT_MESSAGE: &str = "the TLS session already sent close_notify";
+
+struct CloseNotifySent;
+
+impl std::fmt::Debug for CloseNotifySent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(CLOSE_NOTIFY_SENT_MESSAGE, formatter)
+    }
+}
+
+impl std::fmt::Display for CloseNotifySent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(CLOSE_NOTIFY_SENT_MESSAGE)
+    }
+}
+
+impl std::error::Error for CloseNotifySent {}
+
+fn close_notify_sent_error() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, CloseNotifySent)
+}
+
+fn is_close_notify_sent_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync + 'static>::is::<CloseNotifySent>)
 }
 
 struct SharedSessionState {
@@ -367,6 +415,14 @@ struct SharedSessionState {
 struct SharedSessionInner {
     state: Mutex<SharedSessionState>,
     available: Condvar,
+    /// A write future took ciphertext out of the session and never returned.
+    /// The socket may hold any prefix, so no later TLS operation can recover.
+    abandoned_write: AtomicBool,
+    /// `close_notify` has been serialized out of the session. The TLS session
+    /// is OVER at that point: any later record would reach the peer after the
+    /// alert, which is a protocol violation. The flag lives here rather than
+    /// on the session itself so `lease` can refuse WITHOUT taking it.
+    close_notify_out: AtomicBool,
 }
 
 /// The handle both halves share.
@@ -391,11 +447,30 @@ struct SessionLease<'a> {
     poisoned: bool,
 }
 
+/// Marks ciphertext ownership as lost unless the async socket write returns.
+///
+/// Drop must not lease the rustls state: the read half can be inside a caller
+/// callback on another thread. The atomic marker makes abandonment nonblocking
+/// and lets that lease finish before every later operation is refused.
+struct WriteFlight<'a> {
+    shared: &'a SharedSession,
+    armed: bool,
+}
+
 impl SharedSession {
     fn lease(&self) -> io::Result<SessionLease<'_>> {
         let owner = std::thread::current().id();
         let mut state = self.inner.state.lock();
         loop {
+            if self.inner.abandoned_write.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the TLS session lost ciphertext when a write was abandoned",
+                ));
+            }
+            if self.inner.close_notify_out.load(Ordering::Acquire) {
+                return Err(close_notify_sent_error());
+            }
             if state.poisoned {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -424,6 +499,64 @@ impl SharedSession {
         }
     }
 
+    fn try_lease(&self) -> io::Result<Option<SessionLease<'_>>> {
+        if self.inner.abandoned_write.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session lost ciphertext when a write was abandoned",
+            ));
+        }
+        if self.inner.close_notify_out.load(Ordering::Acquire) {
+            return Err(close_notify_sent_error());
+        }
+
+        let Some(mut state) = self.inner.state.try_lock() else {
+            return Ok(None);
+        };
+        if self.inner.abandoned_write.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session lost ciphertext when a write was abandoned",
+            ));
+        }
+        // This recheck and the one before `try_lock` are REDUNDANT BY DESIGN:
+        // the first rejects cheaply, this one closes the window where another
+        // thread marks the session terminal while this one waits for the lock.
+        // So neither is individually bindable - a single-threaded test that
+        // reaches one reaches the other, and disabling either leaves the other
+        // returning the same error. Measured 2026-08-31: disabling ONE keeps
+        // `a_session_that_sent_close_notify_refuses_a_try_lease` green;
+        // disabling BOTH turns it red. The pair is bound, the halves are not.
+        if self.inner.close_notify_out.load(Ordering::Acquire) {
+            return Err(close_notify_sent_error());
+        }
+        if state.poisoned {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session was poisoned by a panicking callback",
+            ));
+        }
+        let Some(session) = state.session.take() else {
+            return Ok(None);
+        };
+        debug_assert!(
+            state.owner.is_none(),
+            "available TLS session still had an owner"
+        );
+        state.owner = Some(std::thread::current().id());
+        Ok(Some(SessionLease {
+            shared: self,
+            session: Some(session),
+            poisoned: false,
+        }))
+    }
+
+    /// Mark the session terminal: `close_notify` is out, so no later lease may
+    /// write another record behind it.
+    pub(crate) fn mark_close_notify_sent(&self) {
+        self.inner.close_notify_out.store(true, Ordering::Release);
+    }
+
     pub(crate) fn with<R>(
         &self,
         f: impl FnOnce(&mut TlsSession) -> io::Result<R>,
@@ -439,9 +572,51 @@ impl SharedSession {
         }
     }
 
+    pub(crate) fn try_with<R>(
+        &self,
+        f: impl FnOnce(&mut TlsSession) -> io::Result<R>,
+    ) -> io::Result<Option<R>> {
+        let Some(mut lease) = self.try_lease()? else {
+            return Ok(None);
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(lease.session_mut()))) {
+            Ok(result) => result.map(Some),
+            Err(payload) => {
+                lease.poisoned = true;
+                drop(lease);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
     #[cfg(test)]
     fn mutex_is_locked(&self) -> bool {
         self.inner.state.try_lock().is_none()
+    }
+}
+
+impl<'a> WriteFlight<'a> {
+    fn new(shared: &'a SharedSession) -> Self {
+        Self {
+            shared,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WriteFlight<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared
+                .inner
+                .abandoned_write
+                .store(true, Ordering::Release);
+            self.shared.inner.available.notify_all();
+        }
     }
 }
 
@@ -484,6 +659,8 @@ pub(crate) fn share(conn: ClientConnection) -> SharedSession {
                 poisoned: false,
             }),
             available: Condvar::new(),
+            abandoned_write: AtomicBool::new(false),
+            close_notify_out: AtomicBool::new(false),
         }),
     }
 }
@@ -674,6 +851,12 @@ where
                 commit(&mut buf, &self.plain[..n]);
                 BufResult(Ok(n), buf)
             }
+            // Synchronous release serialized close_notify and committed to
+            // shutting down the socket. Its typed lease refusal is EOF to the
+            // racing read half, just as local teardown is over plaintext. A
+            // different I/O or TLS failure stays intact, and awaited-response
+            // classification still rejects this EOF when protocol work remains.
+            Err(error) if is_close_notify_sent_error(&error) => BufResult(Ok(0), buf),
             Err(error) => BufResult(Err(error), buf),
         }
     }
@@ -708,12 +891,14 @@ where
         if pending.is_empty() {
             return Ok(());
         }
+        let write_flight = WriteFlight::new(session);
         let BufResult(result, _) = socket.write_all(pending).await;
+        result?;
         session.with(|session| {
             session.write_in_flight = false;
             Ok(())
         })?;
-        result?;
+        write_flight.disarm();
     }
 }
 
@@ -724,6 +909,19 @@ where
     let n = session.with(|session| session.write_plaintext(src))?;
     flush_outgoing(socket, session).await?;
     Ok(n)
+}
+
+/// Flush the transport without allowing an indeterminate buffered ciphertext
+/// tail to outlive a cancelled or failed flush.
+async fn flush_through<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    flush_outgoing(socket, session).await?;
+    let write_flight = WriteFlight::new(session);
+    socket.flush().await?;
+    write_flight.disarm();
+    Ok(())
 }
 
 async fn shutdown_through<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
@@ -747,12 +945,54 @@ impl<S> TlsStreamCore<S> {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (S, SharedSession) {
-        (self.reader.socket, self.reader.session)
-    }
-
     pub(crate) fn session(&self) -> SharedSession {
         self.reader.session.clone()
+    }
+}
+
+impl<S> TlsStreamCore<S>
+where
+    S: SplitStream,
+{
+    /// Split only the socket, carrying every byte already read from it into
+    /// the owned read half. A refused split rebuilds the identical stream.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn try_into_split(
+        self,
+    ) -> Result<(TlsReadHalf<S::ReadHalf>, TlsWriteHalf<S::WriteHalf>), Self> {
+        let TlsReader {
+            socket,
+            session,
+            cipher,
+            cipher_len,
+            cipher_read,
+            plain,
+        } = self.reader;
+        match socket.try_into_split() {
+            Ok((read, write)) => Ok((
+                TlsReadHalf {
+                    reader: TlsReader {
+                        socket: read,
+                        session: session.clone(),
+                        cipher,
+                        cipher_len,
+                        cipher_read,
+                        plain,
+                    },
+                },
+                TlsWriteHalf::new(write, session),
+            )),
+            Err(socket) => Err(Self {
+                reader: TlsReader {
+                    socket,
+                    session,
+                    cipher,
+                    cipher_len,
+                    cipher_read,
+                    plain,
+                },
+            }),
+        }
     }
 }
 
@@ -777,8 +1017,7 @@ where
 
     async fn flush(&mut self) -> io::Result<()> {
         let session = self.reader.session.clone();
-        flush_outgoing(self.reader.socket_mut(), &session).await?;
-        self.reader.socket_mut().flush().await
+        flush_through(self.reader.socket_mut(), &session).await
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
@@ -792,11 +1031,11 @@ pub struct TlsReadHalf<R> {
     reader: TlsReader<R>,
 }
 
-impl<R> TlsReadHalf<R> {
-    pub(crate) fn new(socket: R, session: SharedSession) -> Self {
-        Self {
-            reader: TlsReader::new(socket, session),
-        }
+impl<R> std::fmt::Debug for TlsReadHalf<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsReadHalf")
+            .finish_non_exhaustive()
     }
 }
 
@@ -815,6 +1054,14 @@ pub struct TlsWriteHalf<W> {
     session: SharedSession,
 }
 
+impl<W> std::fmt::Debug for TlsWriteHalf<W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsWriteHalf")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<W> TlsWriteHalf<W> {
     pub(crate) fn new(socket: W, session: SharedSession) -> Self {
         Self { socket, session }
@@ -831,14 +1078,16 @@ where
     }
 
     async fn flush(&mut self) -> io::Result<()> {
-        flush_outgoing(&mut self.socket, &self.session).await?;
-        self.socket.flush().await
+        flush_through(&mut self.socket, &self.session).await
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
         shutdown_through(&mut self.socket, &self.session).await
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::handshaken_pair;
 
 #[cfg(test)]
 mod tests {
@@ -850,7 +1099,9 @@ mod tests {
     };
     use rustls::pki_types::ServerName;
     use std::cell::{Cell, RefCell};
-    use std::sync::Arc;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     /// A peer that accepts every byte and answers every read with EOF.
     ///
@@ -858,6 +1109,7 @@ mod tests {
     /// ClientHello is flushed, the connection is still handshaking, and the
     /// read that follows finds the peer gone.
     struct SilentPeer {
+        pending: usize,
         written: usize,
     }
 
@@ -869,11 +1121,13 @@ mod tests {
 
     impl AsyncWrite for SilentPeer {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
-            self.written += buf.buf_len();
+            self.pending += buf.buf_len();
             BufResult(Ok(buf.buf_len()), buf)
         }
 
         async fn flush(&mut self) -> std::io::Result<()> {
+            self.written += self.pending;
+            self.pending = 0;
             Ok(())
         }
 
@@ -901,6 +1155,343 @@ mod tests {
         async fn shutdown(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A writer that makes observable progress and then never gives its buffer
+    /// back. Dropping its future therefore loses an unknowable TLS frame tail.
+    struct ParkedWriter {
+        wire_prefix: Vec<u8>,
+    }
+
+    /// A peer that accepts a prefix, errors once, then recovers. The recovery
+    /// makes a second TLS operation test the session's own retirement state.
+    struct PartialErrorWriter {
+        writes: usize,
+        wire_prefix: Vec<u8>,
+    }
+
+    /// A buffered transport whose flush exposes one byte and then never
+    /// returns. Dropping that flush loses an unknowable ciphertext tail.
+    struct ParkedFlushWriter {
+        buffered: usize,
+        wire_prefix: Vec<u8>,
+    }
+
+    /// A buffered transport whose first flush exposes one byte and errors.
+    struct PartialErrorFlushWriter {
+        buffered: usize,
+        flushes: usize,
+        wire_prefix: Vec<u8>,
+    }
+
+    struct SplitStateSocket;
+
+    struct EofReadHalf;
+
+    #[derive(Default)]
+    struct ShutdownCapture {
+        wire: Vec<u8>,
+        shutdowns: usize,
+    }
+
+    impl AsyncRead for EofReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for ShutdownCapture {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.wire.extend_from_slice(buf.as_init());
+            let n = buf.buf_len();
+            BufResult(Ok(n), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            assert!(
+                !self.wire.is_empty(),
+                "the TLS write half shut down its transport before sending close_notify"
+            );
+            self.shutdowns += 1;
+            Ok(())
+        }
+    }
+
+    impl SplitStream for SplitStateSocket {
+        type ReadHalf = EofReadHalf;
+        type WriteHalf = ShutdownCapture;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((EofReadHalf, ShutdownCapture::default()))
+        }
+    }
+
+    impl AsyncWrite for ParkedWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let bytes = buf.as_init();
+            assert!(
+                !bytes.is_empty(),
+                "the TLS fixture tried to park an empty write"
+            );
+            self.wire_prefix.push(bytes[0]);
+            std::future::pending::<()>().await;
+            unreachable!("the parked TLS writer completed")
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for PartialErrorWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.writes += 1;
+            let bytes = buf.as_init();
+            match self.writes {
+                1 => {
+                    self.wire_prefix.push(bytes[0]);
+                    BufResult(Ok(1), buf)
+                }
+                2 => BufResult(
+                    Err(io::Error::other("scripted partial ciphertext write")),
+                    buf,
+                ),
+                _ => BufResult(Ok(bytes.len()), buf),
+            }
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for ParkedFlushWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.buffered += buf.buf_len();
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            assert!(
+                self.buffered > 0,
+                "the TLS fixture tried to park an empty transport flush"
+            );
+            self.wire_prefix.push(0);
+            std::future::pending::<()>().await;
+            unreachable!("the parked transport flush completed")
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for PartialErrorFlushWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.buffered += buf.buf_len();
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                assert!(
+                    self.buffered > 0,
+                    "the TLS fixture tried to fail an empty transport flush"
+                );
+                self.wire_prefix.push(0);
+                return Err(io::Error::other("scripted partial transport flush"));
+            }
+            self.buffered = 0;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn tls_split_preserves_the_plain_scratch_buffer() {
+        let (client, _server) = handshaken_pair();
+        let mut stream = TlsStreamCore::new(SplitStateSocket, share(client));
+        stream.reader.plain = vec![0xa5; 257];
+        let plain_ptr = stream.reader.plain.as_ptr();
+        let plain_capacity = stream.reader.plain.capacity();
+
+        let Ok((read, _write)) = stream.try_into_split() else {
+            panic!("the state-carry TLS stream refused to split");
+        };
+
+        assert_eq!(read.reader.plain, vec![0xa5; 257]);
+        assert_eq!(read.reader.plain.capacity(), plain_capacity);
+        assert_eq!(
+            read.reader.plain.as_ptr(),
+            plain_ptr,
+            "the split replaced the TLS reader's plaintext scratch allocation"
+        );
+    }
+
+    #[compio::test]
+    async fn tls_write_half_shutdown_sends_close_notify() {
+        let (client, mut server) = handshaken_pair();
+        let stream = TlsStreamCore::new(SplitStateSocket, share(client));
+        let Ok((_read, mut writer)) = stream.try_into_split() else {
+            panic!("the shutdown TLS stream refused to split");
+        };
+
+        writer
+            .shutdown()
+            .await
+            .expect("shut down the TLS write half");
+        assert_eq!(writer.socket.shutdowns, 1);
+
+        let mut ciphertext = writer.socket.wire.as_slice();
+        let mut peer_has_closed = false;
+        while !ciphertext.is_empty() {
+            let accepted = server
+                .read_tls(&mut ciphertext)
+                .expect("server read close_notify ciphertext");
+            assert!(accepted > 0, "the server stopped consuming close_notify");
+            peer_has_closed |= server
+                .process_new_packets()
+                .expect("server process close_notify")
+                .peer_has_closed();
+        }
+        assert!(peer_has_closed, "the TLS write half sent no close_notify");
+    }
+
+    #[compio::test]
+    async fn cancelling_a_tls_write_poisons_the_reused_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            ParkedWriter {
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let mut write = Box::pin(writer.write(b"abandoned plaintext".to_vec()));
+        assert!(
+            futures_util::poll!(write.as_mut()).is_pending(),
+            "the TLS write fixture did not park after making progress"
+        );
+        drop(write);
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the cancelled write made no progress, so its frame boundary stayed known"
+        );
+
+        let error = writer
+            .flush()
+            .await
+            .expect_err("a cancelled TLS write was reported as a successful reusable stream");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[compio::test]
+    async fn a_partial_tls_write_error_poisons_the_reused_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            PartialErrorWriter {
+                writes: 0,
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let BufResult(first, _) = writer
+            .write(b"partially delivered plaintext".to_vec())
+            .await;
+        first.expect_err("the scripted ciphertext write did not fail");
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the failed TLS write made no progress, so no frame tail was lost"
+        );
+
+        let error = writer
+            .flush()
+            .await
+            .expect_err("a TLS session that lost ciphertext to a returned write error was reused");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[compio::test]
+    async fn cancelling_a_transport_flush_poisons_the_reused_tls_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            ParkedFlushWriter {
+                buffered: 0,
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let BufResult(written, _) = writer.write(b"buffered plaintext".to_vec()).await;
+        written.expect("the fixture transport should buffer the TLS frame");
+
+        let mut flush = Box::pin(writer.flush());
+        assert!(
+            futures_util::poll!(flush.as_mut()).is_pending(),
+            "the TLS fixture did not park after making flush progress"
+        );
+        drop(flush);
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the cancelled transport flush made no progress"
+        );
+
+        let BufResult(retry, _) = writer.write(b"next plaintext".to_vec()).await;
+        let error = retry.expect_err("a cancelled transport flush left a TLS stream reusable");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[compio::test]
+    async fn a_partial_transport_flush_error_poisons_the_reused_tls_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            PartialErrorFlushWriter {
+                buffered: 0,
+                flushes: 0,
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let BufResult(written, _) = writer.write(b"buffered plaintext".to_vec()).await;
+        written.expect("the fixture transport should buffer the TLS frame");
+        writer
+            .flush()
+            .await
+            .expect_err("the fixture transport flush should fail");
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the failed transport flush made no progress"
+        );
+
+        let BufResult(retry, _) = writer.write(b"next plaintext".to_vec()).await;
+        let error = retry.expect_err("a partial transport flush error left a TLS stream reusable");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     /// A flush must leave NOTHING inside the session, including what the cap
@@ -1006,8 +1597,201 @@ mod tests {
     /// A real handshake, not a stub: the state this test is about
     /// (`read_tls` answering `Ok(0)` forever once `close_notify` has arrived)
     /// only exists behind live keys.
-    fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
+    pub(crate) fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
         handshaken_pair_with_store(None)
+    }
+
+    /// `close_notify` is the end of the record stream. A lease taken after it
+    /// could encrypt another record behind the peer's terminal alert, which is
+    /// a protocol violation the peer is entitled to reject outright.
+    #[test]
+    fn a_session_that_sent_close_notify_refuses_a_blocking_lease() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        session.mark_close_notify_sent();
+
+        let error = session
+            .with(|_| Ok(()))
+            .expect_err("a session that sent close_notify granted a lease");
+        assert!(
+            is_close_notify_sent_error(&error),
+            "wrong refusal for a post-close_notify lease: {error}"
+        );
+    }
+
+    /// The non-blocking path guards separately, and is reached by the
+    /// multiplexed write loop rather than by `with`.
+    #[test]
+    fn a_session_that_sent_close_notify_refuses_a_try_lease() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        session.mark_close_notify_sent();
+
+        // `.err().expect(..)` rather than `expect_err`: the Ok type here is
+        // `Option<SessionLease>`, which is private and deliberately not Debug.
+        let error = session
+            .try_lease()
+            .err()
+            .expect("a session that sent close_notify granted a try_lease");
+        assert!(
+            is_close_notify_sent_error(&error),
+            "wrong refusal for a post-close_notify try_lease: {error}"
+        );
+    }
+
+    #[test]
+    fn tls_release_does_not_wait_for_an_in_flight_session_lease() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind release test listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("release test address"))
+            .expect("connect release test socket");
+        let (_peer, _) = listener.accept().expect("accept release test socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate release test socket");
+        release.set_tls_session(session.clone());
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (allow_tx, allow_rx) = mpsc::channel();
+        let held_session = session.clone();
+        let holder = std::thread::spawn(move || {
+            held_session
+                .with(|_| {
+                    held_tx.send(()).expect("report held TLS lease");
+                    allow_rx.recv().expect("release held TLS lease");
+                    Ok(())
+                })
+                .expect("hold TLS lease");
+        });
+        held_rx.recv().expect("wait for held TLS lease");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let releaser = std::thread::spawn(move || {
+            started_tx.send(()).expect("report release start");
+            drop(release);
+            done_tx.send(()).expect("report completed release");
+        });
+        started_rx.recv().expect("wait for release start");
+        let finished_while_held = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+
+        allow_tx.send(()).expect("allow held TLS lease to finish");
+        holder.join().expect("join TLS lease holder");
+        releaser.join().expect("join TLS release thread");
+
+        assert!(
+            finished_while_held,
+            "TLS release waited for an in-flight TLS lease before shutting down the socket"
+        );
+    }
+
+    #[test]
+    fn concurrent_tls_release_guards_do_not_cut_off_close_notify() {
+        let (client, mut server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind release race listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("release race address"))
+            .expect("connect release race socket");
+        let (mut peer, _) = listener.accept().expect("accept release race socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate release race socket");
+        release.set_tls_session(session);
+        let connection_release = release.connection_guard();
+
+        let (serialized_tx, serialized_rx) = mpsc::channel();
+        let (allow_send_tx, allow_send_rx) = mpsc::channel();
+        let releaser = std::thread::spawn(move || {
+            CLOSE_NOTIFY_SERIALIZED_PROBE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    serialized_tx
+                        .send(())
+                        .expect("report serialized close_notify");
+                    allow_send_rx
+                        .recv()
+                        .expect("allow close_notify transport send");
+                }));
+            });
+            drop(release);
+        });
+        serialized_rx
+            .recv()
+            .expect("wait for serialized close_notify");
+
+        drop(connection_release);
+        allow_send_tx
+            .send(())
+            .expect("allow elected TLS release to finish");
+        releaser.join().expect("join elected TLS releaser");
+
+        let mut wire = Vec::new();
+        peer.read_to_end(&mut wire)
+            .expect("read released TLS transport");
+        let mut cursor = wire.as_slice();
+        let mut peer_has_closed = false;
+        while !cursor.is_empty() {
+            let accepted = server.read_tls(&mut cursor).expect("server read_tls");
+            assert!(
+                accepted > 0,
+                "the server stopped consuming release ciphertext"
+            );
+            peer_has_closed |= server
+                .process_new_packets()
+                .expect("server process close_notify")
+                .peer_has_closed();
+        }
+        assert!(
+            peer_has_closed,
+            "concurrent TLS release cut off close_notify before shutdown"
+        );
+    }
+
+    #[test]
+    fn tls_release_keeps_the_session_until_socket_shutdown() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind release window listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("release window address"))
+            .expect("connect release window socket");
+        let (_peer, _) = listener.accept().expect("accept release window socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate release window socket");
+        release.set_tls_session(session.clone());
+
+        let writer_acquired = Arc::new(AtomicBool::new(false));
+        let observed = writer_acquired.clone();
+        let probe_session = session;
+        let mut probe_socket = socket.try_clone().expect("duplicate release window writer");
+        crate::release::TLS_BEFORE_SHUTDOWN_PROBE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let writer = std::thread::spawn(move || {
+                    // The invariant is that the write does not HAPPEN, not the
+                    // shape of the refusal. A terminal session answers `Err`
+                    // (like poisoned and abandoned-write do); a merely busy one
+                    // answers `Ok(None)`. Only `Ok(Some(_))` means the writer
+                    // got the session and put a record behind `close_notify`.
+                    let acquired = matches!(
+                        probe_session.try_with(|session| {
+                            session.write_plaintext(b"late plaintext")?;
+                            probe_socket.write_all(&session.take_outgoing())?;
+                            Ok(())
+                        }),
+                        Ok(Some(()))
+                    );
+                    observed.store(acquired, Ordering::SeqCst);
+                });
+                writer.join().expect("join late TLS writer");
+            }));
+        });
+
+        release.shutdown();
+
+        assert!(
+            !writer_acquired.load(Ordering::SeqCst),
+            "a TLS writer acquired the session after close_notify but before socket shutdown"
+        );
     }
 
     fn handshaken_pair_with_store(
@@ -1326,7 +2110,10 @@ mod tests {
     /// up" from "someone cut the connection during key exchange".
     #[compio::test]
     async fn a_peer_that_closes_mid_handshake_is_refused() {
-        let mut peer = SilentPeer { written: 0 };
+        let mut peer = SilentPeer {
+            pending: 0,
+            written: 0,
+        };
         let error = handshake(&mut peer, client_connection())
             .await
             .err()
@@ -1352,11 +2139,14 @@ mod tests {
     /// flight it has not received with nothing.
     #[compio::test]
     async fn the_client_hello_is_flushed_before_the_first_read() {
-        let mut peer = SilentPeer { written: 0 };
+        let mut peer = SilentPeer {
+            pending: 0,
+            written: 0,
+        };
         let _ = handshake(&mut peer, client_connection()).await;
         assert!(
             peer.written > 0,
-            "no bytes reached the peer, so the handshake read before it wrote"
+            "no ClientHello bytes reached the peer before the handshake read"
         );
     }
 }

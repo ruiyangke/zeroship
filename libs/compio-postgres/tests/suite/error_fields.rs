@@ -61,18 +61,23 @@ async fn connect() -> Client {
 async fn a_server_error_carries_the_fields_postgresql_sent() {
     compio::time::timeout(WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("ef");
+        let primary_key = format!("{table}_pkey");
+        let check_constraint = format!("{table}_b_check");
         client
-            .batch_execute("CREATE TEMP TABLE ef (a int PRIMARY KEY, b int NOT NULL CHECK (b > 0))")
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (a int PRIMARY KEY, b int NOT NULL CHECK (b > 0))"
+            ))
             .await
             .expect("create the error fixture");
         client
-            .execute("INSERT INTO ef VALUES (1, 1)", &[])
+            .execute(&format!("INSERT INTO {table} VALUES (1, 1)"), &[])
             .await
             .expect("seed the row the duplicate collides with");
 
         // ---- unique violation: constraint present, column absent ----
         let unique = client
-            .execute("INSERT INTO ef VALUES (1, 1)", &[])
+            .execute(&format!("INSERT INTO {table} VALUES (1, 1)"), &[])
             .await
             .expect_err("a duplicate primary key must fail");
         let unique = unique
@@ -80,8 +85,8 @@ async fn a_server_error_carries_the_fields_postgresql_sent() {
             .expect("a server-sent error must survive as a DbError");
 
         assert_eq!(unique.code().code(), "23505", "unique_violation SQLSTATE");
-        assert_eq!(unique.table(), Some("ef"));
-        assert_eq!(unique.constraint(), Some("ef_pkey"));
+        assert_eq!(unique.table(), Some(table.as_str()));
+        assert_eq!(unique.constraint(), Some(primary_key.as_str()));
         assert!(
             unique.schema().is_some_and(|s| s.starts_with("pg_temp")),
             "a temp table's schema is a pg_temp_N, got {:?}",
@@ -102,7 +107,7 @@ async fn a_server_error_carries_the_fields_postgresql_sent() {
 
         // ---- not-null violation: column present, constraint absent ----
         let not_null = client
-            .execute("INSERT INTO ef VALUES (2, NULL)", &[])
+            .execute(&format!("INSERT INTO {table} VALUES (2, NULL)"), &[])
             .await
             .expect_err("a NULL in a NOT NULL column must fail");
         let not_null = not_null
@@ -114,7 +119,7 @@ async fn a_server_error_carries_the_fields_postgresql_sent() {
             "23502",
             "not_null_violation SQLSTATE"
         );
-        assert_eq!(not_null.table(), Some("ef"));
+        assert_eq!(not_null.table(), Some(table.as_str()));
         assert_eq!(not_null.column(), Some("b"));
         // The mirror of the assertion above: the fields swap between the two
         // errors, so neither can be satisfied by a mapping that ignores tags.
@@ -126,14 +131,14 @@ async fn a_server_error_carries_the_fields_postgresql_sent() {
 
         // ---- check violation: constraint again, on a different failure ----
         let check = client
-            .execute("INSERT INTO ef VALUES (3, -5)", &[])
+            .execute(&format!("INSERT INTO {table} VALUES (3, -5)"), &[])
             .await
             .expect_err("a failing CHECK must fail");
         let check = check
             .as_db_error()
             .expect("a server-sent error must survive as a DbError");
         assert_eq!(check.code().code(), "23514", "check_violation SQLSTATE");
-        assert_eq!(check.constraint(), Some("ef_b_check"));
+        assert_eq!(check.constraint(), Some(check_constraint.as_str()));
         assert_eq!(check.column(), None);
     })
     .await

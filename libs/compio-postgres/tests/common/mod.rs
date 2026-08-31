@@ -134,6 +134,83 @@ pub fn server_answered(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// The endpoint behavior relevant to tests that observe session provenance.
+///
+/// PgBouncer exposes `SHOW CONFIG` only through its `pgbouncer` administration
+/// database, and the `pool_mode=transaction` row is positive evidence that the
+/// endpoint provides transaction pooling. PostgreSQL either rejects that
+/// database or rejects the PgBouncer-only command. Any refusal, query error,
+/// or ambiguous response therefore retains the stricter direct assertions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestTransport {
+    Direct,
+    TransactionPooler,
+}
+
+pub async fn test_transport<T>(endpoint: &str, tls: T) -> TestTransport
+where
+    T: compio_postgres::tls::MakeTlsConnect<compio_postgres::Socket>,
+    T::Stream: compio::io::AsyncRead
+        + compio::io::AsyncWrite
+        + Unpin
+        + compio_postgres::SplitStream
+        + 'static,
+    <T::Stream as compio_postgres::SplitStream>::ReadHalf: 'static,
+{
+    use compio_postgres::SimpleQueryMessage;
+
+    let mut config: compio_postgres::Config = endpoint
+        .parse()
+        .expect("the transport-probe endpoint parses");
+    config.dbname("pgbouncer");
+
+    let Ok((client, connection)) = config.connect(tls).await else {
+        return TestTransport::Direct;
+    };
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let is_transaction_pooler =
+        client
+            .simple_query("SHOW CONFIG")
+            .await
+            .ok()
+            .is_some_and(|messages| {
+                messages.into_iter().any(|message| match message {
+                    SimpleQueryMessage::Row(row) => {
+                        row.get(0) == Some("pool_mode") && row.get(1) == Some("transaction")
+                    }
+                    _ => false,
+                })
+            });
+
+    if is_transaction_pooler {
+        TestTransport::TransactionPooler
+    } else {
+        TestTransport::Direct
+    }
+}
+
+impl TestTransport {
+    /// Assert the backend identity returned by a query separate from the mode
+    /// probe, so the pooled inequality is an independently falsifiable claim.
+    pub fn assert_backend_pid(self, announced_pid: i32, backend_pid: i32, context: &str) {
+        match self {
+            Self::Direct => assert_eq!(
+                backend_pid, announced_pid,
+                "{context}: a direct connection changed physical backend"
+            ),
+            Self::TransactionPooler => assert_ne!(
+                backend_pid, announced_pid,
+                "{context}: a transaction pooler exposed its synthetic frontend PID as a \
+                 PostgreSQL backend PID"
+            ),
+        }
+    }
+}
+
 /// Fail the calling test because the connection this test needs was not made.
 ///
 /// This is what a missing database does now. It used to announce a skip, which
@@ -351,9 +428,7 @@ pub async fn sweep_stale_replication_slots(client: &compio_postgres::Client) {
         }
         // Best effort: another sweep may have taken it first, and losing that
         // race is the correct outcome, not an error.
-        let _ = client
-            .execute("SELECT pg_drop_replication_slot($1)", &[&name])
-            .await;
+        let _ = drop_replication_slot(client, &name).await;
     }
 }
 
@@ -438,20 +513,22 @@ fn process_is_alive(_pid: u32) -> bool {
     true
 }
 
-/// Drop a replication slot, waiting for its walsender to let go first.
+/// Drop a replication slot once its walsender has actually let go.
 ///
-/// `drop(stream)` closes the connection CLIENT-side; the server retires the
-/// walsender a moment later, and until it does the slot is still `active` and
-/// `pg_drop_replication_slot` fails with 55006. Tests that ignore that error
-/// LEAK THE SLOT, and slots are a bounded server resource - a run that leaks
-/// enough of them starts failing with "max_replication_slots" on whatever
-/// happens to run next, which reads as a misconfigured server rather than as
-/// test litter.
+/// Dropping the stream closes the connection CLIENT-side; the server takes a
+/// moment longer to retire the walsender, and until it does the slot is still
+/// `active` and `pg_drop_replication_slot` fails with 55006. That window is
+/// invisible when the test runs alone and opens up under full-suite load,
+/// which is exactly the shape that produces a flake nobody can reproduce.
 ///
-/// Polls rather than sleeping a fixed amount: a sleep long enough for a loaded
-/// machine is wasted on every green run, and one tuned on an idle machine is
-/// the flake again. A slot that is already gone is success, not an error.
-pub async fn drop_replication_slot(client: &compio_postgres::Client, slot: &str) {
+/// Polls the server rather than sleeping a fixed amount: a sleep long enough
+/// to be safe on a loaded machine is wasted on every green run, and one tuned
+/// on an idle machine is the flake again. A slot that is already gone is
+/// success, not an error.
+pub async fn drop_replication_slot(
+    client: &compio_postgres::Client,
+    slot: &str,
+) -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let outcome = client
@@ -462,14 +539,11 @@ pub async fn drop_replication_slot(client: &compio_postgres::Client, slot: &str)
             )
             .await;
         let Err(error) = outcome else {
-            return;
+            return Ok(());
         };
         let still_held = error.code().is_some_and(|code| code.code() == "55006");
         if !still_held || std::time::Instant::now() >= deadline {
-            // Best effort: the caller is cleaning up, often after a failure
-            // that is more interesting than this one.
-            eprintln!("could not drop slot {slot}: {}", error_chain(&error));
-            return;
+            return Err(error_chain(&error));
         }
         compio::time::sleep(std::time::Duration::from_millis(25)).await;
     }

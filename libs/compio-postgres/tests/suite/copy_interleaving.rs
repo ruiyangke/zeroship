@@ -135,12 +135,13 @@ async fn returning_a_lease_with_a_live_copy_handle_evicts_the_connection() {
 
         let client = pool.get().await.expect("borrow the first connection");
         let first_pid = client.process_id();
+        let table = common::test_object_name("copy_mode_pool_probe");
         client
-            .batch_execute("CREATE TEMPORARY TABLE copy_mode_pool_probe (v int4)")
+            .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v int4)"))
             .await
             .expect("create pooled COPY fixture");
         let sink = client
-            .copy_in::<_, Bytes>("COPY copy_mode_pool_probe FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} FROM STDIN"))
             .await
             .expect("start pooled COPY IN");
 

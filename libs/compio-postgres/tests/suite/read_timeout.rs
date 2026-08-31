@@ -932,13 +932,14 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
         let driver = compio::runtime::spawn(async move { connection.run().await });
+        let table = common::test_object_name("cpg_read_timeout_copy");
 
         client
-            .batch_execute("CREATE TEMPORARY TABLE cpg_read_timeout_copy (n int)")
+            .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"))
             .await
             .expect("create COPY deadline fixture");
         let sink = client
-            .copy_in::<_, Bytes>("COPY cpg_read_timeout_copy (n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
             .await
             .expect("enter COPY input mode");
         let mut sink = std::pin::pin!(sink);
@@ -964,7 +965,7 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
             1
         );
         let row = client
-            .query_one("SELECT n FROM cpg_read_timeout_copy", &[])
+            .query_one(&format!("SELECT n FROM {table}"), &[])
             .await
             .expect("query delayed COPY result");
         assert_eq!(row.get::<_, i32>(0), 7);

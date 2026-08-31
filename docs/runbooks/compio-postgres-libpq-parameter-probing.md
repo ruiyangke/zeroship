@@ -302,3 +302,41 @@ end-to-end case is
 `libs/compio-postgres/tests/suite/service_live.rs`, which writes a working service in the awkward forms and
 requires it to connect; it fails with `Undefined` on a parser that only accepts
 the tidy shape.
+
+## Empty numeric values are per-OPTION, not per-type (measured 2026-08-30)
+
+A comment in `config.rs` asserted the rule was per-TYPE: "every numeric option
+takes empty as 'not given' and uses its default". **That is wrong.** Measured
+against the 16.14 libpq in `zs-cpg-types-5475`, against a REAL server (the
+`.invalid` instrument cannot settle integers - see the warning above):
+
+    port=''                 -> 1          connects, uses the compiled default
+    port=          (at end) -> 1          same
+    connect_timeout=''      -> invalid integer value "" for connection option
+    keepalives_idle=        -> invalid integer value ""
+    keepalives_interval=    -> invalid integer value ""
+    connect_timeout=5       -> 1          control: the instrument works
+
+`pg_config --configure` shows `--with-pgport=5432`, which is the default `port=`
+selects. So `port` is a genuine one-option exception and every other numeric
+option refuses an empty value.
+
+### Two driver-specific options are outside libpq's opinion entirely
+
+    statement_cache_capacity=  -> invalid connection option "statement_cache_capacity"
+    max_message_size=          -> invalid connection option "max_message_size"
+
+libpq does not know these keywords, so there is no libpq behaviour to match for
+them and any rule we pick is our own design choice, not a compatibility
+constraint. Do not cite "libpq does X" when arguing about them.
+
+### The probe that looks empty and is not
+
+    psql "host=127.0.0.1 port= user=postgres dbname=postgres"
+    -> invalid integer value "user=postgres" for connection option "port"
+
+libpq skips whitespace after `=` and takes the NEXT TOKEN as the value, so
+`port= user=postgres` sets port to the string `user=postgres`. An empty value
+must be written `port=''` or placed at the end of the string. A probe written
+the first way is not testing what it appears to test - it silently becomes a
+test of a completely different value, and the error message is the only tell.

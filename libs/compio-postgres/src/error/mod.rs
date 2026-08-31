@@ -369,6 +369,20 @@ enum Kind {
     Column(String),
     ColumnCount,
     Parameters(usize, usize),
+    /// A prepared statement with a live owning connection was passed to a
+    /// different connection. `PostgreSQL` prepared statements are session-local,
+    /// so sending it can only produce `26000` for the unknown generated name.
+    ///
+    /// libpq has no analogue: `PQexecPrepared` accepts a caller-owned statement
+    /// name and a `PGconn`, not a statement handle carrying its provenance.
+    StatementOwnerMismatch,
+    /// A prepared statement outlived the connection that created it. Its
+    /// server-side name disappeared with that session and cannot be used on any
+    /// later connection.
+    ///
+    /// libpq has no analogue: it does not expose an owner-bearing prepared
+    /// statement handle whose connection lifetime can be checked locally.
+    StatementOwnerDropped,
     Closed,
     /// An earlier operation on this connection was dropped before it
     /// completed, so the connection is out of step with the server.
@@ -417,6 +431,13 @@ enum Kind {
 struct ErrorInner {
     kind: Kind,
     cause: Option<Box<dyn error::Error + Sync + Send>>,
+    cancel_delivery: CancelDelivery,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum CancelDelivery {
+    Unsent,
+    PossiblySent,
 }
 
 /// An error communicating with the Postgres server.
@@ -458,6 +479,12 @@ impl fmt::Display for Error {
             Kind::ColumnCount => write!(fmt, "query returned an unexpected number of columns"),
             Kind::Parameters(real, expected) => {
                 write!(fmt, "expected {expected} parameters but got {real}")
+            }
+            Kind::StatementOwnerMismatch => {
+                fmt.write_str("prepared statement belongs to a different connection")
+            }
+            Kind::StatementOwnerDropped => {
+                fmt.write_str("prepared statement's owning connection has been dropped")
             }
             Kind::Closed => fmt.write_str("connection closed"),
             Kind::Cancelled => fmt.write_str(
@@ -601,7 +628,20 @@ impl Error {
     }
 
     fn new(kind: Kind, cause: Option<Box<dyn error::Error + Sync + Send>>) -> Error {
-        Error(Box::new(ErrorInner { kind, cause }))
+        Error(Box::new(ErrorInner {
+            kind,
+            cause,
+            cancel_delivery: CancelDelivery::Unsent,
+        }))
+    }
+
+    pub(crate) fn with_cancel_delivery(mut self, delivery: CancelDelivery) -> Error {
+        self.0.cancel_delivery = delivery;
+        self
+    }
+
+    pub(crate) fn cancel_delivery(&self) -> CancelDelivery {
+        self.0.cancel_delivery
     }
 
     pub(crate) fn closed() -> Error {
@@ -679,6 +719,14 @@ impl Error {
 
     pub(crate) fn parameters(real: usize, expected: usize) -> Error {
         Error::new(Kind::Parameters(real, expected), None)
+    }
+
+    pub(crate) fn statement_owner_mismatch() -> Error {
+        Error::new(Kind::StatementOwnerMismatch, None)
+    }
+
+    pub(crate) fn statement_owner_dropped() -> Error {
+        Error::new(Kind::StatementOwnerDropped, None)
     }
 
     pub(crate) fn tls(e: Box<dyn error::Error + Sync + Send>) -> Error {

@@ -406,6 +406,45 @@ retirement after a server ErrorResponse. A defect in any of them shows up here
 as a non-zero live count or a hang, and in neither case would the ordinary
 suite have noticed: it never restarts a server.
 
+RE-MEASURED 2026-08-29 at `aef4e2e54`, on the dedicated 16.15 container
+(`zs-soak-5470`), restart issued 40s into `phase=measure`. All three signals
+reproduced again:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+No watchdog fired - the only lines containing `watchdog` are the three
+phase-start budget declarations, which is worth stating because a grep for
+`watchdog` matches those and can be misread as a firing. No panic, no hang.
+Recovery: 63 `pool_` tests passed against the restarted server on the FIRST
+attempt (7 in `--lib`, 56 in `--test suite`); the 2026-08-27 run recorded 49,
+the difference being tests added since.
+
+This run is the check on `ae8ba17f4`, which changed when a cancel retires a
+session: a defect there surfaces here as a non-zero live count or a hang, and
+the ordinary suite would not notice because it never restarts a server.
+
+RE-MEASURED again after the read-framing unification, at `0c06e95f5`:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+No watchdog fired, no panic, no hang; 63 `pool_` tests passed against the
+restarted server on the FIRST attempt. This run targets the EOF guard: the
+framing unification made `if n == 0` a SINGLE site in `fill_read_buffer`
+serving both the whole-stream and split read paths, where it used to be two
+copies. Mutating that guard wedges the entire suite rather than failing it, so
+it is load-bearing and worth re-measuring after any change to the read path.
+
+**A trap in the harness itself.** If the last command of a wrapper is
+`grep -c` for watchdog firings, a count of ZERO exits 1 and the job is
+reported as FAILED - the good outcome looks like a broken run. Put the
+command whose status you want last, or end with `|| true`.
+
 ## Chaos: freezing the server without closing anything
 
 A restart makes the server CLOSE, which surfaces as an error at once. The
@@ -416,9 +455,13 @@ exists for. `docker pause` reproduces it exactly, which a scripted peer cannot:
 that peer is still a live local socket choosing to withhold bytes.
 
 ```bash
-docker pause zs-cpg-review-5455     # freeze mid-query
+# Build the probe first: an example that fails to COMPILE pauses the container
+# around nothing and prints a plausible-looking log.
+#   cargo build --release -p compio-postgres --example chaos_probe
+#   ./target/release/examples/chaos_probe "$PG_TEST_URL" &
+docker pause zs-cpg-types-5475      # freeze mid-query
 # ... observe ...
-docker unpause zs-cpg-review-5455   # ALWAYS, including on failure
+docker unpause zs-cpg-types-5475    # ALWAYS, including on failure (use a trap)
 ```
 
 MEASURED 2026-08-26, with `Config::read_timeout` at 5s and a query issued
@@ -430,10 +473,33 @@ BH live_connections=0
 ```
 
 The clock fired within half a millisecond of its bound, the session was RETIRED
-rather than left in limbo, and the connection was released. Read all three: a
-timeout that fires but leaves `is_closed=false` would hand a poisoned session to
-the next caller, and a non-zero live count would mean the descriptor outlived
-the failure.
+rather than left in limbo, and the connection was released.
+
+**`is_closed` ON THE TIMEOUT ERROR IS THE WRONG SIGNAL, and this section said to
+read it until 2026-08-28.** The text above asked for `is_closed=true` and warned
+that `false` "would hand a poisoned session to the next caller". Re-measured at
+`506bab466` with the committed probe, the timeout error reports:
+
+```text
+PROBE query ended after 5.000649053s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+`is_closed()` is `kind == Kind::Closed`, and a read timeout carries
+`Kind::ReadTimeout` (`src/error/mod.rs`), so `false` is what the driver MUST
+report - the error says why it failed rather than only that the socket is gone.
+`Kind::ReadTimeout` predates both earlier measurements (`45313c6a6`,
+2026-08-21), so the older transcripts came from a different, uncommitted probe
+and cannot be reproduced; that is why the probe is now committed.
+
+Read these three instead, none of which is ambiguous:
+
+- the elapsed time is within a few milliseconds of the configured bound;
+- `live_connections=0`, so the descriptor did not outlive the failure;
+- **the next query on that client is REFUSED** (`reuse=refused ... connection
+  closed`). That is the poisoned-session property stated directly. A
+  `reuse=SUCCEEDED` line is the defect the old wording was reaching for.
 
 Set a read timeout before trying this. WITHOUT one there is no clock at all on
 this path and the query waits for as long as the freeze lasts - which is the
@@ -459,6 +525,36 @@ USE A PORT NO CONTAINER ALREADY PUBLISHES, and check with
 `zs-dbbind-pg`; docker refused the bind, which is the only reason this section's
 `docker pause` did not freeze a stranger's database mid-session. A published
 port is held by the container whether or not anything is listening right now.
+
+RE-MEASURED 2026-08-29 at `463191209`, 5s bound, on `zs-soak-5470` rather
+than the container the runbook names above - an agent was running the suite
+against `zs-cpg-types-5475` and `docker pause` would have frozen it. Pick a
+container nothing else is using, and check before pausing.
+
+```text
+PROBE query ended after 5.000496008s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+All three signals hold: 0.5ms past the bound, no descriptor outliving the
+failure, and the poisoned session refused on reuse. `is_closed=false` on the
+timeout error is the CORRECT value per the 2026-08-28 note above.
+
+RE-MEASURED again after the read-framing unification, at `c856afc62`:
+
+```text
+PROBE query ended after 5.000526215s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+0.53ms past the bound against 0.50ms before the refactor. This run is the
+reason the section is worth re-running rather than trusting: `fill_read_buffer`
+now serves BOTH the whole-stream and split read paths, and a frozen server is
+the ONLY scenario that drives a real `read_timeout` on a live connection. The
+suite never freezes anything, so a regression here would not have shown up in
+1375 passing tests.
 
 ## Chaos: a healthy server with no connection slots left
 
@@ -506,6 +602,29 @@ sweeps spent that week making the driver prefer a server diagnosis over a local
 symptom, and this is the shape where a regression would be invisible: the pool
 refuses either way, and only the CAUSE distinguishes "the server is full" from
 "something went wrong".
+
+RE-MEASURED 2026-08-28 at `bcd6dcb69` with the committed
+`examples/chaos_slots.rs`, which reports BOTH arms because they are different
+measurements:
+
+```text
+SLOTS held=15 then refused: db error | FATAL: sorry, too many clients already
+SLOTS connect refused after 1.106469ms: db error | FATAL: sorry, too many clients already
+SLOTS pool build refused after 505.091402ms: db error | FATAL: sorry, too many clients already
+SLOTS recovered: SELECT 42 = 42, live=1
+```
+
+**Quote the arm, not just the number.** A direct connect is single-shot by
+design and refuses in about a millisecond; pool warm-up retries three times,
+sleeping 100ms then 400ms between failures, so its refusal costs about 505ms.
+The earlier transcripts above are the POOL arm. Reading a 1.1ms direct refusal
+against a 505ms pool figure looks like a 380x regression and is neither.
+
+That 505ms is also an independent check on the backoff itself: two sleeps, not
+three. `connect_with_retry` guards its sleep with `if attempt < 2`, so the
+`delay *= 4` that would produce a third 1.6s wait is computed and discarded. A
+run near 2.1s would mean that guard had been lost. The rustdoc claimed the
+1.6s sleep happened until 2026-08-28.
 
 ## Limits of the measurement
 
@@ -588,3 +707,127 @@ trips is well shaped to catch.
 Read the workload list under "What the run does" as the boundary of what a
 green result means, and add a shape to the harness rather than stretching a
 claim to reach it. That is what this entry is a worked example of.
+
+### Re-measured 2026-08-29 at `463191209`, and one trap in the setup
+
+```text
+max_connections=15 (verified before probing)
+SLOTS held=15 then refused: db error | FATAL: sorry, too many clients already
+SLOTS connect refused after 1.266915ms: db error | FATAL: sorry, too many clients already
+SLOTS pool build refused after 504.959382ms: db error | FATAL: sorry, too many clients already
+SLOTS recovered: SELECT 42 = 42, live=1
+```
+
+Pool-build refusal at 504.96ms against 504.74ms and 505.33ms on the two earlier
+dates, the FATAL still reachable through the chain, and recovery once the slots
+freed. `live=1` here and `live=2` on 2026-08-27 with the same `max_size(2)`
+probe - the count depends on how many idle connections are up at the recovery
+check, so quote what the probe ASKED for, as the note above says.
+
+**THE PREFIX IN THE OLDER TRANSCRIPTS IS NOT WHAT THE PROBE PRINTS.** The
+2026-08-26 and 2026-08-27 blocks above show `EX` and `EX2`; the committed
+`examples/chaos_slots.rs` prints `SLOTS`. Grepping for the documented prefix
+matches nothing, which looks exactly like a probe that produced no output.
+
+**`pg_isready` IS NOT A READY GATE FOR A FRESHLY CREATED CONTAINER.** The
+postgres image runs a TEMPORARY init server and then restarts it. `pg_isready`
+passes against that transient server, so a probe started on it meets a socket
+being torn down. Measured 2026-08-29, first attempt:
+
+```text
+max_connections=
+SLOTS held=0 then refused: error communicating with the server | Connection reset by peer (os error 104)
+SLOTS pool build SUCCEEDED after 528.157676ms - not exhausted
+```
+
+Zero connections held, a reset reported as a refusal, the pool build SUCCEEDING,
+no FATAL anywhere - and the probe still exited 0. The run measured container
+startup and read like a result. Gate on the SETTING instead, and refuse to probe
+if it is not there:
+
+```bash
+for i in $(seq 1 90); do
+  mc=$(docker exec $CT psql -U postgres -tAc "show max_connections" 2>/dev/null | tr -d " \r")
+  [ "$mc" = "15" ] && break
+  sleep 1
+done
+[ "$mc" = "15" ] || { echo "REFUSING: got ${mc:-empty}"; exit 4; }
+```
+
+The empty `max_connections=` line is what exposed it. Echo the value you are
+depending on, not just the fact that you waited.
+
+## Deciding whether the soak and chaos runs need re-running at all
+
+The soak, the three chaos scenarios and the pgbouncer residue classification all
+measure the behaviour of BUILT production code. A tree whose only changes are
+tests, comments and docs produces a byte-identical binary path, so re-running
+them measures the same thing and costs ~20 minutes. Prove it instead of
+assuming it - and prove it mechanically, because "I only added tests" is exactly
+the claim that turns out to be wrong.
+
+For each changed `src/` file, two numbers settle it:
+
+    f=libs/compio-postgres/src/config.rs
+    since=<ref the runs were last done at>
+
+    # 1. how many changed lines are NOT comments
+    git diff "$since"..HEAD -- "$f" \
+      | grep -E '^[+-][^+-]' | grep -vcE '^[+-]\s*(//|///|//!)'
+
+    # 2. where the test module starts, and the lowest line the diff touched
+    grep -n '#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1
+    git diff -U0 "$since"..HEAD -- "$f" \
+      | grep -oE '^@@ -[0-9,]+ \+[0-9]+' | sed 's/.*+//' | sort -n | head -1
+
+A file is production-inert if (1) is `0`, or if the lowest touched line is at or
+after the `#[cfg(test)]` marker.
+
+Measured 2026-08-30, `bf8517d0b..5bb482384` (nine commits):
+
+    cancel_query_raw.rs  171 non-comment   cfg(test)@234   lowest touched 233
+    config.rs              9 non-comment   cfg(test)@3387  lowest touched 3501
+    copy_out.rs            0 non-comment   -               lowest touched 135
+    lib.rs                 0 non-comment   -               lowest touched 41
+
+`copy_out.rs` and `lib.rs` are comment-only. `config.rs` is entirely inside its
+test module. `cancel_query_raw.rs`'s one line below its marker, 233, is the
+blank separator before `#[cfg(test)]` - confirm that by reading it, do not
+assume it. Conclusion: production behaviour unchanged, so the soak and chaos
+results from `bf8517d0b` still describe this tree.
+
+**Do not stretch this.** It licenses skipping a RE-RUN when the diff is inert;
+it says nothing once a single production line moves. And it is not a substitute
+for the per-crate test gate, which is cheap and must run on every merge
+regardless - a test-only change can still break tests.
+
+### CORRECTION: the `#[cfg(test)]` marker shortcut above is unsound
+
+The procedure above says a file is production-inert if "the lowest touched line
+is at or after the `#[cfg(test)]` marker", found with
+
+    grep -n '#\[cfg(test)\]' "$f" | head -1
+
+**`head -1` is wrong whenever a file has more than one.** Test-only helpers sit
+beside the production code they support, so several files here carry many:
+`client.rs` has NINE `#[cfg(test)]` items (first at line 166, others at 499,
+559, 613, 890, 2166, ...). Using the first would classify everything after line
+166 as test code - about 3000 lines, including `crate::transaction::
+rollback_savepoint` at line 3289 inside `pub fn __private_api_rollback`. The
+same mistake, in the module-graph script, understated the SCC as 8 when it is
+10.
+
+**Ask whether the touched line is INSIDE a test item**, not whether it is after
+some marker. Blank `//` comments in place (preserving length, so offsets stay
+valid - stripping them shifts every line number earlier and silently invents
+answers), then brace-match each `#[cfg(test)]` item and test membership:
+
+    span starts at the attribute, ends at the matching `}` of its item
+    inert  <=>  every changed line lies inside some span, or is a comment
+
+Re-checked all five merges made on 2026-08-30 with the sound version:
+`config.rs:3501`, `connect.rs:1052` and `pool.rs:3802` are all genuinely inside
+test items; `cancel_query_raw.rs:233` is the blank line before its module; and
+`copy_out.rs` has no test module at all and changed only comments. **Every
+verdict stands** - the shortcut happened to be right because those files have
+one test module, or their last one, near the end. It was luck, not method.

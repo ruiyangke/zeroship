@@ -3,10 +3,11 @@
 //! compio-postgres - a native, asynchronous PostgreSQL client for compio/io_uring.
 //!
 //! Port of [`tokio-postgres`](https://github.com/rust-postgres/rust-postgres), adapted to
-//! compio's completion-based, owned-buffer I/O model. Client/Connection split preserved;
-//! pipelining and async notifications preserved - over PLAINTEXT. A TLS stream
-//! cannot be split into owned halves, so it runs a serialized loop that reads
-//! no socket while idle: see
+//! compio's completion-based, owned-buffer I/O model. The Client/Connection
+//! split, pipelining, and async notifications are preserved. Plaintext and the
+//! built-in rustls transport split into owned halves. A custom TLS stream that
+//! refuses owned splitting falls back to a serialized loop that reads no
+//! socket while idle: see
 //! [`Connection::notifications`](crate::Connection::notifications) for what
 //! that costs a LISTEN/NOTIFY subscriber.
 //!
@@ -37,6 +38,7 @@
 //!
 //!     // And then check that we got back the same string we sent over.
 //!     let value: &str = rows[0].get(0);
+//!     // The no_run fence compiles this assertion but does not execute it.
 //!     assert_eq!(value, "hello world");
 //!
 //!     Ok(())
@@ -138,8 +140,8 @@
 //!
 //! # SSL/TLS support
 //!
-//! `Client::connect` and `Config::connect` take a TLS implementation as an argument. The `NoTls` type in this crate can
-//! be used when TLS is not required.
+//! [`connect`] and [`Config::connect`] take a TLS implementation as an argument.
+//! The [`NoTls`] type in this crate can be used when TLS is not required.
 //!
 //! The `tls` Cargo feature adds `MakeRustlsConnect`, a rustls backend that reads its trust anchors from the
 //! connection configuration (TLS version bounds, SNI policy, `sslrootcert`,
@@ -174,8 +176,9 @@
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]
-#![allow(missing_debug_implementations)]
-#![allow(dead_code)]
+// No crate-wide dead_code allow: it hid an uncalled pub(crate) fn and an
+// unread field until a coverage run pointed at them. The one item that is
+// legitimately dead under some feature resolutions carries its own allow.
 
 pub use crate::buf_stream::SplitStream;
 pub use crate::cancel_token::CancelToken;
@@ -196,7 +199,7 @@ pub use crate::pool::{
 pub use crate::portal::Portal;
 pub use crate::query::RowStream;
 pub use crate::row::{Row, SimpleQueryRow};
-pub use crate::simple_query::{SimpleColumn, SimpleQueryStream};
+pub use crate::simple_query::{SimpleColumn, SimpleQueryFormat, SimpleQueryStream};
 pub use crate::socket::Socket;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
@@ -219,6 +222,7 @@ mod cancel_query_raw;
 mod cancel_token;
 pub(crate) mod client;
 mod codec;
+mod command_tag;
 pub mod config;
 mod connect;
 mod connect_raw;
@@ -228,6 +232,7 @@ pub(crate) mod connection;
 mod copy_format;
 mod copy_in;
 mod copy_out;
+mod encryption;
 pub mod error;
 mod escape;
 mod generic_client;

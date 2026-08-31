@@ -97,47 +97,50 @@ async fn schema_free_errors_carry_the_constants_this_crate_names() {
 async fn constraint_violations_carry_the_constants_this_crate_names() {
     let url = test_url();
     let client = connect_client(&url).await;
+    let table = common::test_object_name("sqlstate_probe");
 
     // Temporary, so the shared review database keeps no residue even if this
     // test fails part way through.
     client
-        .batch_execute(
-            "CREATE TEMPORARY TABLE sqlstate_probe (
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table} (
                  id     int PRIMARY KEY,
-                 parent int REFERENCES sqlstate_probe(id),
+                 parent int REFERENCES {table}(id),
                  needed int NOT NULL,
                  small  int CHECK (small < 10)
-             )",
-        )
+             )"
+        ))
         .await
         .expect("create the probe table");
 
     client
-        .batch_execute("INSERT INTO sqlstate_probe (id, needed, small) VALUES (1, 1, 1)")
+        .batch_execute(&format!(
+            "INSERT INTO {table} (id, needed, small) VALUES (1, 1, 1)"
+        ))
         .await
         .expect("seed a row");
 
-    let cases: &[(&str, &SqlState)] = &[
+    let cases = [
         (
-            "INSERT INTO sqlstate_probe (id, needed, small) VALUES (1, 1, 1)",
+            format!("INSERT INTO {table} (id, needed, small) VALUES (1, 1, 1)"),
             &SqlState::UNIQUE_VIOLATION,
         ),
         (
-            "INSERT INTO sqlstate_probe (id, needed, small) VALUES (2, NULL, 1)",
+            format!("INSERT INTO {table} (id, needed, small) VALUES (2, NULL, 1)"),
             &SqlState::NOT_NULL_VIOLATION,
         ),
         (
-            "INSERT INTO sqlstate_probe (id, needed, small) VALUES (3, 1, 99)",
+            format!("INSERT INTO {table} (id, needed, small) VALUES (3, 1, 99)"),
             &SqlState::CHECK_VIOLATION,
         ),
         (
-            "INSERT INTO sqlstate_probe (id, parent, needed, small) VALUES (4, 999, 1, 1)",
+            format!("INSERT INTO {table} (id, parent, needed, small) VALUES (4, 999, 1, 1)"),
             &SqlState::FOREIGN_KEY_VIOLATION,
         ),
     ];
 
     for (sql, expected) in cases {
-        let actual = sqlstate_of(&client, sql).await;
+        let actual = sqlstate_of(&client, &sql).await;
         assert_eq!(
             actual.code(),
             expected.code(),
