@@ -604,7 +604,7 @@ refuses either way, and only the CAUSE distinguishes "the server is full" from
 "something went wrong".
 
 RE-MEASURED 2026-08-28 at `bcd6dcb69` with the committed
-`examples/chaos_slots.rs`, which reports BOTH arms because they are different
+`libs/compio-postgres/examples/chaos_slots.rs`, which reports BOTH arms because they are different
 measurements:
 
 ```text
@@ -726,7 +726,7 @@ check, so quote what the probe ASKED for, as the note above says.
 
 **THE PREFIX IN THE OLDER TRANSCRIPTS IS NOT WHAT THE PROBE PRINTS.** The
 2026-08-26 and 2026-08-27 blocks above show `EX` and `EX2`; the committed
-`examples/chaos_slots.rs` prints `SLOTS`. Grepping for the documented prefix
+`libs/compio-postgres/examples/chaos_slots.rs` prints `SLOTS`. Grepping for the documented prefix
 matches nothing, which looks exactly like a probe that produced no output.
 
 **`pg_isready` IS NOT A READY GATE FOR A FRESHLY CREATED CONTAINER.** The
