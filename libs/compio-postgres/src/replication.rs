@@ -4533,6 +4533,43 @@ mod tests {
         }
     }
 
+    /// A transport whose frontend writes succeed without reaching the peer,
+    /// then whose first backend read fails while the real socket stays open.
+    /// The duplicated socket in `ConnectionRelease` is therefore the only
+    /// thing that can make the peer observe a physical shutdown.
+    struct ReleaseBackedReadFailure {
+        socket: compio::net::TcpStream,
+    }
+
+    impl compio::io::AsyncRead for ReleaseBackedReadFailure {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            compio::buf::BufResult(
+                Err(std::io::Error::other("scripted socket read failure")),
+                buf,
+            )
+        }
+    }
+
+    impl compio::io::AsyncWrite for ReleaseBackedReadFailure {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            compio::buf::BufResult(Ok(compio::buf::IoBuf::buf_len(&buf)), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.socket.shutdown().await
+        }
+    }
+
     async fn release_backed_failing_transport() -> (
         ReleaseBackedWriteFailure,
         ConnectionRelease,
@@ -4644,6 +4681,88 @@ mod tests {
         assert!(
             connection.in_flight.poisoned,
             "the connection was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn identify_system_response_read_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let ReleaseBackedWriteFailure { socket, .. } = transport;
+        let mut connection = ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedReadFailure>::Raw(
+                ReleaseBackedReadFailure { socket },
+            )),
+            parameters: HashMap::new(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+
+        let error = connection
+            .identify_system()
+            .await
+            .expect_err("the scripted IDENTIFY_SYSTEM response read succeeded");
+        assert!(
+            !error.is_read_timeout(),
+            "the inner response-read arm must own this non-timeout failure"
+        );
+        assert_release_shut_down_peer(&mut peer, "IDENTIFY_SYSTEM response read failure").await;
+        assert!(
+            connection.in_flight.poisoned,
+            "the connection was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn next_read_timeout_shuts_down_its_release_handle() {
+        let (mut stream, mut peer) = silent_peer().await;
+        stream
+            .stream
+            .set_read_timeout(Some(std::time::Duration::ZERO));
+        let compio::buf::BufResult(written, _) = peer.write_all(vec![COPY_DATA_TAG]).await;
+        written.expect("write the first byte of a partial CopyBoth frame");
+        peer.flush()
+            .await
+            .expect("flush the first byte of a partial CopyBoth frame");
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the partial CopyBoth frame did not time out");
+        assert!(error.is_read_timeout(), "unexpected read failure: {error}");
+        assert_release_shut_down_peer(&mut peer, "CopyBoth frame read timeout").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn copy_done_with_a_body_shuts_down_its_release_handle() {
+        let (mut stream, mut peer) = silent_peer().await;
+        let compio::buf::BufResult(written, _) =
+            peer.write_all(startup_frame(COPY_DONE_TAG, &[0xAA])).await;
+        written.expect("write malformed CopyDone");
+        peer.flush().await.expect("flush malformed CopyDone");
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("CopyDone with a body was accepted");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("CopyDone") && chain.contains("empty body"),
+            "the malformed CopyDone was not refused by name: {chain}"
+        );
+        assert_release_shut_down_peer(&mut peer, "malformed CopyDone").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
         );
     }
 
