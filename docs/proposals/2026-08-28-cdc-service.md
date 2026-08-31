@@ -428,9 +428,13 @@ chooses the implementable relay shape: creating a Database edits its
 Datastore's existing shared publication; creating a Datastore creates the
 publication, slot and stream. The two other documents need a separate
 correction before implementation begins.
-The routing table in
-`docs/proposals/2026-08-26-runtime-db-binding-00-index.md:25` also still calls
-this "one cluster publication"; that summary must change with them.
+
+The routing table in `docs/proposals/2026-08-26-runtime-db-binding-00-index.md:25`
+called this "one cluster publication" until 2026-08-30 and now reads "one shared
+publication per Datastore". A publication is DATASTORE-scoped
+(`pg_publication.relisshared = f`), so the old wording was not a summary of this
+design but a contradiction of it - and the summary line is what a reader meets
+first.
 
 The same proposal also says the schema epoch never enters WAL and any logical
 marker is forgeable
