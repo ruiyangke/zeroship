@@ -61,6 +61,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 22/27 Housekeeping close (EOF clean-close family) | 4 across the file | 2 covered by 24 each; step C DEAD; **step D was UNBOUND** | `serialized_eof_with_only_housekeeping_in_flight_closes_cleanly` (new) |
 | 23 COPY refusal drain | 2 | BOUND (visible only in the full suite) | agent-reported |
 | 25 Bind cache invalidation | 2 | 1 pre-bound, 1 was UNBOUND | `unnamed_bind_parse_error_invalidates_cached_statement` (new) |
+| 26 Plaintext TLS shortcut | 2 | covered, but by a BLUNT probe - see note | 42 and 216 failures respectively |
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
 | 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
@@ -80,10 +81,20 @@ below was re-run by the pilot against the FULL seven-target gate
 | 50 COPY format validation | 2 | NOT independently bound (2 overlap on one copy) | agent table |
 
 **The worklist's copy COUNTS are unreliable, and that is the most reusable
-finding here.** Group 17 said two and had three; group 28 said two and had five;
-group 18 said three and had four; `remember_server_error` said two and had
-eight. In group 17 and group 28 the
-UNCOUNTED copy was the only unbound one. Always enumerate by content first.
+finding here.** Six groups so far had more copies than claimed:
+
+    17  said two   had three   the uncounted copy was the ONLY unbound one
+    28  said two   had five    the uncounted copies included the only unbound one
+    18  said three had four    extra copy was bound
+    38  said four  had five    the fifth is a guard arm in different syntax
+    44  said two   had three   third copy is the `Weak` variant - unprobed
+    remember_server_error  said two  had EIGHT
+
+In group 17 and group 28 the UNCOUNTED copy was the only unbound one. Always
+enumerate by content first, and note that the extra copy is usually the one
+written in a DIFFERENT syntactic shape - a guard arm rather than an `if` block,
+a `Weak` upgrade rather than a borrow - which is exactly why a
+count-by-eye or a single grep pattern misses it.
 
 ### "More than one failure" is not automatically a gap
 
@@ -110,6 +121,22 @@ zero fail - is there anything to fix.
 The worklist also under-counted here: the `Err(error) if saw_error_response =>`
 guard arm on `Header::parse` is a fifth copy of the same decision in a different
 syntactic shape, and the group entry lists four.
+
+### A mutation that breaks 216 tests has not isolated anything
+
+Group 26 is the counter-example to reading big failure counts as strong
+coverage. Inverting `if encryption == Encryption::Plaintext { return Ok(()) }`
+in `connect_raw.rs` fails **216** tests, because every plaintext connection then
+runs TLS validation and the driver stops working at all. That says the line is
+load-bearing; it says almost nothing about whether the specific decision - skip
+validation when the transport is plaintext - is checked by anything.
+
+The `cancel_query.rs` twin fails 42, including the four cancel TLS-policy tests
+that ARE specific to it, so that copy is genuinely covered.
+
+Treat a three-figure failure count as "the mutation was too coarse to be
+informative", not as "well covered". The useful probe changes one decision, not
+one precondition the whole driver rests on.
 
 ### OPEN: two mid-flush terminal recorders that no test executes
 
