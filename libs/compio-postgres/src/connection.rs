@@ -4832,7 +4832,7 @@ mod tests {
         frame
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::future_not_send, clippy::type_complexity)]
     async fn run_gated_copy_retirement(
         wire: Vec<u8>,
         initial: Option<FrontendMessage>,
@@ -4865,9 +4865,8 @@ mod tests {
             chunks: VecDeque::from([wire]),
             read_gate,
         });
-        let (read_half, write_half) = match stream.try_into_split() {
-            Ok(halves) => halves,
-            Err(_) => panic!("the gated COPY retirement fixture did not split"),
+        let Ok((read_half, write_half)) = stream.try_into_split() else {
+            panic!("the gated COPY retirement fixture did not split");
         };
         let tx_status = Arc::new(AtomicU8::new(b'I'));
         let terminal_server_error = Arc::new(Mutex::new(None));
@@ -4900,10 +4899,10 @@ mod tests {
         )
     }
 
-    /// Once CopyInResponse pauses the read obligation, PostgreSQL owes no
+    /// Once `CopyInResponse` pauses the read obligation, `PostgreSQL` owes no
     /// progress until the producer sends data. Retirement must still inspect
-    /// the ErrorResponse which the reader already found behind the unsupported
-    /// ParameterStatus instead of returning with only the local config error.
+    /// the `ErrorResponse` which the reader already found behind the unsupported
+    /// `ParameterStatus` instead of returning with only the local config error.
     #[compio::test]
     async fn copy_input_retirement_preserves_an_available_server_error() {
         let read_gate = Arc::new(AtomicBool::new(false));
@@ -4950,7 +4949,7 @@ mod tests {
     }
 
     /// A COPY request is published before its producer sends the opening
-    /// frontend batch. An earlier response can change client_encoding in that
+    /// frontend batch. An earlier response can change `client_encoding` in that
     /// interval, leaving the COPY response registered but not yet flushed.
     /// The finite owed-prefix drain excludes that tail; the available drain
     /// must still retain a terminal diagnosis which is already in its FIFO.
