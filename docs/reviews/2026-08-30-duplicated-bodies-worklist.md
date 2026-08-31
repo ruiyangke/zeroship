@@ -48,6 +48,10 @@ below was re-run by the pilot against the FULL seven-target gate
 | ---: | ---: | --- | --- |
 | 1 Query RowDescription | 2 | BOUND (`25712160b`) | pre-existing |
 | 5 Column metadata | 4 | BOUND (`25712160b`) | pre-existing |
+| 2 Text/typed Bind encoding | 2 | BOUND (6 and 3 failures, each naming its own entry point) | agent table |
+| 3 Typed query/execute frontend batch | 2 | BOUND (4 and 2 failures) | agent table |
+| 4 Execute response/COPY refusal | 3 | BOUND, each independently (1 failure each) | agent table |
+| 11 Debug/non-debug query encoding | 2 | BOTH were UNBOUND but LIVE; now BOUND | `query_logs_its_parameters_when_debug_is_enabled`, `execute_logs_its_parameters_when_debug_is_enabled` |
 | 6 Cached statement replay family | 6 | BOUND, each independently | agent table, one distinct failure per copy |
 | 8 Flush/read terminal polling | 3 | CLOSED: all 3 BOUND (2 were executed by nothing) | `flush_retirement_terminal_arm_...`, `read_timeout_during_a_parked_flush_...`, `backpressured_flush_nested_drain_...` |
 | 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
@@ -121,6 +125,23 @@ zero fail - is there anything to fix.
 The worklist also under-counted here: the `Err(error) if saw_error_response =>`
 guard arm on `Header::parse` is a fifth copy of the same decision in a different
 syntactic shape, and the group entry lists four.
+
+### Group 11 needed a NEW TEST TARGET, and that is why it was uncovered
+
+Both `log_enabled!(Level::Debug)` branches in `query.rs` were live but unbound.
+They could not be covered from inside the existing suite: the branch only runs
+when a process-global `log::set_logger` is installed at Debug level, and **only
+the first `set_logger` call in a process succeeds**. `socket_release` and
+`transaction_claims` already claim that slot. A test sharing their binary would
+have silently taken the NON-Debug branch and passed while proving nothing.
+
+The fix is a fifth separate `[[test]]` target, `query_debug_logging`, declared
+in Cargo.toml with that reason written beside it. The gate now reports EIGHT
+targets, not seven.
+
+Worth copying: the two tests use distinct parameter sentinels (`[1101101]` and
+`[2202202]`), so a mutation's failure message names which copy was hit rather
+than only that something failed.
 
 ### A mutation that breaks 216 tests has not isolated anything
 
