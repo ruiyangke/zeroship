@@ -844,7 +844,7 @@ anchor - the control plane refuses to make a deploy live unless the manifest's
 table names, no fields.
 
 The host also needs identities the current app-keyed request and
-`apply_bundle_ir_postgres` signature do not carry. The prerequisite Database
+`apply_ir_documents` signature do not carry. The prerequisite Database
 rekey replaces the app route with the single creator-facing
 `POST /v1/databases/{database_id}/migrations/apply` route
 (`docs/proposals/2026-08-28-app-database-decoupling.md:628-689`). Caddy routes
@@ -887,7 +887,7 @@ without DDL. In every other case an epoch mismatch is the typed stale-binding
 error. This exception must run before ordinary equality or a crash after T4
 would make its own recovery path unreachable.
 
-`apply_bundle_ir_postgres` receives this validated context, derives the shared
+`apply_ir_documents` receives this validated context, derives the shared
 publication from `datastore_id`, and emits `database_id` plus the newly
 committed epoch in the marker. The accepted cost is one authoritative head read
 under the lock; a second internal route, trusting client-supplied binding IDs,
@@ -1141,10 +1141,29 @@ leaves the publication shrunk and the claim pending; the creator must retry
 with the original bundle. This fail-closed recovery requirement is the cost of
 not storing every migration body in a second journal.
 
-**Locked host integration.** The bracket is inserted inside the current
-`apply_bundle_ir_postgres`, not around the obsolete outer `run_apply` seam.
-That function currently acquires the project lock once at
-`crates/zeroship-migrate-server/src/apply.rs:682-688`, runs its body at
+**Locked host integration.** The bracket is inserted inside the project-lock
+bracket in `apply_ir_documents`, which acquires at
+`crates/zeroship-migrate-server/src/apply.rs:346` and releases at `:440`.
+
+**THIS PARAGRAPH NAMED `apply_bundle_ir_postgres` AND CALLED `run_apply` THE
+"OBSOLETE OUTER SEAM" UNTIL 2026-08-30, AND BOTH HALVES ARE NOW WRONG.**
+`apply_bundle_ir_postgres` no longer exists - the rollback-guard work inlined it
+into `apply_ir_documents` - and `run_apply` is not outside anything: it is CALLED
+at `:382`, inside the bracket. The lock comment at `:353-357` states why that
+bracket is where it is: it "binds all four facts the deploy ledger relies on: the
+catalog snapshot used to lower, the complete supplied manifest set, the journal
+coverage verdict, and the terminal ledger timestamp. Releasing before
+`mark_applied` would let an older concurrent request stamp a newer `applied_at`
+after a later schema had already completed."
+
+So the DECISION survives - the bracket belongs where the lock is held, not around
+a wider seam - but every name in its original wording pointed at code that a
+sibling branch deleted. Nothing caught this: the citation gate rules on paths and
+on a line being inside its file, never on symbols, and the six `apply.rs:NNN`
+citations in this document all still land inside a file whose every line moved.
+
+That function previously acquired the project lock once at
+`crates/zeroship-migrate-server/src/apply.rs:682-688`, ran its body at
 `:690-718`, and releases unconditionally at `:720-740`. After the prerequisite
 Database rekey, the same locked host seam remains and the lock key is
 `database_id`, as required by
@@ -3302,7 +3321,7 @@ PostgreSQL-16 signature branch is not added.
 ### 8.3 Where it is emitted
 
 Inside the **widen** transaction of 3.6's bracket, within the locked
-`apply_bundle_ir_postgres` body specified in 3.7. Then "the publication reached
+`apply_ir_documents` body specified in 3.7. Then "the publication reached
 its new shape" and "the database epoch advanced" are one commit, and the relay
 learns both from the same ordered stream. The marker payload is a typed wire
 encoding of `(database_id, database_epoch)` rendered to canonical ASCII, not an
