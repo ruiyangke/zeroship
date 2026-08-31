@@ -523,6 +523,16 @@ where
         if result.as_ref().is_err_and(Error::is_read_timeout) {
             // A timeout cancels a possibly partial frame read. Retrying on the
             // same replication session would parse from an unknown boundary.
+            //
+            // UNBINDABLE BY PEER OBSERVATION, unlike the other five
+            // `release.shutdown()` sites in this file, which each fail exactly
+            // one test when removed. `ConnectionDropRelease::drop` shuts the
+            // handle down unconditionally, and on THIS path there is no window
+            // where the explicit call is the only thing that could have closed
+            // the peer: the sibling arms shut down and then keep the connection
+            // alive, so their peer observation lands strictly before `Drop`.
+            // Measured 2026-08-31 - a scripted read-timeout test stayed green
+            // with this line removed, so it was rejected rather than merged.
             self.in_flight.poison();
             if let Some(release) = &self.release {
                 release.shutdown();
