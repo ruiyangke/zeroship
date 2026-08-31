@@ -53,11 +53,14 @@ below was re-run by the pilot against the FULL seven-target gate
 | 4 Execute response/COPY refusal | 3 | BOUND, each independently (1 failure each) | agent table |
 | 11 Debug/non-debug query encoding | 2 | BOTH were UNBOUND but LIVE; now BOUND | `query_logs_its_parameters_when_debug_is_enabled`, `execute_logs_its_parameters_when_debug_is_enabled` |
 | 6 Cached statement replay family | 6 | BOUND, each independently | agent table, one distinct failure per copy |
+| 7 Cancel-query TLS setup | 2 | `cancel_query` covered by 4; **`cancel_query_confirmed` was UNBOUND** | `a_confirmed_cancel_refuses_a_connector_that_attests_less_than_the_session` (new) |
 | 8 Flush/read terminal polling | 3 | CLOSED: all 3 BOUND (2 were executed by nothing) | `flush_retirement_terminal_arm_...`, `read_timeout_during_a_parked_flush_...`, `backpressured_flush_nested_drain_...` |
 | 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
 | 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
+| 12 TLS prewrite poison/close | 3 | 1 bound alone; the other 2 bound only AS A PAIR (disable either and the test stays green) | `a_session_that_sent_close_notify_refuses_a_blocking_lease` |
 | 13 Startup/auth handshake | 2 | BOUND: 555 and 30 failures; the replication copy now has its own test | `replication_handshake_uses_the_configured_user_in_an_md5_response` |
+| 16 Terminal server-error recording | **8**, not 2 | 6 bound, 2 masked by a preceding drain | three new tests incl. `backpressured_flush_fatal_records_the_terminal_slot` |
 | 17 Cancel confirmation | **3**, not 2 | 2 pre-bound, 1 was UNBOUND | `raw_cancel_success_keeps_pool_lease_reusable` (new) |
 | 15 Scalar row arity | 3 | BOUND | `query_scalar` / `query_one_scalar` / `query_opt_scalar` arity tests |
 | 18 Statement-cache LRU updates | **4**, not 3 | BOUND, including the uncounted candidate-LRU copy | LRU eviction tests |
@@ -65,6 +68,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 21 Serialized terminal handling | 2 (+2 siblings elsewhere) | SPLIT: step B covered by 24; **step C is DEAD** | see below |
 | 22/27 Housekeeping close (EOF clean-close family) | 4 across the file | 2 covered by 24 each; step C DEAD; **step D was UNBOUND** | `serialized_eof_with_only_housekeeping_in_flight_closes_cleanly` (new) |
 | 23 COPY refusal drain | 2 | BOUND (visible only in the full suite) | agent-reported |
+| 24 Replication poison/release | 6 | 5 bound; line 528 UNBINDABLE, masked by `ConnectionDropRelease::drop` | see the line-528 section below |
 | 25 Bind cache invalidation | 2 | 1 pre-bound, 1 was UNBOUND | `unnamed_bind_parse_error_invalidates_cached_statement` (new) |
 | 26 Plaintext TLS shortcut | 2 | covered, but by a BLUNT probe - see note | 42 and 216 failures respectively |
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
@@ -84,6 +88,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 41 COPY state reset | 2 | CLOSED: 1 covered by 26; 1 was executed by nothing, now bound | `an_abort_before_bind_complete_releases_copy_input` |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
+| 44 Pool permit guards | **3**, not 2 | all 3 covered; 2 independently bound incl. the uncounted `WeakPermitGuard` | `after_release_rejection_releases_capacity_to_fifo_head`, `failed_or_cancelled_housekeeping_refill_wakes_fifo_head` |
 | 45 Streaming COPY refusal | 2 | BOUND each | agent table |
 | 46 Simple-query COPY collection | 2 | 1 pre-bound, 1 was UNBOUND | `unsupported_copy_out_is_refused_by_name_at_every_public_entry_point` |
 | 47 TLS panic poisoning | 2 | `with` pre-bound; **`try_with` was UNBOUND** | `a_panicking_callback_under_try_with_poisons_the_shared_session` (new) |
