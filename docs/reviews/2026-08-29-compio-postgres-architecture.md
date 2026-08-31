@@ -832,3 +832,40 @@ module into the cycle for one call.
 parser could not see, because it lives at line 3364 of `client.rs` and the
 parser stopped at 499. The single most load-bearing edge in the graph was
 invisible to the instrument measuring the graph.
+
+## Done: SCC is 8. Two load-bearing edges remain, and neither is free.
+
+Landed 2026-08-30 as `7a5c529c0` - `rollback_savepoint` moved from
+`transaction.rs` to the leaf `escape.rs`, three call sites updated, 24
+insertions and 24 deletions.
+
+    before   SCC 10   34 intra-cycle edges   3 load-bearing
+    after    SCC  8   27 intra-cycle edges   2 load-bearing
+
+`portal` and `transaction` left the cycle. The remaining two:
+
+    prepare -> statement   SCC 8 -> 7
+    client  -> copy_out    SCC 8 -> 7
+
+**Verified test-neutral by a matched control, not by arithmetic.** A pure
+`&str -> String` move must not change the test count. My first attempt to check
+that subtracted the two live targets (48 + 17) from the 7-target gate total of
+1422 and predicted 1357; the run read 1306. The subtraction was invalid because
+the gate also enables the `tls` feature, which adds tests INSIDE the lib and
+suite targets - `verify.sh` already reports this (default 1281, suite-over-tls
+1305) and I subtracted across feature sets anyway. The sound check is the same
+command, same features, same five targets, run on main WITHOUT the move:
+
+    control  (main, no move)   1306 passed 0 failed  exit 0
+    worktree (with the move)   1306 passed 0 failed  exit 0
+
+Identical. Never compare counts across feature resolutions; run the control.
+
+**Why stop here.** `prepare -> statement` is real coupling: preparing a
+statement produces a `Statement`. `client -> copy_out` was examined earlier in
+this document and judged not worth cutting - it would be a metric gain for a
+maintainability loss. Both remaining cuts would move code to satisfy a number
+rather than to make the crate easier to reason about, which is the opposite of
+why the first cut was worth making: `rollback_savepoint` genuinely belonged
+beside the `quote_identifier` it calls, and the SCC drop was the consequence,
+not the motive.
