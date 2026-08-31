@@ -4847,6 +4847,44 @@ mod tests {
         server.join().expect("fake PostgreSQL server panicked");
     }
 
+    #[compio::test]
+    async fn housekeeping_after_connect_failure_records_an_eviction() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let calls = Rc::new(Cell::new(0));
+        let hook_calls = Rc::clone(&calls);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |_| {
+            hook_calls.set(hook_calls.get() + 1);
+            Box::pin(async { Err(pool_error("scripted housekeeping rejection")) })
+        });
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+
+        assert!(Pool::housekeep(&weak).await);
+        assert_eq!(calls.get(), 1, "housekeeping never ran after_connect");
+        assert_eq!(pool.metrics.connections_created.get(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+
+        drop(pool);
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
     /// Drive one housekeeping refill whose FIRST `after_connect` parks, move the
     /// pool's `total` to `contended_total` while it is parked, then let it
     /// finish. Reports how many physical sessions that refill opened, counted
