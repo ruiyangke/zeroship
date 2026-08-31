@@ -49,6 +49,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 1 Query RowDescription | 2 | BOUND (`25712160b`) | pre-existing |
 | 5 Column metadata | 4 | BOUND (`25712160b`) | pre-existing |
 | 6 Cached statement replay family | 6 | BOUND, each independently | agent table, one distinct failure per copy |
+| 8 Flush/read terminal polling | 3 | 1 BOUND; **2 EXECUTED BY NOTHING** - see the open item below | `flush_retirement_terminal_arm_preserves_the_read_error` (the bound one) |
 | 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
 | 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
@@ -109,6 +110,28 @@ zero fail - is there anything to fix.
 The worklist also under-counted here: the `Err(error) if saw_error_response =>`
 guard arm on `Header::parse` is a fifth copy of the same decision in a different
 syntactic shape, and the group entry lists four.
+
+### OPEN: two mid-flush terminal recorders that no test executes
+
+Unlike the unbindable copies below, these are NOT provably unreachable - they
+are simply untested, and each names a real scenario. Measured 2026-08-31:
+replacing either with `panic!` leaves all 1449 tests green, so nothing runs
+them.
+
+- **`flush_with_read_draining`'s ReadTimeout poll** (`read_terminal = Some(terminal)`
+  under the comment "ReadTimeout is out-of-band and outranks every FIFO gate").
+  Needs a read timeout to fire WHILE a flush is parked. The existing
+  read-timeout tests never have a flush in flight, and the existing
+  backpressured-flush tests never arm a timeout.
+- **The nested drain loop's `ReadEvent::Terminal` arm** (`read_terminal =
+  Some(Some(terminal))` followed by `break`). The backpressured-flush tests
+  reach the OUTER poll's terminal arm instead, which is the copy that IS bound.
+  This one needs a terminal read to arrive during the nested read-draining pass.
+
+Both discard the diagnosis silently when broken: swapping either for
+`Some(None)` turns a specific error into "channel closed", which downstream
+becomes a causeless `Error::closed()`. That is the same class of defect the
+terminal-error plumbing exists to prevent.
 
 ### Two copies are unbindable by construction, and no test should be written
 
