@@ -120,7 +120,7 @@ fn injected_ddl_with_policy(
         schema,
         OWNER,
         dialect,
-        &policy,
+        policy,
     )
     .lower(&resolved, &LiveSchema::default())
     .expect("the resolved create lowers");
