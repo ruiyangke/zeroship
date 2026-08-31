@@ -3808,6 +3808,22 @@ mod tests {
     }
 
     #[test]
+    fn pgoutput_relation_type_modifier_reinterprets_the_signed_i32_boundary() {
+        let bytes = pgoutput::encode::relation(
+            16384,
+            "public",
+            "boundary",
+            b'd',
+            &[(0, "value", 25, i32::MIN)],
+        );
+        let PgOutputMessage::Relation { columns, .. } = pgoutput::decode(&bytes).unwrap() else {
+            panic!("expected Relation");
+        };
+
+        assert_eq!(columns[0].type_modifier, i32::MIN);
+    }
+
+    #[test]
     fn pgoutput_decode_insert() {
         let bytes = pgoutput::encode::insert(16384, &[Some("42"), Some("hello"), None]);
         let msg = pgoutput::decode(&bytes).unwrap();
