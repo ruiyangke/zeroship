@@ -33,7 +33,7 @@ depend on plugin-db, so there is no cycle.
 | crate and binary | `zeroship-migrate-server` |
 | config scope | `migrate_server` (`src/config.rs:21`), settings `migrate_server.*` |
 | compose service / network DNS | `migrate-server`, port 9091 |
-| creator endpoint | the configured control URL, with the edge routing `/v1/databases/*` to `migrate-server:9091` |
+| creator endpoint | the configured control URL, with the edge routing `/v1/*` to `migrate-server:9091` |
 | database objects | `zeroship.app_schema_applies`, plus the per-app engine journals |
 
 The compose service name is also the edge upstream in

@@ -11,8 +11,11 @@ use zeroship_core::config::{
     CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_migrate_server::auth::ControlPlaneAuthenticator;
-use zeroship_migrate_server::config::{MigrateServerSettings, MigrateServerSettingsSources, DEFAULT_LOG_FILTER};
+use zeroship_migrate_server::config::{
+    MigrateServerSettings, MigrateServerSettingsSources, DEFAULT_LOG_FILTER,
+};
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
+use zeroship_migrate_server::rate_limit::PostgresMutationRateLimiter;
 use zeroship_migrate_server::MigrationServiceState;
 
 #[global_allocator]
@@ -94,6 +97,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let check_config = *settings.check_config.get();
     let tmp_dir = settings.tmp_dir.get().clone();
+    let mutation_rate_limit = match build_mutation_rate_limit(
+        *settings.mutation_rate_limit_burst.get(),
+        *settings.mutation_rate_limit_per_minute.get(),
+    ) {
+        Ok(quota) => quota,
+        Err(message) => {
+            eprintln!("migrated: {message}");
+            std::process::exit(1);
+        }
+    };
 
     // THE BOOT GATE, and it runs BEFORE the dry-run return below. Until this
     // moved, `zeroship-migrate-server --check-config` reached `report.emit` and
@@ -119,6 +132,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(boot.log_format.to_string()));
         report.field("tmp_dir", CheckValue::Plain(tmp_dir.display().to_string()));
+        report.field("trust_proxy", CheckValue::Flag(*settings.trust_proxy.get()));
+        report.field(
+            "mutation_rate_limit_burst",
+            CheckValue::Count(
+                usize::try_from(*settings.mutation_rate_limit_burst.get()).unwrap_or(usize::MAX),
+            ),
+        );
+        report.field(
+            "mutation_rate_limit_per_minute",
+            CheckValue::Count(
+                usize::try_from(*settings.mutation_rate_limit_per_minute.get())
+                    .unwrap_or(usize::MAX),
+            ),
+        );
         report.field(
             "db_configured",
             CheckValue::Secret(settings.database_url.is_configured()),
@@ -234,8 +261,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .name("zeroship-migrate-server")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
-            let (control_pg, control_conn) =
-                compio_postgres::connect(&database_url, NoTls).await.map_err(|err| {
+            let (control_pg, control_conn) = compio_postgres::connect(&database_url, NoTls)
+                .await
+                .map_err(|err| {
                     tracing::error!(error = %err, "migrated: control-pg connect failed");
                     std::io::Error::other(err.to_string())
                 })?;
@@ -254,10 +282,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 settings.oauth_audience.get().clone(),
             );
             let authenticator = Arc::new(ControlPlaneAuthenticator::new(
-                control_pg,
+                Arc::clone(&control_pg),
                 zeroship_authz::load_platform_policies()
                     .expect("migrated: bundled authz policies parse"),
                 bearer_verifier,
+            ));
+            let mutation_rate_limiter = Arc::new(PostgresMutationRateLimiter::new(
+                control_pg,
+                mutation_rate_limit,
             ));
 
             let state = Arc::new(MigrationServiceState::new(
@@ -265,6 +297,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 database_url,
                 tmp_dir,
                 authenticator,
+                mutation_rate_limiter,
+                *settings.trust_proxy.get(),
                 policy_config,
             ));
             let bind_addr = format!("{}:{}", settings.bind.get(), settings.port.get());
@@ -278,6 +312,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .run()
             .await
         })?)
+}
+
+fn build_mutation_rate_limit(
+    burst: u32,
+    per_minute: u32,
+) -> Result<zeroship_authn::rate_limit::Quota, String> {
+    if burst == 0 {
+        return Err("mutation rate-limit burst must be greater than zero".to_string());
+    }
+    if per_minute == 0 {
+        return Err("mutation rate-limit per-minute rate must be greater than zero".to_string());
+    }
+    Ok(zeroship_authn::rate_limit::Quota::per_minute(
+        burst, per_minute,
+    ))
 }
 
 fn build_policy_config(
@@ -326,9 +375,15 @@ mod tests {
     use zeroship_core::config::GeneratedConfig;
 
     #[test]
+    fn mutation_rate_limit_refuses_zero_capacity_or_refill() {
+        assert!(build_mutation_rate_limit(0, 3).is_err());
+        assert!(build_mutation_rate_limit(2, 0).is_err());
+        assert!(build_mutation_rate_limit(2, 3).is_ok());
+    }
+
+    #[test]
     fn policy_config_refuses_missing_key() {
-        let err = build_policy_config("", 1)
-            .expect_err("missing policy seal key must fail closed");
+        let err = build_policy_config("", 1).expect_err("missing policy seal key must fail closed");
 
         assert!(err.contains("--policy-seal-key-file / ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY"));
     }
@@ -369,7 +424,6 @@ mod tests {
         names
     }
 
-
     #[test]
     fn every_startup_diagnostic_names_a_variable_migrated_reads() {
         // Same defect as control's: the issuer variable gained a ZEROSHIP_
@@ -389,7 +443,9 @@ mod tests {
 
         let diagnostics = [
             build_auth_provider("", "").expect_err("missing issuer must fail closed"),
-            build_policy_config("", 1).map(|_| ()).expect_err("missing seal key must fail closed"),
+            build_policy_config("", 1)
+                .map(|_| ())
+                .expect_err("missing seal key must fail closed"),
         ];
         for diagnostic in diagnostics {
             let tokens = env_like_tokens(&diagnostic);

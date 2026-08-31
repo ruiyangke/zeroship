@@ -62,6 +62,29 @@ pub struct MigrateServerSettings {
     #[config(name = "migrate_server.policy_ceiling_version", default = 1)]
     pub policy_ceiling_version: Operational<u64>,
 
+    /// Trust the rightmost usable `X-Forwarded-For` address from one upstream proxy.
+    #[arg(
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = zeroship_core::config::parse_bool_flag
+    )]
+    #[config(shared = TRUST_PROXY, default = false)]
+    pub trust_proxy: Operational<bool>,
+
+    /// Immediate per-source-IP mutation burst.
+    ///
+    /// Two permits one normal apply plus one immediate retry. Migration DDL is
+    /// far rarer and more expensive than control's broad admin surface.
+    #[config(name = "migrate_server.mutation_rate_limit_burst", default = 2)]
+    pub mutation_rate_limit_burst: Operational<u32>,
+
+    /// Steady per-source-IP mutations per minute after the burst is spent.
+    ///
+    /// Three means one token every 20 seconds, twenty times below control's
+    /// 60-per-minute admin quota while still allowing a bounded recovery loop.
+    #[config(name = "migrate_server.mutation_rate_limit_per_minute", default = 3)]
+    pub mutation_rate_limit_per_minute: Operational<u32>,
+
     /// Expected OAuth audience for accepted bearer tokens.
     #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]
     pub oauth_audience: Operational<String>,
@@ -118,7 +141,6 @@ impl ObservabilityControls for MigrateServerSettings {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -155,6 +177,19 @@ mod tests {
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    #[test]
+    fn migrated_cli_accepts_explicit_edge_safety_controls() {
+        MigrateServerSettingsSources::try_parse_from([
+            "zeroship-migrate-server",
+            "--trust-proxy",
+            "--mutation-rate-limit-burst",
+            "2",
+            "--mutation-rate-limit-per-minute",
+            "3",
+        ])
+        .expect("the edge-facing migration service must expose typed proxy and quota controls");
+    }
+
     // Secrets get a PATH flag and no value flag, so material never reaches an
     // argument list. The negative half is the point: the value spellings that
     // existed before this conversion must be GONE, not merely discouraged.
@@ -177,10 +212,18 @@ mod tests {
             Some(std::path::Path::new("/run/secrets/control"))
         );
 
-        for value_flag in ["--policy-seal-key", "--control-key", "--db", "--provision-db"] {
-            let error =
-                MigrateServerSettingsSources::try_parse_from(["zeroship-migrate-server", value_flag, "x"])
-                    .expect_err("a secret value flag must not exist");
+        for value_flag in [
+            "--policy-seal-key",
+            "--control-key",
+            "--db",
+            "--provision-db",
+        ] {
+            let error = MigrateServerSettingsSources::try_parse_from([
+                "zeroship-migrate-server",
+                value_flag,
+                "x",
+            ])
+            .expect_err("a secret value flag must not exist");
             assert_eq!(
                 error.kind(),
                 clap::error::ErrorKind::UnknownArgument,

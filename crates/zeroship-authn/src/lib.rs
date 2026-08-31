@@ -1,5 +1,7 @@
 //! Shared bearer authentication for control-like services.
 
+pub mod platform_cli;
+pub mod rate_limit;
 pub mod rejection;
 pub mod service_replay;
 
@@ -307,7 +309,7 @@ impl BearerVerifier {
     /// first sight of a platform-native creator IS this request; intersecting
     /// with the empty table would 403 every creator's first command. The
     /// fallback is not a second source of truth - it is exactly the set
-    /// `identity_bridge::ensure_platform_creator_grants` materializes, which
+    /// [`platform_cli::materialize_default_grants`] writes, which
     /// the caller triggers on [`PlatformCliEntitlement::unseeded`].
     async fn platform_cli_entitlement(
         &self,

@@ -38,7 +38,7 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::headers;
 use crate::identity::{password, password_reset};
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::ui::ResetPage;
 
 #[derive(Debug, Deserialize)]
@@ -103,7 +103,7 @@ pub async fn post(
     //    it would make this one global bucket).
     let ip = headers::client_ip(&req);
     let reset_ip_key = format!("reset_ip:{ip}");
-    match ratelimit::consume_or_throttle(db.as_ref(), &reset_ip_key, Bucket::RESET_IP).await {
+    match rate_limit::consume(db.as_ref(), &reset_ip_key, Quota::RESET_IP).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
             audit::emit(

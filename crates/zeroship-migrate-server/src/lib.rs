@@ -21,6 +21,7 @@ pub mod config;
 pub mod policy;
 pub mod provisioning;
 pub mod publication;
+pub mod rate_limit;
 pub mod schema_apply_store;
 pub mod session;
 
@@ -29,6 +30,7 @@ use std::sync::Arc;
 
 use auth::Authenticator;
 use policy::ManagedPolicyConfig;
+use rate_limit::MutationRateLimiter;
 use schema_apply_store::SchemaApplyStore;
 use zeroship_core::readiness::ReadinessGate;
 
@@ -37,6 +39,8 @@ pub struct MigrationServiceState {
     pub provision_dsn: String,
     pub tmp_dir: PathBuf,
     pub authenticator: Arc<dyn Authenticator>,
+    pub mutation_rate_limiter: Arc<dyn MutationRateLimiter>,
+    pub trust_proxy: bool,
     pub policy_config: ManagedPolicyConfig,
     pub schema_apply_store: SchemaApplyStore,
     /// Bounds `/readyz`. The probe opens a connection (this service has no
@@ -53,12 +57,16 @@ impl MigrationServiceState {
         control_dsn: String,
         tmp_dir: PathBuf,
         authenticator: Arc<dyn Authenticator>,
+        mutation_rate_limiter: Arc<dyn MutationRateLimiter>,
+        trust_proxy: bool,
         policy_config: ManagedPolicyConfig,
     ) -> Self {
         Self {
             provision_dsn,
             tmp_dir,
             authenticator,
+            mutation_rate_limiter,
+            trust_proxy,
             policy_config,
             schema_apply_store: SchemaApplyStore::new(control_dsn),
             readiness: ReadinessGate::with_defaults(),

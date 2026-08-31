@@ -19,7 +19,7 @@ agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   → zeroship deploy                            ← path, app and control from the file
   → control plane ingests → BlobStore + route registry
   → zeroship migrate                           ← env.db apps ONLY, and REQUIRED
-  -> Part B edge route -> zeroship-migrate-server applies -> per-app schema + role
+  -> /v1 edge route -> zeroship-migrate-server applies -> per-app schema + role
   → gateway pulls routes (5s) → serves the app (static + RPC + env.* primitives)
 ```
 
@@ -45,16 +45,17 @@ static assets, dispatches its RPCs, and fails the first `env.db` call with
 `{"message":"internal error"}`.
 
 `zeroship migrate` reuses the configured control URL, but control is not in the
-request path once Part B re-keys the route. The edge then routes the migration
-prefix directly to `zeroship-migrate-server`, which verifies the creator bearer,
+request path. The edge routes the complete `/v1/*` namespace directly to
+`zeroship-migrate-server`, which verifies the creator bearer,
 requires `AppsDeploy` plus app ownership, and intersects the creator draft with
 the operator ceiling. The raw migration-service port remains loopback-only at
 the host boundary.
 
-Part A is intentionally staged and is not independently deployable: the CLI and
-service still use `/v1/apps/{app_id}`, while the edge rule reserves
-`/v1/databases/*`. Until Part B lands, a shared-control-URL migration falls
-through to control and returns 404. There is no temporary compatibility route.
+The namespace-wide matcher is deliberate. The current
+`/v1/apps/{app_id}/migrations/apply` route works through the shared control URL,
+and a later database-id re-key does not require another edge rollout. Control
+declares no `/v1` routes; `tests/deploy_scripts_gate.sh` enforces both that
+collision boundary and the exact Caddy handler.
 
 - **Scaffold:** `examples/starter/` — a minimal, agent-facing zeroship app
   (fetch/static SPA + `getMessages`/`addMessage` RPCs via `@zeroship/rpc/server`,

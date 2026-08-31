@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
@@ -15,9 +16,9 @@ use ntex::web::{self, test, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
+use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
 use zeroship_migrate::{
-    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend,
-    ProjectLockAcquisition,
+    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend, ProjectLockAcquisition,
 };
 use zeroship_migrate_postgres::PostgresBackend;
 use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
@@ -25,6 +26,7 @@ use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
 use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
+use zeroship_migrate_server::rate_limit::{MutationRateLimiter, PostgresMutationRateLimiter};
 use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::session::CompioPgSession;
 use zeroship_migrate_server::MigrationServiceState;
@@ -42,10 +44,8 @@ fn dsn() -> String {
 }
 
 fn tmpdir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "zs-migrated-{label}-{}",
-        Uuid::new_v4().simple()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("zs-migrated-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
 }
@@ -63,6 +63,36 @@ struct StaticAuthenticator {
     /// Every `request_id` the handlers passed in, in call order, so a test can
     /// assert the id the caller sent is the id authz was given.
     seen_request_ids: Mutex<Vec<String>>,
+}
+
+#[derive(Debug)]
+struct AllowAllMutationRateLimiter;
+
+#[async_trait(?Send)]
+impl MutationRateLimiter for AllowAllMutationRateLimiter {
+    async fn consume(
+        &self,
+        _source_ip: Option<IpAddr>,
+    ) -> Result<zeroship_authn::rate_limit::RateLimitDecision, String> {
+        Ok(zeroship_authn::rate_limit::RateLimitDecision::Allowed)
+    }
+}
+
+#[derive(Debug)]
+struct ThrottlingMutationRateLimiter;
+
+#[async_trait(?Send)]
+impl MutationRateLimiter for ThrottlingMutationRateLimiter {
+    async fn consume(
+        &self,
+        _source_ip: Option<IpAddr>,
+    ) -> Result<zeroship_authn::rate_limit::RateLimitDecision, String> {
+        Ok(zeroship_authn::rate_limit::RateLimitDecision::Throttled(
+            zeroship_authn::rate_limit::RateLimited {
+                retry_after_secs: 20.0,
+            },
+        ))
+    }
 }
 
 impl StaticAuthenticator {
@@ -111,6 +141,7 @@ impl Authenticator for StaticAuthenticator {
         token: &str,
         app_id: Uuid,
         required_action: Action,
+        _request_ip: Option<IpAddr>,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
         self.seen_request_ids
@@ -210,8 +241,8 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     // holds, so the leak makes a production-shaped check slower on every run and
     // muddies any measurement of it (the `runtime_dependents_sql` docstring's
     // "540 of 540" was taken over a population this suite had been growing).
-    let runtime_role = zeroship_core::database_role::per_app_role_name(&schema)
-        .expect("test app role name");
+    let runtime_role =
+        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
     for r in [role, runtime_role] {
         let _ = conn
             .batch_execute(&format!(
@@ -232,7 +263,10 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
         )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[app_id])
+        .execute(
+            "DELETE FROM zeroship.app_members WHERE app_id = $1",
+            &[app_id],
+        )
         .await;
     let _ = conn
         .execute("DELETE FROM zeroship.apps WHERE id = $1", &[app_id])
@@ -247,13 +281,34 @@ async fn cleanup_user(conn: &Client, user_id: &Uuid) {
         )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.permission_tokens WHERE owner_id = $1", &[user_id])
+        .execute(
+            "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
+            &[user_id],
+        )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[user_id])
+        .execute(
+            "DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1",
+            &[user_id],
+        )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.app_members WHERE user_id = $1", &[user_id])
+        .execute(
+            "DELETE FROM zeroship.app_members WHERE user_id = $1",
+            &[user_id],
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "DELETE FROM zeroship.principal_grants WHERE principal_id = $1",
+            &[user_id],
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "DELETE FROM zeroship.identity_links WHERE principal_id = $1",
+            &[user_id],
+        )
         .await;
     let _ = conn
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[user_id])
@@ -311,6 +366,24 @@ async fn seed_user(conn: &Client, user_id: Uuid, label: &str) {
 
 fn state_for(authenticator: Arc<dyn Authenticator>) -> (Arc<MigrationServiceState>, PathBuf) {
     state_for_with_dsns(authenticator, dsn(), dsn())
+}
+
+async fn state_for_trusted_proxy(
+    authenticator: Arc<dyn Authenticator>,
+) -> (Arc<MigrationServiceState>, PathBuf) {
+    let control_pg = Arc::new(admin_conn().await);
+    state_for_with_policy_config_and_edge(
+        authenticator,
+        dsn(),
+        dsn(),
+        ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config"),
+        Arc::new(PostgresMutationRateLimiter::new(
+            control_pg,
+            zeroship_authn::rate_limit::Quota::per_minute(2, 3),
+        )),
+        true,
+    )
 }
 
 fn state_for_with_dsns(
@@ -424,6 +497,24 @@ fn state_for_with_policy_config(
     control_dsn: String,
     policy_config: ManagedPolicyConfig,
 ) -> (Arc<MigrationServiceState>, PathBuf) {
+    state_for_with_policy_config_and_edge(
+        authenticator,
+        provision_dsn,
+        control_dsn,
+        policy_config,
+        Arc::new(AllowAllMutationRateLimiter),
+        false,
+    )
+}
+
+fn state_for_with_policy_config_and_edge(
+    authenticator: Arc<dyn Authenticator>,
+    provision_dsn: String,
+    control_dsn: String,
+    policy_config: ManagedPolicyConfig,
+    mutation_rate_limiter: Arc<dyn MutationRateLimiter>,
+    trust_proxy: bool,
+) -> (Arc<MigrationServiceState>, PathBuf) {
     assert_policy_fixtures_are_current(&policy_config);
     let tmp = tmpdir("tmp");
     (
@@ -432,6 +523,8 @@ fn state_for_with_policy_config(
             control_dsn,
             tmp.clone(),
             authenticator,
+            mutation_rate_limiter,
+            trust_proxy,
             policy_config,
         )),
         tmp,
@@ -773,6 +866,10 @@ fn platform_jwks_body() -> String {
 /// A platform OAuth access token for `subject` carrying `scope`, signed by the
 /// key `platform_jwks_url()` publishes.
 fn platform_token(subject: Uuid, scope: &str) -> String {
+    platform_token_for_client(subject, CONSOLE_CLIENT_ID, scope)
+}
+
+fn platform_token_for_client(subject: Uuid, client_id: &str, scope: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -785,7 +882,7 @@ fn platform_token(subject: Uuid, scope: &str) -> String {
         "iat": now,
         "nbf": now.saturating_sub(1),
         "jti": Uuid::new_v4().to_string(),
-        "client_id": CONSOLE_CLIENT_ID,
+        "client_id": client_id,
         "scope": scope,
     });
     let mut header = Header::new(Algorithm::EdDSA);
@@ -848,7 +945,10 @@ async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
     );
     let lit = q.replace('\'', "''");
     let present = conn
-        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .query(
+            &format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"),
+            &[],
+        )
         .await
         .expect("regclass probe");
     if !present[0].get::<_, bool>("p") {
@@ -868,7 +968,10 @@ async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
 async fn relation_exists(conn: &Client, qualified: &str) -> bool {
     let lit = qualified.replace('\'', "''");
     let rows = conn
-        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .query(
+            &format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"),
+            &[],
+        )
         .await
         .expect("regclass probe");
     rows[0].get("p")
@@ -918,8 +1021,7 @@ async fn as_app_runtime_identity(
 ) -> Result<(), compio_postgres::Error> {
     let worker = quote_ident(zeroship_migrate_server::apply::WORKER_ROLE);
     let runtime = quote_ident(
-        &zeroship_core::database_role::per_app_role_name(app_schema)
-            .expect("test app role name"),
+        &zeroship_core::database_role::per_app_role_name(app_schema).expect("test app role name"),
     );
     conn.batch_execute(&format!(
         "SET SESSION AUTHORIZATION {worker}; SET ROLE {runtime};"
@@ -931,7 +1033,9 @@ async fn as_app_runtime_identity(
          comes from the test DSN, the second from provision_runtime_app_role",
     );
     let out = conn.batch_execute(sql).await;
-    let restored = conn.batch_execute("RESET ROLE; RESET SESSION AUTHORIZATION;").await;
+    let restored = conn
+        .batch_execute("RESET ROLE; RESET SESSION AUTHORIZATION;")
+        .await;
     assert!(
         restored.is_ok(),
         "the admin identity must come back on this connection or every later \
@@ -1144,8 +1248,8 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     let schema = app_id.to_string();
     let table = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
     let audit = format!("{}.{}", quote_ident(&schema), quote_ident(table));
-    let runtime_role = zeroship_core::database_role::per_app_role_name(&schema)
-        .expect("test app role name");
+    let runtime_role =
+        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
 
     // DELETION, not reordering: say which one before touching any privilege.
     assert!(
@@ -1218,7 +1322,6 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     cleanup_user(&conn, &owner_id).await;
 }
 
-
 #[ntex::test]
 async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     let conn = admin_conn().await;
@@ -1271,8 +1374,11 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     // `schema_migrations` would have it silently adopted as the journal. This
     // asserts nothing occupies that name.
     assert!(
-        !relation_exists(&conn, &format!("\"{app_id}_migrations\".__zeroship_schema_migrations"))
-            .await,
+        !relation_exists(
+            &conn,
+            &format!("\"{app_id}_migrations\".__zeroship_schema_migrations")
+        )
+        .await,
         "the separate <app>_migrations meta schema must be gone"
     );
     assert!(
@@ -1399,14 +1505,11 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let tmp = tmpdir("project-lock-span");
-    let policy_config = ManagedPolicyConfig::default_confined(
-        TEST_POLICY_SEAL_KEY.to_vec(),
-        1,
-    )
-    .expect("test policy config");
+    let policy_config = ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+        .expect("test policy config");
     let schema_apply_store = SchemaApplyStore::new(dsn());
-    let initial: ApplyMigrationsRequest = serde_json::from_value(create_notes_request())
-        .expect("deserialize initial apply request");
+    let initial: ApplyMigrationsRequest =
+        serde_json::from_value(create_notes_request()).expect("deserialize initial apply request");
     apply_ir_documents(
         &dsn(),
         &tmp,
@@ -1419,23 +1522,22 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
     .await
     .expect("create the table file 2 will alter");
 
-    let notes = format!("{}.{}", quote_ident(&app_id.to_string()), quote_ident("notes"));
-    conn.batch_execute(&format!(
-        "BEGIN; LOCK TABLE {notes} IN ACCESS SHARE MODE;"
-    ))
-    .await
-    .expect("hold the file-2 table lock");
+    let notes = format!(
+        "{}.{}",
+        quote_ident(&app_id.to_string()),
+        quote_ident("notes")
+    );
+    conn.batch_execute(&format!("BEGIN; LOCK TABLE {notes} IN ACCESS SHARE MODE;"))
+        .await
+        .expect("hold the file-2 table lock");
 
     let apply_dsn = dsn();
     let apply_tmp = tmp.clone();
     let request: ApplyMigrationsRequest = serde_json::from_value(two_file_lock_span_request())
         .expect("deserialize two-file apply request");
     let apply_task = compio::runtime::spawn(async move {
-        let policy_config = ManagedPolicyConfig::default_confined(
-            TEST_POLICY_SEAL_KEY.to_vec(),
-            1,
-        )
-        .expect("test policy config");
+        let policy_config = ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config");
         let schema_apply_store = SchemaApplyStore::new(apply_dsn.clone());
         apply_ir_documents(
             &apply_dsn,
@@ -1650,7 +1752,10 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     let resp = test::call_service(&svc, post(create_notes_request())).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let journaled_before = journaled_count(&conn, &app_id).await;
-    assert!(journaled_before >= 1, "the journal must exist to be attacked");
+    assert!(
+        journaled_before >= 1,
+        "the journal must exist to be attacked"
+    );
 
     // THE FIXTURE HAS ALREADY FAILED TWICE HERE, both times passing the case while
     // measuring itself: once with `"table":` on a `createTable` (refused as a
@@ -1687,11 +1792,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
              comment above is now wrong: {body}"
         );
         assert!(
-            relation_exists(
-                &conn,
-                &format!("\"{app_id}\".__zeroship_schema_migrations")
-            )
-            .await,
+            relation_exists(&conn, &format!("\"{app_id}\".__zeroship_schema_migrations")).await,
             "the journal must still exist after a refused {label}"
         );
     }
@@ -1716,7 +1817,11 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     )
     .await;
     assert!(
-        !relation_exists(&conn, &format!("\"{fresh_id}\".__zeroship_schema_migrations")).await,
+        !relation_exists(
+            &conn,
+            &format!("\"{fresh_id}\".__zeroship_schema_migrations")
+        )
+        .await,
         "this arm only means anything against an app with NO journal yet"
     );
     let resp = test::call_service(
@@ -1796,9 +1901,8 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
-    let publication =
-        zeroship_core::replication_names::publication_name(&app_id.to_string())
-            .expect("app id is a valid publication seed");
+    let publication = zeroship_core::replication_names::publication_name(&app_id.to_string())
+        .expect("app id is a valid publication seed");
     conn.batch_execute(&format!(
         "CREATE PUBLICATION {} FOR ALL TABLES",
         quote_ident(&publication)
@@ -1975,8 +2079,6 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
     cleanup_user(&conn, &owner_id).await;
 }
 
-
-
 #[ntex::test]
 async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     let app_id = Uuid::now_v7();
@@ -2046,7 +2148,12 @@ async fn apply_api_rejects_bearer_for_different_app() {
     let other_app = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("wrong-app-token", owner_id, [Scope::AppsDeploy], [other_app]);
+    auth.insert(
+        "wrong-app-token",
+        owner_id,
+        [Scope::AppsDeploy],
+        [other_app],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2100,7 +2207,10 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     );
 
     let role_rows = conn
-        .query("SELECT 1 FROM pg_roles WHERE rolname = 'zs_migrated_forbidden'", &[])
+        .query(
+            "SELECT 1 FROM pg_roles WHERE rolname = 'zs_migrated_forbidden'",
+            &[],
+        )
         .await
         .expect("query pg_roles");
     assert!(role_rows.is_empty(), "guard-denied createRole must not run");
@@ -2206,10 +2316,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
         .header("authorization", "Bearer good-token")
-        .set_json(&with_policy(
-            create_notes_request(),
-            escalating_policy(),
-        ))
+        .set_json(&with_policy(create_notes_request(), escalating_policy()))
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2241,10 +2348,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
         .header("authorization", "Bearer good-token")
-        .set_json(&with_policy(
-            create_notes_request(),
-            malformed_policy(),
-        ))
+        .set_json(&with_policy(create_notes_request(), malformed_policy()))
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2254,6 +2358,192 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     assert!(
         detail.contains(MIGRATE_POLICY_FILENAME) && detail.contains("unknown field"),
         "malformed policy should be rejected, got: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+/// The direct edge route must retain the shared, PostgreSQL-backed mutation
+/// bucket that the deleted control forward used to apply. Two tokens are the
+/// configured burst; the third request from the same trusted source is refused,
+/// while a different source still owns an independent bucket.
+#[ntex::test]
+async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    let bucket_keys = [
+        "migrate:mutation:ip:203.0.113.41",
+        "migrate:mutation:ip:203.0.113.42",
+    ];
+    let cleanup = admin_conn().await;
+    for key in bucket_keys {
+        cleanup
+            .execute(
+                "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
+                &[&key],
+            )
+            .await
+            .expect("clear mutation rate-limit fixture");
+    }
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (first_state, first_tmp) = state_for_trusted_proxy(auth.clone()).await;
+    let (second_state, second_tmp) = state_for_trusted_proxy(auth).await;
+    let first_service = test::init_service(
+        web::App::new()
+            .state(first_state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+    let second_service = test::init_service(
+        web::App::new()
+            .state(second_state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let invalid_body = with_policy(create_notes_request(), malformed_policy());
+    let post = |source_ip: &str| {
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .header("x-forwarded-for", format!("198.51.100.1, {source_ip}"))
+            .set_json(&invalid_body)
+            .to_request()
+    };
+
+    let mut statuses = Vec::new();
+    for _ in 0..2 {
+        let response = test::call_service(&first_service, post("203.0.113.41")).await;
+        statuses.push(response.status());
+        let _ = test::read_body(response).await;
+    }
+    let third = test::call_service(&second_service, post("203.0.113.41")).await;
+    let third_retry_after = third
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    statuses.push(third.status());
+    let _ = test::read_body(third).await;
+    let other_source = test::call_service(&second_service, post("203.0.113.42")).await;
+    let other_status = other_source.status();
+    let _ = test::read_body(other_source).await;
+
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::TOO_MANY_REQUESTS,
+        ],
+        "the third same-IP mutation must be throttled after the burst"
+    );
+    assert!(
+        third_retry_after.is_some(),
+        "a throttled caller needs a Retry-After bound"
+    );
+    assert_eq!(
+        other_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a different source IP must not inherit the exhausted bucket"
+    );
+
+    for key in bucket_keys {
+        cleanup
+            .execute(
+                "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
+                &[&key],
+            )
+            .await
+            .expect("remove mutation rate-limit fixture");
+    }
+    let _ = std::fs::remove_dir_all(first_tmp);
+    let _ = std::fs::remove_dir_all(second_tmp);
+}
+
+/// Rollback is not implemented yet, but it is already a mutating route. Bind
+/// the security gate before Phase 2 replaces the stub so that implementation
+/// cannot accidentally publish an unthrottled DDL path.
+#[ntex::test]
+async fn rollback_route_passes_through_the_mutation_rate_limiter() {
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for_with_policy_config_and_edge(
+        auth,
+        dsn(),
+        dsn(),
+        ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config"),
+        Arc::new(ThrottlingMutationRateLimiter),
+        false,
+    );
+    let service = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let request = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/rollback"))
+        .header("authorization", "Bearer good-token")
+        .to_request();
+    let response = test::call_service(&service, request).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("20")
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+/// The CLI posts the generated IR envelope verbatim. Pin the former 8 MiB
+/// ingress contract so ntex's 32 KiB extractor default cannot reject a real
+/// migration bundle before authentication and throttling run.
+#[ntex::test]
+async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for_with_policy_config_and_edge(
+        auth,
+        dsn(),
+        dsn(),
+        ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config"),
+        Arc::new(ThrottlingMutationRateLimiter),
+        false,
+    );
+    let service = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+    let mut body = create_notes_request();
+    body["policy"] = json!({
+        "filename": MIGRATE_POLICY_FILENAME,
+        "body": "#".repeat(40_000),
+    });
+
+    let request = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer good-token")
+        .set_json(&body)
+        .to_request();
+    let response = test::call_service(&service, request).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a body below the documented 8 MiB ceiling must reach the handler"
     );
 
     let _ = std::fs::remove_dir_all(tmp);
@@ -2275,6 +2565,86 @@ async fn real_delegating_authenticator_accepts_apps_deploy_owner_bearer() {
         .await
         .expect("app owner holding apps:deploy verifies");
     assert_eq!(caller.principal_id, owner_id);
+
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+}
+
+/// The migration service is now a platform CLI bearer's first possible
+/// authenticated destination. It must materialize the default rows itself so
+/// an operator can narrow the same token immediately and permanently.
+#[ntex::test]
+async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let scope = PLATFORM_CLI_ISSUABLE_SCOPES.join(" ");
+    let token = platform_token_for_client(owner_id, PLATFORM_CLI_CLIENT_ID, &scope);
+    let auth_conn = admin_conn().await;
+    let authenticator = real_authenticator(auth_conn);
+
+    authenticator
+        .verify_bearer(&token, app_id, Scope::AppsDeploy, "first-cli-apply")
+        .await
+        .expect("the unseeded CLI fallback authorizes its first apply");
+
+    let marker_count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.identity_links \
+             WHERE principal_id = $1 AND provider = 'platform'",
+            &[&owner_id],
+        )
+        .await
+        .expect("query platform identity marker")
+        .get(0);
+    let stored_grants = conn
+        .query(
+            "SELECT grant_name FROM zeroship.principal_grants \
+             WHERE principal_id = $1 ORDER BY grant_name",
+            &[&owner_id],
+        )
+        .await
+        .expect("query materialized CLI grants")
+        .iter()
+        .map(|row| row.get::<_, String>("grant_name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        marker_count, 1,
+        "the platform identity marker was not materialized"
+    );
+    assert_eq!(
+        stored_grants,
+        PLATFORM_CLI_ISSUABLE_SCOPES.map(str::to_owned),
+        "the exact default CLI grant set was not materialized"
+    );
+
+    conn.execute(
+        "DELETE FROM zeroship.principal_grants \
+         WHERE principal_id = $1 AND grant_name = 'apps:deploy'",
+        &[&owner_id],
+    )
+    .await
+    .expect("operator narrows apps:deploy");
+    let error = authenticator
+        .verify_bearer(&token, app_id, Scope::AppsDeploy, "narrowed-cli-apply")
+        .await
+        .expect_err("the already-issued bearer must observe live narrowing");
+    assert!(matches!(error, AuthError::Forbidden));
+    let deploy_grants: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.principal_grants \
+             WHERE principal_id = $1 AND grant_name = 'apps:deploy'",
+            &[&owner_id],
+        )
+        .await
+        .expect("query narrowed grant")
+        .get(0);
+    assert_eq!(
+        deploy_grants, 0,
+        "a later request re-seeded an operator revocation"
+    );
 
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
@@ -2345,7 +2715,12 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let err = authenticator
-        .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(
+            "not-a-jwt",
+            Uuid::now_v7(),
+            Scope::AppsDeploy,
+            "test-request-id",
+        )
         .await
         .expect_err("malformed bearer must be denied");
     assert!(
@@ -2406,4 +2781,68 @@ async fn authz_receives_the_callers_request_id_pg() {
 
     drop(tmp);
     cleanup_app(&conn, &app_id).await;
+}
+
+/// The source address is authz input, not just a rate-limit key. Drive the real
+/// verifier and Cedar audit writer so a value captured only at the HTTP edge
+/// cannot satisfy this regression.
+#[ntex::test]
+async fn trusted_source_ip_reaches_the_authz_context_and_audit_row_pg() {
+    let conn = admin_conn().await;
+    let bucket_key = "migrate:mutation:ip:203.0.113.77";
+    conn.execute(
+        "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
+        &[&bucket_key],
+    )
+    .await
+    .expect("clear source-IP mutation bucket fixture");
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let token = platform_token(owner_id, "apps:deploy");
+    let authenticator = Arc::new(real_authenticator(admin_conn().await));
+    let (state, tmp) = state_for_trusted_proxy(authenticator).await;
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let request_id = format!("migrated-source-ip-{}", Uuid::new_v4().simple());
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-request-id", request_id.as_str())
+        .header("x-forwarded-for", "198.51.100.9, 203.0.113.77")
+        .set_json(&with_policy(create_notes_request(), malformed_policy()))
+        .to_request();
+    let response = test::call_service(&svc, req).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let _ = test::read_body(response).await;
+
+    let observed_ip: Option<String> = conn
+        .query_one(
+            "SELECT host(request_ip) FROM zeroship.authz_decisions WHERE request_id = $1",
+            &[&request_id],
+        )
+        .await
+        .expect("query authz audit source IP")
+        .get(0);
+    assert_eq!(
+        observed_ip.as_deref(),
+        Some("203.0.113.77"),
+        "authz did not receive the trusted proxy's rightmost source address"
+    );
+
+    conn.execute(
+        "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
+        &[&bucket_key],
+    )
+    .await
+    .expect("remove source-IP mutation bucket fixture");
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
 }

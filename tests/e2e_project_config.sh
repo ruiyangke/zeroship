@@ -47,6 +47,7 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 
 # Own port band + container name so this can run beside the other harnesses.
 : "${ZEROSHIP_CONTROL_PORT:=9131}"
+: "${ZEROSHIP_EDGE_PORT:=9130}"
 : "${ZEROSHIP_WORKER_PORT:=8091}"
 : "${ZEROSHIP_GATEWAY_PORT:=8021}"
 : "${ZEROSHIP_MIGRATE_SERVER_PORT:=9231}"
@@ -117,7 +118,7 @@ echo "=== start control, migrated, worker, and gateway ==="
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do
+for p in $ZEROSHIP_EDGE_PORT $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do
   lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -146,6 +147,32 @@ boot control $ZEROSHIP_CONTROL_PORT -- "$BIN/zeroship-control" --port $ZEROSHIP_
   --blob-store "$WORK/blobs"
 boot migrated $ZEROSHIP_MIGRATE_SERVER_PORT -- "$BIN/zeroship-migrate-server" --port $ZEROSHIP_MIGRATE_SERVER_PORT \
   --tmp-dir "$WORK/migrated-tmp"
+# Reproduce the production Caddy path split without adding Caddy as a harness
+# dependency: /v1 belongs to migrate-server and every other path to control.
+# The project keeps one shared URL, so both migrate and deploy exercise the
+# same creator contract as the tracked edge.
+boot edge $ZEROSHIP_EDGE_PORT -- node -e '
+const http = require("http");
+const [edgePort, controlPort, migratePort] = process.argv.slice(1).map(Number);
+http.createServer((request, response) => {
+  const port = request.url.startsWith("/v1/") ? migratePort : controlPort;
+  const upstream = http.request({
+    hostname: "127.0.0.1",
+    port,
+    path: request.url,
+    method: request.method,
+    headers: request.headers,
+  }, incoming => {
+    response.writeHead(incoming.statusCode, incoming.headers);
+    incoming.pipe(response);
+  });
+  upstream.on("error", () => {
+    response.writeHead(502, {"content-type": "application/json"});
+    response.end("{\"error\":\"edge upstream unavailable\"}");
+  });
+  request.pipe(upstream);
+}).listen(edgePort, "127.0.0.1");
+' "$ZEROSHIP_EDGE_PORT" "$ZEROSHIP_CONTROL_PORT" "$ZEROSHIP_MIGRATE_SERVER_PORT"
 boot worker $ZEROSHIP_WORKER_PORT -- "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" --poll-interval 2
 boot gate $ZEROSHIP_GATEWAY_PORT -- "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT \
@@ -202,7 +229,7 @@ cat > "$APP_DIR/zeroship.jsonc" <<JSONC
   "\$schema": "https://zeroship.ai/schema/project-v1.json",
   "name": "projcfg-e2e",
   "app": "$APP_ID",
-  "control": "http://localhost:$ZEROSHIP_CONTROL_PORT",
+  "control": "http://localhost:$ZEROSHIP_EDGE_PORT",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
   "migrations": { "dir": "migrations", "out": "generated/elsewhere" },
@@ -224,11 +251,9 @@ grep -q "\"out\":\"generated/elsewhere\"" "$WORK/config-show.txt" \
 
 echo ""
 echo "--- transcript: zeroship migrate (no flags) ---"
-# PART A STAGING GAP. This harness has one project-config control URL and no
-# edge. The CLI still posts /v1/apps/* while the new edge reservation is
-# /v1/databases/*, so this leg returns control's 404 until Part B re-keys the
-# route. A temporary test proxy or second config endpoint would hide the exact
-# production gap this sequencing deliberately leaves visible.
+# The local edge above sends the CLI's current /v1/apps/* route directly to
+# migrate-server. A narrower /v1/databases/* matcher would send this request to
+# control and reproduce the 404 that held the direct-edge branch.
 MIG_OUT="$( cd "$APP_DIR" && "$BIN/zeroship" migrate 2>&1 )"; MIG_RC=$?
 echo "$MIG_OUT"
 if [ "$MIG_RC" = 0 ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG_OUT"; then
@@ -239,7 +264,7 @@ fi
 grep -q "app = $APP_ID (from zeroship.jsonc)" <<<"$MIG_OUT" \
   && pass "migrate printed the app's provenance before the POST" \
   || fail "migrate did not print app provenance"
-grep -q "control = http://localhost:$ZEROSHIP_CONTROL_PORT (from zeroship.jsonc)" <<<"$MIG_OUT" \
+grep -q "control = http://localhost:$ZEROSHIP_EDGE_PORT (from zeroship.jsonc)" <<<"$MIG_OUT" \
   && pass "migrate printed the control plane's provenance before the POST" \
   || fail "migrate did not print control provenance"
 grep -qF "migrations = $APP_DIR/generated/elsewhere/migrations.ir.json" <<<"$MIG_OUT" \

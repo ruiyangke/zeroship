@@ -7197,6 +7197,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
  "zeroship-mailer",

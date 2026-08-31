@@ -223,7 +223,7 @@ by the generator.
 | `origin_scheme` | operational | `ZEROSHIP_ORIGIN_SCHEME` | `origin_scheme` | zeroship-control `--origin-scheme`<br>zeroship-gate `--origin-scheme` | `OriginScheme::Https` |
 | `pairwise_salt` | secret | `ZEROSHIP_PAIRWISE_SALT` | `pairwise_salt` | zeroship-control `--pairwise-salt-file`<br>zeroship-gate `--pairwise-salt-file` | - |
 | `poll_interval` | operational | `ZEROSHIP_POLL_INTERVAL` | `poll_interval` | zeroship-gate `--poll-interval`<br>zeroship-worker `--poll-interval` | `5` |
-| `trust_proxy` | operational | `ZEROSHIP_TRUST_PROXY` | `trust_proxy` | zeroship-control `--trust-proxy`<br>zeroship-gate `--trust-proxy` | `false` |
+| `trust_proxy` | operational | `ZEROSHIP_TRUST_PROXY` | `trust_proxy` | zeroship-control `--trust-proxy`<br>zeroship-gate `--trust-proxy`<br>zeroship-migrate-server `--trust-proxy` | `false` |
 | `trusted_origins` | operational | `ZEROSHIP_TRUSTED_ORIGINS` | `trusted_origins` | zeroship-gate `--trusted-origins` | empty |
 | `worker_key` | secret | `ZEROSHIP_WORKER_KEY` | `worker_key` | zeroship-control `--worker-key-file`<br>zeroship-gate `--worker-key-file`<br>zeroship-worker `--worker-key-file` | - |
 | `worker_urls` | operational | `ZEROSHIP_WORKER_URLS` | `worker_urls` | zeroship-control `--worker-urls`<br>zeroship-gate `--worker-urls` | `http://localhost:8080` |
@@ -360,6 +360,8 @@ by the generator.
 | --- | --- | --- | --- | --- | --- |
 | `migrate_server.bind` | operational | `ZEROSHIP_MIGRATE_SERVER_BIND` | `migrate_server.bind` | zeroship-migrate-server `--bind` | `127.0.0.1` |
 | `migrate_server.database_url` | secret | `ZEROSHIP_MIGRATE_SERVER_DATABASE_URL` | `migrate_server.database_url` | zeroship-migrate-server `--database-url-file` | - |
+| `migrate_server.mutation_rate_limit_burst` | operational | `ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_BURST` | `migrate_server.mutation_rate_limit_burst` | zeroship-migrate-server `--mutation-rate-limit-burst` | `2` |
+| `migrate_server.mutation_rate_limit_per_minute` | operational | `ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_PER_MINUTE` | `migrate_server.mutation_rate_limit_per_minute` | zeroship-migrate-server `--mutation-rate-limit-per-minute` | `3` |
 | `migrate_server.policy_ceiling_version` | operational | `ZEROSHIP_MIGRATE_SERVER_POLICY_CEILING_VERSION` | `migrate_server.policy_ceiling_version` | zeroship-migrate-server `--policy-ceiling-version` | `1` |
 | `migrate_server.policy_seal_key` | secret | `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` | `migrate_server.policy_seal_key` | zeroship-migrate-server `--policy-seal-key-file` | - |
 | `migrate_server.port` | operational | `ZEROSHIP_MIGRATE_SERVER_PORT` | `migrate_server.port` | zeroship-migrate-server `--port` | `9091` |

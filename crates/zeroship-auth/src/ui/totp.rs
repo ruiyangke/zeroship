@@ -80,7 +80,7 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::password;
 use crate::identity::totp;
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::users::UserRow;
 use crate::store::{sessions, totp as totp_store, users};
@@ -535,7 +535,7 @@ async fn verify_reauth(
 #[allow(clippy::future_not_send)]
 async fn rate_limited(db: &compio_postgres::Client, user_id: uuid::Uuid) -> bool {
     let key = format!("totp:verify:{user_id}");
-    match ratelimit::consume(db, &key, Bucket::TOTP_VERIFY).await {
+    match rate_limit::consume(db, &key, Quota::TOTP_VERIFY).await {
         Ok(RateLimitDecision::Allowed) => false,
         Ok(RateLimitDecision::Throttled(_)) => true,
         Err(e) => {

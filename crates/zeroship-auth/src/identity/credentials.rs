@@ -29,7 +29,7 @@ use serde_json::json;
 use crate::audit::{self, AuditEvent};
 use crate::identity::eligibility;
 use crate::identity::password;
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::store::users;
 
 /// A successfully-verified local user. Carrying the whole row lets the caller
@@ -113,12 +113,12 @@ pub async fn verify_password_credentials(
     // 1. Rate limit (3 buckets, deepest scope first).
     let email_norm = email.trim().to_ascii_lowercase();
     let buckets = [
-        (format!("login:eip:{email_norm}:{ip}"), Bucket::LOGIN_EIP),
-        (format!("login:email:{email_norm}"), Bucket::LOGIN_EMAIL),
-        (format!("login:ip:{ip}"), Bucket::LOGIN_IP),
+        (format!("login:eip:{email_norm}:{ip}"), Quota::LOGIN_EIP),
+        (format!("login:email:{email_norm}"), Quota::LOGIN_EMAIL),
+        (format!("login:ip:{ip}"), Quota::LOGIN_IP),
     ];
     for (key, bucket) in &buckets {
-        match ratelimit::consume(db, key, *bucket).await {
+        match rate_limit::consume(db, key, *bucket).await {
             Ok(RateLimitDecision::Allowed) => {}
             Ok(RateLimitDecision::Throttled(_)) => {
                 audit::emit(
