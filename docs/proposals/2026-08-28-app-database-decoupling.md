@@ -29,13 +29,13 @@ the same creator - which the workspace model satisfies by construction. Cross-cr
 blocked on O1 (section 14): the unmask policy is authored by the READING app, and no server-side
 mechanism reaches it. The same-creator restriction ships without O1 resolved.
 
-**The schema epoch is enforced by PostgreSQL, not compared in Rust.** The per-grant role name
-carries it - `zs_bind_<gid>_e<E>` - and `SET LOCAL ROLE` on that name is the first statement of the
-setup batch that already exists, so a rotated epoch fails in the database and no code path can skip
-it. Section 6 has the mechanism, the rejected alternative and the two measurements that settled it.
+**The worker's stale-binding epoch fence is enforced by PostgreSQL, not by a Rust authorization
+comparison.** The per-grant role name carries it - `zs_bind_<gid>_e<E>` - and `SET LOCAL ROLE` on
+that name is the first statement of the setup batch, so a rotated epoch fails in the database and no
+worker code path can skip it. Section 6 has the mechanism and the measurements that settled it.
 
-*(How this shape was arrived at, and what it replaced, is in
-`2026-08-26-runtime-db-binding-decision-log.md` under 2026-08-29.)*
+**Implementation status: design only.** Datastore, Database, Grant and the CDC relay do not exist in
+this tree. Target-state prose is not shipped code; see `2026-08-26-runtime-db-binding-decision-log.md`.
 
 **Five consequences are measured, not assumed**, and each is recorded with its measurement: the
 role fence works per grant with `WITH SET FALSE`; primary-key narrowing makes all four single-row
@@ -159,11 +159,11 @@ control plane, which needs rate-limiting against grant-flapping; and the boot po
 catalog-checkable arms - `inherit_option = false` on every `zs_bind_*` membership, and
 `pg_has_role(login, <database role>, 'SET') = false` for every database role.
 
-**For CDC, derive the fan-out map from `pg_auth_members`** - the same rows the executor fence reads.
-One `REVOKE` then becomes the single source of truth for both planes: the query path fails at the
-next statement, the reactive path at the next map refresh. That bound must be stated rather than
-assumed; there is no binding-refresh interval in the tree today. The role fence does not reach the
-CDC path at all, which uses no `SET ROLE`; 5.3 carries that path's own answer.
+**For CDC, fan-out comes from control's authoritative Grant topology.** The relay resolves the
+Database behind each pgoutput relation and fans it to active grantees; it does not derive authority
+from `pg_auth_members` or a worker refresh map. Grant changes are revision barriers that purge old
+relay and worker queues before control exposes them. This is target design; there is no such
+topology or CDC relay in the tree today, and 5.3 carries that path's own answer.
 
 **The irreducible limit, which no option closes.** PostgreSQL has no server-side notion of *which app
 a shared-login session is acting for* - `session_user` is fixed at authentication. Measured: while
@@ -175,9 +175,9 @@ per-app logins would not change it either, since the process would then hold eve
 credential.
 
 Two things go the other way and are stated as costs, not omissions: logical decoding consults no
-ACL and no RLS, so CDC is fenced by publication column lists and by nothing else; and cross-creator
-table sharing is refused, because the unmask authorization policy is authored by the *reading*
-app and there is no artifact anywhere that the owner controls.
+ACL and no RLS, so CDC's server-side column projection is fenced by publication column lists and
+nothing else; cross-creator table sharing is refused because the unmask policy is authored by the
+*reading* app and there is no artifact anywhere that the owner controls.
 
 Everything below is measured. Section 14 lists what remains unmeasured and what each item blocks.
 
@@ -216,9 +216,9 @@ grant                 PK (app_id)  -- ONE database per app, see below
 ```
 
 **Every created database gets its own typed id** - `dbs_<base62 uuidv7>`, the same UUIDv7 + base62 +
-prefix shape every other entity uses (`crates/zeroship-core/src/typed_id.rs`). That id, not an app
-id, is what names the physical schema, the migrator role, the per-capability roles, the publication
-and the apply lock. It is the identity the whole decoupling turns on.
+prefix shape every other entity uses (`crates/zeroship-core/src/typed_id.rs`). That Database id, not
+an app id, names the physical schema, migrator role, per-capability roles and apply lock. The
+Datastore id instead names the shared publication and slot. Both are target identities.
 
 **Why `dbs` and not `db`.** Every prefix in `typed_id.rs` is three lowercase letters - `app`, `crd`,
 `mig` - and its doc comments state the shape `^[a-z]{3}_[A-Za-z0-9]{22}$`. Pick `dbs` to match.
@@ -348,8 +348,8 @@ there is no name for creator code to pass, so the injected value is the whole of
 Creator `vars` shadowing does not apply: user vars override `process.env` on collision, but this
 path reads the worker-internal map, which is the same reason metering is unforgeable.
 
-`epoch` is the schema epoch the deploy was gated against. It is not compared anywhere in Rust; it is
-a component of the role name the setup batch sends, which is what makes it enforceable (section 6).
+`epoch` is the schema epoch the deploy was gated against. The worker does not compare it in Rust to
+authorize a transaction; it composes the role name the setup batch sends (section 6).
 
 An app whose binding is absent is a hard refusal with the same shape as `collection_not_declared`
 (`crates/zeroship-plugin-db/src/descriptor.rs:1-31`, whose comment on why there is deliberately no
@@ -704,9 +704,9 @@ creators it is, and no role fixes it.
   2026-08-29 by splitting `hashtextextended` into two `int4` keys. That transport-width fix does not
   perform the app-to-database rekey proposed here.
 - **The apply advances the schema epoch. THE EPOCH ROTATION IS ATOMIC; THE APPLY AS A WHOLE IS NOT,
-  AND CANNOT BE.** The rotation - write the new epoch to the system schema's one table (6.5), mint
-  `zs_bind_<gid>_e<E+1>` for every live grant, drop `zs_bind_<gid>_e<E-1>` - is a small transaction and
-  stays one. **An apply that cannot drop `E-1`'s roles refuses to advance to `E+1`** (6.2), which keeps
+  AND CANNOT BE.** T4 writes the new epoch, mints every `zs_bind_<gid>_e<E+1>` role, widens the
+  publication and emits the marker in one transaction. Reaping `E-1` is the separate T1 before DDL.
+  **An apply that cannot reap `E-1` refuses before DDL and never advances to `E+1`** (6.2), keeping
   the cluster-shared catalog bounded and fail-closed rather than leaking a role family per migration.
 
   The DDL cannot join it. `crates/zeroship-migrate-core/src/engine.rs:2656` states the engine's
@@ -723,10 +723,10 @@ creators it is, and no role fixes it.
       L    host takes a SESSION advisory lock on the database key, held to U
       P    preflight: lower every IR file, refuse a denied plan
       S    record_submitted on the control connection - the audit row opens
-      T1   one transaction: head row FOR UPDATE, DROP ROLE IF EXISTS the E-1 bind roles, take a claim
+      T1   one transaction: head FOR UPDATE, reap E-1 roles, claim, shrink this Database's publication members
       D1..DN  the DDL, engine-journalled, EVERY file passing LockMode::AlreadyHeld
-      T4   one transaction: mint the E+1 bind roles and their grants, reconcile the publication,
-           advance the head to E+1 - iff the journal moved
+      T4   one widen transaction: mint E+1 roles, widen those members, advance the head to E+1,
+           and emit the marker - iff the effective committed schema delta requires rotation
       C    mark_applied / mark_failed on the control connection
       U    release the lock
 
@@ -759,9 +759,9 @@ creators it is, and no role fixes it.
   `LockMode::AlreadyHeld` for every IR file, and releases after the full set. Before that change the
   engine released the lock at the end of the first plan, so every later file ran unlocked.
 
-  **The rotation MAY reuse publication reconciliation** - by taking its transactional body rather than
-  its wrapper. `crates/zeroship-migrate-server/src/publication.rs:59` owns a `BEGIN`/`COMMIT`; `:79` is
-  the caller-independent body. Make the body callable and delete the wrapper.
+  **Publication reconciliation is replaced, not reused or aliased.** The current app-keyed wrapper
+  and `ALTER PUBLICATION ... SET TABLE` body cannot safely edit a shared Datastore publication. The
+  target uses the CDC design's locked per-member shrink-before-DDL and widen-plus-marker bracket.
 
   **STILL OPEN:** the ledger cannot close exactly once across a crash, and this is structural rather
   than a defect to fix. The audit row and the schema live in DIFFERENT DATABASES - the store opens its
@@ -828,9 +828,8 @@ frames" (`crates/zeroship-plugin-db/src/broker.rs:97-112`).
 
 ### 5.1a What is datastore-scoped and what is cluster-scoped
 
-Both cardinalities have to be stated, because the design puts one publication per database and one
-slot per (datastore, worker), and only one of those two objects is a shared resource. Measured on
-18.4:
+The measurements below remain right, but their conclusion moved on 2026-08-30. This section
+previously chose one publication per Database and one slot per (Datastore, worker). Measured on 18.4:
 
 | object | catalog `relisshared` | consequence |
 | --- | --- | --- |
@@ -840,22 +839,24 @@ slot per (datastore, worker), and only one of those two objects is a shared reso
 
 Directly probed rather than inferred: the same publication name created in two databases of one
 cluster coexists, each database's `pg_publication` showing exactly its own row and not the other's.
-So "one publication per database" costs nothing cluster-wide, and no publication name can collide
-across datastores.
+That proves publication locality and independent names, not one publication per Database schema.
+The target uses one shared publication in each Datastore.
 
-**Slots are the opposite, and the ceiling is low.** `max_replication_slots` defaults to **10** and is
+**Slot budget is cluster-scoped, and the ceiling is low.** `max_replication_slots` defaults to **10** and is
 `context = postmaster`, so raising it is a restart. Ten slots created in one database of a cluster
 are all visible from a *different* database of that cluster, and the eleventh - created from that
 other database - fails **`SQLSTATE 53400`, "all replication slots are in use"**. Slot cardinality is
-therefore a cluster budget shared by every datastore tenant, and it is the whole reason 5.3 takes one
-slot per (datastore, worker) rather than one per database.
+therefore a cluster budget shared by every datastore tenant. Budget and namespace do not decide
+decode scope or ownership: one logical slot decodes only its own Datastore, and relay ownership
+removes the worker multiplier. One slot per Datastore means at most ten Datastores on the stock
+cluster, fewer when anything else consumes a slot.
 
 `max_slot_wal_keep_size` measures as **`-1`** - unbounded WAL retention - on a stock server, so one
 abandoned slot can grow `pg_wal` until the cluster dies. It is `context = sighup`, so bounding it is
 a reload rather than a restart; that is a blast-radius cap, not a fix, and it does not clean up an
 abandoned slot.
 
-### 5.2 The publication column list is the only server-side fence, and there is exactly one per table
+### 5.2 The publication column list is the only server-side fence, with one column set per table
 
 **UNRESOLVED, and it is the most fragile load-bearing fact in this document.** Two independent
 reviews reached this collision separately. The measurement below is on **18.4 only, on a single
@@ -919,19 +920,18 @@ Two facts fall out, and the second is the one that decides the design:
 
 ### 5.3 The decisions
 
-- **Slot per (datastore, worker), not per database.** Two independent reasons, and both are
+- **One relay-owned slot and one pgoutput stream per Datastore.** Two independent reasons are
   measured. Slots replicate decode work, they do not partition it: five slots decoding the same
   40,002 changes cost 1,335 ms against 309 ms for one
   (`docs/proposals/2026-08-26-runtime-db-binding-00-index.md:291-301`, with the PostgreSQL sources
-  checked in REL_16 and REL_18 to confirm no output-plugin filter runs before decode). And the slot
-  budget is a **cluster** budget with a stock ceiling of 10 (5.1a), so one slot per database would
-  put the whole datastore's tenancy against a restart-only GUC. One slot, fanned out in-process.
-- **Publication per database**, membership = non-`__zeroship_` tables in `db_<N>`.
-  `crates/zeroship-migrate-server/src/publication.rs:19` already filters `WHERE n.nspname = $1`; only
-  the key changes. This fixes the defect where two apps in one database each
-  `ALTER PUBLICATION ... SET TABLE` (`crates/zeroship-migrate-server/src/publication.rs:46`) the
-  other's members away and the removed
-  tenant's live queries silently stop updating.
+  checked in REL_16 and REL_18 to confirm no output-plugin filter runs before decode). The slot budget
+  is a **cluster** budget with a stock ceiling of 10 (5.1a), while decode is bound to one Datastore.
+  Relay ownership removes the worker term; the relay fans out that one stream.
+- **One relay-owned shared publication per Datastore.** Its membership is the union of every
+  Database's safe table projections plus the CDC design's exact heartbeat exception. Creating or
+  migrating a Database edits only its member entries under the Datastore publication mutex. The
+  current app-keyed `publication_name(app_id)` and reconciler are replaced, not retained or aliased;
+  one Database must never run `ALTER PUBLICATION ... SET TABLE` over the shared object.
 - **The published column set per table is the INTERSECTION over every grant on the database, and
   the plaintext parent of any column with `classification != none` is never published to anyone.**
   This follows directly from 5.2: one column set per table, and the shared stream serves the weakest
@@ -945,12 +945,11 @@ Two facts fall out, and the second is the one that decides the design:
   simpler, because the column a publication would name by default is now the safe one. Anything
   written against the old layout - "publish the sibling, exclude the parent" - is inverted and would
   publish the plaintext.
-- **The filter becomes a fan-out.** `if rel.namespace != self.app_id { return; }`
-  (`crates/zeroship-plugin-db/src/wal_consumer.rs:605`) becomes a lookup of `rel.namespace` in the
-  worker's database-to-grant-holders map, delivering to each app holding a read grant. The broker's
-  `(app_id, collection)` routing table is unchanged in shape.
-  `crates/zeroship-plugin-db/src/wal_consumer.rs:383-384` already passes a single-element
-  `publication_names`, so the wire shape does not change.
+- **The relay performs the fan-out.** It resolves
+  `(datastore_id, physical_schema) -> database_id -> active Grant -> app_id` and sends an app-keyed
+  frame to each active grantee. The current worker-local namespace filter and decode loop are
+  deleted; the broker's `(app_id, collection)` routing table remains app-keyed. Each Datastore stream
+  still passes one `publication_names` entry, now the Datastore-keyed shared publication.
 
 **The two costs, both named.**
 
@@ -958,17 +957,18 @@ Two facts fall out, and the second is the one that decides the design:
    plaintext parent, for anybody, including the app that owns the database. Reads still do. This is
    the price of one shared decode stream, and it is the correct price: CDC is the one path where no
    executor-side check runs, so it must be fenced by what is *not sent* rather than by who is asking.
-2. **Revocation lags on the subscription path.** Delivery is fenced by an in-process map, so a revoked
-   reader keeps receiving events for up to one binding-refresh interval, where revocation on the query
-   path is immediate at the next transaction. Making it stronger costs one slot per database and the
-   measured 4.32x. The lag is taken.
+2. **Grant changes pay a relay-and-worker revision barrier.** The query path still fails at the next
+   transaction. For subscriptions, the relay and frozen workers purge old-generation queues before
+   control exposes a revoke or rebind. This replaces the refresh-lag conclusion; the availability
+   cost is reconnecting healthy apps that shared a response with the changed app.
 
-Separately, and independent of the schema epoch - which never touches the WAL, because it lives in a
-role name (6.2) - **any in-band marker written with `pg_logical_emit_message` is forgeable.**
-Verified on 18.4: two four-argument overloads, `proacl` NULL on both, and the WAL `M` frame carries
-no emitting role. The only thing holding it up is that creator code has no raw-SQL surface. Under
-sharing that is a cross-tenant trust edge rather than a single-tenant footnote, and it bounds what
-any future WAL-carried platform signal can be trusted to say (open question O4).
+**The measurement remains, but its conclusion moved with relay ownership.** Verified on 18.4: both
+four-argument `pg_logical_emit_message` overloads have `proacl` NULL, and the WAL `M` frame carries no
+emitting role, so the default ACL makes a marker forgeable; absence of creator raw SQL is not a
+boundary. The target revokes both exact overloads from `PUBLIC`, grants no worker, app or relay role,
+and has the separate migration service emit `(database_id, database_epoch)` in the widen
+transaction. The role name remains the worker's epoch fence; the epoch also enters WAL so the relay
+learns publication shape and epoch from the same ordered stream.
 
 ---
 
@@ -1099,9 +1099,9 @@ epoch role under a live grant is `SCHEMA_EPOCH_STALE` and is **retryable** - the
 (`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:253-257`). Collapsing it into
 `SCHEMA_NOT_PROVISIONED` would tell a creator to run a migration that has already run.
 
-### 6.4 The producer is the only missing piece
+### 6.4 The worker-side epoch input is the missing piece
 
-The epoch's consumer ships and is tested.
+The worker's stale-binding epoch consumer ships and is tested.
 `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`;
 `:313-315` compares the observed epoch against the expected one and returns `Verdict::ReResolve`,
 which `:253-257` documents as the retryable verdict that rolls the attempt back and makes the caller
@@ -1112,9 +1112,9 @@ What has no input is `crates/zeroship-plugin-db/src/transaction/driver.rs:106`, 
 comment says so at `:100-101`: "The wiring is real; the *input* is not yet", and at `:113-116`:
 "the day a record exists, this is the one function that has to change."
 
-So building the epoch is **supplying one input to a classifier that already ships**, not building a
-subsystem. Anything that reads as though the epoch has to be built from nothing is describing an
-earlier design.
+For the worker stale-binding fence, building the epoch is **supplying one input to a classifier that
+already ships**. It does not build the separate WAL marker, relay or epoch rendezvous; those remain
+designed-not-built prerequisites in the CDC proposal.
 
 ### 6.5 The system schema, which does not exist and must be created
 
@@ -1293,11 +1293,11 @@ open question O3 and it does not block the isolation work.
   `db_statement_us` in **both** arms, measured at the op boundary. This knowingly reverses a
   documented invariant, and the regression test at
   `crates/zeroship-plugin-db/src/exec.rs:1290-1296` changes with it.
-- *Subscriptions are entirely unmetered.* `openSubscription()` provisions a slot and a consumer, and
-  there is not one meter call in `subscription.rs`, `wal_consumer.rs` or `change_stream_pg.rs`. A
-  logical slot retains WAL for the **whole cluster**, so an abandoned subscription pins WAL generated
-  by every co-tenant on the datastore with nothing billing it. Meter `db_subscription_seconds` per
-  open subscription against the app that opened it, and retained WAL against the creator.
+- *Subscriptions are entirely unmetered today.* `openSubscription()` provisions a slot and consumer,
+  and there is not one meter call in `subscription.rs`, `wal_consumer.rs` or `change_stream_pg.rs`.
+  A logical slot retains WAL for the **whole cluster**, so the current abandoned-slot path pins WAL
+  generated by every co-tenant on the datastore with nothing billing it. In the target the relay owns
+  the shared slot; meter subscription time to the app and retained WAL to the creator.
 
 **Spend enforcement stays app-keyed and request-shaped.** Throttling an app's requests does stop the
 db work it issues, because every op rides a dispatch. What it cannot do is protect a shared datastore
@@ -1458,7 +1458,7 @@ re-keyed:
 | --- | --- |
 | 1. subscription gate, keyed on the app | keyed on the database: refuse while any subscription on any grant-holder is observable |
 | 2. drain broker via `subscription_app_dropped` | the broker's `(app_id, collection)` routing table is unchanged, so this fans out to every grant holder rather than to one app |
-| 3. consumer cancel **plus slot teardown** | **the slot is NOT dropped.** It is per (datastore, worker) and shared by every database on that datastore (5.3), so dropping it here would silently stop every co-tenant's stream. Only the publication and this database's fan-out entry go |
+| 3. consumer cancel **plus slot teardown** | **No shared CDC object is dropped.** The relay-owned slot, stream and publication live for the Datastore; remove only this Database's publication members and fan-out routes (5.3) |
 | 4. `DROP SCHEMA "<app_id>" CASCADE` | `DROP SCHEMA "db_<dbsid>" CASCADE` |
 | 5. `DROP ROLE "app_<id>_role"` | `DROP ROLE zs_db_<dbsid>_{mig,rw,ro}`, still after the schema so no objects depend on them |
 
@@ -1510,8 +1510,8 @@ makes legal, and it permits same-app refs that cross a database boundary and can
 
 ## 13. What this costs
 
-1. **Revocation is immediate-at-next-transaction on the query path and lagged by one refresh interval
-   on the subscription path.** Bought with the 4.32x decode measurement.
+1. **Revocation is immediate-at-next-transaction on the query path and revision-barriered on the
+   subscription path.** The barrier can reconnect healthy apps that shared a relay response.
 2. **Classified columns lose plaintext reactivity for everyone, including the owner.** One published
    column set per table per decode stream is a PostgreSQL constraint, not a choice.
 3. **Blanket table grants and prospective default privileges are deleted.** Every apply regenerates
@@ -1566,7 +1566,7 @@ multi-writer DDL is the actual project.
 
 ---
 
-## 14. Open questions, and what each blocks
+## 14. Open questions, resolved prerequisites, and what each blocks
 
 **O1. Where does the owner-side unmask policy live, and what reads it?**
 The reading app authors the policy that gates unmasking of the owner's data
@@ -1590,12 +1590,13 @@ is the worker (`crates/zeroship-plugin-db/src/change_stream_pg.rs:184`), and the
 crate. *Blocks:* fair billing on
 a shared datastore. Does not block isolation.
 
-**O4. Does `pg_logical_emit_message` need a REVOKE, and what is the signature across versions?**
+**O4. RESOLVED: how is `pg_logical_emit_message` made authoritative?**
 `proacl` is NULL on 18.4 (both four-argument overloads, verified) so EXECUTE is public, and the WAL
-`M` frame carries no emitting role. Under sharing this is a cross-tenant forgery edge. PG 16 has one
-three-argument overload; 18.4 has two four-argument ones, so a REVOKE must be written per major.
-*Blocks:* trusting any in-WAL platform marker across tenants. It does **not** block the schema epoch,
-which is carried by a role name and never enters the WAL (6.2).
+`M` frame carries no emitting role. The PostgreSQL-18 target revokes both exact overloads from
+`PUBLIC`; worker, app and relay roles get no grant, and the separate migration service emits the
+widen transaction's epoch marker. There is no PostgreSQL-16 branch or compatibility alias. This
+target is designed, not built; trusting the marker remains blocked until Datastore provisioning
+applies and verifies both revokes.
 
 **O5. What re-validates "same creator" after issuance?**
 The predicate is "same owning user id", evaluated once at grant issuance.
@@ -1656,9 +1657,12 @@ role DDL must never be run against `:5455`, `:5440` or any shared instance.
    **refuses** conflicting column lists for one table across publications on one decode stream. It is
    also **incompatible with `REPLICA IDENTITY FULL`**, and neither DDL step refuses - the writes
    break at DML time (5.2).
-8. **`pg_logical_emit_message` has `proacl = NULL`** on 18.4, with two four-argument overloads.
-9. **Publications are datastore-scoped and slots are cluster-scoped**, with a stock slot ceiling of
-   10 and `SQLSTATE 53400` past it, including from a different database of the same cluster (5.1a).
+8. **`pg_logical_emit_message` has `proacl = NULL`** on 18.4, with two four-argument overloads; the
+   target revokes both from `PUBLIC` before trusting the migration service's WAL marker.
+9. **Publications are datastore-scoped; slot namespace and budget are cluster-scoped; decode is
+   datastore-scoped.** The relay owns one publication, slot and stream per Datastore. The stock slot
+   ceiling is 10 with `SQLSTATE 53400` past it, so the cluster holds at most ten Datastores, fewer
+   when anything else consumes a slot (5.1a).
 10. **The identity and epoch types the design needs already ship.**
     `crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:27-35` defines
     `AuthorityIdentity` carrying `incarnation: u64`, and `:97` defines `SchemaEpoch`; `:313-315`
