@@ -1081,6 +1081,70 @@ mod tests {
             .await;
     }
 
+    /// `cancel_query_confirmed` carries its OWN copy of the policy check, and
+    /// the four tests above cannot reach it: they all drive `cancel_query`.
+    /// Dropping the confirmed path's `validate_cancel_tls_connector` left all
+    /// 1448 tests green, so nothing held pool timeout recovery to the session's
+    /// recorded TLS policy. That path is the one a pool takes on its own
+    /// initiative, with no caller watching, and the leak it would permit is
+    /// SNI or a client certificate offered to a connector that never attested
+    /// to the policy the session was established under.
+    #[compio::test]
+    async fn a_confirmed_cancel_refuses_a_connector_that_attests_less_than_the_session() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted confirmed-cancel server");
+        let addr = listener
+            .local_addr()
+            .expect("scripted confirmed-cancel address");
+        let config = SocketConfig {
+            addr: Addr::tcp(addr),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: Encryption::Tls,
+            ssl_sni: false,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
+            server_verification: crate::tls::ServerVerification::None,
+        };
+
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
+        let policy_identity = tls.policy_identity.clone();
+        let cancel = Box::pin(cancel_query_confirmed(
+            Some(config),
+            SslMode::Require,
+            SslNegotiation::Postgres,
+            tls,
+            PROCESS_ID,
+            SECRET_KEY.into(),
+            Some(policy_identity),
+        ));
+        // Racing the accept is the whole point: the refusal must land BEFORE a
+        // socket is dialed, or the ClientHello has already left.
+        let accept = Box::pin(listener.accept());
+        let error = match select(cancel, accept).await {
+            Either::Left((result, _)) => {
+                result.expect_err("the confirmed cancel dialed with an unattested connector")
+            }
+            Either::Right(_) => {
+                panic!("the confirmed cancel dialed before enforcing the session's sslsni=0 policy")
+            }
+        };
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        });
+        assert!(
+            chain.contains("sslsni=0"),
+            "the confirmed-cancel refusal must name sslsni=0: {chain}"
+        );
+    }
+
     #[compio::test]
     async fn a_cancel_tls_policy_refuses_client_certificate_disclosure() {
         assert_cancel_tls_policy_refused(
