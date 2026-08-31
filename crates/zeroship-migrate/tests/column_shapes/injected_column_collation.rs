@@ -20,6 +20,11 @@ use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy, IrAu
 
 const OWNER: &str = "app_injected_collation";
 
+const PRODUCTION_CONFINED_CHARTER_TOML: &str = concat!(
+    include_str!("../../../zeroship-migrate-server/policies/confined.policy.toml"),
+    include_str!("../../../../policies/confined-system-shape.inject.toml"),
+);
+
 /// Four ids in the consumer's shape - a prefix plus base62 - listed in CREATION
 /// order, which for base62 of a monotonic UUIDv7 is BYTE order.
 ///
@@ -59,11 +64,17 @@ columns = [
   {{ name = "id",         type = "text",        nullable = false{pin} }},
   {{ name = "created_at", type = "timestamptz", nullable = false }},
   {{ name = "created_by", type = "text",        nullable = true{pin} }},
+  {{ name = "updated_by", type = "text",        nullable = true{pin} }},
   {{ name = "version",    type = "integer",     nullable = false }},
 ]
 "#
     );
     effective_policy_from_charter_toml(&toml).expect("injected-collation charter composes")
+}
+
+fn production_confined_charter() -> EffectivePolicy {
+    effective_policy_from_charter_toml(PRODUCTION_CONFINED_CHARTER_TOML)
+        .expect("the production confined charter composes")
 }
 
 fn authored_ir(table: &str) -> MigrationIr {
@@ -92,8 +103,18 @@ fn injected_ddl(
     collation: Option<&str>,
 ) -> String {
     let policy = charter(collation);
-    let resolved = zeroship_migrate::resolve_create_table_policy(&authored_ir(table), &policy, schema)
-        .expect("the charter's injection resolves");
+    injected_ddl_with_policy(dialect, schema, table, &policy)
+}
+
+fn injected_ddl_with_policy(
+    dialect: &zeroship_migrate::DialectId,
+    schema: &str,
+    table: &str,
+    policy: &EffectivePolicy,
+) -> String {
+    let resolved =
+        zeroship_migrate::resolve_create_table_policy(&authored_ir(table), policy, schema)
+            .expect("the charter's injection resolves");
     let migrations = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         schema,
@@ -133,6 +154,10 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
         "PostgreSQL must pin C on every column the charter names; SQL was:\n{pg}"
     );
     assert!(
+        pg.contains(r#""updated_by" character varying(255) COLLATE "C""#),
+        "PostgreSQL must pin C on the complete injected typed-ID domain; SQL was:\n{pg}"
+    );
+    assert!(
         !pg.contains(r#""created_at" timestamptz COLLATE"#),
         "a column the charter did not name must be untouched; SQL was:\n{pg}"
     );
@@ -148,6 +173,11 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
         "SQLite must spell the same intent as BINARY; SQL was:\n{sqlite}"
     );
     assert!(
+        sqlite.contains(r#""created_by" TEXT COLLATE BINARY"#)
+            && sqlite.contains(r#""updated_by" TEXT COLLATE BINARY"#),
+        "SQLite must pin every injected typed-ID column; SQL was:\n{sqlite}"
+    );
+    assert!(
         !sqlite.contains(r#"COLLATE "C""#),
         "the PostgreSQL collation must never reach SQLite; SQL was:\n{sqlite}"
     );
@@ -157,9 +187,9 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
     // is NO PAD and compares the encoded bytes, which is what `C` and BINARY mean.
     // And utf8mb4 rather than the value-format path's `CHARACTER SET ascii`: that
     // path earns ascii from a CHECK proving the content is ascii, which an inject
-    // facet has no equivalent of - `created_by` may hold a non-ascii name, and an
-    // ascii column would REJECT it. Trading a silent ordering bug for a loud
-    // insert failure is not a fix.
+    // facet has no equivalent of. The policy declares a comparison domain, not
+    // a CHECK proving that every future injected value is ASCII, so narrowing the
+    // storage character set here would turn a collation rule into input rejection.
     let mysql = injected_ddl(
         &zeroship_migrate_mysql::DIALECT,
         "app",
@@ -169,6 +199,14 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
     assert!(
         mysql.contains("`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"),
         "MySQL must spell the same intent as utf8mb4_0900_bin; SQL was:\n{mysql}"
+    );
+    assert!(
+        mysql.contains(
+            "`created_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"
+        ) && mysql.contains(
+            "`updated_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"
+        ),
+        "MySQL must pin every injected typed-ID column; SQL was:\n{mysql}"
     );
     assert!(
         !mysql.contains(r#"COLLATE "C""#),
@@ -333,6 +371,7 @@ fn an_author_column_that_matches_every_field_but_the_collation_is_not_the_inject
                 { "name": "id", "type": { "string": { "length": 255 } }, "nullable": false },
                 { "name": "created_at", "type": "timestamp", "nullable": false },
                 { "name": "created_by", "type": { "string": { "length": 255 } }, "nullable": true },
+                { "name": "updated_by", "type": { "string": { "length": 255 } }, "nullable": true },
                 { "name": "version", "type": "int", "nullable": false }
             ],
             "primaryKey": ["id"],
@@ -407,12 +446,26 @@ async fn live_order(
     schema: &str,
     collation: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    let policy = charter(collation);
+    live_order_with_policy(session, schema, &policy).await
+}
+
+async fn live_order_with_policy(
+    session: &support::PgDevSession,
+    schema: &str,
+    policy: &EffectivePolicy,
+) -> Result<Vec<String>, String> {
     let quoted_schema = quote_ident(schema);
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
         .await
         .map_err(|error| format!("create the probe schema: {error}"))?;
-    let ddl = injected_ddl(&zeroship_migrate_postgres::DIALECT, schema, "notes", collation);
+    let ddl = injected_ddl_with_policy(
+        &zeroship_migrate_postgres::DIALECT,
+        schema,
+        "notes",
+        policy,
+    );
     session
         .batch(&ddl)
         .await
@@ -504,6 +557,35 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
         if !drift.is_clean() {
             return Err(format!(
                 "a freshly created collated table must not drift: {drift:#?}"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    result.unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[compio::test]
+async fn production_confined_id_keeps_creation_order() {
+    let url = require_live_pg!();
+    let session = support::PgDevSession::connect(&url);
+    let schema = token("production");
+    let _guard = support::SchemaGuard::arm(&session, [schema.clone()]);
+
+    let result: Result<(), String> = async {
+        let collate = database_collation(&session).await?;
+        if collate == "C" || collate == "POSIX" {
+            return Err(format!(
+                "this database's default collation is {collate}, so the production \
+                 charter ordering assertion cannot distinguish the fix from its absence"
+            ));
+        }
+        let policy = production_confined_charter();
+        let read = live_order_with_policy(&session, &schema, &policy).await?;
+        if read != CREATION_ORDER {
+            return Err(format!(
+                "the production confined charter must keep ORDER BY id in creation \
+                 order on a {collate} database; got {read:?}, expected {CREATION_ORDER:?}"
             ));
         }
         Ok(())

@@ -651,6 +651,17 @@ fn explicit_non_id_reference_column_is_preserved() {
                 && !child.contains("REFERENCES parents(id)"),
             "the explicit target column silently fell back to id on {dialect:?}: {child}"
         );
+        let bytewise = if dialect == &zeroship_migrate_postgres::DIALECT {
+            "\"parent_key\" character varying(255) COLLATE \"C\""
+        } else if dialect == &zeroship_migrate_mysql::DIALECT {
+            "`parent_key` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"
+        } else {
+            "\"parent_key\" TEXT COLLATE BINARY"
+        };
+        assert!(
+            !child.contains(bytewise),
+            "an arbitrary string reference is not a typed-ID domain on {dialect:?}: {child}"
+        );
     }
 }
 

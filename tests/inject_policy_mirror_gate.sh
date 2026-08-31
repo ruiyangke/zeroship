@@ -17,12 +17,12 @@
 #
 #   Rust        concat!(include_str!("<its grants>"), include_str!("<fragment>"))
 #               rustc folds both at compile time, so the fragment's bytes are
-#               literally in the binary. Three consumers:
+#               literally in the binary. Five consumers:
 #                 crates/zeroship-migrate-server/src/policy.rs       (deployed ceiling)
 #                 crates/zeroship-migrate-server/tests/smoke_apply_pg.rs
 #                 crates/zeroship-migrate-server/tests/author_and_apply_pg.rs
-#               The two plugin-db consumers were deleted with the engine
-#               dependency; see the EXPECTED_RUST_CONSUMERS note below.
+#                 crates/zeroship-migrate/tests/column_shapes/injected_column_collation.rs
+#                 crates/zeroship-plugin-db/tests/distributed_live.rs
 #   TypeScript  policies/codegen.mjs emits the fragment as a const into
 #               sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts,
 #               which the emit ceiling and the dev-apply charter import. That
@@ -67,8 +67,8 @@
 #     id/created_by/updated_by TYPE (varchar(255) via the engine vs TEXT here,
 #     measured 2026-08-10 on a deployed app schema). Closing that needs a check
 #     of a different kind - comparing rendered DDL, not text. See the fragment's
-#     header, which until 2026-08-20 wrongly said zeroship-schema had already
-#     pinned COLLATE "C"; neither producer has, and #255 is open on both.
+#     header. Both producers now pin the same bytewise comparison intent, but
+#     this textual mirror gate still cannot prove that rendered-DDL agreement.
 #   - It reads TRACKED files only, via `git ls-files`. Build output
 #     (sdks/vite-plugin/dist/), node_modules, target/, and sibling worktrees
 #     under .worktrees/ are all ignored and therefore unscanned. That is
@@ -116,26 +116,40 @@ CODEGEN="policies/codegen.mjs"
 # is INERT - not that it is inconvenient. A live copy consumes the fragment.
 NOT_MIRRORED=(
     "docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md|a design snapshot, superseded by the shipped dev-apply.ts (whose header records the supersession)"
+    "crates/zeroship-migrate-core/src/model/table_shape.rs|unit-test policy fixtures compiled only under cfg(test)"
+    "crates/zeroship-migrate-core/src/render/fold.rs|unit-test policy fixtures compiled only under cfg(test)"
+    "crates/zeroship-migrate-core/src/render/lower.rs|unit-test policy fixtures compiled only under cfg(test)"
+    "crates/zeroship-migrate-core/src/schema/query.rs|unit-test policy fixtures compiled only under cfg(test)"
+    "crates/zeroship-migrate-core/src/test_fixtures.rs|shared test-only policy fixtures"
+    "crates/zeroship-migrate-node/__test__/gen_artifacts.mjs|Node binding test fixture"
+    "crates/zeroship-migrate-node/src/test_fixtures.rs|Node binding test-only policy fixture"
+    "crates/zeroship-migrate-node/tests/support/mod.rs|integration-test policy fixture"
+    "crates/zeroship-migrate-policy/tests/compose_oracle.rs|policy composer integration-test input"
+    "crates/zeroship-migrate-policy/tests/loader.rs|policy loader integration-test input"
+    "crates/zeroship-migrate-postgres/tests/namespace_authority.rs|PostgreSQL adapter integration-test input"
+    "crates/zeroship-migrate-postgres/tests/support/mod.rs|PostgreSQL adapter test support input"
+    "crates/zeroship-migrate/tests/column_shapes/injected_column_collation.rs|cross-dialect integration-test input"
+    "crates/zeroship-migrate/tests/dialect_matrix/dialectal_ops.rs|dialect matrix integration-test input"
+    "crates/zeroship-migrate/tests/policy_charter/layered_policy.rs|policy layering integration-test input"
+    "crates/zeroship-migrate/tests/rename/rename_column_fk_definition_sqlite.rs|SQLite rename integration-test input"
+    "crates/zeroship-migrate/tests/rename/rename_column_indexed_sqlite.rs|SQLite rename integration-test input"
+    "crates/zeroship-migrate/tests/support/mod.rs|integration-test support policy fixture"
 )
 
 # Discovery finds this file's own declarations otherwise.
 SELF="tests/inject_policy_mirror_gate.sh"
 
-# MEASURED 2026-08-20: one authored fragment, one generated view, one inert
-# snapshot, six consumers. Every number is ASSERTED, not merely reported: a gate
+# MEASURED 2026-08-31: one authored fragment, one generated view, 19 inert
+# fixtures, and seven consumers. Every number is ASSERTED, not merely reported: a gate
 # that adapts to whatever it finds cannot tell "nothing was added" from
 # "something was added and I adjusted".
 #
-# LOWERED 5 -> 3 when plugin-db stopped depending on the migration engine. Two
-# Rust consumers were DELETED, not silently dropped:
-#   the per-collection SQLite engine driver, deleted whole
-#   tests/parity/mod.rs              its ceiling fed a policy to the engine; both
-#                                    legs of the matrix build tables directly now
-# Neither still injects anything, which is the case this count exists to catch;
-# both are gone, which is the case it is allowed to absorb. The remaining three
-# are the deployed ceiling and the two adapter PG tests.
-EXPECTED_INERT=1
-EXPECTED_RUST_CONSUMERS=3
+# The five Rust consumers are the deployed ceiling, two adapter PG tests, the
+# production-charter collation integration test, and plugin-db's distributed
+# live test. The last two are tests, but consuming the shared fragment is the
+# point: neither is an inert copy of the platform shape.
+EXPECTED_INERT=19
+EXPECTED_RUST_CONSUMERS=5
 EXPECTED_TS_CONSUMERS=2
 
 # ---------------------------------------------------------------------------
