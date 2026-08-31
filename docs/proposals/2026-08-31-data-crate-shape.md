@@ -466,8 +466,32 @@ own header that it is unreachable: **"`crud::mask_backfill` has zero consumers"*
 (`crud/mask_backfill.rs:3-8`). Production mask policy uses string constants, not `Classification`
 (`crud/mask_policy.rs:68`).
 
-So the survivor set is `MaskKind` alone, and the 407-line `mask_codec.rs` needs the same
-production-root test before it is carried across rather than deleted. Cutting on the region boundary
+So the survivor set is `MaskKind` alone.
+
+**And `mask_codec.rs` has now had that production-root test. IT FAILS, AND IT IS ALSO A FORK -
+resolved 2026-08-31.** This document said the 407-line `zeroship-schema/src/mask_codec.rs` "needs the
+same production-root test before it is carried across rather than deleted." Run:
+
+- **Its parser has ZERO callers.** Every `parse_mask_sentinel` hit in `crates/` is inside
+  `zeroship-migrate-backend/src/mask_codec.rs` - the ENGINE's own copy. Nothing in `plugin-db`, or
+  anywhere else, calls the schema-side one.
+- **It is a fork of a live engine module.** The engine ships its own `mask_codec.rs` (512 lines) whose
+  header is near word-for-word identical and which round-trips the same four types. The engine's is
+  the generalisation: prefixes are a `SentinelPrefix` knob defaulting to `zero-migrate:enc:` /
+  `zero-migrate:mask:`, and it labels zeroship's `__zsmask:` a "legacy interop prefix - compat-only".
+  The schema-side fork hardcodes `__zsmask:` and REFUSES anything else.
+- **The engine's copy is the live PRODUCER.** `zeroship-migrate-postgres/src/schema.rs:305` calls
+  `build_mask_sentinel_comments` from its `SchemaRenderer`, and `migrate-server` - the service that
+  applies creator migrations - depends on `migrate-postgres`.
+
+**This is NOT a live masking bug, and the reason matters.** Neither host configures
+`SentinelPrefix`, so the engine writes `zero-migrate:mask:` while the schema-side reader accepts only
+`__zsmask:` - which would be a silent unmasking defect IF the data plane read sentinels at runtime.
+It does not: `descriptor.rs:1-30` records that the runtime descriptor is "the data plane's SOLE
+schema authority" and names sentinel-reading as what it REPLACED. So the two prefixes never meet.
+
+**Conclusion: delete it.** `mask_codec.rs` is a FIFTH dead region in `zeroship-schema`, and unlike the
+others it has a live twin that is strictly more capable. Do not carry it into any new crate. Cutting on the region boundary
 still breaks the read path - but at one point, not two, and the rest of that region is larger dead
 weight than this plan credited.
 
