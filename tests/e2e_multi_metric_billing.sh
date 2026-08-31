@@ -51,15 +51,17 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "    Start docker and re-run." >&2
   exit 1
 fi
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
+PROBE_IR="$ROOT/examples/metering-probe/generated/zeroship/migrations.ir.json"; [ -s "$PROBE_IR" ] || { echo "missing $PROBE_IR"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 
-ZEROSHIP_CONTROL_PORT=9178; ZEROSHIP_WORKER_PORT=8078; ZEROSHIP_GATEWAY_PORT=8068; PG_PORT=5478; RP_PORT=19178
+ZEROSHIP_CONTROL_PORT=9178; ZEROSHIP_WORKER_PORT=8078; ZEROSHIP_GATEWAY_PORT=8068; ZEROSHIP_MIGRATE_SERVER_PORT=9078; PG_PORT=5478; RP_PORT=19178
 PGC=zs-e2e-mm-pg; RPC=zs-e2e-mm-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
+MIGRATE_SERVER_URL="http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-mm-e2e"
 WORK="$(mktemp -d -t zs-e2e-mm-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
@@ -73,7 +75,7 @@ cleanup(){
   else docker rm -f "$PGC" "$RPC" >/dev/null 2>&1 || true; rm -rf "$WORK"; echo "  stack down, $WORK cleaned"; fi
 }
 trap cleanup EXIT
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 echo ""; echo "=== Stage 1: infra + migrate + seed + stack (lite provider) ==="
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -153,6 +155,14 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
+  --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 \
+  && pass "zeroship-migrate-server healthy" \
+  || { fail "migrate-server"; tail -30 "$WORK/migrated.log"; exit 1; }
+
 echo ""; echo "=== Stage 2: bearer + creator + app + deploy ==="
 # The scope string is the action list the deleted permission_tokens policy
 # carried, one scope per Cedar action.
@@ -168,6 +178,24 @@ APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/jso
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
+APPLY_CODE="$(curl -sS -o "$WORK/apply-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATE_SERVER_URL/v1/apps/$APP/migrations/apply" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-binary @"$PROBE_IR")"
+APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
+if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
+  pass "applied probe migrations (applied=$APPLIED)"
+else
+  fail "migration apply failed (http=$APPLY_CODE): $(cat "$WORK/apply-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
 "$BIN/zeroship" deploy "$PROBE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | grep -q deploy_hash && pass "deployed probe" || { fail "deploy"; exit 1; }
 sleep 5
 
@@ -175,8 +203,26 @@ echo ""; echo "=== Stage 3: drive traffic → both 'requests' AND 'egress_bytes'
 N_REQ=100; BODY='{"hello":"multi-metric","pad":"........................................................"}'
 READY=0; for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: mm-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/ready")" = "200" ] && { READY=1; break; }; sleep 1; done
 [ "$READY" = "1" ] && pass "app reachable" || { fail "app never reachable"; tail -15 "$WORK/gate.log"; exit 1; }
-GW_OK=0; for i in $(seq 1 $N_REQ); do for _ in 1 2 3; do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: mm-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")" = "200" ] && { GW_OK=$((GW_OK+1)); break; }; sleep 0.2; done; done
-[ "$GW_OK" = "$N_REQ" ] && pass "drove $GW_OK/$N_REQ requests" || { fail "traffic $GW_OK/$N_REQ"; exit 1; }
+GW_OK=0; LAST_BODY=""
+for i in $(seq 1 $N_REQ); do
+  for _ in 1 2 3; do
+    RESPONSE="$(curl -s -w '\n%{http_code}' -H 'Host: mm-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")"
+    CODE="$(printf '%s' "$RESPONSE" | tail -1)"; PROBE_BODY="$(printf '%s' "$RESPONSE" | sed '$d')"
+    [ "$CODE" = "200" ] && { GW_OK=$((GW_OK+1)); LAST_BODY="$PROBE_BODY"; break; }
+    sleep 0.2
+  done
+done
+WROTE="$(printf '%s' "$LAST_BODY" | jget '.wrote')"
+READ_BACK="$(printf '%s' "$LAST_BODY" | jget '.readBack')"
+DB_ERROR_NULL="$(printf '%s' "$LAST_BODY" | jget '.dbError === null')"
+if [ "$GW_OK" = "$N_REQ" ] && [ "$WROTE" = "true" ] && \
+   [ -n "$READ_BACK" ] && [ "$READ_BACK" -ge 1 ] 2>/dev/null && \
+   [ "$DB_ERROR_NULL" = "true" ]; then
+  pass "drove $GW_OK/$N_REQ requests with probe db write/read (wrote=$WROTE readBack=$READ_BACK dbError=null)"
+else
+  fail "traffic $GW_OK/$N_REQ; wrote=$WROTE readBack=$READ_BACK dbError-null=$DB_ERROR_NULL; body: ${LAST_BODY:0:300}"
+  tail -20 "$WORK/worker.log"; exit 1
+fi
 
 usage_of(){ psql_exec -tA -c "SELECT COALESCE(SUM(total),0) FROM zeroship.usage_aggregates WHERE app_id='$APP' AND metric='$1'" 2>/dev/null | tr -d '[:space:]'; }
 # Poll until requests + egress_bytes are present AND STABLE (recompute replaces the

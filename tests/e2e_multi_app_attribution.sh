@@ -50,16 +50,18 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "    Start docker and re-run." >&2
   exit 1
 fi
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }; done
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }; done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
+PROBE_IR="$ROOT/examples/metering-probe/generated/zeroship/migrations.ir.json"; [ -s "$PROBE_IR" ] || { echo "missing $PROBE_IR"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 
-ZEROSHIP_CONTROL_PORT=9174; ZEROSHIP_WORKER_PORT=8074; ZEROSHIP_GATEWAY_PORT=8064; PG_PORT=5474; RP_PORT=19174
+ZEROSHIP_CONTROL_PORT=9174; ZEROSHIP_WORKER_PORT=8074; ZEROSHIP_GATEWAY_PORT=8064; ZEROSHIP_MIGRATE_SERVER_PORT=9074; PG_PORT=5474; RP_PORT=19174
 LAGO_PORT=3480; LAGO_KEY="lago_key-hooli-1234567890"; LAGO_URL="http://localhost:$LAGO_PORT"
 PGC=zs-e2e-mapp-pg; RPC=zs-e2e-mapp-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
+MIGRATE_SERVER_URL="http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-mapp-e2e"
 WORK="$(mktemp -d -t zs-e2e-mapp-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
@@ -80,7 +82,7 @@ cleanup(){
   fi
 }
 trap cleanup EXIT
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 echo ""; echo "=== Stage 1: infra (PG + redpanda + REAL Lago) + migrate + seed + stack ==="
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -187,6 +189,15 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
+  --mutation-rate-limit-burst 6 \
+  --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 \
+  && pass "zeroship-migrate-server healthy" \
+  || { fail "migrate-server"; tail -30 "$WORK/migrated.log"; exit 1; }
+
 echo ""; echo "=== Stage 2: admin bearer + 2 creators + 3 apps (A1,A2->C1 ; A3->C2) + deploy ==="
 # The scope string is the action list the deleted permission_tokens policy
 # carried, one scope per Cedar action.
@@ -206,9 +217,25 @@ ADMIN_TOKEN="$(e2e_mint_platform_bearer "$ADMIN" "$SCOPE")"
 # forwarder's app->creator resolution is unambiguous.
 declare -A APPID
 create_deploy(){ # $1=slug  $2=owner_creator
-  local slug="$1" owner="$2" id
+  local slug="$1" owner="$2" id create_code apply_code applied
   id="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"$slug\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
   [ -n "$id" ] || { fail "create app $slug"; exit 1; }
+  create_code="$(curl -sS -o "$WORK/$slug-create-database-response.json" -w '%{http_code}' \
+    -X POST "$MIGRATE_SERVER_URL/v1/databases/$id" \
+    -H "Authorization: Bearer $ADMIN_TOKEN")"
+  if [[ "$create_code" != 2?? ]]; then
+    fail "database create failed for $slug (http=$create_code): $(cat "$WORK/$slug-create-database-response.json")"
+    tail -30 "$WORK/migrated.log"; exit 1
+  fi
+  apply_code="$(curl -sS -o "$WORK/$slug-apply-response.json" -w '%{http_code}' \
+    -X POST "$MIGRATE_SERVER_URL/v1/apps/$id/migrations/apply" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
+    --data-binary @"$PROBE_IR")"
+  applied="$(jget '.applied.length' < "$WORK/$slug-apply-response.json")"
+  if [ "$apply_code" != "200" ] || [ -z "$applied" ] || ! [ "$applied" -ge 1 ] 2>/dev/null; then
+    fail "migration apply failed for $slug (http=$apply_code applied=$applied): $(cat "$WORK/$slug-apply-response.json")"
+    tail -30 "$WORK/migrated.log"; exit 1
+  fi
   "$BIN/zeroship" deploy "$PROBE" --app="$id" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | grep -q deploy_hash || { fail "deploy $slug"; exit 1; }
   psql_exec >/dev/null 2>&1 <<SQL
 DELETE FROM zeroship.app_members WHERE app_id='$id';
@@ -220,7 +247,7 @@ SQL
 create_deploy app1 "$C1"
 create_deploy app2 "$C1"
 create_deploy app3 "$C2"
-pass "created + deployed 3 apps; ownership: app1,app2→C1  app3→C2"
+pass "created + migrated + deployed 3 apps; ownership: app1,app2->C1 app3->C2"
 
 # One Lago customer + subscription per CREATOR (external_id = creator UUID, which
 # is what the forwarder stamps as the event subject).
@@ -256,19 +283,43 @@ sleep 5
 echo ""; echo "=== Stage 3: per-app traffic (A1=40, A2=60, A3=70) ==="
 BODY='{"hello":"mapp"}'
 drive(){ # $1=slug  $2=count  -> echoes ok count
-  local slug="$1" n="$2" host="$1.localhost" ok=0 i
+  local slug="$1" n="$2" host="$1.localhost" ok=0 i response code probe_body
   local ready=0
   for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/ready")" = "200" ] && { ready=1; break; }; sleep 1; done
   [ "$ready" = "1" ] || { fail "$slug never reachable"; tail -10 "$WORK/gate.log"; exit 1; }
   for _ in 1 2 3; do curl -s -o /dev/null -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/warm" || true; done
-  for i in $(seq 1 "$n"); do for _ in 1 2 3; do [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")" = "200" ] && { ok=$((ok+1)); break; }; sleep 0.2; done; done
+  for i in $(seq 1 "$n"); do
+    for _ in 1 2 3; do
+      response="$(curl -s -w '\n%{http_code}' -H "Host: $host" -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")"
+      code="$(printf '%s' "$response" | tail -1)"; probe_body="$(printf '%s' "$response" | sed '$d')"
+      [ "$code" = "200" ] && { ok=$((ok+1)); printf '%s' "$probe_body" > "$WORK/$slug-last-body.json"; break; }
+      sleep 0.2
+    done
+  done
   echo "$ok"
 }
 N1=40; N2=60; N3=70
 OK1="$(drive app1 $N1)"; OK2="$(drive app2 $N2)"; OK3="$(drive app3 $N3)"
-[ "$OK1" = "$N1" ] && [ "$OK2" = "$N2" ] && [ "$OK3" = "$N3" ] \
-  && pass "drove traffic app1=$OK1/$N1 app2=$OK2/$N2 app3=$OK3/$N3 (HTTP 200)" \
-  || { fail "traffic app1=$OK1/$N1 app2=$OK2/$N2 app3=$OK3/$N3"; tail -20 "$WORK/worker.log"; exit 1; }
+DB_OK=1; DB_SUMMARY=""
+for slug in app1 app2 app3; do
+  if [ -s "$WORK/$slug-last-body.json" ]; then LAST_BODY="$(cat "$WORK/$slug-last-body.json")"; else LAST_BODY=""; fi
+  WROTE="$(printf '%s' "$LAST_BODY" | jget '.wrote')"
+  READ_BACK="$(printf '%s' "$LAST_BODY" | jget '.readBack')"
+  DB_ERROR_NULL="$(printf '%s' "$LAST_BODY" | jget '.dbError === null')"
+  if [ "$WROTE" != "true" ] || [ -z "$READ_BACK" ] || ! [ "$READ_BACK" -ge 1 ] 2>/dev/null || [ "$DB_ERROR_NULL" != "true" ]; then
+    DB_OK=0
+  fi
+  DB_SUMMARY="$DB_SUMMARY $slug(wrote=${WROTE:-absent} readBack=${READ_BACK:-absent} dbError-null=${DB_ERROR_NULL:-absent})"
+done
+if [ "$OK1" = "$N1" ] && [ "$OK2" = "$N2" ] && [ "$OK3" = "$N3" ] && [ "$DB_OK" = "1" ]; then
+  pass "drove traffic app1=$OK1/$N1 app2=$OK2/$N2 app3=$OK3/$N3 with probe db write/read:$DB_SUMMARY"
+else
+  fail "traffic app1=$OK1/$N1 app2=$OK2/$N2 app3=$OK3/$N3; probe db:$DB_SUMMARY"
+  for slug in app1 app2 app3; do
+    [ -s "$WORK/$slug-last-body.json" ] && echo "    $slug body: $(head -c 300 "$WORK/$slug-last-body.json")" || echo "    $slug body: <absent>"
+  done
+  tail -20 "$WORK/worker.log"; exit 1
+fi
 
 echo ""; echo "=== Stage 4: per-creator attribution in REAL Lago (isolation) ==="
 lago_sum(){ # $1=creator -> sum of requests-event values for that subject
