@@ -36,33 +36,75 @@ Three choices, taken by the operator on 2026-08-31:
    as an argument against reducing three to two. It is not - it is about three SPELLINGS of the
    partition-capability fact, not three dialects. The sentence survives gating untouched.
 
-And one shape converged in discussion: a `zeroship-data-*` family, with `zeroship-schema` and
-`zeroship-data-plan` merged, and `zeroship-plugin-db` renamed.
+A `zeroship-data-*` family converged in discussion, with `zeroship-schema` and `zeroship-data-plan`
+merged and `zeroship-plugin-db` renamed. **A read-only review on 2026-08-31 overturned two thirds of
+that shape, and the tree - not taste - is what overturned it.** The target below is the revised one;
+what changed and why is recorded immediately after it, because the discarded version is the one a
+reader is likely to arrive with.
 
 ## Target
 
 ```
 libs/compio-postgres            driver, unchanged
 
-zeroship-data-query             query IR, rendering, validators, naming
-zeroship-data-binding           env.db surface: v8, crud, transaction, encryption, backends,
-                                mask vocabulary, sentinel codec
-zeroship-data-cdc               broker, wal_consumer, replication, cdc_lifecycle, slot_reaper
+zeroship-data-query-ir          the typed query IR. ZERO dependencies, and that stays load-bearing.
+                                (today's zeroship-data-plan, renamed)
+zeroship-plugin-db              env.db surface: v8, crud, transaction, encryption, backends,
+                                broker, worker-side subscription lifecycle, MaskKind.
+                                KEEPS ITS NAME.
+zeroship-data-cdc               relay-side ONLY: WAL stream, publication and slot authority,
+                                reaper. NOT the broker, NOT cdc_lifecycle.
 
 zeroship-migrate-*              the engine, dialect-complete, untouched
 zeroship-migrate-server         the migration service host
 ```
 
-`zeroship-schema` DISSOLVES rather than leaving a stub: its query building merges into
-`data-query`, its mask vocabulary and sentinel codec into `data-binding`, and its dead regions are
-deleted (below). Dependencies run `binding -> query`, acyclic.
+`zeroship-schema` still DISSOLVES: its live query building is replaced by the IR rather than moved,
+its `MaskKind` and sentinel codec go to `plugin-db`, and its dead regions are deleted (below).
 
-**Why `binding` is the right word despite being the most overloaded term in this project** (the
-proposal is *runtime-db-binding*; `binding.rs` defines `DbBinding`; #46 was about *binding
-injection*): the crate's job IS "the bound database, as the app sees it". `DbBinding` is its core
-concept and crud/transaction/encryption are what you do THROUGH a binding. That reading only holds
-because CDC leaves - change streams are not something an app gets through its binding. **The rename
-and the extraction are one change; taking the rename alone leaves the name lying.**
+### Three changes the review forced, each with the evidence that forced it
+
+**1. The schema + data-plan merge is refused BY A TEST, not by preference.**
+`crates/zeroship-data-plan/Cargo.toml` has an EMPTY `[dependencies]` table, and its own manifest
+comment says why: `zeroship-schema` "was the obvious candidate … and is REFUSED, because it is not a
+leaf: its manifest declares `compio-postgres`, `zeroship-core` and `tracing`. Depending on it would
+drag a live PostgreSQL driver into a crate whose whole claim is that it can be built and tested
+without a database, a runtime or an isolate."
+
+The emptiness is a security mechanism, not tidiness: "`serde` is not in scope in this crate, so the
+derive does not compile", which is what makes SC-3 decision 3 - `DbPlan` MUST NOT derive `Serialize`
+- structural rather than reviewable. `serialize_derive_is_structurally_impossible`
+(`tests/no_sql_text_escape_hatch.rs:210`) parses the manifest and fails if any dependency is
+declared. **Merging `zeroship-schema` into it deletes that guarantee and turns that test red.**
+
+So the IR core keeps its empty manifest and gets renamed, not merged. JSON decoding and JSON->IR
+lowering live OUTSIDE it, in `plugin-db`, which may depend on whatever it needs.
+
+*How I got this wrong:* I grepped `Cargo.toml` files for `zeroship-schema` and found data-plan among
+them, concluding data-plan depends on schema. Both hits are in the comment quoted above - the comment
+explaining the refusal. The enforcement test skips comment lines
+(`trimmed.starts_with('#')`, `:224`); my grep did not. **That is the third time this session a
+Cargo.toml comment has been read as a dependency edge.**
+
+**2. `zeroship-data-binding` is the wrong name, and the argument I gave for it was factually false.**
+I wrote that the reading "holds only because CDC leaves - change streams are not something an app
+gets through its binding". `Collection` holds `pub(crate) binding: DbBinding`
+(`v8_classes/collection.rs:32`) and mints its change stream through it (`:565`). A change stream is
+*exactly* something an app gets through its binding.
+
+And `DbBinding` is not the crate's public concept: it is private in release and carries no behaviour
+beyond two strings (`binding.rs:13`). The crate's architectural role is `DbPlugin`, which implements
+`NativePlugin` and registers `env.db` (`lib.rs:285`, `:340`), composed by the worker alongside the
+KV, storage and workflow plugins (`zeroship-worker/src/cache.rs:246`). **`plugin-db` is already the
+accurate name.** Keeping it also dissolves the "plugin-* family breaks" open question below at zero
+cost - there is no asymmetry to accept or to fix by renaming four crates.
+
+**3. The CDC boundary in the previous target contradicted this document's own Track B.** The old
+target listed `broker` inside `zeroship-data-cdc` while Track B argued the broker stays in the
+worker. Both sentences were mine, in one document. Beyond that contradiction, `cdc_lifecycle.rs` is
+not relay-side lifecycle at all: it bridges V8 subscription leases to one consumer per worker process
+(`cdc_lifecycle.rs:1`, `:69`), and the V8 wrapper owns and drops that lease (`subscription.rs:42`).
+It stays. See Track B for what actually moves.
 
 ## Measured starting point
 
