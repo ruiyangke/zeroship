@@ -25,12 +25,30 @@ Three choices, taken by the operator on 2026-08-31:
    default-off `mysql` feature degrades to a runtime rejection, not a compile error, and
    `--all-features` (what `clippy_gate.sh` lints under) still covers the code.
 
-   **The cost is two hardcoded counts, and it lands in the one file designed to name vendors once.**
-   `crates/zeroship-migrate/src/lib.rs:65` is `static SHIPPING: [&BackendVendor; 3]` - a fixed-size
-   array, so the length becomes conditional (or the const becomes a slice), and
-   `tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs:15,:21` hardcode
-   `REGISTERED_VENDOR_FLOOR = 3` and `-> [&'static BackendVendor; 3]`. Both must become
-   feature-conditional or a default-feature build fails to compile that test.
+   **THE COST WAS COSTED WRONG - corrected 2026-08-31 by a build-lens review, verified.** This said
+   "the cost is two hardcoded counts" and predicted a COMPILE failure. Both halves are false:
+
+   - **A facade-only feature does not remove MySQL from the build.**
+     `crates/zeroship-migrate-node/Cargo.toml:59` declares `zeroship-migrate-mysql` as a DIRECT
+     dependency, bypassing the facade entirely, and the addon constructs `MysqlBackend` on five paths
+     (apply, rollback, status, legacy status, baseline). So the addon still compiles MySQL - and then
+     `ApplyDialect::parse` consults the now-two-vendor facade registry and REJECTS `"mysql"`
+     (`verbs.rs:59-78`). **That is the worst available state: pay the build cost, lose the feature,
+     and break the addon's published contract** (`zero-migrate-cli` documents MySQL 8 support and has
+     a live N-API MySQL test).
+   - **The predicted compile failure does not happen.** `crates/zeroship-migrate/Cargo.toml:83` keeps
+     MySQL as an unconditional DEV-dependency, so the dialect-matrix tests still compile; their
+     registry assertions fail at RUNTIME instead. And there are three such tests with vendor arrays,
+     not one.
+
+   So the real choice is: have `zeroship-migrate-node` explicitly enable `zeroship-migrate/mysql`
+   (preserving its contract, accepting that N-API builds pay for MySQL), or add an addon-level
+   feature gating the direct dependency, the enum variant, the lowerer, all five bridge arms,
+   generated types, CLI branches, tests and docs. **Only the isolated `zeroship-migrate-server`
+   benefits cheaply** - it depends on the facade and the PostgreSQL vendor and never on MySQL.
+
+   This also means the target block's "`zeroship-migrate-*` untouched" is not true if the gate ships:
+   the facade, the addon's feature propagation and the test matrix all change.
 
    *A near-miss worth recording:* `:161` of that test says "three is a promise to" drift, which reads
    as an argument against reducing three to two. It is not - it is about three SPELLINGS of the
