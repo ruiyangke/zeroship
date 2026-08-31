@@ -7,6 +7,11 @@ this page does not re-argue it.
 **Working name:** `zeroship-cdc`. One binary, one process, executes no creator
 code.
 
+**Implementation status at `df8cf8472`: design only.** `zeroship-cdc`, its wire
+crate, Datastore, Database and Grant, the CDC control surface, process credentials
+and `__zeroship_admin.database_heads` do not exist. Section 3.7 makes them
+prerequisites, not descriptions of the tree.
+
 ---
 
 ## 0. How to read the citations in this document
@@ -79,17 +84,17 @@ sources.
 | How many slots, streams and publications? | One slot, one pgoutput stream and one shared publication **per Datastore**, all owned by one relay leader per physical cluster. Creating a Database edits the Datastore publication live; creating a Datastore starts another stream | 3.6, 6.1 |
 | When is membership reconciled? | **Bracketing** the migration DDL - shrink before, widen after - because a published column is a catalog dependency and `DROP COLUMN` of one fails `2BP01` | 3.6 |
 | Where does the column set come from? | The same policy-resolved fold that produces the DDL. The migration service holds the IR, not the descriptor, and must not re-derive `valueColumn` by string formatting | 3.7 |
-| Which crates move? | `wal_consumer.rs` and `replication.rs` move; `slot_reaper.rs`, `replication_ops.rs`, `change_stream_pg.rs` and the **whole** local-emit path are **deleted**; `broker.rs`, `read_set.rs`, `cdc_lifecycle.rs` stay | 4 |
+| Which code moves? | The reusable decoder and exact-slot algorithms are extracted and rewritten for relay-owned types; the plugin-coupled parts of `wal_consumer.rs` and `replication.rs` do not move literally. `slot_reaper.rs`, `replication_ops.rs`, `change_stream_pg.rs` and the **whole** local-emit path are **deleted**; `broker.rs`, `read_set.rs`, `cdc_lifecycle.rs` stay | 4 |
 | Is `zeroship-stream` the carrier? | **No**, and the reasons are in its own source, not in taste | 5.1 |
 | What is the carrier? | A volatile relay-owned bounded per-app ring plus an immutable-registration long-lived response over `ntex` (server) and `cyper` (client), authenticated by a service assertion | 5.2 |
 | What happens to a slow worker? | It is shed, never awaited. Ring overrun sends that connection an unsequenced `Resync`; a wedged connection is closed. No credit scheme, because credit would let a consumer stall slot confirmation | 5.4 |
 | How big is the ring? | Byte depth, frame cap and time depth, per app, plus a cluster cap that evicts from the largest ring | 5.5 |
-| What is the crash-delivery contract? | Same-term reconnects replay while the per-app cursor remains in the ring. Every higher leader term returns `Registered::Reset(RelayFailover)` before app data. Incremental events may be lost across relay failure; live queries recover by refetch and raw subscribers must handle the reset | 6.3-6.4 |
+| What is the crash-delivery contract? | Same-term **worker transport** reconnects replay while the per-app cursor remains in the ring; a same-term Datastore replication reconnect instead resets as `DatastoreReconnect`. Every higher leader term returns `Registered::Reset(RelayFailover)` before app data. Incremental events may be lost across relay failure; live queries recover by refetch and raw subscribers must handle the reset | 6.3-6.4 |
 | What if a change cannot be represented? | A `Gap` frame for that row, not a `Resync` for the app. Plus a `Truncate` frame and a three-way value encoding that distinguishes NULL from unavailable | 5.6 |
-| Leader election | One session advisory lock per `cluster_id`, taken by every contender in the designated `zeroship` coordination database over a dedicated least-privilege DSN. The leader owns one exact slot/stream per Datastore | 6 |
+| Leader election | One session advisory lock per `cluster_id` in the designated coordination database. A control-recorded predecessor-worker fence blocks every new-term topology ACK until each old-term worker drains or a supervisor proves that exact process dead and its credential revoked. The leader owns one exact slot/stream per Datastore | 6 |
 | Duplicate-suppression key | `(commit_lsn, change_index)`, lexicographic. The per-change LSN is unusable: measured to go backwards between transactions and to collapse under `heap_multi_insert` | 6.3 |
 | What invalidates a watermark? | A `systemid`, `timeline`, Datastore replication reconnect, Database rebind or leader-term change clears the numeric dedup watermark. Duplicate raw events are accepted rather than risking suppression after a rewind or failover | 6.4 |
-| Failure behaviour | `max_slot_wal_keep_size` bounds WAL; slot invalidation becomes a shared `AppReset`; the worker maps every reset to the existing broker `Resync` contract | 7 |
+| Failure behaviour | `max_slot_wal_keep_size` bounds WAL; same-term slot invalidation resets apps before the slot is dropped and recreated, then restores from a complete durable-head snapshot. A process restart is observed instead as `RelayFailover` | 7 |
 | Blast radius of one tenant | Bounded by construction: a total per-app step, no `catch_unwind`, and a degraded app is quarantined without stopping the slot | 7.5 |
 | What does the relay report? | Relay-side, per app and per Datastore. `confirmed_flush_lsn` and `safe_wal_size` are structurally blind to a worker-delivery outage under this gap-signaled contract | 7.6 |
 | Schema-change signal | A PostgreSQL-18 `pg_logical_emit_message` inside the **widen** transaction, after revoking both built-in overloads from `PUBLIC`. WAL ordering solves ordering; the ACL makes the marker authoritative | 8 |
@@ -216,7 +221,7 @@ safe `Masked` `valueColumn`; and a field with non-public classification but no
 separate safe representation is `ExcludedProtected`. The last case includes
 the supported explicit `.mask({ kind: "none", classification: ... })` shape:
 `raw_column_for_field` deliberately returns none
-(`crates/zeroship-migrate-core/src/schema/query.rs:4966-4973`), so publishing its
+(`crates/zeroship-migrate-backend/src/schema.rs:583-609`), so publishing its
 only column cannot be proven to withhold classified plaintext. This design
 excludes it. If an excluded protected field is part of replica identity, the
 migration is refused rather than unioning it back in. The accepted cost is that
@@ -300,10 +305,16 @@ constructors are:
   against `storage.valueColumn` for each declared field.
 
 `changed_columns` is not constructed independently. Both producers derive it
-only from `ProjectedTuple::visible_keys()`, and `old_tuple` passes through the
-same constructors before predicate evaluation. This closes the name vector as
-well as the value vector; projecting only `new_tuple` while retaining SQLite's
-current key collection at `sqlite/cdc.rs:622-623` would not.
+only from `ProjectedTuple::visible_keys()`. The target `ChangeEvent` deletes
+`old_tuple`: old tuples do not cross the relay wire or the broker boundary.
+For an identity-changing UPDATE, `pk` is the pre-change replica-identity vector;
+the new identity remains in the positional values. Otherwise `pk` is the current
+identity for INSERT/UPDATE and the deleted identity for DELETE. The relay and
+SQLite producer discard every other old value before publishing.
+Section 5.3's bounded delivered-pk set replaces before-image predicate
+evaluation. This closes the name vector as well as the value vector; projecting
+only `new_tuple` while retaining SQLite's current key collection at
+`sqlite/cdc.rs:622-623` would not.
 
 The newtype does not create the guarantee. Its job is to make every producer
 **name** which guarantee it is relying on, so that a third producer cannot be
@@ -543,6 +554,21 @@ mutex, but replace `SET TABLE` with per-member `DROP TABLE` plus `ADD TABLE`.
 The accepted cost is serial migration publication work for Databases sharing
 one Datastore, not for the whole physical cluster.
 
+The publication xact lock is not the marker-loss fence. The target adds one fixed
+Datastore-local session advisory read/write fence. Every ordinary head writer
+takes shared before its transaction or publication mutex and revalidates
+`cdc_state == Ready` within three seconds. Failure unlocks and retries after a
+fence-free wait; ambiguous unlock closes the session. Commit or abort releases
+shared before any remote wait.
+
+A destructive reset holds exclusive through heartbeat, `RestoreReady` and
+durable `Ready`. In `Quiesce`, only its exact unsealed classification token may
+authorize that migration's T1, repair, journal-only or T4 head transaction;
+finalize seals it before `Restore`, and durable state refuses unrelated writes
+after relay death. Both arms use fixed
+`(CDC_DATASTORE_RESET_NAMESPACE, 0)` through `pg_advisory_lock_shared` or
+`pg_advisory_lock` in the target database, never a tenant hash.
+
 **(iii) A published column is a catalog dependency.** MEASURED, 18.4, on a table
 published as `(id, b, ssn)`:
 
@@ -579,7 +605,9 @@ remove-mask operation. The old proposal's mask-removal example was inverted.
 
 **The specification: shrink before, DDL, widen after.** Three steps, and the
 first and third are their own transactions on the same pinned migration
-connection while the existing project lock remains held.
+connection while the existing Database lock remains held. The shrink and widen
+transactions also take the publication mutex; the head-advancing widen/T4 takes
+the shared reset fence unless it carries the exact classification token above.
 
 1. **Shrink.** For every table of this Database currently in the publication, set its
    column list to `old_wire INTERSECT new_wire`. A table leaving the declared set
@@ -613,28 +641,28 @@ same bundle and adding encryption with explicit mask kind `none`. False-positive
 Datastore resets on ambiguous rename/drop chains are accepted; a missed
 collision can strand pre-DDL plaintext in retained WAL.
 
-Before shrink, the migration service asks the control plane for a typed
-`PrepareClassifiedMigration(database_id, expected_epoch)` barrier. The control
-plane serializes barriers per Datastore, persists `reset_generation = G` with
-`cdc_state = Resetting { phase: Quiesce }`, and publishes that topology
-revision.
-The relay cancels the decoder, closes its replication socket, and joins the
-decoder task before touching a ring or acknowledging anything. The ingress
-generation is fenced at cancellation, so a late task cannot publish after join.
-For each affected ring it then appends
-`AppReset(ClassificationChanged)` at the existing `ring_next_seq`, advances
-`ring_next_seq` once, removes every older frame and sets `tail_seq` to the reset
-frame's sequence; it never resets or reuses a sequence within the term. Every
-invalidated connection then receives a staged prime batch plus connection-local
-`Resync` whose accepted cursor is immediately after that shared fence, or is
-closed if the control cannot be queued. The relay also clears every affected
-egress queue before acknowledging. It then calls the exact
-`drop_datastore_slot`. It acknowledges the revision only after
-`pg_replication_slots` proves that exact slot is absent, using
-`TopologyAck.state = Quiesced` at the exact reset generation. The control plane
-then returns the opaque `(datastore_id, reset_generation)` token to the
-migration service. If any participant is unavailable, the migration refuses
-before DDL.
+Before shrink, the migration service calls
+`PrepareClassifiedMigration(database_id, expected_epoch, apply_attempt_id,
+apply_fingerprint)`. `apply_attempt_id` is a caller-stable typed UUIDv7 key for
+one request; resubmission uses a new key. The fingerprint hashes canonical
+ordered identities, checksums and resolved policy, never journal progress.
+Control serializes per Datastore, persists same-kind `Quiesce` generation G and
+publishes it. The relay takes exclusive, cancels, closes and joins the decoder
+before any ring or ACK; cancellation fences late ingress. Per ring it appends
+`AppReset(ClassificationChanged)` at `ring_next_seq`, increments once, removes
+older frames and sets `tail_seq` to the reset sequence; a term never reuses a
+sequence. It clears egress and gives each invalidated connection staged primes
+plus local `Resync` at the post-fence cursor, or closes it if control cannot queue.
+It then drops the exact slot and sends exact-generation `Quiesced` only after
+`pg_replication_slots` proves absence.
+
+Control returns an opaque token and `MigrationApplyId` bound to Datastore,
+generation, Database, expected epoch, attempt and fingerprint. Exact
+attempt/fingerprint replay returns the same token, id and result; changed content
+conflicts, and a new attempt after `Ready` may start a new generation. An
+unavailable participant refuses before DDL. The relay retains exclusive; during
+`Quiesce`, only that Database and apply's unsealed token authorize its head
+transactions, while durable state refuses every unrelated write.
 
 The ordinary shrink, DDL and widen then run. After success or a converged engine
 failure, the migration service sends one idempotent typed request:
@@ -646,9 +674,17 @@ Content-Type: application/json
 
 {
   "database_id": DatabaseId,
+  "migration_apply_id": MigrationApplyId,
   "final_head_epoch": DatabaseEpoch,
   "last_rotation": MigrationApplyId,
-  "checkpoint_sha256": Sha256
+  "checkpoint_sha256": Sha256,
+  "datastore_heads": [{
+    "database_id": DatabaseId,
+    "physical_schema": SqlIdentifier,
+    "epoch": DatabaseEpoch,
+    "last_rotation": MigrationApplyId,
+    "checkpoint_sha256": Sha256
+  }]
 }
 ```
 
@@ -657,21 +693,27 @@ identity that already committed remains committed, so the convergence tail
 advances the head and epoch to describe that exact journal prefix before
 reporting the original error. If the journal cannot be reconstructed exactly,
 the service does not call finalize: the publication stays shrunk, the token
-stays claimed and the Datastore stays
-`Resetting { phase: Quiesce }` for identical-bundle recovery.
+stays claimed and the Datastore stays in that classification-owned `Quiesce`
+for identical-bundle recovery.
 
-This finalize is deliberately the epoch commit and reset release in one control
-operation, not the blocking epoch-commit call from 3.7 followed by a second
-call. Control validates the token, Database-to-Datastore mapping, rotation and
-checkpoint. If `final_head_epoch` is unchanged, it requires desired and serving
-to equal it. If it advanced once, the same transaction stores 3.7's
-epoch-commit tuple, requires desired and serving at the prior epoch, sets
-desired to the final epoch, and publishes one fresh-slot topology revision.
-That transaction changes the same generation to
-`Resetting { phase: Restore }`; it does not make the Datastore `Ready`.
-Any other jump is `409 EpochCommitOutOfOrder`. A byte-identical replay of the
-same token and body waits on or returns the same revision; a changed body is
-`409 ClassificationFinalizeConflict`.
+Finalize combines epoch commit, complete-head recovery and reset release. Control
+checks its durable record first: a byte-identical replay, even after `Ready`,
+waits on or returns the original result; a changed body is
+`409 ClassificationFinalizeConflict`. First application requires the active
+unsealed token in its exact classification `Quiesce`, a current-term `Quiesced`
+ACK, and matching Database and `migration_apply_id`; `last_rotation` may remain
+unchanged. The ACK proves earlier shared writers drained, while durable
+`Quiesce` excludes later unrelated writers.
+
+The service supplies every authoritative head as one sorted exact set, and
+control validates every Database/schema mapping. A desired+1 head requires
+desired=serving and advances desired once. A desired head with serving one behind
+must match and rebind its pending transition; with serving=desired it may reflect
+journal-only convergence and leaves epoch history untouched. Missing, extra,
+backward, larger or two-epoch serving jumps refuse. One transaction persists the
+finalize record and snapshot, records or adopts actual pending transitions
+through 3.7's shared record, seals the token, and enters same-kind `Restore`, not
+`Ready`. The target epoch, rotation and hash must equal its vector entry.
 
 The body deliberately carries no success/failure label. Control needs the
 durable converged head, not the ephemeral reason the apply loop stopped, and
@@ -682,25 +724,11 @@ process that did not witness that error returns a deterministic
 remaining identities; it does not guess whether the vanished attempt had
 succeeded, failed or skipped.
 
-`Resetting { phase: Restore }` is the sole authorization to create a fresh exact
-slot at the current WAL position. The relay still serves no worker rows in this
-phase. It creates or validates that slot, decodes a heartbeat under active reset
-coverage, seeds observed from the validated desired epoch under 6.2's
-explicit-gap rule, and acknowledges `RestoreReady` at the exact generation.
-That one ACK transaction atomically promotes serving when needed, changes the
-Datastore to `Ready`, publishes the resulting topology revision, and releases
-finalize. A `Quiesce` snapshot can never authorize slot creation, and a
-`Restore` snapshot can never satisfy the prepare barrier. The typed phase is
-what avoids the circular rule in which a relay must open a slot while the only
-`Resetting` rule forbids it.
-
-A migration-service crash before finalize leaves `Quiesce` durable and the slot
-absent. A crash after finalize leaves `Restore` durable, so the relay can
-idempotently finish fresh-slot recovery while a request retry waits on the same
-token. Retry consults the journal and head row, then finalizes the same token.
-There is no timeout that silently advances either phase. The widen marker is
-intentionally not relied on for this transition because the new slot starts
-after it.
+Classification follows 6.2 and 7.2's canonical `Restore`: only its durable
+complete-head snapshot authorizes the fresh slot. Under the exclusive fence the
+relay serves no rows, decodes the new slot's heartbeat, seeds observed from the
+snapshot, and sends `RestoreReady`; that ACK publishes `Ready`. A crash resumes
+the same durable phase without timeout. The discarded widen marker is unused.
 
 This loses every incremental change committed during the barrier and refetches
 every app sharing the Datastore, including apps whose schema did not change.
@@ -781,19 +809,18 @@ subset of both. Narrower than intended, never wider. **The bracket can lose a
 column from a change; it cannot leak one.** That polarity is the whole reason
 shrink comes first.
 
-An engine error stops later files but does not bypass the 3.7 convergence tail.
-The host rereads the journal and either restores the unchanged checkpoint or
-widen-commits the exact prefix that really applied. Only an unresolvable
-half-applied journal state leaves the publication shrunk and
-`pending_rotation` set for an identical-bundle recovery; it never waits for an
-unrelated later migration to guess the intended shape. The operator signal is
-7.6's `cdc_published_columns` against the committed checkpoint.
+An engine error still follows 3.7's journal-derived convergence tail. Only
+unresolvable recovery debt remains shrunk with `pending_rotation`; 7.6 compares
+`cdc_published_columns` with the committed checkpoint.
 
 The bracket also keeps the epoch marker on the right side of the DDL. The
 Database advisory lock prevents another migration for this Database from
-interleaving the three steps; it does not stop creator DML. That lock axis is a
-prerequisite, not current fact: the host currently calls it a project lock and
-keys it through `ExecutorConfig.project_id`. The Database rekey specified in
+interleaving the three steps; it does not stop a sibling Database or creator
+DML. The publication mutex orders each catalog transaction, while the shared
+T4/exclusive-reset fence above decides whether a committed marker precedes slot
+destruction or lands after the replacement slot is live. The Database lock axis
+is a prerequisite, not current fact: the host currently calls it a project lock
+and keys it through `ExecutorConfig.project_id`. The Database rekey specified in
 `docs/proposals/2026-08-28-app-database-decoupling.md:698-705` and `:706-739`
 must land before this bracket. Shipping the bracket on the app/project key would
 permit two apps sharing a Database to interleave it. Changes committed between
@@ -866,12 +893,13 @@ committed epoch in the marker. The accepted cost is one authoritative head read
 under the lock; a second internal route, trusting client-supplied binding IDs,
 or inferring identity from a schema string is rejected.
 
-`DatabaseEpoch` is a nonzero `u64` newtype in `zeroship-core`. The private
-`SchemaEpoch` now at
-`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` is moved,
-renamed and used by the migration service, control topology, CDC wire and
-plugin-db in the same change; the old name is deleted. `SqlIdentifier` is an
-opaque newtype owned by `zeroship-migrate-core`. Its fallible constructor applies
+The implementation adds `DatabaseEpoch` as a nonzero `u64` newtype in
+`zeroship-core`. The private `SchemaEpoch` now at
+`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97` is moved and
+renamed for use by the migration service, control topology, CDC wire and
+plugin-db in the same change; the old name is deleted. It also adds
+`SqlIdentifier` as an opaque newtype owned by `zeroship-migrate-core`. Its
+fallible constructor applies
 the platform identifier grammar, rejects NUL and names longer than PostgreSQL's
 63-byte limit, and the type does not implement `Display`. Only the SQL renderer
 can obtain its contents through the existing identifier-quoting path. Thus
@@ -1028,6 +1056,7 @@ __zeroship_admin.database_heads {
   physical_schema name unique not null,
   epoch bigint not null check (epoch > 0),
   projection_checkpoint bytea not null,
+  checkpoint_sha256 bytea not null check (octet_length(checkpoint_sha256) = 32),
   last_rotation uuid not null,
   pending_rotation uuid,
   pending_base_epoch bigint,
@@ -1035,11 +1064,15 @@ __zeroship_admin.database_heads {
 }
 ```
 
-The schema and table are owned by an operator no-login role. `PUBLIC`, app
-roles, worker roles and the relay receive no schema usage or table privilege,
-and the schema contains no function. The migration service writes it through
-the existing privileged `migrate_server.provision_database_url`, which is
-explicitly a superuser DSN today
+The schema and table are owned by an operator no-login role and contain no
+function. `PUBLIC`, app and worker roles receive no schema usage or table
+privilege. The relay's Datastore management login receives only schema usage
+and column-level `SELECT` on `database_id`, `physical_schema`, `epoch`,
+`last_rotation` and `checkpoint_sha256`; it cannot read
+`projection_checkpoint` or pending claims and cannot write anything. That
+minimal read is solely the slot-reset handshake in 6.2. The migration service
+writes the row through the existing privileged
+`migrate_server.provision_database_url`, which is explicitly a superuser DSN today
 (`deploy/compose/docker-compose.yml:473-501`). That is permissible because the
 migration service is the separate privileged process; this proposal does not
 pretend the current credential is a least-privilege login.
@@ -1050,9 +1083,12 @@ BTreeSet<MigrationIdentity> }`. A `MigrationIdentity` contains the engine's
 version, checksum and versioned/repeatable kind. It is the exact effective
 journal set after squash and repeatable semantics, not a count and not an
 assumed filename prefix.
+`checkpoint_sha256` is the raw 32-byte SHA-256 of that exact encoding and is
+maintained atomically on every checkpoint change. It lets the relay attest the
+commit tuple without receiving the folded schema.
 
-Database provisioning inserts epoch one, an empty checkpoint and its
-provisioning rotation id. Under the
+Database provisioning takes the shared Datastore fence and inserts epoch one,
+an empty checkpoint, its hash and the provisioning rotation id. Under the
 Database lock, an apply reads the row `FOR UPDATE` and compares its exact set
 with the engine journal. A mismatch is recovery debt and must be reconciled from
 matching resolved documents before new DDL can run. This checkpoint is what
@@ -1061,12 +1097,13 @@ unrelated later migration may apply
 (`crates/zeroship-migrate-core/src/apply/executor.rs:601-605`), so "first N
 documents" is not a valid schema boundary.
 
-T1 writes a typed `MigrationApplyId` UUID into `pending_rotation` with the
+T1 writes a typed `MigrationApplyId` UUID, returned by classification Prepare or
+locally minted for an ordinary apply, into `pending_rotation` with the
 current epoch in `pending_base_epoch` in the same transaction that reaps E-1.
 A retry adopts an existing claim only when its base epoch still equals the head
 and its journal delta is representable by the supplied exact-checksum
 documents; otherwise it refuses. T4 clears both fields atomically with the head
-advance and moves the claim to `last_rotation`. If the engine journal does not
+advance, checkpoint hash and `last_rotation`. If the engine journal does not
 move and there was no recovery debt,
 the host runs a no-rotation repair transaction: widen back to the exact
 checkpoint projection and clear the claim atomically, without minting roles,
@@ -1134,26 +1171,36 @@ missing documents. Inside that body, in order:
 6. If the delta is empty, run the no-rotation repair. If it contains only
    `RecordSupersessionNoOp` steps, run a journal-only convergence transaction:
    keep the folded schema, publication, roles and epoch unchanged; store the
-   engine's new exact `net_applied` set, move `last_rotation` and clear the
-   pending claim. Emit no marker and create no control epoch obligation.
+   engine's new exact `net_applied` set and checkpoint hash, move
+   `last_rotation` and clear the pending claim. Emit no marker and create no
+   control epoch obligation.
    Otherwise, in one T4
    transaction, mint epoch E+1 bind roles and grants, widen this Database's
-   members to that exact projection, update the head epoch and checkpoint, and
-   emit the returned `(database_id, epoch)` marker. All four effects commit or
-   abort together, matching the prerequisite T4 contract at
+   members to that exact projection, update the head epoch, checkpoint and hash,
+   and emit the returned `(database_id, epoch)` marker. On an ordinary apply,
+   before opening T4 or taking the publication mutex, the host takes the shared
+   Datastore fence and revalidates control `Ready`; on a classification apply,
+   the exact unsealed token authorizes this T4 only in `Quiesce` after
+   `Quiesced` established exclusive. The same choice applies to the head-writing
+   no-rotation and journal-only branches above. The durable reset state
+   preserves exclusion if that relay later dies. All effects commit or abort
+   together, matching the prerequisite T4 contract at
    `docs/proposals/2026-08-28-app-database-decoupling.md:706-739`.
 
-Only after that convergence and, when an epoch moved, the control/relay
-rendezvous below does the endpoint return the retained engine error. A failed
-bundle may therefore have an applied prefix and a higher serving epoch, which
-is already the engine's per-migration transaction semantics; the new rule makes that
-state explicit rather than leaving the publication and worker descriptor
-behind it. An unresolvable journal state returns recovery-required instead of
-the original error until the identical bundle repairs it.
+The ordinary shared fence is released immediately after T4, before the blocking
+control POST. A reset that acquires exclusive afterwards must recover that
+committed head even if the process dies before POST. Conversely, a T4 that did
+not commit before exclusive acquisition releases shared without opening T4 or
+taking the publication mutex and returns retryable. It may wait fence-free, then
+reacquire and revalidate only after durable `Ready`, when its marker enters the
+fresh slot. This is the complete ordering proof; neither the Database lock nor
+the publication transaction mutex covers a sibling Database.
 
 The edge routes the creator apply request directly to the migration service, so
 an apply response cannot update control by observation. T4 therefore creates a
-durable epoch-commit obligation. When no classification-reset token is active,
+durable epoch-commit obligation in the head row. The WAL marker is the normal
+retained-slot delivery mechanism; the complete-head reset handshake is its only
+explicit-gap substitute. When no classification-reset token is active,
 the migration service sends the following before returning either success or a
 retained engine error whose committed prefix advanced the epoch:
 
@@ -1172,41 +1219,29 @@ Content-Type: application/json
 ```
 
 It uses the required `ZEROSHIP_CONTROL_URL` and a single-use service assertion
-whose exact audience is `spiffe://zeroship.ai/svc/control`. Control verifies
-the Database-to-Datastore mapping, requires its currently desired and serving
-epochs both to be exactly E when accepting E+1, and idempotently stores the
-complete tuple before setting desired E+1 and incrementing
-`topology_revision`. That transaction does not yet expose E+1 to workers.
-Control holds the request until the current-term relay acknowledgment for that
-revision reports both the marker-observed and topology-desired epoch as E+1 for
-this Database. It then atomically advances the worker-visible serving epoch and
-returns
+for `spiffe://zeroship.ai/svc/control`. Control consults a durable record keyed
+by `(database_id, epoch)`, used only for E-to-E+1 and shared by this endpoint,
+classification finalize and `ResetHeads`. It binds the complete tuple to an
+ordinary topology revision or reset generation plus Restore revision; an exact
+match waits or returns, while a changed tuple is `409 EpochCommitConflict`.
+Absent a record, this endpoint verifies the mapping, requires
+desired=serving=E, and atomically stores the E+1 tuple and record, advances
+desired and increments `topology_revision`. A complete-head snapshot creates a
+reset-bound record for desired+1, or, when desired=E+1 and serving=E, requires
+the exact pending tuple and rebinds its unfinishable marker revision to the reset.
+Stable desired=serving heads leave epoch history untouched. Ordinary authority
+completes on the marker-observed/topology-desired ACK; reset authority completes
+on `RestoreReady`. Either advances worker-visible serving and returns
 `200 { "topology_revision": R, "serving_database_epoch": E + 1 }`.
-Repeating the same tuple waits on or returns the barrier associated with the
-revision that first committed it. A different tuple for the same
-`(database_id, epoch)` is `409 EpochCommitConflict`; an epoch other than the
-same epoch or exactly next is `409 EpochCommitOutOfOrder`.
+An epoch other than the recorded epoch or exactly next is
+`409 EpochCommitOutOfOrder`.
 
-The apply endpoint returns success only after that relay-fenced acknowledgment
-and serving-epoch promotion are durable.
-If T4 committed but the request or response was lost, retry discovers
-`last_rotation` and the exact checkpoint hash, reposts the same tuple, and does
-not increment the Database epoch. This is the head-ahead branch that precedes
-ordinary binding equality above; it also chooses classification finalize when
-that durable token is active. Before any later T1, the migration service
-requires the idempotent response's `serving_database_epoch` to equal
-`database_heads.epoch`; it first replays an unacknowledged commit and refuses
-new DDL if the full relay barrier cannot complete. This ordering prevents E
-from being reaped while workers are still bound to E-1. It also resolves both
-arrival orders: a marker seen before topology pauses at observed-only, and
-topology seen before the marker pauses at desired-only. A crash after DDL but
-before T4 leaves the old checkpoint and a journal delta, which the same recovery
-path reconstructs before rotating. The accepted cost is that control and the
-affected Datastore's relay stream are now on the successful migration response
-path, while committed DDL remains safely retryable during either outage.
-When a classification-reset token is active, 3.6's single finalize request
-performs this same durable epoch-commit transaction and serving promotion; the
-migration service must not call both endpoints.
+The apply returns only after durable relay ACK and serving promotion. Lost T4
+request or response retries the exact head tuple without another epoch; before a
+later T1, serving must equal the head or that obligation replays and new DDL
+refuses. Section 6.2 closes both marker/topology arrival orders. Control and the
+relay are therefore on the response path, while committed DDL stays retryable.
+An active classification token uses 3.6's finalize instead of this endpoint.
 
 The post-lock call to `reconcile_app_publication` at
 `crates/zeroship-migrate-server/src/apply.rs:461` is deleted. There is one
@@ -1238,7 +1273,7 @@ publishing a skipped, pending, undeclared or raw column.
 
 ---
 
-## 4. Which crates move, which are deleted, what stays
+## 4. Which code is extracted, deleted or retained
 
 The test applied is the one the index already adopted for the crate split
 (`...-00-index.md:192-203`): a crate boundary must buy a dependency the compiler
@@ -1250,8 +1285,8 @@ wire types (see 5.2).
 
 | file | verdict |
 | --- | --- |
-| `wal_consumer.rs` (1,440 lines) | **Moves.** The decode loop, `RelationEntry` and its `primary_key_index` (`:256-260`), `tuple_to_map`, `ensure_replication_param`, the backoff supervisor (`:710-843`) and `is_fatal` (`:743-760`) are the relay's core. What does **not** move: `SUPPRESSED_APPS`, `suppress_app`, `unsuppress_app`, `is_app_suppressed`, `SuppressGuard` and `emit_local` (`:66-164`). Those exist only to stop the in-process local-emit path double-delivering, and the Postgres local-emit path is deleted (below). |
-| `replication.rs` (908 lines) | **Moves**, reshaped. The app-keyed `publication_name` is replaced by `datastore_publication_name` and `datastore_slot_name` (3.6). `worker_slot_name` / `worker_slot_name_prefix` (`:114-132`) are **deleted**. `ensure_worker_slot` (`:154-279`) becomes `ensure_datastore_slot`, called once for each Datastore the cluster leader owns. `watchdog_query` (`:359-402`) and `SlotHealth` move, but every query and termination is constrained by the exact derived slot name and `database = current_database()`. Broad prefix enumeration is forbidden because the slot namespace is cluster-scoped and may contain another Datastore's or another service's slot. The per-worker `drop_worker_slot` and `drop_worker_slots` entry points are deleted. Their generic `drop_slot` body is replaced by `drop_datastore_slot(datastore_id)`, which derives one exact name, verifies `database = current_database()` and is the only path used by invalidation, system-identity change and classified-field rotation. |
+| `wal_consumer.rs` (1,440 lines) | **Split and rewrite; do not move the file.** It imports plugin-db's broker, `ChangeEvent` and `DbError`, so a literal move would make the relay depend on the V8-bearing plugin crate. Extract the pgoutput decode algorithm, `RelationEntry` and its `primary_key_index` (`:256-260`), replication parameter check, backoff policy (`:710-843`) and fatal classification (`:743-760`) behind relay and wire-owned types. Delete the plugin-only `SUPPRESSED_APPS`, suppression guard and `emit_local` (`:66-164`) with the Postgres local-emit path below. No `zeroship-cdc -> zeroship-plugin-db` dependency is allowed. |
+| `replication.rs` (908 lines) | **Split and rewrite; do not move the file.** It imports plugin-db's `DbError` and app/worker naming. Extract exact-slot lifecycle and health-query algorithms behind relay errors. Replace app-keyed names with `datastore_publication_name` and `datastore_slot_name` (3.6); delete `worker_slot_name`, its prefix (`:114-132`) and per-worker drop entry points. `ensure_datastore_slot` serves one Datastore. `drop_datastore_slot` derives and verifies one exact name plus `database = current_database()` and is reachable only through the fenced classification, identity or invalidation reset handshake. Broad prefix enumeration remains forbidden. |
 | `slot_reaper.rs` (593 lines) | **Deleted.** Section 2.2. |
 | `change_stream_pg.rs` (315 lines) | **Deleted.** `SharedExit` (`:24-64`) and `WalConsumerHandle` (`:66-108`) are the process-local supervision of a task that no longer exists in the worker. `PgChangeStream::spawn_consumer` (`:170-264`) and `deprovision` (`:162-164`) go away with the per-worker slot. `pause_broker` / `engage_schema_pending` (`:269-278`) survive as broker functions, which is what they already delegate to. |
 | `replication_ops.rs` (47 lines) | **Deleted.** `db.replication.watchdog()` exposes slot diagnostics to creator JavaScript for slots the creator will no longer own. Its own module comment already narrowed it once (`:1-7`). |
@@ -1314,9 +1349,12 @@ forget/revoke is control topology and must pass 6.2's revision barrier.
 
 ## 5. The worker/relay wire contract
 
-`ChangeEvent` (`broker.rs:81-119`) crosses a process boundary now. Today it is a
-Rust struct passed by `Arc` inside one process (`broker.rs:756-759` wraps it once
-and clones the `Arc` per subscriber), so it has never needed an encoding.
+The information represented by `ChangeEvent` (`broker.rs:81-119`) crosses a
+process boundary now, but that plugin-owned Rust struct does not. Today it is
+passed by `Arc` inside one process (`broker.rs:756-759` wraps it once and clones
+the `Arc` per subscriber), so it has never needed an encoding. The leaf wire
+crate owns the new process contract and the worker translates it into the
+smaller target `ChangeEvent`; the relay never imports the broker type.
 
 ### 5.1 `zeroship-stream` is not the carrier, and the reasons are in its source
 
@@ -1417,8 +1455,8 @@ SlotInvalidated, SystemIdentityChanged, ClassificationChanged` starting at
 reject codes follow `AppNotInTopology, GrantInactive, DatastoreUnavailable,
 StaleExpectedBinding, EpochPending, CursorBindingMismatch, CursorAhead`
 starting at `0x01`; and
-`GapReason` follows `OversizeValue,
-UnrepresentableType, MissingOldTuple` starting at `0x01`. Boolean bytes are only `0x00` and
+`GapReason` follows `OversizeValue, UnrepresentableType` starting at `0x01`.
+Boolean bytes are only `0x00` and
 `0x01`. Any other discriminant is a fatal v1 decode error, not an
 `Unknown` variant.
 
@@ -1449,6 +1487,11 @@ before `AppCursor`; `Rejected` contains only its
 `Null` and `Unavailable` have no body. These tagged-union rules apply inside
 both `pk` and `values`. All other tuples in the table encode left to right using
 the closed primitives above.
+
+For `Change`, the `pk` polarity is 3.4's closed rule. On an identity-changing
+UPDATE the worker derives the new identity from the replica-identity positions
+in `values`; an unavailable or malformed identity makes the row a `Gap` rather
+than guessing. No before-image field exists in v1.
 
 Identity validation is part of decoding, not caller convention. A `Registered`
 must repeat the request's exact `registration_generation` and contain exactly
@@ -1515,17 +1558,17 @@ mistake section 3 exists to prevent.
 dedup watermark (6.4). `leader_term` independently invalidates incremental
 subscriber state and forces `Registered::Reset(RelayFailover)`.
 
-The worker keeps one term fence per `cluster_id`. That fence moves at the first
-syntactically valid `Hello` received over the topology-pinned, successfully
-verified TLS connection, after cluster, `systemid` and timeline checks, and
-before `Registered`. A higher term atomically cancels every lower-term response
-for that cluster and drops its queued frames before the worker reads another
-frame from any of them. It never compares or cancels a response belonging to
-another cluster. A lower term is closed; the same term with a different
-`relay_id` in the same cluster is a split-brain invariant failure. This
-early boundary may interrupt a healthy old feed before the replacement
-registers, which is the accepted availability cost of ensuring a delayed old
-frame cannot reach the broker after N+1 is known.
+The worker keeps one term fence per `cluster_id`; every response frame and broker
+item retains its exact `(cluster_id, relay_id, leader_term)`. Broker admission and
+subscriber delivery take that cluster fence's shared guard through one
+non-yielding side effect. A valid higher pair from control or a verified `Hello`
+makes the worker acquire exclusive, wait for every in-flight guard, cancel lower-
+term responses, purge their queues, publish local `Resync(RelayFailover)`, and
+advance the pair before acknowledging control. A paused guard therefore prevents
+the ACK instead of resuming after it. Lower terms close, same-term/different-relay
+is split brain, and another cluster's responses are untouched. Section 6.2 makes
+this local quiescence a prerequisite to the control transition, not a timed
+assumption.
 
 Not `serde_json`. A JSON `HashMap<String,String>` per row is precisely what
 `new_tuple` is today, and that shape is what let a bag of physical column names
@@ -1586,10 +1629,11 @@ HTTP failures use `application/problem+json` with only a closed `code`:
 `406 NotAcceptable`; `409 ClusterMismatch`; `413 RequestTooLarge`;
 `415 UnsupportedMediaType`; `426 UnsupportedWireVersion` plus
 `ZeroShip-CDC-Wire-Version: 1`; and `503 NotLeader` or
-`AuthenticationStoreUnavailable` or `ConnectionCapacityExceeded`. None begins a binary
-body or emits `Hello`.
+`AuthenticationStoreUnavailable`, `TermAuthorityUnavailable` or
+`ConnectionCapacityExceeded`. None begins a binary body or emits `Hello`.
 
-The worker retries `NotLeader`, `AuthenticationStoreUnavailable` and
+The worker retries `NotLeader`, `AuthenticationStoreUnavailable`,
+`TermAuthorityUnavailable` and
 `ConnectionCapacityExceeded` with full jitter starting at 250 ms and capped at
 5 seconds, minting a fresh assertion for every attempt. Other HTTP errors are
 terminal until topology or code changes; they are never converted into an
@@ -1604,7 +1648,7 @@ restore the old term. After `Registered`, the worker freezes each last
 processed `AppCursor`, keeps local subscriptions in reconnecting state, mints a
 new registration generation because the body changed, and opens a
 make-before-break replacement with the same 250 ms to 5 second full jitter;
-slow-consumer and leader-fence closures use this path. Certificate,
+slow-consumer and term-fence closures use this path. Certificate,
 hostname and trust-bundle failures are configuration-fatal and wait for
 topology or certificate change. A frame decode violation is an implementation
 or peer invariant failure: it closes the response, drops staged state, surfaces
@@ -1632,6 +1676,7 @@ SubscribeRequest {
   wire_version,
   cluster_id,
   worker_id,
+  term_permit: Bytes,
   registration_generation,
   shard_index,
   shard_count,
@@ -1657,8 +1702,9 @@ SubscribeRequest {
 ```
 
 The request bytes are, in order,
-`u16 wire_version || ClusterId || WorkerId || u64 registration_generation ||
-u32 shard_index || u32 shard_count || Vec<AppRegistration>`. The decoder
+`u16 wire_version || ClusterId || WorkerId || Bytes term_permit ||
+u64 registration_generation || u32 shard_index || u32 shard_count ||
+Vec<AppRegistration>`. A term permit is capped at 512 bytes. The decoder
 requires `0 < shard_count` and `shard_index < shard_count`. An
 `AppRegistration` is
 `AppId || ExpectedBinding || Option<AppCursor>`; `ExpectedBinding` is
@@ -1668,11 +1714,21 @@ u64 database_epoch || u64 grant_generation || u64 next_seq`. These definitions
 and the frame table are the complete v1 field order. The encoder does not use a
 Rust enum layout, `bincode` defaults or architecture-sized integers.
 
+The non-circular permit commitment is SHA-256 over domain
+`zs-cdc-subscribe-v1\0` plus these canonical request bytes with `term_permit`
+encoded as zero-length `Bytes`. Issuance and redemption use that same digest;
+neither the permit itself nor the HTTP `Authorization` header is in its preimage.
+
 The endpoint is operator-controlled topology, not a creator URL. The relay
-rejects a request whose `cluster_id` differs from its configured cluster, and
-authenticates the worker service assertion before examining any app id.
-`worker_id` is a typed, UUIDv7 `wrk_` worker-process identity minted at process
-start; `relay_id` is the equivalent `rly_` relay-process identity. Neither
+rejects a request whose `cluster_id` differs from its configured cluster, then
+authenticates the worker assertion and redeems the control-signed term permit as
+specified in 6.2 before examining any app id. The permit and redemption must bind
+the request's cluster, worker-process id, credential, admission epoch, relay pair,
+shard key and commitment;
+the authenticated assertion credential id must equal the permit's credential.
+`worker_id` is a typed, UUIDv7 `wrk_` identity minted at process start and bound
+into its supervisor-issued process credential; `relay_id` is the equivalent
+`rly_` relay-process identity. Neither
 survives a process restart. `registration_generation` starts at one and is monotonically
 increasing per worker process **snapshot**, with all of that snapshot's sibling
 shards sharing it. The relay keys shard admission by
@@ -1889,9 +1945,11 @@ worker resume coordinate.
 ### 5.3 Delete, and "row left the view", without a full before-image
 
 Section 3.5(b) rules out `REPLICA IDENTITY FULL`. So a DELETE frame carries the
-replica-identity columns and the pk, and an UPDATE carries an `old_tuple` only
-when the replica-identity columns changed (this is pgoutput's own contract,
-documented at `libs/compio-postgres/src/replication.rs:1930-1932`).
+replica-identity columns and the pk, and pgoutput supplies an UPDATE old tuple
+only when the replica-identity columns changed (this is pgoutput's own contract,
+documented at `libs/compio-postgres/src/replication.rs:1930-1932`). The relay
+uses that tuple only to recover the identity when required, then discards it.
+Wire `Change` and the target broker `ChangeEvent` carry no old tuple.
 
 The broker's current answer is to test the predicate against both tuples
 (`broker.rs:293-297`). Without a before-image that arm cannot fire, and a row
@@ -1900,9 +1958,11 @@ that leaves a subscriber's view would silently stop updating.
 The replacement: the subscription keeps the bounded set of pks it has delivered
 into the subscriber's current view. An event whose pk is in that set is delivered
 regardless of whether the new tuple matches the predicate, so the subscriber
-learns the row left. The set is bounded by the query's page size; overflow emits
-`Resync`, which the broker already models (`broker.rs:318-340`) and the
-live-query client already absorbs (7.3).
+learns the row left. For an identity-changing UPDATE it removes that old `pk`
+and evaluates the new identity derived from positional values for insertion.
+The set is bounded by the query's page size; overflow emits `Resync`, which the
+broker already models (`broker.rs:318-340`) and the live-query client absorbs
+(7.3).
 
 This is **not prototyped**, and it is the one part of the design where the
 subscriber-side contract changes shape rather than moving (12.4, 13).
@@ -2031,15 +2091,14 @@ shared app ring. Both carry the same closed `ResetReason` from 5.2. This is
 load-bearing: when a barrier clears queued `AppReset(S)`, the replacement
 connection-local `Resync(S)` preserves the original reason and therefore the
 same watermark decision. These resets are the right vocabulary for a lost
-interval. They are the wrong frame for three row-level conditions the relay will
-meet, and the prior art made all three first-class: Salesforce has `GAP_UPDATE`
-and `GAP_OVERFLOW` as distinct event types, and Debezium ships a configurable
+interval. They are wrong for the three conditions below, each of which needs a
+narrower vocabulary. The prior art made all three first-class: Salesforce has
+`GAP_UPDATE` and `GAP_OVERFLOW` as distinct event types, and Debezium ships a configurable
 `unavailable.value.placeholder`.
 
 1. **One change for one row that cannot be represented.** A value over the frame
-   budget; a type the wire format has no encoding for; an UPDATE whose old tuple
-   is absent when a subscriber needed it (5.3). Resyncing a whole app for one row
-   is a refetch storm caused by one bad row.
+   budget or a type the wire format has no encoding for. Resyncing a whole app
+   for one bad row is a refetch storm.
 2. **A value the server did not send.** pgoutput sends an unchanged-TOAST marker
    in place of a large unmodified value. The relay must not guess and must not
    encode it as NULL.
@@ -2061,8 +2120,8 @@ is NULL" is the same class of collapse section 3 exists to prevent**: a
 downstream consumer that cannot tell them apart will eventually write the wrong
 one into a cache and call it a value.
 
-`Gap.reason` is a **closed** enum - `OversizeValue`, `UnrepresentableType`,
-`MissingOldTuple`. Closed rather than a string, because an open reason field is
+`Gap.reason` is a **closed** enum - `OversizeValue`, `UnrepresentableType`.
+Closed rather than a string, because an open reason field is
 somewhere a physical column name reappears on the wire the moment someone writes
 a helpful error message. If even the keyed `Gap` exceeds `max_frame_bytes`, the
 relay appends `AppReset(AppDegraded)` and enters the active-reset quarantine of
@@ -2118,7 +2177,8 @@ GRANT CONNECT ON DATABASE zeroship TO zeroship_cdc_coord;
 GRANT USAGE ON SCHEMA control TO zeroship_cdc_coord;
 GRANT SELECT (
   cluster_id, advisory_lock_key, postgres_system_identifier,
-  postgres_timeline, leader_term, leader_relay_id, topology_revision
+  postgres_timeline, leader_term, leader_relay_id, predecessor_fenced_term,
+  topology_revision
 ) ON control.cdc_clusters TO zeroship_cdc_coord;
 GRANT UPDATE (leader_term, leader_relay_id)
   ON control.cdc_clusters TO zeroship_cdc_coord;
@@ -2147,9 +2207,16 @@ cdc_cluster {
     check (postgres_timeline > 0 and postgres_timeline <= 4294967295),
   leader_term bigint not null check (leader_term > 0),
   leader_relay_id text,
+  predecessor_fenced_term bigint not null
+    check (predecessor_fenced_term > 0
+       and predecessor_fenced_term <= leader_term),
   topology_revision bigint not null
 }
 ```
+
+Provisioning seeds `leader_term` and `predecessor_fenced_term` to the same
+positive, non-serving value and leaves `leader_relay_id` null. The first leader
+increments the term before serving.
 
 Provisioning obtains `(postgres_system_identifier, postgres_timeline)` from
 `IDENTIFY_SYSTEM` over the first Datastore's replication connection. Every
@@ -2168,11 +2235,17 @@ clusters exclude each other. Every relay instance is configured with exactly
 one `cluster_id`. On a dedicated coordination connection it calls
 `pg_try_advisory_lock(CDC_LOCK_NAMESPACE, advisory_lock_key)`. After success,
 on the same session, it atomically increments `leader_term`, writes its
-`leader_relay_id`, and uses the returned pair in `Hello`. The update predicate
-requires `leader_term < 9223372036854775807`; exhaustion is a hard operator
-refusal rather than an overflowing increment. It opens no Datastore
-stream before that commit. Non-leaders retry with bounded jitter and serve no
-worker stream.
+`leader_relay_id` and uses the returned pair in `Hello`. The update predicate
+requires `predecessor_fenced_term = leader_term` as well as
+`leader_term < 9223372036854775807`; a standby cannot skip an unfinished fence.
+An operator-owned `SECURITY DEFINER` row trigger has a no-login owner, fixed
+`search_path = pg_catalog, control`, and `PUBLIC` execute revoked. It freezes every active old-term member
+against the new relay pair with a random challenge in that transaction. It alone sets
+`predecessor_fenced_term` to the new term when the set is empty. The relay role
+cannot invoke it directly or edit fence state. Exhaustion is a hard operator
+refusal rather than an overflowing increment. It opens no Datastore stream
+before that commit. Lock or predicate misses retry with bounded jitter and serve
+no worker stream.
 
 `cdc_endpoint` is a cluster-local load-balanced service address. A contender's
 readiness endpoint is green only while its leadership guard and topology loop
@@ -2186,8 +2259,9 @@ over. A non-leader answers a direct subscription attempt with `503 NotLeader`
 and no redirect URL; the worker retries the operator-provided endpoint with
 bounded jitter.
 
-**The connection is the fence.** The dedicated coordination session lives for
-the entire leadership term and is used only for the lock, term update and a
+**The connection probe accelerates self-demotion; the predecessor ACK is the
+delivery fence.** The dedicated coordination session lives for the entire
+leadership term and is used only for the lock, term update and a
 `SELECT leader_term, leader_relay_id ... WHERE cluster_id = $1` probe every two
 seconds. Each probe has a three-second deadline. EOF, timeout, query error,
 ambiguous cancellation, a missing row, or a returned pair different from the
@@ -2199,10 +2273,63 @@ process must reacquire the lock and mint a higher term before serving again.
 The central control database is therefore an accepted CDC availability
 dependency; uncertainty self-demotes rather than risking split brain.
 
+Control owns one durable `CdcWorkerTermMember` per `(cluster_id, worker_id)` with
+credential id, monotonic nonzero `admission_epoch`, active/fenced terms, pending
+predecessor/successor pair and challenge, and completed receipt. It owns
+`CdcWorkerGrantFence` rows keyed by `(cluster_id, worker_id, revision, app_id,
+old_grant_generation)`, each with challenge and worker-or-supervisor receipt.
+Typed cluster routes cover permits, releases, redemptions and both fence ACKs.
+The first request fixes the credential; later routes require it and mismatches
+change nothing. A new process receives a new worker id.
+
+Workers poll `term-permits` every two seconds and per shard with nonce, request
+commitment and `expected_admission_epoch`; `null` creates only an absent row at
+1. Every later worker-originated membership mutation locks cluster before member
+and compares that epoch. Mismatch is side-effect-free `StaleAdmissionEpoch`. For
+release or fence completion, exact durable receipt lookup precedes the comparison,
+so replay returns its recorded epoch without reapplying. Control then
+activates the member in the current term and returns a signed current-pair permit
+bound to that epoch, or returns `FenceRequired { term?, grants[] }`.
+
+A PendingRevoke/Rebind snapshots all active members into Grant-fence rows;
+inactive workers cannot hold valid responses, and permit issuance/redemption is
+blocked while the transition is pending. Online redemption requires the current
+relay pair, unchanged member epoch, no pending Grant transition, and an exact body for first-claim
+replay. Issue, redemption, release, transition creation, fence completion and
+term increment all lock cluster before member/fence. A releasing worker holds
+its exclusive guard while cancelling and joining cluster response/admission
+tasks, purging queues and calling control. A preexisting fence returns its exact
+`FenceRequired` without clearing active; the worker completes it under that
+guard and retries. Accepted release clears active and increments
+`admission_epoch` before guard release; operation nonce and request hash key its
+receipt. Thus transition-first fences the member, while release-first removes it
+and invalidates earlier permits before the transition snapshot.
+
+N+1 freezes every active N member against its exact successor and challenge. For
+either fence set, the worker takes one cluster-exclusive guard, drains delivery,
+cancels named responses, purges queues, records per-app minimum Grant generations
+and sends exact ACKs. Term ACK echoes worker, both relay pairs and challenge;
+Grant ACK echoes its row key and challenge. Term completion atomically receipts
+all incomplete Grant fences visible for that worker, clears active/pending,
+advances fenced-through and stores its receipt; the last member advances
+`predecessor_fenced_term`. Term-first makes the member absent from a later Grant
+snapshot; Grant-only completion leaves it active. The first worker or supervisor
+batch increments `admission_epoch` once. Exact challenge receipts replay without
+another increment; missing or newly visible rows return the complete
+`FenceRequired` set without mutation.
+
+Control exposes revoke/rebind only after all frozen-worker receipts and an exact
+current-pair relay topology ACK. A term change invalidates older relay evidence,
+so the successor must ACK even when worker receipts exist. Only the supervisor
+may complete either fence after exact process death and credential revocation,
+using its termination record. There is no timeout: a paused worker blocks until
+it drains or is externally fenced, even without N+1 `Hello`.
+
 Each Datastore topology entry names a separate
 `management_dsn_secret_ref`. Its login may read `pg_replication_slots` and
-`pg_stat_activity`, update only `__zeroship_cdc.heartbeat`, and is a member of
-`pg_signal_backend`; it has no creator-schema DML privilege. After acquisition,
+`pg_stat_activity`, read only the five head columns granted in 3.7, update only
+`__zeroship_cdc.heartbeat`, and is a member of `pg_signal_backend`; it has no
+creator-schema DML privilege or head write privilege. After acquisition,
 the leader may terminate an old `active_pid` over that connection only after one
 query proves the slot name equals the exact Datastore-derived name,
 `database = current_database()`, `slot_type = 'logical'`, the plugin is
@@ -2210,9 +2337,8 @@ query proves the slot name equals the exact Datastore-derived name,
 relay replication identity. Failure of any predicate refuses termination. This
 is privileged process authority and is deliberately kept out of the worker.
 
-A worker that accepts term N+1 atomically closes and ignores every lower-term
-response. This is the second fence for an old relay whose worker socket outlives
-its coordination connection.
+A worker that accepts term N+1 closes and ignores every lower-term response; its
+fenced acknowledgment proves that state even when N+1's `Hello` was withheld.
 
 **Topology channel.** `ZEROSHIP_CONTROL_URL` is required and must be HTTPS. The
 leader mints a single-use service assertion for exact audience
@@ -2239,7 +2365,10 @@ Datastore {
   reset_generation,
   cdc_state:
     Ready
-    | Resetting { phase: Quiesce | Restore }
+    | Resetting {
+        phase: Quiesce | Restore,
+        kind: ClassificationChanged | SlotInvalidated | SystemIdentityChanged
+      }
 }
 Database {
   database_id,
@@ -2286,28 +2415,39 @@ TopologyAck {
 ```
 
 `reset_generation` is a nonzero monotonic counter seeded at Datastore
-provisioning and incremented by every reset barrier. The status vector contains
+provisioning and incremented by every reset barrier. Its `kind` is immutable
+until that generation reaches `Ready`: `ClassificationChanged` completes only
+through migration finalize; the other two kinds complete only through
+`ResetHeads`. The status vector contains
 every Datastore in revision `R` exactly once, sorted by typed id. `Ready` and
 `RestoreReady` contain every Database and Grant for that Datastore exactly
 once, also sorted, with no foreign child or duplicate. `Quiesced` and
 `Unavailable` require both child vectors empty because neither has a live
-decoder; `Unavailable` never satisfies a barrier. A topology `Ready` entry
+decoder; `Quiesced` attests that exclusive acquisition drained earlier writers
+and proved the exact slot absent, while durable reset state bars later unrelated
+writes; `RestoreReady` additionally attests the relay currently holds exclusive.
+`Unavailable` never satisfies a
+barrier. A topology `Ready` entry
 admits `Ready` or `Unavailable`,
-`Resetting { phase: Quiesce }` admits `Quiesced` or `Unavailable`, and
-`Resetting { phase: Restore }` admits `RestoreReady` or `Unavailable` at the
+`Resetting { phase: Quiesce, .. }` admits `Quiesced` or `Unavailable`, and
+`Resetting { phase: Restore, .. }` admits `RestoreReady` or `Unavailable` at the
 exact `reset_generation`. Unknown enum values, a missing status, inconsistent
 reset generations, a non-`Unavailable` phase/status mismatch or a child set
 that is not the exact topology slice rejects the whole ACK.
 
-Control accepts the acknowledgment only when
-`control.cdc_clusters` still contains that exact
-`(leader_relay_id, leader_term)` and `revision` is not greater than the latest
-topology revision. A stale-term or future-revision acknowledgment is rejected;
-an exact replay is idempotent. ACKs are cumulative complete-snapshot evidence,
-not one global "current pending" latch. For each Datastore status, control
-stores the greatest acknowledged revision and the exact observed reset, Grant
-and Database-epoch generations. An ACK at R may satisfy a barrier created at B
-only when `R >= B`. A prepare-reset barrier requires `Quiesced` at its exact
+Control accepts the acknowledgment in one transaction that row-locks the same
+`control.cdc_clusters` row used by term increment. Under that lock it requires
+the exact `(leader_relay_id, leader_term)`,
+`predecessor_fenced_term == leader_term`, and `revision` no greater than the
+latest topology revision; it writes all resulting barrier state before
+unlocking. Thus either an N+2 term update precedes the check and rejects N+1, or
+the N+1 ACK commits before N+2 can become current. A stale-term, unfenced or
+future-revision acknowledgment is rejected; an exact replay is idempotent. ACKs
+are cumulative complete-snapshot evidence, not one global "current pending"
+latch. For each Datastore status, control stores the greatest acknowledged
+revision, its relay pair, and the exact observed reset, Grant and Database-epoch generations. An
+ACK at R may satisfy a barrier created at B only when `R >= B`. A prepare-reset
+barrier requires `Quiesced` at its exact
 reset generation under a `Quiesce` snapshot. Finalize first publishes `Restore`
 and then requires `RestoreReady` at that same generation; accepting that ACK is
 the transaction that publishes `Ready`. A Grant barrier requires its exact
@@ -2337,8 +2477,11 @@ secret fetch for an implementer to choose.
 Every foreign-key axis shown above is mandatory. `grant_generation` increments
 on every activation, revocation and rebind and never resets for an app. The
 Datastore's `reset_generation` is likewise monotonic and supplies 3.6's durable
-classification-barrier token. A relay never opens a slot in `Quiesce`. It may
-open only a fresh exact slot in `Restore` at that generation, and it never
+classification-barrier token. The immutable kind selects exactly one
+completion endpoint; neither endpoint may reinterpret another kind. A relay
+never opens a slot in `Quiesce`. It may
+open only a fresh exact slot in `Restore` at that generation after the complete
+head snapshot is durable, and it never
 serves worker rows until control publishes `Ready`. The
 mapping is authoritative. The app ids and expected bindings in a worker
 registration only select and compare an allowed subset; they never decide a
@@ -2351,25 +2494,34 @@ Grant activation, revocation and rebind are revision barriers. For activation,
 the relay installs the pending route before acknowledging; only then does
 control expose it as `Active`. For revocation or rebind, the relay first
 generation-fences the app, clears its old ring and every queued egress frame,
-and closes every immutable response containing the old binding. Only after all
-old response tasks have observed cancellation does it acknowledge. The worker
-then opens a replacement response from its new active set. No buffered row from
-the old Database may cross the accepted acknowledgment. This can reconnect
+and closes every immutable response containing the old binding before its ACK.
+In parallel, 6.2's Grant fence makes each frozen worker drain delivery, purge
+old-generation decoder/broker/subscriber queues and install its minimum generation
+before ACK. Control exposes the transition only after both evidence sets; a new
+or reactivating worker receives no permit while it is pending. Thus no buffered
+old-Database row can cross broker admission or subscriber delivery after the
+accepted barrier, in either the current or a predecessor term. The worker then
+opens a replacement from its new active set. This can reconnect
 otherwise healthy apps that shared a response with the changed app; that
 availability cost buys a simple, testable confidentiality fence.
 
 **Desired, serving and observed epoch are distinct.** Relay topology supplies
-both control's desired epoch and its durable worker-visible serving epoch; the
-stream supplies observed epoch through section 8's transactional marker.
-Registration and row delivery require all three to agree. If topology advances
-first, new registrations receive `EpochPending` while existing connections
-finish epoch-N frames. If the marker arrives first, that Datastore pauses
-delivery at the marker.
+both control's desired epoch and its durable worker-visible serving epoch. On
+an ordinary retained-slot path, the stream supplies observed epoch through
+section 8's transactional marker; new-term initialization may seed it from
+equal desired and serving after the fenced heartbeat below, and a destructive
+reset may seed it only from the durable complete-head snapshot.
+New registration requires all three to agree. An existing feed may finish
+frames through the epoch for which observed equals serving even when desired has
+advanced. It stops at the marker and cannot deliver an E+1 frame until all three
+equal E+1. Thus topology-first gives new registrations `EpochPending` while
+existing connections finish epoch-N frames; marker-first pauses at the marker.
 
 Matching desired and observed is not yet permission to confirm the marker.
 The relay keeps `highest_gap_covered_lsn` below that marker's commit, posts the
 fenced topology ACK, and waits until control durably promotes serving epoch and
-returns success. It then atomically appends the sequenced `Epoch` fence, marks
+returns success. It then atomically appends one sequenced `Epoch` fence to every
+active grantee app ring for that Database, marks
 the local Database serving, unpauses delivery, and only afterwards admits or
 confirms the marker commit. A crash before the ACK commit therefore replays the
 marker; a crash after it may resume beyond the marker because control's serving
@@ -2379,8 +2531,8 @@ earlier frames, clears relation and live-query state, re-resolves the binding,
 publishes local `Resync`, and only then accepts frames after `Epoch`.
 
 On a new leader term, the relay does not expose backlog from the old term after
-workers refetch. It validates one topology snapshot revision R, puts every
-Datastore under active reset coverage, and drains the existing slot through a
+workers refetch. For each topology-`Ready` Datastore with a retained slot, it
+validates one snapshot revision R, activates reset coverage and drains through a
 decoded heartbeat commit. For each Database, if that same snapshot has
 `desired_database_epoch == serving_database_epoch` and the drain saw no newer
 marker, the relay seeds in-memory observed epoch from serving: the prior fenced
@@ -2390,24 +2542,42 @@ newer marker, it remains `EpochPending` and follows the normal rendezvous; a
 heartbeat never synthesizes an epoch. Only after this initialization does it
 confirm the heartbeat and admit registrations. This uses the chosen failover
 gap without persisting a second relay-owned observed-epoch ledger.
+A `Resetting` Datastore instead resumes its exact `Quiesce` or `Restore` phase
+under the exclusive fence and complete-head snapshot; it never takes this
+retained-slot drain or topology-only seed path.
 
-There is one explicit substitute for an unreplayable pending marker. If the old
-slot is lost, or a classification or cluster-identity barrier deliberately
-drops it, the relay first completes the applicable app-wide reset, creates a
-fresh slot at the current WAL position, and decodes its heartbeat. Because that
-path has already declared the whole prior interval lost, it may seed observed
-epoch from the validated desired epoch and run the same fenced ACK/serving
-promotion. It never does this on an ordinary reconnect or retained-slot
-failover. The accepted cost is already the stronger one: every affected app
-refetches and raw subscribers receive an explicit gap instead of replaying the
-missing marker.
+The sole substitute for an unreplayable pending marker is the complete-head reset
+handshake. Slot loss, classification and identity rotation all follow 7.2's
+reset-before-drop-before-create order under the exclusive Datastore fence. After
+`Quiesced` proves the old slot absent, the authorized service submits every head's
+`(database_id, physical_schema, epoch, last_rotation, checkpoint_sha256)` sorted
+by id. Classification finalize carries it under 3.6; invalidation and identity
+reset use the relay's column-limited read grant and POST closed body
+`ResetHeads { relay_id, leader_term, heads: [DatastoreHead] }` to
+`/internal/v1/cdc/datastores/{datastore_id}/resets/{reset_generation}/heads`
+under a single-use relay assertion for the control audience.
 
-**Zero tokio.** Every component named is already compio: `compio-postgres` for
-the lock and the replication connection, `compio::time::sleep` for backoff
-(already used at `wal_consumer.rs:825`), `flume` for shutdown channels
-(`change_stream_pg.rs:188-189`), `ntex` with the `compio` feature for the HTTP
-server, `cyper` for the client. Nothing in the design requires an async runtime
-that is not already in the workspace.
+`DatastoreHead` is that exact tuple. Control first checks the durable result keyed
+by Datastore and generation: an exact-current-pair, byte-identical replay in
+`Restore` or `Ready` returns its original revision; a changed replay conflicts.
+A first application row-locks cluster and Datastore, requires the exact leader,
+`Quiesce`, kind `SlotInvalidated` or `SystemIdentityChanged`, and an accepted
+current-term `Quiesced` ACK. It then validates the exact topology set and 3.6's
+desired/head rules, creates or adopts each actual pending epoch record, persists
+the result and vector, and atomically enters `Restore` without changing kind.
+Any stale term, wrong kind, phase or generation,
+or partial or extra vector refuses without state change. `ResetHeads` cannot
+complete classification, nor can classification finalize complete another kind.
+
+Only that `Restore` snapshot authorizes fresh-slot creation, heartbeat and
+observed-epoch seeding. The `Quiesced` drain plus durable reset state proves it
+includes every earlier head commit; later ordinary writers retry after `Ready`, reacquire shared and put any
+new marker in the fresh slot. Unqualified desired topology cannot seed observed,
+and this exception never applies to ordinary reconnect or retained-slot failover.
+
+**Zero tokio.** The design uses `compio-postgres`, `compio::time::sleep`
+(`wal_consumer.rs:825`), `flume` (`change_stream_pg.rs:188-189`), compio `ntex`
+and `cyper`; it adds no async runtime.
 
 ### 6.3 Resume, confirmation and same-term dedup
 
@@ -2469,8 +2639,8 @@ durable spool is required; acknowledgment coupling remains rejected.
 
 **Confirmation and the clamp.** `wal_consumer.rs:449-497` advances on `Commit`
 and sends a standby status update; the long comment at `:459-494` records why a
-mid-transaction `wal_end` is safe to report. That reasoning moves with the
-decoder.
+mid-transaction `wal_end` is safe to report. The extracted relay decoder retains
+that reasoning.
 
 `wal_consumer.rs:441` does `stream.advance_lsn(wal_end)` on `PrimaryKeepalive`.
 Under the driver's stated durability contract that call is not a valid promise,
@@ -2525,7 +2695,7 @@ every EARLIER transaction's commit record, and under the relay those earlier
 transactions' frames may still be in flight to the ring. Fixing only the
 keepalive arm produces a relay that confirms unreplayable WAL just during
 long-running transactions - rarer, harder to reproduce, identical in consequence.
-So the moved decoder replaces all three calls with one `confirm(pos)` helper
+So the extracted relay decoder replaces all three calls with one `confirm(pos)` helper
 that clamps and then calls
 `confirm_lsn(clamped, ConfirmationBasis::GapFenced { leader_term })`. At `:454`
 the clamp is a no-op by construction, because the commit is confirmed only
@@ -2702,13 +2872,13 @@ different WAL at the same positions, which is exactly the failure this section
 exists to prevent.
 
 The unchanged pair on crash recovery is not accepted as a silent inference.
-Every Datastore replication-connection discontinuity emits
-`AppReset(DatastoreReconnect)` for its routed apps and clears their numeric
-watermarks before the reconnect starts delivering. That covers a storage rewind
-which comes back on the same `(systemid, timeline)`. It also turns an ordinary
-network interruption into refetches and possible duplicate raw events. That
-availability and read-load cost is accepted because the relay has no trustworthy
-server incarnation signal with which to distinguish the two cases.
+Every same-term ordinary Datastore reconnect outside an active reset generation
+emits `AppReset(DatastoreReconnect)` for its routed apps and clears their numeric
+watermarks before delivery. A higher term uses `RelayFailover`; a reset-owned
+fresh connection uses that generation's immutable reset kind and emits no second
+reconnect reset. The ordinary rule covers a same-pair storage rewind and turns a
+network interruption into refetches and possible duplicates. That cost is
+accepted because the relay has no trustworthy server-incarnation signal.
 
 **The relay already fetches the answer and throws it away.**
 `ReplicationConnection::identify_system` returns
@@ -2722,7 +2892,8 @@ Specification:
 
 - On every leader acquisition and every Datastore replication connect, the relay
   reads `(systemid, timeline)` from `IDENTIFY_SYSTEM` and records them beside
-  the Datastore topology revision. A reconnect reset occurs even if they match.
+  the Datastore topology revision. Matching identity follows the scoped rule
+  above: only a same-term ordinary reconnect emits `DatastoreReconnect`.
 - A `systemid` different from the Cluster's
   `postgres_system_identifier` is first treated as a misrouted tenant DSN. The
   relay fails that Datastore closed and does not update topology, drop a slot or
@@ -2732,11 +2903,14 @@ Specification:
   `(systemid, timeline)`, then in one control transaction compare-and-swaps both
   durable identity columns, increments
   the topology revision and places every Datastore in
-  `Resetting { phase: Quiesce }` at a new generation. A higher-term relay
-  appends `AppReset(SystemIdentityChanged)` for every app, proves the exact old
-  slots absent and acknowledges `Quiesced`. Control then advances the same
-  generations to `Restore`; only that phase authorizes fresh slots, heartbeat
-  decode and `RestoreReady` before `Ready`. This operational step is the
+  `Resetting { phase: Quiesce, kind: SystemIdentityChanged }` at a
+  new generation. A higher-term relay
+  takes each exclusive Datastore fence, appends
+  `AppReset(SystemIdentityChanged)` for every app, proves the exact old slots
+  absent and acknowledges `Quiesced`. It must submit 6.2's complete-head
+  snapshots before control advances the same generations to `Restore`; only
+  that phase authorizes fresh slots, heartbeat decode and `RestoreReady` before
+  `Ready`. This operational step is the
   accepted recovery cost; automatically trusting a changed identifier could
   connect a relay to another tenant cluster.
 - With the expected system id unchanged, a timeline equal to
@@ -2744,9 +2918,10 @@ Specification:
   leader proves every Datastore connection reports it, submits a fenced
   `AdvanceCdcClusterTimeline(expected, observed)` control operation, and
   self-demotes. Control compare-and-swaps the stored timeline, places every
-  Datastore into the same `Quiesce -> Restore -> Ready` state machine and
-  requires the higher-term slot recreation/reset barrier above. A lower timeline
-  fails closed for operator recovery. Persisting
+  Datastore into the same `SystemIdentityChanged`
+  `Quiesce -> Restore -> Ready` state machine and
+  requires the higher-term fenced reset and complete-head handshake above. A
+  lower timeline fails closed for operator recovery. Persisting
   the expected timeline is what lets a replacement process make this decision;
   process memory is not the authority. The extra reset is accepted because
   reused LSNs are silently dangerous.
@@ -2830,11 +3005,26 @@ LOCATION:  CreateDecodingContext, logical.c:607
 ```
 
 So with the GUC set, a down relay costs bounded disk and a lost slot instead of a
-full disk. Each Datastore restart path reads `wal_status` (already modelled:
+full disk. The lost-slot path reads `wal_status` (already modelled:
 `SlotHealth.wal_status` at `replication.rs:331-335`, documented values `reserved`
-/ `extended` / `unreserved` / `lost`), and on `lost` it drops the slot, recreates
-it, and appends `AppReset(SlotInvalidated)` for every app routed from that
-Datastore.
+/ `extended` / `unreserved` / `lost`) and uses this one canonical order:
+
+1. publish `Quiesce` with kind `SlotInvalidated`, acquire the
+   exclusive Datastore fence, cancel and join the decoder;
+2. append `AppReset(SlotInvalidated)` to every affected ring, activate reset
+   coverage, clear egress and close any response that cannot take the control;
+3. drop the exact lost slot, prove it absent and acknowledge `Quiesced`;
+4. submit and durably validate 6.2's complete-head snapshot, then publish
+   `Restore`;
+5. create the fresh exact slot at the current WAL position, decode its heartbeat,
+   seed observed from that snapshot, acknowledge `RestoreReady`, observe durable
+   `Ready`, and release the fence before worker data resumes.
+
+Reset precedes drop, and drop precedes create. In the same relay term, existing
+subscriptions process the shared `SlotInvalidated` reset before any fresh-slot
+change. If recovery also changes process and term, registration instead observes
+the stronger `RelayFailover`; the protocol does not promise that an evicted old
+ring's slot reason survives a term change.
 
 Note that `restart_lsn` becomes NULL on invalidation, which makes
 `watchdog_query`'s `lag_bytes` CASE (`replication.rs:370-372`) return NULL. The
@@ -2894,8 +3084,8 @@ with the message "can no longer get changes from replication slot". **None of th
 three arms match it**, so today's supervisor would classify it as transient and
 retry it forever at the 30-second cap (`wal_consumer.rs:712`, `MAX_BACKOFF`). The
 relay's classifier must key on SQLSTATE, and `55000` from `START_REPLICATION`
-must route to the exact drop-recreate-`AppReset(SlotInvalidated)` path rather
-than to backoff.
+must route to section 7.2's fenced lost-slot recovery path rather than to
+backoff.
 
 There is a collision to be careful about: `replication.rs:229-247` already maps
 SQLSTATE `55000` to
@@ -2995,7 +3185,7 @@ fact requires:
 | `cdc_connected_workers{app_id}` | "No subscribers" and "every subscriber wedged" both leave the ring shallow, because 5.4 evicts. Without this they alert identically |
 | `cdc_published_columns{datastore_id,database_id,collection}` | The bracket's failure window (3.6): a published set that is a strict subset of the declared wire set, with no migration in flight, means a shrink whose widen never ran |
 | `cdc_slot_wal_status{cluster_id,datastore_id}` / `cdc_slot_safe_wal_bytes{cluster_id,datastore_id}` | Slot loss and remaining WAL budget belong to one Datastore stream; an app label would hide shared capacity |
-| `cdc_leader{cluster_id,relay_id,term}` / `cdc_topology_revision{cluster_id}` | The election fence and fan-out authority an operator checks before interpreting delivery metrics |
+| `cdc_leader{cluster_id,relay_id,term}` / `cdc_topology_revision{cluster_id}` | The election pair, term-permit/membership fence and fan-out authority an operator checks before interpreting delivery metrics |
 
 The exact label sets above will drift once the relay is written; the durable
 content is the paragraph explaining why `confirmed_flush_lsn` is blind. If the
@@ -3017,9 +3207,10 @@ creator-visible namespace - `replication_ops.rs` is deleted for that reason
 
 ## 8. The schema-change signal
 
-**A relay stamping `(database_id, database_epoch)` from a cached map merely moves the
-epoch-carrier problem. Emitting the marker into the WAL dissolves it. The design
-does the second.**
+**A relay stamping `(database_id, database_epoch)` from a cached map merely moves
+the epoch-carrier problem. On a retained slot, emitting the marker into WAL
+dissolves it. A deliberately discarded slot instead uses 6.2's fenced durable-
+head snapshot and never guesses from a cache.**
 
 ### 8.1 Why stamping from a cache only moves the problem
 
@@ -3140,6 +3331,11 @@ zero. The bracket narrows it a little further: a widen that does not run leaves
 the publication measurably shrunk (7.6's `cdc_published_columns`), so a missing
 marker has a second, independent observable rather than being pure silence.
 
+The complete-head reset handshake is the only exception. It is authorized only
+after an app-wide reset has declared the WAL interval lost, under the exclusive
+fence and durable reset generation. It does not provide a fallback for a missing
+marker on a retained slot.
+
 The first argument is always `true`. A non-transactional message is outside the
 contract and receives no fallback path.
 
@@ -3157,7 +3353,7 @@ rather than retroactively attributed to the index.
 | A wire projection that is a WHITELIST over declared fields, covering `changed_columns` | Section 3. Publication column lists computed from `storage.valueColumn` over declared fields unioned with the replica identity (3.1), folded server-side from the same policy-resolved ops as the DDL (3.7), one shared publication bracketing the DDL (3.6), plus the `ProjectedTuple` newtype for the SQLite arm (3.4) |
 | A MASK-ONLY fixture that fails if the raw sibling name or plaintext enters pgoutput or relay ingress | 10.2 |
 | The schema-change signal | Section 8: `pg_logical_emit_message` in the widen transaction |
-| Leader election and resume, without tokio | Section 6: one `pg_try_advisory_lock` per `cluster_id` in the designated coordination database; one Datastore stream per slot; worker resume through `AppCursor`; mandatory failover reset; numeric watermark reset on leader failover, Grant rebind, Datastore reconnect or PostgreSQL identity change |
+| Leader election and resume, without tokio | Section 6: one `pg_try_advisory_lock` per `cluster_id` in the designated coordination database; worker term permits plus the predecessor-membership fence; one Datastore stream per slot; worker resume through `AppCursor`; mandatory failover reset; numeric watermark reset on leader failover, Grant rebind, Datastore reconnect or PostgreSQL identity change |
 | `max_slot_wal_keep_size` must be set | 7.2, plus 7.4 - setting the GUC without fixing the fatal classifier converts a full disk into an infinite retry loop |
 | Measure the added latency; do not estimate it | Section 11. No figure appears in this document |
 
@@ -3272,17 +3468,24 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   `NonMonotonicRegistrationGeneration`, `ConflictingShard`,
   `MalformedRequest`, `NotAcceptable`, `ClusterMismatch`,
   `RequestTooLarge`, `UnsupportedMediaType`, `UnsupportedWireVersion`,
-  `NotLeader`, `AuthenticationStoreUnavailable` and
+  `NotLeader`, `AuthenticationStoreUnavailable`, `TermAuthorityUnavailable` and
   `ConnectionCapacityExceeded`. Assert its exact status, problem content type,
   absence of `Hello`, and terminal or jitter-retry classification.
+  Pair a permit with another valid worker credential and require
+  `AuthenticationFailed` before redemption or app lookup.
+  Pin the permit commitment golden: mutating any non-permit request byte must
+  fail redemption, while hashing the permit into its own preimage must not match
+  the zero-length-field digest used by issuance and redemption.
   A same-term pre-`Registered` EOF must discard primes without replacing the
   old feed. After a validated N+1 `Hello`, the same EOF must leave the old term
   fenced and the app reconnecting. Post-`Registered` EOF must retry frozen
   cursors under a new registration generation; a decode violation must not
   hot-loop.
-- **Epoch marker.** A migration that changes a collection must produce an `Epoch`
-  frame ordered before the next `Change` frame for that Database's apps. On
-  PostgreSQL 18.4 decode the same transaction twice: with
+- **Epoch marker.** A migration that changes a collection must produce the WAL
+  `Message`. Only after the desired/observed/serving rendezvous may the relay
+  append one worker `Epoch` to every active grantee app ring for that Database,
+  ordered before its next `Change`. On PostgreSQL 18.4 decode the same
+  transaction twice: with
   `StartReplicationOptions::messages = true` require the ordered `Message`, and
   with the option omitted require all surrounding DML but no `Message` and no
   decoder error. The second arm is the target-version negative promised by the
@@ -3305,9 +3508,18 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   kill after durable ACK: the new leader must initialize observed from equal
   desired/serving topology and become ready even when no marker replays.
   In a third arm, invalidate the slot while desired is E+1 and serving is E;
-  after `AppReset(SlotInvalidated)`, fresh-slot heartbeat and explicit-gap
-  seeding, the barrier must promote E+1 rather than wait forever for the lost
-  marker.
+  after reset-before-drop, the complete-head handshake and fresh-slot heartbeat,
+  the reset must adopt the exact pending commit record and promote E+1 rather
+  than wait forever for the lost marker. Its blocked ordinary POST must return
+  the reset revision without another topology revision; a changed tuple conflicts.
+  Then exercise the missing cross-product: commit T4 at E+1, crash the migration
+  process before its first control POST so desired and serving remain E, and
+  invalidate the slot in the same relay term. The reset snapshot must contain
+  the exact E+1 rotation and checkpoint hash, durably advance desired, seed
+  observed at E+1 and promote serving. Restart the migration service and send
+  that first exact POST: it must return the reset-associated revision without a
+  new epoch, revision or barrier. Omitting the head read, shared commit record or
+  seeding stale desired E must strand this arm and fail it.
   Drop the first successful POST response and prove reposting the identical
   `last_rotation` and checkpoint hash returns the original revision without an
   extra epoch. Hold the relay barrier incomplete and prove the next migration
@@ -3329,11 +3541,15 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   arrives without restarting A's stream; add Datastore C and prove a new stream
   is required. With stock settings, reserve ten slots and assert provisioning the
   eleventh Datastore fails before it becomes CDC-ready.
-- **Slot invalidation.** Set `max_slot_wal_keep_size` small, stop the relay,
-  churn WAL, restart the relay, assert `wal_status = 'lost'` is observed and a
-  sequenced `AppReset` is processed as a broker `Resync` by every affected
-  subscription. Assert the SQLSTATE-`55000`
-  classification arm, since 7.4 shows substring matching misses it.
+- **Slot invalidation.** Keep process, `relay_id`, term, rings and responses alive;
+  pause one decoder and churn under a small `max_slot_wal_keep_size` until `lost`.
+  Recovery must order `Quiesce`, exclusive, cancel/join, shared
+  `AppReset(SlotInvalidated)`, egress clear, exact drop/absence, `Quiesced`, exact
+  head validation, `Restore`, fresh create/heartbeat, `RestoreReady`, `Ready`, then
+  fresh `Change`. Every subscription processes broker `Resync`; an earlier
+  `DatastoreReconnect` neither replaces it nor causes a second reset on creation.
+  Assert SQLSTATE `55000`. A process-restart control observes
+  `Reset(RelayFailover)`, not slot reason; moving drop before reset fails.
 - **Leader election and coordination scope.** Two relay instances for one
   `cluster_id` connect to the designated `zeroship` coordination database while
   owning two Datastore streams. Assert exactly one holds the allocated lock key,
@@ -3344,14 +3560,32 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   ring-write, topology-ACK and worker-send failpoints after the cancellation
   token trips must all refuse; the test makes no impossible claim about work
   completed during the bounded detection interval.
-  In the split-brain overlap arm, terminate leader N's coordination backend
-  server-side while a proxy withholds EOF from N. Let the standby acquire N+1,
-  then release a delayed N topology ACK and a delayed N worker frame. Control
-  must reject the ACK against its fenced leader pair, an authenticated and
-  validated N+1 `Hello` must make the worker cancel every N response before
-  the delayed frame reaches the broker, and the N+1 management session must
-  fence the exact old slot backend before taking the stream. The old process's
-  next coordination probe must then trip its cancellation token.
+  In the overlap arm, hold N's last permit after its cluster read; terminate N's
+  coordination backend while withholding EOF and require N+1 update to wait.
+  Commit the permit, withhold its response and N+1 `Hello`, finish the update, and
+  hold N frames before broker admission and in the subscriber queue. The trigger
+  and poll must expose the exact N+1 pair/challenge; mutation fails, and pending
+  state rejects N's topology ACK and N+1's transition ACK.
+  The worker learns N+1 only by control poll and pauses N delivery under its shared
+  guard. Both ACKs wait without timeout. Guard release cancels N responses, purges
+  queues, advances the pair, publishes resync and stores the receipt. Exact replay
+  succeeds, changed challenge fails, then topology ACK may succeed. Still without
+  `Hello`, delayed permit redemption and broker admission reject.
+  For a second guarded worker, only exact death, credential revocation and bound
+  `SupervisorFence` unblock; stale proof fails, receipt replay succeeds, and the
+  process cannot resume. With N+1 update locked first, permit returns N+1 or
+  `FenceRequired`. Race final N-to-N+1 ACK with N+2 and topology ACK with retry:
+  update-first cannot skip the unfinished term; completion/ACK-first commits first.
+  N+1 death still requires worker/supervisor completion; empty membership advances.
+  Mutation-remove the definer trigger, cluster-first locks, pending guard,
+  redemption, local fence, receipt/death proof or empty-set arm. Race release with
+  issue/redemption: release-first increments the epoch and delayed operations reject
+  while inactive; issue/redemption-first may succeed, then release drains and clears.
+  Stale epoch or changed body changes no state; exact release/fence replay does not
+  increment twice. Racing term increment must freeze or reject the stale pair.
+  Wrong credentials leave membership byte-identical. N+1 fences the exact old slot
+  and N's probe cancels. `zeroship_cdc_coord` updates only the leader pair; writes
+  to fence, revision, identity or member state get `42501`.
   A negative fixture taking the same
   numeric advisory key separately in the two Datastores proves why those
   connections cannot be the election authority: both locks succeed. Register
@@ -3367,7 +3601,21 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   On dedicated PostgreSQL-18.4 fixtures, take a base backup, start it with
   `recovery.signal` and promote it; `IDENTIFY_SYSTEM` must preserve
   `systemid`, increase the timeline, and drive the authorized
-  `AdvanceCdcClusterTimeline` plus higher-term reset path. In the control arm,
+  `AdvanceCdcClusterTimeline` plus higher-term reset path. Before that reset,
+  commit one head at E+1 while suppressing its control POST so desired remains
+  E. In isolated first-application fixtures, a stale term, wrong generation,
+  non-`Quiesce` phase, wrong kind, missing current-term `Quiesced` ACK, partial
+  or extra vector, and migration finalize must each fail while preserving its
+  prior state. Accept the exact current-term `ResetHeads`, pause in
+  `Restore`, and replay its byte-identical body under a fresh assertion; it must
+  return the original revision. A changed replay must conflict without changing
+  that persisted snapshot or revision. Reach `Ready`, replay the identical body
+  again, and require the same result. Recovery must bring desired, observed and
+  serving to E+1. Separate vectors must reject both a head at E+2 and a head at
+  desired E+1 whose rotation or hash differs from the stored tuple while serving
+  is E. As the relay management login, select exactly the five granted head
+  columns, then require `42501` when reading `projection_checkpoint` or pending
+  claims and when updating any head column. In the control arm,
   crash-stop PostgreSQL, restart the same data directory through ordinary crash
   recovery, and require `IDENTIFY_SYSTEM` to preserve both values. That arm
   must still emit `AppReset(DatastoreReconnect)` and clear the numeric
@@ -3408,12 +3656,24 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   bounded egress permit, assert the documented break-before-make fallback
   closes only enough old responses to admit progress and marks their selected
   apps reconnecting.
-- **Topology acknowledgment and Grant fan-out.** Bind two active app Grants to
-  one Database and assert one decoded row reaches both with the same
-  `(commit_lsn, change_index)`. Pause one old-binding row in connection egress,
-  submit a revoke/rebind revision, and prove the relay clears that egress and
-  closes the affected response before its current-term ACK is accepted. After
-  ACK, only the remaining Grant receives the next row. Hold revision R1's
+- **Topology acknowledgment and Grant fan-out.** Bind two Grants to one Database;
+  one row reaches both with the same `(commit_lsn, change_index)`. Hold old-binding
+  rows in relay egress, worker decode and subscriber delivery, then revoke/rebind.
+  Relay cancellation and topology ACK cannot expose it while worker poll is held;
+  after the exact Grant fence arrives, a held shared guard still blocks worker ACK.
+  Guard release purges all old-generation queues, installs the minimum generation
+  and stores the receipt; delayed frames reject, only the remaining Grant gets the
+  next row, and new permits wait. A second active worker with no matching app also
+  needs exact receipt or supervisor death proof. Deleting the Grant-fence row,
+  local floor or receipt predicate must admit a post-exposure row.
+  Race permit issue/redemption with transition: either operation first leaves an
+  active member that is snapshotted; transition-first blocks both through exposure.
+  Race release with transition: release-first joins tasks and escapes the snapshot,
+  invalidating delayed redemption; transition-first returns `FenceRequired`, stays
+  active, completes under the guard, then retries release. Race Grant creation with
+  term completion: Grant-first joins the term batch; term-first removes the member
+  before snapshot. Orphan rows or early completion fail. Old-term relay ACK plus
+  new-term worker receipts still waits for the successor's current-pair ACK. Hold revision R1's
   barrier on failed Datastore A, then publish R2 for healthy Datastore B.
   A cumulative R2 ACK must complete B's barrier while A remains pending.
   Replaying that ACK is idempotent; a future revision, an old term and a status
@@ -3565,27 +3825,37 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   sentinel may occur anywhere in the process-wide capture from either decoder.
   Both an unrelated app and the changed app must refetch. Mutation: leave the
   old decoder task live or keep the old slot, and require the ordering or
-  plaintext-ingress arm to fail.
-  Make one reset participant unavailable and prove prepare refuses before DDL.
-  Make the first DDL identity fail after a successful prepare and assert the
-  finalize body carries the unchanged `final_head_epoch`, `last_rotation` and
-  `checkpoint_sha256` and no success/failure label. It must restore the
-  unchanged checkpoint, create a fresh slot, decode its heartbeat, and reach
-  `Ready` without inventing an epoch. In a second source document with
-  two lowered identities, let the first commit and the second fail. The
-  convergence tail must select by exact journal identity, advance the head
-  once, widen to exactly the first identity's projection, complete the
-  serving-epoch rendezvous, then return the second identity's original error;
-  treating the source document as atomic must fail the test. Kill the migration service after
-  persisting `Quiesce` and prove neither a timeout nor relay restart reopens
-  the Datastore. Kill it again after `Restore` is durable and prove the relay
-  may create only the fresh slot, reports `RestoreReady`, and serves no worker
-  frame until control atomically publishes `Ready`. Retry the same journaled
-  migration and identical barrier token; finalize must reconstruct
-  byte-identical head fields and be idempotent, and a different token must be
-  rejected. Mutation-split classification finalize
-  into the generic blocking epoch-commit call and a later reset-release call;
-  require the test to expose the resulting deadlock.
+  plaintext-ingress arm to fail. A relay-authenticated `ResetHeads` request for
+  this classification-owned generation must fail without changing phase.
+  With Databases A and B sharing a Datastore, table-drive B's provisioning, T1,
+  no-rotation repair, journal-only convergence and T4 through the shared-fenced
+  head helper while A starts reset. Exclusive, slot drop and `Quiesced` wait for
+  B's commit. Suppress B's T4 POST: A's exact snapshot includes B and Restore
+  converges desired=observed=serving=head; B's later POST returns that revision
+  without a new epoch, revision or barrier. Partial fence, A-only snapshot or a
+  separate commit record fails.
+  In `Quiesce`, A's token used for B or changed `migration_apply_id` refuses before
+  a transaction. Kill after `Quiesced`: finalize waits for successor exclusive and
+  current-term ACK. Kill after snapshot: durable `Resetting` rejects unrelated T4
+  and exact-token writes in `Restore` until that generation completes.
+  Let ordinary T4 take shared, then publish `Quiesce` before `Ready` revalidation:
+  it releases and retries before T4/publication mutex, then reacquires after reset.
+  Reverse lock order as deadlock mutation. A blackholed lookup must release shared
+  at three seconds, or ambiguous unlock closes the session, so exclusive proceeds.
+  An unavailable reset participant refuses prepare before DDL. Make the first DDL
+  identity fail after prepare: finalize carries `migration_apply_id`, unchanged
+  head tuple and no outcome label, restores the checkpoint, creates the fresh slot,
+  heartbeats and reaches `Ready` without an epoch. With two identities, commit the
+  first and fail the second: exact journal convergence advances once, widens only
+  to the first projection, completes serving rendezvous, then returns the error;
+  document-atomic treatment fails.
+  Crash after Prepare/`Quiesced` before T1. The same attempt/fingerprint recovers
+  token and apply id; changed content refuses. After failed-attempt `Ready`, that
+  key replays its result while a new key starts a generation. Timeout/restart never
+  reopens. Kill in `Restore`: only the fresh slot opens, `RestoreReady` reports and
+  no row serves before `Ready`. Drop finalize success and retry identical token/body
+  under a fresh assertion: it returns the original; changed body/token refuses.
+  Splitting finalize into epoch commit plus reset release must deadlock.
   Repeat with one bundle that renames plaintext `legacy_ssn` to `ssn` and
   renames its table, then classifies `ssn`; the renderer must follow the same
   `ProjectionFieldKey` through both operations and trigger the reset before DDL.
@@ -3619,11 +3889,12 @@ of pgoutput cannot prove that plaintext never entered the relay process.
   admitted. A failed probe restarts quarantine instead. Mutation: drop rows
   without the active-reset coverage arm and require the confirmation invariant
   to fail.
-- **Gap and Truncate.** A value over the frame budget produces `Gap` for that row
-  and leaves neighbouring rows' `Change` frames intact; `TRUNCATE` on a published
-  table produces `Truncate` and not a stream of `Change` frames. Plus the
-  `CellValue` arm: an unchanged-TOAST value arrives as `Unavailable` and not as
-  `Null`.
+- **Gap and Truncate.** An over-budget value emits `Gap` only for that row;
+  `TRUNCATE` emits `Truncate`, and unchanged TOAST is `Unavailable`, not `Null`.
+  Decode an ordinary UPDATE without old tuple and an identity-changing UPDATE with
+  one: the latter carries only old identity as `pk`, derives new identity from
+  `values`, discards other old fields and updates 5.3's delivered-pk set. Neither
+  wire nor `ChangeEvent` has an old tuple. Repeat through SQLite preupdate.
 - **Gate arms.** Per `AGENTS.md`, every arm of the gate script declares the
   number of items it ruled on and a floor. The floor that matters here is the
   number of published columns the projection test inspected: an arm that inspects
@@ -3720,9 +3991,16 @@ volatile ring instead of a persistent spool. The central coordination database
 is another availability dependency: uncertainty closes healthy Datastore
 streams deliberately.
 
-The mitigation is honest but partial: `pg_terminate_backend` on the stale session
-is available to an operator, and a standby that repeatedly fails to acquire can
-escalate. Neither is automatic.
+Worker fencing adds polling, permit redemption, durable membership, credentials
+and trusted death records. One unreachable worker can block a term or Grant
+transition indefinitely, and every revoke/rebind fences every active worker.
+This availability loss is the strongest objection to the choice.
+
+A bounded userspace lease is rejected: after its last clock check, a descheduled
+process can resume inside delivery. Kernel expiry is enforceable but turns
+scheduler delay into process death and adds another safety-critical mechanism.
+Explicit ACK or proved death costs more coordination, but its delivery
+precondition remains true; neither relay may manufacture the death proof.
 
 ### 12.2 It is the new bottleneck, and it is a single decode plus a single fan-out
 
@@ -3792,14 +4070,12 @@ it is exact *without a premise*.
 ### 12.7 The bracket makes a migration's publication work three times bigger
 
 3.6 turns one post-apply reconcile into two transactions around the DDL, each
-doing a catalog read and a `DROP TABLE` + `ADD TABLE` per member table, under a
-Datastore-local advisory lock while the Database project lock also remains held.
-Migrations sharing a Datastore serialize their publication edits; migrations on
-other Datastores do not. It also
-introduces a state - shrunk, not yet widened - that did not exist before and that
-an operator can now find in production. Both are real costs, and the alternative
-is a migration that aborts whenever a creator drops an ordinary published
-column, which is worse.
+doing a catalog read and a `DROP TABLE` + `ADD TABLE` per member table while the
+Database lock remains held. Shared-Datastore publication transactions serialize,
+and a destructive reset also blocks unrelated head commits until `Ready`; other
+Datastores remain independent. The bracket introduces an operator-visible
+shrunk-but-not-widened state. Those are the costs of avoiding a migration that
+aborts whenever a creator drops an ordinary published column.
 
 ### 12.8 The relay's failure policy is ten interacting knobs and a lint
 
@@ -3953,8 +4229,8 @@ letting either read as a portable fact.
   neither (6.4). What remains unobserved is a *consumer* resuming across that
   divergence and encountering reused LSNs; the gate is specified and its input
   is proved to move, but the failure it prevents has not been reproduced.
-  Section 6.4 no longer depends only on that signal: every replication reconnect
-  resets state even when the pair is unchanged.
+  Section 6.4 no longer depends only on that signal: every same-term ordinary
+  reconnect outside a reset generation resets state even when the pair matches.
 - **`heap_multi_insert` IS reachable, through creator migrations. Enumerated.**
   The data plane is clear: `env.db.insertMany` emits multi-`VALUES`
   (`query.rs:4243-4396`), and a three-row multi-`VALUES` insert was measured
