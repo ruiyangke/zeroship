@@ -5408,8 +5408,8 @@ mod tests {
         );
     }
 
-    /// Asynchronous backend messages remain legal while CopyDone is draining
-    /// the ordinary response that closes the CopyBoth phase.
+    /// Asynchronous backend messages remain legal while `CopyDone` is draining
+    /// the ordinary response that closes the `CopyBoth` phase.
     #[compio::test]
     async fn copy_both_completion_tolerates_an_asynchronous_parameter_status() {
         let mut wire = startup_frame(COPY_DONE_TAG, b"");
