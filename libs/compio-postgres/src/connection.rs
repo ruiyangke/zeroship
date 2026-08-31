@@ -3580,6 +3580,31 @@ mod tests {
         }
     }
 
+    impl AsyncRead for GatedScriptedReadSplitStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            while !self.read_gate.load(Ordering::Acquire) {
+                yield_once().await;
+            }
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for GatedScriptedReadSplitStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.read_gate.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for GatedScriptedReadHalf {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             while !self.read_gate.load(Ordering::Acquire) {
@@ -4805,6 +4830,178 @@ mod tests {
         frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
         frame.extend_from_slice(&payload);
         frame
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn run_gated_copy_retirement(
+        wire: Vec<u8>,
+        initial: Option<FrontendMessage>,
+        read_gate: Arc<AtomicBool>,
+        poll_observed: Option<Arc<AtomicBool>>,
+    ) -> (
+        Error,
+        RequestServerError,
+        Arc<Mutex<Option<DbError>>>,
+        Arc<AtomicU8>,
+    ) {
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(initial, poll_observed);
+        let request_server_error = RequestServerError::default();
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::CopyIn(copy_in),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::clone(&request_server_error),
+            })
+            .expect("queue the scripted COPY request");
+
+        let stream = BufStream::new(GatedScriptedReadSplitStream {
+            chunks: VecDeque::from([wire]),
+            read_gate,
+        });
+        let (read_half, write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the gated COPY retirement fixture did not split"),
+        };
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let terminal_server_error = Arc::new(Mutex::new(None));
+        let result = compio::time::timeout(
+            Duration::from_secs(1),
+            Connection::<GatedScriptedReadSplitStream, GatedScriptedReadSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::clone(&tx_status),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::clone(&terminal_server_error),
+                Cell::new(false),
+                None,
+                None,
+                crate::live::LiveConnectionGuard::new(),
+            ),
+        )
+        .await
+        .expect("the gated COPY retirement fixture exceeded its watchdog");
+        drop(request_tx);
+
+        (
+            result.expect_err("the unsupported encoding left the split session reusable"),
+            request_server_error,
+            terminal_server_error,
+            tx_status,
+        )
+    }
+
+    /// Once CopyInResponse pauses the read obligation, PostgreSQL owes no
+    /// progress until the producer sends data. Retirement must still inspect
+    /// the ErrorResponse which the reader already found behind the unsupported
+    /// ParameterStatus instead of returning with only the local config error.
+    #[compio::test]
+    async fn copy_input_retirement_preserves_an_available_server_error() {
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut wire = copy_in_response_frame();
+        wire.extend_from_slice(&parameter_status_frame("client_encoding", "LATIN1"));
+        wire.extend_from_slice(&server_error_frame(
+            "ERROR",
+            "22012",
+            "scripted division by zero",
+        ));
+
+        let (local, request_server_error, _terminal_server_error, tx_status) =
+            run_gated_copy_retirement(
+                wire,
+                Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted COPY startup",
+                ))),
+                Arc::clone(&read_gate),
+                None,
+            )
+            .await;
+
+        assert!(
+            read_gate.load(Ordering::Acquire),
+            "the opening COPY flush did not release the scripted reader"
+        );
+        assert!(
+            local.is_config(),
+            "retirement lost its local cause: {local}"
+        );
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error| error.code().code()),
+            Some("22012"),
+            "paused COPY retirement discarded the available server diagnosis"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "unsupported client_encoding did not poison the session"
+        );
+    }
+
+    /// A COPY request is published before its producer sends the opening
+    /// frontend batch. An earlier response can change client_encoding in that
+    /// interval, leaving the COPY response registered but not yet flushed.
+    /// The finite owed-prefix drain excludes that tail; the available drain
+    /// must still retain a terminal diagnosis which is already in its FIFO.
+    #[compio::test]
+    async fn unflushed_copy_retirement_preserves_an_available_terminal_error() {
+        let read_gate = Arc::new(AtomicBool::new(false));
+        let mut wire = parameter_status_frame("client_encoding", "LATIN1");
+        wire.extend_from_slice(&server_error_frame(
+            "FATAL",
+            "57P01",
+            "scripted administrator shutdown",
+        ));
+
+        let (local, request_server_error, terminal_server_error, tx_status) =
+            run_gated_copy_retirement(
+                wire,
+                None,
+                Arc::clone(&read_gate),
+                Some(Arc::clone(&read_gate)),
+            )
+            .await;
+
+        assert!(
+            read_gate.load(Ordering::Acquire),
+            "the empty COPY producer was not polled before retirement"
+        );
+        assert!(
+            local.is_config(),
+            "retirement lost its local cause: {local}"
+        );
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error| error.code().code()),
+            Some("57P01"),
+            "unflushed COPY retirement discarded its available diagnosis"
+        );
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error| error.code().code()),
+            Some("57P01"),
+            "unflushed COPY retirement discarded the terminal diagnosis"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "unsupported client_encoding did not poison the session"
+        );
     }
 
     #[test]
