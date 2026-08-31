@@ -1,5 +1,6 @@
 //! Rollback-sensitive coverage for every method on the public `GenericClient` trait.
 
+use compio_postgres::error::SqlState;
 use compio_postgres::types::{ToSql, Type};
 use compio_postgres::{Client, Error, GenericClient, Row, SimpleQueryMessage, Transaction};
 use futures_util::TryStreamExt;
@@ -276,6 +277,107 @@ where
     C: GenericClient,
 {
     <C as GenericClient>::transaction(client).await
+}
+
+async fn assert_cardinality_delegates<C>(client: &C, implementation: &str)
+where
+    C: GenericClient + Sync,
+{
+    let rows = expect_ok(
+        <C as GenericClient>::query(
+            client,
+            "SELECT marker FROM (VALUES (1::int4), (2::int4)) AS markers(marker) \
+             ORDER BY marker",
+            &[],
+        )
+        .await,
+        "GenericClient::query cardinality",
+    );
+    let markers = rows
+        .into_iter()
+        .map(|row| row.get::<_, i32>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        markers,
+        [1, 2],
+        "{implementation} GenericClient::query collapsed a multirow result"
+    );
+
+    let row = expect_ok(
+        <C as GenericClient>::query_opt(client, "SELECT 1::int4 WHERE false", &[]).await,
+        "GenericClient::query_opt cardinality",
+    );
+    assert!(
+        row.is_none(),
+        "{implementation} GenericClient::query_opt invented a row"
+    );
+}
+
+async fn assert_prepare_typed_delegate<C>(client: &C, table: &str, implementation: &str)
+where
+    C: GenericClient + Sync,
+{
+    let sql = format!("INSERT INTO {table} (marker) VALUES ($1)");
+    let error = match <C as GenericClient>::prepare_typed(client, &sql, &[Type::TEXT]).await {
+        Ok(_) => {
+            panic!("{implementation} GenericClient::prepare_typed ignored its explicit TEXT type")
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::DATATYPE_MISMATCH),
+        "{implementation} GenericClient::prepare_typed returned the wrong error: {}",
+        common::error_chain(&error)
+    );
+}
+
+#[compio::test]
+async fn query_and_query_opt_preserve_cardinality_for_client_and_transaction() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+
+        assert_cardinality_delegates(&client, "Client").await;
+
+        let transaction = expect_ok(client.transaction().await, "start cardinality transaction");
+        assert_cardinality_delegates(&transaction, "Transaction").await;
+        expect_ok(
+            transaction.rollback().await,
+            "roll back cardinality transaction",
+        );
+    })
+    .await
+    .expect("GenericClient cardinality test exceeded its 20 second deadline");
+}
+
+#[compio::test]
+async fn prepare_typed_preserves_explicit_types_for_client_and_transaction() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_generic_client_typed");
+        expect_ok(
+            client
+                .batch_execute(&format!(
+                    "CREATE TEMP TABLE {table} (marker int4 PRIMARY KEY)"
+                ))
+                .await,
+            "create GenericClient typed fixture",
+        );
+
+        assert_prepare_typed_delegate(&client, &table, "Client").await;
+
+        let transaction = expect_ok(client.transaction().await, "start typed transaction");
+        assert_prepare_typed_delegate(&transaction, &table, "Transaction").await;
+        expect_ok(transaction.rollback().await, "roll back typed transaction");
+    })
+    .await
+    .expect("GenericClient typed test exceeded its 20 second deadline");
 }
 
 #[compio::test]
