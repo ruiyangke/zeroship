@@ -3310,6 +3310,19 @@ mod tests {
         write_started: Rc<Cell<bool>>,
     }
 
+    /// The EOF twin of `ReadFailureDuringWriteSplitStream`. A non-EOF terminal
+    /// is taken by `take_captured_non_eof_terminal` before the flush path's
+    /// `classify_read_terminal` call is reached, so only a clean EOF exercises
+    /// that call site.
+    struct EofDuringWriteSplitStream {
+        write_started: Rc<Cell<bool>>,
+        write_future_dropped: Rc<Cell<bool>>,
+    }
+
+    struct EofAfterWriteStarts {
+        write_started: Rc<Cell<bool>>,
+    }
+
     struct ParkedWriteHalf {
         write_started: Rc<Cell<bool>>,
         write_future_dropped: Rc<Cell<bool>>,
@@ -3632,6 +3645,52 @@ mod tests {
 
         async fn shutdown(&mut self) -> std::io::Result<()> {
             unreachable!("the coordinated failure fixture must split before shutdown")
+        }
+    }
+
+    impl AsyncRead for EofDuringWriteSplitStream {
+        async fn read<B: IoBufMut>(&mut self, _buf: B) -> BufResult<usize, B> {
+            unreachable!("the coordinated EOF fixture must split before reading")
+        }
+    }
+
+    impl AsyncWrite for EofDuringWriteSplitStream {
+        async fn write<B: IoBuf>(&mut self, _buf: B) -> BufResult<usize, B> {
+            unreachable!("the coordinated EOF fixture must split before writing")
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            unreachable!("the coordinated EOF fixture must split before flushing")
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            unreachable!("the coordinated EOF fixture must split before shutdown")
+        }
+    }
+
+    impl SplitStream for EofDuringWriteSplitStream {
+        type ReadHalf = EofAfterWriteStarts;
+        type WriteHalf = ParkedWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((
+                EofAfterWriteStarts {
+                    write_started: Rc::clone(&self.write_started),
+                },
+                ParkedWriteHalf {
+                    write_started: self.write_started,
+                    write_future_dropped: self.write_future_dropped,
+                },
+            ))
+        }
+    }
+
+    impl AsyncRead for EofAfterWriteStarts {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            while !self.write_started.get() {
+                yield_once().await;
+            }
+            BufResult(Ok(0), buf)
         }
     }
 
@@ -6177,6 +6236,80 @@ mod tests {
         })
         .await
         .expect("terminal read stayed trapped behind the in-flight write");
+    }
+
+    /// The flush path's own `classify_read_terminal` call, which nothing
+    /// reached: passing `None` in place of the captured terminal left all 1441
+    /// tests green. Its sibling above cannot bind it, because a non-EOF
+    /// terminal is taken by `take_captured_non_eof_terminal` and returned
+    /// before that call site runs. Only a clean EOF arrives still carried in
+    /// `terminal`, and it must be classified rather than discarded - discarding
+    /// it downgrades `UnexpectedEof` to a bare `Error::closed()` with no cause,
+    /// which is exactly the unexplained disconnect the terminal-error plumbing
+    /// exists to prevent.
+    #[compio::test]
+    async fn eof_during_write_classifies_the_captured_terminal() {
+        compio::time::timeout(Duration::from_secs(5), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(EofDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let (read_half, write_half) = match stream.try_into_split() {
+                Ok(halves) => halves,
+                Err(_) => panic!("the EOF-during-write fixture did not split"),
+            };
+            let (request_tx, request_rx) = mpsc::unbounded();
+            let (response_tx, _response_rx) = mpsc::channel(1);
+            request_tx
+                .unbounded_send(Request {
+                    messages: RequestMessages::Single(FrontendMessage::Raw(
+                        bytes::Bytes::from_static(b"scripted request"),
+                    )),
+                    sender: response_tx,
+                    disposition: RequestDisposition::Awaited,
+                    transaction_effect: TransactionEffect::MayChange,
+                    prepare_cleanup: None,
+                    statement: None,
+                    observation: None,
+                    request_server_error: Arc::default(),
+                })
+                .expect("queue the coordinated EOF request");
+
+            let result =
+                Connection::<EofDuringWriteSplitStream, EofDuringWriteSplitStream>::run_multiplexed(
+                    read_half,
+                    write_half,
+                    Arc::default(),
+                    request_rx,
+                    None,
+                    Arc::new(AtomicU8::new(b'I')),
+                    Arc::new(AtomicUsize::new(1)),
+                    Arc::default(),
+                    Cell::new(false),
+                    None,
+                    None,
+                    crate::live::LiveConnectionGuard::new(),
+                )
+                .await;
+
+            let error = result.expect_err("an awaited response survived the mid-flush EOF");
+            // The EOF ITSELF, not `Error::closed()`. Both are errors, so
+            // asserting only `is_err` would pass with the terminal discarded.
+            assert_eq!(
+                error.as_io().map(std::io::Error::kind),
+                Some(std::io::ErrorKind::UnexpectedEof),
+                "the mid-flush EOF was not classified: {error:?}"
+            );
+            assert!(
+                write_started.get(),
+                "the read reached EOF before the write started"
+            );
+            drop(request_tx);
+        })
+        .await
+        .expect("mid-flush EOF test exceeded its watchdog");
     }
 
     #[compio::test]
