@@ -623,14 +623,33 @@ pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
 /// Platform-owned collection prefixes mirrored by every collection validator.
 pub(crate) const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
 
+/// Catalog prefixes owned by the backends the runtime can address.
+///
+/// Keep these outside [`RESERVED_NAMES`]: they are backend conventions, not
+/// neutral platform reservations. They are a defense-in-depth copy after the
+/// migration declaration gate. The behavioral parity suite derives the real
+/// shipping set and fails when a backend is added without updating this list.
+const BACKEND_CATALOG_PREFIXES: &[(&str, &str)] =
+    &[("pg_", "PostgreSQL"), ("sqlite_", "SQLite")];
+
+fn reserved_backend_catalog_prefix(name: &str) -> Option<(&'static str, &'static str)> {
+    BACKEND_CATALOG_PREFIXES
+        .iter()
+        .copied()
+        .find(|(prefix, _)| {
+            name.len() >= prefix.len()
+                && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        })
+}
+
 /// Validate a collection name: alphanumeric + underscores only.
 ///
 /// Additional security constraints (beyond character allowlist):
 /// - Must not be empty.
 /// - Must not exceed 63 bytes (Postgres `NAMEDATALEN` limit).
 /// - Must not contain a null byte.
-/// - Must not start with `pg_` (case-insensitive) — reserved for Postgres
-///   system catalogs.
+/// - Must not start with a shipping backend's catalog prefix
+///   (case-insensitive).
 /// - Must not start with a platform-owned prefix (case-insensitive):
 ///   `__zero_migrate` or `__zeroship`.
 pub fn validate_collection(name: &str) -> Result<(), QueryError> {
@@ -650,11 +669,12 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
         )));
     }
     // Reserved-prefix checks via byte-slice equality avoid an allocating
-    // .to_ascii_lowercase() per CRUD dispatch.
+    // .to_ascii_lowercase() per CRUD dispatch. The union is deliberate: a
+    // creator schema may be retargeted, and SQLite refuses sqlite_* table names.
     let bytes = name.as_bytes();
-    if bytes.len() >= 3 && bytes[..3].eq_ignore_ascii_case(b"pg_") {
+    if let Some((prefix, owner)) = reserved_backend_catalog_prefix(name) {
         return Err(QueryError::InvalidCollection(format!(
-            "collection name '{name}' uses reserved prefix 'pg_' (Postgres system catalog)"
+            "collection name '{name}' uses reserved prefix '{prefix}' ({owner} system catalog)"
         )));
     }
     for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
@@ -754,7 +774,6 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // `validate_collection` reservations for table-name shape.
     ReservedName::Prefix("__zs_"),
     ReservedName::Prefix("__zeroship_"),
-    ReservedName::Prefix("sqlite_"),
     // Masked-column sibling suffix. The platform
     // emits `<col>_masked` siblings (Path B); creators must not
     // declare a column ending in `_masked` themselves. Refused at
@@ -851,6 +870,14 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
                 "reserved field name '{name}': {hint}"
             )));
         }
+    }
+    // Backend catalog conventions stay outside the neutral platform table.
+    // This remains a runtime defense in depth; creator declarations are fenced
+    // structurally by the migration engine before IR lowering.
+    if let Some((prefix, owner)) = reserved_backend_catalog_prefix(name) {
+        return Err(QueryError::InvalidIdent(format!(
+            "reserved field name '{name}': prefix '{prefix}' is reserved by the {owner} system catalog"
+        )));
     }
     Ok(())
 }
@@ -10417,6 +10444,126 @@ mod tests {
             PLATFORM_RESERVED_COLLECTION_PREFIXES,
             zeroship_data_plan::ident::PLATFORM_RESERVED_COLLECTION_PREFIXES,
             "data-plane and runtime-plan collection prefixes diverged"
+        );
+    }
+
+    fn shipping_catalog_reservation_witnesses() -> Vec<String> {
+        zeroship_migrate::shipping_vendors()
+            .as_slice()
+            .iter()
+            .flat_map(|vendor| {
+                vendor
+                    .descriptor
+                    .limits
+                    .reserved_identifier_prefixes
+                    .iter()
+                    .flat_map(|prefix| {
+                        [
+                            format!("{prefix}catalog_object"),
+                            format!("{}CATALOG_OBJECT", prefix.to_ascii_uppercase()),
+                        ]
+                    })
+            })
+            .collect()
+    }
+
+    fn assert_reserved_identifier_behavior_matches(
+        role: zeroship_data_plan::ident::IdentRole,
+        names: &[String],
+    ) {
+        let vendors = zeroship_migrate::shipping_vendors();
+        let mut mismatches = Vec::new();
+
+        for name in names {
+            let engine_accepts = match role {
+                zeroship_data_plan::ident::IdentRole::Collection => {
+                    zeroship_migrate_core::schema::query::validate_collection(vendors, name).is_ok()
+                }
+                zeroship_data_plan::ident::IdentRole::Column => {
+                    zeroship_migrate_core::schema::query::validate_field_name(vendors, name).is_ok()
+                }
+                other => panic!("parity corpus does not cover {other:?}"),
+            };
+            let schema_accepts = match role {
+                zeroship_data_plan::ident::IdentRole::Collection => {
+                    validate_collection(name).is_ok()
+                }
+                zeroship_data_plan::ident::IdentRole::Column => {
+                    validate_field_name(name).is_ok()
+                }
+                other => panic!("parity corpus does not cover {other:?}"),
+            };
+            let plan_accepts =
+                zeroship_data_plan::ident::Ident::parse_as(name, role).is_ok();
+
+            if engine_accepts != schema_accepts || engine_accepts != plan_accepts {
+                mismatches.push(format!(
+                    "{name:?}: engine={engine_accepts}, zeroship-schema={schema_accepts}, zeroship-data-plan={plan_accepts}"
+                ));
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "{} reservation verdicts diverged:\n{}",
+            role,
+            mismatches.join("\n")
+        );
+    }
+
+    #[test]
+    fn reserved_collection_behavior_matches_migration_engine() {
+        let mut names = [
+            "users",
+            "_distance",
+            "__zero_migrate_state",
+            "__ZERO_MIGRATE_STATE",
+            "__zeroship_state",
+            "__ZEROSHIP_STATE",
+            "__zs_internal",
+            "ssn_masked",
+            "pgx",
+            "sqlitex",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        names.extend(shipping_catalog_reservation_witnesses());
+
+        assert_reserved_identifier_behavior_matches(
+            zeroship_data_plan::ident::IdentRole::Collection,
+            &names,
+        );
+    }
+
+    #[test]
+    fn reserved_column_behavior_matches_migration_engine() {
+        let mut names = [
+            "name",
+            "_distance",
+            "__zero_migrate_state",
+            "__zs_internal",
+            "__zeroship_state",
+            "ssn_masked",
+            "ssn_MASKED",
+            "public",
+            "pii",
+            "spi",
+            "phi",
+            "pci",
+            "internal",
+            "PUBLIC",
+            "publication",
+            "masked_ssn",
+            "pgx",
+            "sqlitex",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        names.extend(shipping_catalog_reservation_witnesses());
+
+        assert_reserved_identifier_behavior_matches(
+            zeroship_data_plan::ident::IdentRole::Column,
+            &names,
         );
     }
 
