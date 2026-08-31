@@ -329,3 +329,33 @@ COPY-IN receiver state refactor (`bec97d0aa`) and the cancelled-close fix
 **Match the SQLSTATE, not the test name.** A COPY-named test failing right after
 COPY changes is exactly the coincidence that invites a wrong conclusion; the
 error code says catalog permission, which no protocol change of ours can cause.
+
+## Re-measured 2026-08-30 at `2bbc000da`: 62 failures, ALL of them already named
+
+This run followed the first production-logic change in nine commits
+(`fix(postgres): reject empty driver numeric settings`), which is precisely when
+this classification earns its keep.
+
+    login_attempts_before=24775
+    login_attempts_after=25728   delta=953      <- the pooler WAS reached
+    TOTAL passed=1221 failed=62  (5 targets, --no-fail-fast)
+
+Compare 2026-08-29 at `a02f8909c`: 1172 passed, 61 failed. The pass count rose
+by 49 because the suite grew; the failure count moved by one.
+
+**The count is not the check.** Diffing the failing names against the names this
+document already classifies:
+
+    failing now but NOT named here : 0
+    named here but passing now     : 11
+
+Zero unclassified failures. The one-failure delta is movement inside the flaky
+fringe described above, not a new class. Specifically, none of the seven tests
+added by the production change appear in the failure set:
+`empty_driver_numeric_values_are_rejected_by_name` and its six siblings all pass
+through the pooler.
+
+**Do this diff, not the subtraction.** 61 -> 62 invites "one new failure, find
+it", and 62 -> 61 would invite "one fixed". Both readings are wrong here: the
+membership is what is stable, and the count drifts within it. Extract the names
+and use `comm` against this document.
