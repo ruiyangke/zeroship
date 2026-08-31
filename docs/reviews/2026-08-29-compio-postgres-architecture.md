@@ -651,3 +651,42 @@ nothing.
 Recorded as unmeasured rather than replaced with another unverified number. The
 useful conclusion from the two verified bodies - a destructor here must not
 block, await, allocate or panic, and those do not - is unaffected.
+
+## Re-measured 2026-08-30 at `c2e964a29`: unchanged, and here is the command
+
+Twenty commits later - nineteen test/doc commits plus one production deletion in
+`Config::param` - the shape is identical:
+
+    modules            44
+    intra-crate edges  164
+    largest SCC        8
+    SCC members        statement prepare simple_query connection client
+                       copy_in copy_out query
+
+Same as recorded above. Adding tests does not move this, which is the expected
+result and worth stating so the numbers are not assumed to have drifted.
+
+**Reproduce it without python** (there is no `python3` on this machine, which is
+how the first attempt at this re-measurement failed):
+
+    cd libs/compio-postgres/src
+    : > /tmp/edges.txt
+    for f in *.rs; do
+      m="${f%.rs}"; [ "$m" = lib ] && continue
+      awk '/^#\[cfg\(test\)\]/{exit} {gsub(/\/\/.*/,""); print}' "$f" \
+        | grep -oE 'crate::[a-z_][a-z0-9_]*' | sed 's/crate:://' | sort -u \
+        | while read -r d; do
+            [ -f "$d.rs" ] && [ "$d" != "$m" ] && echo "$m $d" >> /tmp/edges.txt
+          done
+    done
+    sort -u /tmp/edges.txt | wc -l          # 164
+
+then a Warshall closure in awk over those pairs, taking the largest set of
+mutually reachable modules. The two filters that matter are in the `awk`:
+stopping at `#[cfg(test)]` (test code imports far more than production does) and
+stripping `//` comments (rustdoc intra-doc links like ``[`crate::pool`]`` match
+a naive grep and would invent edges that do not exist).
+
+Run this in BASH, not zsh: the `for`/`read` pipeline above depends on word
+splitting that zsh does not do by default, and the failure mode is a silent
+count of zero rather than an error.
