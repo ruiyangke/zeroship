@@ -359,3 +359,45 @@ through the pooler.
 it", and 62 -> 61 would invite "one fixed". Both readings are wrong here: the
 membership is what is stable, and the count drifts within it. Extract the names
 and use `comm` against this document.
+
+## RE-RUN 2026-08-31 at `a4012c7df`: FOUR NEW NAMES, one new mechanism, class A
+
+1295 passed, 62 failed. The count is the same 62 as the run above, which is
+exactly why the count is not the check. The `comm` diff moved:
+
+    failing now but NOT named here : 4
+    named here but passing now     : 9
+
+The four are all statement-cache reprepare cases:
+
+    integration::execute_raw_probationary_cache_winner_reprepares_after_deallocate
+    integration::query_raw_probationary_cache_winner_reprepares_after_deallocate
+    integration::stale_cached_copy_in_reprepares_before_bind
+    integration::stale_cached_copy_out_reprepares_before_bind
+
+**All four are class A, and the SQLSTATE is what proves it.** Each fails with
+
+    severity: "FATAL", code: SqlState(E08P01), message: "prepared statement did not exist"
+
+`08P01` is `protocol_violation`, raised at FATAL. PostgreSQL's own error for a
+missing prepared statement is `26000` at severity ERROR, with the text
+"prepared statement ... does not exist". Neither the code, the severity, nor
+the wording matches. This error is PgBouncer's, emitted when it cannot map a
+named prepared statement onto the server connection it routed the next
+statement to - which is precisely what these tests set up on purpose, by
+`DEALLOCATE`-ing a cached statement and requiring the driver to re-prepare it.
+Transaction pooling terminates the frontend before the driver's reprepare path
+is reachable.
+
+**Match the SQLSTATE, not the test name.** A reprepare test failing against a
+pooler could plausibly be a driver bug in the same area; `26000` at ERROR would
+have meant the server refused the driver's statement and the driver failed to
+recover, which IS class B. `08P01` at FATAL means the pooler killed the session
+first. The two are one field apart in the same struct.
+
+Ruled out as a regression by direct control: all four are `... ok` on **both**
+5455 (PG 16) and 5459 (PG 18) in the same-commit gate, which runs the suite
+unfiltered. They fail only through 6548.
+
+Why they are new here and absent above: they postdate the 2026-08-28 sweep. No
+name that document classifies changed category.
