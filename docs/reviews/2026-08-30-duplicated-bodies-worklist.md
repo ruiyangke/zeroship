@@ -52,6 +52,8 @@ below was re-run by the pilot against the FULL seven-target gate
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
 | 17 Cancel confirmation | **3**, not 2 | 2 pre-bound, 1 was UNBOUND | `raw_cancel_success_keeps_pool_lease_reusable` (new) |
 | 19 Config value lexer | 2 | 1 pre-bound, 1 was UNBOUND | `unquoted_conninfo_backslash_escapes_the_next_character` |
+| 21 Serialized terminal handling | 2 (+2 siblings elsewhere) | SPLIT: step B covered by 24; **step C is DEAD** | see below |
+| 22/27 Housekeeping close (EOF clean-close family) | 4 across the file | 2 covered by 24 each; step C DEAD; **step D was UNBOUND** | `serialized_eof_with_only_housekeeping_in_flight_closes_cleanly` (new) |
 | 23 COPY refusal drain | 2 | BOUND (visible only in the full suite) | agent-reported |
 | 25 Bind cache invalidation | 2 | 1 pre-bound, 1 was UNBOUND | `unnamed_bind_parse_error_invalidates_cached_statement` (new) |
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
@@ -110,6 +112,15 @@ syntactic shape, and the group entry lists four.
   head frame is incomplete - which this scanner then refuses. Panicking on its
   `Some` arm left all 1445 tests green; the same mutation on its live
   replication twin fails exactly four.
+- **Step C's clean-close arm in the serialized loop.** Step B already returns
+  `Ok(())` for `terminating && !has_awaited_response`, so reaching step C means
+  an awaited response EXISTS; `publish_terminal_error` then returns early on an
+  EOF instead of draining, so on the `is_eof` branch the deque is provably
+  unchanged and the second conjunct stays false. A non-EOF error may drain, but
+  then the first conjunct is false. `panic!` there leaves all 1447 tests green.
+  **Its step D twin is spelled identically and IS reachable** - that one was a
+  real gap and now has a test. Same source text, opposite verdicts, which is why
+  these have to be judged per copy and never per group.
 - **The doubled-quote arm of `may_enter_copy_in`'s identifier scanner.**
   Deleting it exposes no byte: the first quote closes the identifier and the
   second reopens it, so the same span stays quoted. Checked over every string of
