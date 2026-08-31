@@ -1301,3 +1301,57 @@ mod backend_init_tests {
         );
     }
 }
+
+/// The workflow journal schema name is derived TWICE, in two crates that
+/// deliberately do not depend on each other, and until this module existed the
+/// only thing holding them in agreement was a comment.
+///
+/// `zeroship-migrate-server` WRITES the schema
+/// (`provisioning::workflow_journal_schema_name`, called at
+/// `provisioning.rs:327` and `apply.rs:1526`); `zeroship-plugin-workflow` READS
+/// it (`store::pg::app_schema_for`, called at `store/pg.rs:81`). The writer's
+/// own doc says why they are separate: "this crate does not depend on that one,
+/// so the derivation is duplicated rather than shared."
+///
+/// THIS LIVES IN plugin-db, WHICH IS NEITHER OF THEM, and that is not an
+/// accident: plugin-db is the only crate that already dev-depends on both
+/// (`Cargo.toml` :121 and :141, the latter noting "DEV-only ... so no cycle"),
+/// so the check costs no new edge in the dependency graph.
+///
+/// WHY AN EQUALITY TEST AND NOT AN INTEGRATION TEST. The obvious alternative -
+/// provision through the writer, then read through the reader - is what
+/// `tests/integration.rs` looks like it does and does NOT: it computes the name
+/// with the READER, then creates and drops that schema as its own fixture, so a
+/// drift in the writer alone leaves it green. A test that builds its own
+/// precondition cannot detect a disagreement between two producers.
+#[cfg(test)]
+mod journal_schema_derivations_agree {
+    use uuid::Uuid;
+
+    /// Both derivations must produce the same schema name for the same app.
+    ///
+    /// Asserted over several ids rather than one, because the shapes that could
+    /// diverge are formatting choices - hyphenation, case, prefix - and a single
+    /// fixed uuid can hide a difference that only some byte patterns expose.
+    #[test]
+    fn the_writer_and_the_reader_name_the_same_schema() {
+        let ids = [
+            Uuid::nil(),
+            Uuid::max(),
+            Uuid::parse_str("0198f0a1-0000-7000-8000-0123456789ab")
+                .expect("fixed uuid parses"),
+            Uuid::new_v4(),
+        ];
+        for id in ids {
+            let writer =
+                zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
+            let reader = zeroship_plugin_workflow::store::pg::app_schema_for(&id);
+            assert_eq!(
+                writer, reader,
+                "the migration service provisions the workflow journal schema as \
+                 {writer} while the workflow plugin reads {reader}; a deploy would \
+                 write its journal where nothing looks for it"
+            );
+        }
+    }
+}
