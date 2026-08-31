@@ -1121,6 +1121,45 @@ export function schema() {}
   }
 });
 
+test("lint accepts distinct timestamp prefixes and rejects a collision", () => {
+  const dir = temporaryDirectory(".cli-duplicate-timestamps-");
+  try {
+    writeSimpleMigration(dir, {
+      filename: "20260715000000_first.mjs",
+      migrationName: "first",
+      tableName: "first_table",
+    });
+    writeSimpleMigration(dir, {
+      filename: "20260715000001_second.mjs",
+      migrationName: "second",
+      tableName: "second_table",
+    });
+    const env = { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH };
+
+    const distinct = runCliWithEnv(env, "lint", `--dir=${dir}`);
+    assert.equal(distinct.status, 0, distinct.stderr || distinct.stdout);
+    assert.match(distinct.stdout, /lint first: ok/);
+    assert.match(distinct.stdout, /lint second: ok/);
+
+    writeSimpleMigration(dir, {
+      filename: "20260715000000_collision.mjs",
+      migrationName: "collision",
+      tableName: "collision_table",
+    });
+    const collided = runCliWithEnv(env, "lint", `--dir=${dir}`);
+    assert.equal(collided.status, 1);
+    assert.match(
+      collided.stderr,
+      /duplicate migration timestamp prefix.*20260715000000/i,
+    );
+    assert.match(collided.stderr, /20260715000000_first\.mjs/);
+    assert.match(collided.stderr, /20260715000000_collision\.mjs/);
+    assert.match(collided.stderr, /pick a distinct timestamp/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("lint reports schema-confinement failures as a migration verdict", () => {
   const dir = temporaryDirectory(".cli-schema-");
   try {
