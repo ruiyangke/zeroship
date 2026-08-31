@@ -5408,6 +5408,30 @@ mod tests {
         );
     }
 
+    /// Asynchronous backend messages remain legal while `CopyDone` is draining
+    /// the ordinary response that closes the `CopyBoth` phase.
+    #[compio::test]
+    async fn copy_both_completion_tolerates_an_asynchronous_parameter_status() {
+        let mut wire = startup_frame(COPY_DONE_TAG, b"");
+        wire.extend_from_slice(&startup_frame(b'C', b"COPY 0\0"));
+        wire.extend_from_slice(&startup_frame(
+            PARAMETER_STATUS_TAG,
+            b"group33_completion\0sentinel-3302\0",
+        ));
+        wire.extend_from_slice(&startup_frame(b'C', b"START_REPLICATION\0"));
+        wire.extend_from_slice(&startup_frame(b'Z', b"I"));
+
+        let mut stream = stream_over(wire);
+        assert!(
+            stream
+                .next()
+                .await
+                .expect("an asynchronous completion status must not fail CopyBoth shutdown")
+                .is_none(),
+            "CopyDone must end the stream after both server confirmations"
+        );
+    }
+
     /// Logical replication ends with two distinct confirmations: one closes
     /// COPY and one closes START_REPLICATION. ReadyForQuery cannot make a
     /// missing, reordered, changed, or extra tag into a clean exchange.

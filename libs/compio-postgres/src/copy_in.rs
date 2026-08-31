@@ -173,7 +173,9 @@ impl Stream for CopyInReceiver {
                 };
                 self.state = finished;
                 let mut buf = BytesMut::new();
-                frontend::copy_fail(reason, &mut buf).unwrap();
+                frontend::copy_fail(reason, &mut buf).expect(
+                    "COPY failure reasons are fixed NUL-free driver strings that fit the protocol frame",
+                );
                 if include_sync {
                     frontend::sync(&mut buf);
                 }

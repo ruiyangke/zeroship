@@ -1,0 +1,75 @@
+# Coverage found a 54-line function that no test executes
+
+Measured 2026-08-31 at `7a8fac9d1`, `cargo llvm-cov --package compio-postgres`
+under `tls,live-tls-tests,live-unix-socket,with-chrono-0_4,with-time-0_3`,
+`--test-threads=1`, exit 0.
+
+    crate total   34860 lines   3022 missed   91.33% line coverage
+
+Compare 2026-08-28 at `5734bc81a`: 31783 lines, 2991 missed, 90.59%. The tree
+grew about 3,000 lines and missed only 31 more, so coverage rose.
+
+## Why this sweep was worth running at all
+
+The mutation sweep over the 50 duplicate-body groups is finished, and it
+structurally CANNOT find this class of defect. Mutation asks "does anything
+CHECK this line"; it can only ask that of a line some test executes. Coverage
+asks "does anything REACH this line". The two are complementary, which
+`docs/reviews/2026-08-28-coverage-cannot-see-test-gaps.md` records from the
+other direction: closing five mutation gaps moved coverage by nothing, because
+those lines already ran.
+
+Ranked by ABSOLUTE missed lines, ignoring the generated `error/sqlstate.rs`
+table (235 missed, 12.64%, meaningless) and `test_utils.rs` (scaffolding):
+
+    connection.rs   554 of 5120   89.18%
+    tls_rustls.rs   251 of 1428   82.42%
+    connect_raw.rs  239 of 2677   91.07%
+    pool.rs         205 of 3260   93.71%
+    replication.rs  186 of 3356   94.46%
+    tls_sansio.rs   153 of 1256   87.82%
+
+## The finding: `drain_available_retirement_read_channel` never runs
+
+`connection.rs:2037-2090`, 54 lines. **43 counted regions, all with count 0.**
+Both call sites, `:3016` and `:3040`, are also never executed.
+
+An independent confirmation that the instrument is pointed at something real:
+lines `720-723` are in the same never-executed set, and that is the step C
+clean-close arm which a `panic!` probe had already proved unreachable by
+construction. Two instruments, same verdict, arrived at separately.
+
+## What gates it, measured rather than guessed
+
+The enclosing retirement arm is NOT dead. `connection.rs:3005`,
+`DispatchOutcome::RetireAfterDiagnostics(error) => {`, has **count 3**. So the
+loop does retire after diagnostics; it never does so in the two states the drain
+serves:
+
+- `:3016` sits inside `if copy_read_obligation.as_ref()
+  .is_some_and(ReadObligation::accepts_copy_input)` - retirement while
+  PostgreSQL is waiting for producer data. No test retires a session in COPY
+  mode.
+- `:3040` sits inside `if response_count < responses.len()` - a re-drain when
+  more responses were registered while the first drain awaited. No test grows
+  the response deque during retirement.
+
+Also never entered: `connection.rs:2571`, a second
+`DispatchOutcome::RetireAfterDiagnostics` arm, count 0.
+
+## What to do with it
+
+The same two-outcome question that resolved every dead line this week, and it
+must be answered before writing a fixture:
+
+- **Unreachable by construction** - then the honest output is a source comment
+  giving the argument, exactly as for the step C arm and
+  `take_buffered_server_error`. Retirement in COPY mode may be excluded by an
+  invariant upstream; if so, name it.
+- **Reachable but untested** - then it is a real gap, and a serious one:
+  retirement while the peer waits for COPY data is precisely where a session can
+  be left wedged, and 54 lines of the recovery path have never run.
+
+Do not assume from the comment at `:3011` ("PostgreSQL is waiting for producer
+data, not owing a response") that the state is impossible. That comment explains
+why the code does what it does, not that the branch is unreachable.

@@ -267,7 +267,9 @@ where
                             "before authentication completed"
                         }
                         HandshakePhase::Complete => "after startup completed",
-                        HandshakePhase::ReadingStartupInfo => unreachable!(),
+                        HandshakePhase::ReadingStartupInfo => {
+                            unreachable!("the phase guard excludes ReadingStartupInfo")
+                        }
                     };
                     return Err(protocol_error(format!(
                         "PostgreSQL sent BackendKeyData {timing}"
@@ -358,8 +360,16 @@ where
             ));
         }
 
-        let version = u32::from_be_bytes(body[..4].try_into().unwrap());
-        let option_count = i32::from_be_bytes(body[4..8].try_into().unwrap());
+        let version = u32::from_be_bytes(
+            body[..4]
+                .try_into()
+                .expect("the eight-byte body minimum guarantees a complete protocol version"),
+        );
+        let option_count = i32::from_be_bytes(
+            body[4..8]
+                .try_into()
+                .expect("the eight-byte body minimum guarantees a complete option count"),
+        );
         let Some(protocol) = ProtocolVersion::from_wire(version) else {
             return Err(protocol_error(format!(
                 "PostgreSQL negotiated unsupported protocol version {}.{}",
@@ -452,7 +462,11 @@ where
             ));
         }
 
-        let process_id = i32::from_be_bytes(body[..4].try_into().unwrap());
+        let process_id = i32::from_be_bytes(
+            body[..4]
+                .try_into()
+                .expect("the four-byte body minimum guarantees a complete process ID"),
+        );
         let secret_key = CancelKey::new(body.slice(4..)).map_err(Error::parse)?;
         Self::validate_cancel_key(self.protocol, &secret_key)?;
 
@@ -3361,6 +3375,40 @@ mod tests {
         );
         drop(client);
         drop(connection);
+    }
+
+    #[compio::test]
+    async fn replication_handshake_uses_the_configured_user_in_an_md5_response() {
+        const EXPECTED: &[u8] = b"md538b05cef655ccdf8f933eb51f8cd2ef6";
+
+        let mut md5_request = 5i32.to_be_bytes().to_vec();
+        md5_request.extend_from_slice(&[5, 6, 7, 8]);
+        let (stream, client_bytes) = scripted_password_auth_server(md5_request, true).await;
+
+        let mut config = Config::new();
+        config
+            .user("replication-md5-user")
+            .password("replication-md5-password")
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(5));
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(stream);
+        let (stream, _, _, _) = handshake_for_replication(stream, &config)
+            .await
+            .expect("the scripted replication MD5 exchange must complete");
+
+        let client_bytes = compio::time::timeout(Duration::from_secs(5), client_bytes)
+            .await
+            .expect("scripted replication MD5 server did not finish")
+            .expect("scripted replication MD5 server dropped its observation")
+            .expect("scripted replication MD5 server failed");
+        assert!(
+            client_bytes
+                .windows(EXPECTED.len())
+                .any(|window| window == EXPECTED),
+            "the replication handshake used the wrong MD5 user: {}",
+            String::from_utf8_lossy(&client_bytes)
+        );
+        drop(stream);
     }
 
     #[compio::test]

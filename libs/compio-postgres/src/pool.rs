@@ -2844,13 +2844,21 @@ impl OwnedPooledClient {
 impl Deref for OwnedPooledClient {
     type Target = Client;
     fn deref(&self) -> &Self::Target {
-        &self.entry.as_ref().unwrap().client
+        &self
+            .entry
+            .as_ref()
+            .expect("an owned pooled lease retains its entry until Drop returns it")
+            .client
     }
 }
 
 impl DerefMut for OwnedPooledClient {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.entry.as_mut().unwrap().client
+        &mut self
+            .entry
+            .as_mut()
+            .expect("an owned pooled lease retains its entry until Drop returns it")
+            .client
     }
 }
 
@@ -2871,13 +2879,21 @@ impl std::fmt::Debug for OwnedPooledClient {
 impl Deref for PooledClient<'_> {
     type Target = Client;
     fn deref(&self) -> &Self::Target {
-        &self.entry.as_ref().unwrap().client
+        &self
+            .entry
+            .as_ref()
+            .expect("a pooled lease retains its entry until Drop returns it")
+            .client
     }
 }
 
 impl DerefMut for PooledClient<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.entry.as_mut().unwrap().client
+        &mut self
+            .entry
+            .as_mut()
+            .expect("a pooled lease retains its entry until Drop returns it")
+            .client
     }
 }
 
