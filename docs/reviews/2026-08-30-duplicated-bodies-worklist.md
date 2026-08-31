@@ -363,7 +363,9 @@ above each say so.
 ## Line 528 is UNBINDABLE by peer observation, and here is what masks it
 
 2026-08-31. An agent wrote `identify_system_read_timeout_shuts_down_its_release_handle`
-for the last unbound copy. It compiles, it passes, it is named correctly - and
+for the last unbound copy. **That name is deliberately absent from the tree - the
+test was rejected, for the reason below.** Every other test name in this
+document resolves to a live `fn`; this one is the single intentional exception. It compiles, it passes, it is named correctly - and
 it binds NOTHING. Mutating each of the six `release.shutdown()` call sites to
 `/* mutated */` in turn leaves it green every time:
 
