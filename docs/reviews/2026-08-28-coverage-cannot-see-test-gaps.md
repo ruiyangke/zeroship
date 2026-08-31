@@ -178,3 +178,36 @@ Two helper functions (`assert_cardinality_delegates`,
 `assert_prepare_typed_delegate`) were filtered out of the list first - they are
 called BY tests and are not tests, so including them would have made the
 arithmetic fail to reconcile and sent me looking for a phantom missing test.
+
+## A worked case where the test COUNT went up by less than the binding did
+
+2026-08-30, commit `453a1288d`. I predicted the gate would read 1416 (1407 plus
+nine new tests). It read **1415**, and chasing the missing one is instructive.
+
+All nine new tests did run - each appears once in the gate log. The gap is a
+test that was DELETED:
+
+    -  every_coalesced_failure_is_attached_to_the_wire_earlier_error_batch
+    +  assert_coalesced_failure_is_deferred(..)            <- helper, not a test
+    +  a_malformed_header_after_error_response_is_deferred
+    +  a_message_ceiling_failure_after_error_response_is_deferred
+    +  a_startup_limit_failure_after_error_response_is_deferred
+    +  a_copy_metadata_failure_after_error_response_is_deferred
+    +  a_ready_for_query_failure_after_error_response_is_deferred
+
+So 1407 + 9 - 1 = 1415. **Predict net, not added** - counting only `+fn` lines
+overstates it whenever a test is refactored away.
+
+**The substance moved the other way from the count.** The deleted test asserted
+that coalesced failures are deferred, without distinguishing WHICH of the four
+identical `if saw_error_response { deferred_error = Some(error); }` arms
+produced the deferral. One test, four arms, three of them unbound. The five
+replacements bind one arm each, which was proved by mutating them separately:
+
+    mutate codec.rs:431 -> only a_startup_limit_failure_...    FAILED
+    mutate codec.rs:448 -> only a_copy_metadata_failure_...    FAILED
+
+Net +8 tests; binding went from 1 arm-agnostic assertion to 5 arm-specific
+ones. A reviewer watching the total would see a smaller number than expected
+and could read it as a regression. The count is not the measurement - the
+one-copy-one-failure result is.
