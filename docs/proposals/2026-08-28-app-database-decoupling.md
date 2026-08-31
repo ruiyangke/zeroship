@@ -334,19 +334,52 @@ never creator-supplied, which 2.2(a) covers.
 
 ### 2.2 The mechanism, in three parts, all required
 
-**(a) Resolution is server-injected, exactly like `APP_ID`.** The control plane resolves the app's
-grants at deploy time and injects a binding table into the isolate on the same path as `APP_ID`
-(the worker-internal `env_vars` map):
+**(a) Resolution is server-injected, and it terminates in Rust.** The control plane resolves the
+app's grants at deploy time and hands the worker a binding:
 
 ```
-ZEROSHIP_DB_BINDING = { db: "dbs_01J...", schema: "db_01J...",
-                        ds: <DbResourceKey>, cap: "readwrite", epoch: 7 }
+DbBinding { db: "dbs_01J...", schema: "db_01J...",
+            ds: <DbResourceKey>, cap: "readwrite", epoch: 7 }
 ```
 
 **One binding, not a map**, because an app sees one database. Nothing creator-supplied selects it -
 there is no name for creator code to pass, so the injected value is the whole of the resolution.
-Creator `vars` shadowing does not apply: user vars override `process.env` on collision, but this
-path reads the worker-internal map, which is the same reason metering is unforgeable.
+
+**It does NOT travel in the worker-internal `env_vars` map, and this is a correction.** An earlier
+draft of this section prescribed injecting it there, "on the same path as `APP_ID`", and defended
+the choice on the ground that creator `vars` cannot shadow a worker-internal entry. That defence is
+true and answers the wrong question. Shadowing is a *forgery* concern; the requirement here is
+*disclosure*. `crates/zeroship-runtime/src/core/init.rs:3516-3520` copies every entry of that map
+into `process.env`, so the prescribed vehicle would have published both ids to app JS through
+`JSON.parse(process.env.ZEROSHIP_DB_BINDING)` or any npm package that walks `Object.keys`.
+
+That contradicts `docs/architecture/data-system.md:62`, "Both ids are internal. Neither is exposed
+to creators," and `:68`, which holds the datastore id stricter still because it names a shared
+resource: it is "a co-tenancy oracle, and it makes noisy-neighbour and resource-exhaustion attacks
+aimable rather than speculative." The `ds` field is the sharpest edge. `DbResourceKey` is a SHA-256
+digest, stable per datastore (`crates/zeroship-plugin-db/src/service.rs:44-52`); two apps under one
+actor that read equal digests have confirmed co-residency.
+
+**The rule this establishes, stated so the next binding-shaped value does not have to rediscover
+it.** The worker-internal `env_vars` map is a *disclosure channel* by construction. It may carry
+only identifiers the app already possesses. Today it carries exactly two, and both qualify:
+`APP_ID` and `ZEROSHIP_DEPLOY_ID` (`crates/zeroship-worker/src/cache.rs:467`, `:474`). An
+identifier that names a resource shared with another tenant - the datastore key always, and the
+database id as soon as databases are shared - must never enter it. Being unforgeable is not
+sufficient; the map is readable.
+
+**The vehicle instead is the channel that already exists.** `DbServiceConfig`
+(`crates/zeroship-plugin-db/src/lib.rs:454`) already carries the DSN to the plugin without passing
+through V8, and `DbBinding` (`crates/zeroship-plugin-db/src/binding.rs`) is already the per-isolate
+identity every `Db` and `Collection` wrapper travels with. The binding extends that struct rather
+than adding a fourth env var. App JS never needs these values: `env.db` methods are native ops, so
+the plugin reads the binding in Rust at the moment the op runs, and nothing is serialised into the
+isolate to be read back out.
+
+Note the asymmetry that makes this workable: `DbBinding` is minted today from `ZEROSHIP_DEPLOY_ID`,
+which *is* an env var, and that stays correct - a deploy id is the app's own. The change is not
+"stop using injection", it is "stop using the readable channel for the values that are not the
+app's to know."
 
 `epoch` is the schema epoch the deploy was gated against. The worker does not compare it in Rust to
 authorize a transaction; it composes the role name the setup batch sends (section 6).
