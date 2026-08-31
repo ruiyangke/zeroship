@@ -572,6 +572,13 @@ mod tests {
     }
 
     #[test]
+    fn copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters() {
+        assert!(may_enter_copy_in(
+            r#"SELECT "not "" copy"; COPY t FROM STDIN"#
+        ));
+    }
+
+    #[test]
     fn copy_in_classifier_ignores_non_commands_and_copy_out() {
         for query in [
             "SELECT 'COPY t FROM STDIN'",
