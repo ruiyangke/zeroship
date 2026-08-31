@@ -141,6 +141,43 @@ go to control.<domain>" and concludes control should proxy them is rebuilding wh
 in whatever ingress ships there. That is a second place to get it wrong and is stated here so it is
 not discovered in production.
 
+**15. `control.<domain>` KEEPS its name for now.** Raised as "I don't like the control.domain, I want
+it to be api.domain", investigated, and declined on evidence rather than on preference. Recorded
+because a rejected rename returns every few months, and the reason it was rejected is the part that
+gets lost.
+
+**`api.<domain>` is already the gateway, and it is load-bearing in a way a hostname usually is not.**
+`deploy/ops/Caddyfile:79-80` routes it to `gateway:8000`, and `https://api.zeroship.ai` is the
+gateway's `--public-url` default (`docs/reference/env-vars.md:345`) - which is the **`iss` claim of
+the tokens the gateway signs**. It is hardcoded as the issuer in three shipped harnesses
+(`tests/e2e_auth_rpc.sh:143`, `tests/e2e_dev_vs_deployed_auth.sh:555`, `tests/golden_path.sh:4067`)
+and one integration test (`crates/zeroship-gateway/tests/oidc_rp_e2e.rs:43`). Repointing it is not a
+routing change; it moves a cryptographic identity, and every already-issued token's `iss` stops
+matching.
+
+**What is behind it, enumerated rather than assumed.** Nine registered endpoints, of which exactly
+ONE is a proxy: `/__zeroship/internal/workflow-advance`, which looks up the route, enforces account
+and spend state, and forwards to a worker over the hash ring
+(`crates/zeroship-gateway/src/router/dispatch.rs:105-160`). The other seven TERMINATE at the gateway -
+`/healthz` and `/readyz` (`health.rs:22-25`; `healthz` is a constant 200 so a control-plane outage
+cannot kill every container), and the browser identity surface under `/__zeroship/auth/*`, which mints
+and re-signs session cookies with zero outbound calls in `auth_token.rs`, `browser_auth.rs` or
+`backchannel_logout.rs`. The remaining two registrations are dispatch catch-alls, not endpoints.
+
+So `api.<domain>` is the END-USER identity and session plane. Moving creator resource management onto
+it would put the console's operations on the origin end-user browsers authenticate against, sharing
+cookies. That is an origin-boundary change, not a rename.
+
+**Two counting errors made while establishing this, both worth the warning.** The endpoint count was
+first reported as seven: `.configure(health::configure)` and `.configure(backchannel_logout::configure)`
+register indirectly and do not match a `web::resource("...")` grep. And `/healthz` and `/readyz` are
+not under the `__zeroship` prefix at all, so "all endpoints are under `/__zeroship/`" was wrong twice
+over. Enumerating a route table by grepping literal path strings in one file misses every
+`configure`-style registration.
+
+If `api.` is wanted for creators later, the honest move is renaming the GATEWAY's host and freeing the
+name - a token-identity change deserving its own task, never a line item inside a database refactor.
+
 ## 2026-08-29
 
 ### Three more operator decisions, two of which fix defects no review round found
