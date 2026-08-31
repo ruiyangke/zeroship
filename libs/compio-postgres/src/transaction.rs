@@ -86,11 +86,13 @@ impl Drop for Transaction<'_> {
             return;
         }
 
-        // Mark the client dirty *before* firing the rollback. The pool
-        // inspects this flag at checkout time and drains any pending
-        // ROLLBACK via a barrier (`simple_query("")`) so the next caller
-        // never inherits a broken-tx state. `__private_api_rollback` also
-        // sets the flag synchronously before it encodes or sends anything.
+        // Mark the client dirty *before* firing the rollback. At checkout the
+        // pool runs `simple_query("")` as a FIFO barrier: success proves only
+        // that the fire-and-forget command reached `ReadyForQuery`, not that
+        // the session is clean. `return_client` isolates the next borrower by
+        // queuing a ROLLBACK for every session that is not provably idle.
+        // `__private_api_rollback` also sets the flag synchronously before it
+        // encodes or sends anything.
         // That makes this caller-side ordering redundant by construction:
         // moving this mark below the call cannot become observable while the
         // callee owns the same pre-send mark. Keep it here because this acting
