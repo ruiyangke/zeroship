@@ -285,3 +285,26 @@ Four instances of built-tested-unreferenced code sit in one dependency closure: 
 the index builders, the differ plus live introspection, and `data-plan` itself. Every one has
 passing tests, which is exactly why none of them looked dead. When this shape is found again, the
 question to ask is not "do the tests pass" but "who calls this in production".
+
+## The pattern in how this document got things WRONG
+
+Five claims in this document have been corrected since it was written, and they share one shape:
+**each substituted a proxy for the execution path, and each proxy was locally accurate.**
+
+| the claim | the proxy trusted | why the proxy was not wrong, just not the answer |
+| --- | --- | --- |
+| `env.db` must grow a name for a second database | a general principle about naming | true in general; the design had already scoped one-app-N-databases out |
+| the DDL region is dead and deletes cleanly | grep, searched OUTSIDE the crate | correct about the outside; seven callers were inside |
+| `SqliteEmitScope` is live and must be rehomed | a compile error naming it | the symbol WAS named - by a method that is itself dead |
+| moving the broker adds a round trip to local writes | `broker.rs`'s own header, "merges local mutations … and WAL frames" | accurate about the BROKER; its caller suppresses the local side (`exec.rs:485`) |
+| the DDL builders have "no callers" | the same grep, restated in a table | conflated "no production root" with "no callers"; both true, neither the other |
+
+The fourth is the sharpest, because the misleading source was a correct comment. `broker.rs` really
+does merge two inputs. What it cannot tell you - what no module header can - is whether anything
+still feeds one of them. **A module's documentation describes the module; questions about the SYSTEM
+are answered only at the call sites.**
+
+The practical rule: grep answers spelling, the compiler answers "is this named", and neither answers
+"does production reach this". Only walking outward from a real entry point does. Every correction
+above arrived when someone walked that path - which is the argument for doing it BEFORE writing the
+claim, not after review returns.
