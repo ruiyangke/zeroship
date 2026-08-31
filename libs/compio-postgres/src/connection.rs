@@ -987,6 +987,9 @@ where
                     )])));
             }
             if server_error_ends_session(error) || self.responses.is_empty() {
+                // The preceding complete-frame drain also records terminal
+                // ErrorResponses through ordinary dispatch; a partial frame
+                // cannot be parsed by this fallback scanner.
                 remember_server_error(&self.terminal_server_error, error);
             }
         }
