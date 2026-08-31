@@ -297,6 +297,43 @@ if [ ! -f "$CLI" ]; then
   exit 2
 fi
 
+# A STALE dist is worse than an absent one, and the asymmetry is the whole
+# reason this check exists. `dist/` is GITIGNORED BUILD OUTPUT, so its contents
+# are whatever this machine compiled last:
+#
+#   ABSENT  -> the check above stops the run and names the fix. LOUD.
+#   STALE   -> the gate applies the corpus with OLD CODE and reports PASSED.
+#              SILENT, and the verdict is about a build nobody is looking at.
+#
+# MEASURED 2026-08-31, which is why this is here rather than hypothetical: a
+# duplicate-timestamp guard committed to `src/cli.ts` was absent from a
+# three-day-old `dist/cli-bin.js`. A migration with a colliding prefix was added
+# expecting refusal; this gate reported PASSED with 38 files and zero refusals.
+# After `pnpm --filter zero-migrate-cli build` the identical probe produced the
+# correct refusal. Nothing about the corpus changed - only which build ran.
+#
+# Every guard in that CLI is exercised here only to the extent the on-disk build
+# contains it: the duplicate-NAME guard, the duplicate-TIMESTAMP guard, checksum
+# refusal, orphan-journal detection. A committed-but-unbuilt change to cli.ts is
+# invisible to the gate that exists to prove the platform can migrate itself.
+#
+# mtime, not a content hash, on purpose: this must be cheap enough to run every
+# time, and it only has to catch "somebody edited the source and did not
+# rebuild". A rebuild that produces byte-identical output still refreshes the
+# mtime, so the false-positive costs one build and never a wrong verdict.
+CLI_SRC="$ROOT/packages/zero-migrate-cli/src"
+if [ -d "$CLI_SRC" ]; then
+  CLI_STALE_AGAINST="$(find "$CLI_SRC" -type f -newer "$CLI" -print 2>/dev/null | head -3)"
+  if [ -n "$CLI_STALE_AGAINST" ]; then
+    echo "FAIL: the sanctioned applier's CLI is STALE: $CLI" >&2
+    echo "  These sources are newer than the build the gate would run:" >&2
+    echo "$CLI_STALE_AGAINST" | sed 's|^|    |' >&2
+    echo "  Applying the corpus with a stale build would rule on code nobody is" >&2
+    echo "  reading. run: pnpm --filter zero-migrate-cli build" >&2
+    exit 2
+  fi
+fi
+
 if [ -z "$DSN" ]; then
   if ! command -v docker >/dev/null 2>&1; then
     echo "FAIL: no --dsn given and docker is not on PATH." >&2
