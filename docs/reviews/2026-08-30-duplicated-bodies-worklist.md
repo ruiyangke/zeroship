@@ -39,9 +39,58 @@ Read each group before assuming the copies are interchangeable.
 
 ## Status
 
-DONE: group 1 (query RowDescription) and group 5 (column metadata), bound by
-`25712160b`, plus the copy_in/copy_out reprepare pair.
-The rest are open. Line ranges are as of 2026-08-30 and drift; locate by content.
+Line ranges are as of 2026-08-30 and drift; locate by content. Every verdict
+below was re-run by the pilot against the FULL seven-target gate
+(`--features tls,live-tls-tests,live-unix-socket,with-chrono-0_4,with-time-0_3
+--no-fail-fast`), not taken from an agent's report.
+
+| Group | Copies | Verdict | Binding test(s) |
+| ---: | ---: | --- | --- |
+| 1 Query RowDescription | 2 | BOUND (`25712160b`) | pre-existing |
+| 5 Column metadata | 4 | BOUND (`25712160b`) | pre-existing |
+| 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
+| 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
+| 17 Cancel confirmation | **3**, not 2 | 2 pre-bound, 1 was UNBOUND | `raw_cancel_success_keeps_pool_lease_reusable` (new) |
+| 19 Config value lexer | 2 | 1 pre-bound, 1 was UNBOUND | `unquoted_conninfo_backslash_escapes_the_next_character` |
+| 23 COPY refusal drain | 2 | BOUND (visible only in the full suite) | agent-reported |
+| 25 Bind cache invalidation | 2 | 1 pre-bound, 1 was UNBOUND | `unnamed_bind_parse_error_invalidates_cached_statement` (new) |
+| 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
+| 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
+| 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
+| 34 Row-range decoding | 2 | NOT independently bound (3 overlap on one copy) | see agent table |
+| 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
+| 36 Binary COPY rejection | 2 | BOUND | `bytes_after_the_binary_copy_trailer_are_refused` + sibling |
+| 37 Frame-offset guard | 2 | was UNBOUND, now BOUND each | `{first_matching_tag,error_response_before}_advances_past_the_entire_leading_frame` |
+| 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
+| 42 Weak pool callbacks | 6 | BOUND | agent table |
+| 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
+| 45 Streaming COPY refusal | 2 | BOUND each | agent table |
+| 46 Simple-query COPY collection | 2 | 1 pre-bound, 1 was UNBOUND | `unsupported_copy_out_is_refused_by_name_at_every_public_entry_point` |
+| 47 TLS panic poisoning | 2 | `with` pre-bound; **`try_with` was UNBOUND** | `a_panicking_callback_under_try_with_poisons_the_shared_session` (new) |
+| 48 Transaction drop | 2 | BOUND | agent table |
+| 49 Row panic mapping | 2 | BOUND | `a_get_panic_distinguishes_a_null_from_a_type_mismatch` + sibling |
+| 50 COPY format validation | 2 | NOT independently bound (2 overlap on one copy) | agent table |
+
+**The worklist's copy COUNTS are unreliable, and that is the most reusable
+finding here.** Group 17 said two and had three; group 28 said two and had five;
+`remember_server_error` said two and had eight. In group 17 and group 28 the
+UNCOUNTED copy was the only unbound one. Always enumerate by content first.
+
+### Two copies are unbindable by construction, and no test should be written
+
+- **`connection.rs`'s `take_buffered_server_error`** cannot return `Some`. Both
+  callers run `drain_buffered_backend_frames` first, which returns only when the
+  head frame is incomplete - which this scanner then refuses. Panicking on its
+  `Some` arm left all 1445 tests green; the same mutation on its live
+  replication twin fails exactly four.
+- **The doubled-quote arm of `may_enter_copy_in`'s identifier scanner.**
+  Deleting it exposes no byte: the first quote closes the identifier and the
+  second reopens it, so the same span stays quoted. Checked over every string of
+  length <= 12 in `{quote, x, semicolon}` - 797,161 inputs, zero disagreements.
+
+Both carry source comments saying so. A mutation report calling either unbound
+is CORRECT; inventing a test to satisfy it would bind a path the system cannot
+take.
 
 ## The 50 groups
 
