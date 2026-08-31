@@ -47,11 +47,17 @@ reader is likely to arrive with.
 ```
 libs/compio-postgres            driver, unchanged
 
-zeroship-query-plan             the typed query grammar. ZERO dependencies, and that stays
+zeroship-data-query-builder     the typed query grammar. ZERO dependencies, LEAF, and that stays
                                 load-bearing. (today's zeroship-data-plan, renamed)
+zeroship-data-core              the contract every backend implements, PLUS the backend-neutral
+                                layer both already share: encryption, MaskKind, TypedCell/TypedRows,
+                                and the four orphan helpers below. -> data-query-builder
+zeroship-data-postgres          impl of the core contract.   -> data-core, compio-postgres
+zeroship-data-sqlite            impl of the core contract.   -> data-core, rusqlite
+zeroship-data-cdc-server        service tier: WAL stream, slot authority, reaper. Peer of
+                                zeroship-migrate-server.     -> data-core, data-postgres
 zeroship-plugin-db              env.db surface, worker tier. impl NativePlugin. KEEPS ITS NAME.
-zeroship-db-relay               service tier: WAL stream, publication and slot authority, reaper.
-                                Peer of zeroship-workflow-scheduler, named the same way.
+                                V8, crud, broker, subscription lifecycle. -> all of the above
 
 zeroship-core::change_event     the cross-process event type, beside usage_event and
                                 replication_names, which are already there.
@@ -59,6 +65,45 @@ zeroship-core::change_event     the cross-process event type, beside usage_event
 zeroship-migrate-*              the engine, dialect-complete, untouched
 zeroship-migrate-server         the migration service host
 ```
+
+**This replaces the three-crate target, on an operator proposal of 2026-08-31, and it is better for a
+reason worth recording: `data-core` restores the predicate the prefix had lost.** The previous
+revision DROPPED the `data-*` prefix because its two members shared no edge, and a prefix you cannot
+ask a question about is decoration. With a core, the question exists again and has the same answer
+`migrate-*` gives: *every member depends on the contract crate.* That is exactly what makes
+`migrate-*` a family - every one of `migrate-{backend,postgres,sqlite,mysql}` declares
+`zeroship-migrate-ir`.
+
+**And a core is not merely tidy here - it is REQUIRED, because four production call sites already run
+the wrong way.** Backend-agnostic and PostgreSQL-path code calls *into* the SQLite module today:
+
+| call site | reaches | on |
+| --- | --- | --- |
+| `crud/read_pipeline.rs:278` | `backend::sqlite::session_minter::parse_iso_to_millis` | the backend-agnostic read pipeline, so it runs for PG timestamps |
+| `crud/mod.rs:409` | `backend::sqlite::vector::vec_to_le_bytes` | the write encoder |
+| `crud/mod.rs:433` | `backend::sqlite::spatial::point_to_blob` | the write encoder |
+| `v8_bridge.rs:34` | `backend::sqlite::session::{TypedCell, TypedRows}` | the V8 seam |
+
+These are pure, side-effect-free helpers that merely LIVE under `backend/sqlite/`. Two consequences,
+and the first kills a recommendation this document made two sections ago:
+
+- **A whole-module `#[cfg]` on `backend/sqlite/` does not compile a PostgreSQL-only worker.** The
+  "feature-gate the dev backend" step was costed here as "much smaller than extraction". It is not:
+  it requires relocating these helpers first, which is the same first move the crate split needs.
+- **`data-sqlite` cannot be extracted before they move either**, or `data-postgres` would have to
+  depend on `data-sqlite`. `data-core` is where all four belong, alongside `encryption` (7 edges from
+  each backend) and row-to-JSON. **One relocation unblocks the gate AND the split.**
+
+**Two corrections to the proposed shape:**
+
+1. **`data-postgres`, not `data-postgresql`.** The tree spells it `zeroship-migrate-postgres` and
+   `libs/compio-postgres` without exception.
+2. **Do not let one crate implement both the query contract and the CDC contract.** The worker links
+   the PostgreSQL backend for ordinary queries; if that crate also carries the CDC implementation, the
+   worker links the CDC code too and the trust-tier separation is cosmetic at the crate level. Either
+   gate it (`data-postgres/cdc`, default-off) or split `data-postgres-cdc` out. **But see S3 below:
+   the crate boundary is defence in depth, not the fence.** The fence is the role attribute - a
+   worker holding `REPLICATION` can drop ANY slot regardless of which crate the code sits in.
 
 **This block names crates. It does NOT enumerate modules** - that is Track B's table, and holding the
 inventory in two places is what produced two contradictions in two rounds.
