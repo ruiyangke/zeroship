@@ -74,6 +74,35 @@ Do not assume from the comment at `:3011` ("PostgreSQL is waiting for producer
 data, not owing a response") that the state is impossible. That comment explains
 why the code does what it does, not that the branch is unreachable.
 
+## A per-line lookup into the coverage segments is NOT "did this line run"
+
+Recorded because it nearly cost a dispatch. Reading segment counts line by line,
+`connect_raw.rs` appeared to show the driver's auth-method refusals unexecuted:
+
+    line 1174  counts=None       GSSAPI
+    line 1180  counts=[16]       SSPI
+    line 1187  counts=[0, 0]     Kerberos V5
+    line 1191  counts=[1473]     SCM credential
+
+Two of those are absurd on their face - nothing runs an SCM-credential refusal
+1,473 times - and that implausibility is the tell. A segment is a region
+BOUNDARY at a (line, column); a zero-count segment on a line can coexist with
+the line executing, because the zero belongs to some sub-expression region
+rather than to the statement. Counts also propagate from enclosing regions.
+
+All four refusals are in fact covered, by the table-driven
+`authentication_local_refusals_preserve_pending_server_errors`, which drives
+codes 7, 9, 2 and 6 and passes. There was no gap.
+
+**Use the aggregate form instead**: take a whole function or impl span and ask
+whether ANY region in it has a non-zero count. That is what produced the
+retirement-drain finding (43 regions, all zero) and the `Debug` table, and both
+were independently confirmed by a `panic!` probe before anything was written.
+
+The rule that saved this: never act on a coverage reading alone. Every
+never-executed claim acted on this session was corroborated by a panic probe
+first, and the one claim that was not probed is the one that turned out false.
+
 ## Companion sweep: the 47 production panic messages
 
 Same day, same principle applied to a different surface. Every production
