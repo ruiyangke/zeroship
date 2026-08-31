@@ -1197,6 +1197,27 @@ fn first_ascii_server_error(messages: &BackendMessages) -> Option<DbError> {
 /// session, and waiting for additional bytes could hang on a one-way failure.
 /// Complete asynchronous frames are dispatched before this scanner; any other
 /// frame still belongs to ordinary protocol dispatch.
+///
+/// **THIS COPY CANNOT RETURN `Some` IN PRODUCTION, AND ITS TWIN IN
+/// `replication.rs` CAN.** Both of this one's callers reach it only through
+/// `record_buffered_server_error`, and both run `drain_buffered_backend_frames`
+/// first (the `receiver`-closed arm, and `prefer_buffered_server_error`). That
+/// drain returns only when the head frame is
+/// incomplete or the buffer holds fewer than five bytes - and this scanner
+/// refuses both, at the `peek_u32_be(1)?` and the `buf().len() < total_len`
+/// guard. Nothing reads the socket between the two, so the buffer cannot
+/// change. The replication copy is live because its three call sites invoke it
+/// DIRECTLY after a failed flush, with no drain in front; four tests bind it,
+/// one per call site.
+///
+/// Measured 2026-08-31, not merely argued: panicking on the `Some` arm here
+/// leaves all 1445 tests passing, while the same mutation applied to the
+/// replication twin fails exactly its four. So a mutation report calling this
+/// copy unbound is CORRECT, and a test written to satisfy it would have to
+/// call this private function with a hand-built buffer - binding a path the
+/// system cannot take. Whether the defensive scanner earns its place, or
+/// `record_buffered_server_error` should collapse to its `unwrap_or(local)`
+/// fallback, is a design decision and not a test gap.
 fn take_buffered_server_error<S>(stream: &mut BufStream<S>) -> Option<Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
