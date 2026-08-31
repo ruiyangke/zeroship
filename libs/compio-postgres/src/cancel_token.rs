@@ -694,6 +694,47 @@ mod tests {
         .expect("pooled confirmed-cancel test exceeded its 5 second deadline");
     }
 
+    /// The THIRD confirmation site, and the one the other two do not cover.
+    /// `cancel_query_raw` is the public API that takes the caller's own stream,
+    /// so it reaches `attempt.confirm()` by its own path. Without that call
+    /// `PoolCancelAttempt::drop` stores `uncertain_cancel`, and a cancellation
+    /// that fully succeeded would retire a healthy pooled connection.
+    #[compio::test]
+    async fn raw_cancel_success_keeps_pool_lease_reusable() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted raw-cancel peer");
+            let addr = listener
+                .local_addr()
+                .expect("scripted raw-cancel peer address");
+            let mut token = network_token(addr);
+            let lease = PoolCancelLease::active();
+            token.pool_lease = Some(Arc::clone(&lease));
+            let stream = TcpStream::connect(addr)
+                .await
+                .expect("connect scripted raw-cancel peer");
+
+            let peer = compio::runtime::spawn(async move {
+                let (mut accepted, _) = listener.accept().await.expect("accept raw cancellation");
+                assert_eq!(read_exact(&mut accepted, 16).await, cancel_packet());
+                drop(accepted);
+            });
+
+            token
+                .cancel_query_raw(stream, NoTls)
+                .await
+                .expect("raw cancellation failed after peer EOF");
+            peer.await.expect("scripted raw-cancel peer panicked");
+            assert!(
+                !lease.is_uncertain(),
+                "a confirmed raw cancellation made the pool lease unsafe to reuse"
+            );
+        })
+        .await
+        .expect("pooled raw-cancel test exceeded its 5 second deadline");
+    }
+
     #[compio::test]
     async fn public_and_internal_cancel_wait_for_eof() {
         compio::time::timeout(TEST_TIMEOUT, async {
