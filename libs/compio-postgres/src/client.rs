@@ -1323,12 +1323,12 @@ pub struct InnerClient {
     buffer: Mutex<BytesMut>,
 
     /// Set when a fire-and-forget ROLLBACK has been queued (e.g. by
-    /// `Transaction::drop`) but not yet observed to completion. The pool
-    /// uses this at checkout time to run a barrier (`simple_query("")`)
-    /// that drains the pending ROLLBACK before the connection is handed
-    /// to the next caller. Cleared once the pool confirms the connection
-    /// is clean, or on explicit commit/rollback (which await completion
-    /// synchronously).
+    /// `Transaction::drop`) but not yet observed to completion. At checkout,
+    /// the pool runs `simple_query("")` as a FIFO barrier: success proves only
+    /// that the fire-and-forget command reached `ReadyForQuery`, not that the
+    /// session is clean. `return_client` isolates the next borrower by queuing
+    /// a ROLLBACK for every session that is not provably idle. Explicit
+    /// commit/rollback also clear the flag after awaiting completion.
     ///
     /// `AtomicBool` with `Relaxed` ordering: the pool and the Client are
     /// on the same thread in the current usage model, but `Client` is
