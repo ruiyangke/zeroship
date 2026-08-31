@@ -618,6 +618,7 @@ fn der_tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(contents.len() + 8);
     encoded.push(tag);
     if contents.len() < 128 {
+        // Below 128, so the value is in `0..=127` and this cast is exact.
         encoded.push(contents.len() as u8);
     } else {
         let width = (usize::BITS - contents.len().leading_zeros()).div_ceil(8) as usize;
