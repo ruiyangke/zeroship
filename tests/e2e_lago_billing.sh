@@ -44,20 +44,22 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "    Start docker and re-run." >&2
   exit 1
 fi
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }; done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"
 [ -f "$PROBE" ] || { echo "missing $PROBE — (cd examples/metering-probe && pnpm i && pnpm build)"; exit 2; }
+PROBE_IR="$ROOT/examples/metering-probe/generated/zeroship/migrations.ir.json"; [ -s "$PROBE_IR" ] || { echo "missing $PROBE_IR"; exit 2; }
 JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 
-ZEROSHIP_CONTROL_PORT=9172; ZEROSHIP_WORKER_PORT=8072; ZEROSHIP_GATEWAY_PORT=8062; PG_PORT=5472; RP_PORT=19172
+ZEROSHIP_CONTROL_PORT=9172; ZEROSHIP_WORKER_PORT=8072; ZEROSHIP_GATEWAY_PORT=8062; ZEROSHIP_MIGRATE_SERVER_PORT=9072; PG_PORT=5472; RP_PORT=19172
 LAGO_PORT=3480; LAGO_KEY="lago_key-hooli-1234567890"; LAGO_URL="http://localhost:$LAGO_PORT"
 PGC=zs-e2e-lago-pg; RPC=zs-e2e-lago-redpanda
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
+MIGRATE_SERVER_URL="http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
 RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-lago-e2e"
 WORK="$(mktemp -d -t zs-e2e-lago-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"
 PIDFILE="$WORK/pids"; : > "$PIDFILE"
@@ -78,7 +80,7 @@ cleanup(){
   fi
 }
 trap cleanup EXIT
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 echo ""; echo "=== Stage 1: infra (PG + redpanda + REAL Lago) + migrate + seed + stack ==="
 docker rm -f "$PGC" >/dev/null 2>&1 || true
@@ -199,6 +201,14 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
+  --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 \
+  && pass "zeroship-migrate-server healthy" \
+  || { fail "migrate-server"; tail -30 "$WORK/migrated.log"; exit 1; }
+
 echo ""; echo "=== Stage 2: bearer + creator + app + deploy + matching Lago customer/subscription ==="
 # The scope string is the action list the deleted permission_tokens policy
 # carried, one scope per Cedar action.
@@ -215,6 +225,24 @@ APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/jso
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
+APPLY_CODE="$(curl -sS -o "$WORK/apply-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATE_SERVER_URL/v1/apps/$APP/migrations/apply" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-binary @"$PROBE_IR")"
+APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
+if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
+  pass "applied probe migrations (applied=$APPLIED)"
+else
+  fail "migration apply failed (http=$APPLY_CODE): $(cat "$WORK/apply-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
 "$BIN/zeroship" deploy "$PROBE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | grep -q deploy_hash && pass "deployed probe" || { fail "deploy"; exit 1; }
 
 # The forwarder attributes usage to the app's OWNING creator, so the Lago
@@ -229,8 +257,26 @@ N_REQ=100; BODY='{"hello":"lago","n":1}'
 READY=0; for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: lago-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/ready")" = "200" ] && { READY=1; break; }; sleep 1; done
 [ "$READY" = "1" ] && pass "app reachable via gateway" || { fail "app never reachable"; tail -15 "$WORK/gate.log"; exit 1; }
 for _ in 1 2 3 4 5 6; do curl -s -o /dev/null -H 'Host: lago-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/warm" || true; done
-GW_OK=0; for i in $(seq 1 $N_REQ); do for _ in 1 2 3; do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: lago-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")" = "200" ] && { GW_OK=$((GW_OK+1)); break; }; sleep 0.2; done; done
-[ "$GW_OK" = "$N_REQ" ] && pass "drove $GW_OK/$N_REQ requests (HTTP 200)" || { fail "traffic $GW_OK/$N_REQ"; tail -20 "$WORK/worker.log"; exit 1; }
+GW_OK=0; LAST_BODY=""
+for i in $(seq 1 $N_REQ); do
+  for _ in 1 2 3; do
+    RESPONSE="$(curl -s -w '\n%{http_code}' -H 'Host: lago-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$i")"
+    CODE="$(printf '%s' "$RESPONSE" | tail -1)"; PROBE_BODY="$(printf '%s' "$RESPONSE" | sed '$d')"
+    [ "$CODE" = "200" ] && { GW_OK=$((GW_OK+1)); LAST_BODY="$PROBE_BODY"; break; }
+    sleep 0.2
+  done
+done
+WROTE="$(printf '%s' "$LAST_BODY" | jget '.wrote')"
+READ_BACK="$(printf '%s' "$LAST_BODY" | jget '.readBack')"
+DB_ERROR_NULL="$(printf '%s' "$LAST_BODY" | jget '.dbError === null')"
+if [ "$GW_OK" = "$N_REQ" ] && [ "$WROTE" = "true" ] && \
+   [ -n "$READ_BACK" ] && [ "$READ_BACK" -ge 1 ] 2>/dev/null && \
+   [ "$DB_ERROR_NULL" = "true" ]; then
+  pass "drove $GW_OK/$N_REQ requests with probe db write/read (wrote=$WROTE readBack=$READ_BACK dbError=null)"
+else
+  fail "traffic $GW_OK/$N_REQ; wrote=$WROTE readBack=$READ_BACK dbError-null=$DB_ERROR_NULL; body: ${LAST_BODY:0:300}"
+  tail -20 "$WORK/worker.log"; exit 1
+fi
 
 echo ""; echo "=== Stage 4: forwarder -> REAL Lago + enforcement (usage_aggregates) ==="
 # The forwarder posts each usage event to Lago /api/v1/events attributed to the
