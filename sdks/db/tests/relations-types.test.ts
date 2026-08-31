@@ -25,7 +25,6 @@ import type { NativeDb } from "../src/native.js";
 type AnyRec = Record<string, unknown>;
 
 const native = {
-  registerModel: () => Promise.resolve(),
   // P9 PR 3: native `transaction(callback)` orchestrator stub.
   transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
   collection(_name: string) {

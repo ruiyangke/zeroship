@@ -46,7 +46,6 @@ function makeMockNative() {
   });
   return {
     collection,
-    registerModel: async () => null,
   } as unknown as Parameters<typeof installSchemaForTest>[1]["native"];
 }
 

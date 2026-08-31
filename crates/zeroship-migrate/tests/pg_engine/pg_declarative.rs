@@ -1,7 +1,7 @@
 //! Resurrected live-Postgres DECLARATIVE-deploy scenarios.
 //!
 //! The desired-vs-live diff → DDL path: given a set of `CollectionDescriptor`s (the
-//! `registerModel` shape the SDK emits), `desired_snapshot` compiles the desired schema,
+//! runtime-descriptor shape the SDK emits), `desired_snapshot` compiles the desired schema,
 //! `snapshot_schema` introspects the live one, and `MigrationEngine::plan_declarative` +
 //! `apply_declarative` deploy the diff — the whole flow driven through the shipped
 //! `PostgresBackend<PgDevSession>` over the `driver::SqlSession` seam against real PG.
@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zeroship_migrate::{
-    diff_snapshots, Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy,
-    ExecutorConfig, FieldDescriptor, GuardConfig, MigrationEngine, RenameHint,
+    Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig,
+    FieldDescriptor, GuardConfig, MigrationEngine, RenameHint, diff_snapshots,
 };
 
 use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
@@ -426,9 +426,7 @@ async fn adding_a_mask_to_populated_plaintext_preserves_data_and_writes() {
             serde_json::json!("charlie"),
             serde_json::json!("fallback"),
         ]),
-        mask: masked.then(|| {
-            serde_json::json!({ "kind": "full", "classification": "pii" })
-        }),
+        mask: masked.then(|| serde_json::json!({ "kind": "full", "classification": "pii" })),
         ..Default::default()
     };
     let collection = |masked: bool| CollectionDescriptor {
@@ -690,9 +688,8 @@ async fn mask_backfill_uses_creator_wire_text_for_bytes_and_numbers() {
                 name: "value".into(),
                 ty: ty.into(),
                 required: true,
-                mask: mask_kind.map(|kind| {
-                    serde_json::json!({ "kind": kind, "classification": "pii" })
-                }),
+                mask: mask_kind
+                    .map(|kind| serde_json::json!({ "kind": kind, "classification": "pii" })),
                 ..Default::default()
             },
         ],
@@ -815,7 +812,11 @@ async fn mask_backfill_uses_creator_wire_text_for_bytes_and_numbers() {
         )
         .await
         .expect("read transitioned number");
-    assert!(number.try_get::<_, bool>("raw_ok").expect("decode raw number"));
+    assert!(
+        number
+            .try_get::<_, bool>("raw_ok")
+            .expect("decode raw number")
+    );
     assert_eq!(
         number
             .try_get::<_, String>("masked")

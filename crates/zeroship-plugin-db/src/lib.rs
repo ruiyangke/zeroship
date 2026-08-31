@@ -9,10 +9,9 @@
 //!   that hands the callback a collections-only tx view (the old
 //!   `beginTransaction` / `Transaction` wrapper surface was deleted).
 //!
-//! Platform-internal capabilities such as model registration,
-//! migrations, and replication no longer sit on the public `Db`
-//! wrapper; they hang off the private `__platform` capability handle
-//! instead.
+//! Platform-internal capabilities such as mask-policy installation and
+//! replication do not sit on the public `Db` wrapper; they hang off the
+//! private `__platform` capability handle instead.
 //!
 //! Each wrapper carries a `v8::Weak` guaranteed finalizer that
 //! releases its backing resource on GC (broker handle, transaction
@@ -101,7 +100,7 @@ pub mod v8_classes;
 // `backend::SqliteBackend` + the `SqlExecutor` trait directly. The PG
 // `tests/integration.rs` target reaches PG-specific behaviour through
 // the lifted-to-pub helpers in `exec` / `migrations` /
-// `register_model` / `drop_namespace` — those continue to gate on
+// `drop_namespace` - those continue to gate on
 // `test-helpers`. The backend traits themselves carry no
 // production-only behaviour (their bodies are SQL + RPC plumbing), so
 // exposing them under the same gate is safe.
@@ -116,11 +115,9 @@ pub(crate) mod context;
 // directly to pin the rejection contract. The function is a pure JSON
 // walk — no DB round-trip — so exposing it has zero runtime impact;
 // those integration tests are, as of 2026-08-20, its ONLY reachable
-// callers. This comment claimed a "production call site is one line in
-// `register_model/bootstrap.rs::bootstrap`", and that line is real but
-// sits in a `#[cfg(any(test, feature = "test-helpers"))]` module. See
-// the enumeration in `cross_app_fk`'s own module header, and read the
-// FK-stays-in-app property off `zeroship_schema::query` instead.
+// callers. The production FK-stays-in-app property is enforced by
+// `zeroship_schema::query`; this helper remains test-only evidence for the
+// policy-level validator.
 pub mod cross_app_fk;
 // `crud` is crate-private in release builds; `pub`
 // under `test-helpers` so `tests/sqlite_integration.rs` can reach
@@ -220,11 +217,6 @@ pub(crate) mod drop_namespace;
 pub mod drop_namespace;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod register_model;
-#[cfg(feature = "test-helpers")]
-pub mod register_model;
-
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod replication;
 #[cfg(feature = "test-helpers")]
 pub mod replication;
@@ -280,43 +272,6 @@ pub mod wal_consumer;
 // helper rebuilt off `tracing_subscriber` re-exposed elsewhere.
 #[cfg(test)]
 pub(crate) mod test_support;
-
-// ---------------------------------------------------------------------------
-// Per-worker-thread state
-// ---------------------------------------------------------------------------
-//
-// All per-thread slots live on [`context::ThreadDbContext`]; this
-// module just re-exports the helpers the rest of the crate calls.
-
-/// Check if a model is already registered for this app on this thread.
-pub(crate) fn is_model_registered(app_id: &str, collection: &str) -> bool {
-    context::with(|c| c.is_model_registered(app_id, collection))
-}
-
-/// Mark a model as registered.
-pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
-    ctx_mut(|c| c.mark_model_registered(app_id, collection));
-}
-
-/// Test helper — mark a model registered in the current worker-thread context,
-/// mirroring what `register_model` does at the SDK boundary. The runtime schema
-/// resolver gates on `is_model_registered` (the cold-schema contract), so a
-/// faithful e2e that drives the CRUD pipelines directly must mark the model.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
-    mark_model_registered(app_id, collection);
-}
-
-/// Test helper — clear the registered mark so a re-register of the same
-/// `(app, collection)` with a CHANGED schema re-runs the cold path (a real dev
-/// re-deploy presents a fresh binding; tests reuse one context). Used by the destructive-
-/// apply test to drive a v1→v2 schema change through the engine.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn clear_model_registered_for_tests(app_id: &str, collection: &str) {
-    ctx_mut(|c| c.clear_model_registered(app_id, collection));
-}
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
 // has been removed — every callback dispatches through
@@ -404,6 +359,22 @@ impl NativePlugin for DbPlugin {
         v8_classes::db::mint_db(scope, app_id)
     }
 
+    fn bind_runtime_descriptor(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        app_id: &str,
+        descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        // The runtime validates the complete descriptor before invoking this
+        // hook. Collect every field map before mutating the shared thread
+        // context anyway, so a future validator change cannot publish a
+        // partial schema on error.
+        let schemas = descriptor_schemas(descriptor)?;
+        let binding = v8_classes::db::binding_for_isolate(scope, app_id);
+        ctx_mut(|context| context.replace_schemas(&binding, schemas));
+        Ok(())
+    }
+
     fn register(&self, r: &mut NativeRegistrar) {
         // Poison the URL thread-local so `ensure_pool_initialized`
         // (invoked lazily on first callback) can find it. `register()`
@@ -429,6 +400,146 @@ impl NativePlugin for DbPlugin {
         // Every JS-visible entry point lives on the Db v8_class wrapper
         // (see `v8_classes::db`).
         let _ = r;
+    }
+}
+
+fn descriptor_schemas(
+    descriptor: Option<&serde_json::Value>,
+) -> Result<Vec<(String, serde_json::Value)>, String> {
+    let Some(descriptor) = descriptor else {
+        return Ok(Vec::new());
+    };
+    let collections = descriptor
+        .get("collections")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "descriptor has no object `collections` field".to_string())?;
+
+    collections
+        .iter()
+        .map(|(name, collection)| {
+            let fields = collection
+                .get("fields")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    format!("descriptor collection {name:?} has no object `fields` field")
+                })?;
+            Ok((name.clone(), serde_json::Value::Object(fields.clone())))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod runtime_descriptor_binding_tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use serde_json::json;
+    use zeroship_runtime::{RuntimeState, SharedState, init_v8};
+
+    use super::*;
+
+    const APP: &str = "app_native_descriptor";
+    const DEPLOY: &str = "deploy_native_descriptor";
+
+    fn install_runtime_state(scope: &mut v8::PinScope<'_, '_>) {
+        let mut env = HashMap::new();
+        env.insert("APP_ID".to_string(), APP.to_string());
+        env.insert("ZEROSHIP_DEPLOY_ID".to_string(), DEPLOY.to_string());
+        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
+        scope.set_slot(state);
+    }
+
+    fn plugin() -> std::sync::Arc<DbPlugin> {
+        service::DbService::new(service::DbServiceConfig {
+            url: "sqlite::memory:".to_string(),
+            worker_id: "worker_descriptor_test".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin()
+    }
+
+    #[test]
+    fn validated_runtime_descriptor_makes_declared_collection_serveable() {
+        reset_context_for_tests();
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        install_runtime_state(scope);
+
+        let runtime_descriptor = json!({
+            "version": 2,
+            "collections": {
+                "users": {
+                    "fields": {
+                        "id": { "type": "id", "idPrefix": "usr" },
+                        "email": { "type": "string", "required": true }
+                    },
+                    "options": {
+                        "softDelete": false,
+                        "versioning": true,
+                        "strictness": "strict"
+                    },
+                    "indexes": []
+                }
+            }
+        });
+        plugin()
+            .bind_runtime_descriptor(scope, APP, Some(&runtime_descriptor))
+            .expect("bind descriptor");
+
+        let binding = binding::DbBinding::new(APP, DEPLOY);
+        let schema = descriptor::collection_schema(&binding, "users")
+            .expect("declared collection must resolve before any read");
+        assert_eq!(
+            schema.as_ref(),
+            &runtime_descriptor["collections"]["users"]["fields"],
+            "native boot must publish the descriptor's field map verbatim"
+        );
+    }
+
+    #[test]
+    fn schema_less_runtime_replaces_binding_with_an_empty_view() {
+        reset_context_for_tests();
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        install_runtime_state(scope);
+
+        let runtime_descriptor = json!({
+            "version": 2,
+            "collections": {
+                "stale": {
+                    "fields": { "id": { "type": "id" } },
+                    "options": { "softDelete": false, "versioning": false },
+                    "indexes": []
+                }
+            }
+        });
+        let plugin = plugin();
+        plugin
+            .bind_runtime_descriptor(scope, APP, Some(&runtime_descriptor))
+            .expect("bind descriptor");
+        plugin
+            .bind_runtime_descriptor(scope, APP, None)
+            .expect("bind schema-less runtime");
+
+        let binding = binding::DbBinding::new(APP, DEPLOY);
+        let error = descriptor::collection_schema(&binding, "stale")
+            .expect_err("schema-less binding must declare no collection");
+        assert!(
+            format!("{error:?}").contains("collection_not_declared"),
+            "missing descriptor entry must remain a loud typed refusal: {error:?}"
+        );
+        assert!(
+            descriptor::declared_collections(&binding).is_empty(),
+            "schema-less transaction view source must be empty"
+        );
     }
 }
 
@@ -620,10 +731,9 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 
 /// Test helper: install one collection's descriptor entry into this isolate's
 /// store, so the CRUD passes and the unmask dispatcher's `lookup_mask_meta` /
-/// `lookup_encryption_meta` resolve the column metadata. Mirrors the install
-/// the production `register_model_dispatch` performs on the SDK boundary, and
-/// `schema` is the same descriptor-shaped `{ <column>: FieldDef }` map
-/// `installSchema` hands it.
+/// `lookup_encryption_meta` resolve the column metadata. `schema` is the same
+/// descriptor-shaped `{ <column>: FieldDef }` map native boot extracts from a
+/// `RuntimeSchemaDescriptor` collection.
 ///
 /// The entry lands under the COLD-START binding, which is what every test-side
 /// binding is (`crud::write_pipeline`'s fixture, the `_for_tests` seams in
@@ -632,11 +742,7 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
-    cache_schema_for_deploy_for_tests(
-        &binding::DbBinding::cold_start(app_id),
-        collection,
-        schema,
-    );
+    cache_schema_for_deploy_for_tests(&binding::DbBinding::cold_start(app_id), collection, schema);
 }
 
 /// Test helper: [`cache_schema_for_tests`] for an explicit binding, so a
@@ -649,31 +755,7 @@ pub fn cache_schema_for_deploy_for_tests(
     collection: &str,
     schema: serde_json::Value,
 ) {
-    ctx_mut(|c| {
-        c.cache_schema(binding, collection, schema);
-        // Production `register_model_dispatch` BOTH installs the descriptor
-        // entry AND marks the model registered. `registerModel`'s own warm
-        // short-circuit reads that mark, so a helper that installed the schema
-        // without it would leave the isolate in a half-state production never
-        // reaches.
-        c.mark_model_registered(binding.app_id(), collection);
-    });
-}
-
-/// Test helper: drop every cached declared schema for `app_id` (and clear
-/// the model-registered marks for the given collections). Simulates a FRESH
-/// isolate booting against a WARM app file — the per-isolate sibling cache starts
-/// empty even though the file already holds the tables. The warm-multi-
-/// collection drop-suppression path must survive exactly this state.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn simulate_fresh_isolate_for_tests(app_id: &str, collections: &[&str]) {
-    ctx_mut(|c| {
-        c.clear_schemas_for_app(app_id);
-        for coll in collections {
-            c.clear_model_registered(app_id, coll);
-        }
-    });
+    ctx_mut(|c| c.cache_schema(binding, collection, schema));
 }
 
 /// Test helper: clear the per-isolate mask-policy cache
@@ -719,9 +801,11 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
-        let _previous =
-            c.install_tx_client(app_id, crate::context::TxConnection::Postgres(client));
-        debug_assert!(_previous.is_none(), "install_tx_marker_for_tests: slot already occupied");
+        let _previous = c.install_tx_client(app_id, crate::context::TxConnection::Postgres(client));
+        debug_assert!(
+            _previous.is_none(),
+            "install_tx_marker_for_tests: slot already occupied"
+        );
     });
 }
 
@@ -1041,7 +1125,7 @@ pub async fn init_pool_async() -> Result<(), String> {
 
 #[cfg(test)]
 mod backend_init_input_tests {
-    use super::{backend_init_inputs, BackendUrl};
+    use super::{BackendUrl, backend_init_inputs};
 
     /// Nothing installed is the DISABLED state and stays a success.
     ///
@@ -1056,8 +1140,14 @@ mod backend_init_input_tests {
     #[test]
     fn both_installed_resolve_to_the_composed_selection() {
         assert_eq!(
-            backend_init_inputs(Some("postgres://host/db".to_string()), Some(BackendUrl::Postgres)),
-            Ok(Some(("postgres://host/db".to_string(), BackendUrl::Postgres))),
+            backend_init_inputs(
+                Some("postgres://host/db".to_string()),
+                Some(BackendUrl::Postgres)
+            ),
+            Ok(Some((
+                "postgres://host/db".to_string(),
+                BackendUrl::Postgres
+            ))),
         );
     }
 

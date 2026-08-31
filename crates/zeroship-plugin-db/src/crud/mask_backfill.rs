@@ -204,7 +204,7 @@ pub struct BackfillReport {
 // `ALTER COLUMN ... SET NOT NULL`, the remove with
 // `ALTER TABLE ... DROP COLUMN`. plugin-db does not touch DDL, and it is not
 // the schema authority, so a mask lifecycle it can only half-perform does not
-// belong here. Their one caller, `register_model::apply`, is deleted too.
+// belong here. Their former schema-apply caller is deleted too.
 //
 // WHERE THIS GOES INSTEAD. Backfill is a migration-engine capability:
 // `PlanStep::Backfill` carries a structured, resumable `BackfillSpec` that is
@@ -224,21 +224,13 @@ pub struct BackfillReport {
 // Shared loop
 // ---------------------------------------------------------------------
 
-
-
-
 // ---------------------------------------------------------------------
 // Audit-table helpers
 // ---------------------------------------------------------------------
 
-
-
-
-
 // ---------------------------------------------------------------------
 // Helpers shared with the existing encryption pass
 // ---------------------------------------------------------------------
-
 
 /// Convert decrypted plaintext bytes to the human-readable string the
 /// mask pass needs. Mirrors `plaintext_to_sidechannel_string` in
@@ -348,7 +340,10 @@ pub fn compute_masked_pairs_for_row(
         let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
             continue;
         };
-        let kind_str = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
+        let kind_str = mask_meta
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("full");
         if kind_str == "none" {
             continue;
         }
@@ -418,7 +413,11 @@ mod tests {
     fn malformed_mask_sentinel_returns_typed_error() {
         // Missing prefix.
         let err = parse_mask_sentinel("kind=last4,classification=spi").unwrap_err();
-        assert!(err.clone().into_string().contains("mask_sentinel_malformed"));
+        assert!(
+            err.clone()
+                .into_string()
+                .contains("mask_sentinel_malformed")
+        );
 
         // Unknown kind.
         let err = parse_mask_sentinel("__zsmask:kind=blink_182,classification=pii").unwrap_err();
@@ -435,7 +434,8 @@ mod tests {
         assert!(err.clone().into_string().contains("missing kind="));
 
         // Extra junk.
-        let err = parse_mask_sentinel("__zsmask:kind=last4,classification=pii,extra=bogus").unwrap_err();
+        let err =
+            parse_mask_sentinel("__zsmask:kind=last4,classification=pii,extra=bogus").unwrap_err();
         assert!(err.clone().into_string().contains("unrecognised key"));
     }
 
@@ -445,10 +445,7 @@ mod tests {
             backfill_audit_name("users", "ssn"),
             "mask_backfill_users_ssn"
         );
-        assert_eq!(
-            rewrite_audit_name("users", "ssn"),
-            "mask_rewrite_users_ssn"
-        );
+        assert_eq!(rewrite_audit_name("users", "ssn"), "mask_rewrite_users_ssn");
         assert_ne!(
             backfill_audit_name("users", "ssn"),
             rewrite_audit_name("users", "ssn")
@@ -468,10 +465,7 @@ mod tests {
         });
         let row = serde_json::json!({ "id": "u1", "ssn": "BASE64CT" });
         let mut pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
-        pt.insert(
-            "ssn".to_string(),
-            Zeroizing::new("123-45-6789".to_string()),
-        );
+        pt.insert("ssn".to_string(), Zeroizing::new("123-45-6789".to_string()));
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("ssn".to_string(), "***-**-6789".to_string()));
@@ -489,7 +483,10 @@ mod tests {
         let pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0], ("email".to_string(), "a***@example.com".to_string()));
+        assert_eq!(
+            pairs[0],
+            ("email".to_string(), "a***@example.com".to_string())
+        );
     }
 
     #[test]

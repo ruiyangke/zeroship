@@ -98,10 +98,10 @@ export type LoadNormalized = () => Promise<NormalizedUserModule>;
 
 /**
  * Caller-supplied schema-readiness awaiter. Resolves once the cold-boot
- * DDL chain (`registerModel` + mask-policy flush) has settled. Called
+ * mask-policy flush has settled. Called
  * AFTER `loadNormalized()` — which, on the dev path, is what populates
  * the module-local `schemaReady` promise — and BEFORE the user's
- * `default.fetch` runs. A rejected chain (failed migration) rejects
+ * `default.fetch` runs. A rejected policy flush rejects
  * here; the caller may surface it however it likes. Optional: when
  * absent (e.g. unit tests, schema-less apps) the fetch is ungated, same
  * as before this gate existed.
@@ -113,11 +113,9 @@ export type AwaitSchemaReady = () => Promise<void> | undefined;
  * loader. Returns the closure the platform exports as `default.fetch`.
  *
  * `awaitSchemaReady`, when supplied, gates the fall-through to the
- * user's `default.fetch` on schema readiness (C1) — symmetric with the
- * RPC dispatcher, which awaits the same chain before the first
- * procedure. Without it a `default.fetch` handler could run
- * `env.db.*` concurrently with a cold-boot migration and observe a
- * half-built schema ("no such table").
+ * user's `default.fetch` on schema readiness, symmetric with the RPC
+ * dispatcher, which awaits the same mask-policy flush before the first
+ * procedure.
  */
 export function createFetchHandler(
   loadNormalized: LoadNormalized,
@@ -175,12 +173,9 @@ export function createFetchHandler(
     }
     const userFetch = normalized.fetch;
     if (typeof userFetch === "function") {
-      // Schema-readiness gate (C1). `loadNormalized()` above already ran
-      // schema registration (dev path: it populates the module-local
-      // `schemaReady`); await it before the user handler so an
-      // `env.db.*` write/read in `default.fetch` never races the
-      // cold-boot migration. A rejected chain surfaces as a sanitized
-      // 500 rather than a half-built read.
+      // `loadNormalized()` above already populated the dev path's
+      // module-local `schemaReady`; await it before the user handler.
+      // A rejected mask-policy flush surfaces as a sanitized 500.
       if (awaitSchemaReady) {
         try {
           const ready = awaitSchemaReady();

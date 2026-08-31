@@ -73,8 +73,7 @@ pub(crate) fn haversine_m(a: GeoPoint, b: GeoPoint) -> f64 {
     let phi2 = b.lat.to_radians();
     let dphi = (b.lat - a.lat).to_radians();
     let dlam = (b.lng - a.lng).to_radians();
-    let h = (dphi / 2.0).sin().powi(2)
-        + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
+    let h = (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
     2.0 * EARTH_RADIUS_M * h.sqrt().atan2((1.0 - h).sqrt())
 }
 
@@ -95,12 +94,9 @@ pub(crate) fn haversine_m(a: GeoPoint, b: GeoPoint) -> f64 {
 /// schema-emission time, but this helper stays lexically robust
 /// against any caller that passes a raw string.
 ///
-/// **No production caller yet** in this PR: the SQLite-side
-/// `build_create_table_with_fks` (the orchestrator's column-DDL
-/// emitter) is PG-flavoured today; a follow-up PR that teaches
-/// `register_model::apply` to dispatch by dialect will route through
-/// this helper. The integration test in `tests/sqlite_integration.rs`
-/// constructs the DDL inline using the same shape.
+/// **No production caller.** The integration test in
+/// `tests/sqlite_integration.rs` constructs the DDL inline using the same
+/// shape.
 #[allow(dead_code)]
 pub(crate) fn sqlite_geopoint_column_ddl(name: &str) -> String {
     let quoted = format!("\"{}\"", name.replace('"', "\"\""));
@@ -168,7 +164,10 @@ mod tests {
     /// `haversine_m(a, a) == 0.0` exactly.
     #[test]
     fn haversine_self_distance_is_zero() {
-        let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
+        let london = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
         let d = haversine_m(london, london);
         assert_eq!(d, 0.0, "self-distance must be exactly 0, got {d}");
     }
@@ -180,8 +179,14 @@ mod tests {
     /// imprecise "centre" coordinates.
     #[test]
     fn haversine_london_to_paris() {
-        let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
-        let paris = GeoPoint { lat: 48.8566, lng: 2.3522 };
+        let london = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
+        let paris = GeoPoint {
+            lat: 48.8566,
+            lng: 2.3522,
+        };
         let d = haversine_m(london, paris);
         let expected_km = 344.0;
         let actual_km = d / 1000.0;
@@ -198,8 +203,14 @@ mod tests {
     /// bit-identical.
     #[test]
     fn haversine_is_symmetric() {
-        let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
-        let paris = GeoPoint { lat: 48.8566, lng: 2.3522 };
+        let london = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
+        let paris = GeoPoint {
+            lat: 48.8566,
+            lng: 2.3522,
+        };
         let d1 = haversine_m(london, paris);
         let d2 = haversine_m(paris, london);
         assert_eq!(
@@ -214,7 +225,10 @@ mod tests {
     #[test]
     fn haversine_antipodal_is_half_circumference() {
         let a = GeoPoint { lat: 0.0, lng: 0.0 };
-        let b = GeoPoint { lat: 0.0, lng: 180.0 };
+        let b = GeoPoint {
+            lat: 0.0,
+            lng: 180.0,
+        };
         let d = haversine_m(a, b);
         let expected = std::f64::consts::PI * EARTH_RADIUS_M;
         assert!(
@@ -261,7 +275,10 @@ mod tests {
     /// `point_to_blob` produces a 16-byte payload.
     #[test]
     fn point_to_blob_is_16_bytes() {
-        let p = GeoPoint { lat: 51.5074, lng: -0.1278 };
+        let p = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
         let blob = point_to_blob(p);
         assert_eq!(blob.len(), 16, "geoPoint blob is 16 bytes (2 × f64 LE)");
     }
@@ -269,7 +286,10 @@ mod tests {
     /// `point_to_blob` then `blob_to_point` round-trips bit-exact.
     #[test]
     fn point_blob_round_trip_is_bit_exact() {
-        let p = GeoPoint { lat: 51.5074, lng: -0.1278 };
+        let p = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
         let blob = point_to_blob(p);
         let back = blob_to_point(&blob).expect("decode");
         // Bit-exact: bytes in, bytes out (no FP rounding through the

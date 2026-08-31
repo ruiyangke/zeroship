@@ -18,8 +18,7 @@
 //!
 //! ## Platform-internal surface (behind `__platform`)
 //!
-//! `registerModel`, `setMaskPolicy`, and the
-//! `replication` namespace moved off `env.db` to the
+//! `setMaskPolicy` and the `replication` namespace live off `env.db` on the
 //! [`super::db_platform::DbPlatform`] capability handle. That handle is
 //! set on this `Db` object under the `ZS_PLATFORM` private symbol in
 //! [`mint_db`] and reached only via `@zeroship/bootstrap`'s
@@ -84,7 +83,10 @@ impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("binding", &self.binding)
-            .field("collection_cache_len", &self.collection_cache.borrow().len())
+            .field(
+                "collection_cache_len",
+                &self.collection_cache.borrow().len(),
+            )
             .finish()
     }
 }
@@ -139,10 +141,6 @@ impl Db {
         }
     }
 
-    // `db.registerModel` moved to `DbPlatform::register_model` (reached
-    // via `__platform`, not `env.db`). The `register_model_dispatch`
-    // pipeline is unchanged.
-
     /// `db.transaction(asyncFn, opts?)` — run `asyncFn` inside a
     /// transaction.
     ///
@@ -190,9 +188,7 @@ impl Db {
                 )));
             }
             let parsed = v8_value_to_serde_json(scope, opts).map_err(|e| {
-                OpError::type_error(format!(
-                    "db.transaction: opts could not be decoded ({e:?})"
-                ))
+                OpError::type_error(format!("db.transaction: opts could not be decoded ({e:?})"))
             })?;
             let raw = parsed
                 .as_object()
@@ -250,14 +246,23 @@ impl Db {
 /// `typeof` would surface so users can correlate with what they
 /// passed.
 fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
-    if v.is_string() { "string" }
-    else if v.is_number() { "number" }
-    else if v.is_boolean() { "boolean" }
-    else if v.is_function() { "function" }
-    else if v.is_array() { "array" }
-    else if v.is_null() { "null" }
-    else if v.is_undefined() { "undefined" }
-    else { "value" }
+    if v.is_string() {
+        "string"
+    } else if v.is_number() {
+        "number"
+    } else if v.is_boolean() {
+        "boolean"
+    } else if v.is_function() {
+        "function"
+    } else if v.is_array() {
+        "array"
+    } else if v.is_null() {
+        "null"
+    } else if v.is_undefined() {
+        "undefined"
+    } else {
+        "value"
+    }
 }
 
 /// Normalise a JS-supplied isolation-level identifier into the SQL
@@ -304,8 +309,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 /// Before returning, this also mints a [`crate::v8_classes::db_platform::DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the
 /// `Db` object under the `ZS_PLATFORM` private symbol. The handle
-/// holds the platform-internal callables (`registerModel`,
-/// `setMaskPolicy`, `migrations`,
+/// holds the platform-internal callables (`setMaskPolicy`, `migrations`,
 /// `replication`); it is unreachable from creator JS (a `v8::Private`
 /// slot is invisible to every JS reflection path and cannot be keyed
 /// from JS) and is read only by Rust and the bootstrap runtime-entry
@@ -314,20 +318,7 @@ pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    // Capture the app-at-deploy identity from THIS isolate. The worker injects
-    // `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow runtimes carry the
-    // hash they were started on. Absent in dev/raw-JS harnesses means the
-    // historical `cold_start` token.
-    let binding = {
-        let state = crate::v8_bridge::runtime_state(scope);
-        let deploy_token = state
-            .borrow()
-            .env_vars
-            .get("ZEROSHIP_DEPLOY_ID")
-            .cloned()
-            .unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string());
-        DbBinding::new(app_id, deploy_token)
-    };
+    let binding = binding_for_isolate(scope, app_id);
 
     let class_tmpl = Db::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -367,21 +358,35 @@ pub fn mint_db<'s>(
     // Mint the platform capability handle and stash it on
     // the Db object under the `ZS_PLATFORM` private symbol. A failure to
     // mint the handle is non-fatal: the Db is still usable for the public
-    // `collection` / `transaction` surface; `__platform` resolution
-    // simply yields `undefined` and `installSchema` falls back to its
-    // platform-handle-absent path (skip registerModel, used by RPC-only /
-    // fetch-only apps and dev runs without a DB URL).
+    // `collection` / `transaction` surface; `__platform` resolution simply
+    // yields `undefined`, so optional platform-only boot work is skipped.
     if let Some(plat) = mint_db_platform(scope, binding) {
         let priv_sym = zeroship_runtime::core::init::zs_platform_private(scope);
         // `set_private` returns `Option<bool>` (None only on context
         // teardown — impossible here, we just minted the object). The
         // private slot is the sole capability carrier; if it somehow
-        // failed, `__zsDbPlatform` returns undefined and installSchema
-        // takes its handle-absent path.
+        // failed, `__zsDbPlatform` returns undefined.
         let _ = obj.set_private(scope, priv_sym, plat.into());
     }
 
     Some(obj)
+}
+
+/// Resolve the immutable app-at-deploy identity for the active isolate.
+/// Native descriptor binding and the `Db` wrapper both call this helper so
+/// cache keys cannot drift from the receivers that later read them.
+pub(crate) fn binding_for_isolate(scope: &mut v8::PinScope<'_, '_>, app_id: &str) -> DbBinding {
+    // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
+    // runtimes carry the hash they were started on. Absent in dev/raw-JS
+    // harnesses means the historical `cold_start` token.
+    let state = crate::v8_bridge::runtime_state(scope);
+    let deploy_token = state
+        .borrow()
+        .env_vars
+        .get("ZEROSHIP_DEPLOY_ID")
+        .cloned()
+        .unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string());
+    DbBinding::new(app_id, deploy_token)
 }
 
 #[cfg(test)]
@@ -400,10 +405,7 @@ mod tests {
         Runtime::builder()
             .env_vars(HashMap::from([
                 ("APP_ID".to_string(), app_id.to_string()),
-                (
-                    "ZEROSHIP_DEPLOY_ID".to_string(),
-                    deploy_token.to_string(),
-                ),
+                ("ZEROSHIP_DEPLOY_ID".to_string(), deploy_token.to_string()),
             ]))
             .build()
     }
@@ -544,7 +546,12 @@ mod tests {
     /// falling behind a level this test already knows is accepted.
     #[test]
     fn rejection_message_names_every_accepted_level() {
-        let levels = ["readUncommitted", "readCommitted", "repeatableRead", "serializable"];
+        let levels = [
+            "readUncommitted",
+            "readCommitted",
+            "repeatableRead",
+            "serializable",
+        ];
 
         for spelling in levels {
             assert!(
@@ -562,5 +569,4 @@ mod tests {
             );
         }
     }
-
 }

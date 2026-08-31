@@ -99,10 +99,10 @@ pub struct BuiltQuery {
 /// kept this move from dragging `render::declarative` and `render::lower` (and
 /// therefore the whole engine) into the leaf.
 pub use zeroship_migrate_backend::schema::{
-    char_len, decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
+    MAX_MASKED_FIELD_NAME_BYTES, RAW_COLUMN_PREFIX, SchemaRenderer, char_len,
+    decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
     is_schema_metadata_key, mask_sentinel_for_field, max_length, raw_column_for_field,
-    raw_column_name, string_enum_values, SchemaRenderer, MAX_MASKED_FIELD_NAME_BYTES,
-    RAW_COLUMN_PREFIX,
+    raw_column_name, string_enum_values,
 };
 
 /// The schema renderer for a dialect.
@@ -548,10 +548,9 @@ pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 ///
 /// Defense in depth, and deliberately unconditional. Two fences sit upstream of
 /// this one in the consuming product: the db SDK rejects a reserved prefix at
-/// build time, and the platform-internal `registerModel` op that the descriptor
-/// route ends in over there is itself fenced off from creator JS. Neither fence
-/// is in this repository, and this crate is a library - it validates the
-/// descriptor it is handed and cannot see which producer built it.
+/// build time, and native descriptor binding is fenced off from creator JS.
+/// This crate is a library: it validates the descriptor it is handed and cannot
+/// see which producer built it.
 ///
 /// Whether some wire route delivers a descriptor to these emitters without
 /// crossing the SDK fence is UNTRACED: nobody has followed that path end to end
@@ -624,7 +623,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  */
 
 // ---------------------------------------------------------------------------
-// DDL builders for registerModel
+// DDL builders for declarative schema application
 // ---------------------------------------------------------------------------
 
 /* THE `pub fn` THAT BUILT A `CREATE SCHEMA` STATEMENT IS DELETED. It had ZERO callers:
@@ -1104,7 +1103,7 @@ fn injected_column_type(
             return Err(QueryError::InvalidFilter(format!(
                 "injected column {:?} has unsupported resolved type {:?}",
                 column.name, column.ty
-            )))
+            )));
         }
     };
     Ok(backend.column_type(&column_snapshot_for_type_def(&def), false))
@@ -1417,12 +1416,12 @@ pub fn build_add_column(
 }
 
 // ---------------------------------------------------------------------------
-// Index builders for registerModel. Materialises `t.string().index()` /
+// Index builders for declarative schema application. Materialises `t.string().index()` /
 // `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
 // the markers actually do something at the database layer.
 // ---------------------------------------------------------------------------
 
-/// A single index to materialise during `registerModel`.
+/// A single index to materialise during declarative schema application.
 ///
 /// `name` is the deterministic Postgres identifier (<= 63 bytes). `sql` is a
 /// `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...` statement ready to be
@@ -1461,7 +1460,7 @@ pub struct IndexSpec {
 }
 
 /// Index shape - the closed sum over the four kinds of indexes
-/// `registerModel` can materialise.
+/// declarative schema application can materialise.
 ///
 /// The default is [`IndexKind::BTree`] so every existing call site keeps
 /// the same observable behaviour. Which kind an index carries does NOT decide
@@ -1896,7 +1895,7 @@ pub fn named_index_name(collection: &str, name: &str) -> String {
 ///      need stable + roughly-uniform). sha256 is the cheaper choice.
 ///
 /// Naming is content-addressed (same input -> same name), so re-running
-/// `registerModel` with `IF NOT EXISTS` is idempotent.
+/// Declarative application with `IF NOT EXISTS` is idempotent.
 pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
     let suffix = if unique { "key" } else { "idx" };
     let joined_cols = columns.join("_");
@@ -1954,7 +1953,7 @@ fn short_hash_base32(input: &str) -> String {
 /// `field_to_column_for_dialect` (the column-DDL emitter that bakes it after
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
-/// engine `generate`s is byte-identical to the one `registerModel` writes. The
+/// engine `generate`s is byte-identical to the one schema application writes. The
 /// parser side lives in the live-catalog readers (PG `pg_attribute` comment regex) /
 /// the SQLite `sqlite_master.sql` regex.
 ///
@@ -2513,7 +2512,7 @@ mod tests {
         .expect_err("MySQL writes its own refusal");
         assert_eq!(
             mysql.to_string(),
-            "invalid filter: MySQL register-model column changes are not live-rendered"
+            "invalid filter: MySQL declarative column changes are not live-rendered"
         );
     }
 
@@ -2987,7 +2986,7 @@ columns = [
     //
     // Before this change, `t.string().unique()` set FieldDef.unique = true
     // in the SDK but the Rust layer never emitted a unique index. This
-    // test asserts that the emitted SQL after registerModel actually
+    // test asserts that the emitted SQL after schema application actually
     // contains a CREATE UNIQUE INDEX CONCURRENTLY statement targeting
     // the `email` column.
     // -----------------------------------------------------------------------
@@ -4024,13 +4023,9 @@ columns = [
     #[test]
     fn schema_query_create_table_rejects_zeroship_collection() {
         let schema = serde_json::json!({ "probe": { "type": "string" } });
-        let err = build_create_table_with_fks(
-            "app1",
-            "__zeroship_probe",
-            &schema,
-            &FkEmission::Inline,
-        )
-        .expect_err("the schema-query helper must refuse the __zeroship prefix");
+        let err =
+            build_create_table_with_fks("app1", "__zeroship_probe", &schema, &FkEmission::Inline)
+                .expect_err("the schema-query helper must refuse the __zeroship prefix");
 
         assert!(matches!(err, QueryError::InvalidCollection(_)), "{err:?}");
     }
@@ -4832,12 +4827,14 @@ columns = [
         assert!(inject.columns().is_empty());
         assert!(inject.indexes().is_empty());
         assert!(inject.primary_key().is_none());
-        assert!(super::validate_field_name_for_declaration(
-            crate::test_fixtures::VENDORS,
-            "updated_at",
-            &inject
-        )
-        .is_ok());
+        assert!(
+            super::validate_field_name_for_declaration(
+                crate::test_fixtures::VENDORS,
+                "updated_at",
+                &inject
+            )
+            .is_ok()
+        );
 
         let sql = super::build_create_table_with_fks_for_dialect(
             crate::test_fixtures::VENDORS,

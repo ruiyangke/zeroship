@@ -5,8 +5,8 @@ use crate::physical_type::{self, MysqlPhysicalType};
 use zeroship_migrate_backend::ddl::ExclusionConstraintRequest;
 use zeroship_migrate_backend::renderer::DmlRenderer;
 use zeroship_migrate_backend::schema::{
-    char_len, decimal_precision_scale, def_case_sensitive, AddColumnIfNotExistsRequest,
-    CreateIndexIfNotExistsRequest, KeyStorageEvidence, SchemaRenderer, StorageValidationRefusal,
+    AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest, KeyStorageEvidence, SchemaRenderer,
+    StorageValidationRefusal, char_len, decimal_precision_scale, def_case_sensitive,
 };
 use zeroship_migrate_backend::snapshot::ColumnSnapshot;
 use zeroship_migrate_ir::dialect::DialectId;
@@ -237,7 +237,9 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         desired: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
         live: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
-        use zeroship_migrate_backend::ddl::{fk_local_columns, fk_referenced_columns, fk_target_table};
+        use zeroship_migrate_backend::ddl::{
+            fk_local_columns, fk_referenced_columns, fk_target_table,
+        };
 
         let check = |position: &str, table: &str, columns: &[String]| -> Result<(), String> {
             let snapshot = desired.tables.get(table).or_else(|| live.tables.get(table));
@@ -509,7 +511,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         _table: &str,
         _clause: &str,
     ) -> Result<String, &'static str> {
-        Err("MySQL register-model foreign-key changes are not live-rendered")
+        Err("MySQL declarative foreign-key changes are not live-rendered")
     }
 
     fn drop_foreign_key_if_exists_statement(
@@ -525,7 +527,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         &self,
         _request: AddColumnIfNotExistsRequest<'_>,
     ) -> Result<Vec<String>, &'static str> {
-        Err("MySQL register-model column changes are not live-rendered")
+        Err("MySQL declarative column changes are not live-rendered")
     }
 
     fn create_index_if_not_exists_statement(
@@ -817,7 +819,7 @@ pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SchemaRenderer, RENDERER};
+    use super::{RENDERER, SchemaRenderer};
     use zeroship_migrate_backend::snapshot::ColumnSnapshot;
 
     const PIN: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs";

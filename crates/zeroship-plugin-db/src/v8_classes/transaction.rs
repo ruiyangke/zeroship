@@ -47,8 +47,8 @@ use crate::v8_classes::collection::mint_collection;
 ///
 /// Builds a fresh `v8::Object` and sets one
 /// [`Collection`](super::collection::Collection) property per collection
-/// the per-thread schema cache knows about for `app_id` (the same set
-/// `register_model_dispatch` populates). Each minted `Collection` is an
+/// the per-thread schema cache knows about for this binding (the same set
+/// native runtime boot publishes). Each minted `Collection` is an
 /// ordinary v8_class instance — identical to what `db.collection(name)`
 /// returns — so its CRUD methods route through the active transaction
 /// connection via the `tx_conn` slot the orchestrator set before calling
@@ -58,11 +58,9 @@ use crate::v8_classes::collection::mint_collection;
 /// method is set on the view: the only members are collections. Manual
 /// abort = throw inside the callback; commit is implicit on resolve.
 ///
-/// When the descriptor store holds no entry for this BINDING (no
-/// `registerModel` has run on this worker thread yet — e.g. a raw-JS deploy
-/// that opens a tx before declaring a schema), the view is an empty object. That
-/// is correct: a transaction with no declared collections has nothing to address
-/// through `tx.<name>`; the creator can still drive raw work, and the
+/// When the descriptor store holds no entry for this binding, as with a raw-JS
+/// schema-less deploy, the view is an empty object. A transaction with no
+/// declared collections has nothing to address through `tx.<name>`; the
 /// commit/rollback envelope still applies.
 pub(crate) fn mint_tx_view<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -129,7 +127,14 @@ mod tests {
 
         // None of the legacy `Transaction` methods, nor `transaction` /
         // `live`, may appear on the view.
-        for forbidden in ["commit", "rollback", "collection", "transaction", "live", "beginTransaction"] {
+        for forbidden in [
+            "commit",
+            "rollback",
+            "collection",
+            "transaction",
+            "live",
+            "beginTransaction",
+        ] {
             assert_absent(scope, view, forbidden);
         }
 
@@ -140,14 +145,16 @@ mod tests {
         // `get` walks the prototype chain; a plain object's chain ends at
         // Object.prototype which has no `commit`.
         let v = view.get(scope, key.into()).unwrap();
-        assert!(v.is_undefined(), "commit must be absent up the whole prototype chain");
+        assert!(
+            v.is_undefined(),
+            "commit must be absent up the whole prototype chain"
+        );
     }
 
     #[test]
-    fn tx_view_is_empty_when_no_schema_registered() {
-        // This app has registered no collections in the thread context, so the view has
-        // no own enumerable properties. (Real requests register a schema
-        // first; the empty case is the raw-JS-deploy path.)
+    fn tx_view_is_empty_without_runtime_descriptor() {
+        // A schema-less app has no collections in the thread context, so the view has
+        // no own enumerable properties. This is the raw-JS-deploy path.
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -162,7 +169,7 @@ mod tests {
         assert_eq!(
             names.length(),
             0,
-            "tx-view for an app with no registered schema must be empty"
+            "tx-view for a schema-less app must be empty"
         );
     }
 }

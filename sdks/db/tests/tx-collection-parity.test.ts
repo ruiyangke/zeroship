@@ -18,7 +18,7 @@ type ExampleSchema = {
 type ExpectNever<T extends never> = T;
 type PublicCollectionKeys = Exclude<
   keyof Collection<ExampleSchema>,
-  "_setReady" | "_setResolveCollection" | "_loadRelations" | "Id" | "RowInput"
+  "_setResolveCollection" | "_loadRelations" | "Id" | "RowInput"
 >;
 type PublicQueryKeys = Exclude<keyof Query<ExampleSchema>, "_exec">;
 
@@ -58,7 +58,6 @@ async function assertTxSurfaceTypes(tx: TxCollection<ExampleSchema>): Promise<vo
 void assertTxSurfaceTypes;
 
 const native = {
-  registerModel: () => Promise.resolve(),
   transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
   collection(_name: string) {
     return {

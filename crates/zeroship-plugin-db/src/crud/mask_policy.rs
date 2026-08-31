@@ -67,9 +67,7 @@ use crate::error::DbError;
 
 /// The six canonical classification values. Mirrors the SDK's
 /// `Classification` type (`sdks/db/src/types.ts`) and `crate::diff::Classification`.
-pub const VALID_CLASSIFICATIONS: &[&str] = &[
-    "public", "pii", "spi", "phi", "pci", "internal",
-];
+pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
 
 /// Per-app mask policy. Maps actor-role string → set
 /// of classifications the role is permitted to unmask.
@@ -147,22 +145,20 @@ impl MaskPolicy {
             message: "mask policy: must be an object mapping role strings \
                       to arrays of classifications"
                 .to_string(),
-            hint: Some(
-                "shape: { \"<role>\": [\"<classification>\", ...], ... }".into(),
-            ),
+            hint: Some("shape: { \"<role>\": [\"<classification>\", ...], ... }".into()),
         })?;
         let mut roles: HashMap<String, HashSet<String>> = HashMap::new();
         for (role, classifications) in obj.iter() {
-            let arr = classifications.as_array().ok_or_else(|| {
-                DbError::ValidationFailed {
+            let arr = classifications
+                .as_array()
+                .ok_or_else(|| DbError::ValidationFailed {
                     code: "invalid_mask_policy_shape",
                     message: format!(
                         "mask policy: role '{role}' must map to an array of \
                          classifications"
                     ),
                     hint: None,
-                }
-            })?;
+                })?;
             let mut set: HashSet<String> = HashSet::with_capacity(arr.len());
             for c in arr {
                 let s = c.as_str().ok_or_else(|| DbError::ValidationFailed {
@@ -239,9 +235,10 @@ impl MaskPolicy {
 pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(), DbError> {
     let policy = MaskPolicy::from_json(&policy_v)?;
 
-    let backend = crate::context::with(|c| c.backend()).ok_or_else(|| {
-        DbError::config("not_configured", "db: backend not initialized")
-    })?;
+    // Policy installation runs during boot, before creator code can trigger a
+    // data-plane operation. Initialise the configured backend here so the
+    // policy path does not depend on an unrelated earlier DB call.
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     // ---- PG arm: cache only, no storage round-trip ----
     if backend.as_postgres().is_some() {
@@ -281,9 +278,9 @@ fn sqlite_policy_file_lock(path: &Path) -> Result<std::sync::MutexGuard<'static,
     static POLICY_FILE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, PolicyFileLock>>> = OnceLock::new();
     let locks = POLICY_FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let lock: PolicyFileLock = {
-        let mut locks = locks.lock().map_err(|_| {
-            DbError::internal("mask_policies.json: global lock registry poisoned")
-        })?;
+        let mut locks = locks
+            .lock()
+            .map_err(|_| DbError::internal("mask_policies.json: global lock registry poisoned"))?;
         *locks
             .entry(path.to_path_buf())
             .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
@@ -317,10 +314,16 @@ async fn persist_sqlite(
     let policy = policy.clone();
     compio::runtime::spawn_blocking(move || persist_sqlite_blocking(path, app_id, policy))
         .await
-        .map_err(|_| DbError::internal("mask_policies.json: persist spawn_blocking task panicked"))?
+        .map_err(|_| {
+            DbError::internal("mask_policies.json: persist spawn_blocking task panicked")
+        })?
 }
 
-fn persist_sqlite_blocking(path: PathBuf, app_id: String, policy: MaskPolicy) -> Result<(), DbError> {
+fn persist_sqlite_blocking(
+    path: PathBuf,
+    app_id: String,
+    policy: MaskPolicy,
+) -> Result<(), DbError> {
     use std::fs;
     let _file_guard = sqlite_policy_file_lock(&path)?;
     let tmp = path.with_extension("json.tmp");
@@ -334,14 +337,12 @@ fn persist_sqlite_blocking(path: PathBuf, app_id: String, policy: MaskPolicy) ->
             ))
         })?,
         Ok(_) => Value::Object(serde_json::Map::new()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Value::Object(serde_json::Map::new())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
         Err(e) => {
             return Err(DbError::internal(format!(
                 "mask_policies.json: read {}: {e}",
                 path.display()
-            )))
+            )));
         }
     };
     let mut obj = match existing {
@@ -352,9 +353,8 @@ fn persist_sqlite_blocking(path: PathBuf, app_id: String, policy: MaskPolicy) ->
     // 2. Merge.
     obj.insert(app_id, policy.to_json());
     let merged = Value::Object(obj);
-    let serialised = serde_json::to_string_pretty(&merged).map_err(|e| {
-        DbError::internal(format!("mask_policies.json: serialise: {e}"))
-    })?;
+    let serialised = serde_json::to_string_pretty(&merged)
+        .map_err(|e| DbError::internal(format!("mask_policies.json: serialise: {e}")))?;
 
     // 3 + 4. Write tmp.
     fs::write(&tmp, &serialised).map_err(|e| {
@@ -399,17 +399,14 @@ fn load_sqlite_blocking(path: PathBuf, app_id: String) -> Result<Option<MaskPoli
             return Err(DbError::internal(format!(
                 "mask_policies.json: read {}: {e}",
                 path.display()
-            )))
+            )));
         }
     };
     if text.trim().is_empty() {
         return Ok(None);
     }
     let v: Value = serde_json::from_str(&text).map_err(|e| {
-        DbError::internal(format!(
-            "mask_policies.json: parse {}: {e}",
-            path.display()
-        ))
+        DbError::internal(format!("mask_policies.json: parse {}: {e}", path.display()))
     })?;
     let entry = v.get(app_id.as_str());
     match entry {
@@ -665,10 +662,7 @@ mod tests {
             "admin".to_string(),
             HashSet::from(["pii".to_string(), "spi".to_string(), "public".to_string()]),
         );
-        roles.insert(
-            "user".to_string(),
-            HashSet::from(["public".to_string()]),
-        );
+        roles.insert("user".to_string(), HashSet::from(["public".to_string()]));
         let p = MaskPolicy { roles };
         let s1 = p.to_json().to_string();
         let s2 = p.to_json().to_string();
@@ -676,10 +670,7 @@ mod tests {
         // Also: roles are sorted alphabetically.
         let idx_admin = s1.find("admin").expect("admin present");
         let idx_user = s1.find("user").expect("user present");
-        assert!(
-            idx_admin < idx_user,
-            "roles must serialise sorted: {s1}"
-        );
+        assert!(idx_admin < idx_user, "roles must serialise sorted: {s1}");
     }
 
     #[test]
@@ -742,14 +733,23 @@ mod tests {
         let a = ctx.mask_policy_for("app_a").expect("app_a cached");
         assert!(a.allows("admin", "pii"));
         assert!(a.allows("admin", "spi"));
-        assert!(!a.allows("support", "public"), "app_b's role must not leak into app_a");
+        assert!(
+            !a.allows("support", "public"),
+            "app_b's role must not leak into app_a"
+        );
 
         // App B sees policy B only — support grants are visible; the
         // app-A `admin` role is not in the cache for app B.
         let b = ctx.mask_policy_for("app_b").expect("app_b cached");
         assert!(b.allows("support", "public"));
-        assert!(!b.allows("admin", "pii"), "app_a's role must not leak into app_b");
-        assert!(!b.allows("admin", "spi"), "app_a's role must not leak into app_b");
+        assert!(
+            !b.allows("admin", "pii"),
+            "app_a's role must not leak into app_b"
+        );
+        assert!(
+            !b.allows("admin", "spi"),
+            "app_a's role must not leak into app_b"
+        );
 
         // App C — never seeded — sees nothing.
         assert!(ctx.mask_policy_for("app_c").is_none());
@@ -788,6 +788,31 @@ mod tests {
     }
 
     #[test]
+    fn set_mask_policy_initializes_a_cold_sqlite_backend() {
+        crate::reset_context_for_tests();
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let url = format!("sqlite:{}", dir.path().join("cold.sqlite").display());
+        crate::set_db_url_for_tests(&url);
+        assert!(crate::context::with(|context| context.backend()).is_none());
+
+        run(async {
+            dispatch_set_mask_policy("app_cold_policy", json!({ "support": ["spi"] }))
+                .await
+                .expect("cold policy install must initialize the backend");
+        });
+
+        assert!(
+            crate::context::with(|context| context.backend())
+                .is_some_and(|backend| backend.as_sqlite().is_some()),
+            "policy install must leave the configured SQLite backend ready"
+        );
+        let policy = crate::context::with(|context| context.mask_policy_for("app_cold_policy"))
+            .expect("policy must be cached after cold initialization");
+        assert!(policy.allows("support", "spi"));
+        crate::reset_context_for_tests();
+    }
+
+    #[test]
     fn sqlite_mask_policy_sidecar_serializes_concurrent_writers() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mask_policies.json");
@@ -803,12 +828,10 @@ mod tests {
         std::thread::scope(|scope| {
             let path_a = path.clone();
             let path_b = path.clone();
-            let write_a = scope.spawn(move || {
-                persist_sqlite_blocking(path_a, "app_a".to_string(), policy_a)
-            });
-            let write_b = scope.spawn(move || {
-                persist_sqlite_blocking(path_b, "app_b".to_string(), policy_b)
-            });
+            let write_a =
+                scope.spawn(move || persist_sqlite_blocking(path_a, "app_a".to_string(), policy_a));
+            let write_b =
+                scope.spawn(move || persist_sqlite_blocking(path_b, "app_b".to_string(), policy_b));
 
             write_a
                 .join()

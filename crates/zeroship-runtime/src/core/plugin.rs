@@ -80,6 +80,31 @@ pub trait NativePlugin: Send + Sync + 'static {
     ) -> Option<v8::Local<'s, v8::Object>> {
         None
     }
+
+    /// Bind the runtime's fully validated schema descriptor before creator
+    /// modules evaluate.
+    ///
+    /// The hook is fallible so a plugin can reject a descriptor without
+    /// publishing partial native state. `None` is a real schema-less runtime,
+    /// not a validation fallback. The default is a no-op for plugins that do
+    /// not consume schema metadata.
+    fn bind_runtime_descriptor(
+        &self,
+        _scope: &mut v8::PinScope<'_, '_>,
+        _app_id: &str,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Resolve the app id stamped onto the active runtime for plugin lifecycle
+/// hooks and namespace construction.
+pub(crate) fn runtime_app_id(scope: &mut v8::PinScope<'_, '_>) -> String {
+    scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_vars.get("APP_ID").cloned())
+        .unwrap_or_else(|| "default".to_string())
 }
 
 /// Collects function registrations from a plugin.
@@ -116,11 +141,13 @@ impl NativeRegistrar {
     {
         self.entries.push((
             name,
-            Box::new(move |scope: &mut v8::PinScope, ns_obj: v8::Local<v8::Object>| {
-                let func = v8::Function::new(scope, callback).unwrap();
-                let key = v8::String::new(scope, name).unwrap();
-                ns_obj.set(scope, key.into(), func.into());
-            }),
+            Box::new(
+                move |scope: &mut v8::PinScope, ns_obj: v8::Local<v8::Object>| {
+                    let func = v8::Function::new(scope, callback).unwrap();
+                    let key = v8::String::new(scope, name).unwrap();
+                    ns_obj.set(scope, key.into(), func.into());
+                },
+            ),
         ));
     }
 
@@ -173,7 +200,8 @@ pub(crate) fn build_env_object(
     // a single object with secrets winning on collision (the authoritative
     // sensitive value). Malformed JSON degrades to an empty object.
     let env_obj = v8::Object::new(scope);
-    if let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(env_json) {
+    if let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(env_json)
+    {
         // Vars first, then secrets — secrets win on overwrite.
         for half in ["vars", "secrets"] {
             if let Some(serde_json::Value::Object(map)) = root.get(half) {
@@ -226,10 +254,7 @@ pub(crate) fn build_env_object(
         // state at construction time (avoiding the per-callback
         // `env_vars.get("APP_ID")` lookup the legacy flat callbacks
         // do).
-        let app_id_for_instance = scope
-            .get_slot::<crate::state::SharedState>()
-            .and_then(|s| s.borrow().env_vars.get("APP_ID").cloned())
-            .unwrap_or_else(|| "default".to_string());
+        let app_id_for_instance = runtime_app_id(scope);
         let ns_obj = plugin
             .build_instance(scope, &app_id_for_instance)
             .unwrap_or_else(|| v8::Object::new(scope));

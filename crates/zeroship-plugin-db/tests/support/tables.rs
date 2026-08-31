@@ -1,7 +1,7 @@
 //! Raw-SQL fixture tables for plugin-db's SQLite tests.
 //!
-//! plugin-db does not own DDL. `registerModel` is metadata; the schema authority
-//! is a separate process (`crates/zeroship-migrate-server` at deploy, the vite plugin's
+//! plugin-db does not own DDL. The schema authority is a separate process
+//! (`crates/zeroship-migrate-server` at deploy, the vite plugin's
 //! dev apply locally). A test that wants to exercise the data plane therefore has
 //! to put the table there itself, and it does so by SPELLING THE SQL, not by
 //! calling a builder.
@@ -39,15 +39,10 @@
 //! is not the one an earlier draft of this doc gave.
 //!
 //! THAT DRAFT SAID the data-plane backend ATTACHes `zs-<app_id>.sqlite` "lazily,
-//! on the app's first use". It does not. `SqliteBackend::ensure_app_schema` is
-//! an idempotent cached ATTACH, but NOTHING calls it lazily: its only production
-//! caller is `register_model`, and every other call site is `#[cfg(test)]`. No
-//! CRUD path attaches on its own.
-//!
-//! What actually makes this safe is call ORDER, which is the invariant either
-//! way: the fixture opens its own connection, writes DDL and drops it BEFORE
-//! `registerModel` runs and performs the ATTACH. Two connections never hold the
-//! file at once. See [`create_sqlite_table`].
+//! on the app's first use". That is now true: the execution path calls the
+//! idempotent cached ATTACH before addressing a table. The fixture still opens
+//! its own connection, writes DDL, and drops it before the runtime connection
+//! opens the file. See [`create_sqlite_table`].
 
 use rusqlite::Connection;
 use std::path::Path;

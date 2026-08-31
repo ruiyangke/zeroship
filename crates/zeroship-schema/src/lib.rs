@@ -37,7 +37,7 @@
 //!
 //! AEAD encrypt/decrypt, the mask read-pass, the backfill *runner*
 //! (`run_mask_backfill` / `run_mask_rewrite`), CRUD / transactions /
-//! `SET LOCAL ROLE` / metering, and `register_model`. Those are the data
+//! `SET LOCAL ROLE` and metering. Those are the data
 //! plane; they call *into* this crate for any DDL / diff / introspection /
 //! codec they need.
 //!

@@ -26,8 +26,8 @@ use crate::descriptors::EncryptionMode;
 /// Populated by schema introspection:
 /// - **PG**: from `<meta>.encrypted_columns` rows written alongside the table
 ///   create by whichever orchestrator drives this kernel. In appbase that is
-///   `plugin-db`'s `register_model`; this workspace has no such module, so the
-///   rows are the consumer's to write.
+///   the platform migration service; runtime data-plane code only consumes
+///   those rows.
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (same regex-on-DDL pattern used for

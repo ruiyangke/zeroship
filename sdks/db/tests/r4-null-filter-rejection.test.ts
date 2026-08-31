@@ -35,7 +35,6 @@ function installEnv(native: unknown): void {
 function makeRecordingNative() {
   const calls: { op: string; filter: unknown }[] = [];
   const native = {
-    registerModel: async () => undefined,
     // P9 PR 3: native `transaction(callback)` orchestrator — call the
     // callback (begin already succeeded), resolve with its result
     // (commit), propagate a throw (rollback). The bootstrap wrapper

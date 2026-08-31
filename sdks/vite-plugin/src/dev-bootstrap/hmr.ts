@@ -24,7 +24,6 @@ interface PollHmrChangesOptions {
   log?: (message: string) => void;
   pendingChanged?: Set<string>;
   onBeforeInvalidate?: (changed: string[]) => void;
-  onRuntimeDescriptorJson?: (json: string | null) => void;
 }
 
 function collectAffectedModules(
@@ -76,21 +75,11 @@ export async function pollHmrChanges({
   log,
   pendingChanged = new Set<string>(),
   onBeforeInvalidate,
-  onRuntimeDescriptorJson,
 }: PollHmrChangesOptions): Promise<number> {
   const token = typeof clearKind === "function" ? clearKind() : -1;
   try {
     const resp = await fetchImpl(pollUrl);
-    const payload = await resp.json() as {
-      changed?: unknown;
-      runtimeDescriptorJson?: unknown;
-    };
-    if (
-      typeof payload.runtimeDescriptorJson === "string" ||
-      payload.runtimeDescriptorJson === null
-    ) {
-      onRuntimeDescriptorJson?.(payload.runtimeDescriptorJson);
-    }
+    const payload = await resp.json() as { changed?: unknown };
     if (Array.isArray(payload.changed)) {
       for (const file of payload.changed) {
         if (typeof file === "string") {
@@ -132,7 +121,6 @@ export function startHmrPoll(
   getCurrentRunner: () => ModuleRunner | null,
   log?: (message: string) => void,
   onBeforeInvalidate?: (changed: string[]) => void,
-  onRuntimeDescriptorJson?: (json: string | null) => void,
 ): () => void {
   const pendingChanged = new Set<string>();
   const readGlobal = globalThis as {
@@ -148,7 +136,6 @@ export function startHmrPoll(
       log,
       pendingChanged,
       onBeforeInvalidate,
-      onRuntimeDescriptorJson,
     });
   }, 500);
 

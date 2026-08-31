@@ -25,7 +25,6 @@ type AnyRec = Record<string, unknown>;
 function makeMockNative() {
   const calls: { method: string; collection: string; filter: AnyRec; opts: AnyRec }[] = [];
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(name: string) {
       return {
         async find(filter: AnyRec, opts: AnyRec) {

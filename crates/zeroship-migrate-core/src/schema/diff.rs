@@ -9,10 +9,8 @@
 //! a `Vec<DiffOp>` that an orchestrator sequences with the advisory lock,
 //! audit writes, and validation pass.
 //!
-//! That orchestrator is NOT in this workspace. This kernel was extracted from
-//! appbase's `zeroship-schema`, where `exec_register_model_with_pool` is a live
-//! `pub async fn` in that project's register-model module, confirmed by them on
-//! 2026-08-08. Nothing in this repository consumes the diff that way.
+//! The platform migration service owns that orchestration. This module remains
+//! the classifier it consumes and does not execute a diff by itself.
 //!
 //! No line number sits on that citation, deliberately. A coordinate into a
 //! repository this one does not build cannot be kept true, and the reader who
@@ -736,8 +734,7 @@ pub fn compute_diff(
                 // nor a decrypt primitive. That arm stays refused. Up-front
                 // encrypted masks remain supported by the trusted CRUD path.
                 (None, Some(new_meta)) => {
-                    let encrypted =
-                        live_col.encryption.is_some() || def.get("encrypted").is_some();
+                    let encrypted = live_col.encryption.is_some() || def.get("encrypted").is_some();
                     let mut details = serde_json::json!({
                         "kind": "mask_backfill",
                         "field": field,

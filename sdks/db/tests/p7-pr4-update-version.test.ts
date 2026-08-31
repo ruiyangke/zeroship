@@ -27,7 +27,6 @@ type AnyRec = Record<string, unknown>;
 function makeNativeCapturingUpdate() {
   const captured: { filter?: AnyRec; update?: AnyRec } = {};
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async update(filter: AnyRec, update: AnyRec) {
@@ -50,7 +49,6 @@ function makeNativeCapturingUpdate() {
  *  `update` to simulate the PR 4 path. */
 function makeNativeOptimisticConcurrencyFailure() {
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async update(_filter: AnyRec, _update: AnyRec) {

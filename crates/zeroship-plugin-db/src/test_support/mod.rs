@@ -10,12 +10,6 @@
 //! `audit_err=…`. A future commit that renames one of those fields
 //! silently breaks the runbook with no compile error.
 //!
-//! One such site has already drifted once: the warn-half in
-//! `register_model::apply` had its `audit_err` field renamed to
-//! `error` in passing; a code review caught it and the rename was
-//! reverted. A snapshot test running under this capture layer would
-//! have caught the drift pre-commit.
-//!
 //! This capture harness also covers the `release_advisory_lock`
 //! typed-error caller paths.
 //!
@@ -178,7 +172,8 @@ struct FieldVisitor {
 
 impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
@@ -187,26 +182,26 @@ impl Visit for FieldVisitor {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
-    fn record_error(
-        &mut self,
-        field: &Field,
-        value: &(dyn std::error::Error + 'static),
-    ) {
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         self.fields
             .insert(field.name().to_string(), value.to_string());
     }
@@ -315,7 +310,9 @@ mod self_tests {
         // `tracing::warn!` defaults `target` to `module_path!()` —
         // here that is this test module.
         assert!(
-            events[0].target.starts_with("zeroship_plugin_db::test_support"),
+            events[0]
+                .target
+                .starts_with("zeroship_plugin_db::test_support"),
             "unexpected target: {}",
             events[0].target,
         );
@@ -327,7 +324,13 @@ mod self_tests {
             tracing::warn!(retried = true, name = %"users", "shape");
         });
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].fields.get("retried").map(String::as_str), Some("true"));
-        assert_eq!(events[0].fields.get("name").map(String::as_str), Some("users"));
+        assert_eq!(
+            events[0].fields.get("retried").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            events[0].fields.get("name").map(String::as_str),
+            Some("users")
+        );
     }
 }

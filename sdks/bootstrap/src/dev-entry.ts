@@ -129,7 +129,7 @@ export interface DevEntry {
   /**
    * Test/runtime hook: reset the lazy schema-install latch. Called by
    * the dev-bootstrap when Vite's dep optimizer regenerated pre-
-   * bundled files (schema must be re-registered against the fresh
+   * bundled files (schema must be re-installed against the fresh
    * runner because the new runtime instance carries a separate
    * `@zeroship/bootstrap` copy — see `instanceof` rationale below).
    */
@@ -158,47 +158,44 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   // (first request). Capturing the reference here, module-locally (and
   // therefore invisible to user code, which lives in a separate module),
   // lets the lazy install still resolve the `__platform` handle after the
-  // global is gone. `registerModel` / `setMaskPolicy` moved onto that
-  // handle in P9 PR 4; without this capture, dev registration would
-  // silently no-op.
+  // global is gone. `setMaskPolicy` lives on that handle; without this
+  // capture, the dev mask-policy flush would silently no-op.
   const platformResolver = (globalThis as unknown as {
     __zsDbPlatform?: (db: unknown) => unknown;
   }).__zsDbPlatform;
 
-  // Module-local handle on the most recent install's `ready` promise.
+  // Module-local handle on the most recent mask-policy flush.
   // Stage 6 of the @zeroship/db refactor replaced the cross-module
   // `globalThis.__zeroshipPlatformReady` with a per-isolate (per-
-  // module-load) variable. HMR re-runs of `maybeRegisterSchema`
+  // module-load) variable. HMR re-runs of `maybeInstallSchema`
   // overwrite the handle in place so the second request awaits the
   // FRESH chain.
   let schemaReady: Promise<unknown> | undefined;
 
-  // Set once per ModuleRunner lifetime — schema auto-discovery is
-  // idempotent on the SDK side, but re-running registerModel for every
-  // RPC dispatch is wasted work. The caller resets it via
+  // Set once per ModuleRunner lifetime. The caller resets it via
   // `resetSchemaInstalled()` after a deps re-optimize (which forces
   // the runner to rebuild and re-imports the SDK copy).
   let schemaInstalled = false;
-  let schemaRegistration: Promise<void> | undefined;
+  let schemaInstall: Promise<void> | undefined;
 
   async function loadNormalized(): Promise<NormalizedUserModule> {
     const mod = await options.loadUserModule();
-    await maybeRegisterSchema(mod);
+    await maybeInstallSchema(mod);
     return normalizeUserModule(mod, options.registry);
   }
 
-  async function maybeRegisterSchema(mod: unknown): Promise<void> {
+  async function maybeInstallSchema(mod: unknown): Promise<void> {
     if (schemaInstalled) return;
-    if (!schemaRegistration) {
-      schemaRegistration = registerSchema(mod);
+    if (!schemaInstall) {
+      schemaInstall = installRuntimeSchema(mod);
     }
-    await schemaRegistration;
+    await schemaInstall;
   }
 
-  async function registerSchema(_mod: unknown): Promise<void> {
-    // **Migration-first cutover (P5 S4)** — dev installs from the generated
-    // RuntimeSchemaDescriptor the Vite dev server injects. An absent descriptor
-    // is a schema-less app.
+  async function installRuntimeSchema(_mod: unknown): Promise<void> {
+    // **Migration-first cutover (P5 S4)** - dev installs from the generated
+    // RuntimeSchemaDescriptor that native runtime boot injects. An absent
+    // descriptor is a schema-less app.
     const descriptorGlobal = globalThis as unknown as {
       __zsRuntimeDescriptor?: unknown;
     };
@@ -257,7 +254,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     const envDb = options.getEnvDb();
     if (!envDb) {
       logError(
-        `[zeroship:dev] schema registration skipped: env.db not available — ` +
+        `[zeroship:dev] schema install skipped: env.db not available - ` +
           `is the DbPlugin registered on this runtime?`,
       );
       schemaInstalled = true;
@@ -275,21 +272,19 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       : bundledInstallSchema;
     // **P9 §8** — resolve the `__platform` handle via the captured
     // resolver (the global may already be deleted by the production
-    // runtime-entry; the module-local capture survives). Hand it to
-    // `installSchema` so `registerModel` routes through `__platform`.
+    // runtime-entry; the module-local capture survives). It is used only
+    // for the mask-policy flush below.
     const platform =
       typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
-    const { ready } = installSchema(
+    installSchema(
       schema as Parameters<typeof installSchema>[0],
       envDb as Parameters<typeof installSchema>[1],
       {
-        platform,
         // **P5 S3** — descriptor mode is the only runtime schema source.
         descriptor: hasDescriptor ? descriptor : undefined,
       } as Parameters<typeof installSchema>[2],
     );
     schemaReady = (async () => {
-      await ready;
       const policyMod = options.getDbInternal
         ? await options.getDbInternal()
         : await import("@zeroship/db/internal") as DbInternalModule;
@@ -306,22 +301,20 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         }
       }
     })();
-    log(`[zeroship:dev] registered schema from runtime descriptor`);
+    log(`[zeroship:dev] installed schema from runtime descriptor`);
     schemaInstalled = true;
   }
 
   async function dispatchRpcAsync(name: string, input: unknown, ctx: unknown): Promise<unknown> {
     // Re-import per call so HMR invalidations land naturally. On the
-    // FIRST call this also triggers schema registration — schemaReady
+    // FIRST call this also triggers schema install, so schemaReady
     // gets populated here.
     const normalized = await loadNormalized();
 
     // Await schema-readiness AFTER `loadNormalized` had a chance to
     // populate `schemaReady`. Reading it BEFORE the import would
-    // observe `undefined` on the first call. On the cold path,
-    // `registerModel` may still be installing schema state when the
-    // first RPC tries to begin a transaction, so gate here. No-op on
-    // the warm path.
+    // observe `undefined` on the first call. Gate the first RPC on the
+    // mask-policy flush. No-op on the warm path.
     if (schemaReady && typeof schemaReady.then === "function") {
       try { await schemaReady; } catch { /* surfaces via the handler */ }
     }
@@ -377,7 +370,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
 
   // Gate the dev fetch fall-through on schema readiness (C1). By the
   // time `createFetchHandler` calls this, it has already awaited
-  // `loadNormalized()` — which runs `maybeRegisterSchema` and populates
+  // `loadNormalized()`, which runs `maybeInstallSchema` and populates
   // the module-local `schemaReady`. So reading it here observes the
   // freshly-installed chain (or `undefined` for schema-less apps). A
   // rejected chain rejects here and the handler surfaces a 500.
@@ -430,7 +423,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     resetSchemaInstalled: () => {
       schemaInstalled = false;
       schemaReady = undefined;
-      schemaRegistration = undefined;
+      schemaInstall = undefined;
     },
   };
 }

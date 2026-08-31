@@ -38,6 +38,7 @@ use zeroship_migrate_backend::registry::VendorSet;
 use zeroship_migrate_ir::attribute::CreateIndexAttributes;
 use zeroship_migrate_ir::attribute::OpAttributes;
 
+use crate::ResolvedInject;
 use crate::guard::{GuardConfig, GuardError, MigrationGuard};
 use crate::model::backfill::{
     CursorColumnContract, CursorComparison, CursorContract, CursorScalarType,
@@ -58,10 +59,10 @@ use crate::model::snapshot::{
 };
 use crate::render::backends::guard_for;
 use crate::render::declarative::{
-    build_resolved_table_snapshot, json_value_default_expr_for_col_type,
-    json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, DeferredForeignKeyUnit, FieldDescriptor,
-    LoweredCreateTable, LoweredUnit,
+    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeferredForeignKeyUnit,
+    FieldDescriptor, LoweredCreateTable, LoweredUnit, build_resolved_table_snapshot,
+    json_value_default_expr_for_col_type, json_value_default_expr_for_data_type,
+    push_primary_key_snapshot,
 };
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DmlRenderer, MaterializedNamedTypeOp};
@@ -73,7 +74,6 @@ use crate::render::value_format::{
     authored_id_default, authored_text_id_default, authored_uuid_id_default,
     column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
-use crate::ResolvedInject;
 use zeroship_migrate_backend::advisory::Advisory;
 use zeroship_migrate_backend::ddl::{ExclusionConstraintRequest, ExclusionElementParts};
 use zeroship_migrate_backend::fold::{
@@ -319,7 +319,7 @@ pub struct LiveSchema {
     /// wrong rebuild.
     pub table_snapshots: std::collections::BTreeMap<String, crate::model::snapshot::TableSnapshot>,
     /// **Populated for the SQLite `renameColumn` rebuild facts.** The live per-table SDK
-    /// schema `Value` (`table -> registerModel-shaped JSON`), the SAME shape
+    /// schema `Value` (`table -> descriptor-shaped JSON`), the SAME shape
     /// [`crate::render::declarative::DesiredSchema`]'s `sdk_schemas` carries. The SQLite
     /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
     /// the renamed field key) through the shared `crate::schema::query` emitter,
@@ -6027,7 +6027,7 @@ impl IrAuthor {
             live_schema,
         )?;
         Ok(vec![
-            decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)
+            decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down),
         ])
     }
 
@@ -7231,8 +7231,8 @@ impl IrAuthor {
             &mut main,
             &self.dialect,
         )?;
-        let sibling = sibling_name
-            .and_then(|name| snap.columns.into_iter().find(|c| c.name == name));
+        let sibling =
+            sibling_name.and_then(|name| snap.columns.into_iter().find(|c| c.name == name));
         Ok((main, sibling))
     }
 
@@ -8292,15 +8292,18 @@ fn vendor_inverse_from_history(
             let snapshot = live_schema.extensions.get(name)?;
             let mut sql = format!(
                 "CREATE EXTENSION {}",
-                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(name, backend)
+                    .ok()?
             );
             // The placement comes from the recorded CREATE. A DROP EXTENSION has no
             // schema qualifier, so the drop's effective schema would be a guess.
             if let Some(schema) = &snapshot.schema {
                 sql.push_str(" WITH SCHEMA ");
                 sql.push_str(
-                    &zeroship_migrate_backend::dml::quote_ident_checked_for_backend(schema, backend)
-                        .ok()?,
+                    &zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
+                        schema, backend,
+                    )
+                    .ok()?,
                 );
             }
             Some(sql)
@@ -8389,7 +8392,8 @@ fn vendor_inverse_from_history(
             let snapshot = live_schema.schemas.get(name)?;
             let mut sql = format!(
                 "CREATE SCHEMA {}",
-                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(name, backend)
+                    .ok()?
             );
             if let Some(owner) = &snapshot.owner {
                 sql.push_str(" AUTHORIZATION ");
@@ -10419,8 +10423,8 @@ pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
 #[cfg(test)]
 mod dialect_scope_wire_spellings {
     use super::{
-        collect_expr_dialect_reach, DIALECT_LEGS, EXPR_DIALECT_NODE, EXPR_NODE_TAG, OP_DIALECTAL,
-        OP_TAG,
+        DIALECT_LEGS, EXPR_DIALECT_NODE, EXPR_NODE_TAG, OP_DIALECTAL, OP_TAG,
+        collect_expr_dialect_reach,
     };
     use crate::test_fixtures::{POSTGRES, SQLITE};
     use std::collections::{BTreeMap, BTreeSet};
@@ -11594,10 +11598,14 @@ mod tests {
         ] {
             let migrations = test_ir_author("app", "app_a", dialect.clone())
                 .lower(&ir, &LiveSchema::default())
-                .unwrap_or_else(|error| panic!("{dialect:?} named reference should lower: {error}"));
+                .unwrap_or_else(|error| {
+                    panic!("{dialect:?} named reference should lower: {error}")
+                });
             let create = migrations
                 .iter()
-                .find(|migration| migration.up.contains("CREATE TABLE") && migration.up.contains("entries"))
+                .find(|migration| {
+                    migration.up.contains("CREATE TABLE") && migration.up.contains("entries")
+                })
                 .unwrap_or_else(|| panic!("{dialect:?} should create entries: {migrations:#?}"));
             assert!(
                 create.up.contains(expected),
@@ -12513,7 +12521,7 @@ mod tests {
         let author = test_ir_author("app1", "app_a", POSTGRES)
             // The operator CLI widens the scope to admit the connection default it binds.
             .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec![
-                "dflt".into()
+                "dflt".into(),
             ]))
             .with_default_schema(Some("dflt".into()));
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
@@ -13239,9 +13247,11 @@ mod tests {
                 1,
                 "recovery must keep one record for the child op: {spans:#?}"
             );
-            assert!(child_spans[0]
-                .additional_step_ranges
-                .contains(&(foreign_key..foreign_key + 1)));
+            assert!(
+                child_spans[0]
+                    .additional_step_ranges
+                    .contains(&(foreign_key..foreign_key + 1))
+            );
             assert!(
                 std::iter::once(&child_spans[0].step_range)
                     .chain(&child_spans[0].additional_step_ranges)
@@ -13709,8 +13719,7 @@ mod tests {
             // wrong halves of the pair, and its `None` sentinels would make the
             // equality below the tautology the closing assertion exists to
             // rule out.
-            let ciphertext_column =
-                zeroship_migrate_backend::schema::raw_column_name("secret");
+            let ciphertext_column = zeroship_migrate_backend::schema::raw_column_name("secret");
             let differ_col = differ_snap
                 .columns
                 .iter()
@@ -14312,7 +14321,7 @@ columns = [
 
     #[test]
     fn set_column_type_using_is_validate_refused() {
-        use crate::model::validate::{validate_ir, UnsupportedKind, CODE_UNSUPPORTED};
+        use crate::model::validate::{CODE_UNSUPPORTED, UnsupportedKind, validate_ir};
 
         let ir = MigrationIr {
             inverse_ops: None,
@@ -14702,10 +14711,11 @@ columns = [
             vec!["fresh".to_string()],
             "the createTable is reported"
         );
-        assert!(out
-            .migrations()
-            .iter()
-            .any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
+        assert!(
+            out.migrations()
+                .iter()
+                .any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\""))
+        );
         assert!(!out.fragments.is_empty(), "fragments are attributed");
     }
 
@@ -15416,11 +15426,13 @@ columns = [
         let plan = test_ir_author("app", "app_a", POSTGRES)
             .lower_plan(&ir, &LiveSchema::default())
             .expect("safety flags are derived from the operation");
-        let [PlanStep::Dml {
-            destructive,
-            requires_approval,
-            ..
-        }] = plan.steps.as_slice()
+        let [
+            PlanStep::Dml {
+                destructive,
+                requires_approval,
+                ..
+            },
+        ] = plan.steps.as_slice()
         else {
             panic!("expected one DML step, got {:?}", plan.steps);
         };
@@ -15986,18 +15998,21 @@ columns = [
         };
 
         assert_eq!(step.migration.up.lines().count(), 1);
-        assert!(step
-            .migration
-            .up
-            .contains(r#"table="accounts\nSELECT pg_sleep(2)""#));
-        assert!(step
-            .migration
-            .up
-            .contains(r#"column="id\nDELETE FROM accounts""#));
-        assert!(step
-            .migration
-            .up
-            .contains(r#"writes quiesced="import window closed\nSELECT pg_sleep(1)""#));
+        assert!(
+            step.migration
+                .up
+                .contains(r#"table="accounts\nSELECT pg_sleep(2)""#)
+        );
+        assert!(
+            step.migration
+                .up
+                .contains(r#"column="id\nDELETE FROM accounts""#)
+        );
+        assert!(
+            step.migration
+                .up
+                .contains(r#"writes quiesced="import window closed\nSELECT pg_sleep(1)""#)
+        );
     }
 
     #[test]

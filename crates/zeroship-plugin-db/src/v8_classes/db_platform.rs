@@ -3,12 +3,11 @@
 //!
 //! ## Why this class exists
 //!
-//! The platform-internal entry points - `registerModel`,
-//! `setMaskPolicy`, and the `replication`
+//! The platform-internal entry points - `setMaskPolicy` and the `replication`
 //! sub-namespace — do not live directly on the `Db` v8_class
-//! (`env.db`). Living there would make them directly reachable from
-//! creator JS (`env.db.registerModel(...)`) and would surface them in
-//! IDE hover on the published `@zeroship/types` surface.
+//! (`env.db`). Living there would make them directly reachable from creator JS
+//! and would surface them in IDE hover on the published `@zeroship/types`
+//! surface.
 //!
 //! Instead they live behind a single `DbPlatform` handle that is set on
 //! the `Db` object under a **V8 private symbol** (`ZS_PLATFORM`, minted
@@ -24,11 +23,9 @@
 //!
 //! ## What this class adds
 //!
-//! Every method delegates to the SAME dispatch helper the `Db` method
-//! used to call — only the JS carrier moved. The `register_model` /
-//! `set_mask_policy` pipeline and the
-//! `Replication` v8_class are unchanged; this wrapper is a thin,
-//! app-scoped re-home of the platform entry points.
+//! The `set_mask_policy` pipeline and the `Replication` v8_class delegate to
+//! their app-scoped native implementations; this wrapper is their private
+//! capability carrier.
 //!
 //! ## App scoping
 //!
@@ -47,7 +44,6 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::binding::DbBinding;
 use crate::crud::dispatch_set_mask_policy_field;
-use crate::register_model::register_model_dispatch;
 use crate::v8_bridge::read_json_arg;
 
 // ---------------------------------------------------------------------------
@@ -98,46 +94,6 @@ impl DbPlatform {
         Err(OpError::type_error("Illegal constructor"))
     }
 
-    /// `__platform.registerModel(collection, schema, indexes?, declared?)`
-    ///
-    /// Registers a collection's METADATA. It issues no DDL: the schema
-    /// authority is a separate process, and the table must already exist.
-    /// Idempotent, and cheap after the first call per app+collection.
-    ///
-    /// `schema` is the one argument with an effect - it is cached so the CRUD
-    /// encryption pass can find `t.encrypted(...)` columns without a round
-    /// trip. `indexes` and `declared` are ACCEPTED AND IGNORED: they fed the
-    /// DDL orchestrator that used to live here, and nothing reads them now.
-    /// They stay in the signature because `installSchema` and older raw
-    /// deploys pass them positionally, and narrowing the arity of a shipped
-    /// JS API would break those callers for no gain.
-    #[v8_method]
-    #[v8_name = "registerModel"]
-    fn register_model<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        collection: String,
-        schema: v8::Local<v8::Value>,
-        indexes: v8::Local<v8::Value>,
-        declared: v8::Local<v8::Value>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        if collection.is_empty() {
-            return Err(OpError::type_error(
-                "db.registerModel: collection must be a non-empty string",
-            ));
-        }
-        let schema_v = match read_json_arg(scope, Some(schema)) {
-            Ok(v) => v,
-            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
-        };
-        // `indexes` and `declared` are read by nobody, so they are not parsed
-        // either. Parsing them would still be dead work, and a parse that no
-        // consumer can disagree with cannot fail usefully - a malformed value
-        // would be silently coerced to an empty default and then discarded.
-        let _ = (&indexes, &declared);
-        Ok(register_model_dispatch(scope, &self.binding, &collection, schema_v).into())
-    }
-
     /// `__platform.setMaskPolicy(policy)` — persist the
     /// per-app mask policy and refresh the in-process cache. Moved off
     /// `Db`; [`dispatch_set_mask_policy_field`] is unchanged.
@@ -171,7 +127,6 @@ impl DbPlatform {
         *self.replication_obj.borrow_mut() = Some(global);
         Ok(obj)
     }
-
 }
 
 // ---------------------------------------------------------------------------

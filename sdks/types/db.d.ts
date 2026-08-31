@@ -119,91 +119,6 @@ type ZeroshipDbAccumulator =
   | { $first: string };
 
 // ---------------------------------------------------------------------------
-// Schema types (zeroship.db.registerModel)
-// ---------------------------------------------------------------------------
-
-/**
- * Supported field type names. Includes:
- * - core primitives + `"json"` + `"array"`
- * - `"ref"` (B2 typed FKs)
- * - `"object"` (D2 nested validators, stored as JSONB)
- * - `"calendarDate"` (D3, stored as Postgres DATE)
- * - `"literal"` and `"union"` (C2 discriminated unions; a top-level
- *   union is flattened by the SDK into discrete columns before it
- *   reaches the native driver, but the discriminator column still
- *   carries the `variants` metadata for DDL CHECK emission.)
- */
-type ZeroshipDbTypeName =
-  | "string"
-  | "number"
-  | "boolean"
-  | "date"
-  | "json"
-  | "array"
-  | "ref"
-  | "object"
-  | "calendarDate"
-  | "literal"
-  | "union";
-
-/** Supported primitive item type names (for array fields). */
-type ZeroshipDbPrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
-
-/** B2 — foreign-key action policy emitted into FK DDL. */
-type ZeroshipDbFkAction = "restrict" | "cascade" | "set null" | "no action";
-
-/** Normalized schema field definition passed to registerModel. */
-interface ZeroshipDbFieldDef {
-  type: ZeroshipDbTypeName;
-  items?: ZeroshipDbPrimitiveTypeName;
-  required?: boolean;
-  unique?: boolean;
-  index?: boolean;
-  default?: ZeroshipScalar | Record<string, unknown>;
-  min?: number;
-  max?: number;
-  enum?: (string | number)[];
-  pattern?: RegExp;
-  /** B2 — target collection name for `t.ref("...")`. Present iff `type === "ref"`. */
-  refTarget?: string;
-  /** B2 — ON DELETE policy. Default at DDL emit time: "restrict". */
-  onDelete?: ZeroshipDbFkAction;
-  /** B2 — ON UPDATE policy. Default at DDL emit time: "restrict". */
-  onUpdate?: ZeroshipDbFkAction;
-  /** B2 — whether FK is `DEFERRABLE INITIALLY DEFERRED`. Default: true. */
-  deferrable?: boolean;
-  /** D2 — nested-object shape (JSONB column, validated app-side). */
-  shape?: Record<string, ZeroshipDbFieldDef>;
-  /** C2 — literal value for `type === "literal"` (or per-variant disc field). */
-  literalValue?: string | number | boolean;
-  /** C2 — per-variant shape map for a flat-expanded union discriminator. */
-  variants?: Record<string, ZeroshipDbFieldDef>[];
-  /**
-   * C2 — discriminator marker. On a `type === "union"` def this is the
-   * field name; on a flat-expanded primitive column it's the literal
-   * `"__discriminator__"` sentinel telling the DDL emitter to attach
-   * per-variant CHECK constraints.
-   */
-  discriminator?: string;
-}
-
-/** Normalized schema — field name → definition. */
-type ZeroshipDbSchema = Record<string, ZeroshipDbFieldDef>;
-
-/**
- * Named multi-column index declaration carried alongside the schema in
- * the `registerModel` wire format. The orchestrator materialises each
- * entry as `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<table>__<name>"`.
- * `fields` carries column names (already mapped through the naming
- * strategy by the SDK), in declared order.
- */
-interface ZeroshipDbNamedIndex {
-  name: string;
-  fields: string[];
-  unique?: boolean;
-}
-
-// ---------------------------------------------------------------------------
 // Wrapper v8_classes — the v2 native surface.
 // ---------------------------------------------------------------------------
 
@@ -412,15 +327,14 @@ interface ZeroshipSubscription {
  * The `zeroship.db` namespace surfaced as `env.db` on every isolate.
  * The creator-facing operations live on the Db v8_class instance —
  * collection mint and transaction open. The platform-internal entry
- * points (schema registration, mask policy, replication, migrations)
- * moved to the `__platform` capability handle in P9 PR 4 (§8) and are
+ * points (mask policy, replication, migrations) live on the `__platform`
+ * capability handle and are
  * not on this surface.
  */
 interface ZeroshipDb {
   // the platform-internal entry points moved off `env.db`
   // to the `__platform` capability handle (reached only via a V8
   // private symbol; §8). Removed from this published surface:
-  //   - `registerModel`         → `__platform.registerModel`
   //   - `setMaskPolicy`         → `__platform.setMaskPolicy`
   //   - `migrations` (getter)   → `__platform.migrations`
   //   - `replication` (getter)  → `__platform.replication`

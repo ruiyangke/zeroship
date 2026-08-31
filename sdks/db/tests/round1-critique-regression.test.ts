@@ -56,7 +56,6 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
   test("two concurrent next() calls both resolve when an event arrives", async () => {
     const subs: ReturnType<typeof makeFakeSub>[] = [];
     const native = {
-      registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() { return [{ id: 1, title: "buy milk" }]; },
         // **P9 PR 1** — Collection-scoped openSubscription replaces the
@@ -119,7 +118,6 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
 
   test("close() wakes every pending next() with done:true", async () => {
     const native = {
-      registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() { return [] as unknown[]; },
         openSubscription: () => makeFakeSub(),
@@ -154,7 +152,6 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     let runCount = 0;
     const subs: ReturnType<typeof makeFakeSub>[] = [];
     const native = {
-      registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() {
           runCount += 1;
@@ -244,7 +241,6 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
 
   function makeDb() {
     const native = {
-      registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() { return []; },
         async findOne() { return null; },
@@ -285,7 +281,6 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
 
   test("compound filter where every key is marked suppresses the warning", async () => {
     const native = {
-      registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() { return []; },
         async findOne() { return null; },
@@ -320,7 +315,6 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
     const events: string[] = [];
 
     const native = {
-      registerModel: () => Promise.resolve(),
       // P9 PR 3: native `transaction(callback)` orchestrator. The
       // bootstrap wrapper bumps `_txDepth` synchronously before invoking
       // this; we then stall (await the gate) BEFORE running the callback,
@@ -402,7 +396,6 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
 
   test("native transaction begin failure rolls back the _txDepth bump", async () => {
     const native = {
-      registerModel: () => Promise.resolve(),
       // P9 PR 3: native orchestrator rejects (begin failed) — the callback
       // never runs. The bootstrap wrapper's `finally` must still decrement
       // `_txDepth`.
@@ -495,7 +488,6 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
       ],
     };
     const native = {
-      registerModel: () => Promise.resolve(),
       collection: (n: string) => ({
         async find(filter: AnyRec) {
           callLog.push({ table: n, filter });

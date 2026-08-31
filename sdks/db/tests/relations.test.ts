@@ -59,7 +59,6 @@ function makeMock(
 ): { native: NativeDb; calls: CallLog } {
   const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   const native = {
-    registerModel: () => Promise.resolve(),
     // P9 PR 3: native `transaction(callback)` orchestrator stub.
     transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(name: string) {
@@ -459,7 +458,6 @@ describe("with: parallel relation loading", () => {
     const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const spans: SlowSpan[] = [];
     const native = {
-      registerModel: () => Promise.resolve(),
       // P9 PR 3: native `transaction(callback)` orchestrator stub.
       transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
       collection(name: string) {
@@ -700,7 +698,6 @@ describe("with: soft-delete + relations contract", () => {
     };
     const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const native = {
-      registerModel: () => Promise.resolve(),
       // P9 PR 3: native `transaction(callback)` orchestrator stub.
       transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
       collection(name: string) {
