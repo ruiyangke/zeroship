@@ -25,7 +25,7 @@
 
 import { readdir, mkdir, writeFile, access, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { extname, join, resolve, isAbsolute } from "node:path";
+import { basename, extname, join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   apply,
@@ -846,10 +846,12 @@ async function discover(dir: string): Promise<MigrationFile[]> {
   const files = entries
     .filter((n) => /\.(ts|mts|cts|js|mjs|cjs)$/i.test(n) && !/\.d\.ts$/i.test(n))
     .sort();
-  return files.map((n) => {
+  const migrations = files.map((n) => {
     const path = resolve(dir, n);
     return { path, label: deriveNameFromPath(n) };
   });
+  assertUniqueMigrationTimestampPrefixes(migrations);
+  return migrations;
 }
 
 /** Dynamic-import a migration module by absolute path. */
@@ -893,6 +895,25 @@ function assertUniqueMigrationNames(migrations: readonly LoadedMigration[]): voi
       );
     }
     firstFileByName.set(name, file);
+  }
+}
+
+/** Reject ambiguous filename ordering before importing migration modules. */
+function assertUniqueMigrationTimestampPrefixes(files: readonly MigrationFile[]): void {
+  const firstFileByTimestamp = new Map<string, MigrationFile>();
+  for (const file of files) {
+    const filename = basename(file.path);
+    const timestamp = /^(\d{14})_/.exec(filename)?.[1];
+    if (timestamp === undefined) continue;
+    const first = firstFileByTimestamp.get(timestamp);
+    if (first !== undefined) {
+      throw new CliError(
+        `duplicate migration timestamp prefix ${JSON.stringify(timestamp)}: ` +
+          `${basename(first.path)} and ${filename}; ` +
+          "pick a distinct timestamp for each migration file",
+      );
+    }
+    firstFileByTimestamp.set(timestamp, file);
   }
 }
 
