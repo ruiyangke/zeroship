@@ -152,9 +152,22 @@ distinction is what makes the deletion ORDER necessary rather than arbitrary.
 
 **Cut by SYMBOL, never by region marker.** The index region also holds LIVE code -
 `raw_column_name` (`:2218`, 21 call sites), the mask and encryption sentinel builders,
-`def_to_column_type_for_dialect`. `diff.rs` holds five LIVE mask types (`MaskKind`, `MaskMeta`,
-`EncryptionMeta`, `WrappedType`, `Classification`) inside a dead differ. Cutting on the boundary
-breaks the read path twice.
+`def_to_column_type_for_dialect`.
+
+**`diff.rs` holds ONE live mask type, not five - corrected 2026-08-31 by review, verified.** This
+document and #91 both said `MaskKind`, `MaskMeta`, `EncryptionMeta`, `WrappedType` and
+`Classification` were all live. Only `MaskKind` is: the write mask pass uses it
+(`crud/mask_pass.rs:81`, `crud/write_pipeline.rs:237`) and subscription predicate lowering uses it
+(`read_set.rs:320`). The other four appear only behind `cfg(test)` / `test-helpers` in the SQLite
+introspection path, and their one other consumer, `crud::mask_backfill`, is gated AND states in its
+own header that it is unreachable: **"`crud::mask_backfill` has zero consumers"**, grepped 2026-08-28
+(`crud/mask_backfill.rs:3-8`). Production mask policy uses string constants, not `Classification`
+(`crud/mask_policy.rs:68`).
+
+So the survivor set is `MaskKind` alone, and the 407-line `mask_codec.rs` needs the same
+production-root test before it is carried across rather than deleted. Cutting on the region boundary
+still breaks the read path - but at one point, not two, and the rest of that region is larger dead
+weight than this plan credited.
 
 **PROVED BY EXPERIMENT, 2026-08-31, and it corrected this plan.** I deleted `query.rs:1056-1754`
 (the DDL region) and ran `cargo check --workspace --all-targets`. It FAILED with 16 errors, and the
@@ -223,6 +236,25 @@ a `crate::query::build_*` grep undercounts to 9, because most are imported unqua
 **205 total, and the tests outnumber the production sites 7:1.** That ratio, not the 26, is the cost
 of Track A: porting the data plane is a day of work whose bill is paid in the test suite. Any plan
 that costs this as "26 call sites" is off by an order of magnitude.
+
+The independent review reached **23** production call expressions against my 26, measuring
+`(?:crate::)?query::build_<name>(` and checking imports by hand. The gap is that my count is of
+non-comment LINES matching a builder name, which also catches type positions and re-exports; 23
+counts call EXPRESSIONS. Take 23 as the production figure and 26 as its upper bound. Both refute the
+35 this document used to assert, which is the point.
+
+**And `6,282` is a FLOOR for the IR, not the replacement cost.** `data-plan` implements three of six
+planned families (`lib.rs:49`), ships only a PostgreSQL renderer (`render/mod.rs:74`) while live CRUD
+also selects SQLite (`crud/mod.rs:182`), and has no JSON->IR lowering at all. The completed IR is
+materially larger than the string builder it replaces - so the "correctness trade, not a size
+reduction" framing below is right, and understated.
+
+**The security property that pays for it is concrete, not abstract.** Today's update and delete
+builders omit `WHERE` entirely for an empty filter (`query.rs:4528`, `:4562`), and ordinary update and
+purge paths call them with no mandatory bound (`crud/mod.rs:1372`, `:1617`). The typed `Update` and
+`Delete` require a `RowLimit` to construct (`data-plan/src/write.rs:602`, `:754`). That is the whole
+argument for the port in one line: an unbounded write is currently expressible and would become
+unrepresentable.
 
 Of the 100 `crate::query::` references (this document said 127), most are naming helpers rather than
 builders: `quote_ident`, `raw_column_name`, `field_to_column`.
