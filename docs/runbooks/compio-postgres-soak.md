@@ -783,6 +783,36 @@ For each changed `src/` file, two numbers settle it:
 A file is production-inert if (1) is `0`, or if the lowest touched line is at or
 after the `#[cfg(test)]` marker.
 
+**THE MARKER HEURISTIC IS UNSOUND, AND FAILS IN THE DANGEROUS DIRECTION.** It
+assumes everything after the first `#[cfg(test)]` is test code. Measured
+2026-08-31 over the twelve `src/` files touched since `5b11ab1fb`, that is FALSE
+for three of them:
+
+    cancel_token.rs    995 non-empty lines of PRODUCTION code after its first marker
+    config.rs          446   (a second `#[cfg(test)] mod dsn_parse_tests`)
+    tls_sansio.rs     1863
+
+`cancel_token.rs` opens with a small `#[cfg(test)] impl From<i32> for CancelKey`
+and then continues with the whole `CancelToken` type. A production edit there
+lands AFTER the marker and the heuristic calls it inert - a false "no need to
+re-run" on a real behaviour change.
+
+Use `tests/lib/production_lines_changed.py <base> <head>` instead. It brace-
+matches EVERY `#[cfg(test)]` item to build the full set of test spans, and
+counts changed lines outside all of them, excluding comments and blanks. Run its
+two controls before trusting a zero:
+
+    production_lines_changed.py a228a10aa~1 a228a10aa   -> 35   (a known prod fix)
+    production_lines_changed.py 8df74effc~1 8df74effc   ->  0   (a docs commit)
+
+A tool that reports zero is only useful if you have watched it report non-zero.
+
+Measured 2026-08-31, `5b11ab1fb..8df74effc` (about fifty commits): **0 production
+lines across all twelve changed files.** Every one of the 837 changed non-comment
+lines is inside a test span. So the soak, the three chaos scenarios and the
+pgbouncer classification from `5b11ab1fb` still describe this tree, and
+re-running them would exercise a byte-identical production path.
+
 Measured 2026-08-30, `bf8517d0b..5bb482384` (nine commits):
 
     cancel_query_raw.rs  171 non-comment   cfg(test)@234   lowest touched 233
