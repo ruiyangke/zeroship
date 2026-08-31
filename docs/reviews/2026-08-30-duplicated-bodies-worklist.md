@@ -81,10 +81,20 @@ below was re-run by the pilot against the FULL seven-target gate
 | 50 COPY format validation | 2 | NOT independently bound (2 overlap on one copy) | agent table |
 
 **The worklist's copy COUNTS are unreliable, and that is the most reusable
-finding here.** Group 17 said two and had three; group 28 said two and had five;
-group 18 said three and had four; `remember_server_error` said two and had
-eight. In group 17 and group 28 the
-UNCOUNTED copy was the only unbound one. Always enumerate by content first.
+finding here.** Six groups so far had more copies than claimed:
+
+    17  said two   had three   the uncounted copy was the ONLY unbound one
+    28  said two   had five    the uncounted copies included the only unbound one
+    18  said three had four    extra copy was bound
+    38  said four  had five    the fifth is a guard arm in different syntax
+    44  said two   had three   third copy is the `Weak` variant - unprobed
+    remember_server_error  said two  had EIGHT
+
+In group 17 and group 28 the UNCOUNTED copy was the only unbound one. Always
+enumerate by content first, and note that the extra copy is usually the one
+written in a DIFFERENT syntactic shape - a guard arm rather than an `if` block,
+a `Weak` upgrade rather than a borrow - which is exactly why a
+count-by-eye or a single grep pattern misses it.
 
 ### "More than one failure" is not automatically a gap
 
