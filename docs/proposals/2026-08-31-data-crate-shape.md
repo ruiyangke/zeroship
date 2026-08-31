@@ -94,6 +94,35 @@ and the first kills a recommendation this document made two sections ago:
   depend on `data-sqlite`. `data-core` is where all four belong, alongside `encryption` (7 edges from
   each backend) and row-to-JSON. **One relocation unblocks the gate AND the split.**
 
+**SETTLED WITHOUT A COMPILER, AND THE FULL COUNT IS 29 SITES ACROSS 13 FILES, NOT 4.** The review
+that raised this flagged its own claim as "high confidence but not compiler-settled". It does not
+need a compiler: the question reduces to whether the CALLERS are conditional, and they are not.
+`crud/read_pipeline.rs` contains exactly one `#[cfg]` in the entire file - `#[cfg(test)]` at `:452`,
+far below the call at `:278` - and `v8_bridge.rs:34` is a bare top-level `use`. An unconditional
+caller plus a gated callee is a compile error by construction.
+
+The same review noted it had not enumerated exhaustively. Enumerated (every `backend::sqlite`
+reference from outside `backend/`, comment lines excluded):
+
+| file | sites | what it reaches for |
+| --- | --- | --- |
+| `transaction/driver.rs` | 5 | `TerminalIntent`, `reservation::TerminalOutcome`, `SqliteSessionHandle` |
+| `crud/mod.rs` | 4 | `vec_to_le_bytes`, `point_to_blob` (2 of the 4 are in tests) |
+| `crud/mask_policy.rs` | 4 | `SqliteBackend` in type position |
+| `context.rs` | 3 | `SqliteSessionHandle`, `SqliteBackend` |
+| `transaction/cancel.rs` | 2 | `TerminalOutcome`, `SqliteCancelHandle` |
+| `lib.rs` | 2 | construction at `:1109`, a test setter at `:728` |
+| `exec.rs`, `v8_bridge.rs`, `crud/read_pipeline.rs`, `crud/unmask.rs`, `crud/mask_drift.rs`, `crud/write_pipeline.rs`, `transaction/mod.rs` | 1-2 each | `TypedCell`, `parse_iso_to_millis`, `SqliteBackend` |
+
+**The transaction layer is the surprise, and it is the expensive one.** `transaction/driver.rs` and
+`transaction/cancel.rs` carry seven references to SQLite terminal-outcome and cancel-handle types -
+this is the SC-1 reducer (#8, #21), which was built to be backend-neutral and is not. Splitting or
+gating the dev backend therefore reaches into the transaction reducer, not just the read pipeline.
+
+Sites in type position naming `SqliteBackend` itself are expected to gate WITH the backend; the ones
+that block are the type and helper imports in neutral code. Either way the honest cost of "gate the
+dev backend" is a 13-file relocation, not a `#[cfg]`.
+
 **Two corrections to the proposed shape:**
 
 1. **`data-postgres`, not `data-postgresql`.** The tree spells it `zeroship-migrate-postgres` and
