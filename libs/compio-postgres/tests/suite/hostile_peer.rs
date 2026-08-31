@@ -5714,6 +5714,92 @@ async fn a_copy_out_whose_copy_out_response_never_arrives_is_refused() {
     .expect("missing-CopyOutResponse test exceeded its outer watchdog");
 }
 
+/// `CopyDone` closes the data phase. Bytes after it are protocol corruption,
+/// not another chunk for the caller.
+#[compio::test]
+async fn copy_data_after_copy_done_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'd', b"row-two\n"));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 2\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(521, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "post-CopyDone data reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("post-CopyDone data test exceeded its outer watchdog");
+}
+
+/// Ordinary COPY OUT has one data terminator. A second `CopyDone` must not be
+/// accepted as an idempotent delimiter.
+#[compio::test]
+async fn duplicate_copy_done_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 0\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(522, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "duplicate CopyDone reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("duplicate-CopyDone test exceeded its outer watchdog");
+}
+
+/// `CommandComplete` describes the COPY command and therefore cannot precede
+/// the `CopyDone` that ends its data phase.
+#[compio::test]
+async fn command_complete_before_copy_done_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 0\0"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(523, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "early CommandComplete reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("early-CommandComplete test exceeded its outer watchdog");
+}
+
+/// `ReadyForQuery` cannot turn `CopyDone` directly into success; the missing
+/// `CommandComplete` leaves the COPY command without a result.
+#[compio::test]
+async fn ready_for_query_before_command_complete_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(524, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "early ReadyForQuery reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("early-ReadyForQuery test exceeded its outer watchdog");
+}
+
 // ---------------------------------------------------------------------------
 // Binary COPY OUT framing.
 //

@@ -132,6 +132,9 @@ async fn start(
             .map_err(ExecutionError::after_bind_complete)?
         {
             Message::CopyOutResponse(body) => {
+                // `codec::read_backend` validates every COPY response body
+                // before dispatch. This conversion is defense in depth; a
+                // deterministic connection test cannot reach its error arm.
                 break CopyResponse::from_backend(body.format(), body.column_formats())
                     .map_err(ExecutionError::after_bind_complete)?;
             }
@@ -163,7 +166,9 @@ pin_project! {
         copy_done: bool,
         command_complete: bool,
         // Last so Drop disconnects the consumer, arming connection-owned
-        // draining, before ordinary requests may queue behind it.
+        // draining, before ordinary requests may queue behind it. Safe code
+        // has no hook between synchronous field drops, so after-Drop probes
+        // cannot deterministically observe the opposite ordering.
         copy_mode: Option<CopyModeGuard>,
     }
 }
