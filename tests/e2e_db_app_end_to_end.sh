@@ -259,7 +259,6 @@ e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" \
-  --migrate-server-url "$MIGRATE_SERVER_URL" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
@@ -346,13 +345,12 @@ ROLE_BEFORE="$(psql_exec -tA -c "SELECT count(*) FROM pg_roles WHERE rolname='$A
   && pass "the per-app role $APP_ROLE does NOT exist on the deployed, unmigrated app" \
   || fail "$APP_ROLE already existed before migrate (count=$ROLE_BEFORE) - the control proves nothing"
 
-# --- APPLY THROUGH THE CLI, THROUGH CONTROL ---------------------------------
+# --- APPLY THROUGH THE CLI, DIRECT TO MIGRATE-SERVER ------------------------
 #
-# `zeroship migrate` posts to the CONTROL plane, which authorizes the caller for
-# this app and forwards to migrated. It is driven here exactly as a creator
-# drives it: the committed build artifact, the app id, the control URL, and the
-# same bearer the deploy above used - no extra scope, no operator credential, and
-# no direct reach to migrated (which binds loopback in every real deployment).
+# This harness has no edge process, so its `--control` value is the migration
+# service's loopback URL. Production uses the public control URL and the edge
+# selects this same upstream. The committed build artifact, app id, and bearer
+# are otherwise the creator path: no extra scope and no operator credential.
 #
 # The body is the file the BUILD wrote (`generated/zeroship/migrations.ir.json`),
 # not one this harness records inline. That is deliberate: it makes the
@@ -363,11 +361,11 @@ IR_FILE="$APP_EXAMPLE/generated/zeroship/migrations.ir.json"
   && pass "the build emitted $(basename "$IR_FILE")" \
   || { fail "missing $IR_FILE - run pnpm gen-types"; exit 1; }
 
-MIGRATE_OUT="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
+MIGRATE_OUT="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$MIGRATE_SERVER_URL" --token="$ADMIN_TOKEN" 2>&1)"
 MIGRATE_RC=$?
 echo "$MIGRATE_OUT" > "$WORK/migrate.log"
 if [ "$MIGRATE_RC" = "0" ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIGRATE_OUT"; then
-  pass "zeroship migrate applied the app's migrations through control ($(head -c 80 <<<"$MIGRATE_OUT"))"
+  pass "zeroship migrate applied the app's migrations through migrate-server ($(head -c 80 <<<"$MIGRATE_OUT"))"
 else
   fail "zeroship migrate failed (rc=$MIGRATE_RC): $MIGRATE_OUT"
   tail -50 "$WORK/migrated.log"
@@ -378,7 +376,7 @@ fi
 # Re-running must be a no-op, not a second apply. A creator runs `deploy` then
 # `migrate` on every push; if the second run re-applied, every push after the
 # first would fail on an already-existing table.
-MIGRATE_AGAIN="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
+MIGRATE_AGAIN="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$MIGRATE_SERVER_URL" --token="$ADMIN_TOKEN" 2>&1)"
 grep -qE 'Applied 0 migration op' <<<"$MIGRATE_AGAIN" \
   && pass "a second zeroship migrate is a no-op (idempotent)" \
   || fail "re-running zeroship migrate was not a no-op: $MIGRATE_AGAIN"

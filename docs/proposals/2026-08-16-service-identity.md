@@ -174,13 +174,13 @@ the individual service; the class is only a way to reason about it.
 
 | identity | exact outbound grants |
 | --- | --- |
-| `core/control` | auth `POST /internal/platform-token`; migrated `POST /v1/apps/{app}/migrations/apply` with delegated creator `AppsDeploy`; plus worker calls |
+| `core/control` | auth `POST /internal/platform-token`; plus worker calls |
 | `core/auth` | gateway `POST /oidc/backchannel-logout`, or registered third-party BCL URIs using signed logout JWTs |
 | `core/migrated` | **No credentialed platform HTTP endpoint at all** - public auth JWKS only |
 | `edge/gateway` | control `GET /internal/routes`; control `POST /internal/workflows/signals/ingress`; worker `POST /dispatch/{app}`; worker workflow routes |
 | `worker` | control `GET /internal/versions` (the one current global exception); control `GET /internal/apps/{app}`; app-scoped app/env reads |
 | no machine authority | JWKS GETs; the gateway's auth-host reverse proxy to public/UI/OIDC routes |
-| creator identity, not machine | every CLI call; control to migrated delegated creator authorization |
+| creator identity, not machine | every CLI call, including migration applies routed directly by the edge |
 
 Two immediate consequences: **`core/migrated` needs no credential** - its
 current `ZEROSHIP_CONTROL_KEY` is unused (finding 8) - and the worker's only

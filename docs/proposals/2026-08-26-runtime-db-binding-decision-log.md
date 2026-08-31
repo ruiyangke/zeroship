@@ -37,7 +37,7 @@ whose honest answer was that we did not, and that the argument the proposal gave
 **11. The control plane does not forward migrations, and is not responsible for them.** "no forward,
 and the control service is not responsible for the migration."
 
-Today `crates/zeroship-control/src/migrations_api.rs` (214 lines) authorizes the caller for the app
+The now-DELETED `crates/zeroship-control/src/migrations_api.rs` (214 lines) authorized the caller for the app
 and re-issues the request to `zeroship-migrate-server`. That proxy is deleted; the CLI calls the
 migration service directly.
 

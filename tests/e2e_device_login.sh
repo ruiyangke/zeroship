@@ -196,7 +196,6 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --app-base-domain "localhost" \
-  --migrate-server-url "$MIGRATE_SERVER_URL" \
   > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -592,8 +591,8 @@ step "Migrate the same app with the same login credential"
 # WHAT THIS LEG COVERS AND WHAT IT DOES NOT. It covers AUTHORIZATION: that the
 # credential `zeroship login` produced -- an OAuth device-flow bearer carrying
 # the full CLI scope asserted above is accepted all the way
-# through control's authz, control's forward, and migrated's independent
-# re-verification plus its `app_members` owner-row check (the row was created by
+# through migrated's independent verification, Cedar decision, and
+# `app_members` owner-row check (the row was created by
 # `POST /api/apps` above, not seeded here). Nothing else in the suite drives
 # that token type into the migration service.
 #
@@ -607,7 +606,7 @@ BORROWED_IR="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 if [ ! -f "$BORROWED_IR" ]; then
   fail "missing $BORROWED_IR - run: pnpm gen-types"
 else
-  MIG_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$APP_ID" --control="$CONTROL_URL" 2>&1)"
+  MIG_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$APP_ID" --control="$MIGRATE_SERVER_URL" 2>&1)"
   MIG_RC=$?
   echo "  zeroship migrate (no --token; it used the saved login):"
   echo "$MIG_OUT" | sed 's/^/    /'
@@ -621,15 +620,11 @@ else
   # The negative half: a creator must not be able to migrate an app they do not
   # own.
   #
-  # WHAT THIS DOES NOT SHOW. The refusal below almost certainly comes from
-  # CONTROL, which authorizes before it forwards, so this arm says nothing about
-  # migrated's own gate. That gate exists and is independent (migrated
-  # re-verifies the bearer and additionally requires an `app_members` owner row,
-  # crates/zeroship-migrate-server/src/auth.rs), but proving it would mean reaching migrated
-  # directly, which is exactly the topology this design removes. Read this as
-  # "the creator-facing surface refuses", not "defence in depth was measured".
+  # This direct loopback call proves migrate-server's own gate: it re-verifies
+  # the bearer and additionally requires an `app_members` owner row
+  # (crates/zeroship-migrate-server/src/auth.rs).
   FOREIGN_APP="$(node -e 'console.log(require("crypto").randomUUID())')"
-  FOREIGN_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$FOREIGN_APP" --control="$CONTROL_URL" 2>&1)"
+  FOREIGN_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$FOREIGN_APP" --control="$MIGRATE_SERVER_URL" 2>&1)"
   grep -qE 'HTTP (403|404)' <<<"$FOREIGN_OUT" \
     && pass "migrating an app this creator does not own is refused ($(grep -oE 'HTTP [0-9]+' <<<"$FOREIGN_OUT" | head -1))" \
     || fail "an unowned app was not refused: $FOREIGN_OUT"

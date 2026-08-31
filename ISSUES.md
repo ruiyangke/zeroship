@@ -165,8 +165,8 @@ provision worker workflow test journal: Db("db error: ERROR: schema \"app_<uuid>
 `PgStore::provision`, whose DDL is `CREATE TABLE IF NOT EXISTS app_<uuid>.<table>` and deliberately
 contains no `CREATE SCHEMA` — that is asserted, in the same crate, at
 `crates/plugin-workflow/src/store/pg.rs:1961` ("worker workflow provisioning must not create roles
-or schemas"). Creating the per-app schema is the control plane's authority alone
-(`crates/control/src/migrations_api.rs:28`). Nothing in the test path invokes it, and the id is
+or schemas"). Creating the per-app schema belongs to the standalone migration
+service (`crates/zeroship-migrate-server/src/apply.rs`). Nothing in the test path invokes it, and the id is
 fresh each run, so the schema can never pre-exist. The test is asking a component that is forbidden
 to create schemas to create one.
 

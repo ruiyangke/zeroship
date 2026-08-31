@@ -139,8 +139,6 @@ pub struct ControlSection {
     pub bind: Option<String>,
     /// Gateway internal base URL for the workflow dispatch seam.
     pub gateway_url: Option<String>,
-    /// Migration-service base URL the creator-facing apply endpoint forwards to.
-    pub migrate_server_url: Option<String>,
     /// Usage meter provider.
     pub meter_provider: Option<String>,
     /// Invoicer provider.

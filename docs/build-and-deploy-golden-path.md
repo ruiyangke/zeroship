@@ -19,7 +19,7 @@ agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   → zeroship deploy                            ← path, app and control from the file
   → control plane ingests → BlobStore + route registry
   → zeroship migrate                           ← env.db apps ONLY, and REQUIRED
-  → control authorizes → zeroship-migrate-server applies → per-app schema + role
+  -> Part B edge route -> zeroship-migrate-server applies -> per-app schema + role
   → gateway pulls routes (5s) → serves the app (static + RPC + env.* primitives)
 ```
 
@@ -44,14 +44,17 @@ static assets, dispatches its RPCs, and fails the first `env.db` call with
 `role "app_..._role" does not exist` — which reaches the end user as
 `{"message":"internal error"}`.
 
-`zeroship migrate` posts to the CONTROL plane, which authorizes the caller for
-that app and forwards to `migrated`. It is not a shortcut around the migration
-service's trust profile: control forwards the caller's own bearer, `migrated`
-re-verifies it independently, and the operator-ceiling ⊓ creator-draft policy
-composition is unchanged. The hop exists because `migrated` holds the superuser
-provisioning DSN and binds loopback in every deployment we ship, so control is
-the only route a creator has to it (`deploy/compose/docker-compose.yml`, the
-`migrated` service: "Creators drive it through control").
+`zeroship migrate` reuses the configured control URL, but control is not in the
+request path once Part B re-keys the route. The edge then routes the migration
+prefix directly to `zeroship-migrate-server`, which verifies the creator bearer,
+requires `AppsDeploy` plus app ownership, and intersects the creator draft with
+the operator ceiling. The raw migration-service port remains loopback-only at
+the host boundary.
+
+Part A is intentionally staged and is not independently deployable: the CLI and
+service still use `/v1/apps/{app_id}`, while the edge rule reserves
+`/v1/databases/*`. Until Part B lands, a shared-control-URL migration falls
+through to control and returns 404. There is no temporary compatibility route.
 
 - **Scaffold:** `examples/starter/` — a minimal, agent-facing zeroship app
   (fetch/static SPA + `getMessages`/`addMessage` RPCs via `@zeroship/rpc/server`,
@@ -217,10 +220,9 @@ For the **real agent flow** against a deployed platform, the path is
   it was written as open: **provision-app-if-needed already existed** -
   `resolve_or_create_app` looks a non-uuid `--app` up by name and creates it on a
   miss, with `--no-create` to turn that off; and the TRANSPORT half was done -
-  `deploy/scripts/deploy-app.sh` forwards the control plane over ssh, which is
-  what a remote deploy was blocked on (control binds loopback with no Caddy
-  route, so `--control=https://control.<domain>` 404s and the direct port is
-  refused). What was actually missing, and is what landed: the created id was
+  Caddy now routes `control.<domain>` to control, while
+  `deploy/scripts/deploy-app.sh` retains an SSH fallback to the loopback
+  services. What was actually missing, and is what landed: the created id was
   reported to stderr and then thrown away, so the next command needed the flag
   again, and the archive path plus the target had to be retyped on every
   invocation. `zeroship.jsonc` now records all three, and an auto-create splices
