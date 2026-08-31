@@ -800,3 +800,34 @@ results from `bf8517d0b` still describe this tree.
 it says nothing once a single production line moves. And it is not a substitute
 for the per-crate test gate, which is cheap and must run on every merge
 regardless - a test-only change can still break tests.
+
+### CORRECTION: the `#[cfg(test)]` marker shortcut above is unsound
+
+The procedure above says a file is production-inert if "the lowest touched line
+is at or after the `#[cfg(test)]` marker", found with
+
+    grep -n '#\[cfg(test)\]' "$f" | head -1
+
+**`head -1` is wrong whenever a file has more than one.** Test-only helpers sit
+beside the production code they support, so several files here carry many:
+`client.rs` has NINE `#[cfg(test)]` items (first at line 166, others at 499,
+559, 613, 890, 2166, ...). Using the first would classify everything after line
+166 as test code - about 3000 lines, including `crate::transaction::
+rollback_savepoint` at line 3289 inside `pub fn __private_api_rollback`. The
+same mistake, in the module-graph script, understated the SCC as 8 when it is
+10.
+
+**Ask whether the touched line is INSIDE a test item**, not whether it is after
+some marker. Blank `//` comments in place (preserving length, so offsets stay
+valid - stripping them shifts every line number earlier and silently invents
+answers), then brace-match each `#[cfg(test)]` item and test membership:
+
+    span starts at the attribute, ends at the matching `}` of its item
+    inert  <=>  every changed line lies inside some span, or is a comment
+
+Re-checked all five merges made on 2026-08-30 with the sound version:
+`config.rs:3501`, `connect.rs:1052` and `pool.rs:3802` are all genuinely inside
+test items; `cancel_query_raw.rs:233` is the blank line before its module; and
+`copy_out.rs` has no test module at all and changed only comments. **Every
+verdict stands** - the shortcut happened to be right because those files have
+one test module, or their last one, near the end. It was luck, not method.
