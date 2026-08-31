@@ -2237,6 +2237,129 @@ mod tests {
     }
 
     #[test]
+    fn crl_issuer_bmp_string_decodes_big_endian_two_byte_units() {
+        // BMPString stores each Unicode scalar as one two-byte, big-endian unit.
+        let encoded = [0x00, 0x61, 0x26, 0x03];
+        let value = Any::from_tag_and_data(Tag::BmpString, &encoded);
+
+        let canonical = openssl_canonical_string(&value)
+            .expect("a BMPString containing valid Unicode scalars must decode")
+            .expect("BMPString is an OpenSSL-canonical string type");
+
+        assert_eq!(
+            canonical,
+            "a☃".as_bytes(),
+            "two-byte big-endian BMPString units must become the scalar's UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn crl_issuer_bmp_string_rejects_an_odd_byte_count() {
+        // BMPString requires exactly two bytes per character, so no trailing byte is valid.
+        let encoded = [0x00, 0x61, 0x00];
+        let value = Any::from_tag_and_data(Tag::BmpString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("an odd-length BMPString cannot contain complete two-byte units");
+
+        assert_eq!(error, "odd-length BMPString in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_bmp_string_rejects_a_non_scalar_unit() {
+        // BMPString units are decoded independently; UTF-16 surrogate 0xd800 is not a scalar.
+        let encoded = [0xd8, 0x00];
+        let value = Any::from_tag_and_data(Tag::BmpString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("a BMPString surrogate unit is not a Unicode scalar value");
+
+        assert_eq!(error, "invalid BMPString scalar in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_universal_string_decodes_big_endian_four_byte_units() {
+        // UniversalString stores each Unicode scalar as one four-byte, big-endian unit.
+        let encoded = [0x00, 0x00, 0x00, 0x61, 0x00, 0x01, 0xf6, 0x42];
+        let value = Any::from_tag_and_data(Tag::UniversalString, &encoded);
+
+        let canonical = openssl_canonical_string(&value)
+            .expect("a UniversalString containing valid Unicode scalars must decode")
+            .expect("UniversalString is an OpenSSL-canonical string type");
+
+        assert_eq!(
+            canonical,
+            "a🙂".as_bytes(),
+            "four-byte big-endian UniversalString units must become the scalar's UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn crl_issuer_universal_string_rejects_a_partial_unit() {
+        // UniversalString requires exactly four bytes per character, so a fifth byte is invalid.
+        let encoded = [0x00, 0x00, 0x00, 0x61, 0x00];
+        let value = Any::from_tag_and_data(Tag::UniversalString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("a misaligned UniversalString ends with a partial four-byte unit");
+
+        assert_eq!(error, "misaligned UniversalString in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_universal_string_rejects_a_non_scalar_unit() {
+        // UniversalString 0x00110000 is above Unicode's largest scalar, U+10ffff.
+        let encoded = [0x00, 0x11, 0x00, 0x00];
+        let value = Any::from_tag_and_data(Tag::UniversalString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("a UniversalString unit above U+10ffff is not a Unicode scalar value");
+
+        assert_eq!(error, "invalid UniversalString scalar in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_teletex_string_maps_each_byte_to_the_same_value_character() {
+        // TeletexString byte 0xe9 maps to U+00e9, whose UTF-8 encoding is the two bytes c3 a9.
+        let encoded = [0x61, 0xe9];
+        let value = Any::from_tag_and_data(Tag::TeletexString, &encoded);
+
+        let canonical = openssl_canonical_string(&value)
+            .expect("every TeletexString byte denotes a same-value Unicode character")
+            .expect("TeletexString is an OpenSSL-canonical string type");
+
+        assert_eq!(
+            canonical,
+            "aé".as_bytes(),
+            "same-value TeletexString characters must then be emitted as UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn der_tlv_uses_big_endian_long_form_lengths_above_127_bytes() {
+        // DER uses 0x80 | width followed by the content length in width big-endian bytes.
+        for (contents_len, expected_length) in
+            [(128, &[0x81, 0x80][..]), (256, &[0x82, 0x01, 0x00][..])]
+        {
+            let contents = vec![0x5a; contents_len];
+            let encoded = der_tlv(0x04, &contents);
+            let contents_start = 1 + expected_length.len();
+
+            assert_eq!(encoded[0], 0x04, "the TLV tag must be preserved");
+            assert_eq!(
+                &encoded[1..contents_start],
+                expected_length,
+                "a {contents_len}-byte value needs the minimal big-endian DER long-form length"
+            );
+            assert_eq!(
+                &encoded[contents_start..],
+                contents,
+                "the long-form length must not alter the TLV contents"
+            );
+        }
+    }
+
+    #[test]
     fn only_openssl_hashed_crl_names_are_directory_entries() {
         for (name, expected) in [
             ("0123abcd.r0", Some(("0123abcd", 0))),
