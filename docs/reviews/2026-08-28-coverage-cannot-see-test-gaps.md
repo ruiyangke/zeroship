@@ -149,3 +149,32 @@ tree is leftover from the 2026-08-28 run above, not a current measurement -
 mutation that motivated each test and confirm the named test still goes red.
 That is a direct measurement of detection. Coverage answers a different
 question, and answering it here has already been tried and reported.
+
+## The complementary property: a mutation-proved test is worthless if it is flaky
+
+Mutation-proof answers "would this test notice the defect". It says nothing
+about "does it answer the same way every run". Both are required, and the second
+is cheap to measure, so measure it rather than assuming it.
+
+Measured 2026-08-30 at `eedde7d81`. The 19 tests added between `bf8517d0b` and
+that commit, extracted from the commits themselves rather than from memory, run
+five times each against 5455:
+
+    iter 1: lib 11 passed / 0 failed    suite 8 passed / 0 failed
+    iter 2: lib 11 / 0                  suite 8 / 0
+    iter 3: lib 11 / 0                  suite 8 / 0
+    iter 4: lib 11 / 0                  suite 8 / 0
+    iter 5: lib 11 / 0                  suite 8 / 0
+
+Zero variance across five runs.
+
+**Check the arithmetic, not just the zeros.** `11 + 8 = 19`, which equals the
+number of names fed in. That equality is the real guard: a name list that
+matches nothing prints `test result: ok. 0 passed` and a run of five such
+iterations is five identical, meaningless greens. The pass count must reconcile
+against the input list, or the stability result is vacuous.
+
+Two helper functions (`assert_cardinality_delegates`,
+`assert_prepare_typed_delegate`) were filtered out of the list first - they are
+called BY tests and are not tests, so including them would have made the
+arithmetic fail to reconcile and sent me looking for a phantom missing test.
