@@ -25,7 +25,7 @@ pub fn extract_row_affected(body: &CommandCompleteBody) -> Result<u64, Error> {
         .map_err(Error::parse)?
         .rsplit(' ')
         .next()
-        .unwrap()
+        .expect("str::rsplit yields one field even for an empty command tag")
         .parse()
         .unwrap_or(0);
     Ok(rows)
