@@ -519,6 +519,14 @@ impl SharedSession {
                 "the TLS session lost ciphertext when a write was abandoned",
             ));
         }
+        // This recheck and the one before `try_lock` are REDUNDANT BY DESIGN:
+        // the first rejects cheaply, this one closes the window where another
+        // thread marks the session terminal while this one waits for the lock.
+        // So neither is individually bindable - a single-threaded test that
+        // reaches one reaches the other, and disabling either leaves the other
+        // returning the same error. Measured 2026-08-31: disabling ONE keeps
+        // `a_session_that_sent_close_notify_refuses_a_try_lease` green;
+        // disabling BOTH turns it red. The pair is bound, the halves are not.
         if self.inner.close_notify_out.load(Ordering::Acquire) {
             return Err(close_notify_sent_error());
         }
@@ -1591,6 +1599,44 @@ mod tests {
     /// only exists behind live keys.
     pub(crate) fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
         handshaken_pair_with_store(None)
+    }
+
+    /// `close_notify` is the end of the record stream. A lease taken after it
+    /// could encrypt another record behind the peer's terminal alert, which is
+    /// a protocol violation the peer is entitled to reject outright.
+    #[test]
+    fn a_session_that_sent_close_notify_refuses_a_blocking_lease() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        session.mark_close_notify_sent();
+
+        let error = session
+            .with(|_| Ok(()))
+            .expect_err("a session that sent close_notify granted a lease");
+        assert!(
+            is_close_notify_sent_error(&error),
+            "wrong refusal for a post-close_notify lease: {error}"
+        );
+    }
+
+    /// The non-blocking path guards separately, and is reached by the
+    /// multiplexed write loop rather than by `with`.
+    #[test]
+    fn a_session_that_sent_close_notify_refuses_a_try_lease() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        session.mark_close_notify_sent();
+
+        // `.err().expect(..)` rather than `expect_err`: the Ok type here is
+        // `Option<SessionLease>`, which is private and deliberately not Debug.
+        let error = session
+            .try_lease()
+            .err()
+            .expect("a session that sent close_notify granted a try_lease");
+        assert!(
+            is_close_notify_sent_error(&error),
+            "wrong refusal for a post-close_notify try_lease: {error}"
+        );
     }
 
     #[test]
