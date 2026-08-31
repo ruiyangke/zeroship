@@ -976,6 +976,9 @@ where
             // value for the owning response and keep the request-local copy as
             // a fallback if that response channel is backpressured.
             if let Some(response) = self.responses.front_mut() {
+                // Both production callers first drain every complete buffered
+                // frame through ordinary dispatch, which fills this same slot;
+                // an incomplete ErrorResponse cannot reach this scanner.
                 remember_server_error(&response.request_server_error, error);
                 let _ = response
                     .sender
