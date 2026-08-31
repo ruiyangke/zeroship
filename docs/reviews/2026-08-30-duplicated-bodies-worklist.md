@@ -84,7 +84,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 37 Frame-offset guard | 2 | was UNBOUND, now BOUND each | `{first_matching_tag,error_response_before}_advances_past_the_entire_leading_frame` |
 | 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
-| 40 Request COPY flags | 2 | UNRULED - the mutation HANGS rather than fails, see note | - |
+| 40 Request COPY flags | 2 | CLOSED: both BOUND (1 and 3 failures, each path-specific) | serialized + multiplexed post-G COPY error tests |
 | 41 COPY state reset | 2 | CLOSED: 1 covered by 26; 1 was executed by nothing, now bound | `an_abort_before_bind_complete_releases_copy_input` |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
@@ -210,7 +210,7 @@ does not distinguish "never executed" from "executed but nothing depends on this
 part of it", and the right response differs: the first is dead code, the second
 is a live path with an unobservable sub-effect.
 
-### A mutation that HANGS is not a verdict either
+### CLOSED: a downstream COPY mutation turns the hang into path-specific failures
 
 Group 40's `ReadObligation::new(deadline, is_copy)` takes an `is_copy` flag.
 Setting it to `false` does not make tests fail - it makes
@@ -218,14 +218,49 @@ Setting it to `false` does not make tests fail - it makes
 obligation never arms and the loop waits for a read that is never scheduled.
 The probe ran 35 minutes with no result.
 
-That tells you the flag is load-bearing and nothing else. Worse, a hung run
-defeats the restore: the script sits in `wait`, so its EXIT trap cannot fire
-until the child is killed, and the mutated file stays in the tree meanwhile.
+That tells you the flag is load-bearing and nothing else. The ruling probes
+therefore left `is_copy` flowing into `ReadObligation::new` and disabled the
+adjacent extended-COPY terminal-Sync consumer instead. On the serialized copy,
+the exact replacement was
 
-For a flag whose removal deadlocks, pick a mutation that keeps the loop
-progressing - flip a downstream consumer of the flag rather than the flag
-itself - or bound the run with `timeout` so a hang reports as a hang instead of
-stalling the sweep.
+    read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync);
+    -> read_obligation.set_copy_terminal_has_sync(false);
+
+On the multiplexed copy it was
+
+    read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync);
+    -> read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync && !is_copy);
+
+Neither mutation can recreate the startup deadlock: the `is_copy` constructor
+argument still allocates `ReadObligationInner`, `pause_for_copy_input` can still
+end startup, and `prepare_copy_terminal` / `activate_copy_terminal` still run.
+The multiplexed copy also keeps `accepts_copy_input` true, so its producer is
+still polled. Only the later recovery accounting is wrong, which progresses to
+an extra `ReadyForQuery` or a wrong-direction COPY failure.
+
+The serialized mutation failed exactly one test:
+
+    a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query
+
+The multiplexed mutation failed three:
+
+    copy_in_failure::a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query
+    hostile_peer::a_copy_out_response_cannot_transition_to_copy_in
+    hostile_peer::copy_response_direction_changes_preserve_batch_wire_order
+
+The first multiplexed failure is independently specific: its serialized twin
+stayed green in the same run. Thus both copies are BOUND. The argument against
+that verdict is that these probes directly bind terminal-Sync metadata, not the
+constructor bit in isolation. That is true, but narrower than it sounds: these
+tests run without a read deadline, so the inner object receiving that metadata
+exists only because the corresponding constructor received `is_copy = true`;
+the original hanging probe separately proves that removing the bit destroys
+startup progress.
+
+A hung probe also defeats its own restore: the script sits in `wait`, so its
+EXIT trap cannot fire until the child is killed, and the mutated file stays in
+the tree meanwhile. For another flag whose removal deadlocks, mutate a
+progress-safe downstream consumer and keep the outer `timeout` even then.
 
 ### A probe log can go BINARY, and then plain grep reports nothing
 
