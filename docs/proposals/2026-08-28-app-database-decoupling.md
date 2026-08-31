@@ -1369,7 +1369,7 @@ await env.db.transaction(async (tx) => {                 // UNCHANGED
 
 **`env.db.users` survives, and one-database-per-app is what saves it.** `installSchema` plants
 collections directly on the target with `Object.defineProperty`
-(`sdks/bootstrap/src/install-schema.ts:1509`), alongside `transaction` (`:1516`) and `live`
+(`sdks/bootstrap/src/install-schema.ts:952`), alongside `transaction` (`:960`) and `live`
 (`:1522`), so with several bindings a binding named `analytics` and a collection named `analytics`
 would be the same key. With one database there is no binding level and no collision. The creator
 surface does not change at all: no call-site sweep, no regenerated types, no edits to

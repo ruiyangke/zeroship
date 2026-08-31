@@ -267,9 +267,9 @@ question; it does not answer it.
   The generation half is what makes this arm test Decision 2 at all. Today's
   in-place path already produces the removed-collection outcome without any
   restart: the dev bootstrap reapplies the descriptor and resets the latch
-  (`sdks/vite-plugin/src/dev-bootstrap/index.ts:183-185`) and `installSchema`
+  (`sdks/vite-plugin/src/dev-bootstrap/index.ts:103`) and `installSchema`
   deletes stale names and defines the replacements
-  (`sdks/bootstrap/src/install-schema.ts:1489-1508`). So an arm asserting only
+  (`sdks/bootstrap/src/install-schema.ts:1225`). So an arm asserting only
   absence **passes on the very mechanism this document rejected** - and would
   keep passing if someone renamed the latch while preserving the mutation.
 - After such an edit with no migration applied, DB operations fail closed rather

@@ -139,7 +139,7 @@ The descriptor reaches the plugin through the deploy artifact:
 (`crates/zeroship-worker/src/sync.rs:40-70`) -> `RuntimeState.runtime_descriptor`
 -> validated and exposed by `setup_globals`
 (`crates/zeroship-runtime/src/core/init.rs:3415-3434`) -> `installSchema` walks
-it (`sdks/bootstrap/src/install-schema.ts:1314-1350`) -> the per-isolate store.
+it (`sdks/bootstrap/src/install-schema.ts:970`) -> the descriptor store.
 The `storage` block survives that chain untouched, because
 `normalizeSchema`'s wire-`FieldDef` branch is a shallow spread
 (`install-schema.ts:369-372`) and `read_json_arg` filters no keys.
@@ -1166,8 +1166,11 @@ with `git merge-base --is-ancestor`. Unverified; the SHAs are owed.
 `DbIsolateBinding` itself, the deletion of `registerModel`, the mask-policy
 artifact wire, the operator ceiling as worker configuration, Fork C's identity
 substrate, `DbPlan`'s remaining families and its ledger, the SC-4 dev mechanism,
-and the masking storage flip. `crates/zeroship-plugin-db/src/register_model/mod.rs`
-and `v8_classes/db_platform.rs`'s `setMaskPolicy` (`:145`) are both still live.
+and the masking storage flip. `v8_classes/db_platform.rs`'s `setMaskPolicy`
+(`:145`) is still live. Its sibling `registerModel` is NOT: the module, the V8
+method and the `installSchema` chain that drove it were all deleted on
+2026-08-30 (DELETED - `crates/zeroship-plugin-db/src/register_model/mod.rs`),
+and the descriptor entries it used to publish are now planted natively at boot.
 That list names mechanisms, not documents: `DbPlan`'s shared core and read family
 exist as `crates/zeroship-data-plan`, and SC-5's service ownership partly landed
 as step 5a while SC-5 as a contract is unimplemented.
