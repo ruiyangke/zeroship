@@ -1,35 +1,35 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, NoTls};
-use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
-use ntex::web::{self, HttpResponse, test};
-use serde_json::{Value, json};
+use ntex::web::{self, test, HttpResponse};
+use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
 use zeroship_migrate::{
-    ExecutorConfig, MigrationBackend, ProjectLockAcquisition, effective_policy_from_charter_toml,
+    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend, ProjectLockAcquisition,
 };
 use zeroship_migrate_postgres::PostgresBackend;
-use zeroship_migrate_server::MigrationServiceState;
-use zeroship_migrate_server::apply::{ApplyMigrationsRequest, apply_ir_documents};
+use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
 use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
-use zeroship_migrate_server::policy::{MIGRATE_POLICY_FILENAME, ManagedPolicyConfig};
+use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
 use zeroship_migrate_server::rate_limit::{MutationRateLimiter, PostgresMutationRateLimiter};
 use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::session::CompioPgSession;
+use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
@@ -531,6 +531,52 @@ fn state_for_with_policy_config_and_edge(
     )
 }
 
+/// Drive the explicit database lifecycle operation through the same HTTP surface
+/// every apply caller uses. Keeping this separate from `seed_app` is deliberate:
+/// an app row and a database schema are independent lifecycle facts, and the
+/// refusal test needs to seed the former while leaving the latter absent.
+async fn post_database_create<S, E>(
+    service: &ntex::service::Pipeline<S>,
+    database_id: Uuid,
+    token: Option<&str>,
+) -> (StatusCode, Value)
+where
+    S: ntex::Service<ntex::http::Request, Response = web::WebResponse, Error = E>,
+    E: std::fmt::Debug,
+{
+    let uri = format!("/v1/databases/{database_id}");
+    let request = match token {
+        Some(token) => test::TestRequest::post()
+            .uri(&uri)
+            .header("authorization", format!("Bearer {token}"))
+            .to_request(),
+        None => test::TestRequest::post().uri(&uri).to_request(),
+    };
+    let response = test::call_service(service, request).await;
+    let status = response.status();
+    let body = serde_json::from_slice(&test::read_body(response).await)
+        .expect("database create response is JSON");
+    (status, body)
+}
+
+async fn create_database<S, E>(service: &ntex::service::Pipeline<S>, database_id: Uuid, token: &str)
+where
+    S: ntex::Service<ntex::http::Request, Response = web::WebResponse, Error = E>,
+    E: std::fmt::Debug,
+{
+    let (status, body) = post_database_create(service, database_id, Some(token)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "explicit database create failed: {body}"
+    );
+    assert_eq!(
+        body,
+        json!({"database_id": database_id}),
+        "database create returned the wrong identity"
+    );
+}
+
 /// A syntactically valid descriptor hash for the cases that are about
 /// something else.
 ///
@@ -1020,6 +1066,301 @@ async fn probe_bool(conn: &Client, sql: &str) -> bool {
     rows[0].get(0)
 }
 
+/// Explicit creation is idempotent and stops at the database's migration
+/// boundary. Runtime-owned objects still belong to the later apply operation.
+#[ntex::test]
+async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_pg() {
+    let conn = admin_conn().await;
+    let database_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, database_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [database_id]);
+    let (state, tmp) = state_for(auth);
+    let service = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let first = post_database_create(&service, database_id, Some("good-token")).await;
+    let second = post_database_create(&service, database_id, Some("good-token")).await;
+
+    let schema = database_id.to_string();
+    let migrator_role =
+        zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
+    let runtime_role =
+        zeroship_core::database_role::per_app_role_name(&schema).expect("runtime role name");
+    let data_schema_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{}')",
+            schema.replace('\'', "''")
+        ),
+    )
+    .await;
+    let migrator_role_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{}')",
+            migrator_role.replace('\'', "''")
+        ),
+    )
+    .await;
+    let workflow_schema = format!("app_{schema}");
+    let workflow_schema_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{}')",
+            workflow_schema.replace('\'', "''")
+        ),
+    )
+    .await;
+    let runtime_role_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{}')",
+            runtime_role.replace('\'', "''")
+        ),
+    )
+    .await;
+    let audit = format!(
+        "{}.{}",
+        quote_ident(&schema),
+        quote_ident(zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE)
+    );
+    let audit_table_exists = relation_exists(&conn, &audit).await;
+    let ledger_rows: i64 = conn
+        .query_one(
+            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1",
+            &[&database_id],
+        )
+        .await
+        .expect("count create-only ledger rows")
+        .get(0);
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &database_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    let expected = (StatusCode::OK, json!({"database_id": database_id}));
+    assert_eq!(first, expected, "first database create response");
+    assert_eq!(second, expected, "idempotent database create response");
+    assert!(data_schema_exists, "create did not create schema {schema}");
+    assert!(
+        migrator_role_exists,
+        "create did not provision migrator role {migrator_role}"
+    );
+    assert!(
+        !workflow_schema_exists,
+        "create crossed into apply-owned workflow schema {workflow_schema}"
+    );
+    assert!(
+        !runtime_role_exists,
+        "create crossed into apply-owned runtime role {runtime_role}"
+    );
+    assert!(
+        !audit_table_exists,
+        "create crossed into apply-owned audit table {audit}"
+    );
+    assert_eq!(
+        ledger_rows, 0,
+        "database creation must not open an apply ledger row"
+    );
+}
+
+/// Database creation uses the same bearer scope and app ownership check as
+/// apply, and every denial precedes provisioning.
+#[ntex::test]
+async fn create_database_denials_leave_no_schema_role_or_ledger_pg() {
+    let conn = admin_conn().await;
+    let database_id = Uuid::now_v7();
+    let other_app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, database_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("no-scope-token", owner_id, [Scope::AppsRead], [database_id]);
+    auth.insert(
+        "wrong-app-token",
+        owner_id,
+        [Scope::AppsDeploy],
+        [other_app_id],
+    );
+    let (state, tmp) = state_for(auth);
+    let service = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let unauthenticated = post_database_create(&service, database_id, None).await;
+    let missing_scope = post_database_create(&service, database_id, Some("no-scope-token")).await;
+    let wrong_app = post_database_create(&service, database_id, Some("wrong-app-token")).await;
+
+    let schema = database_id.to_string();
+    let migrator_role =
+        zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
+    let schema_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{}')",
+            schema.replace('\'', "''")
+        ),
+    )
+    .await;
+    let role_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{}')",
+            migrator_role.replace('\'', "''")
+        ),
+    )
+    .await;
+    let ledger_rows: i64 = conn
+        .query_one(
+            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1",
+            &[&database_id],
+        )
+        .await
+        .expect("count denied-create ledger rows")
+        .get(0);
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &database_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    assert_eq!(
+        unauthenticated,
+        (
+            StatusCode::UNAUTHORIZED,
+            json!({"error": "unauthenticated"})
+        )
+    );
+    assert_eq!(
+        missing_scope,
+        (StatusCode::FORBIDDEN, json!({"error": "forbidden"}))
+    );
+    assert_eq!(
+        wrong_app,
+        (StatusCode::FORBIDDEN, json!({"error": "forbidden"}))
+    );
+    assert!(!schema_exists, "denied create made schema {schema}");
+    assert!(
+        !role_exists,
+        "denied create made migrator role {migrator_role}"
+    );
+    assert_eq!(ledger_rows, 0, "denied create opened an apply ledger row");
+}
+
+/// An apply is not a database-creation operation.
+///
+/// This is deliberately a live PostgreSQL case because the refusal's important
+/// property is absence of catalog side effects: `provision_migrator` creates a
+/// cluster-global role and grants membership before it first touches the missing
+/// schema. A mocked handler can prove the 409 body but cannot prove those objects
+/// were never created, or that the deploy ledger stayed untouched.
+#[ntex::test]
+async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let schema = app_id.to_string();
+    let migrator_role =
+        zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+
+    let response = test::call_service(
+        &svc,
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .set_json(&create_notes_request())
+            .to_request(),
+    )
+    .await;
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&test::read_body(response).await).expect("JSON refusal body");
+    let schema_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{}')",
+            schema.replace('\'', "''")
+        ),
+    )
+    .await;
+    let role_exists = probe_bool(
+        &conn,
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{}')",
+            migrator_role.replace('\'', "''")
+        ),
+    )
+    .await;
+    let membership_exists: bool = conn
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_auth_members membership \
+                 JOIN pg_roles granted ON granted.oid = membership.roleid \
+                 JOIN pg_roles member ON member.oid = membership.member \
+                 WHERE granted.rolname = $1 AND member.rolname = current_user)",
+            &[&migrator_role],
+        )
+        .await
+        .expect("probe refused apply migrator membership")[0]
+        .get(0);
+    let ledger_rows: i64 = conn
+        .query(
+            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("count refused apply ledger rows")[0]
+        .get(0);
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an absent database must be a creator-recoverable 409, never a 404 or 5xx: {body}"
+    );
+    assert_eq!(body["error"], "database_not_created", "{body}");
+    assert_eq!(
+        body["remedy"],
+        format!("POST /v1/databases/{app_id}"),
+        "the body must name the explicit operation that makes a retry valid: {body}"
+    );
+    assert!(!schema_exists, "a refused apply created schema {schema}");
+    assert!(
+        !role_exists,
+        "a refused apply leaked cluster-global role {migrator_role}"
+    );
+    assert!(
+        !membership_exists,
+        "a refused apply granted cluster-global role {migrator_role} to the provisioner"
+    );
+    assert_eq!(
+        ledger_rows, 0,
+        "a refused apply polluted the deploy gate's ledger head"
+    );
+}
+
 async fn table_privileges(conn: &Client, grantee: &str, schema: &str, table: &str) -> Vec<String> {
     conn.query(
         "SELECT privilege_type \
@@ -1101,6 +1442,7 @@ async fn a_real_apply_preserves_the_column_level_read_fence_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -1271,6 +1613,7 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -1373,6 +1716,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -1544,6 +1888,17 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (create_state, create_tmp) = state_for(auth);
+    let create_service = test::init_service(
+        web::App::new()
+            .state(create_state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+    create_database(&create_service, app_id, "good-token").await;
 
     let tmp = tmpdir("project-lock-span");
     let policy_config = ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
@@ -1740,6 +2095,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
         .get::<_, bool>(0);
 
     let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(create_tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
 
@@ -1808,6 +2164,7 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let post = |body: Value| {
         test::TestRequest::post()
@@ -1874,6 +2231,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let post = |body: Value| {
         test::TestRequest::post()
@@ -1952,6 +2310,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&fresh_svc, fresh_id, "good-token").await;
     assert!(
         !relation_exists(
             &conn,
@@ -2055,6 +2414,7 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -2145,6 +2505,7 @@ async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
     let post = |body: Value| {
         test::TestRequest::post()
             .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -2244,6 +2605,7 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let post = |body: Value| {
         test::TestRequest::post()
@@ -2418,6 +2780,7 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -2479,6 +2842,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
+    create_database(&svc, app_id, "good-token").await;
 
     // A JSON object, so it clears validate_request_shape, but not an IR envelope.
     let malformed = json!({
@@ -2982,11 +3346,12 @@ async fn authz_receives_the_callers_request_id_pg() {
     )
     .await;
 
-    // THE APPLY ENDPOINT, because it is the only authenticated one left. This
-    // case used to drive `PUT /v1/apps/{app}/policy`, which was deleted with the
-    // policy store; a request-id test pointed at a route that 404s before authz
-    // runs would observe an empty `seen_request_ids` and read as a failure of the
-    // header plumbing rather than of the fixture.
+    // THE APPLY ENDPOINT reaches authorization before its expected database
+    // precondition refusal. This case used to drive
+    // `PUT /v1/apps/{app}/policy`, which was deleted with the policy store; a
+    // request-id test pointed at a route that 404s before authz runs would observe
+    // an empty `seen_request_ids` and read as a failure of the header plumbing
+    // rather than of the fixture.
     let caller_request_id = "req-from-the-caller-0001";
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
@@ -2995,7 +3360,7 @@ async fn authz_receives_the_callers_request_id_pg() {
         .set_json(&create_notes_request())
         .to_request();
     let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
 
     let seen = auth
         .seen_request_ids

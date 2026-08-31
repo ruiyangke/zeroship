@@ -213,6 +213,15 @@ pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
 declare -a GP_FAILURES=()
 fail() { FAIL=$((FAIL+1)); GP_FAILURES+=("$1"); echo "  ✗ $1"; }
 
+# Explicitly create the app-derived database before migration apply. This is a
+# harness operation, not a fallback in deploy, migrate, or dev-provision.
+gp_create_database() { # app-id bearer response-file -> http status
+  local app_id="$1" token="$2" response_file="$3"
+  curl -sS -o "$response_file" -w '%{http_code}' -X POST \
+    "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/databases/$app_id" \
+    -H "Authorization: Bearer $token"
+}
+
 # --- The gate must not be able to pass over zero assertions ----------------
 #
 # Exit status alone cannot tell "everything passed" from "nothing was checked".
@@ -943,7 +952,11 @@ e2e_export_database_urls "$DB_URL"
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store /tmp/gp-bundles \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --audit-retention-check-secs 1 >/tmp/gp-control.log 2>&1 & PIDS+=($!)
+# Four database-backed app legs each issue one explicit create plus one apply.
+# Eight is the exact test-local burst needed to keep their result independent of
+# how much wall time the unrelated build and probe steps happen to consume.
 "$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
+  --mutation-rate-limit-burst 8 \
   --tmp-dir /tmp/gp-migrated-tmp \
   >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
@@ -2665,12 +2678,18 @@ SQL
     # the .zship's manifest is content-addressed by. Re-recording here would
     # produce a body with no descriptor at all, and the deploy activation below
     # would then be refused for a reason that has nothing to do with the app.
-    DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_TOKEN" \
-      --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
-    DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
-    if [ "$DB9_APPLY_CODE" = "200" ] && [ "${DB9_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+    DB9_CREATE_CODE="$(gp_create_database "$DB9_APP_ID" "$DB9_TOKEN" /tmp/gp-dbtodos9-create.json)"
+    if [[ "$DB9_CREATE_CODE" = 2?? ]]; then
+      DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
+        "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
+        -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_TOKEN" \
+        --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
+      DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
+    else
+      DB9_APPLY_CODE=""
+      DB9_APPLIED=0
+    fi
+    if [[ "$DB9_CREATE_CODE" = 2?? ]] && [ "$DB9_APPLY_CODE" = "200" ] && [ "${DB9_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
       pass "db-todos' own migrations applied through zeroship-migrate-server to the deployed app (applied=$DB9_APPLIED ops)"
       # NOW the deploy can go live: the app's newest applied migration records
       # the descriptor this artifact carries. Same command, minus the flag. No
@@ -2686,6 +2705,8 @@ SQL
       else
         fail "db-todos migrations applied but the deploy did not go live: ${DB9_ACT:0:300}"
       fi
+    elif [[ "$DB9_CREATE_CODE" != 2?? ]]; then
+      fail "zeroship-migrate-server could not create db-todos' database for the deployed leg (http=$DB9_CREATE_CODE): $(head -c 200 /tmp/gp-dbtodos9-create.json)"
     else
       fail "zeroship-migrate-server could not apply db-todos' migrations for the deployed leg (http=$DB9_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos9-apply.json)"
     fi
@@ -3004,7 +3025,7 @@ fi
 # --defer-deploy: the scaffold's .zship carries a runtime schema descriptor, and
 # control refuses to make such a deploy live before the matching migrations are
 # applied. The app row has to exist first for the migration service to accept
-# them, so creation and activation are two calls with the apply between them.
+# them, so app creation, database creation, apply, and activation stay distinct.
 SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" --defer-deploy 2>&1)
 SC_APP_ID=$(echo "$SC_OUT" | awk -F= '$1 == "app_id" { print $2 }')
 SC_API_KEY=$(echo "$SC_OUT" | awk -F= '$1 == "api_key" { print $2 }')
@@ -3045,12 +3066,18 @@ SQL
   # `genArtifacts` call emitted and the .zship is content-addressed by. A
   # re-recording here carries no descriptor and the activation below would be
   # refused for a reason unrelated to the app.
-  SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
-    "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
-    --data-binary @"$SCAFFOLD/generated/zeroship/migrations.ir.json")"
-  SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
-  if [ "$SC_APPLY_CODE" = "200" ] && [ "${SC_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+  SC_CREATE_CODE="$(gp_create_database "$SC_APP_ID" "$SC_TOKEN" /tmp/gp-scaffold-create.json)"
+  if [[ "$SC_CREATE_CODE" = 2?? ]]; then
+    SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
+      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
+      --data-binary @"$SCAFFOLD/generated/zeroship/migrations.ir.json")"
+    SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
+  else
+    SC_APPLY_CODE=""
+    SC_APPLIED=0
+  fi
+  if [[ "$SC_CREATE_CODE" = 2?? ]] && [ "$SC_APPLY_CODE" = "200" ] && [ "${SC_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
     pass "the scaffold's own migrations applied through zeroship-migrate-server (applied=$SC_APPLIED ops)"
     # Activate now that the schema matches. No new `pass`: the floor is an exact
     # measurement and every probe below needs the app serving anyway.
@@ -3062,6 +3089,8 @@ SQL
     else
       fail "the scaffold's migrations applied but the deploy did not go live: ${SC_ACT:0:300}"
     fi
+  elif [[ "$SC_CREATE_CODE" != 2?? ]]; then
+    fail "zeroship-migrate-server could not create the scaffold's database (http=$SC_CREATE_CODE): $(head -c 200 /tmp/gp-scaffold-create.json)"
   else
     fail "zeroship-migrate-server could not apply the scaffold's migrations (http=$SC_APPLY_CODE): $(head -c 200 /tmp/gp-scaffold-apply.json)"
   fi
@@ -3398,12 +3427,18 @@ SQL
     # The build's own apply body - it carries the `descriptor_sha256` that the
     # .zship's manifest is content-addressed by, which the activation below
     # requires. A re-recording of the same sources carries no descriptor.
-    DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
-      --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
-    DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
-    if [ "$DB_APPLY_CODE" = "200" ] && [ "${DB_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+    DB_CREATE_CODE="$(gp_create_database "$DB_APP_ID" "$SC_TOKEN" /tmp/gp-dbtodos-create.json)"
+    if [[ "$DB_CREATE_CODE" = 2?? ]]; then
+      DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
+        "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
+        -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
+        --data-binary @"$TODOS/generated/zeroship/migrations.ir.json")"
+      DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
+    else
+      DB_APPLY_CODE=""
+      DB_APPLIED=0
+    fi
+    if [[ "$DB_CREATE_CODE" = 2?? ]] && [ "$DB_APPLY_CODE" = "200" ] && [ "${DB_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
       pass "db-todos migrations applied through zeroship-migrate-server (applied=$DB_APPLIED ops)"
       DB_ACT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" 2>&1)
       DB_LIVE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
@@ -3414,6 +3449,8 @@ SQL
       else
         fail "db-todos migrations applied but the deploy did not go live: ${DB_ACT:0:300}"
       fi
+    elif [[ "$DB_CREATE_CODE" != 2?? ]]; then
+      fail "zeroship-migrate-server could not create db-todos' database (http=$DB_CREATE_CODE): $(head -c 200 /tmp/gp-dbtodos-create.json)"
     else
       fail "zeroship-migrate-server could not apply db-todos' migrations (http=$DB_APPLY_CODE): $(head -c 200 /tmp/gp-dbtodos-apply.json)"
     fi
@@ -4012,14 +4049,24 @@ else
     # exactly what the .zship's manifest is content-addressed by, and therefore
     # what the deploy below is checked against. Re-recording the sources here
     # would produce a body with no descriptor and the deploy would be refused.
-    AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
-      "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
-      --data-binary @"$ROOT/examples/auth-notes-db/generated/zeroship/migrations.ir.json")
-    AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
-    { [ "$AN_APPLY" = "200" ] && [ "${AN_APPLIED:-0}" -ge 1 ] 2>/dev/null; } \
-      && pass "14: notes migration applied through zeroship-migrate-server (applied=$AN_APPLIED ops)" \
-      || fail "14: migrated could not apply (http=$AN_APPLY applied=${AN_APPLIED:-0}): $(head -c 200 /tmp/gp-notes-apply.json)"
+    AN_CREATE=$(gp_create_database "$AN_APP_ID" "$SC_TOKEN" /tmp/gp-notes-create-db.json)
+    if [[ "$AN_CREATE" = 2?? ]]; then
+      AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
+        "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
+        -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
+        --data-binary @"$ROOT/examples/auth-notes-db/generated/zeroship/migrations.ir.json")
+      AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
+    else
+      AN_APPLY=""
+      AN_APPLIED=0
+    fi
+    if [[ "$AN_CREATE" = 2?? ]] && [ "$AN_APPLY" = "200" ] && [ "${AN_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
+      pass "14: notes migration applied through zeroship-migrate-server (applied=$AN_APPLIED ops)"
+    elif [[ "$AN_CREATE" != 2?? ]]; then
+      fail "14: migrated could not create the notes database (http=$AN_CREATE): $(head -c 200 /tmp/gp-notes-create-db.json)"
+    else
+      fail "14: migrated could not apply (http=$AN_APPLY applied=${AN_APPLIED:-0}): $(head -c 200 /tmp/gp-notes-apply.json)"
+    fi
 
     if ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
          --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" \

@@ -267,6 +267,7 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control"; tail -40 "$WORK/control.log"; exit 1; }
 
 "$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
+  --mutation-rate-limit-burst 3 \
   --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -344,6 +345,18 @@ ROLE_BEFORE="$(psql_exec -tA -c "SELECT count(*) FROM pg_roles WHERE rolname='$A
 [ "$ROLE_BEFORE" = "0" ] \
   && pass "the per-app role $APP_ROLE does NOT exist on the deployed, unmigrated app" \
   || fail "$APP_ROLE already existed before migrate (count=$ROLE_BEFORE) - the control proves nothing"
+
+# Create the database only after the absent-database control above has observed
+# the precondition. Create, first apply, and the immediate idempotent re-apply
+# consume three mutation tokens, so this harness raises only its test-local burst
+# to three at server startup.
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -50 "$WORK/migrated.log"; exit 1
+fi
 
 # --- APPLY THROUGH THE CLI, DIRECT TO MIGRATE-SERVER ------------------------
 #

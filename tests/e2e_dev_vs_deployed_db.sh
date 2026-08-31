@@ -883,6 +883,17 @@ SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint"; exit 1; }
 
+# Database creation is an explicit lifecycle operation. Keep it separate from
+# both dev-provision and migration apply so neither path can recreate the old
+# deploy-implies-database coupling.
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/databases/$APP_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
+
 # THE BUILD'S OWN APPLY BODY, not a second recording of the same sources. It
 # carries `descriptor_sha256` - the hash of the `schema.runtime.json` the same
 # `genArtifacts` call emitted, which is what the .zship's manifest is
