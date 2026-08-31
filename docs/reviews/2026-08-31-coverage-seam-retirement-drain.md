@@ -74,6 +74,36 @@ Do not assume from the comment at `:3011` ("PostgreSQL is waiting for producer
 data, not owing a response") that the state is impossible. That comment explains
 why the code does what it does, not that the branch is unreachable.
 
+## Re-measured after the work: the seam closed
+
+Coverage re-run at `5905f885e`, same command and features.
+
+    before   34860 lines   3022 missed   91.33%
+    after    35254 lines   2904 missed   91.76%
+
+The tree grew 394 lines and missed 118 FEWER. Per target, aggregating regions
+over each span:
+
+    drain_available_retirement_read_channel   43 regions   0 -> 36 executed
+    CancelToken Debug                         61 regions   0 -> 54
+    RustlsConnect Debug                       15 regions   0 -> 15
+
+That is the check worth doing after any coverage-driven work: re-measure the
+SPECIFIC spans that motivated it, not just the crate percentage. A crate figure
+moves for many reasons - here the tree also grew - and would not by itself
+distinguish "the dead function is now covered" from "the new tests happen to
+execute other lines".
+
+Refreshed ranking by absolute missed lines, generated table and scaffolding
+excluded:
+
+    connection.rs   543 of 5302   89.76%
+    connect_raw.rs  239 of 2686   91.10%
+    tls_rustls.rs   232 of 1467   84.19%   <- lowest genuine coverage
+    pool.rs         209 of 3276   93.62%
+    replication.rs  167 of 3368   95.04%
+    tls_sansio.rs   140 of 1282   89.08%
+
 ## A per-line lookup into the coverage segments is NOT "did this line run"
 
 Recorded because it nearly cost a dispatch. Reading segment counts line by line,
