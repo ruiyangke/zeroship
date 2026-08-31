@@ -120,7 +120,6 @@ where
         has_hostname,
         process_id,
         secret_key,
-        true,
         delivery,
     )
     .await?;
@@ -153,7 +152,6 @@ where
         has_hostname,
         process_id,
         secret_key,
-        true,
         &delivery,
     )
     .await
@@ -169,19 +167,24 @@ async fn send_cancel_request<S, T>(
     has_hostname: bool,
     process_id: i32,
     secret_key: CancelKey,
-    exact_encryption: bool,
     delivery: &CancelDeliveryTracker,
 ) -> Result<MaybeTlsStream<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    let mut stream = if exact_encryption {
+    // ALWAYS `_exact`, never plain `negotiate_tls`. This packet carries the
+    // cancel secret, a bearer credential, and `negotiate_tls` converts an
+    // unavailable TLS transport to plaintext under `sslmode=prefer` - which
+    // would put that secret on the wire in the clear for a session the caller
+    // established over TLS. This used to be an `exact_encryption: bool`; all
+    // four callers passed `true`, so the downgrade arm was unreachable, and a
+    // bool at a call site names the mechanism rather than the consequence. If a
+    // renegotiating mode is ever wanted, give it an enum that says what it
+    // costs.
+    let mut stream =
         connect_tls::negotiate_tls_exact(stream, encryption, mode, negotiation, tls, has_hostname)
-            .await?
-    } else {
-        connect_tls::negotiate_tls(stream, encryption, mode, negotiation, tls, has_hostname).await?
-    };
+            .await?;
 
     let packet_len = 12 + secret_key.as_bytes().len();
     let mut packet = Vec::with_capacity(packet_len);
@@ -304,7 +307,6 @@ mod tests {
             false,
             PROCESS_ID,
             cancel_key(b"key!"),
-            true,
             &delivery,
         )
         .await;
@@ -375,7 +377,6 @@ mod tests {
             false,
             PROCESS_ID,
             cancel_key(b"eightkey"),
-            true,
             &delivery,
         )
         .await;
