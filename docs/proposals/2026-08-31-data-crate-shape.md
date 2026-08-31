@@ -76,7 +76,9 @@ zeroship-data-cdc-server        service tier: WAL stream, slot authority, reaper
                                 zeroship-migrate-server.
                                 -> compio-postgres, zeroship-core. NOT data-core, NOT data-postgres.
 zeroship-plugin-db              env.db surface, worker tier. impl NativePlugin. KEEPS ITS NAME.
-                                V8, crud, broker, subscription lifecycle. -> all of the above
+                                V8, crud, broker, subscription lifecycle.
+                                -> data-core, data-postgres, data-sqlite.
+                                NOT -> data-cdc-server. The worker must not link the relay.
 
 zeroship-core::change_event     the cross-process event type, beside usage_event and
                                 replication_names, which are already there.
@@ -159,8 +161,32 @@ this is the SC-1 reducer (#8, #21), which was built to be backend-neutral and is
 gating the dev backend therefore reaches into the transaction reducer, not just the read pipeline.
 
 Sites in type position naming `SqliteBackend` itself are expected to gate WITH the backend; the ones
-that block are the type and helper imports in neutral code. Either way the honest cost of "gate the
-dev backend" is a 13-file relocation, not a `#[cfg]`.
+that block are the type and helper imports in neutral code.
+
+**THAT CENSUS IS A SPELLING COUNT, NOT THE FOOTPRINT, AND ITS EXCLUSION HIDES A CYCLE - corrected
+2026-08-31 by review, verified.** Two defects in the method, both mine:
+
+- **It greps the literal string `backend::sqlite`, so it misses every SEMANTIC reference.** Counted:
+  **34 more** sites outside `backend/` spell the dependency `BackendHandle::Sqlite` or
+  `TxConnection::Sqlite` instead. The real footprint is 63+, not 29.
+- **It excludes all of `backend/`, but the cut line is `backend/sqlite/`.** That exclusion silently
+  removed `backend/mod.rs` - the shared file that sits ON the cut and contains
+  `pub enum BackendHandle { Sqlite(Rc<SqliteBackend>), ... }` (`:1475`), the SQLite re-export
+  (`:91`), and a concrete SQLite change-stream return type (`:1622`).
+
+**The second is structural, not another missed spelling.** `BackendHandle` names the SQLite backend
+by value, so moving it into `data-core` produces `data-core -> data-sqlite -> data-core`. Leaving it
+above the vendors means the production composition seam has no home in the proposed graph and must be
+designed. Either way, a census that excluded the file holding the vendor-bearing enum could not have
+found this.
+
+**This is the third time in this document's history that a grep has been the defect** - a Cargo.toml
+comment read as a dependency edge, source comments counted as code, and now a literal spelling
+standing in for a semantic dependency. The pattern is not carelessness about greps; it is that each
+census answered the question it could ask rather than the question that was being decided.
+
+So the honest cost of "gate the dev backend" is unknown but larger than a 13-file relocation, and the
+first thing any implementer must do is settle where `BackendHandle` lives.
 
 ### What to build NOW: three moves, not five crates
 
@@ -228,7 +254,8 @@ dependencies. Judged against THAT, `data-core` as specified fails on three conte
 2. **Do not let one crate implement both the query contract and the CDC contract.** The worker links
    the PostgreSQL backend for ordinary queries; if that crate also carries the CDC implementation, the
    worker links the CDC code too and the trust-tier separation is cosmetic at the crate level. Either
-   gate it (`data-postgres/cdc`, default-off) or split `data-postgres-cdc` out. **But see S3 below:
+   gate it (`data-postgres/cdc`, default-off) or split `data-postgres-cdc` out. **But the crate
+   boundary is not the fence:
    the crate boundary is defence in depth, not the fence.** The fence is the role attribute - a
    worker holding `REPLICATION` can drop ANY slot regardless of which crate the code sits in.
 
@@ -428,8 +455,12 @@ is reachable from a production path.
 Two facts that shape everything below, both contradicting `AGENTS.md:143`:
 
 - **No `zeroship-migrate*` crate depends on `zeroship-schema`.** Its only dependants are
-  `zeroship-data-plan` and `zeroship-plugin-db`. The engine carries parallel copies of the same
-  code. So the `data-*` family has no cross-family edge.
+  `zeroship-plugin-db` (a normal dependency) and `zeroship-schema`'s own dev-dependency on
+  `zeroship-data-plan` - which runs the OTHER WAY: `schema` dev-depends on `data-plan`, and
+  `data-plan` depends on nothing at all. *This bullet named `zeroship-data-plan` as a dependant of
+  `zeroship-schema` until 2026-08-31; that is the reversed-edge error this document corrects at
+  length two sections above, surviving in a stale bullet the correction did not sweep.* The engine
+  carries parallel copies of the same code, so the `data-*` family has no cross-family edge.
 - **`zeroship-data-plan` has zero production consumers.** It is a `[dev-dependencies]` entry in both
   dependants, and the `zeroship-schema` uses of it sit after `#[cfg(test)]` at `query.rs:6446`.
   #12 is marked complete; the consumer never landed.
