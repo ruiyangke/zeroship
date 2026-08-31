@@ -1,3 +1,11 @@
+// This target is its own crate ROOT and overflows rustc's layout query on the
+// async block at the end of the `oidc_refresh_token_test` module.
+// `recursion_limit` is per crate root, so the crate's lib does not cover it,
+// and merging the files into one target means this entry file carries the
+// attribute for all of them. Caught by `tests/clippy_gate.sh`, which lints
+// `--all-targets`; a bare `cargo test -p zeroship-auth --lib` never builds it.
+#![recursion_limit = "256"]
+
 //! The one integration-test target for `zeroship-auth`.
 //!
 //! WHY THIS FILE EXISTS
