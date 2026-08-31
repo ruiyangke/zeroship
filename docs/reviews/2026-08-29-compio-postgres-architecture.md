@@ -748,3 +748,41 @@ one of them was the whole story.
 method, so its absolute values are probably understated by a similar amount.
 The DIRECTION - that extracting `encryption.rs` broke a cycle - was verified by
 the edge that disappeared, and that part stands.
+
+### How much code the truncating parser could not see: about 4900 lines
+
+Quantified 2026-08-30. For every file, brace-match each `#[cfg(test)]` item and
+count the lines that lie AFTER the first attribute but OUTSIDE every test span -
+exactly what `head -1` on the marker discards:
+
+    client.rs         9 items   2689 production lines hidden
+    tls_sansio.rs     4 items    926
+    codec.rs          2 items    485
+    release.rs        2 items    326
+    test_utils.rs     2 items    239
+    cancel_token.rs   2 items    224
+    connect_tls.rs    1 item      22
+    replication.rs    2 items      7
+    config.rs         2 items      2
+                                ----
+                                4920
+
+(Every other file reports 1, which is the trailing line after its module's
+closing brace - an artifact of the counting, not a finding. Read only the rows
+above 1.)
+
+**30 files carry a `#[cfg(test)]` item; 8 carry more than one.** That is the
+whole cause. A single test module at the end of a file makes truncation
+harmless, and 22 files are shaped that way - which is why the method looked fine
+for so long. The 8 exceptions are files where test-only helpers sit BESIDE the
+production code they support, and `client.rs` is the extreme: 9 items, the first
+at line 166 of 3651, so the parser read 4.5% of the file.
+
+`connect_tls.rs` is worth noting separately: it has ONE item and still loses 22
+lines, because that item is not the last thing in the file. "One test module"
+does not imply "at the end".
+
+This is the measured scope of the SCC error corrected above. It is also why the
+correction changed the SCC by two members rather than shuffling edges: with
+2689 lines of `client.rs` invisible, whole dependencies were absent, not
+mis-weighted.
