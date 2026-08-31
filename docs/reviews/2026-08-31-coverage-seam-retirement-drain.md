@@ -73,3 +73,36 @@ must be answered before writing a fixture:
 Do not assume from the comment at `:3011` ("PostgreSQL is waiting for producer
 data, not owing a response") that the state is impossible. That comment explains
 why the code does what it does, not that the branch is unreachable.
+
+## Companion sweep: the 47 production panic messages
+
+Same day, same principle applied to a different surface. Every production
+`expect` / `unwrap` / `unreachable!` / `panic!` outside a `#[cfg(...test...)]`
+span, excluding the unconditionally-compiled `test_utils.rs`:
+
+    28 ACCURATE   18 VAGUE   1 WRONG   0 UNGUARDED
+
+Zero UNGUARDED is the reassuring number: no production `unwrap` sits on a path a
+hostile or merely unusual peer can reach. The VAGUE ones were bare `unwrap()`
+and messages like `unreachable!("handled above")` - true, and useless to the
+person reading them once, at 3am, unable to reproduce.
+
+**The one WRONG message, `codec.rs`.** It attributed the guarantee to the async
+tag: an async header, it said, means the body is buffered. It does not. A header
+may be followed by a partial body; what actually guarantees completeness is the
+explicit check at `codec.rs:410`,
+
+    let msg_len = header.len() as usize + 1;
+    if stream.buf()[idx..].len() < msg_len { ... break }
+
+which the walk reaches before any async-tag branch. Verified by reading, not
+accepted on report. The distinction is the whole value: if that assertion ever
+fires, the broken contract is between the length check and `Message::parse`, and
+the old message would have sent the reader to tag recognition instead.
+
+**Enumeration trap worth repeating.** A naive `#[cfg(test)]`-only span check
+counts 104 sites, 44 of them phantoms in `connect_socket.rs`, because the crate
+also uses `#[cfg(all(test, unix))]` and
+`#[cfg(all(test, target_os = "linux"))]`. Matching every cfg predicate that
+mentions `test` gives 53, of which `connect_socket.rs` contributes 0 - that zero
+is the control worth keeping.
