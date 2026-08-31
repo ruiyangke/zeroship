@@ -72,6 +72,8 @@ below was re-run by the pilot against the FULL seven-target gate
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
 | 31 Pool acquisition arms | **9**, not 2 | UNRULED - largest family after `remember_server_error` | - |
 | 32 Pool return/handoff | 2 | 1 covered by 5 `pool_close` tests; 1 REACHED but its wake unobservable | see note |
+| 20 Authentication exchange | 2 | BOUND, each independently | SCRAM pre-continue and pre-final tests |
+| 33 Replication async/error | 2 | BOUND, each independently | `identify_system_tolerates_an_asynchronous_parameter_status`, `copy_both_completion_tolerates_an_asynchronous_parameter_status` |
 | 34 Row-range decoding | 2 | NOT independently bound (3 overlap on one copy) | see agent table |
 | 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
 | 36 Binary COPY rejection | 2 | BOUND | `bytes_after_the_binary_copy_trailer_are_refused` + sibling |
