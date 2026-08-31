@@ -1535,10 +1535,10 @@ VERIFIED walk-through:
    deleted (section 4.1), Migrated holds no signing key and signs no replacement
    credential.
 
-Part A staging gap: the CLI and service still use `/v1/apps/{app_id}`, while
-the new edge split reserves `/v1/databases/*` for Part B. Until the route is
-re-keyed, the direct CLI request falls through to control and returns 404. This
-intermediate commit must not be deployed alone.
+The edge reserves `/v1/*` for Migrated, so the CLI's current
+`/v1/apps/{app_id}` request reaches the service directly. The same split also
+admits a later database-id route without another edge change. Control declares
+no `/v1` resource, and the deploy gate enforces that collision boundary.
 
 ### 4.3 Workflow signal-capability issuance
 

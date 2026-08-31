@@ -144,7 +144,7 @@ async fn guard_from_bearer(
     let Some(raw) = zeroship_core::auth::extract_bearer(header) else {
         return Ok(None);
     };
-    let verified = state
+    let mut verified = state
         .bearer_verifier()
         .verify_bearer(raw, request_ip, request_id)
         .await?;
@@ -156,15 +156,29 @@ async fn guard_from_bearer(
     //
     // The request itself was already authorized against the default CLI set,
     // so this is materialization, not authorization, and it runs at most once
-    // per principal: `ensure_platform_creator_grants` is guarded on the
+    // per principal: the shared materializer is guarded on the
     // `zeroship.identity_links` marker, so the steady state is a pure read.
     if verified.seed_platform_cli_grants {
-        if let Err(err) = crate::device_handlers::ensure_platform_creator_grants_committed(
-            state,
+        match zeroship_authn::platform_cli::materialize_default_grants(
+            state.control_pg.as_ref(),
             verified.principal_id,
         )
         .await
         {
+            Ok(materialization) if materialization.requires_entitlement_refresh() => {
+                verified = state
+                    .bearer_verifier()
+                    .verify_bearer(raw, request_ip, verified.request_id.clone())
+                    .await?;
+                if verified.seed_platform_cli_grants {
+                    return Err(zeroship_authn::AuthnRejection::internal(
+                        "platform_cli_materialization_race",
+                    )
+                    .into());
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
             // Loud but non-fatal, and the two halves of that are deliberate.
             // Failing the request would lock a creator out over a table they
             // have never heard of, for a request the entitlement rules already
@@ -178,6 +192,7 @@ async fn guard_from_bearer(
                 "control: materializing default platform CLI grants failed; \
                  operator narrowing will not take effect for this principal"
             );
+            }
         }
     }
 

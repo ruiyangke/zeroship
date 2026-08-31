@@ -20,7 +20,6 @@ pub mod error;
 pub mod headers;
 pub mod identity;
 pub mod oidc;
-pub mod ratelimit;
 pub mod return_to;
 pub mod server;
 pub mod sessions;

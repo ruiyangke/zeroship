@@ -94,7 +94,7 @@ iff principal owns N", so the project/ownership row is still required - it was t
 depended on `(project, name)`, not the authorization. Read this decision as unblocking the route
 shape, never as unblocking authz.
 
-**14. The CLI reuses the control URL; the EDGE routes `/v1/databases/*` to the migration service.**
+**14. The CLI reuses the control URL; the EDGE routes `/v1/*` to the migration service.**
 "can we reuse the control url?" Yes, and investigating it surfaced a gap decisions 11-13 had left
 open.
 
@@ -115,7 +115,7 @@ control host gains the same shape:
 
 ```
 http://control.{$ZEROSHIP_DOMAIN} {
-	handle /v1/databases/* { reverse_proxy migrate-server:9091 }
+	handle /v1/*           { reverse_proxy migrate-server:9091 }
 	handle                 { reverse_proxy control:9090 }
 }
 ```
@@ -134,7 +134,7 @@ go to control.<domain>" and concludes control should proxy them is rebuilding wh
 - **The edge config becomes load-bearing.** Deploy without that rule and `zeroship migrate` receives
   control's 404. Combined with the empty-apply ledger write (task #74), a migrate that reaches nothing
   can still look like it did something, so the two failure modes compound.
-- **A path-collision invariant appears.** The control plane must never define a `/v1/databases/*`
+- **A path-collision invariant appears.** The control plane must never define a `/v1/*`
   route, and nothing enforces that. It gets a gate arm rather than a convention.
 
 `deploy/ops/Caddyfile` is the LOCAL edge; production may be Kubernetes, so the same rule has to exist
@@ -177,6 +177,28 @@ over. Enumerating a route table by grepping literal path strings in one file mis
 
 If `api.` is wanted for creators later, the honest move is renaming the GATEWAY's host and freeing the
 name - a token-identity change deserving its own task, never a line item inside a database refactor.
+
+**16. THE MIGRATION SERVICE IS REACHABLE FROM OUTSIDE.** "the migrate-server is accessable to outers."
+This confirms decisions 11 and 14 against the objection raised on 2026-08-30 and settles it.
+
+The deleted control forward described the opposite topology: migrate-server held a superuser
+provisioning DSN, bound loopback at the host boundary, and creators reached it through control. That
+is evidence that the isolation was deliberate. This decision overrides it knowingly. The service
+verifies each creator bearer and enforces its own policy and app ownership, so reachability is not
+the authorization boundary.
+
+Three protections die with the hop and must be replaced, not noted:
+
+- A PostgreSQL-backed per-IP limit on the endpoint that runs `CREATE SCHEMA` and `CREATE ROLE`.
+  Control's old admin quota was a burst of 30 with a steady rate of 60/minute; the two constructor
+  arguments were previously summarized incorrectly as simply "30/minute".
+- Source-IP propagation into the bearer verifier, Cedar context, and audit row. Behind the edge,
+  proxy trust must be correct or the platform shares one Caddy bucket, or trusts a spoofable header.
+- First-seen platform CLI grant materialization. Without its identity marker and exact default rows,
+  an operator has nothing to remove and the fallback entitlement persists until an unrelated
+  control request happens to materialize it.
+
+Exposure without those replacements is a security downgrade, not a routing refactor.
 
 ## 2026-08-29
 

@@ -16,7 +16,7 @@ use crate::oidc::auth_request::AuthRequest;
 use crate::oidc::authorization_code::{
     prompt_requests_login, return_to_after_prompt_interaction,
 };
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
@@ -434,7 +434,7 @@ pub async fn post_2fa(
 
     // 4. Rate-limit the verify (per-user).
     let rl_key = format!("totp:verify:{}", user.id);
-    match ratelimit::consume(db.as_ref(), &rl_key, Bucket::TOTP_VERIFY).await {
+    match rate_limit::consume(db.as_ref(), &rl_key, Quota::TOTP_VERIFY).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
             return render_2fa_error(

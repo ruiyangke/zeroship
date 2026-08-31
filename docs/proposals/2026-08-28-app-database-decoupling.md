@@ -636,16 +636,15 @@ creators it is, and no role fixes it.
   2026-08-30). No new config key, flag or environment variable: `control` already resolves through a
   four-step precedence with printed provenance, and a second endpoint is a second thing to omit.
 
-  This closes a gap the other decisions left open. **The migration service is not exposed at the edge
-  at all today** - `deploy/ops/Caddyfile` has blocks for `auth`, `control` and the gateway and none
-  for `migrate-server`, which `deploy/compose/docker-compose.yml:450-457` publishes on
-  `127.0.0.1:9091` as a loopback for operator tunnelling. Deleting the forward without this leaves the
-  CLI with no route, not merely no URL.
+  This closes a gap the other decisions left open. The migration service has no separate public host,
+  and its raw port remains loopback-only for operator tunnelling. The tracked edge now exposes its
+  creator routes by splitting the control host before the control catch-all. Deleting the forward
+  without that split would leave the CLI with no route, not merely no URL.
 
   ```
   http://control.{$ZEROSHIP_DOMAIN} {
-  	handle /v1/databases/* { reverse_proxy migrate-server:9091 }
-  	handle                 { reverse_proxy control:9090 }
+    handle /v1/*           { reverse_proxy migrate-server:9091 }
+    handle                 { reverse_proxy control:9090 }
   }
   ```
 
@@ -660,7 +659,7 @@ creators it is, and no role fixes it.
 
   Two costs, taken deliberately: the edge config becomes load-bearing (a missing rule yields control's
   404, and an apply that reaches nothing can still write a ledger row - see the empty-apply path), and
-  the control plane must never define a `/v1/databases/*` route. The second gets a gate arm rather
+  the control plane must never define a `/v1/*` route. The second gets a gate arm rather
   than a convention. `Caddyfile` is the LOCAL edge; a production ingress needs the same rule.
 
   **THIS REPLACES A TWO-ROUTE SPLIT** in which a creator-facing

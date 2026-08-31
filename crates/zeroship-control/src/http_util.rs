@@ -5,9 +5,7 @@
 //! code 1:1, which a critic flagged as a drift hazard.
 
 use ntex::web::{self, HttpRequest};
-use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
-
-use crate::rate_limit::Quota;
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 
 const UNRESOLVED_CLIENT_IDENTITY: &str = "unresolved";
 
@@ -57,11 +55,7 @@ pub async fn rate_limit(
     let identity = source_ip(req, trust_proxy)
         .unwrap_or_else(|| UNRESOLVED_CLIENT_IDENTITY.to_string());
     let key = format!("control:{namespace}:ip:{identity}");
-    let bucket = Bucket {
-        capacity: quota.capacity,
-        refill_per_sec: quota.refill_per_sec,
-    };
-    match ratelimit::consume_or_throttle(db, &key, bucket).await {
+    match rate_limit::consume(db, &key, quota).await {
         Ok(RateLimitDecision::Allowed) => None,
         Ok(RateLimitDecision::Throttled(limited)) => Some(
             web::HttpResponse::TooManyRequests()

@@ -38,7 +38,7 @@ fn test_cfg(db_url: &str) -> AuthConfig {
 /// `headers::client_ip` reads THAT HEADER ALONE - `TestRequest::peer_addr` does
 /// not reach `req.peer_addr()`, so a request without the header resolves to
 /// `0.0.0.0` and lands in one bucket shared by every request, every test and
-/// every concurrent run. `Bucket::RESET_IP` is 30 tokens refilling at 30/hour,
+/// every concurrent run. `Quota::RESET_IP` is 30 tokens refilling at 30/hour,
 /// so that bucket does not recover inside a test session: once two runs have
 /// drained it, every later run on the same database keeps taking 429 where
 /// these tests assert 302, for an hour, whether or not anything is running

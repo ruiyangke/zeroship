@@ -44,7 +44,6 @@ pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
 pub mod proration;
-pub mod rate_limit;
 pub mod refund;
 pub mod registry;
 pub mod reserved_names;
@@ -96,9 +95,9 @@ use zeroship_bundle::{BlobStore, WorkflowBlobStore};
 use zeroship_stream::{StreamConfig, StreamError, StreamRegistry, StreamTransport};
 
 pub use env_store::EnvStore;
-pub use rate_limit::{Quota, RateLimiter};
 pub use registry::Registry;
 pub use stripe_store::StripeStore;
+pub use zeroship_authn::rate_limit::{Quota, RateLimiter};
 
 // Trusted first-party OAuth client resolution lives in `zeroship-core` so it
 // can be shared without a control → core cycle. Re-exported here so control's

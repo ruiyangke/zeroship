@@ -276,6 +276,10 @@ pub struct MigrateServerSection {
     pub tmp_dir: Option<std::path::PathBuf>,
     /// Active managed ceiling version stamped into sealed profiles.
     pub policy_ceiling_version: Option<u64>,
+    /// Maximum mutating requests one source IP may burst.
+    pub mutation_rate_limit_burst: Option<u32>,
+    /// Sustained mutating requests per minute for one source IP.
+    pub mutation_rate_limit_per_minute: Option<u32>,
 }
 
 /// Platform-schema migrate one-shot values supplied by the overlay.
@@ -1069,6 +1073,8 @@ max_isolates = 200
 
 [migrate_server]
 port = 9091
+mutation_rate_limit_burst = 2
+mutation_rate_limit_per_minute = 3
 
 [workflow_scheduler]
 tick_secs = 1
@@ -1085,6 +1091,11 @@ relay_smtp_tls = "starttls"
         assert_eq!(config.gateway.db_pool_size, Some(16));
         assert_eq!(config.worker.threads, Some(4));
         assert_eq!(config.migrate_server.port, Some(9091));
+        assert_eq!(config.migrate_server.mutation_rate_limit_burst, Some(2));
+        assert_eq!(
+            config.migrate_server.mutation_rate_limit_per_minute,
+            Some(3)
+        );
         assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
         assert_eq!(config.auth.addr.as_deref(), Some("0.0.0.0:9092"));
         assert_eq!(config.auth.provider.as_deref(), Some("native"));

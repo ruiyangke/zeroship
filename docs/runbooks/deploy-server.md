@@ -29,7 +29,7 @@ Cloudflare (terminates TLS)
        -> gateway:8000         creator apps, {app}.<domain>
        -> auth:9092            OIDC provider, auth.<domain>
        -> control:9090         control.<domain> catch-all
-       -> migrate-server:9091  control.<domain>/v1/databases/*
+       -> migrate-server:9091  control.<domain>/v1/*
   host:9090 -> control:9090    optional LOOPBACK override, SSH fallback
   host:9091 -> migrate-server  LOOPBACK publish, operator access only
 ```
@@ -257,7 +257,7 @@ can reach it; every protected route still requires the generated control-key or
 creator authentication. If an operator also needs a raw port for an SSH tunnel,
 bind it to loopback with a **server-only** override:
 
-`control.<domain>` has two edge-owned upstreams. Route `/v1/databases/*`
+`control.<domain>` has two edge-owned upstreams. Route `/v1/*`
 directly to `zeroship-migrate-server` on port 9091, then route every other path
 to `zeroship-control` on port 9090. The tracked Compose deployment implements
 this ordering in `deploy/ops/Caddyfile`. Kubernetes Ingress, ALB, nginx,
@@ -266,10 +266,10 @@ rule before its control catch-all. Do not proxy or redirect migrations through
 control: `zeroship migrate` reuses the control URL, but the edge selects
 migrate-server directly.
 
-This rule becomes reachable with Part B's migration route re-key. In this Part
-A tree the CLI and service still use `/v1/apps/{app_id}`, so the request misses
-the new `/v1/databases/*` matcher and receives control's 404. Do not deploy Part
-A alone, and do not add a temporary `/v1/apps/*` compatibility route.
+The complete namespace matcher includes the current
+`/v1/apps/{app_id}/migrations/apply` route and remains valid if that route is
+later re-keyed by database id. Control must not declare a `/v1` route;
+`tests/deploy_scripts_gate.sh` enforces that collision boundary.
 
 Verify a migration through the public ingress and inspect both the HTTP response
 and `applied_versions`. A successful idempotent request can write a

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_core::{crypto, typed_id};
 use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
 use zeroship_plugin_workflow::errors::WorkflowError;
@@ -1706,11 +1706,11 @@ async fn consume_signal_rate_limit(
     app_id: Uuid,
 ) -> Result<(), WorkflowApiError> {
     let key = format!("control:workflow_signal:app:{app_id}");
-    let bucket = Bucket {
+    let quota = Quota {
         capacity: SIGNAL_RATE_LIMIT_CAPACITY,
         refill_per_sec: SIGNAL_RATE_LIMIT_REFILL_PER_SEC,
     };
-    match ratelimit::consume_or_throttle(&state.control_pg, &key, bucket).await {
+    match rate_limit::consume(&state.control_pg, &key, quota).await {
         Ok(RateLimitDecision::Allowed) => Ok(()),
         Ok(RateLimitDecision::Throttled(limited)) => Err(WorkflowApiError::RateLimited {
             retry_after_secs: limited.retry_after_secs,

@@ -438,10 +438,9 @@ services:
   # is crates/zeroship-migrate-server/src/main.rs - a service that was not here.
   #
   # LOOPBACK at the host boundary: nothing outside the compose network reaches
-  # the raw port. Part B moves the creator route under the control hostname's
-  # /v1/databases/* edge rule, which sends requests straight here without
-  # passing through control. Operators can still reach the raw port over an SSH
-  # tunnel.
+  # the raw port. The control hostname's /v1/* edge rule sends creator requests
+  # straight here without passing through control. Operators can still reach
+  # the raw port over an SSH tunnel.
   migrate-server:
     build:
       context: ../..
@@ -494,6 +493,13 @@ services:
       # through the same read_secret_file() the flag uses, so the owner-only
       # (0600) permission refusal applies here too.
       ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL:-urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn}
+      # This deployment has exactly one trusted hop: Caddy overwrites/appends
+      # the rightmost X-Forwarded-For address before calling this container.
+      # Do not copy this value to a topology where clients can dial the service.
+      ZEROSHIP_TRUST_PROXY: ${ZEROSHIP_TRUST_PROXY:-true}
+      # One apply plus one immediate retry, then one token every 20 seconds.
+      ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_BURST: ${ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_BURST:-2}
+      ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_PER_MINUTE: ${ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_PER_MINUTE:-3}
       # The SAME internal key every other service reads, under the SAME name.
       # It used to be spelled differently here, which is precisely the split
       # this migration removed.
@@ -881,8 +887,8 @@ services:
 
   # caddy - dev reverse proxy on :80 for the *.<domain> domain.
   # Routes auth/control/console/api + the {app}.<domain> catch-all to the right
-  # upstream (see deploy/ops/Caddyfile). The control host reserves
-  # /v1/databases/* for migrate-server before its control catch-all. console.*
+  # upstream (see deploy/ops/Caddyfile). The control host reserves /v1/* for
+  # migrate-server before its control catch-all. console.*
   # proxies to the GATEWAY (the console is a gateway-fronted app). The network
   # aliases below make auth/console/api resolve to Caddy from INSIDE the compose
   # network, so server-side OIDC (control/gateway verifying tokens, fetching

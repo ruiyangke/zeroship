@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,8 +6,8 @@ use async_trait::async_trait;
 use compio_postgres::Client;
 use ntex::http::StatusCode;
 use uuid::Uuid;
-use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
 use zeroship_authn::BearerVerifier;
+use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
@@ -34,6 +35,7 @@ pub trait Authenticator: Send + Sync {
         token: &str,
         app_id: Uuid,
         required_action: Action,
+        request_ip: Option<IpAddr>,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError>;
 }
@@ -66,7 +68,7 @@ impl ControlPlaneAuthenticator {
         required_scope: Scope,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
-        self.verify_action(token, app_id, required_scope.action(), request_id)
+        self.verify_action(token, app_id, required_scope.action(), None, request_id)
             .await
     }
 
@@ -90,7 +92,7 @@ impl ControlPlaneAuthenticator {
             action: required_action,
             resource,
             now,
-            request_ip: None,
+            request_ip: seed.request_ip,
             mfa_verified: seed.mfa_verified,
             mfa_age_seconds: seed.mfa_age_seconds,
             request_id: Some(seed.request_id.as_str()),
@@ -121,17 +123,44 @@ impl Authenticator for ControlPlaneAuthenticator {
         token: &str,
         app_id: Uuid,
         required_action: Action,
+        request_ip: Option<IpAddr>,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
-        let verified = self
+        let mut verified = self
             .bearer_verifier
-            .verify_bearer(token, None, request_id.to_owned())
+            .verify_bearer(token, request_ip, request_id.to_owned())
             .await
             .map_err(map_bearer_error)?;
+        if verified.seed_platform_cli_grants {
+            let materialization = zeroship_authn::platform_cli::materialize_default_grants(
+                self.control_pg.as_ref(),
+                verified.principal_id,
+            )
+            .await
+            .map_err(|error| {
+                AuthError::Infrastructure(format!(
+                    "platform CLI default-grant materialization failed: {error}"
+                ))
+            })?;
+            if materialization.requires_entitlement_refresh() {
+                verified = self
+                    .bearer_verifier
+                    .verify_bearer(token, request_ip, request_id.to_owned())
+                    .await
+                    .map_err(map_bearer_error)?;
+                if verified.seed_platform_cli_grants {
+                    return Err(AuthError::Infrastructure(
+                        "platform CLI entitlement remained unseeded after a raced materialization"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         let seed = VerifiedSeed {
             principal_id: verified.principal_id,
             token_policy: verified.token_policy,
             request_id: verified.request_id,
+            request_ip: verified.request_ip,
             mfa_verified: verified.mfa_verified,
             mfa_age_seconds: verified.mfa_age_seconds,
         };
@@ -144,6 +173,7 @@ struct VerifiedSeed {
     principal_id: Uuid,
     token_policy: Option<authz::Policy>,
     request_id: String,
+    request_ip: Option<IpAddr>,
     mfa_verified: bool,
     mfa_age_seconds: Option<u32>,
 }

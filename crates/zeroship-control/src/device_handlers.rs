@@ -1,4 +1,4 @@
-//! RFC 9728 protected-resource metadata, and the platform creator grant seed.
+//! RFC 9728 protected-resource metadata.
 //!
 //! Control used to own a SECOND RFC 8628 device flow here: `/api/device/auth`
 //! wrote `provider = 'platform'` rows, `/api/device/approve` bound a principal
@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::json;
 use zeroship_core::device_grant;
 
-use crate::{identity_bridge, AppState};
+use crate::AppState;
 
 /// RFC 9728 protected-resource metadata.
 ///
@@ -67,41 +67,4 @@ pub async fn protected_resource_metadata(state: State<Arc<AppState>>) -> web::Ht
             resource: state.expected_oauth_audience.clone(),
             authorization_servers: Vec::from([issuer.to_string()]),
         })
-}
-
-/// Seed a platform creator's default grants in their own committed
-/// transaction.
-///
-/// ONE caller: [`crate::authz_guard`], on control's first sight of a
-/// platform-native principal. That is the only moment control gets, and it is
-/// why this survived the device flow it used to sit inside - the deleted
-/// `/api/device/token` was the other caller, and was the only thing that had
-/// ever written a platform creator's grant rows. Deleting it without this
-/// running on the bearer path would 403 every first `zeroship deploy`.
-pub(crate) async fn ensure_platform_creator_grants_committed(
-    state: &AppState,
-    principal_id: uuid::Uuid,
-) -> Result<(), String> {
-    let mut conn = state
-        .registry
-        .conn()
-        .await
-        .map_err(|err| format!("creator grant DB connect: {err}"))?;
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(|err| format!("creator grant transaction begin: {err}"))?;
-    if let Err(err) = identity_bridge::ensure_platform_creator_grants(&tx, principal_id).await {
-        if let Err(rollback_err) = tx.rollback().await {
-            tracing::error!(
-                error = %rollback_err,
-                principal_id = %principal_id,
-                "control: creator grant transaction rollback failed"
-            );
-        }
-        return Err(err.to_string());
-    }
-    tx.commit()
-        .await
-        .map_err(|err| format!("creator grant transaction commit: {err}"))
 }
