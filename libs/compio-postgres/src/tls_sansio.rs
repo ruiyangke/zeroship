@@ -384,7 +384,10 @@ struct CloseNotifySent;
 
 impl std::fmt::Debug for CloseNotifySent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(CLOSE_NOTIFY_SENT_MESSAGE, formatter)
+        formatter
+            .debug_tuple("CloseNotifySent")
+            .field(&CLOSE_NOTIFY_SENT_MESSAGE)
+            .finish()
     }
 }
 
@@ -1103,6 +1106,20 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
+    #[test]
+    fn close_notify_sent_debug_names_its_type() {
+        let debug = format!("{CloseNotifySent:?}");
+
+        assert!(
+            debug.starts_with("CloseNotifySent("),
+            "close-notify error Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("close_notify"),
+            "close-notify error Debug lost its diagnostic message: {debug}"
+        );
+    }
+
     /// A peer that accepts every byte and answers every read with EOF.
     ///
     /// Enough to drive the handshake loop through one full iteration: the
@@ -1228,6 +1245,34 @@ mod tests {
         fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
             Ok((EofReadHalf, ShutdownCapture::default()))
         }
+    }
+
+    #[test]
+    fn tls_read_half_debug_names_its_type() {
+        let (client, _server) = handshaken_pair();
+        let read = TlsReadHalf {
+            reader: TlsReader::new(EofReadHalf, share(client)),
+        };
+
+        let debug = format!("{read:?}");
+
+        assert!(
+            debug.starts_with("TlsReadHalf {"),
+            "TLS read-half Debug did not name its type: {debug}"
+        );
+    }
+
+    #[test]
+    fn tls_write_half_debug_names_its_type() {
+        let (client, _server) = handshaken_pair();
+        let write = TlsWriteHalf::new(ShutdownCapture::default(), share(client));
+
+        let debug = format!("{write:?}");
+
+        assert!(
+            debug.starts_with("TlsWriteHalf {"),
+            "TLS write-half Debug did not name its type: {debug}"
+        );
     }
 
     impl AsyncWrite for ParkedWriter {
