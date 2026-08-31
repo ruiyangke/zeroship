@@ -93,8 +93,27 @@ End Users → Gateway          JWT, rate-limit, manifest dispatch, asset proxy, 
 ```
 PostgreSQL          One database, separate schemas (control, auth, per-app)
 Object Storage      Bundles, assets, user uploads (LocalFs in dev; S3/R2 in prod)
-DNS                 console.zeroship.ai · auth.zeroship.ai · {app}.zeroship.ai
+DNS                 control · auth · api · {app} .zeroship.ai   (console is claimed but DEAD)
 ```
+
+The authority is `deploy/ops/Caddyfile`, which declares five host blocks and nothing else:
+`auth` -> `auth:9092`, `control` -> `control:9090`, `console` -> a console **this image does not
+ship** (extracted in `8dbe4a8d4`), `api` -> `gateway:8000`, and `*` -> `gateway:8000` for creator-app
+subdomains. A name appearing there is one a creator app may not register, and
+`crates/zeroship-control/src/reserved_names.rs` is pinned to that file's sha256, so editing the edge
+without regenerating fails `cargo test -p zeroship-control` rather than silently leaving the reserved
+list describing an edge you replaced.
+
+**This line listed `console · auth · {app}` until 2026-08-30** - omitting `control`, omitting `api`,
+and leading with the one host that is dead. Read the Caddyfile, not this line, if the answer matters.
+
+**`api.<domain>` is the gateway, and it is not a management API.** It serves nine endpoints, of which
+exactly one is a proxy (`/__zeroship/internal/workflow-advance`, which forwards to a worker over the
+hash ring). Seven terminate at the gateway - `/healthz`, `/readyz`, and the browser identity surface
+under `/__zeroship/auth/*` that mints and re-signs session cookies - and the rest is app dispatch.
+That hostname is also the gateway's `iss` claim (`--public-url` default `https://api.zeroship.ai`),
+so it is a cryptographic identity, not just an address: repointing it moves end-user session issuance,
+not a route.
 
 ### How they connect
 
