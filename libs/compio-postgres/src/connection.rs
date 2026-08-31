@@ -4781,6 +4781,79 @@ mod tests {
         );
     }
 
+    #[compio::test]
+    async fn flush_retirement_terminal_arm_preserves_the_read_error() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the yielding-write fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let mut parameter_frame =
+            BytesMut::from(parameter_status_frame("client_encoding", "LATIN1").as_slice());
+        let frame_len = parameter_frame.len();
+        let parameter_status = Message::parse(&mut parameter_frame)
+            .expect("decode the scripted ParameterStatus")
+            .expect("the scripted ParameterStatus was incomplete");
+        let (mut read_tx, mut read_rx) = mpsc::channel(2);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Async {
+                    message: parameter_status,
+                    frame_len,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the encoding change");
+        read_tx
+            .try_send(ReadEvent::Terminal(Error::io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "scripted reset during retirement",
+            ))))
+            .expect("queue the terminal read behind the encoding change");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        let local = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(local.is_config());
+        let terminal = terminal
+            .expect("the retirement path discarded the terminal read event")
+            .expect("the retirement path downgraded the read error to channel closure");
+        assert_eq!(
+            terminal.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionReset)
+        );
+    }
+
     /// The serialized fallback used to stop on the unsupported ParameterStatus
     /// and drop the SQLSTATE for the second request which it had already
     /// flushed. A CommandComplete prefix gives the loop a dispatch point at

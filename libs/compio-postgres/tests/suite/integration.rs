@@ -7043,6 +7043,92 @@ async fn statement_cache_retries_a_statement_missing_after_deallocate_all() {
     );
 }
 
+/// COPY IN has its own pre-Bind stale-cache recovery arm. Losing that arm
+/// leaves the cached name invalid after `DEALLOCATE ALL`, even though ordinary
+/// query recovery still works.
+#[compio::test]
+async fn stale_cached_copy_in_reprepares_before_bind() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let table = common::test_object_name("cpg_stale_cached_copy_in");
+
+    client
+        .batch_execute(&format!("CREATE TEMP TABLE {table} (n int4 NOT NULL)"))
+        .await
+        .unwrap();
+    let sql = format!("COPY {table} (n) FROM STDIN /* cpg_stale_cached_copy_in */");
+
+    let first = client.copy_in::<_, Bytes>(&sql).await.unwrap();
+    let mut first = Box::pin(first);
+    first
+        .as_mut()
+        .send(Bytes::from_static(b"17\n"))
+        .await
+        .unwrap();
+    assert_eq!(first.as_mut().finish().await.unwrap(), 1);
+    drop(first);
+    assert_eq!(prepared_statement_names(&client, &sql).await.len(), 1);
+
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, &sql).await.is_empty());
+
+    let retried = client.copy_in::<_, Bytes>(&sql).await.unwrap();
+    let mut retried = Box::pin(retried);
+    retried
+        .as_mut()
+        .send(Bytes::from_static(b"23\n"))
+        .await
+        .unwrap();
+    assert_eq!(retried.as_mut().finish().await.unwrap(), 1);
+    drop(retried);
+
+    assert_eq!(prepared_statement_names(&client, &sql).await.len(), 1);
+    assert_eq!(
+        simple_query_scalar_i32(&client, &format!("SELECT sum(n)::int4 FROM {table}"))
+            .await
+            .unwrap(),
+        40
+    );
+}
+
+/// COPY OUT has a separate pre-Bind stale-cache recovery arm from both query
+/// and COPY IN, so exercise its cached name independently.
+#[compio::test]
+async fn stale_cached_copy_out_reprepares_before_bind() {
+    use futures_util::StreamExt;
+
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "COPY (SELECT 73::int4) TO STDOUT /* cpg_stale_cached_copy_out */";
+    let first = client.copy_out(SQL).await.unwrap();
+    let mut first = Box::pin(first);
+    let mut first_body = Vec::new();
+    while let Some(chunk) = first.as_mut().next().await {
+        first_body.extend_from_slice(&chunk.unwrap());
+    }
+    drop(first);
+    assert_eq!(first_body, b"73\n");
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    let retried = client.copy_out(SQL).await.unwrap();
+    let mut retried = Box::pin(retried);
+    let mut retried_body = Vec::new();
+    while let Some(chunk) = retried.as_mut().next().await {
+        retried_body.extend_from_slice(&chunk.unwrap());
+    }
+    drop(retried);
+
+    assert_eq!(retried_body, b"73\n");
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
 /// `DISCARD ALL` includes `DEALLOCATE ALL`, so it invalidates protocol-level
 /// prepared names just as directly as the narrower command. The next cached
 /// use must recover on the same session.

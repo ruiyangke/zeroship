@@ -19,6 +19,8 @@
 //! resolved against the wrong relation.
 
 use compio_postgres::Client;
+use compio_postgres::types::Type;
+use std::num::NonZeroUsize;
 
 #[allow(unused_imports)]
 use crate::common;
@@ -38,6 +40,48 @@ async fn connect_client(url: &str) -> Client {
     })
     .detach();
     client
+}
+
+async fn connect_client_with_probationary_statements(url: &str) -> Client {
+    let mut config: compio_postgres::Config = url.parse().expect("parse the test URL");
+    config.statement_cache_capacity(1);
+    config.statement_cache_execution_threshold(
+        NonZeroUsize::new(2).expect("the test threshold is nonzero"),
+    );
+    let (client, connection) = config
+        .connect(common::suite_tls())
+        .await
+        .expect("connect to PostgreSQL");
+    compio::runtime::spawn(async move {
+        if let Err(error) = connection.run().await {
+            eprintln!("connection error: {error}");
+        }
+    })
+    .detach();
+    client
+}
+
+async fn create_probe_table(client: &Client, prefix: &str) -> (String, u32) {
+    let table = common::test_object_name(prefix);
+    client
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table} (id int4); \
+             INSERT INTO {table} VALUES (17)"
+        ))
+        .await
+        .expect("create and populate the metadata probe table");
+
+    let oid_row = client
+        .query_one("SELECT (($1::text)::regclass)::oid::int8", &[&table])
+        .await
+        .expect("resolve the probe table's catalog oid");
+    let oid = oid_row.get::<_, i64>(0);
+    let oid = u32::try_from(oid).expect("PostgreSQL oids fit in u32");
+    assert_ne!(
+        oid, 0,
+        "a live relation never uses the no-relation sentinel"
+    );
+    (table, oid)
 }
 
 /// A real table column carries the catalog's own oid, attnum and typmod.
@@ -184,4 +228,72 @@ async fn a_system_column_reports_a_negative_attribute_number() {
         .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
         .await
         .ok();
+}
+
+/// A raw-string transaction bind describes its unnamed portal in `bind.rs`.
+#[compio::test]
+async fn bind_unnamed_portal_row_description_preserves_table_oid() {
+    let url = test_url();
+    let mut client = connect_client_with_probationary_statements(&url).await;
+    let (table, expected_oid) = create_probe_table(&client, "cpg_colmeta_bind").await;
+    let sql = format!("SELECT id FROM {table}");
+
+    let transaction = client.transaction().await.expect("start a transaction");
+    let portal = transaction
+        .bind(sql.as_str(), &[])
+        .await
+        .expect("bind the first, still-unnamed execution");
+    let rows = transaction
+        .query_portal(&portal, 0)
+        .await
+        .expect("read the portal");
+
+    assert_eq!(rows.len(), 1, "the probe table carries one row");
+    assert_eq!(
+        rows[0].columns()[0].table_oid(),
+        Some(expected_oid),
+        "the unnamed portal's descriptor must retain its source relation"
+    );
+
+    drop(portal);
+    transaction.rollback().await.expect("roll back the probe");
+}
+
+/// `query_text_params` constructs its own statement from a portal descriptor.
+#[compio::test]
+async fn query_text_params_row_description_preserves_table_oid() {
+    let client = connect_client(&test_url()).await;
+    let (table, expected_oid) = create_probe_table(&client, "cpg_colmeta_text").await;
+    let rows = client
+        .query_text_params(&format!("SELECT id FROM {table} WHERE id = $1"), &["17"])
+        .await
+        .expect("run the text-parameter query");
+
+    assert_eq!(rows.len(), 1, "the parameter must select the probe row");
+    assert_eq!(
+        rows[0].columns()[0].table_oid(),
+        Some(expected_oid),
+        "query_text_params must retain its RowDescription's source relation"
+    );
+}
+
+/// `query_typed` has a separate duplicated RowDescription construction loop.
+#[compio::test]
+async fn query_typed_row_description_preserves_table_oid() {
+    let client = connect_client(&test_url()).await;
+    let (table, expected_oid) = create_probe_table(&client, "cpg_colmeta_typed").await;
+    let rows = client
+        .query_typed(
+            &format!("SELECT id FROM {table} WHERE id = $1"),
+            &[(&17_i32, Type::INT4)],
+        )
+        .await
+        .expect("run the typed query");
+
+    assert_eq!(rows.len(), 1, "the parameter must select the probe row");
+    assert_eq!(
+        rows[0].columns()[0].table_oid(),
+        Some(expected_oid),
+        "query_typed must retain its RowDescription's source relation"
+    );
 }
