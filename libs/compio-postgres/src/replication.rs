@@ -4475,6 +4475,102 @@ mod tests {
         }
     }
 
+    /// A real socket whose first write fails locally while its read direction
+    /// remains live. `ConnectionRelease` duplicates this socket before it is
+    /// wrapped, so a test can distinguish logical poison from physical
+    /// shutdown while the owning replication object is still alive.
+    struct ReleaseBackedWriteFailure {
+        socket: compio::net::TcpStream,
+        failed: bool,
+    }
+
+    impl compio::io::AsyncRead for ReleaseBackedWriteFailure {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            self.socket.read(buf).await
+        }
+    }
+
+    impl compio::io::AsyncWrite for ReleaseBackedWriteFailure {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            if !self.failed {
+                self.failed = true;
+                return compio::buf::BufResult(
+                    Err(std::io::Error::other("scripted socket write failure")),
+                    buf,
+                );
+            }
+            self.socket.write(buf).await
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.socket.flush().await
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.socket.shutdown().await
+        }
+    }
+
+    async fn release_backed_failing_transport() -> (
+        ReleaseBackedWriteFailure,
+        ConnectionRelease,
+        compio::net::TcpStream,
+    ) {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind release-backed writer listener");
+        let address = listener
+            .local_addr()
+            .expect("release-backed writer address");
+        let accepting = compio::runtime::spawn(async move {
+            listener
+                .accept()
+                .await
+                .expect("accept release-backed writer peer")
+                .0
+        });
+        let socket = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect release-backed writer");
+        let peer = accepting.await.expect("accept release-backed writer task");
+        let release =
+            ConnectionRelease::dup_of(&socket).expect("duplicate release-backed writer socket");
+        (
+            ReleaseBackedWriteFailure {
+                socket,
+                failed: false,
+            },
+            release,
+            peer,
+        )
+    }
+
+    async fn assert_release_shut_down_peer(peer: &mut compio::net::TcpStream, arm: &str) {
+        let compio::buf::BufResult(result, _) =
+            compio::time::timeout(std::time::Duration::from_secs(1), peer.read(vec![0u8; 1]))
+                .await
+                .unwrap_or_else(|_| panic!("{arm} left its release-backed peer open"));
+        match result {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                ) => {}
+            Ok(read) => panic!("{arm} sent {read} byte(s) instead of shutting down"),
+            Err(error) => panic!("{arm} peer shutdown produced {error}"),
+        }
+    }
+
     /// CopyBoth remains an ordinary protocol response boundary for
     /// asynchronous backend messages. A status change or notification can be
     /// coalesced ahead of the ErrorResponse which actually ends replication;
@@ -4507,6 +4603,94 @@ mod tests {
             error.code().map(crate::error::SqlState::code),
             Some("55000"),
             "replication stream discarded SQLSTATE 55000 behind asynchronous messages: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn identify_system_write_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let mut connection = ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedWriteFailure>::Raw(
+                transport,
+            )),
+            parameters: HashMap::new(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+
+        let error = connection
+            .identify_system()
+            .await
+            .expect_err("the scripted IDENTIFY_SYSTEM write succeeded");
+        assert!(!error.is_cancelled(), "the first failure must be the write");
+        assert_release_shut_down_peer(&mut peer, "IDENTIFY_SYSTEM write failure").await;
+        assert!(
+            connection.in_flight.poisoned,
+            "the connection was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn automatic_keepalive_write_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let mut stream = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedWriteFailure>::Raw(
+                transport,
+            )),
+            lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+        let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+        keepalive.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        keepalive.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        keepalive.push(1);
+        let compio::buf::BufResult(written, _) = peer
+            .write_all(startup_frame(COPY_DATA_TAG, &keepalive))
+            .await;
+        written.expect("write reply-requesting keepalive");
+        peer.flush()
+            .await
+            .expect("flush reply-requesting keepalive");
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the automatic keepalive reply write succeeded");
+        assert!(!error.is_cancelled(), "the first failure must be the write");
+        assert_release_shut_down_peer(&mut peer, "automatic keepalive write failure").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn manual_status_write_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let mut stream = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedWriteFailure>::Raw(
+                transport,
+            )),
+            lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+
+        let error = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("the scripted manual status write succeeded");
+        assert!(!error.is_cancelled(), "the first failure must be the write");
+        assert_release_shut_down_peer(&mut peer, "manual status write failure").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
         );
     }
 
