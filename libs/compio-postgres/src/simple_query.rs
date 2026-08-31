@@ -367,6 +367,19 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                 while index < bytes.len() {
                     if bytes[index] == b'"' {
                         index += 1;
+                        // NO TEST CAN BIND THIS ESCAPE ARM, and that is a
+                        // property of the function rather than a gap. Deleting
+                        // it does not expose any byte: the first quote closes
+                        // this identifier and the second immediately opens the
+                        // next, so the same span stays inside quotes and the
+                        // COPY verdict is unchanged. Checked exhaustively over
+                        // every string of length <= 12 in {'"', 'x', ';'} -
+                        // 797,161 inputs, zero disagreements. It earns its
+                        // place by keeping identifier boundaries honest for a
+                        // future caller that wants them, not by changing what
+                        // THIS function returns, so a mutation report calling
+                        // it unbound is right and no test should be invented
+                        // to satisfy it.
                         if bytes.get(index) == Some(&b'"') {
                             index += 1;
                         } else {
