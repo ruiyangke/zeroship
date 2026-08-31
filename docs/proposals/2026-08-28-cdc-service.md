@@ -45,7 +45,7 @@ claim that must be repeated on 18.4 before implementation can rely on it.
 
 | claim | measured server | version sensitivity and decision |
 | --- | --- | --- |
-| Publication column lists remove excluded names and values; a new column defaults out (3.2-3.3) | both properties on 16.15; filtering independently repeated on 18.4 (`docs/proposals/2026-08-28-app-database-decoupling.md:903-918`), but not the new-column arm | Version-sensitive. Filtering has target evidence; 10.3's 18.4 new-column fixture must establish the default-out arm before implementation relies on it |
+| Publication column lists remove excluded names and values; a new column defaults out (3.2-3.3) | both properties on 16.15; filtering independently repeated on 18.4 (`docs/proposals/2026-08-28-app-database-decoupling.md:904-919`), but not the new-column arm | Version-sensitive. Filtering has target evidence; 10.3's 18.4 new-column fixture must establish the default-out arm before implementation relies on it |
 | Missing replica identity breaks UPDATE/DELETE with `42P10`; `REPLICA IDENTITY FULL` is incompatible; conflicting lists fail decode (3.5) | 18.4 | Version-sensitive. This is target evidence and remains a live-server acceptance test |
 | Publications are Datastore-scoped; slot namespace/budget is cluster-scoped; one logical slot decodes one Datastore (3.6, 6.1) | all three properties on 18.4 (`docs/architecture/data-system.md:394-413`); this proposal has no retained PostgreSQL-16 publication-locality transcript | Version-sensitive. No evidence supports a 16/18 split; the old one-slot-per-cluster claim was an inference from the wrong scope, not a PostgreSQL-16 measurement |
 | A publication member can be changed atomically with DROP/ADD; published columns are catalog dependencies; `attnames` follows renames (3.6) | 18.4 | Version-sensitive. This is target evidence |
@@ -238,7 +238,7 @@ happens, and why the service cannot read a descriptor it never receives, is 3.7.
 This is the load-bearing claim, and it is the reason one mechanism satisfies both
 halves of the inherited requirement. The PostgreSQL 18.4 filtering measurement
 is recorded in
-`docs/proposals/2026-08-28-app-database-decoupling.md:903-918`. The target
+`docs/proposals/2026-08-28-app-database-decoupling.md:904-919`. The target
 fixture is:
 
 ```sql
@@ -416,18 +416,18 @@ default and can be the active-stream ceiling first. Both are
 Datastore provisioning therefore reserves both capacities before declaring the
 Datastore CDC-ready and fails closed when either reservation is unavailable.
 
-**A surviving authority conflict is called out, not propagated.**
+**The decoupling conflicts are corrected; one authority conflict remains.**
 `docs/architecture/data-system.md:394-442` has the corrected measurements and
-one-slot-per-Datastore conclusion. Its later text at `:450-461` still says
-creating a Database creates a publication and reasons about adding that
-publication to one shared slot. Those statements cannot survive the corrected
-decode scope. Likewise,
-`docs/proposals/2026-08-28-app-database-decoupling.md:922-947` still chooses
-one slot per (Datastore, worker) and one publication per Database. This proposal
-chooses the implementable relay shape: creating a Database edits its
-Datastore's existing shared publication; creating a Datastore creates the
-publication, slot and stream. The two other documents need a separate
-correction before implementation begins.
+one-slot-per-Datastore conclusion. But `:391-400` still says one publication
+per Database, and `:450-461` says Database creation creates a publication and
+adds it to one shared slot. Those statements cannot survive the corrected
+decode scope. `docs/proposals/2026-08-28-app-database-decoupling.md:831-971`
+now preserves the measurements, says why their conclusion moved, and chooses
+one relay-owned slot, stream and shared publication per Datastore. It also
+replaces the app-keyed publication API rather than retaining or aliasing it.
+The architecture document still needs its separate publication correction
+before implementation begins. This proposal keeps the implementable relay
+shape: Database creation edits the Datastore's existing shared publication.
 
 The routing table in `docs/proposals/2026-08-26-runtime-db-binding-00-index.md:25`
 called this "one cluster publication" until 2026-08-30 and now reads "one shared
@@ -436,13 +436,13 @@ publication per Datastore". A publication is DATASTORE-scoped
 design but a contradiction of it - and the summary line is what a reader meets
 first.
 
-The same proposal also says the schema epoch never enters WAL and any logical
-marker is forgeable
-(`docs/proposals/2026-08-28-app-database-decoupling.md:966-971`). Section 8's
-PostgreSQL-18 ACL and migration-service-only emitter deliberately supersede both
-statements. That document must be corrected with the publication claims; leaving
-both readings in the design set would make the bracket impossible to implement
-consistently.
+The decoupling proposal now preserves the default-PUBLIC ACL measurement and adopts section 8's
+PostgreSQL-18 revokes; worker, app and relay roles get no grant, and the migration service emits the marker
+(`docs/proposals/2026-08-28-app-database-decoupling.md:965-971`). It states
+separately that this target marker and relay are designed, not built. The old
+claims that the schema epoch never enters WAL and every logical marker is
+forgeable are no longer live alternatives, so the design set has one bracket
+and one marker-authority rule.
 
 The shared objects are keyed by the typed `DatastoreId`, never by `app_id`:
 
