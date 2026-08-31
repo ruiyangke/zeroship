@@ -59,6 +59,12 @@ async fn unsupported_copy_out_is_refused_by_name_at_every_public_entry_point() {
         assert_named_copy_out_refusal("batch_execute", error);
 
         let error = client
+            .batch_execute_reporting_tag(&copy)
+            .await
+            .expect_err("batch_execute_reporting_tag accepted COPY TO STDOUT");
+        assert_named_copy_out_refusal("batch_execute_reporting_tag", error);
+
+        let error = client
             .simple_query(&copy)
             .await
             .expect_err("simple_query accepted COPY TO STDOUT");
