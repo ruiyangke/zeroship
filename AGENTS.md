@@ -464,7 +464,7 @@ cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
 # THAT SET IS STILL NOT ENOUGH WHEN A CHANGE TOUCHES THE TYPE CODECS. The
 # `with-*` family gates TESTS as well as impls, and a gated-out test is not
 # reported as skipped -- it simply is not in the binary. Measured 2026-08-27 at
-# 6302fdee0: `tests/suite/temporal_edge_values.rs` declares 6 cases behind
+# 6302fdee0: `libs/compio-postgres/tests/suite/temporal_edge_values.rs` declares 6 cases behind
 # `with-chrono-0_4` / `with-time-0_3`; the set above compiled 3 of them and
 # printed a clean green, and the three it dropped were exactly the ones proving
 # that PostgreSQL `time '24:00'` is refused rather than silently aliased to
