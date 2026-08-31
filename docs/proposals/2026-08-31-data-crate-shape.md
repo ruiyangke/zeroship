@@ -47,17 +47,51 @@ reader is likely to arrive with.
 ```
 libs/compio-postgres            driver, unchanged
 
-zeroship-data-query-ir          the typed query IR. ZERO dependencies, and that stays load-bearing.
-                                (today's zeroship-data-plan, renamed)
-zeroship-plugin-db              env.db surface: v8, crud, transaction, encryption, backends,
-                                broker, worker-side subscription lifecycle, MaskKind.
-                                KEEPS ITS NAME.
-zeroship-data-cdc               relay-side ONLY: WAL stream, publication and slot authority,
-                                reaper. NOT the broker, NOT cdc_lifecycle.
+zeroship-query-plan             the typed query grammar. ZERO dependencies, and that stays
+                                load-bearing. (today's zeroship-data-plan, renamed)
+zeroship-plugin-db              env.db surface, worker tier. impl NativePlugin. KEEPS ITS NAME.
+zeroship-db-relay               service tier: WAL stream, publication and slot authority, reaper.
+                                Peer of zeroship-workflow-scheduler, named the same way.
+
+zeroship-core::change_event     the cross-process event type, beside usage_event and
+                                replication_names, which are already there.
 
 zeroship-migrate-*              the engine, dialect-complete, untouched
 zeroship-migrate-server         the migration service host
 ```
+
+**This block names crates. It does NOT enumerate modules** - that is Track B's table, and holding the
+inventory in two places is what produced two contradictions in two rounds.
+
+**The `zeroship-data-*` prefix is DROPPED - corrected 2026-08-31 by review.** Once `plugin-db` kept
+its name, the two remaining `data-*` members shared no production dependency edge, no type, no trait
+and no process. Measured: across `wal_consumer.rs`, `replication.rs` and `slot_reaper.rs` there is
+exactly ONE reference to any query-building symbol, `replication.rs:674`, and it is inside the
+`#[cfg(test)]` module opened at `:598`. Zero references to `DbPlan` in any of the three.
+
+Every other prefix in this workspace denotes something checkable. `plugin-*` means "implements
+`NativePlugin` (`zeroship-runtime/src/core/plugin.rs:36`) and is composed at
+`zeroship-worker/src/cache.rs:246`" - you can ask and get a yes. `migrate-*` names a
+dependency-closed stack: every member declares `zeroship-migrate-ir`. Ask the same of `data-*` and
+there is no predicate to ask. A prefix worn by two of roughly ten members of the data system, with
+the four largest excluded by this very plan, tells a reader "these two are related to each other" -
+the one thing that is false.
+
+**Two names follow from that, and both come from precedent already in the tree:**
+
+- **`zeroship-db-relay`, not `zeroship-data-cdc`.** The repo has spelled worker-tier plus service-tier
+  of one domain twice already: `zeroship-plugin-workflow` beside `zeroship-workflow-scheduler`
+  (whose `src/lib.rs:1-10` describes "the standalone process is a deferred extraction target" - the
+  same situation Track B is in), and `zeroship-migrate-server`. `data-cdc` invents a third axis and
+  reads like a library when the thing is a process tier - exactly the distinction the "privilege
+  follows the PROCESS" invariant turns on.
+- **`zeroship-query-plan`, not `zeroship-data-query-ir`.** `-ir` is already taken in this workspace
+  and means the OPPOSITE: `zeroship-migrate-ir` is "the zeroship-migrate **wire contract**"
+  (`Cargo.toml:6`), whose `MigrationIr` derives `Serialize, Deserialize, JsonSchema` and whose first
+  dependency is serde. The data-plane crate is defined by forbidding exactly that. Naming it `-ir`
+  hands a reader that expectation and then bans it. "Plan" is the crate's own word (`DbPlan`), it
+  matches the repo's shape for shared leaves (`zeroship-core`, `zeroship-bundle`, `zeroship-schema`),
+  and it is a smaller rename than the one this plan proposed.
 
 `zeroship-schema` still DISSOLVES: its live query building is replaced by the IR rather than moved,
 its `MaskKind` and sentinel codec go to `plugin-db`, and its dead regions are deleted (below).
@@ -363,17 +397,32 @@ owns the `broker::Subscription` directly in its V8 [slot]" - with `:316` minting
 `broker::try_subscribe`. A registry whose handles live in V8 slots cannot leave the process that
 runs V8. That argument holds regardless of which side publishes.
 
-So the seam is one module lower:
+So the seam is one module lower. **THIS TABLE IS THE ONE MODULE INVENTORY. The target block at the
+top of this document does not enumerate modules, by rule** - see the correction below.
 
 | stays in the worker | moves to the relay |
 | --- | --- |
-| `broker.rs` (76 KB) - merges local writes with remote changes | `wal_consumer.rs` - decodes pgoutput |
-| | `replication.rs`, `cdc_lifecycle.rs` - slot and publication lifecycle |
-| | `slot_reaper.rs` - the privileged, destructive part |
+| `broker.rs` - the subscriber registry V8 holds handles into | `wal_consumer.rs` - decodes pgoutput |
+| `cdc_lifecycle.rs` - bridges V8 subscription leases to one consumer per worker process (`:1`, `:69`) | `replication.rs` - slot and publication lifecycle, **rewritten not moved** (below) |
+| `replication_ops.rs` - V8 bridge for replication diagnostics; calls `replication::watchdog_query` (`:32`), which moves | `slot_reaper.rs` - the privileged, destructive part |
+| `change_stream_pg.rs` - "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" (`:1-4`); `backend/mod.rs` names it 7 times | |
 
-Extract those three-and-a-bit into `zeroship-data-cdc`, hosted by a process that never executes
-creator code - plausibly the relay that #5 builds, which would make the extraction its prerequisite
-rather than a separate job.
+**Corrected 2026-08-31 by review. Three defects in the previous version of this table:**
+
+- **`cdc_lifecycle.rs` was listed as moving while the target block said it stays.** Both sentences
+  were mine. The tree settles it against the table: it is worker-side, and the V8 wrapper owns the
+  lease it hands out (`subscription.rs:42`).
+- **`change_stream_pg.rs` (315 lines) and `replication_ops.rs` (47 lines) were unassigned entirely**,
+  and the boundary forces both. Moving `wal_consumer.rs` orphans `cdc_lifecycle`'s handle type
+  (`cdc_lifecycle.rs:22` imports `WalConsumerHandle` from `change_stream_pg`); moving `replication.rs`
+  orphans a V8 dispatch. Both become new cross-process calls this plan had not priced.
+- **`replication.rs` cannot be extracted, only rewritten.** It is keyed per app per worker (`:1`,
+  `:96`), while the settled target is one slot and publication per Datastore with relay fan-out
+  (`2026-08-28-app-database-decoupling.md:955`). Moving the file would move the wrong data model.
+
+Extract the right-hand column into the relay crate, hosted by a process that never executes creator
+code - plausibly the relay that #5 builds, which would make the extraction its prerequisite rather
+than a separate job.
 
 Hazards this track inherits, all measured:
 
