@@ -1,3 +1,11 @@
+// Same layout-query overflow as `bin/dev_provision.rs`, and the SECOND binary in
+// this crate to hit it: "query depth increased by 130 when computing layout of
+// {async block ...main.rs:635}". `recursion_limit` is per crate ROOT and every
+// bin is its own root, so raising it on one bin does nothing for the others.
+// RELEASE ONLY - debug `cargo check` compiles both, which is how the whole
+// platform's release build stayed broken while every debug gate ran green.
+#![recursion_limit = "256"]
+
 //! zeroship-control — control plane binary. Thin wrapper over
 //! `zeroship_control` (the library crate).
 
