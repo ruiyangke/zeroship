@@ -76,7 +76,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
 | 40 Request COPY flags | 2 | UNRULED - the mutation HANGS rather than fails, see note | - |
-| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 UNBOUND** | the `CopyFrame(None)` reset at the multiplexed arm is uncovered |
+| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 EXECUTED BY NOTHING** - see open item | - |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
 | 45 Streaming COPY refusal | 2 | BOUND each | agent table |
@@ -144,6 +144,30 @@ targets, not seven.
 Worth copying: the two tests use distinct parameter sentinels (`[1101101]` and
 `[2202202]`), so a mutation's failure message names which copy was hit rather
 than only that something failed.
+
+### OPEN: the `CopyFrame(None)` COPY-state reset, and the ordering question behind it
+
+`panic!` at the `MuxEvent::CopyFrame(None)` arm's `copy_in = None` leaves all
+1453 tests green, so nothing executes it. Whether it is REACHABLE turns on one
+ordering question that must be answered before writing a test:
+
+The multiplexed loop resets the same four COPY variables in two places. The
+top-of-loop check fires when `copy_initial_flushed && copy_producer_finished`,
+and clears `copy_in`. The event producer only yields `CopyFrame(_)` while
+`copy_in` is `Some`:
+
+    if accept_copy
+        && let Some(rx) = copy_in.as_mut()
+        && let Poll::Ready(frame) = rx.poll_next_unpin(cx)
+
+So if `copy_producer_finished` latches BEFORE the receiver's stream yields
+`None`, the top-of-loop reset clears `copy_in` first and the `CopyFrame(None)`
+arm can never be entered - dead by construction, like the step C arm. If the
+stream ends FIRST, the arm is live and simply untested.
+
+Answer that before building a fixture. Do not write a test that asserts COPY
+state is cleared without checking WHICH reset cleared it - the other one runs on
+every loop iteration and would make such a test pass regardless.
 
 ### A mutation that HANGS is not a verdict either
 
