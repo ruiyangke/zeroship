@@ -22,7 +22,7 @@ is what makes this page go stale.
 | `...-sc4-dev-and-hmr-mechanism.md` | Dev tier and hot reload. The thinnest document in the set; essentially unreviewed |
 | `...-sc5-service-ownership.md` | `DbService`, process-wide cache, per-thread driver resources, the durable app incarnation |
 | `...-sc6-ceiling-read-contract.md` | The ceiling meet, joined reads, and the masking storage flip |
-| `2026-08-28-cdc-service.md` | The CDC relay: wire projection, one cluster publication, the worker/relay wire contract, leader election, failure behaviour |
+| `2026-08-28-cdc-service.md` | The CDC relay: wire projection, one shared publication per Datastore, the worker/relay wire contract, leader election, failure behaviour |
 | `2026-08-28-deploy-schema-precondition.md` | Refusing a deploy whose migrations have not applied - path 1 of decision 9 |
 | `2026-08-28-migration-record-consolidation.md` | Where migration records live, and which of today's four are deleted |
 | `2026-08-28-migrate-server-rename.md` | The migration service is one crate, `zeroship-migrate-server` |
