@@ -27,6 +27,73 @@ measurements age.
 
 ---
 
+## 2026-08-30
+
+### Three operator decisions that delete a design rather than add one
+
+Taken in conversation, in response to "why do we need the internal api for db migration?" - a question
+whose honest answer was that we did not, and that the argument the proposal gave for it did not hold.
+
+**11. The control plane does not forward migrations, and is not responsible for them.** "no forward,
+and the control service is not responsible for the migration."
+
+Today `crates/zeroship-control/src/migrations_api.rs` (214 lines) authorizes the caller for the app
+and re-issues the request to `zeroship-migrate-server`. That proxy is deleted; the CLI calls the
+migration service directly.
+
+**This costs almost nothing to remove, because the migration service never trusted control's
+authorization in the first place.** `crates/zeroship-migrate-server/src/api.rs:98` calls
+`verify_action(token, app_id, Action::AppsDeploy, ...)`, backed by `ControlPlaneAuthenticator`, which
+holds its own `control_pg` client, its own `PolicySet` and its own `BearerVerifier` (`auth.rs:42-46`)
+and reads the creator's bearer directly. The forward added a hop and an authorization that was
+already being done one service later. Removing it is deletion, not redesign.
+
+It also retires a hazard this page raised the same day: that an id-bearing "internal" route might one
+day accept the control key and hand platform authority to anyone holding a `dbs_...`. There is no
+internal route to confuse, and the surviving route already demands the caller's own bearer.
+
+**12. `zeroship-migrate-server` is re-keyed from app id to database id.** "we need to refactor the
+migrate-server as well to use the latest database id rather than app id."
+
+116 occurrences across seven files - `schema_apply_store.rs` (35), `policy.rs` (32), `apply.rs` (19),
+`auth.rs` (11), `api.rs` (9), `publication.rs` (6), `provisioning.rs` (4). Four routes move from
+`/v1/apps/{app_id}/migrations/{apply,plan,status,rollback}` to `/v1/databases/{database_id}/...`,
+though only `apply` is live; the other three are `stub_phase2`.
+
+**The count is not the work.** `auth.rs:79` builds `Resource::App { id }`, and that becomes
+`Resource::Database { id }` with the policy moving from "may deploy this app" to "owns this database".
+That is the change that needs care. The rest is mechanical.
+
+**13. A database is addressed BY ID, always. There is no `(project, name)` resolution.** "we should
+not use project + name to resolve the db, always use database id."
+
+**This REVERSES operator decision 6 of 2026-08-29**, which held that the database id is internal and
+never exposed to creators. That decision is withdrawn, and the two-route split it justified -
+`POST /v1/projects/{project}/databases/{name}/migrations/apply` for creators against
+`POST /v1/databases/{database_id}/migrations/apply` internally - dies with it. One route remains, and
+it takes the id.
+
+The reversal is coherent rather than a change of mind about the same facts. Decision 6 rested on "a
+route that takes the id in its URL is an exposure", which was an argument about the FORWARD: while the
+control plane stood in front, hiding the id was free. Decision 11 removes the thing in front, and with
+it the premise. What is left of the id-hiding case is ergonomic - keeping `dbs_...` out of error text
+and generated types - and that never justified a service boundary.
+
+It also matches the pattern already shipped for apps rather than inventing a second one:
+`schema/project-v1.json:33` defines `app` as "The deploy target's app id (uuid) or name. Absent on a
+fresh project: the first `zeroship deploy` auto-creates the app and appends its id here." A database
+now works the same way, in the same file.
+
+**Two open tasks are dissolved by this, not deferred:** keeping the database id out of every
+creator-facing surface, and the finding that "the database id is internal" was asserted rather than
+enforced across three leaking channels. Neither describes a defect any more; the id is public by
+decision.
+
+**What does NOT dissolve is ownership.** The authorization policy is still "principal may migrate N
+iff principal owns N", so the project/ownership row is still required - it was the ADDRESSING that
+depended on `(project, name)`, not the authorization. Read this decision as unblocking the route
+shape, never as unblocking authz.
+
 ## 2026-08-29
 
 ### Three more operator decisions, two of which fix defects no review round found
