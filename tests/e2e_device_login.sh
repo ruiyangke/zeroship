@@ -612,20 +612,24 @@ else
     -H "Authorization: Bearer $TOKEN" \
     "$MIGRATE_SERVER_URL/v1/databases/$APP_ID" 2>/dev/null || true)"
   case "$DB_CREATE_CODE" in
-    2??) pass "database creation succeeded on the saved login credential" ;;
-    *) fail "database creation failed on the login credential (HTTP ${DB_CREATE_CODE:-none}): $(head -c 300 "$DB_CREATE_BODY" 2>/dev/null)" ;;
-  esac
+    2??)
+      pass "database creation succeeded on the saved login credential"
 
-  MIG_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$APP_ID" --control="$MIGRATE_SERVER_URL" 2>&1)"
-  MIG_RC=$?
-  echo "  zeroship migrate (no --token; it used the saved login):"
-  echo "$MIG_OUT" | sed 's/^/    /'
-  if [ "$MIG_RC" = "0" ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG_OUT"; then
-    pass "zeroship migrate succeeded on the saved login credential"
-  else
-    fail "zeroship migrate failed on the login credential (rc=$MIG_RC): $MIG_OUT"
-    tail -20 "$WORK/migrated.log"
-  fi
+      MIG_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$APP_ID" --control="$MIGRATE_SERVER_URL" 2>&1)"
+      MIG_RC=$?
+      echo "  zeroship migrate (no --token; it used the saved login):"
+      echo "$MIG_OUT" | sed 's/^/    /'
+      if [ "$MIG_RC" = "0" ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG_OUT"; then
+        pass "zeroship migrate succeeded on the saved login credential"
+      else
+        fail "zeroship migrate failed on the login credential (rc=$MIG_RC): $MIG_OUT"
+        tail -20 "$WORK/migrated.log"
+      fi
+      ;;
+    *)
+      fail "database creation failed on the login credential (HTTP ${DB_CREATE_CODE:-none}): $(head -c 300 "$DB_CREATE_BODY" 2>/dev/null)"
+      ;;
+  esac
 
   # The negative half: a creator must not be able to migrate an app they do not
   # own.
