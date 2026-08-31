@@ -390,9 +390,18 @@ states the principle: "The authority is the worker's IDENTITY, not an env flag -
 even if someone exported `ZEROSHIP_DEV=1` into a prod worker."
 
 **A cargo feature keyed to the binary IS identity.** The worker went to real trouble to build a
-runtime refusal for a backend it has no reason to contain. Gating it removes 9,485 lines from the
-production binary and from the attack surface of the process that executes creator code, and it
-strengthens exactly the guard that already exists rather than duplicating it.
+runtime refusal for a backend it has no reason to contain. Gating it stops the production worker
+COMPILING the dev backend, and it strengthens exactly the guard that already exists rather than
+duplicating it.
+
+*Say it that way and no other.* An earlier version of this sentence said gating "removes 9,485 lines
+from the production binary and from the attack surface" - two overclaims in one clause. 9,485 is
+total source including test regions, and no linked-byte measurement has been taken; and the review
+that examined this found the runtime refusal is already TOTAL for the reachable surface, since a
+`SqliteBackend` is constructed on exactly one production path (`lib.rs:1108-1113`) which the worker
+refuses by DSN. So the gate removes DORMANT code. That is worth doing - defence in depth, and the
+compile-time fence cannot be misconfigured - but it is not a reduction in what an attacker can reach
+today.
 
 ### The split is right, and it is blocked by a measurable cycle
 
@@ -454,10 +463,20 @@ marker, not the production abstraction** ... nothing takes `dyn Backend`." Produ
 vendors, make the sub-traits driver-neutral, resolve the `v8_bridge` cycle, THEN invert the broker
 edge, THEN split. "Extract the backends" is not one move with one prerequisite.
 
-**The cheap win does not wait for any of it.** Feature-gating the SQLite backend inside today's
-`plugin-db` is a much smaller change than extraction and delivers the whole production-binary
-benefit. Do that first; it is also the forcing function that will surface every place the dev backend
-is reachable from a production path.
+**There is no cheap win here, and this paragraph used to claim one.** It said feature-gating the
+SQLite backend inside today's `plugin-db` "is a much smaller change than extraction and delivers the
+whole production-binary benefit. Do that first." Both halves are contradicted elsewhere in this same
+document and the contradiction stood for several revisions:
+
+- **Not much smaller.** The gate needs the same relocation the split needs - 63+ inbound sites, and
+  `BackendHandle` rehomed first. A module `#[cfg]` does not compile a PostgreSQL-only worker.
+- **The "production-binary benefit" is unmeasured.** 9,485 is total SQLite SOURCE including its own
+  test regions; how many linked bytes a feature-off build removes has never been measured.
+
+What survives is the security argument, which does not depend on either claim: the worker holds a
+runtime refusal for a backend it has no reason to contain, and a cargo feature keyed to the binary is
+the same authority applied earlier. Do it because the fence belongs at compile time, not because it
+is cheap.
 
 ## Measured starting point
 
