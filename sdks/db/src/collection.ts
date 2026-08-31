@@ -144,7 +144,6 @@ export class Collection<
   private _knownFields: Set<string>;
   private _toColumn: (field: string) => string;
   private _toField: (column: string) => string;
-  private _ready: Promise<void> | null;
   private _softDelete: boolean;
   private _versioning: boolean;
   /**
@@ -183,7 +182,6 @@ export class Collection<
     native: NativeDb,
     options?: {
       naming?: NamingStrategy;
-      ready?: Promise<void> | null;
       softDelete?: boolean;
       versioning?: boolean;
       indexes?: readonly NamedIndexSpec[];
@@ -193,7 +191,6 @@ export class Collection<
     this._schema = schema;
     this._native = native;
     this._nativeCol = null;
-    this._ready = options?.ready ?? null;
     this._softDelete = options?.softDelete ?? false;
     this._versioning = options?.versioning ?? false;
     this._idLoader = null;
@@ -249,14 +246,6 @@ export class Collection<
     return this as unknown as VectorGeoCollectionInternals<S>;
   }
 
-  /** Await table registration (DDL) before first operation. */
-  private async ensureReady(): Promise<void> {
-    if (this._ready) {
-      await this._ready;
-      this._ready = null;
-    }
-  }
-
   /**
    * Resolve the Collection v8_class instance for this collection name.
    * Cached on first call so subsequent CRUD ops are a single property
@@ -276,11 +265,6 @@ export class Collection<
     return this._nativeCol;
   }
 
-  /** @internal — used by `installSchema` to chain registrations sequentially. */
-  _setReady(p: Promise<void> | null): void {
-    this._ready = p;
-  }
-
   /** @internal — planted by `installSchema` so `with` can resolve siblings. */
   _setResolveCollection(
     fn: (name: string) => Collection<unknown> | undefined,
@@ -292,10 +276,9 @@ export class Collection<
     return loadRelations(this._relations(), rows, withSpec);
   }
 
-  /** Wraps an operation in ensureReady + try/catch → Result. */
+  /** Wraps an operation in try/catch and maps it to Result. */
   private async _run<T>(fn: () => Promise<T>): Promise<Result<T>> {
     try {
-      await this.ensureReady();
       return ok(await fn());
     } catch (e) {
       return err(toResultError(e));

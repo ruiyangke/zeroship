@@ -15,18 +15,16 @@
 // the microtask checkpoint `load_modules` invokes after
 // `module.evaluate()`).
 //
-// Schema-readiness MUST NOT block module evaluation. `installSchema`
+// Schema install MUST NOT block module evaluation. `installSchema`
 // plants the typed `Collection` wrappers on `env.db` SYNCHRONOUSLY (so
 // `default.{fetch,rpc}` and `env.db.<collection>.find(...)` are live the
-// instant evaluation completes); the async DDL chain (`registerModel`
-// advisory-lock + the mask-policy flush) resolves later. We stash that
-// chain on `globalThis.__zsSchemaReady` and the shared dispatcher
+// instant evaluation completes). The async mask-policy flush resolves
+// later. We stash that promise on `globalThis.__zsSchemaReady` and the shared dispatcher
 // (`dispatcher.ts`) AWAITS it before running any procedure — mirroring
 // the dev path (`dev-entry.ts`, which gates on `schemaReady` per request).
 //
-// Why not `await` here: the dynamic `import("@zeroship/db/internal")`
-// settles synchronously, but the DDL chain does real async Postgres I/O.
-// A top-level `await` on it leaves the bootstrap module's evaluation
+// Why not `await` here: the mask-policy flush does real async database I/O.
+// A top-level `await` on it can leave the bootstrap module's evaluation
 // PENDING after `load_modules`' single microtask checkpoint (which cannot
 // drive the compio event loop). `default.fetch` / `default.rpc` would
 // then be unread (exports unpopulated) and every dispatch 404s with
@@ -42,7 +40,7 @@
 //
 // Errors from the synchronous `installSchema` call (validation, naming
 // collisions) re-raise — module evaluation rejects, the runtime surfaces
-// it as an init failure. DDL-chain errors surface on the first dispatch
+// it as an init failure. Mask-policy errors surface on the first dispatch
 // (the dispatcher awaits `__zsSchemaReady` and lets the rejection through
 // to the RPC error envelope) — same as the dev path.
 
@@ -54,13 +52,12 @@ declare const globalThis: {
   __zs_env?: () => { db?: unknown } | undefined;
   // **P9 §8** — the capability-handle resolver the runtime installs.
   // `runtime-entry` is the sole legitimate caller: it resolves the
-  // `__platform` handle once here, hands it to `installSchema`, then
-  // DELETES this global so no creator handler (which runs only after
-  // module evaluation completes) can reach it.
+  // `__platform` handle for the mask-policy flush, then DELETES this
+  // global so no creator handler can reach it.
   __zsDbPlatform?: (db: unknown) => unknown;
-  // Schema-readiness promise — set here (the DDL + mask-flush chain) and
+  // Schema-readiness promise, set here for the mask-policy flush and
   // awaited by the shared dispatcher (`dispatcher.ts`) before running any
-  // procedure. Keeps the DDL off the module-eval critical path. (ISS-66)
+  // procedure. Keeps the policy flush off the module-eval critical path.
   __zsSchemaReady?: Promise<unknown>;
   // **Migration-first cutover (P5 S3)** — the bundled RuntimeSchemaDescriptor
   // v2 `{ version, collections }`, resolved from `manifest.runtime_descriptor`
@@ -139,46 +136,29 @@ if (hasDescriptor && schema && typeof schema === "object") {
       installSchema?: (
         schema: unknown,
         env: unknown,
-        options?: { platform?: unknown; descriptor?: unknown },
-      ) => { collections: unknown; ready: Promise<void> };
+        options?: { descriptor?: unknown },
+      ) => { collections: unknown };
     };
     if (typeof sdk.installSchema === "function") {
       // **P9 §8** — resolve the platform capability handle via the
       // runtime resolver, BEFORE we delete the global below. The handle
-      // is the carrier for `registerModel` / `setMaskPolicy` (those
-      // moved off `env.db`). Resolving once and passing it through
-      // `installSchema` + the mask flush means the rest of this entry
-      // works after the resolver is gone.
+      // carries `setMaskPolicy`, which moved off `env.db`; the local
+      // reference keeps the flush working after the resolver is gone.
       const plat = (typeof globalThis.__zsDbPlatform === "function" && envDb)
         ? globalThis.__zsDbPlatform(envDb)
         : undefined;
 
-      // `installSchema` plants the Collection wrappers SYNCHRONOUSLY; the
-      // returned `ready` is the async DDL chain. We do NOT await it here —
-      // awaiting would leave module evaluation pending and 404 the
-      // dispatch (see the header note). Build the full readiness chain
-      // (DDL → mask-policy flush) and stash it on `__zsSchemaReady`; the
-      // shared dispatcher awaits it before the first procedure runs.
-      const { ready } = sdk.installSchema(schema, envDb, {
-        platform: plat,
+      // `installSchema` plants the Collection wrappers synchronously.
+      sdk.installSchema(schema, envDb, {
         // **P5 S3** — the descriptor is the source of truth; _installSchemaInner
         // reads it and ignores the first arg for options.
         descriptor: hasDescriptor ? descriptor : undefined,
       });
 
+      // Keep only the asynchronous mask-policy flush off the module-eval
+      // critical path. The shared dispatcher awaits it before the first
+      // procedure runs.
       globalThis.__zsSchemaReady = (async () => {
-        // DDL (registerModel advisory-lock chain).
-        try {
-          await ready;
-        } catch (e) {
-          const err = e as { message?: string };
-          console.error(
-            "[zeroship] schema DDL failed:",
-            (err && err.message) ? err.message : String(e),
-          );
-          throw e;
-        }
-
         // **P5.5 PR 5** — flush the pending mask policy (declared via
         // `defineMaskPolicy()` at app top-level) through the native
         // `setMaskPolicy` op. Single shot at boot — re-declares after
@@ -200,8 +180,7 @@ if (hasDescriptor && schema && typeof schema === "object") {
           const setMaskPolicy = (plat as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
           if (typeof setMaskPolicy === "function") {
             // Call via `.call(plat, ...)` so the v8_class brand check
-            // sees the right receiver (mirrors the `registerModel`
-            // pattern in `installSchema`).
+            // sees the right receiver.
             await (setMaskPolicy as (
               this: typeof plat,
               p: Record<string, readonly string[]>,
@@ -214,8 +193,8 @@ if (hasDescriptor && schema && typeof schema === "object") {
 }
 
 // **P9 §8** — capability boundary close-out. The platform handle has
-// been handed to `installSchema` (and used for the mask flush); the
-// resolver global is no longer needed. Delete it so no creator `fetch` /
+// been used to start the mask flush; the resolver global is no longer
+// needed. Delete it so no creator `fetch` /
 // `rpc` handler — which runs only AFTER this module evaluation
 // completes — can call `globalThis.__zsDbPlatform(env.db)` to fish the
 // handle out of the private slot. The handle itself remains live (held

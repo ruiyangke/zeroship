@@ -11,20 +11,13 @@
  *    re-installs without throwing.
  *
  * 2. A schema name colliding with the native v8_class method surface (e.g.
- *    `collection`, `registerModel`, ...) throws — silently shadowing the
+ *    `collection`, `transaction`, ...) throws, silently shadowing the
  *    native `env.db.collection` mint would be worse than a clear boot-time
  *    error.
  *
- * 3. The returned `ready` promise resolves once the chained registerModel
- *    DDL has settled. A synchronous install failure (reserved-name
- *    collision) does NOT reject `ready` directly — the throw propagates to
- *    the caller — but the module-local prev-chain is updated so subsequent
- *    installs serialise behind it.
- *
  * Every case needs a runtime schema descriptor. Collections come from the
  * descriptor alone, so an install with none has nothing to apply these
- * mechanics to: the collision never fires, `ready` resolves trivially, and
- * the assertions below pass while testing nothing.
+ * mechanics to and the assertions below would pass while testing nothing.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -44,15 +37,11 @@ function install(schemas: Record<string, unknown>, native: NativeDb) {
 }
 
 /**
- * Build a permissive mock `native` whose `registerModel` resolves
- * immediately. The Collection wrappers SDK installs onto it are the
- * subject under test — we don't exercise CRUD here.
+ * Build a permissive mock native. The Collection wrappers SDK installs
+ * onto it are the subject under test; we don't exercise CRUD here.
  */
 function makeMockNative() {
   return {
-    async registerModel(_name: string, _schema: unknown, _indexes?: unknown): Promise<void> {
-      // no-op
-    },
     // Native `transaction(callback)` orchestrator stub.
     async transaction(cb: (raw: unknown) => unknown) {
       return cb(undefined);
@@ -113,7 +102,6 @@ describe("installSchema", () => {
     const native = makeMockNative();
     for (const reserved of [
       "collection",
-      "registerModel",
       "openSubscription",
       "migrations",
       "replication",
@@ -142,55 +130,6 @@ describe("installSchema", () => {
       (native as unknown as Record<string, unknown>).beginTransaction,
       "and it installs as an ordinary collection",
     );
-  });
-
-  test("returned `ready` resolves once registerModel has settled", async () => {
-    const native = makeMockNative();
-    const registered: string[] = [];
-    (native as unknown as { registerModel: unknown }).registerModel =
-      async (name: string) => { registered.push(name); };
-    const { ready } = install({ items: { name: t.string().required() } }, native);
-    assert.ok(ready instanceof Promise, "ready must be a Promise");
-    await ready;
-    assert.deepEqual(registered, ["items"], "ready settles after registerModel ran");
-  });
-
-  test("returned `ready` propagates DDL failures", async () => {
-    // A native whose `registerModel` rejects models the case of a
-    // schema-build failure (bad DDL, advisory-lock fight, ...). The
-    // promise the SDK pins on the Collection rejects on first CRUD,
-    // and the returned `ready` carries the same rejection so the
-    // bootstrap can surface it during module evaluation.
-    const native = {
-      async registerModel(_name: string): Promise<void> {
-        throw Object.assign(new Error("DDL bombed"), { code: "DDL_FAILED" });
-      },
-      async transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
-      collection(_name: string) { return { async find() { return []; } }; },
-    } as unknown as NativeDb;
-    const { ready } = install({ items: { name: t.string().required() } }, native);
-    let caught: unknown = null;
-    try { await ready; } catch (e) { caught = e; }
-    assert.ok(caught instanceof Error, "ready must reject on DDL failure");
-    assert.equal((caught as Error).message, "DDL bombed");
-  });
-
-  test("subsequent install after a sync failure still serialises behind the prior chain", async () => {
-    // A reserved-name collision throws synchronously from `installSchema`.
-    // The module-local prev-chain is updated to a rejected promise so
-    // the next install's `prev.catch(() => undefined).then(() => chain)`
-    // observes the rejection but doesn't propagate it — the new
-    // install's `ready` resolves on its own success.
-    const native = makeMockNative();
-    assert.throws(
-      () => install({ collection: { name: t.string().required() } }, native),
-      /collides with a native env.db method/,
-    );
-    // The next install on a fresh env handle must resolve cleanly —
-    // the prior install's rejection is swallowed in the chain.
-    const fresh = makeMockNative();
-    const { ready } = install({ items: { name: t.string().required() } }, fresh);
-    await ready;
   });
 
   test("re-entrant install throws install_in_flight", () => {

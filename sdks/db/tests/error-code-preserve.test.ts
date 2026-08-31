@@ -19,7 +19,6 @@ type AnyRec = Record<string, unknown>;
 
 function makeFailingNative(err: Error) {
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async insert(_doc: AnyRec) { throw err; },

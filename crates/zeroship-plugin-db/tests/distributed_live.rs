@@ -39,9 +39,7 @@ use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{
-    init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch,
-};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
@@ -50,12 +48,12 @@ const PROBE: &str = "distributed-live-cross-isolate-probe";
 /// **Why the fixture carries one at all.** The data plane's sole schema
 /// authority is this document: `crate::descriptor::collection_schema`
 /// (`crates/zeroship-plugin-db/src/descriptor.rs:66-80`) resolves a collection
-/// out of the per-isolate store or refuses it with `collection_not_declared`,
-/// and the only writer of that store is `register_model_dispatch`
-/// (`crates/zeroship-plugin-db/src/register_model/mod.rs:104-106`), which
-/// `installSchema` drives off `globalThis.__zsRuntimeDescriptor`
-/// (`sdks/bootstrap/src/runtime-entry.ts:77-167`). A deploy that ships no
-/// descriptor is a schema-less app and gets no `env.db` collections - see
+/// out of the thread-local, app-and-deploy-keyed store or refuses it with
+/// `collection_not_declared`.
+/// The runtime validates the deployed descriptor and asks `DbPlugin` to plant
+/// every collection entry natively before creator modules evaluate. A deploy
+/// that ships no descriptor is a schema-less app and gets no `env.db`
+/// collections - see
 /// `docs/reference/zeroship-standard.md`. This target used to reach `events`
 /// anyway, through a live-catalog fallback that no longer exists; shipping the
 /// descriptor is what makes it exercise the documented deploy shape instead.
@@ -298,9 +296,7 @@ async fn settle_response(outcome: FetchOutcome) -> Result<(u16, String), String>
                 }
             }
         }
-        FetchOutcome::Stream { .. } => {
-            Err("expected buffered response, got stream".to_string())
-        }
+        FetchOutcome::Stream { .. } => Err("expected buffered response, got stream".to_string()),
         FetchOutcome::WebSocketUpgrade { .. } => {
             Err("expected buffered response, got WebSocket upgrade".to_string())
         }
@@ -545,7 +541,9 @@ fn spawn_anchor(
             runtime.start_pump();
             let (status, body) = settle_response(arm).await?;
             if status != 200 {
-                return Err(format!("anchor readiness failed: status={status} body={body}"));
+                return Err(format!(
+                    "anchor readiness failed: status={status} body={body}"
+                ));
             }
             ready
                 .send(Ok(AnchorReady { thread_id }))
@@ -587,13 +585,7 @@ fn spawn_subscriber(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(
-            &url,
-            app_uuid,
-            &app_id,
-            &worker_id,
-            subscriber_modules(),
-        );
+        let runtime = runtime_for(&url, app_uuid, &app_id, &worker_id, subscriber_modules());
         let outcome = call(
             &runtime,
             "POST",
@@ -613,7 +605,9 @@ fn spawn_subscriber(
                     && value.eq_ignore_ascii_case("text/event-stream")
             });
             if !is_sse {
-                return Err(format!("stream RPC missing text/event-stream header: {headers:?}"));
+                return Err(format!(
+                    "stream RPC missing text/event-stream header: {headers:?}"
+                ));
             }
 
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -703,9 +697,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
         )
         .await
         .map_err(|error| format!("query replication slot: {error}"))?;
-    Ok(rows
-        .first()
-        .map(|row| row.get::<_, bool>("active")))
+    Ok(rows.first().map(|row| row.get::<_, bool>("active")))
 }
 
 /// Refuse to run the exercise unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`]
@@ -866,8 +858,8 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
     let worker_id = format!("distributed-live-worker-{app_uuid}");
     let slot = zeroship_plugin_db::replication::worker_slot_name(&app_id, &worker_id)
         .expect("valid worker slot name");
-    let publication = zeroship_plugin_db::replication::publication_name(&app_id)
-        .expect("valid publication name");
+    let publication =
+        zeroship_plugin_db::replication::publication_name(&app_id).expect("valid publication name");
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {
@@ -941,8 +933,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
             worker_id.clone(),
             initial_tx,
         ));
-        let (subscriber_thread, initial_body) =
-            receive(&initial_rx, "subscriber initial frame")?;
+        let (subscriber_thread, initial_body) = receive(&initial_rx, "subscriber initial frame")?;
         if initial_body.contains(PROBE) {
             return Err(format!(
                 "probe was present before the writer ran: {initial_body:?}"
@@ -962,16 +953,15 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
                 writer_result.status, writer_result.body
             ));
         }
-        let subscriber_result = join_role(
-            subscriber.take().expect("subscriber handle"),
-            "subscriber",
-        )
-        .map_err(|error| {
-            format!(
-                "writer status={} body={:?}; {error}",
-                writer_result.status, writer_result.body
-            )
-        })?;
+        let subscriber_result =
+            join_role(subscriber.take().expect("subscriber handle"), "subscriber").map_err(
+                |error| {
+                    format!(
+                        "writer status={} body={:?}; {error}",
+                        writer_result.status, writer_result.body
+                    )
+                },
+            )?;
         if subscriber_result.thread_id != subscriber_thread {
             return Err("subscriber thread identity changed".to_string());
         }
@@ -1082,7 +1072,11 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         app_delete_result.expect("app CDC deprovision"),
         "worker deprovision must leave the migration-owned publication in place"
     );
-    assert_eq!(writer_result.status, 200, "writer body={}", writer_result.body);
+    assert_eq!(
+        writer_result.status, 200,
+        "writer body={}",
+        writer_result.body
+    );
     assert!(body.contains(PROBE), "subscriber body={body:?}");
 
     assert_ne!(anchor_ready.thread_id, subscriber_thread);

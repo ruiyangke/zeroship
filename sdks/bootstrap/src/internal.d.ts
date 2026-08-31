@@ -38,28 +38,11 @@ interface ZeroshipReplication {
  * The platform-internal capability handle (P9 §8) — set on the native
  * `env.db` object under a V8 private symbol and reached only via the
  * runtime's `globalThis.__zsDbPlatform(db)` resolver. Holds the
- * callables that moved off `env.db` in P9 PR 4. Absent from the
- * published `@zeroship/types` surface; this is the framework-internal
- * shape `@zeroship/bootstrap`'s install path consumes.
+ * remaining platform-only callables. Absent from the published
+ * `@zeroship/types` surface; this is the framework-internal shape the
+ * bootstrap mask-policy path consumes.
  */
 interface ZeroshipDbPlatform {
-  /**
-   * Register a model — creates table and columns if not exist. The
-   * optional third argument carries named multi-column indexes declared
-   * via `schema(...).index(name, fields)`; each materialises as a
-   * CONCURRENTLY-built Postgres index named `"<collection>__<name>"`.
-   */
-  registerModel(
-    collection: string,
-    schema: ZeroshipDbSchema,
-    indexes?: ZeroshipDbNamedIndex[],
-    // H1 — the FULL declared-collection-name set (`Object.keys(schemas)`),
-    // passed on every per-collection call so the dev SQLite drop pass can
-    // tell a not-yet-registered sibling from a genuinely-removed collection.
-    // Inert on PG. Optional for raw/older callers.
-    declared?: readonly string[],
-  ): Promise<void>;
-
   /**
    * **P5.5 PR 5** — install the per-app mask policy. Called once at app
    * boot from `defineMaskPolicy()`'s pending-slot drain.

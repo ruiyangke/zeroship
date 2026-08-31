@@ -30,11 +30,11 @@ use std::rc::Rc;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::backend::SchemaIntrospect;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::Backend;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::backend::SchemaIntrospect;
+use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
 use crate::error::DbError;
 
 // `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
@@ -237,8 +237,8 @@ impl SqliteBackend {
     ///
     /// `path` names the control database file for the backend. Per-app
     /// files still live beside it as `zs-<app_id>.sqlite` and are bound into
-    /// the session by `attach_app_file`, which registerModel calls. It is
-    /// idempotent but NOT lazy: nothing attaches an app file on first use.
+    /// the session by `attach_app_file`. It is idempotent, and data-plane
+    /// entry points call it lazily before addressing an app table.
     ///
     /// If `path` points at an existing directory we place the control
     /// session at `<dir>/zs-control.sqlite`. `:memory:` opens the
@@ -249,7 +249,9 @@ impl SqliteBackend {
         let path = path.as_ref().to_path_buf();
         let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
             .await
-            .map_err(|_| DbError::internal("SqliteBackend::open: spawn_blocking task panicked"))??;
+            .map_err(|_| {
+                DbError::internal("SqliteBackend::open: spawn_blocking task panicked")
+            })??;
         Ok(Self::finish_open(opened))
     }
 
@@ -267,10 +269,7 @@ impl SqliteBackend {
     /// owns the `SqliteBackend` directly rather than wrapping it in a
     /// `BackendHandle::Sqlite(Rc<...>)`.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn pause_broker_for_tests(
-        &self,
-        app_id: &str,
-    ) -> crate::backend::BrokerPauseGuard {
+    pub fn pause_broker_for_tests(&self, app_id: &str) -> crate::backend::BrokerPauseGuard {
         crate::backend::BrokerPauseGuard::new(app_id.to_string())
     }
 
@@ -361,11 +360,7 @@ impl SqliteBackend {
         // `app_id` argument is currently unused inside the dispatcher
         // (per-event app_id derives from the hook's `db_name`
         // parameter — see `cdc::install` rustdoc), so we pass `None`.
-        let session = SqliteSession::open(
-            &session_path,
-            None,
-            Some(packet_tx),
-        )?;
+        let session = SqliteSession::open(&session_path, None, Some(packet_tx))?;
 
         Ok(OpenedBackend {
             session,
@@ -422,8 +417,7 @@ impl SqliteBackend {
         // pattern where the secret comes from `ZEROSHIP_SESSION_SECRET`.
         // Cache lives for the lifetime of the backend; clears on backend
         // drop.
-        let key_store =
-            crate::encryption::KeyStore::new(crate::context::isolate_key_source());
+        let key_store = crate::encryption::KeyStore::new(crate::context::isolate_key_source());
 
         Self {
             memory_db_dir,
@@ -464,11 +458,7 @@ impl SqliteBackend {
         let cdc_name_cache_invalidations = Rc::new(RefCell::new(HashSet::new()));
 
         let session_path = db_dir.join("zs-control.sqlite");
-        let session = Rc::new(SqliteSession::open(
-            &session_path,
-            None,
-            Some(packet_tx),
-        )?);
+        let session = Rc::new(SqliteSession::open(&session_path, None, Some(packet_tx))?);
 
         let _publisher = cdc::spawn_publisher(
             session.clone(),
@@ -482,8 +472,7 @@ impl SqliteBackend {
         // Same local-source shape as `new()`. The test helper diverges
         // only on the session-minter secret; the column-key store reads
         // the isolate's local source regardless.
-        let key_store =
-            crate::encryption::KeyStore::new(crate::context::isolate_key_source());
+        let key_store = crate::encryption::KeyStore::new(crate::context::isolate_key_source());
 
         Ok(Self {
             memory_db_dir: None,
@@ -781,9 +770,7 @@ impl SqliteBackend {
         // upstream anyway.
         match self.session.attach(app_id, &path_str).await {
             Ok(()) => {
-                self.app_id_cache
-                    .borrow_mut()
-                    .insert(app_id.to_string());
+                self.app_id_cache.borrow_mut().insert(app_id.to_string());
                 Ok(())
             }
             Err(e) => {
@@ -796,9 +783,7 @@ impl SqliteBackend {
                 // then return Ok. Other errors propagate verbatim.
                 let msg = format!("{e}");
                 if msg.contains("already in use") || msg.contains("already attached") {
-                    self.app_id_cache
-                        .borrow_mut()
-                        .insert(app_id.to_string());
+                    self.app_id_cache.borrow_mut().insert(app_id.to_string());
                     Ok(())
                 } else {
                     Err(e)
@@ -858,16 +843,12 @@ impl SchemaIntrospect for SqliteBackend {
         //    `"`s; PRAGMA / sqlite_master both accept the dotted form
         //    `"app_id".sqlite_master`.
         let q_app = self.quote_ident(app_id);
-        let tables_sql = format!(
-            "SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name"
-        );
+        let tables_sql =
+            format!("SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name");
         let table_rows = self.session.query(&tables_sql, &[]).await?;
         let mut user_tables: Vec<String> = Vec::with_capacity(table_rows.len());
         for row in &table_rows {
-            let name = row
-                .first()
-                .and_then(|c| c.clone())
-                .unwrap_or_default();
+            let name = row.first().and_then(|c| c.clone()).unwrap_or_default();
             // Filter out system + bookkeeping tables (plan §3.4).
             if name.starts_with("sqlite_") || name.starts_with("__zs_") {
                 continue;
@@ -925,14 +906,8 @@ impl SchemaIntrospect for SqliteBackend {
 
             let mut col_map = std::collections::HashMap::new();
             for row in &col_rows {
-                let name = row
-                    .get(1)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
-                let pg_type = row
-                    .get(2)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
+                let name = row.get(1).and_then(|c| c.clone()).unwrap_or_default();
+                let pg_type = row.get(2).and_then(|c| c.clone()).unwrap_or_default();
                 let not_null = row
                     .get(3)
                     .and_then(|c| c.as_deref())
@@ -979,19 +954,13 @@ impl SchemaIntrospect for SqliteBackend {
             let idx_rows = self.session.query(&index_list_sql, &[]).await?;
             let mut idx_map = std::collections::HashMap::new();
             for row in &idx_rows {
-                let idx_name = row
-                    .get(1)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
+                let idx_name = row.get(1).and_then(|c| c.clone()).unwrap_or_default();
                 let is_unique = row
                     .get(2)
                     .and_then(|c| c.as_deref())
                     .map(|s| s != "0")
                     .unwrap_or(false);
-                let origin = row
-                    .get(3)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
+                let origin = row.get(3).and_then(|c| c.clone()).unwrap_or_default();
                 if origin == "pk" {
                     // PG impl skips primary-key indexes; we mirror.
                     // The auto-generated `sqlite_autoindex_*` names
@@ -1009,10 +978,7 @@ impl SchemaIntrospect for SqliteBackend {
                 let info_rows = self.session.query(&index_info_sql, &[]).await?;
                 let mut columns = Vec::with_capacity(info_rows.len());
                 for info_row in &info_rows {
-                    let col_name = info_row
-                        .get(2)
-                        .and_then(|c| c.clone())
-                        .unwrap_or_default();
+                    let col_name = info_row.get(2).and_then(|c| c.clone()).unwrap_or_default();
                     columns.push(col_name);
                 }
 
@@ -1049,30 +1015,12 @@ impl SchemaIntrospect for SqliteBackend {
             let fk_rows = self.session.query(&fk_sql, &[]).await?;
             let mut fk_map = std::collections::HashMap::new();
             for row in &fk_rows {
-                let fk_id = row
-                    .first()
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
-                let target_table = row
-                    .get(2)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
-                let from_col = row
-                    .get(3)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
-                let target_column = row
-                    .get(4)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
-                let on_update = row
-                    .get(5)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
-                let on_delete = row
-                    .get(6)
-                    .and_then(|c| c.clone())
-                    .unwrap_or_default();
+                let fk_id = row.first().and_then(|c| c.clone()).unwrap_or_default();
+                let target_table = row.get(2).and_then(|c| c.clone()).unwrap_or_default();
+                let from_col = row.get(3).and_then(|c| c.clone()).unwrap_or_default();
+                let target_column = row.get(4).and_then(|c| c.clone()).unwrap_or_default();
+                let on_update = row.get(5).and_then(|c| c.clone()).unwrap_or_default();
+                let on_delete = row.get(6).and_then(|c| c.clone()).unwrap_or_default();
                 let constraint_name = format!("fk_{fk_id}_{from_col}");
                 fk_map.insert(
                     from_col.clone(),
@@ -1152,7 +1100,6 @@ impl DialectBuilder for SqliteBackend {
         SqliteDialect.quote_ident(name)
     }
 
-
     fn map_zs_type(&self, zs_type: &str, opts: &Value) -> String {
         SqliteDialect.map_zs_type(zs_type, opts)
     }
@@ -1204,16 +1151,18 @@ impl crate::backend::SessionMinter for SqliteBackend {
         // §11 Q-P3-H. A backend booted without
         // `ZEROSHIP_SESSION_SECRET` set still serves plain DB
         // ops; only the SessionMinter surface is degraded.
-        let secret = self.minter_secret.as_ref().ok_or_else(|| DbError::Configuration {
-            code: "not_configured",
-            message: "SQLite SessionMinter not configured (set ZEROSHIP_SESSION_SECRET)"
-                .into(),
-            hint: Some(
-                "Generate a 32-byte hex secret with `openssl rand -hex 32` and \
+        let secret = self
+            .minter_secret
+            .as_ref()
+            .ok_or_else(|| DbError::Configuration {
+                code: "not_configured",
+                message: "SQLite SessionMinter not configured (set ZEROSHIP_SESSION_SECRET)".into(),
+                hint: Some(
+                    "Generate a 32-byte hex secret with `openssl rand -hex 32` and \
                  export it as ZEROSHIP_SESSION_SECRET."
-                    .into(),
-            ),
-        })?;
+                        .into(),
+                ),
+            })?;
 
         let ttl = ttl_secs.unwrap_or(crate::auth::util::DEFAULT_TOKEN_TTL_SECS);
 
@@ -1257,18 +1206,17 @@ impl crate::backend::SessionMinter for SqliteBackend {
         })
     }
 
-    async fn init_session(
-        &self,
-        token: &crate::backend::MintedToken,
-    ) -> Result<(), DbError> {
+    async fn init_session(&self, token: &crate::backend::MintedToken) -> Result<(), DbError> {
         // Secret required at verify time too. Same lazy-failure
         // contract as `mint_session_token`.
-        let secret = self.minter_secret.as_ref().ok_or_else(|| DbError::Configuration {
-            code: "not_configured",
-            message: "SQLite SessionMinter not configured (set ZEROSHIP_SESSION_SECRET)"
-                .into(),
-            hint: None,
-        })?;
+        let secret = self
+            .minter_secret
+            .as_ref()
+            .ok_or_else(|| DbError::Configuration {
+                code: "not_configured",
+                message: "SQLite SessionMinter not configured (set ZEROSHIP_SESSION_SECRET)".into(),
+                hint: None,
+            })?;
 
         // -- Step 1: expiry. The signed payload includes
         // `expires_at_iso`, so any tamper would fail signature
@@ -1276,12 +1224,9 @@ impl crate::backend::SessionMinter for SqliteBackend {
         // legitimate token shouldn't even reach the HMAC path.
         // The 5 reject codes match PG's SECURITY DEFINER
         // `init_session` DETAIL tags 1-for-1.
-        let exp_ms = session_minter::parse_iso_to_millis(&token.expires_at_iso)
-            .ok_or_else(|| {
-                DbError::validation(
-                    "session_invalid_signature",
-                    "malformed expires_at in token",
-                )
+        let exp_ms =
+            session_minter::parse_iso_to_millis(&token.expires_at_iso).ok_or_else(|| {
+                DbError::validation("session_invalid_signature", "malformed expires_at in token")
             })?;
         let now_ms = session_minter::current_unix_millis();
         if exp_ms < now_ms {
@@ -1453,8 +1398,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // returns the WHERE expression text directly (or an empty
         // string if `filter` is non-object / `Null`).
         let mut params: Vec<String> = Vec::new();
-        let where_expr = crate::query::build_where(filter, &mut params)
-            .map_err(DbError::from)?;
+        let where_expr = crate::query::build_where(filter, &mut params).map_err(DbError::from)?;
 
         // Inline the query vector as a hex BLOB literal. SQLite's
         // x'…' syntax is the canonical form for binary literals and
@@ -1580,9 +1524,9 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         // pass the radius filter.
         let mut scored: Vec<(f64, usize)> = Vec::with_capacity(typed.rows.len());
         for (idx, row) in typed.rows.iter().enumerate() {
-            let cell = row.get(col_idx).ok_or_else(|| {
-                DbError::internal("spatial_near: typed row cell-count mismatch")
-            })?;
+            let cell = row
+                .get(col_idx)
+                .ok_or_else(|| DbError::internal("spatial_near: typed row cell-count mismatch"))?;
             let blob_bytes: &[u8] = match cell {
                 session::TypedCell::Blob(b) => b.as_slice(),
                 session::TypedCell::Null => {
@@ -1659,11 +1603,7 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 impl crate::backend::EncryptedColumn for SqliteBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
-    async fn resolve_key(
-        &self,
-        app_id: &str,
-        key_id: &str,
-    ) -> Result<Self::KeyHandle, DbError> {
+    async fn resolve_key(&self, app_id: &str, key_id: &str) -> Result<Self::KeyHandle, DbError> {
         self.key_store.resolve(app_id, key_id).await
     }
 
@@ -1946,9 +1886,9 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 // Three methods on `impl Backup for SqliteBackend`:
 //
 //   * `snapshot(app_id, dest_uri, opts)`:
-//       1. Hold the per-app `register_model` advisory lock through the
-//          in-process `LockManager` so concurrent register_model /
-//          migration can't reshape the schema during the copy.
+//       1. Hold the per-app snapshot/restore advisory lock through the
+//          in-process `LockManager` so another backup operation cannot replace
+//          the database during the copy.
 //       2. Parse `dest_uri` - `file://` only (S3/HTTPS deferred,
 //          mirrors the PG arm). Bare paths accepted.
 //       3. Send `Command::VacuumInto { Some(app_id), dest_path }` to
@@ -1963,7 +1903,7 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //          created_at_ms }`.
 //
 //   * `restore(app_id, snapshot)`:
-//       1. Hold the per-app `register_model` lock.
+//       1. Hold the per-app snapshot/restore lock.
 //       2. Resolve `snapshot.uri` to a `file://` path.
 //       3. Re-hash the file and compare to `snapshot.content_hash`.
 //          Mismatch -> `snapshot_hash_mismatch` Coded error, BEFORE
@@ -2012,11 +1952,10 @@ impl crate::backend::Backup for SqliteBackend {
     ) -> Result<(), DbError> {
         Err(DbError::Configuration {
             code: "pitr_pg_only",
-            message:
-                "SQLite has no WAL-archive PITR — use snapshot/restore against a \
+            message: "SQLite has no WAL-archive PITR; use snapshot/restore against a \
                  per-app file copy instead. PITR replay is supported only on the \
                  PG backend (recovery_target_lsn / recovery_target_time)."
-                    .into(),
+                .into(),
             hint: Some(
                 "Configure WAL archiving on a PG backend to enable PITR; for the \
                  SQLite arm use Backup::snapshot followed by Backup::restore."
@@ -2046,13 +1985,9 @@ mod backup_sqlite {
     use crate::backend::{BusyPolicy, LockScope, PitrTarget, SnapshotHandle, SnapshotOpts};
     use crate::error::DbError;
 
-    /// Tag used by both `snapshot` and `restore` for the per-app
-    /// register_model advisory lock. Matches the PG arm's literal
-    /// `REGISTER_MODEL_LOCK_TAG = "register_model"`; the SQLite arm
-    /// doesn't expose that constant outside `register_model`,
-    /// so we duplicate the literal here. A future shared-constant lift
-    /// can unify both sides.
-    const REGISTER_MODEL_LOCK_TAG: &str = "register_model";
+    /// Tag used by both `snapshot` and `restore` for the per-app backup lock.
+    /// It matches the PostgreSQL arm's shared tag.
+    const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore";
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
     /// path. Mirrors the PG arm's `parse_dest_path` shape so the SDK
@@ -2107,18 +2042,18 @@ mod backup_sqlite {
         Ok(hasher.finalize().into())
     }
 
-    /// Acquire the per-app `register_model` advisory lock through the
+    /// Acquire the per-app snapshot/restore advisory lock through the
     /// in-process registry. Returns the `(key1, key2)` pair so the
     /// caller can release it symmetrically. On contention emits the
     /// typed `migration_in_progress` Coded error (mirrors the PG arm).
-    async fn acquire_register_model_lock(
+    async fn acquire_snapshot_restore_lock(
         backend: &SqliteBackend,
         app_id: &str,
         op: &'static str,
     ) -> Result<(String, String), DbError> {
         let scope = LockScope::GlobalApp {
             app_id: app_id.to_string(),
-            name: REGISTER_MODEL_LOCK_TAG.to_string(),
+            name: SNAPSHOT_RESTORE_LOCK_TAG.to_string(),
         };
         let (k1, k2) = scope.to_keys();
         // Use a bounded poll matching the PG arm's
@@ -2129,32 +2064,27 @@ mod backup_sqlite {
             if pre_wait > 0 {
                 compio::time::sleep(std::time::Duration::from_millis(pre_wait)).await;
             }
-            if backend
-                .lock_registry
-                .try_acquire((k1.clone(), k2.clone()))
-            {
+            if backend.lock_registry.try_acquire((k1.clone(), k2.clone())) {
                 return Ok((k1, k2));
             }
         }
         Err(DbError::Coded {
             code: "migration_in_progress".to_string(),
             message: format!(
-                "{op}: another deploy / migration is in progress for app {app_id:?} \
-                 (in-process register_model lock held; 5-attempt bounded retry exhausted)"
+                "{op}: another snapshot / restore is in progress for app {app_id:?} \
+                 (in-process backup lock held; 5-attempt bounded retry exhausted)"
             ),
             hint: Some(
-                "retry the operation once the in-flight register_model / migration \
-                 completes"
-                    .to_string(),
+                "retry the operation once the in-flight snapshot / restore completes".to_string(),
             ),
         })
     }
 
-    /// Drop the register_model lock acquired by [`acquire_register_model_lock`].
+    /// Drop the lock acquired by [`acquire_snapshot_restore_lock`].
     /// Infallible at the registry layer — unheld slots emit a
     /// `tracing::warn` no-op. Matches the contract of every other
     /// `release_advisory_lock` site.
-    fn release_register_model_lock(backend: &SqliteBackend, k1: String, k2: String) {
+    fn release_snapshot_restore_lock(backend: &SqliteBackend, k1: String, k2: String) {
         backend.lock_registry.release((k1, k2));
     }
 
@@ -2175,28 +2105,23 @@ mod backup_sqlite {
         dest_uri: &str,
         opts: SnapshotOpts,
     ) -> Result<SnapshotHandle, DbError> {
-        // 1. Hold the per-app register_model lock for the whole
-        //    snapshot. Concurrent migrations would otherwise reshape
-        //    schema mid-copy; the in-process registry serialises every
-        //    register_model call against this same scope.
-        let (k1, k2) = acquire_register_model_lock(backend, app_id, "snapshot").await?;
+        // 1. Hold the per-app snapshot/restore lock for the whole snapshot.
+        let (k1, k2) = acquire_snapshot_restore_lock(backend, app_id, "snapshot").await?;
 
         // 2. Parse + prepare destination.
         let dest_path = match parse_dest_path(dest_uri) {
             Ok(p) => p,
             Err(e) => {
-                release_register_model_lock(backend, k1, k2);
+                release_snapshot_restore_lock(backend, k1, k2);
                 return Err(e);
             }
         };
         if let Some(parent) = dest_path.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    release_register_model_lock(backend, k1, k2);
+                    release_snapshot_restore_lock(backend, k1, k2);
                     return Err(DbError::Internal {
-                        message: format!(
-                            "snapshot: create parent dir {parent:?} failed: {e}"
-                        ),
+                        message: format!("snapshot: create parent dir {parent:?} failed: {e}"),
                     });
                 }
             }
@@ -2207,7 +2132,7 @@ mod backup_sqlite {
         // signal rather than the raw rusqlite "output file already
         // exists" message.
         if dest_path.exists() {
-            release_register_model_lock(backend, k1, k2);
+            release_snapshot_restore_lock(backend, k1, k2);
             return Err(DbError::Configuration {
                 code: "backup_dest_exists",
                 message: format!(
@@ -2258,7 +2183,7 @@ mod backup_sqlite {
                     continue;
                 }
                 Err(e) => {
-                    release_register_model_lock(backend, k1, k2);
+                    release_snapshot_restore_lock(backend, k1, k2);
                     // Clean up a partial dest file so a re-run doesn't
                     // see stale bytes.
                     let _ = std::fs::remove_file(&dest_path);
@@ -2270,7 +2195,7 @@ mod backup_sqlite {
             // Exhausted retries (or Abort with one failed attempt) on
             // a SQLITE_BUSY-equivalent. Translate to the typed
             // `backup_busy` Coded code the SDK can branch on.
-            release_register_model_lock(backend, k1, k2);
+            release_snapshot_restore_lock(backend, k1, k2);
             let _ = std::fs::remove_file(&dest_path);
             return Err(DbError::Coded {
                 code: "backup_busy".to_string(),
@@ -2300,21 +2225,19 @@ mod backup_sqlite {
         let content_hash = match sha256_file(&dest_path) {
             Ok(h) => h,
             Err(e) => {
-                release_register_model_lock(backend, k1, k2);
+                release_snapshot_restore_lock(backend, k1, k2);
                 let _ = std::fs::remove_file(&dest_path);
                 return Err(DbError::Internal {
-                    message: format!(
-                        "snapshot: SHA-256 of {dest_path_str:?} failed: {e}"
-                    ),
+                    message: format!("snapshot: SHA-256 of {dest_path_str:?} failed: {e}"),
                 });
             }
         };
 
         // 5. Release the lock now that the snapshot is committed to
-        //    disk. From here on concurrent register_model can proceed;
+        //    disk. From here on another backup operation can proceed;
         //    the SnapshotHandle's content_hash pins integrity for the
         //    eventual restore.
-        release_register_model_lock(backend, k1, k2);
+        release_snapshot_restore_lock(backend, k1, k2);
 
         Ok(SnapshotHandle {
             uri: dest_uri.to_string(),
@@ -2328,18 +2251,16 @@ mod backup_sqlite {
         app_id: &str,
         snapshot: &SnapshotHandle,
     ) -> Result<(), DbError> {
-        // 1. Hold the per-app register_model lock for the whole
-        //    restore. Without it, a concurrent register_model would
-        //    race the DETACH/rename/ATTACH sequence.
-        let (k1, k2) =
-            acquire_register_model_lock(backend, app_id, "restore").await?;
+        // 1. Hold the per-app snapshot/restore lock for the whole restore so
+        //    another backup operation cannot race the DETACH/rename/ATTACH sequence.
+        let (k1, k2) = acquire_snapshot_restore_lock(backend, app_id, "restore").await?;
 
         // 2. Resolve the snapshot URI to an on-disk path. SQLite
         //    supports file:// only.
         let src_path = match parse_dest_path(&snapshot.uri) {
             Ok(p) => p,
             Err(e) => {
-                release_register_model_lock(backend, k1, k2);
+                release_snapshot_restore_lock(backend, k1, k2);
                 return Err(e);
             }
         };
@@ -2350,7 +2271,7 @@ mod backup_sqlite {
         match sha256_file(&src_path) {
             Ok(observed) if observed == snapshot.content_hash => { /* ok */ }
             Ok(_) => {
-                release_register_model_lock(backend, k1, k2);
+                release_snapshot_restore_lock(backend, k1, k2);
                 return Err(DbError::Coded {
                     code: "snapshot_hash_mismatch".to_string(),
                     message: format!(
@@ -2366,11 +2287,9 @@ mod backup_sqlite {
                 });
             }
             Err(e) => {
-                release_register_model_lock(backend, k1, k2);
+                release_snapshot_restore_lock(backend, k1, k2);
                 return Err(DbError::Internal {
-                    message: format!(
-                        "restore: SHA-256 of {src_path:?} failed: {e}"
-                    ),
+                    message: format!("restore: SHA-256 of {src_path:?} failed: {e}"),
                 });
             }
         }
@@ -2383,11 +2302,13 @@ mod backup_sqlite {
         //    would consume the operator-supplied snapshot file (which
         //    they may want to keep) AND fail across filesystems.
         let live_path = backend.db_dir.join(format!("zs-{app_id}.sqlite"));
-        let temp_path = backend.db_dir.join(format!("zs-{app_id}.sqlite.restore-tmp"));
+        let temp_path = backend
+            .db_dir
+            .join(format!("zs-{app_id}.sqlite.restore-tmp"));
         // Best-effort cleanup of a stale tmp from a prior crashed run.
         let _ = std::fs::remove_file(&temp_path);
         if let Err(e) = std::fs::copy(&src_path, &temp_path) {
-            release_register_model_lock(backend, k1, k2);
+            release_snapshot_restore_lock(backend, k1, k2);
             return Err(DbError::Internal {
                 message: format!(
                     "restore: std::fs::copy({src_path:?} -> {temp_path:?}) failed: {e}; \
@@ -2412,14 +2333,14 @@ mod backup_sqlite {
             .reattach_file(app_id, &temp_path_str, &live_path_str)
             .await
         {
-            release_register_model_lock(backend, k1, k2);
+            release_snapshot_restore_lock(backend, k1, k2);
             // Best-effort: leave the temp file in place so the
             // operator can inspect it; do NOT delete on error.
             return Err(e);
         }
 
         // 6. Restore complete. Release the lock.
-        release_register_model_lock(backend, k1, k2);
+        release_snapshot_restore_lock(backend, k1, k2);
         Ok(())
     }
 
@@ -2453,7 +2374,10 @@ mod tests {
                 .await
                 .expect("open in-memory backend");
             let temp_dir_path = backend.db_dir().to_path_buf();
-            assert!(temp_dir_path.exists(), "temp dir should exist while backend lives");
+            assert!(
+                temp_dir_path.exists(),
+                "temp dir should exist while backend lives"
+            );
             drop(backend);
             temp_dir_path
         });
@@ -2514,8 +2438,7 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    fn assert_sqlite_backend_impls_namespace_manager() {
-    }
+    fn assert_sqlite_backend_impls_namespace_manager() {}
 
     fn assert_sqlite_backend_impls_schema_introspect() {
         fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
@@ -2597,7 +2520,10 @@ mod tests {
         assert!(matches!(m.mode, crate::backend::EncryptionMode::Randomised));
         assert_eq!(m.key_id, "default");
         assert!(matches!(m.wraps, crate::diff::WrappedType::String));
-        assert!(!got.contains_key("name"), "non-encrypted col must be absent");
+        assert!(
+            !got.contains_key("name"),
+            "non-encrypted col must be absent"
+        );
         assert!(!got.contains_key("id"));
     }
 
@@ -2695,10 +2621,7 @@ mod tests {
     #[test]
     fn recover_preceding_quoted_ident_picks_last_token() {
         let text = "CREATE TABLE \"app\".\"users\" ( \"ssn\" BYTEA ";
-        assert_eq!(
-            recover_preceding_quoted_ident(text).as_deref(),
-            Some("ssn")
-        );
+        assert_eq!(recover_preceding_quoted_ident(text).as_deref(), Some("ssn"));
     }
 
     #[test]
@@ -2735,7 +2658,11 @@ mod tests {
         assert_eq!(meta.kind, MaskKind::Last4);
         assert_eq!(meta.classification, Classification::Spi);
         assert_eq!(meta.sibling_column, raw);
-        assert_eq!(got.len(), 1, "the raw column is not itself a masked field: {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "the raw column is not itself a masked field: {got:?}"
+        );
     }
 
     /// Multiple masked columns in one table → one entry per field.
@@ -2756,7 +2683,10 @@ mod tests {
         assert_eq!(got.get("ssn").unwrap().kind, MaskKind::Last4);
         assert_eq!(got.get("ssn").unwrap().classification, Classification::Spi);
         assert_eq!(got.get("email").unwrap().kind, MaskKind::Email);
-        assert_eq!(got.get("email").unwrap().classification, Classification::Pii);
+        assert_eq!(
+            got.get("email").unwrap().classification,
+            Classification::Pii
+        );
     }
 
     /// A sentinel with no recoverable column name before it is ignored, and
@@ -2770,7 +2700,10 @@ mod tests {
     fn sqlite_introspection_ignores_a_sentinel_with_no_column() {
         let ddl = "CREATE TABLE t (\n  /* __zsmask:kind=last4,classification=spi */\n)";
         let got = parse_mask_sentinels(ddl);
-        assert!(got.is_empty(), "a sentinel with no column must not stamp anything: {got:?}");
+        assert!(
+            got.is_empty(),
+            "a sentinel with no column must not stamp anything: {got:?}"
+        );
     }
 
     /// Empty DDL / no markers → empty map.
@@ -2785,8 +2718,7 @@ mod tests {
     /// stays unmasked.
     #[test]
     fn sqlite_introspection_malformed_sentinel_skipped() {
-        let ddl =
-            "CREATE TABLE t (\n  \"ssn\" TEXT,\n  \
+        let ddl = "CREATE TABLE t (\n  \"ssn\" TEXT,\n  \
              \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=cosmic,classification=pii */\n)";
         let got = parse_mask_sentinels(ddl);
         assert!(
@@ -2798,8 +2730,7 @@ mod tests {
     /// Unterminated mask comment doesn't loop forever; we bail out.
     #[test]
     fn sqlite_introspection_unterminated_comment() {
-        let ddl =
-            "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi";
+        let ddl = "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi";
         let got = parse_mask_sentinels(ddl);
         assert!(got.is_empty());
     }

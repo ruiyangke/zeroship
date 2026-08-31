@@ -2,13 +2,11 @@
  * ISS-66 regression — `__zsDispatch` MUST await `globalThis.__zsSchemaReady`
  * before running a procedure.
  *
- * The production `runtime-entry` installs the Collection wrappers
- * synchronously but defers the async DDL chain to `__zsSchemaReady`
- * (awaiting it at module top-level leaves the bootstrap module's
- * evaluation pending and 404s the dispatch). The dispatcher is the gate
- * that ensures a handler doesn't race `registerModel`. This test pins
- * that gate: the procedure body must not execute until `__zsSchemaReady`
- * settles, and a rejected chain must surface through the dispatch.
+ * The production `runtime-entry` installs Collection wrappers
+ * synchronously but defers the asynchronous mask-policy flush to
+ * `__zsSchemaReady`. This test pins that gate: the procedure body must
+ * not execute until `__zsSchemaReady` settles, and a rejected flush must
+ * surface through the dispatch.
  */
 
 import { test, describe, afterEach } from "node:test";
@@ -58,14 +56,14 @@ describe("ISS-66 — __zsDispatch awaits __zsSchemaReady", () => {
   });
 
   test("a rejected __zsSchemaReady surfaces through the dispatch", async () => {
-    g.__zsSchemaReady = Promise.reject(new Error("DDL boom"));
+    g.__zsSchemaReady = Promise.reject(new Error("mask policy boom"));
 
     let ran = false;
     const rpc = { ping: () => { ran = true; return "pong"; } };
 
     await assert.rejects(
       () => g.__zsDispatch(rpc, "ping", {}, {}),
-      /DDL boom/,
+      /mask policy boom/,
     );
     assert.equal(ran, false, "procedure must not run when schema-ready rejected");
   });

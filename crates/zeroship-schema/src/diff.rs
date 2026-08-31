@@ -6,11 +6,9 @@
 //! **compatible** (auto-apply, may need a validation backfill), or
 //! **destructive** (refused; surfaces a `validation_refused` envelope).
 //!
-//! The engine intentionally does not run any DDL on its own — it returns
-//! a `Vec<DiffOp>` that the orchestrator in
-//! `zeroship_plugin_db::register_model::exec_register_model_with_pool`
-//! then sequences with the advisory lock, audit writes, and validation
-//! pass.
+//! The engine intentionally does not run any DDL on its own. It returns a
+//! `Vec<DiffOp>` for a migration host to sequence with its locking, audit, and
+//! validation policy.
 //!
 //! ## Volatile-default trap
 //!
@@ -97,7 +95,10 @@ pub enum ChangeKind {
     /// `CREATE INDEX CONCURRENTLY` for a new index marker.
     AddIndex,
     /// `DROP INDEX` for an index no longer in the declared schema.
-    #[allow(dead_code, reason = "DropIndex remains part of the diff model for strictness tests even though the default release build does not construct it.")]
+    #[allow(
+        dead_code,
+        reason = "DropIndex remains part of the diff model for strictness tests even though the default release build does not construct it."
+    )]
     DropIndex,
     /// Design doc section B2 - `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`.
     /// Emitted when a column already exists but no FK constraint is
@@ -126,7 +127,10 @@ pub enum ChangeKind {
     MaskRewrite {
         collection: String,
         column: String,
-        #[allow(dead_code, reason = "The old mask kind is carried for diagnostics/tests; the apply path only consumes the new shape today.")]
+        #[allow(
+            dead_code,
+            reason = "The old mask kind is carried for diagnostics/tests; the apply path only consumes the new shape today."
+        )]
         old_kind: MaskKind,
         new_kind: MaskKind,
         classification: Classification,
@@ -213,16 +217,28 @@ pub struct LiveSchema {
 
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub pg_type: String,
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub not_null: bool,
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub default_expr: Option<String>,
     /// `pg_proc.provolatile` for the default expression's function, if
     /// the default is a function call. `i`/`s`/`v`. `None` if the default
     /// is a plain literal.
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub default_volatility: Option<char>,
     /// Vector dimensionality observed from the live
     /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
@@ -232,13 +248,19 @@ pub struct ColumnInfo {
     /// hasn't populated yet from `information_schema` /
     /// `sqlite_master.sql` (Q-P4-A -- regex on DDL today, a sidecar
     /// `__zs_schema_meta` table is the upgrade path).
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub vector_dims: Option<i32>,
     /// Whether this column is a `geography(POINT,
     /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
     /// CHECK constraint (SQLite). `false` for every existing column
     /// until live-schema introspection populates it.
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub is_geopoint: bool,
     /// Column-encryption metadata when the SDK
     /// declared the column with `t.encrypted(...)`. `None` for every
@@ -247,7 +269,10 @@ pub struct ColumnInfo {
     /// populates via regex on `sqlite_master.sql` for the
     /// sentinel CHECK comment. Stays `None` in the default-feature
     /// build because no consumer wires the field yet.
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
+    #[allow(
+        dead_code,
+        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
+    )]
     pub encryption: Option<EncryptionMeta>,
     /// Column-mask metadata when the SDK declared the
     /// column with `t.string().mask(...)` or `t.encrypted(...)` (the
@@ -305,8 +330,7 @@ impl Default for ColumnInfo {
 /// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
 ///
 /// Populated by schema introspection:
-/// - **PG**: from `__zeroship_meta.encrypted_columns` rows the
-///   `zeroship_plugin_db::register_model` DDL emitter writes alongside the table create.
+/// - **PG**: from encryption metadata emitted alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
@@ -521,14 +545,23 @@ impl Classification {
 
 #[derive(Debug, Clone)]
 pub struct IndexInfo {
-    #[allow(dead_code, reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
+    #[allow(
+        dead_code,
+        reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
+    )]
     pub is_unique: bool,
-    #[allow(dead_code, reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
+    #[allow(
+        dead_code,
+        reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
+    )]
     pub columns: Vec<String>,
     /// Whether `pg_index.indisvalid` is true. An INVALID index means a
     /// prior CREATE INDEX CONCURRENTLY failed; the diff engine flags it
     /// for retry.
-    #[allow(dead_code, reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
+    #[allow(
+        dead_code,
+        reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
+    )]
     pub is_valid: bool,
 }
 
@@ -538,12 +571,18 @@ pub struct ForeignKeyInfo {
     /// Postgres constraint name (e.g. `"author_id_fkey"`).
     pub constraint_name: String,
     /// Local column the FK is attached to.
-    #[allow(dead_code, reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
+    #[allow(
+        dead_code,
+        reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
+    )]
     pub column: String,
     /// Referenced table name (relative to the same app schema).
     pub target_table: String,
     /// Referenced column on the target table — typically `id`.
-    #[allow(dead_code, reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
+    #[allow(
+        dead_code,
+        reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
+    )]
     pub target_column: String,
     /// ON DELETE policy in upper-case Postgres form (`RESTRICT`,
     /// `CASCADE`, `SET NULL`, `NO ACTION`).
@@ -551,7 +590,10 @@ pub struct ForeignKeyInfo {
     /// ON UPDATE policy.
     pub on_update: String,
     /// True if the constraint is `DEFERRABLE` (any timing).
-    #[allow(dead_code, reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
+    #[allow(
+        dead_code,
+        reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
+    )]
     pub deferrable: bool,
 }
 
@@ -655,7 +697,7 @@ SELECT c.relname AS table_name,
         //     pass (stamps `MaskMeta` on the PARENT);
         //   - `zsenc:…` on the encrypted column itself → parsed inline here into
         //     `EncryptionMeta`. On PG the inline `/* zsenc */` DDL comment is
-        //     parse-discarded, so the engine/registerModel also write a
+        //     parse-discarded, so the migration emitter also writes a
         //     `COMMENT ON COLUMN` carrying the `zsenc:` body; this is where the
         //     data plane (and the diff) recover it.
         let mut encryption: Option<EncryptionMeta> = None;
@@ -727,28 +769,27 @@ SELECT c.relname AS table_name,
             continue;
         };
         let sibling = masked_column;
-        let (kind, classification) =
-            match crate::mask_codec::parse_mask_sentinel(&sentinel) {
-                Ok(p) => p,
-                Err(e) => {
-                    // Surface a malformed sentinel as a tracing::warn —
-                    // the diff will then treat the parent as
-                    // `mask: None` and a re-deploy would re-emit the
-                    // sentinel via the AddColumn / CreateTable path.
-                    // We don't propagate as an Err because a transient
-                    // hand-edit shouldn't take the entire deploy down;
-                    // operators get a loud warn instead.
-                    tracing::warn!(
-                        table = %table,
-                        column = %sibling,
-                        sentinel = %sentinel,
-                        error = %e,
-                        "diff: malformed mask sentinel on a PG column; \
-                         treating it as unmasked"
-                    );
-                    continue;
-                }
-            };
+        let (kind, classification) = match crate::mask_codec::parse_mask_sentinel(&sentinel) {
+            Ok(p) => p,
+            Err(e) => {
+                // Surface a malformed sentinel as a tracing::warn.
+                // the diff will then treat the parent as
+                // `mask: None` and a re-deploy would re-emit the
+                // sentinel via the AddColumn / CreateTable path.
+                // We don't propagate as an Err because a transient
+                // hand-edit shouldn't take the entire deploy down;
+                // operators get a loud warn instead.
+                tracing::warn!(
+                    table = %table,
+                    column = %sibling,
+                    sentinel = %sentinel,
+                    error = %e,
+                    "diff: malformed mask sentinel on a PG column; \
+                     treating it as unmasked"
+                );
+                continue;
+            }
+        };
         parent_col.mask = Some(MaskMeta {
             kind,
             classification,
@@ -1043,10 +1084,7 @@ pub fn compute_diff(
             if def.get("type").and_then(|t| t.as_str()) != Some("ref") {
                 continue;
             }
-            let target = def
-                .get("refTarget")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let target = def.get("refTarget").and_then(|v| v.as_str()).unwrap_or("");
             if target.is_empty() {
                 continue;
             }
@@ -1108,12 +1146,10 @@ pub fn compute_diff(
                 });
             } else if let Some(fk) = live_fk {
                 // Detect policy mismatch — surfaced as paired DROP+ADD.
-                let declared_on_delete = crate::query::normalize_fk_action(
-                    def.get("onDelete").and_then(|v| v.as_str()),
-                );
-                let declared_on_update = crate::query::normalize_fk_action(
-                    def.get("onUpdate").and_then(|v| v.as_str()),
-                );
+                let declared_on_delete =
+                    crate::query::normalize_fk_action(def.get("onDelete").and_then(|v| v.as_str()));
+                let declared_on_update =
+                    crate::query::normalize_fk_action(def.get("onUpdate").and_then(|v| v.as_str()));
                 let declared_deferrable = def
                     .get("deferrable")
                     .and_then(|v| v.as_bool())
@@ -1128,7 +1164,12 @@ pub fn compute_diff(
                         collection: collection.to_string(),
                         change_kind: ChangeKind::DropForeignKey,
                         class: ChangeClass::Compatible,
-                        sql: crate::query::build_drop_foreign_key(app_id, collection, &fk.constraint_name).ok(),
+                        sql: crate::query::build_drop_foreign_key(
+                            app_id,
+                            collection,
+                            &fk.constraint_name,
+                        )
+                        .ok(),
                         details: serde_json::json!({
                             "kind": "drop_foreign_key",
                             "field": field,
@@ -1140,7 +1181,8 @@ pub fn compute_diff(
                         collection: collection.to_string(),
                         change_kind: ChangeKind::AddForeignKey,
                         class: ChangeClass::Compatible,
-                        sql: crate::query::build_add_foreign_key(app_id, collection, field, def).ok(),
+                        sql: crate::query::build_add_foreign_key(app_id, collection, field, def)
+                            .ok(),
                         details: serde_json::json!({
                             "kind": "add_foreign_key",
                             "field": field,
@@ -1204,8 +1246,7 @@ pub fn compute_diff(
                 // computing the mask. Two classifiers that disagree about this
                 // boundary are worse than either answer.
                 (None, Some(new_meta)) => {
-                    let encrypted =
-                        live_col.encryption.is_some() || def.get("encrypted").is_some();
+                    let encrypted = live_col.encryption.is_some() || def.get("encrypted").is_some();
                     let mut details = serde_json::json!({
                         "kind": "mask_backfill",
                         "field": field,
@@ -1415,7 +1456,10 @@ pub fn compute_diff(
 /// sentinel; this helper just needs to round-trip the declared shape).
 pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
     let mask_obj = def.get("mask").and_then(|v| v.as_object())?;
-    let kind_str = mask_obj.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
+    let kind_str = mask_obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("full");
     if kind_str == "none" {
         return None;
     }
@@ -1490,14 +1534,20 @@ mod tests {
     fn nullable_add_is_additive() {
         let def = json!({"type": "string"});
         let live = live_with_rows("users", 1000);
-        assert_eq!(classify_add_column(&def, &live, "users"), ChangeClass::Additive);
+        assert_eq!(
+            classify_add_column(&def, &live, "users"),
+            ChangeClass::Additive
+        );
     }
 
     #[test]
     fn required_add_on_empty_table_is_additive() {
         let def = json!({"type": "string", "required": true});
         let live = live_with_rows("users", 0);
-        assert_eq!(classify_add_column(&def, &live, "users"), ChangeClass::Additive);
+        assert_eq!(
+            classify_add_column(&def, &live, "users"),
+            ChangeClass::Additive
+        );
     }
 
     #[test]
@@ -1770,7 +1820,8 @@ mod tests {
         let declared = json!({ "email": { "type": "string", "required": true } });
         let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
         assert!(
-            !ops.iter().any(|op| matches!(op.change_kind, ChangeKind::DropColumn)),
+            !ops.iter()
+                .any(|op| matches!(op.change_kind, ChangeKind::DropColumn)),
             "system columns must survive schema revalidation without destructive drops: {ops:?}"
         );
     }
@@ -1896,7 +1947,10 @@ mod tests {
         });
         let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
         assert!(
-            !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::AddForeignKey | ChangeKind::DropForeignKey)),
+            !ops.iter().any(|o| matches!(
+                o.change_kind,
+                ChangeKind::AddForeignKey | ChangeKind::DropForeignKey
+            )),
             "should not emit FK ops when policies match: {ops:?}"
         );
     }
@@ -1963,8 +2017,8 @@ mod tests {
     // SCOPE NOTE: CHECK-constraint evolution (extending the
     // discriminator's IN-list, adding per-variant integrity CHECKs)
     // is NOT yet diffed - design doc section C2 calls it out as
-    // additive-by-construction. Re-running registerModel today does
-    // not amend existing CHECK constraints. This is a known follow-up.
+    // additive-by-construction. Re-applying migrations does not amend existing
+    // CHECK constraints. This is a known follow-up.
     // -----------------------------------------------------------------
 
     #[test]
@@ -2118,7 +2172,8 @@ mod tests {
         let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
 
         assert!(
-            !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::AddColumn)),
+            !ops.iter()
+                .any(|o| matches!(o.change_kind, ChangeKind::AddColumn)),
             "the classifier must not emit a partial AddColumn transition: {ops:?}",
         );
         let backfill_ops: Vec<&DiffOp> = ops
@@ -2148,13 +2203,20 @@ mod tests {
         // live is unaffected - it still emits working DDL through the
         // column-additions branch. Without this arm the assertions above would
         // pass on an implementation that refused masking outright.
-        let ops = compute_diff(&live, "app1", "users", &json!({
-            "ssn": { "type": "string" },
-            "dob": {
-                "type": "string",
-                "mask": { "kind": "dateYear", "classification": "phi" }
-            }
-        }), "", &[]);
+        let ops = compute_diff(
+            &live,
+            "app1",
+            "users",
+            &json!({
+                "ssn": { "type": "string" },
+                "dob": {
+                    "type": "string",
+                    "mask": { "kind": "dateYear", "classification": "phi" }
+                }
+            }),
+            "",
+            &[],
+        );
         let adds: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::AddColumn))
@@ -2226,7 +2288,10 @@ mod tests {
             .filter(|o| matches!(o.change_kind, ChangeKind::AddColumn))
             .filter(|o| o.field.as_deref() == Some("ssn_masked"))
             .collect();
-        assert!(add_sib.is_empty(), "no ALTER ADD when sibling exists: {ops:?}");
+        assert!(
+            add_sib.is_empty(),
+            "no ALTER ADD when sibling exists: {ops:?}"
+        );
     }
 
     /// No-op: same kind + classification both sides ->
@@ -2247,9 +2312,10 @@ mod tests {
         });
         let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
         assert!(
-            !ops.iter()
-                .any(|o| matches!(o.change_kind, ChangeKind::MaskBackfill { .. }
-                                | ChangeKind::MaskRewrite { .. })),
+            !ops.iter().any(|o| matches!(
+                o.change_kind,
+                ChangeKind::MaskBackfill { .. } | ChangeKind::MaskRewrite { .. }
+            )),
             "unchanged mask must produce no ops: {ops:?}"
         );
     }
@@ -2352,8 +2418,9 @@ mod tests {
         });
         let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
         assert!(
-            !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::DropColumn)
-                && o.field.as_deref() == Some(crate::query::raw_column_name("ssn").as_str())),
+            !ops.iter()
+                .any(|o| matches!(o.change_kind, ChangeKind::DropColumn)
+                    && o.field.as_deref() == Some(crate::query::raw_column_name("ssn").as_str())),
             "the platform-owned raw column must not be dropped: {ops:?}"
         );
     }
@@ -2390,17 +2457,17 @@ mod tests {
             Classification::Pci,
             Classification::Internal,
         ] {
-            assert_eq!(
-                Classification::from_sql(c.as_sql()).expect("round-trip"),
-                c
-            );
+            assert_eq!(Classification::from_sql(c.as_sql()).expect("round-trip"), c);
         }
     }
 
     #[test]
     fn mask_kind_kebab_case_accepted_for_dates() {
         assert_eq!(MaskKind::from_sql("date-year"), Some(MaskKind::DateYear));
-        assert_eq!(MaskKind::from_sql("date-decade"), Some(MaskKind::DateDecade));
+        assert_eq!(
+            MaskKind::from_sql("date-decade"),
+            Some(MaskKind::DateDecade)
+        );
     }
 
     #[test]

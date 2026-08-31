@@ -34,7 +34,6 @@ function makeMockNative(rowsByCall: AnyRec[][]) {
   const calls: { filter: AnyRec; opts: AnyRec }[] = [];
   let i = 0;
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async find(filter: AnyRec, opts: AnyRec) {
@@ -50,7 +49,6 @@ function makeMockNative(rowsByCall: AnyRec[][]) {
 
 function makeFailingNative(err: Error) {
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async find(_f: AnyRec, _o: AnyRec): Promise<AnyRec[]> {

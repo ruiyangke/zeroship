@@ -11,7 +11,6 @@ import type { InferId, InferRow, InferRowInput } from "@zeroship/db";
 import type { NativeDb } from "../src/native.js";
 
 const native = {
-  registerModel: () => Promise.resolve(),
   collection: (_name: string) => ({
     insert: async () => ({}),
   }),

@@ -52,7 +52,6 @@ function makeMockNative(rows: Record<string, AnyRec>, opts?: { findThrows?: Erro
   const stringIndex: Record<string, AnyRec> = {};
   for (const [k, v] of Object.entries(rows)) stringIndex[k] = v;
   const native = {
-    registerModel: () => Promise.resolve(),
     // P9 PR 3: native `transaction(callback)` orchestrator stub. The
     // begin tick happens when this is invoked (the bootstrap wrapper has
     // already drained the loaders + bumped `_txDepth`); the callback runs
@@ -336,7 +335,6 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       },
     };
     const native = {
-      registerModel: () => Promise.resolve(),
       // P9 PR 3: native `transaction(callback)` orchestrator. The "begin"
       // tick fires when the orchestrator is invoked — AFTER the bootstrap
       // wrapper drained the loaders. The callback resolving pushes
@@ -392,8 +390,8 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     events.length = 0;
 
     // Reach into the loader and queue an entry directly: this models a
-    // get() that has already passed ensureReady and called load(), so
-    // it's in the loader queue at the moment tx starts. The original
+    // get() that has already called load(), so it's in the loader queue
+    // at the moment tx starts. The original
     // bug: this queued dispatch fires AFTER the tx begin, and the find
     // lands on TX_CONN. The fix: the bootstrap wrapper awaits the loader
     // drain before invoking the native transaction(fn) (whose begin runs

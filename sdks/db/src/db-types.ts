@@ -4,7 +4,7 @@
  * transaction callback receives a `TxCollection`, etc).
  *
  * Stage 7 of the refactor moved the runtime helpers (`installSchema`,
- * `model`, `normalizeSchema`, `validateRefTargets`, `topoSortByRefs`)
+ * `model`, `normalizeSchema`, `validateRefTargets`)
  * into `@zeroship/bootstrap`. Only the types stay here — `@zeroship/db`
  * is now purely user-facing. The bootstrap package consumes these
  * types via `@zeroship/db/internal` (one-way dependency: bootstrap →

@@ -35,20 +35,12 @@ export const CONFINED_SYSTEM_SHAPE_INJECT_TOML = `# THE PLATFORM SYSTEM-TABLE SH
 # which rustc evaluates at compile time, so the bytes below are literally in
 # every binary that carries the rule:
 #
-#   crates/migrated/policies/confined.policy.toml
-#       + crates/migrated/src/policy.rs :: CONFINED_CEILING_TOML
+#   crates/zeroship-migrate-server/policies/confined.policy.toml
+#       + crates/zeroship-migrate-server/src/policy.rs :: CONFINED_CEILING_TOML
 #       the DEPLOYED server ceiling - the shape a creator's tables get in
 #       production.
-#   crates/plugin-db/policies/confined.policy.toml
-#       + crates/plugin-db/src/register_model/sqlite_engine.rs
-#       the DEV SQLite registerModel ceiling - the shape "zeroship serve" gives
-#       the same tables locally.
-#   crates/plugin-db/tests/parity/mod.rs
-#       the PG/SQLite parity matrix, which must run both dialects under the
-#       SAME ceiling or its projections differ for a reason that has nothing to
-#       do with the dialect.
-#   crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs
-#   crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs
+#   crates/zeroship-migrate-server/tests/smoke_apply_pg.rs
+#   crates/zeroship-migrate-server/tests/author_and_apply_pg.rs
 #       two Postgres-gated fixtures, each of which calls itself "the confined
 #       table-shape ceiling" and must therefore be the shipped one.
 #

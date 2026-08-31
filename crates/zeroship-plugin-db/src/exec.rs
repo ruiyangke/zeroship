@@ -55,8 +55,8 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::backend::BackendHandle;
-use crate::context::TxConnection;
 use crate::context;
+use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
@@ -96,16 +96,15 @@ fn sqlite_shared_crud_unavailable() -> DbError {
     }
 }
 
-async fn ensure_backend_for_shared_sql() -> Result<BackendHandle, DbError> {
+pub(crate) async fn ensure_backend_for_shared_sql() -> Result<BackendHandle, DbError> {
     if context::with(|c| c.backend().is_none()) {
-        crate::init_pool_async()
-            .await
-            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
+        crate::init_pool_async().await.map_err(|e| {
+            DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}"))
+        })?;
     }
 
-    context::with(|c| c.backend()).ok_or_else(|| {
-        DbError::config("not_configured", "db: backend not initialized".to_string())
-    })
+    context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized".to_string()))
 }
 
 async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Pool>, DbError> {
@@ -116,9 +115,8 @@ async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Poo
         return Err(sqlite_shared_crud_unavailable());
     }
 
-    context::with(|c| c.pool()).ok_or_else(|| {
-        DbError::config("not_configured", "db: pool not initialized".to_string())
-    })
+    context::with(|c| c.pool())
+        .ok_or_else(|| DbError::config("not_configured", "db: pool not initialized".to_string()))
 }
 
 /// The op was dispatched inside a `db.transaction(fn)` callback whose
@@ -250,10 +248,7 @@ pub(crate) async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, D
     let rows = run_sql(route, &bq.sql, &param_refs).await?;
     emit_db_metric(app_id, DB_READS, 1);
 
-    Ok(rows
-        .first()
-        .map(|r| r.get::<_, i64>("count"))
-        .unwrap_or(0))
+    Ok(rows.first().map(|r| r.get::<_, i64>("count")).unwrap_or(0))
 }
 
 /// Execute an insert/update/delete query, returning the affected
@@ -321,10 +316,7 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
     let setup_sql = crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = DbError::classify_pg_per_app_session_setup(&e, app_id);
-        crate::error::prefix_message(
-            classified.error_mut(),
-            "db: per-app session setup: ",
-        );
+        crate::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
         classified.into_db_error()
     })?;
 
@@ -359,10 +351,8 @@ async fn exec_sqlite_json(
     // below qualifies its tables as `"<app_id>"."<table>"`, and that alias
     // exists only because of an ATTACH.
     //
-    // This is the data plane's own job, and it used to be registerModel's:
-    // holding the only ATTACH there made a row read depend on a METADATA call
-    // having run first, on this thread, at some earlier point. Nothing about
-    // reading a row needs that.
+    // This is the data plane's own job. A row read must not depend on an
+    // earlier metadata callback having attached the file on this thread.
     //
     // Cheap to repeat. `attach_app_file` returns on a cache hit before issuing
     // any SQL, so every call after the first is a set lookup. Placing it above
@@ -386,9 +376,8 @@ async fn exec_sqlite_json(
     // route that says "in transaction" means either the transaction has
     // settled or another op holds its connection. Re-typed so the creator
     // sees the same coded errors the Postgres arm produces.
-    let client =
-        context::TxClientSlotGuard::take(route.app_id())
-            .map_err(|_| tx_slot_unavailable(route.app_id()))?;
+    let client = context::TxClientSlotGuard::take(route.app_id())
+        .map_err(|_| tx_slot_unavailable(route.app_id()))?;
     let result = match client.client() {
         TxConnection::Sqlite(client) => {
             #[cfg(test)]
@@ -478,12 +467,7 @@ fn backend_publishes_committed_changes() -> bool {
 /// the COMMIT-time drain would just defer the discard. Subscribers
 /// added mid-transaction would miss the event, mirroring the WAL
 /// consumer's same conservative-true contract.
-fn emit_for_rows(
-    rows: &[Value],
-    route: &TxRoute,
-    collection: &str,
-    op: crate::broker::ChangeOp,
-) {
+fn emit_for_rows(rows: &[Value], route: &TxRoute, collection: &str, op: crate::broker::ChangeOp) {
     let app_id = route.app_id();
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
@@ -686,12 +670,12 @@ pub async fn exec_query_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::sqlite::SqliteBackend;
     use crate::backend::SqlExecutor as _;
+    use crate::backend::sqlite::SqliteBackend;
     use crate::broker::ChangeOp;
-    use std::path::PathBuf;
     use std::cell::Cell;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     thread_local! {
@@ -840,7 +824,12 @@ mod tests {
         crate::wal_consumer::suppress_app("app_suppressed");
 
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, &ambient_route_for_tests("app_suppressed"), "messages", ChangeOp::Insert);
+        emit_for_rows(
+            &rows,
+            &ambient_route_for_tests("app_suppressed"),
+            "messages",
+            ChangeOp::Insert,
+        );
 
         assert_eq!(
             tuple_built_count(),
@@ -860,7 +849,12 @@ mod tests {
         // No subscribers, no suppression — the build should still
         // short-circuit because the broker would discard the event.
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, &ambient_route_for_tests("app_no_subs"), "ghosts", ChangeOp::Insert);
+        emit_for_rows(
+            &rows,
+            &ambient_route_for_tests("app_no_subs"),
+            "ghosts",
+            ChangeOp::Insert,
+        );
 
         assert_eq!(
             tuple_built_count(),
@@ -906,9 +900,17 @@ mod tests {
         reset_world("app_active_queue_or_emit_no_tx_emits_immediately");
         // Defensive: make sure no tx is parked for this app from an
         // earlier test on the same OS thread.
-        context::with(|c| assert!(!c.has_tx_for("app_active_queue_or_emit_no_tx_emits_immediately"), "precondition: no tx"));
+        context::with(|c| {
+            assert!(
+                !c.has_tx_for("app_active_queue_or_emit_no_tx_emits_immediately"),
+                "precondition: no tx"
+            )
+        });
 
-        let sub = crate::broker::subscribe("app_active_queue_or_emit_no_tx_emits_immediately", "messages");
+        let sub = crate::broker::subscribe(
+            "app_active_queue_or_emit_no_tx_emits_immediately",
+            "messages",
+        );
 
         let mut tuple = HashMap::new();
         tuple.insert("id".to_string(), "9".to_string());
@@ -939,7 +941,10 @@ mod tests {
     #[test]
     fn drain_pending_emits_on_commit_fires_every_queued_event() {
         reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
-        let sub = crate::broker::subscribe("app_active_drain_pending_emits_on_commit_fires_every_queued_event", "messages");
+        let sub = crate::broker::subscribe(
+            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
+            "messages",
+        );
 
         let mk_event = |pk: i64| crate::broker::ChangeEvent {
             app_id: "app_active_drain_pending_emits_on_commit_fires_every_queued_event".to_string(),
@@ -962,7 +967,9 @@ mod tests {
         // Sanity: nothing has been delivered before drain.
         assert!(sub.pop().is_none(), "drain must not have happened yet");
 
-        drain_pending_emits_on_commit("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
+        drain_pending_emits_on_commit(
+            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
+        );
 
         let mut pks = Vec::new();
         while let Some(msg) = sub.pop() {
@@ -971,11 +978,17 @@ mod tests {
             }
         }
         pks.sort();
-        assert_eq!(pks, vec!["1", "2", "3"], "drain must publish every queued event");
+        assert_eq!(
+            pks,
+            vec!["1", "2", "3"],
+            "drain must publish every queued event"
+        );
 
         // Drain a second time → nothing left (queue is consumed, not
         // copied).
-        drain_pending_emits_on_commit("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
+        drain_pending_emits_on_commit(
+            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
+        );
         assert!(sub.pop().is_none(), "second drain must be a no-op");
         reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
     }
@@ -986,7 +999,10 @@ mod tests {
     #[test]
     fn clear_pending_emits_drops_without_firing() {
         reset_world("app_active_clear_pending_emits_drops_without_firing");
-        let sub = crate::broker::subscribe("app_active_clear_pending_emits_drops_without_firing", "messages");
+        let sub = crate::broker::subscribe(
+            "app_active_clear_pending_emits_drops_without_firing",
+            "messages",
+        );
 
         let ev = crate::broker::ChangeEvent {
             app_id: "app_active_clear_pending_emits_drops_without_firing".to_string(),
@@ -1014,10 +1030,20 @@ mod tests {
     #[test]
     fn exec_mutation_with_emit_builds_when_active_subscriber() {
         reset_world("app_active_exec_mutation_with_emit_builds_when_active_subscriber");
-        let sub = crate::broker::subscribe("app_active_exec_mutation_with_emit_builds_when_active_subscriber", "messages");
+        let sub = crate::broker::subscribe(
+            "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
+            "messages",
+        );
 
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, &ambient_route_for_tests("app_active_exec_mutation_with_emit_builds_when_active_subscriber"), "messages", ChangeOp::Insert);
+        emit_for_rows(
+            &rows,
+            &ambient_route_for_tests(
+                "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
+            ),
+            "messages",
+            ChangeOp::Insert,
+        );
 
         assert_eq!(
             tuple_built_count(),
@@ -1028,7 +1054,10 @@ mod tests {
         // subscriber's queue holds the change.
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.app_id, "app_active_exec_mutation_with_emit_builds_when_active_subscriber");
+                assert_eq!(
+                    ev.app_id,
+                    "app_active_exec_mutation_with_emit_builds_when_active_subscriber"
+                );
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("7"));
@@ -1052,17 +1081,29 @@ mod tests {
 
     #[test]
     fn exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes() {
-        reset_world("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes");
+        reset_world(
+            "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
+        );
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
             );
             context::with_mut(|c| c.set_sqlite_backend(Rc::clone(&backend)));
-            let sub = crate::broker::subscribe("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes", "messages");
+            let sub = crate::broker::subscribe(
+                "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
+                "messages",
+            );
 
             let rows = vec![synthetic_row()];
-            emit_for_rows(&rows, &ambient_route_for_tests("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes"), "messages", ChangeOp::Insert);
+            emit_for_rows(
+                &rows,
+                &ambient_route_for_tests(
+                    "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
+                ),
+                "messages",
+                ChangeOp::Insert,
+            );
 
             assert_eq!(
                 tuple_built_count(),
@@ -1074,16 +1115,28 @@ mod tests {
                 "SQLite SDK-local emit must not publish a duplicate broker event"
             );
         });
-        reset_world("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes");
+        reset_world(
+            "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
+        );
     }
 
     #[test]
     fn exec_mutation_with_emit_uses_logical_typed_id_for_pk() {
         reset_world("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk");
-        let sub = crate::broker::subscribe("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk", "messages");
+        let sub = crate::broker::subscribe(
+            "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
+            "messages",
+        );
 
         let rows = vec![synthetic_typed_id_row()];
-        emit_for_rows(&rows, &ambient_route_for_tests("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk"), "messages", ChangeOp::Insert);
+        emit_for_rows(
+            &rows,
+            &ambient_route_for_tests(
+                "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
+            ),
+            "messages",
+            ChangeOp::Insert,
+        );
 
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
@@ -1140,12 +1193,15 @@ mod tests {
             });
 
             reset_sqlite_route();
-            let inserted = exec_mutation(&ambient_route_for_tests("app_exec"), BuiltQuery {
-                sql: r#"INSERT INTO "app_exec"."notes" (id, title)
+            let inserted = exec_mutation(
+                &ambient_route_for_tests("app_exec"),
+                BuiltQuery {
+                    sql: r#"INSERT INTO "app_exec"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
-                    .to_string(),
-                params: vec![],
-            })
+                        .to_string(),
+                    params: vec![],
+                },
+            )
             .await
             .expect("exec_mutation through tx");
             assert_eq!(
@@ -1159,10 +1215,13 @@ mod tests {
             );
 
             reset_sqlite_route();
-            let count = exec_count(&ambient_route_for_tests("app_exec"), BuiltQuery {
-                sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
-                params: vec![],
-            })
+            let count = exec_count(
+                &ambient_route_for_tests("app_exec"),
+                BuiltQuery {
+                    sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
+                    params: vec![],
+                },
+            )
             .await
             .expect("exec_count through tx");
             assert_eq!(
@@ -1173,10 +1232,13 @@ mod tests {
             assert_eq!(count, 1);
 
             reset_sqlite_route();
-            let rows = exec_query(&ambient_route_for_tests("app_exec"), BuiltQuery {
-                sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
-                params: vec![],
-            })
+            let rows = exec_query(
+                &ambient_route_for_tests("app_exec"),
+                BuiltQuery {
+                    sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
+                    params: vec![],
+                },
+            )
             .await
             .expect("exec_query through tx");
             assert_eq!(
@@ -1244,36 +1306,48 @@ mod tests {
             });
 
             // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
-            exec_mutation(&ambient_route_for_tests(app_id), BuiltQuery {
-                sql: format!(
-                    r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
-                ),
-                params: vec![],
-            })
+            exec_mutation(
+                &ambient_route_for_tests(app_id),
+                BuiltQuery {
+                    sql: format!(
+                        r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
+                    ),
+                    params: vec![],
+                },
+            )
             .await
             .expect("insert");
 
             // 1 query (read) → db_reads +1.
-            exec_query(&ambient_route_for_tests(app_id), BuiltQuery {
-                sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
-                params: vec![],
-            })
+            exec_query(
+                &ambient_route_for_tests(app_id),
+                BuiltQuery {
+                    sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
+                    params: vec![],
+                },
+            )
             .await
             .expect("select");
 
             // 1 count (read) → db_reads +1.
-            exec_count(&ambient_route_for_tests(app_id), BuiltQuery {
-                sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
-                params: vec![],
-            })
+            exec_count(
+                &ambient_route_for_tests(app_id),
+                BuiltQuery {
+                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
+                    params: vec![],
+                },
+            )
             .await
             .expect("count");
 
             // A FAILED op (bad SQL) must emit NOTHING.
-            let bad = exec_query(&ambient_route_for_tests(app_id), BuiltQuery {
-                sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
-                params: vec![],
-            })
+            let bad = exec_query(
+                &ambient_route_for_tests(app_id),
+                BuiltQuery {
+                    sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
+                    params: vec![],
+                },
+            )
             .await;
             assert!(bad.is_err(), "the bad query must fail");
 
@@ -1359,10 +1433,13 @@ mod tests {
             // Co-resident app_b now runs a plain (non-transactional)
             // query on the same thread.
             reset_sqlite_route();
-            let rows = exec_query(&ambient_route_for_tests("app_b"), BuiltQuery {
-                sql: "SELECT 'b' AS title".to_string(),
-                params: vec![],
-            })
+            let rows = exec_query(
+                &ambient_route_for_tests("app_b"),
+                BuiltQuery {
+                    sql: "SELECT 'b' AS title".to_string(),
+                    params: vec![],
+                },
+            )
             .await
             .expect("app_b query");
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("b"));
@@ -1447,10 +1524,14 @@ mod tests {
 
             let gate = backend.arm_next_command_gate_for_tests();
             let task = compio::runtime::spawn(async {
-                exec_query(&ambient_route_for_tests("app_exec_cancel"), BuiltQuery {
-                    sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
-                    params: vec![],
-                })
+                exec_query(
+                    &ambient_route_for_tests("app_exec_cancel"),
+                    BuiltQuery {
+                        sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#
+                            .to_string(),
+                        params: vec![],
+                    },
+                )
                 .await
             });
             gate.wait_until_blocked()
@@ -1465,13 +1546,19 @@ mod tests {
                 "dropping the in-flight future must restore the tx slot"
             );
 
-            let rows = exec_query(&ambient_route_for_tests("app_exec_cancel"), BuiltQuery {
-                sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
-                params: vec![],
-            })
+            let rows = exec_query(
+                &ambient_route_for_tests("app_exec_cancel"),
+                BuiltQuery {
+                    sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
+                    params: vec![],
+                },
+            )
             .await
             .expect("subsequent query must reuse restored tx slot");
-            assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("persisted"));
+            assert_eq!(
+                rows[0].get("title").and_then(Value::as_str),
+                Some("persisted")
+            );
 
             if let Some(TxConnection::Sqlite(client)) =
                 context::with_mut(|c| c.take_tx_client_for("app_exec_cancel"))
@@ -1629,12 +1716,7 @@ mod tests {
             // SET LOCAL role + timeouts are live on the backend.
             let cancelled = compio::time::timeout(
                 Duration::from_millis(100),
-                query_postgres_pool_with_autocommit_role(
-                    &pool,
-                    app_id,
-                    "SELECT pg_sleep(1)",
-                    &[],
-                ),
+                query_postgres_pool_with_autocommit_role(&pool, app_id, "SELECT pg_sleep(1)", &[]),
             )
             .await;
             assert!(

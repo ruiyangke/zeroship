@@ -19,31 +19,9 @@
 //!
 //! # THIS VALIDATOR HAS NO PRODUCTION CALL SITE
 //!
-//! Re-enumerated 2026-08-26. Exactly ONE line in the crate calls
-//! [`reject_cross_app_fk`], and it is not reachable from a running worker:
-//!
-//! - `register_model::bootstrap::bootstrap` - NOT `build_ctx`, which this
-//!   paragraph named until 2026-08-20 and which does not call it and runs on
-//!   the far side of the advisory lock. The whole `bootstrap` module is
-//!   `#[cfg(any(test, feature = "test-helpers"))]`, so it is absent from a
-//!   default build. Its only caller is `run_pipeline`, gated the same way.
-//!
-//! A SECOND CALLER USED TO BE LISTED HERE and is gone, not moved: it was the
-//! dev-tier arm that drove the migration engine, and it was deleted outright
-//! when plugin-db stopped depending on the engine in any profile. An earlier
-//! version of this note pointed at a `tests/support/` fixture it had briefly
-//! become; that file does not exist either. Beyond the one call above, the
-//! only things that reach this validator are the two integration tests that
-//! call it directly to pin its refusal.
-//!
-//! What production `registerModel` does instead is in
-//! `register_model::exec_register_model`: the PG arm returns `Ok(())`
-//! with no DDL and no validation (the migration engine is the PG schema
-//! authority, applying at deploy), and the SQLite dev arm only calls
-//! `attach_app_file`. Neither passes through here.
-//!
-//! **So do not read this module as the thing that keeps foreign keys
-//! inside an app.** That property does hold, but it is owned by the
+//! The only callers are integration tests that pin its refusal. Do not read
+//! this module as the thing that keeps foreign keys inside an app. That
+//! property is owned by the
 //! migration engine, which applies schema at deploy: a dot-qualified
 //! column ref is refused by `reject_cross_app_ref` in the vendored
 //! `zero-migrate` (`render/declarative.rs`), the renderer qualifies
@@ -55,11 +33,7 @@
 //! this module sits in, and the engine carries its own copy.
 //!
 //! This module is kept because `tests/integration.rs` and
-//! `tests/sqlite_integration.rs` pin its rejection contract, and
-//! because the four-phase pipeline it belongs to is still the reference
-//! shape for an apply. Whether the pipeline (and this with it) should
-//! be deleted outright under the repo's no-back-compat stance is an
-//! open call, flagged the same way at `register_model/mod.rs:41`.
+//! `tests/sqlite_integration.rs` pin its rejection contract.
 
 use crate::error::DbError;
 
@@ -85,10 +59,7 @@ use crate::error::DbError;
 /// §6: `DbError::Configuration { code: "cross_app_fk_forbidden", ... }`.
 /// The static `.code` is the canonical SDK-visible classifier; the
 /// `hint` carries operator-facing remediation text.
-pub fn reject_cross_app_fk(
-    schema: &serde_json::Value,
-    app_id: &str,
-) -> Result<(), DbError> {
+pub fn reject_cross_app_fk(schema: &serde_json::Value, app_id: &str) -> Result<(), DbError> {
     let Some(obj) = schema.as_object() else {
         // Non-object schema is malformed — but this hook isn't the
         // place to flag that; the downstream `compute_diff` /
@@ -184,10 +155,13 @@ mod tests {
         let schema = json!({
             "authorId": { "type": "ref", "refTarget": "other_app.users" }
         });
-        let err = reject_cross_app_fk(&schema, "app_demo")
-            .expect_err("cross-app ref must reject");
+        let err = reject_cross_app_fk(&schema, "app_demo").expect_err("cross-app ref must reject");
         match err {
-            DbError::Configuration { code, message, hint } => {
+            DbError::Configuration {
+                code,
+                message,
+                hint,
+            } => {
                 assert_eq!(code, "cross_app_fk_forbidden");
                 assert!(
                     message.contains("other_app.users"),
@@ -245,8 +219,8 @@ mod tests {
             "mirrorId": { "type": "ref", "refTarget": "app_demo.snapshots" },
             "audit": { "type": "ref", "refTarget": "other_app.entries" }
         });
-        let err = reject_cross_app_fk(&schema, "app_demo")
-            .expect_err("third field crosses; must reject");
+        let err =
+            reject_cross_app_fk(&schema, "app_demo").expect_err("third field crosses; must reject");
         match err {
             DbError::Configuration { code, message, .. } => {
                 assert_eq!(code, "cross_app_fk_forbidden");

@@ -4,22 +4,22 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
+use zeroship_core::database_role::{PerAppRoleNameError, per_app_role_name};
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
-    resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine,
-    MigrationIr, SealError, SealedPolicy,
+    Approval, ApprovalScope, DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig,
+    IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationIr, SealError,
+    SealedPolicy, resolve_create_table_policy,
 };
 // PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
 // them off the facade, so this PostgreSQL host names PostgreSQL rather than
 // reaching for a re-export that deliberately no longer exists.
-use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
-use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zeroship_migrate_postgres::role::migrator_role_name;
-use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
-use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use crate::session::CompioPgSession;
+use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::role::migrator_role_name;
+use zeroship_migrate_postgres::{DIALECT as POSTGRES, PostgresBackend};
 
 /// The backends this host hands to every engine entry point.
 ///
@@ -30,20 +30,19 @@ use crate::session::CompioPgSession;
 /// at each call site, NOT by narrowing the set: the engine resolves a backend by
 /// `DialectId` out of whatever it was given, so a narrowed set would only change
 /// which errors are reachable, not which backend runs.
-const VENDORS: zeroship_migrate_backend::registry::VendorSet =
-    zeroship_migrate::shipping_vendors();
+const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
 use crate::policy::{
-    confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
-    ManagedPolicyError, SealVerifier,
-};
-use crate::publication::{reconcile_app_publication, PublicationError};
-use crate::schema_apply_store::{
-    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
+    CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError, SealVerifier,
+    confined_guard_policy_for_schema,
 };
 use crate::provisioning::{
-    exec_retry, provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
-    AUDIT_UNMASK_TABLE,
+    AUDIT_UNMASK_TABLE, ProvisionRoleError, exec_retry, provision_audit_unmask_table,
+    provision_migrator,
+};
+use crate::publication::{PublicationError, reconcile_app_publication};
+use crate::schema_apply_store::{
+    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -295,8 +294,8 @@ pub async fn apply_ir_documents(
         ))
         .await
         .map_err(ApplyRequestError::ProvisionSchema)?;
-    let role = migrator_role_name(&schema)
-        .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
+    let role =
+        migrator_role_name(&schema).map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
     // The executor re-vets rendered SQL at apply time from its own policy, so it must
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
@@ -711,7 +710,9 @@ async fn apply_bundle_ir_postgres(
             .await?;
             outcome.applied.extend(file_outcome.applied);
             outcome.skipped.extend(file_outcome.skipped);
-            outcome.pending_contract.extend(file_outcome.pending_contract);
+            outcome
+                .pending_contract
+                .extend(file_outcome.pending_contract);
         }
         Ok::<SealedApplyOutcome, IrApplyError>(outcome)
     }
@@ -952,7 +953,6 @@ fn guard_policy_for_managed(schema: &str) -> PdpPolicy {
         .expect("embedded no-inject confined guard charter must bind and compose")
 }
 
-
 // `ApplyRequestError` is ~152 bytes wide because it wraps `IrApplyError` /
 // `SealedApplyError` (themselves wide - see the allows on `discover_ir_files`
 // above). Boxing it would ripple through every match arm on this type in
@@ -971,12 +971,11 @@ fn write_ir_documents(
 
     for doc in &request.documents {
         let path = dir.path().join(&doc.filename);
-        let bytes = serde_json::to_vec_pretty(&doc.body).map_err(|source| {
-            ApplyRequestError::Write {
+        let bytes =
+            serde_json::to_vec_pretty(&doc.body).map_err(|source| ApplyRequestError::Write {
                 path: path.clone(),
                 source: std::io::Error::other(source.to_string()),
-            }
-        })?;
+            })?;
         std::fs::write(&path, bytes).map_err(|source| ApplyRequestError::Write {
             path: path.clone(),
             source,
@@ -1012,7 +1011,6 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
     }
     Ok(())
 }
-
 
 /// Close the request's ledger row as `failed`, best effort.
 ///
@@ -1447,8 +1445,8 @@ pub fn runtime_role_provisioning_sql(
 
     let grants = format!(
         // USAGE only - the runtime role does DML, never DDL. Object creation
-        // (tables, sequences) is the migrator role's job; plugin-db's
-        // register_model is a no-op on Postgres. Granting CREATE here would let
+        // (tables, sequences) is the migrator role's job; plugin-db has no
+        // runtime schema-authoring path. Granting CREATE here would let
         // app runtime code author schema objects, which it must not.
         "GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema_q} TO {role_q};
@@ -1754,8 +1752,12 @@ mod live_audit_unmask_provisioning {
                 continue;
             }
             let q = quote_ident(&role);
-            let _ = admin.batch_execute(&format!("DROP OWNED BY {q} CASCADE")).await;
-            let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {q}")).await;
+            let _ = admin
+                .batch_execute(&format!("DROP OWNED BY {q} CASCADE"))
+                .await;
+            let _ = admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {q}"))
+                .await;
         }
     }
 
@@ -2242,8 +2244,12 @@ mod live_worker_role_fence {
         }
         for role in [&fx.worker, &fx.app_role] {
             let q = quote_ident(role);
-            let _ = admin.batch_execute(&format!("DROP OWNED BY {q} CASCADE")).await;
-            let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {q}")).await;
+            let _ = admin
+                .batch_execute(&format!("DROP OWNED BY {q} CASCADE"))
+                .await;
+            let _ = admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {q}"))
+                .await;
         }
     }
 
@@ -2281,10 +2287,7 @@ mod live_worker_role_fence {
     /// `(roleid, member, GRANTOR)` and a second grantor's inheriting row would
     /// re-open the fence for the pair - a query shaped `LIMIT 1` would report a
     /// fence that a sibling row has already opened.
-    async fn inherit_options(
-        admin: &compio_postgres::Client,
-        fx: &Fixture,
-    ) -> Vec<bool> {
+    async fn inherit_options(admin: &compio_postgres::Client, fx: &Fixture) -> Vec<bool> {
         admin
             .query(
                 "SELECT membership.inherit_option \
@@ -2512,10 +2515,7 @@ mod live_worker_role_fence {
 
         // ARM B - the role attribute, which is the intuitive fix and is inert.
         admin
-            .batch_execute(&format!(
-                "ALTER ROLE {} NOINHERIT",
-                quote_ident(&fx.worker)
-            ))
+            .batch_execute(&format!("ALTER ROLE {} NOINHERIT", quote_ident(&fx.worker)))
             .await
             .expect("alter the role attribute");
         let rolinherit: bool = admin

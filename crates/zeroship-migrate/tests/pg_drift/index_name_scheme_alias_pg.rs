@@ -27,9 +27,9 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zeroship_migrate::{
-    diff_snapshots, diff_snapshots_with_index_aliases, AcceptedIndexAlias, Approval,
-    CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
-    GuardConfig, IndexDescriptor, MigrationEngine,
+    AcceptedIndexAlias, Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy,
+    ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine, diff_snapshots,
+    diff_snapshots_with_index_aliases,
 };
 
 use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
@@ -249,7 +249,7 @@ async fn deploy(
 /// declarative author's differently-derived name for the same index.
 ///
 /// The live index is created under `schema::query::index_name`, byte-for-byte what
-/// the out-of-repo data plane's `registerModel` writes. The desired snapshot derives
+/// the platform migration service writes. The desired snapshot derives
 /// the same index through `cap_ident_name`. Both names are live-legal and under
 /// NAMEDATALEN; they simply disagree. Nothing about the index itself differs, so the
 /// plan must be empty and drift must be clean.
@@ -271,7 +271,8 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     );
 
     // The data plane's spelling, from the REAL function the data plane calls.
-    let data_plane_name = zeroship_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
+    let data_plane_name =
+        zeroship_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
     assert_ne!(
         data_plane_name, natural,
         "above 60 bytes the data plane replaces the tail with its base32 hash"
@@ -296,7 +297,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     );
 
     // Now REPLACE it with the byte-identical index under the data plane's spelling.
-    // This is the live shape a project gets when `registerModel` built the index
+    // This is the live shape a project gets when schema application built the index
     // before any migration ran.
     {
         use zeroship_migrate::driver::SqlSession;
@@ -568,7 +569,8 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
 
     let field = long_unique_field();
     let natural = format!("{TABLE}_{field}_key");
-    let data_plane_name = zeroship_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
+    let data_plane_name =
+        zeroship_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     let mut owner_desc = unique_descriptor(TABLE, &field);

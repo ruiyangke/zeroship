@@ -5,18 +5,14 @@
  * implementation backs both the runtime crate's bootstrap and the Vite
  * plugin's dev path. User code MUST NOT call this.
  *
- * Behaviour (mirrors the previous `@zeroship/db::installSchema`):
- *   - Walks the schema map and runs `registerModel` in topological order
- *     so parent tables precede child tables.
+ * Behaviour:
  *   - Plants typed `Collection` wrappers PLUS the `transaction` / `live`
  *     extension methods as own properties on the supplied `env` (the
  *     native `ZeroshipDb` handle — `env.db` in production, a mock in
  *     tests). After this returns, `env.<collection>.find(...)` and
  *     `env.transaction(tx => ...)` are live.
- *   - Returns `{ collections, ready }`. The bootstrap (production
- *     `runtime-entry.ts`, dev `dev-entry.ts`) awaits `ready` before
- *     dispatching any request so handlers don't race the orchestrator's
- *     `pg_advisory_lock`.
+ *   - Returns `{ collections }`. Runtime descriptor entries are planted
+ *     natively before this JavaScript installer runs.
  *
  * Re-entrancy: a second call with overlapping names re-installs the
  * Collection wrappers (`configurable: true` on the descriptors).
@@ -52,74 +48,6 @@ import {
   type PlainObject,
   type FieldDef,
 } from "@zeroship/db/internal";
-
-// ---------------------------------------------------------------------------
-// DbPlatform capability handle (P9 PR 4 — §8)
-// ---------------------------------------------------------------------------
-
-/**
- * The platform-internal capability handle, set on the native `env.db`
- * object under a V8 private symbol and reachable only via the runtime's
- * `globalThis.__zsDbPlatform(db)` resolver (P9 §8). It is NOT a string
- * property on `env.db` — creator code cannot reach it, and it is absent
- * from the published `@zeroship/types` surface (its shape lives in this
- * package's framework-internal `internal.d.ts`).
- *
- * `installSchema` reads it via {@link resolveDbPlatform} and routes
- * `registerModel` / `setMaskPolicy` through it. The matching
- * `ZeroshipDbPlatform` ambient interface (in `internal.d.ts`) carries
- * the full surface (including the `migrations` / `replication`
- * namespaces); this local alias is the subset `installSchema` calls.
- */
-export interface DbPlatformHandle {
-  registerModel(
-    collection: string,
-    schema: unknown,
-    indexes?: unknown,
-    // H1 — the FULL declared-collection-name set (`Object.keys(schemas)`).
-    // The dev SQLite drop pass uses it to distinguish a not-yet-registered
-    // sibling (declared → keep) from a genuinely-removed collection (not
-    // declared → drop). Inert on PG. Optional for older callers.
-    declared?: readonly string[],
-  ): Promise<void>;
-  setMaskPolicy(policy: Record<string, readonly string[]>): Promise<unknown>;
-}
-
-/**
- * Resolve the {@link DbPlatformHandle} for a native `env.db` object via
- * the runtime's `globalThis.__zsDbPlatform(db)` resolver (P9 §8). The
- * resolver reads the handle out of the private-symbol slot on `db`.
- *
- * Returns `undefined` when:
- *   - the resolver isn't installed (no DbPlugin on this runtime — e.g. a
- *     dev run without `DATABASE_URL`, or a unit test with a mock
- *     `env.db`), or
- *   - `db` carries no platform slot (a mock that wasn't minted by the
- *     native `mint_db`).
- *
- * In both cases `installSchema` falls back to its handle-absent path: it
- * skips `registerModel` (the dispatcher's `_schemaReady` defense still
- * gates request handling), exactly as it did before P9 PR 4 when
- * `registerModel` lived directly on `env.db`. The `prefer` argument lets a caller (the
- * runtime-entry) pass a handle it resolved earlier so the resolver isn't
- * consulted twice — and so it keeps working after runtime-entry deletes
- * the global.
- */
-export function resolveDbPlatform(
-  db: unknown,
-  prefer?: DbPlatformHandle,
-): DbPlatformHandle | undefined {
-  if (prefer && typeof prefer.registerModel === "function") return prefer;
-  const g = globalThis as unknown as {
-    __zsDbPlatform?: (db: unknown) => unknown;
-  };
-  if (typeof g.__zsDbPlatform !== "function") return undefined;
-  const handle = g.__zsDbPlatform(db);
-  if (handle == null || typeof handle !== "object") return undefined;
-  const h = handle as Partial<DbPlatformHandle>;
-  if (typeof h.registerModel !== "function") return undefined;
-  return handle as DbPlatformHandle;
-}
 
 // ---------------------------------------------------------------------------
 // normalizeSchema + expandUnionToFlatColumns (moved from @zeroship/db/schema)
@@ -311,8 +239,8 @@ function isFieldDef(value: unknown): value is FieldDef {
  * constant (`crates/zeroship-schema/src/query.rs`). The seven names are
  * platform-managed system fields; creator schemas cannot declare
  * fields with these names. Fences at schema-declaration time so the
- * failure shows up immediately in `pnpm dev` (not at the first DB
- * call), matching the spec's "throw at app-boot time" requirement.
+ * failure shows up immediately in `pnpm dev`, matching the spec's
+ * "throw at app-boot time" requirement.
  *
  * Drift between this list and the Rust constant would let creators
  * declare a field the SDK accepts but the runtime refuses (or vice-
@@ -336,9 +264,8 @@ const SYSTEM_FIELD_NAMES: readonly string[] = Object.freeze([
  *
  * **P7 PR 1** — refuses any field whose name collides with a
  * platform system field. The Rust-side `field_to_column` would also
- * refuse such schemas at register-model time; throwing here lets
- * `pnpm dev` surface the error immediately on first build instead
- * of waiting for the worker round-trip.
+ * refuse such schemas at descriptor-install time; throwing here lets
+ * `pnpm dev` surface the error immediately on first build.
  */
 export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   // C2 — top-level discriminated union.
@@ -374,7 +301,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
     // **P7 PR 1** — refuse creator-declared fields whose names collide
     // with the seven platform system fields. The Rust-side validator
     // (`validate_field_name_for_declaration`) enforces the same fence
-    // at register-model; the SDK-side check surfaces the error at
+    // while installing the descriptor; the SDK-side check surfaces the error at
     // `pnpm dev` build time so creators don't wait for a worker
     // round-trip. Error code mirrors the Rust-side
     // `RESERVED_SYSTEM_FIELD_NAME`.
@@ -383,8 +310,8 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
       // DECLARATION for the always-present system `id` PK column — not
       // an attempt to override the column. Allow it through ONLY when
       // the value is a `type:"id"` builder; the `{type:"id", idPrefix}`
-      // def then reaches `registerModel` (and the Rust schema cache) so
-      // the auto-mint pass can read the declared prefix. Any other type
+      // def then reaches the runtime descriptor so the auto-mint pass can
+      // read the declared prefix. Any other type
       // declared under `id`, and all six other system names, stay
       // rejected. The Rust column emitter skips this field (no duplicate
       // `id` column) and its validator mirrors the `usr` fence.
@@ -621,15 +548,9 @@ export function validateRefTargets(
  *
  * Framework-internal — `installSchema` is the only caller in
  * production. Tests construct collections through `installSchema`'s
- * return value too; the standalone `model()` shape kept on
- * `@zeroship/db` would re-introduce the eager-registerModel race that
- * Stage 5 fixed. If a user needs a one-off Collection outside of
+ * return value too. If a user needs a one-off Collection outside of
  * `installSchema`, they should declare schema on the entry and read
  * `env.db.<name>` — that's the supported path.
- *
- * @internal — `installSchema` sets `skipRegister=true` so `model()`
- *   doesn't eagerly fire `registerModel` itself; `installSchema` runs
- *   the registrations in topological order.
  */
 export function model<S extends Record<string, unknown>>(
   name: string,
@@ -638,7 +559,6 @@ export function model<S extends Record<string, unknown>>(
   namingStrategy: NamingStrategy = naming.asIs,
   softDelete: boolean = false,
   versioning: boolean = false,
-  skipRegister: boolean = false,
   declaredIndexes: readonly NamedIndexSpec[] = [],
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
@@ -668,101 +588,12 @@ export function model<S extends Record<string, unknown>>(
     normalized.version = { type: "number", required: false, default: 1 };
   }
 
-  // Register model with the runtime — creates table + columns if not exists.
-  // Convert schema keys to column names for DDL.
-  const dbSchema: ZeroshipDbSchema = {};
-  for (const [key, def] of Object.entries(normalized)) {
-    dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
-  }
-
-  const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
-    name: idx.name,
-    fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
-    ...(idx.unique ? { unique: true } : {}),
-  }));
-
-  // Call via `.call(native, ...)` so the v8_class brand check sees the
-  // right receiver. The unbound-fn form drops `this` and triggers
-  // "Illegal invocation" — see commit e564c010 for context.
-  //
-  // **P9 PR 4** — `registerModel` moved off the published `ZeroshipDb`
-  // surface to the `__platform` handle, so it's no longer a typed member
-  // of `native: NativeDb`. The standalone `model()` path (skipRegister =
-  // false) is exercised only by `@zeroship/db` unit tests, which pass a
-  // mock `native` carrying its own `registerModel`; we read it via a
-  // structural cast so those callers keep working. The production
-  // `installSchema` path passes `skipRegister = true` and runs
-  // registration through the `__platform` handle instead (see
-  // `_installSchemaInner`).
-  const nativeRegisterModel = (native as unknown as {
-    registerModel?: (
-      this: typeof native,
-      collection: string,
-      schema: ZeroshipDbSchema,
-      indexes?: ZeroshipDbNamedIndex[],
-    ) => Promise<void>;
-  }).registerModel;
-  let registrationPromise: Promise<void> | null = null;
-  if (!skipRegister && typeof nativeRegisterModel === "function") {
-    registrationPromise = nativeRegisterModel.call(native, name, dbSchema, wireIndexes);
-  }
-
   return new Collection<S>(name, normalized, native, {
     naming: namingStrategy,
-    ready: registrationPromise,
     softDelete,
     versioning,
     indexes: declaredIndexes,
   });
-}
-
-// ---------------------------------------------------------------------------
-// topoSortByRefs
-// ---------------------------------------------------------------------------
-
-/**
- * Topologically sort schema names so parents precede children. A child
- * is a collection with `t.ref(parent)` somewhere in its field set.
- * Used by `installSchema` to chain `registerModel` calls in dependency
- * order. Cycles (mutual refs) fall back to declaration order — they're
- * resolved by `DEFERRABLE INITIALLY DEFERRED` at the SQL layer.
- */
-function topoSortByRefs(schemas: Record<string, unknown>): string[] {
-  const names = Object.keys(schemas);
-  const deps = new Map<string, Set<string>>();
-  for (const name of names) {
-    deps.set(name, new Set());
-    const raw = schemas[name];
-    const fields = isSchemaBuilder(raw) ? raw.fields : raw;
-    if (!isPlainRecord(fields)) continue;
-    for (const rawFieldDef of Object.values(fields)) {
-      const def = isTypeBuilder(rawFieldDef)
-        ? rawFieldDef.toFieldDef()
-        : isFieldDef(rawFieldDef)
-          ? rawFieldDef
-          : null;
-      if (def?.type === "ref") {
-        const target = def.refTarget;
-        if (target && target !== name && names.includes(target)) {
-          deps.get(name)!.add(target);
-        }
-      }
-    }
-  }
-  const visited = new Set<string>();
-  const onStack = new Set<string>();
-  const out: string[] = [];
-  function visit(n: string): void {
-    if (visited.has(n)) return;
-    if (onStack.has(n)) return; // cycle — break; DEFERRABLE handles it
-    onStack.add(n);
-    for (const d of deps.get(n)!) visit(d);
-    onStack.delete(n);
-    visited.add(n);
-    out.push(n);
-  }
-  for (const n of names) visit(n);
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -929,8 +760,6 @@ export type Db<T extends Record<string, SchemaInput>> = Collections<T> & DbExten
 // ---------------------------------------------------------------------------
 // TxCollection — wraps a Collection, throws on error
 // ---------------------------------------------------------------------------
-
-let _prevChain: Promise<void> | null = null;
 
 async function unwrap<T>(result: Result<T>): Promise<T> {
   if (result.error) throw result.error;
@@ -1109,21 +938,6 @@ export interface InstallSchemaOptions {
    */
   naming?: NamingStrategy;
   /**
-   * **P9 PR 4** — the platform capability handle the caller already
-   * resolved via the runtime's `globalThis.__zsDbPlatform(env.db)`
-   * resolver (§8). The production `runtime-entry` resolves it once and
-   * passes it here so registration (`registerModel` / `setMaskPolicy`)
-   * routes through `__platform` even after the runtime-entry deletes the
-   * resolver global.
-   *
-   * When omitted, `installSchema` resolves the handle itself; when no
-   * handle is available (no DbPlugin, or a mock `env`), registration
-   * falls back to a `registerModel` method on `env` directly if present
-   * (the shape `@zeroship/db` unit-test mocks use), else skips.
-   */
-  platform?: DbPlatformHandle;
-
-  /**
    * **Migration-first cutover (P5 S3)** — the bundled
    * {@link RuntimeSchemaDescriptor}, resolved from `manifest.runtime_descriptor`
    * and injected by the runtime as `globalThis.__zsRuntimeDescriptor`. v2 carries
@@ -1143,7 +957,6 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
   // creator-facing `transaction` (below) is now a native method on
   // `env.db`, so it stays reserved.
   "openSubscription",
-  "registerModel",
   "transaction",
   "live",
 ]);
@@ -1152,14 +965,13 @@ let _installInFlight = false;
 
 /**
  * Framework-internal helper that installs the runtime schema descriptor.
- * Returns `{ collections, ready }` — callers MUST await
- * `ready` before dispatching handlers.
+ * Returns the typed collection map after planting it on `env.db`.
  */
 export function installSchema<const T extends Record<string, SchemaInput>>(
   schemas: ValidateSchemaShape<T>,
   env: NativeDb,
   options?: InstallSchemaOptions,
-): { collections: Collections<T>; ready: Promise<void> } {
+): { collections: Collections<T> } {
   if (_installInFlight) {
     throw Object.assign(
       new Error(
@@ -1173,13 +985,6 @@ export function installSchema<const T extends Record<string, SchemaInput>>(
   _installInFlight = true;
   try {
     return _installSchemaInner(schemas as unknown as T, env, options);
-  } catch (e) {
-    const prev = _prevChain ?? Promise.resolve();
-    const reason = e instanceof Error ? e : new Error(String(e));
-    const published = prev.catch(() => undefined).then(() => Promise.reject(reason));
-    published.catch(() => undefined);
-    _prevChain = published;
-    throw e;
   } finally {
     _installInFlight = false;
   }
@@ -1189,7 +994,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   schemas: T,
   env: NativeDb,
   options?: InstallSchemaOptions,
-): { collections: Collections<T>; ready: Promise<void> } {
+): { collections: Collections<T> } {
   if (env == null || typeof env !== "object") {
     throw Object.assign(
       new Error(
@@ -1214,33 +1019,6 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       : ({} as T);
 
   const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
-
-  // **P9 PR 4** — registration (`registerModel`) target. In production
-  // `registerModel` lives on the `__platform` capability handle, not on
-  // `env.db`; resolve it via the runtime resolver (or the handle the
-  // caller pre-resolved through `options.platform`). When no handle is
-  // available, fall back to a `registerModel` method on `env` directly —
-  // the shape `@zeroship/db`'s unit-test mocks use — else registration
-  // is skipped (RPC-only / fetch-only apps, dev without a DB URL). The
-  // call is dispatched with `.call(registerTarget, ...)` so the v8_class
-  // brand check sees the right receiver.
-  const platform = resolveDbPlatform(native, options?.platform);
-  const registerTarget = (platform ?? (native as unknown)) as {
-    registerModel?: (
-      this: unknown,
-      collection: string,
-      schema: ZeroshipDbSchema,
-      indexes?: ZeroshipDbNamedIndex[],
-      declared?: readonly string[],
-    ) => Promise<void>;
-  };
-
-  // H1 — the FULL set of collection names this app declares. Passed to EVERY
-  // per-collection `registerModel` so the dev SQLite drop pass can tell a
-  // not-yet-registered sibling (declared) from a genuinely-removed collection
-  // (absent here). Computed once; stable across the topo-ordered chain.
-  // Sourced only from the descriptor.
-  const declaredCollectionNames: readonly string[] = Object.keys(source);
 
   // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
   // method BEFORE the install loop overwrites `env.db.transaction` with
@@ -1267,14 +1045,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
   validateRefTargets(source);
 
-  // P5 S3: v2 descriptors carry collection-level options directly. Strictness
-  // is sent to the native register path as `schema._meta.strictness`.
+  // P5 S3: v2 descriptors carry collection-level options directly.
   const collectionOptionsFor = (
     name: string,
   ): {
     softDelete: boolean;
     versioning: boolean;
-    strictness?: RuntimeStrictness;
     indexes: readonly NamedIndexSpec[];
   } => {
     const fromDescriptor = descriptorV2?.collections[name];
@@ -1282,7 +1058,6 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return {
         softDelete: fromDescriptor.options?.softDelete ?? false,
         versioning: fromDescriptor.options?.versioning ?? false,
-        strictness: fromDescriptor.options?.strictness,
         indexes: fromDescriptor.indexes ?? [],
       };
     }
@@ -1305,52 +1080,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         namingStrategy,
         opts.softDelete,
         opts.versioning,
-        /* skipRegister */ true,
         opts.indexes,
       ) as Collection<unknown, string, T>;
-  }
-
-  const refOrder = topoSortByRefs(source as Record<string, unknown>);
-  let chain: Promise<void> = Promise.resolve();
-  for (const name of refOrder) {
-    const col = (collections as Record<string, Collection<unknown, string, T>>)[name];
-    if (!col) continue;
-    const rawSchema = source[name as keyof T];
-    const fields =
-      isSchemaBuilder(rawSchema) ? rawSchema.fields : rawSchema;
-    const normalized = normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]);
-    const dbSchema: ZeroshipDbSchema = {};
-    for (const [key, def] of Object.entries(normalized)) {
-      dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
-    }
-    // v2 descriptor mode carries indexes directly. On PG these are benign —
-    // migrations own DDL — but the dev-SQLite register feed and the
-    // unindexed-filter warning both read them.
-    const opts = collectionOptionsFor(name);
-    const declaredIndexes: readonly NamedIndexSpec[] = opts.indexes;
-    const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
-      name: idx.name,
-      fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
-      ...(idx.unique ? { unique: true } : {}),
-    }));
-    if (opts.strictness !== undefined) {
-      (dbSchema as Record<string, unknown>)._meta = { strictness: opts.strictness };
-    }
-    chain = chain.then(() => {
-      // **P9 PR 4** — register through the `__platform` handle (or the
-      // mock fallback); see `registerTarget` above.
-      if (typeof registerTarget.registerModel !== "function") {
-        return Promise.resolve();
-      }
-      return registerTarget.registerModel.call(
-        registerTarget,
-        name,
-        dbSchema,
-        wireIndexes,
-        declaredCollectionNames,
-      );
-    });
-    (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
 
   const resolveCollection = (n: string): Collection<unknown> | undefined =>
@@ -1533,10 +1264,5 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     });
   }
 
-  const prev = _prevChain ?? Promise.resolve();
-  const ready = prev.catch(() => undefined).then(() => chain);
-  _prevChain = ready;
-  ready.catch(() => undefined);
-
-  return { collections: collections as Collections<T>, ready };
+  return { collections: collections as Collections<T> };
 }

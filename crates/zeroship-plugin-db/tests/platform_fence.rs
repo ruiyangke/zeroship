@@ -20,7 +20,7 @@ use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 /// Minimal SSR shim (mirrors `capability.rs`): a function-shape
 /// `default.rpc` + `default.fetch` that invokes a named procedure and
@@ -64,16 +64,15 @@ fn dispatch(source: &str, name: &str) -> (u16, serde_json::Value) {
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> =
-        vec![
-            DbService::new(DbServiceConfig {
-                url: "postgres://_platform_fence_unused".to_string(),
-                worker_id: "platform-fence-test-worker".to_string(),
-                meter: None,
-            })
-            .expect("db service")
-            .plugin(),
-        ];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: "postgres://_platform_fence_unused".to_string(),
+            worker_id: "platform-fence-test-worker".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -143,7 +142,6 @@ import { env } from "zeroship";
 function probe() {
     const db = env.db;
     const report = {
-        registerModel: typeof db.registerModel,
         setMaskPolicy: typeof db.setMaskPolicy,
         migrations: typeof db.migrations,
         replication: typeof db.replication,
@@ -169,12 +167,7 @@ const _procedures = { probe };
     let json = body.get("json").unwrap_or(&body);
 
     // Moved members gone.
-    for name in [
-        "registerModel",
-        "setMaskPolicy",
-        "migrations",
-        "replication",
-    ] {
+    for name in ["setMaskPolicy", "migrations", "replication"] {
         assert_eq!(
             json.get(name).and_then(|v| v.as_str()),
             Some("undefined"),
@@ -182,8 +175,14 @@ const _procedures = { probe };
         );
     }
     // Public surface retained.
-    assert_eq!(json.get("collection").and_then(|v| v.as_str()), Some("function"));
-    assert_eq!(json.get("transaction").and_then(|v| v.as_str()), Some("function"));
+    assert_eq!(
+        json.get("collection").and_then(|v| v.as_str()),
+        Some("function")
+    );
+    assert_eq!(
+        json.get("transaction").and_then(|v| v.as_str()),
+        Some("function")
+    );
     // Not in own property names.
     assert_eq!(
         json.get("ownNames").and_then(|v| v.as_bool()),
