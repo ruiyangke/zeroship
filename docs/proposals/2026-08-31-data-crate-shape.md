@@ -85,6 +85,21 @@ starts. Detail and per-symbol evidence in **#91** and **#92**. Summary:
 `EncryptionMeta`, `WrappedType`, `Classification`) inside a dead differ. Cutting on the boundary
 breaks the read path twice.
 
+**PROVED BY EXPERIMENT, 2026-08-31, and it corrected this plan.** I deleted `query.rs:1056-1754`
+(the DDL region) and ran `cargo check --workspace --all-targets`. It FAILED with 16 errors, and the
+two causes both change the sequencing above:
+
+- **The DDL builders and the differ are ONE dead cluster, not two regions.** `diff.rs:998-1184` -
+  inside `compute_diff` - calls `build_add_column`, `build_add_foreign_key`, `normalize_fk_action`
+  and `build_drop_foreign_key`. They are transitively dead TOGETHER; neither deletes alone.
+- **`SqliteEmitScope` is defined in the DDL region and used by the LIVE renderer** at `query.rs:139`,
+  `:225`, `:339`, `:469`. It must be kept and rehomed, not deleted with its neighbours.
+
+So the grep-derived plan would have broken the build. Anyone executing step 0 should repeat this
+experiment per cut rather than trusting the region table: **"no callers found" and "nothing can call
+it" are different claims, and only the compiler settles the second.** The restore is clean -
+`cargo check -p zeroship-schema --all-targets` returns 0 errors at `13,814` lines.
+
 Delete the tests that reach the dead code in the same change. They are the only thing making it look
 alive, and keeping them is how the next reader concludes it still runs.
 
