@@ -4321,6 +4321,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn replication_connection_debug_names_its_type() {
+        let connection = replication_connection_over(Vec::new());
+
+        let debug = format!("{connection:?}");
+
+        assert!(
+            debug.starts_with("ReplicationConnection {"),
+            "replication connection Debug did not name its type: {debug}"
+        );
+    }
+
     fn copy_both_response(body: &[u8]) -> Vec<u8> {
         let mut frame = vec![COPY_BOTH_RESPONSE_TAG];
         frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
@@ -5348,6 +5360,18 @@ mod tests {
             release: None,
             cancel_token: test_cancel_token(),
         }
+    }
+
+    #[test]
+    fn replication_stream_debug_names_its_type() {
+        let stream = stream_over(Vec::new());
+
+        let debug = format!("{stream:?}");
+
+        assert!(
+            debug.starts_with("ReplicationStream {"),
+            "replication stream Debug did not name its type: {debug}"
+        );
     }
 
     /// A message header whose declared length is below the 4 bytes the length
