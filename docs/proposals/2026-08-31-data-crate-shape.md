@@ -92,14 +92,21 @@ Two facts that shape everything below, both contradicting `AGENTS.md:143`:
 
 ## Step 0 - delete the dead. Independent, and first.
 
-Roughly **1,966 lines** in `query.rs`, plus the dead half of `diff.rs`, delete before any porting
+Roughly **2,044 lines** in `query.rs`, plus the dead half of `diff.rs`, delete before any porting
 starts. Detail and per-symbol evidence in **#91** and **#92**. Summary:
 
 | region | lines | why dead |
 | --- | --- | --- |
-| `query.rs:1057-1755` DDL builders | 699 | no callers; engine uses its own `crate::schema::query` |
+| `query.rs:1057-1755` DDL builders | 699 | no PRODUCTION ROOT; engine uses its own `crate::schema::query`. It does have intra-crate callers - see the experiment below |
 | `query.rs:1756-3022` index builders | 1,267 | engine calls its own `index_name`; `migrate-backend/src/ddl.rs:123` says "i.e. the ENGINE's" |
+| `query.rs:135-140`, `:221`, `:335`, `:465` `system_field_indexes` | 78 | the trait declaration and its three impls, ABOVE the region table's "live" boundary. Correction 2 below |
 | `diff.rs` differ + introspection | ~2,000 | `compute_diff` has no production caller; `read_live_schema` / `estimate_row_count` reachable only from `tests/sqlite_integration.rs` |
+
+**"No callers" and "no production root" are different claims, and this table used to conflate them.**
+The DDL builders row said "no callers" while the experiment below concedes seven intra-crate callers
+inside `compute_diff`. Both facts are true and neither is the other: the builders are unreachable
+from anything production runs, AND they are called from code that is itself unreachable. The
+distinction is what makes the deletion ORDER necessary rather than arbitrary.
 
 **Cut by SYMBOL, never by region marker.** The index region also holds LIVE code -
 `raw_column_name` (`:2218`, 21 call sites), the mask and encryption sentinel builders,
