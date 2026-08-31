@@ -119,6 +119,8 @@ services:
       - wal_level=logical
       - -c
       - max_prepared_transactions=10
+      - -c
+      - max_slot_wal_keep_size=8GB
     environment:
       POSTGRES_PASSWORD: zeroship
       POSTGRES_DB: zeroship
