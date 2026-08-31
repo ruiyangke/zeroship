@@ -7210,6 +7210,69 @@ mod tests {
         );
     }
 
+    /// Step D's clean-close arm, which nothing reached: `panic!` on its
+    /// `return Ok(())` left all 1447 tests green. Its step C twin is spelled
+    /// identically and is UNREACHABLE, so the two cannot share a test.
+    ///
+    /// The state it needs is specific: still running (not terminating), the
+    /// response deque NOT empty, and yet nothing awaited - which is exactly a
+    /// dropped `Statement` or `Portal` whose `Close` is in flight when the
+    /// server goes away. That is a clean shutdown, not a failure, and reporting
+    /// an error would retire a pooled session over a `Close` nobody is waiting
+    /// for.
+    #[compio::test]
+    async fn serialized_eof_with_only_housekeeping_in_flight_closes_cleanly() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let housekeeping_sender = request_sender.clone();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        housekeeping_sender
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted housekeeping close",
+                ))),
+                sender: response_tx,
+                disposition: RequestDisposition::Housekeeping,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the housekeeping close");
+
+        // No chunks: the peer goes away the moment the loop reads, with the
+        // housekeeping response still registered.
+        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::new(),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            client.parameters_handle(),
+            request_receiver,
+            client.tx_status_handle(),
+            client.in_flight_requests_handle(),
+            client.terminal_server_error_handle(),
+            None,
+        );
+
+        let result = connection.run_serialized().await;
+        assert!(
+            result.is_ok(),
+            "an EOF with only housekeeping in flight was reported as a failure: {:?}",
+            result.err()
+        );
+    }
+
     #[compio::test]
     async fn serialized_client_shutdown_preserves_a_buffered_server_error() {
         let (request_sender, request_receiver) = mpsc::unbounded();
