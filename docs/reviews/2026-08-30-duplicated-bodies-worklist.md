@@ -69,6 +69,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
 | 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
+| 32 Pool return/handoff | 2 | 1 covered by 5 `pool_close` tests; 1 REACHED but its wake unobservable | see note |
 | 34 Row-range decoding | 2 | NOT independently bound (3 overlap on one copy) | see agent table |
 | 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
 | 36 Binary COPY rejection | 2 | BOUND | `bytes_after_the_binary_copy_trailer_are_refused` + sibling |
@@ -168,6 +169,29 @@ stream ends FIRST, the arm is live and simply untested.
 Answer that before building a fixture. Do not write a test that asserts COPY
 state is cleared without checking WHICH reset cleared it - the other one runs on
 every loop iteration and would make such a test pass regardless.
+
+### "Reached" and "observable" are different, and only two probes separate them
+
+Group 32's post-hook close re-check is the clearest case in this document.
+
+    delete the `wake_close_waiters_if_drained()` call  -> 0 failures
+    `panic!` on the same line                          -> exactly 1 failure,
+        `reentrant_close_from_after_release_cannot_redeposit_after_shutdown`
+
+The mutation alone says "unbound", and I nearly filed it as defensive dead code
+on the strength of the source comment beside it. The panic says the arm is
+REACHED - by a test that deliberately simulates the forbidden hook re-entry.
+
+Both are true. The arm runs; the wake inside it does nothing there, because
+`close()` calls `begin_close()` BEFORE awaiting `CloseWaiter`, so a parked close
+waiter implies the pool was already closed when the return began - and then the
+PRE-hook arm fires instead. Observing this wake needs a hook that re-enters AND
+leaves its own close parked: two stacked contract violations.
+
+**Run both probes before classifying anything.** A mutation that changes nothing
+does not distinguish "never executed" from "executed but nothing depends on this
+part of it", and the right response differs: the first is dead code, the second
+is a live path with an unobservable sub-effect.
 
 ### A mutation that HANGS is not a verdict either
 

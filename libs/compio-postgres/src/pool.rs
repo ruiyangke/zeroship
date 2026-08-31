@@ -1538,6 +1538,20 @@ impl Pool {
         // a close on this single-threaded path. Only forbidden re-entry can
         // make this arm observable; keeping it preserves shutdown accounting
         // if a violating hook closes the pool before returning.
+        //
+        // THE ARM IS REACHED; THE WAKE INSIDE IT IS NOT. Measured 2026-08-31:
+        // `panic!` here fails exactly one test,
+        // `reentrant_close_from_after_release_cannot_redeposit_after_shutdown`,
+        // which simulates the forbidden re-entry. But deleting the
+        // `wake_close_waiters_if_drained()` call fails NOTHING, because in that
+        // state there is no parked close waiter to wake: `close()` runs
+        // `begin_close()` BEFORE awaiting `CloseWaiter`, so any parked waiter
+        // implies the pool was already closed when the return started - and
+        // then the PRE-hook arm above fires instead of this one. Observing this
+        // wake needs a hook that both re-enters AND leaves its own close
+        // parked, i.e. two stacked contract violations. The call stays for
+        // accounting safety, not because a test can pin it; a mutation report
+        // calling it unbound is correct and needs no new test.
         if self.closed.get() {
             drop(entry);
             drop(permit);
