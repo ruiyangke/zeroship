@@ -5286,6 +5286,136 @@ async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> 
     common::error_chain(&error)
 }
 
+/// `CopyInMessage::Abort` is the one COPY producer exit which yields `None`
+/// without first emitting a terminal frontend frame. A `CopyInResponse` received
+/// before `BindComplete` pauses the read obligation, but makes `copy_in_inner`
+/// send that abort when it rejects the out-of-order response. The obligation
+/// therefore has NOT reached `copy_producer_finished` when the receiver ends.
+///
+/// The peer withholds `ReadyForQuery` until it sees the follow-up query. That
+/// excludes the loop-head producer-finished reset: the query can reach the wire
+/// only if the `MuxEvent::CopyFrame(None)` arm clears COPY mode itself. Run the
+/// async half on its own OS thread so deleting that arm's reset fails this test
+/// at the watchdog instead of letting the resulting ready-`None` loop hang the
+/// entire test target.
+#[test]
+fn an_abort_before_bind_complete_releases_copy_input() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let runtime = compio::runtime::Runtime::new().expect("create isolated COPY abort runtime");
+        runtime.block_on(async move {
+            let server = StubServer::spawn(move |listener| {
+                let mut stream = accept_bounded(&listener);
+                complete_startup(&mut stream, 512);
+
+                expect_frontend_until_sync(&mut stream);
+                let mut prepared = backend_frame(b'1', b"");
+                prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+                prepared.extend_from_slice(&backend_frame(b'n', b""));
+                prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+                stream
+                    .write_all(&prepared)
+                    .expect("write scripted prepare response");
+                stream.flush().expect("flush scripted prepare response");
+
+                expect_frontend_until_sync(&mut stream);
+                stream
+                    .write_all(&backend_frame(b'G', b"\x00\x00\x00"))
+                    .expect("write CopyInResponse before BindComplete");
+                stream
+                    .flush()
+                    .expect("flush CopyInResponse before BindComplete");
+
+                // A mutation that leaves the CopyFrame(None) arm empty loops
+                // on the already-finished receiver and never writes this query.
+                // Return cleanly on timeout/EOF so the test itself is the sole
+                // reported failure in either mutation run.
+                stream
+                    .set_read_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("bound follow-up query read");
+                let follow_up = (|| -> Option<(u8, Vec<u8>)> {
+                    let mut tag = [0u8; 1];
+                    stream.read_exact(&mut tag).ok()?;
+                    let mut length = [0u8; 4];
+                    stream.read_exact(&mut length).ok()?;
+                    let length = u32::from_be_bytes(length) as usize;
+                    if length < 4 {
+                        return None;
+                    }
+                    let mut body = vec![0u8; length - 4];
+                    stream.read_exact(&mut body).ok()?;
+                    Some((tag[0], body))
+                })();
+                let Some((b'Q', query)) = follow_up else {
+                    return;
+                };
+                if query != b"SELECT 2\0" {
+                    return;
+                }
+
+                // Retire the abandoned COPY response first, then answer the
+                // follow-up request whose arrival proved COPY mode was clear.
+                let mut responses = backend_frame(b'Z', b"I");
+                responses.extend_from_slice(&backend_frame(b'C', b"SELECT 2\0"));
+                responses.extend_from_slice(&backend_frame(b'Z', b"I"));
+                stream
+                    .write_all(&responses)
+                    .expect("write COPY and follow-up completions");
+                stream
+                    .flush()
+                    .expect("flush COPY and follow-up completions");
+            });
+
+            let (client, connection) = stub_config(server.addr)
+                .connect(common::suite_tls())
+                .await
+                .expect("connect to scripted PostgreSQL peer");
+            let driver = compio::runtime::spawn(async move { connection.run().await });
+
+            // Keep an explicit Statement alive through the follow-up. The
+            // string overload may retry a pre-Bind failure by repreparing,
+            // which would replace the request whose release this test binds.
+            let statement = client
+                .prepare("COPY t FROM STDIN")
+                .await
+                .expect("prepare scripted COPY IN");
+            let Err(copy_error) = client.copy_in::<_, bytes::Bytes>(&statement).await else {
+                panic!("COPY IN accepted CopyInResponse before BindComplete");
+            };
+            assert!(
+                common::error_chain(&copy_error).contains("unexpected message from server"),
+                "out-of-order CopyInResponse reported the wrong failure: {copy_error}"
+            );
+
+            let follow_up =
+                compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+            drop(client);
+            drop(statement);
+            let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+            server.finish();
+
+            follow_up
+                .expect("the request behind an aborted COPY never left COPY mode")
+                .expect("the request behind an aborted COPY did not complete");
+        });
+        done_tx
+            .send(())
+            .expect("COPY abort test owner dropped its completion channel");
+    });
+
+    match done_rx.recv_timeout(ASYNC_WATCHDOG) {
+        Ok(()) => worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => worker
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the COPY abort regression exceeded its isolated watchdog")
+        }
+    }
+}
+
 /// `CopyOutResponse` where the IN direction was requested -- the mirror of
 /// [`a_copy_in_response_to_a_copy_out_request_is_refused`], and the more
 /// dangerous half. A driver that ignored the direction here would hold a sink

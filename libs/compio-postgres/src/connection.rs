@@ -2250,7 +2250,9 @@ where
         loop {
             if retirement.is_some() {
                 if read_terminal.is_some() {
-                    let retirement = retirement.take().expect("checked above");
+                    let retirement = retirement
+                        .take()
+                        .expect("retirement.is_some() guards reader-terminal handling");
                     return Poll::Ready(Err(retirement.error));
                 }
 
@@ -2260,7 +2262,9 @@ where
                             && retirement.response_offset >= retirement.response_count)
                 });
                 if finished {
-                    let retirement = retirement.take().expect("checked above");
+                    let retirement = retirement
+                        .take()
+                        .expect("the finished predicate was computed from a present retirement");
                     return Poll::Ready(Err(retirement.error));
                 }
 
@@ -2269,7 +2273,9 @@ where
                         message,
                         acknowledgement,
                     }))) => {
-                        let retirement = retirement.as_mut().expect("checked above");
+                        let retirement = retirement
+                            .as_mut()
+                            .expect("retirement.is_some() guards retirement-message handling");
                         match scan_retirement_message(
                             message,
                             &mut retirement.response_offset,

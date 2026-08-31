@@ -53,10 +53,14 @@ below was re-run by the pilot against the FULL seven-target gate
 | 4 Execute response/COPY refusal | 3 | BOUND, each independently (1 failure each) | agent table |
 | 11 Debug/non-debug query encoding | 2 | BOTH were UNBOUND but LIVE; now BOUND | `query_logs_its_parameters_when_debug_is_enabled`, `execute_logs_its_parameters_when_debug_is_enabled` |
 | 6 Cached statement replay family | 6 | BOUND, each independently | agent table, one distinct failure per copy |
+| 7 Cancel-query TLS setup | 2 | `cancel_query` covered by 4; **`cancel_query_confirmed` was UNBOUND** | `a_confirmed_cancel_refuses_a_connector_that_attests_less_than_the_session` (new) |
 | 8 Flush/read terminal polling | 3 | CLOSED: all 3 BOUND (2 were executed by nothing) | `flush_retirement_terminal_arm_...`, `read_timeout_during_a_parked_flush_...`, `backpressured_flush_nested_drain_...` |
 | 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
 | 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
+| 12 TLS prewrite poison/close | 3 | 1 bound alone; the other 2 bound only AS A PAIR (disable either and the test stays green) | `a_session_that_sent_close_notify_refuses_a_blocking_lease` |
+| 13 Startup/auth handshake | 2 | BOUND: 555 and 30 failures; the replication copy now has its own test | `replication_handshake_uses_the_configured_user_in_an_md5_response` |
+| 16 Terminal server-error recording | **8**, not 2 | 6 bound, 2 masked by a preceding drain | three new tests incl. `backpressured_flush_fatal_records_the_terminal_slot` |
 | 17 Cancel confirmation | **3**, not 2 | 2 pre-bound, 1 was UNBOUND | `raw_cancel_success_keeps_pool_lease_reusable` (new) |
 | 15 Scalar row arity | 3 | BOUND | `query_scalar` / `query_one_scalar` / `query_opt_scalar` arity tests |
 | 18 Statement-cache LRU updates | **4**, not 3 | BOUND, including the uncounted candidate-LRU copy | LRU eviction tests |
@@ -64,23 +68,27 @@ below was re-run by the pilot against the FULL seven-target gate
 | 21 Serialized terminal handling | 2 (+2 siblings elsewhere) | SPLIT: step B covered by 24; **step C is DEAD** | see below |
 | 22/27 Housekeeping close (EOF clean-close family) | 4 across the file | 2 covered by 24 each; step C DEAD; **step D was UNBOUND** | `serialized_eof_with_only_housekeeping_in_flight_closes_cleanly` (new) |
 | 23 COPY refusal drain | 2 | BOUND (visible only in the full suite) | agent-reported |
+| 24 Replication poison/release | 6 | 5 bound; line 528 UNBINDABLE, masked by `ConnectionDropRelease::drop` | see the line-528 section below |
 | 25 Bind cache invalidation | 2 | 1 pre-bound, 1 was UNBOUND | `unnamed_bind_parse_error_invalidates_cached_statement` (new) |
 | 26 Plaintext TLS shortcut | 2 | covered, but by a BLUNT probe - see note | 42 and 216 failures respectively |
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
 | 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
-| 31 Pool acquisition arms | **9**, not 2 | UNRULED - largest family after `remember_server_error` | - |
+| 31 Pool acquisition arms | **9**, not 2 | CLOSED: all nine BOUND, no zero-failure mutation among them | per-copy table in the agent report; two further uses excluded as different shapes |
 | 32 Pool return/handoff | 2 | 1 covered by 5 `pool_close` tests; 1 REACHED but its wake unobservable | see note |
+| 20 Authentication exchange | 2 | BOUND, each independently | SCRAM pre-continue and pre-final tests |
+| 33 Replication async/error | 2 | BOUND, each independently | `identify_system_tolerates_an_asynchronous_parameter_status`, `copy_both_completion_tolerates_an_asynchronous_parameter_status` |
 | 34 Row-range decoding | 2 | NOT independently bound (3 overlap on one copy) | see agent table |
 | 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
 | 36 Binary COPY rejection | 2 | BOUND | `bytes_after_the_binary_copy_trailer_are_refused` + sibling |
 | 37 Frame-offset guard | 2 | was UNBOUND, now BOUND each | `{first_matching_tag,error_response_before}_advances_past_the_entire_leading_frame` |
 | 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
-| 40 Request COPY flags | 2 | UNRULED - the mutation HANGS rather than fails, see note | - |
-| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 EXECUTED BY NOTHING** - see open item | - |
+| 40 Request COPY flags | 2 | CLOSED: both BOUND (1 and 3 failures, each path-specific) | serialized + multiplexed post-G COPY error tests |
+| 41 COPY state reset | 2 | CLOSED: 1 covered by 26; 1 was executed by nothing, now bound | `an_abort_before_bind_complete_releases_copy_input` |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
+| 44 Pool permit guards | **3**, not 2 | all 3 covered; 2 independently bound incl. the uncounted `WeakPermitGuard` | `after_release_rejection_releases_capacity_to_fifo_head`, `failed_or_cancelled_housekeeping_refill_wakes_fifo_head` |
 | 45 Streaming COPY refusal | 2 | BOUND each | agent table |
 | 46 Simple-query COPY collection | 2 | 1 pre-bound, 1 was UNBOUND | `unsupported_copy_out_is_refused_by_name_at_every_public_entry_point` |
 | 47 TLS panic poisoning | 2 | `with` pre-bound; **`try_with` was UNBOUND** | `a_panicking_callback_under_try_with_poisons_the_shared_session` (new) |
@@ -95,7 +103,7 @@ finding here.** Seven groups so far had more copies than claimed:
     28  said two   had five    the uncounted copies included the only unbound one
     18  said three had four    extra copy was bound
     38  said four  had five    the fifth is a guard arm in different syntax
-    31  said two   had NINE    `if !entry.is_pool_eligible()` across acquire/return/housekeeping
+    31  said two   had NINE    all nine bound; the count was wrong, the coverage was not
     44  said two   had three   third copy is the `Weak` variant - probed, BOUND
     remember_server_error  said two  had EIGHT
 
@@ -148,7 +156,7 @@ Worth copying: the two tests use distinct parameter sentinels (`[1101101]` and
 `[2202202]`), so a mutation's failure message names which copy was hit rather
 than only that something failed.
 
-### OPEN: the `CopyFrame(None)` COPY-state reset, and the ordering question behind it
+### CLOSED: the `CopyFrame(None)` reset is LIVE - the abort path beats the loop head
 
 `panic!` at the `MuxEvent::CopyFrame(None)` arm's `copy_in = None` leaves all
 1453 tests green, so nothing executes it. Whether it is REACHABLE turns on one
@@ -168,9 +176,16 @@ So if `copy_producer_finished` latches BEFORE the receiver's stream yields
 arm can never be entered - dead by construction, like the step C arm. If the
 stream ends FIRST, the arm is live and simply untested.
 
-Answer that before building a fixture. Do not write a test that asserts COPY
-state is cleared without checking WHICH reset cleared it - the other one runs on
-every loop iteration and would make such a test pass regardless.
+**Answered: `copy_producer_finished` does NOT always latch first.** A
+`CopyInResponse` arriving before `BindComplete` pauses the read obligation;
+`copy_in_inner` then sends `CopyInMessage::Abort`, and that receiver returns
+`None` while `copy_producer_finished()` is still false. On the ordinary
+terminal-frame path the loop-head reset does win - which is why every existing
+COPY test misses this arm - but the abort path reaches it.
+
+Verified twice, and the first proof is the one that matters: a `panic!` in the
+arm fails ONLY the new test, so it genuinely enters this reset rather than the
+loop-head one that runs every iteration.
 
 ### "Reached" and "observable" are different, and only two probes separate them
 
@@ -195,7 +210,7 @@ does not distinguish "never executed" from "executed but nothing depends on this
 part of it", and the right response differs: the first is dead code, the second
 is a live path with an unobservable sub-effect.
 
-### A mutation that HANGS is not a verdict either
+### CLOSED: a downstream COPY mutation turns the hang into path-specific failures
 
 Group 40's `ReadObligation::new(deadline, is_copy)` takes an `is_copy` flag.
 Setting it to `false` does not make tests fail - it makes
@@ -203,14 +218,70 @@ Setting it to `false` does not make tests fail - it makes
 obligation never arms and the loop waits for a read that is never scheduled.
 The probe ran 35 minutes with no result.
 
-That tells you the flag is load-bearing and nothing else. Worse, a hung run
-defeats the restore: the script sits in `wait`, so its EXIT trap cannot fire
-until the child is killed, and the mutated file stays in the tree meanwhile.
+That tells you the flag is load-bearing and nothing else. The ruling probes
+therefore left `is_copy` flowing into `ReadObligation::new` and disabled the
+adjacent extended-COPY terminal-Sync consumer instead. On the serialized copy,
+the exact replacement was
 
-For a flag whose removal deadlocks, pick a mutation that keeps the loop
-progressing - flip a downstream consumer of the flag rather than the flag
-itself - or bound the run with `timeout` so a hang reports as a hang instead of
-stalling the sweep.
+    read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync);
+    -> read_obligation.set_copy_terminal_has_sync(false);
+
+On the multiplexed copy it was
+
+    read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync);
+    -> read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync && !is_copy);
+
+Neither mutation can recreate the startup deadlock: the `is_copy` constructor
+argument still allocates `ReadObligationInner`, `pause_for_copy_input` can still
+end startup, and `prepare_copy_terminal` / `activate_copy_terminal` still run.
+The multiplexed copy also keeps `accepts_copy_input` true, so its producer is
+still polled. Only the later recovery accounting is wrong, which progresses to
+an extra `ReadyForQuery` or a wrong-direction COPY failure.
+
+The serialized mutation failed exactly one test:
+
+    a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query
+
+The multiplexed mutation failed three:
+
+    copy_in_failure::a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query
+    hostile_peer::a_copy_out_response_cannot_transition_to_copy_in
+    hostile_peer::copy_response_direction_changes_preserve_batch_wire_order
+
+The first multiplexed failure is independently specific: its serialized twin
+stayed green in the same run. Thus both copies are BOUND. The argument against
+that verdict is that these probes directly bind terminal-Sync metadata, not the
+constructor bit in isolation. That is true, but narrower than it sounds: these
+tests run without a read deadline, so the inner object receiving that metadata
+exists only because the corresponding constructor received `is_copy = true`;
+the original hanging probe separately proves that removing the bit destroys
+startup progress.
+
+A hung probe also defeats its own restore: the script sits in `wait`, so its
+EXIT trap cannot fire until the child is killed, and the mutated file stays in
+the tree meanwhile. For another flag whose removal deadlocks, mutate a
+progress-safe downstream consumer and keep the outer `timeout` even then.
+
+### A probe log can go BINARY, and then plain grep reports nothing
+
+Group 13's two probes wrote logs containing NUL bytes, because the mutation made
+auth fail and a failing test printed a raw PostgreSQL password message -
+`"PostgreSQL specifies: p\0(md55d57ce..."`. `grep` treats such a file as binary
+and matches nothing, so the harness reported
+
+    line 602 applied=2 gitM=[M] targets=0 passed= failed=
+
+which looks like a compile failure. With `grep -a` the same log says **9 targets,
+900 passed, 555 failed**.
+
+Any probe that makes an auth, startup or framing test fail can do this. The
+danger is not the noise: an empty `failed=` renders as zero failures, and zero
+failures is how a copy gets classified UNBOUND. A blinded parse can invent a gap
+in code that 555 tests already cover.
+
+All 73 probe logs from this session were audited; only those two contained NULs,
+so no other verdict is affected. Every probe script now parses with `grep -a`,
+and `targets=0` is treated as instrument failure rather than as a result.
 
 ### A mutation that breaks 216 tests has not isolated anything
 
@@ -363,7 +434,9 @@ above each say so.
 ## Line 528 is UNBINDABLE by peer observation, and here is what masks it
 
 2026-08-31. An agent wrote `identify_system_read_timeout_shuts_down_its_release_handle`
-for the last unbound copy. It compiles, it passes, it is named correctly - and
+for the last unbound copy. **That name is deliberately absent from the tree - the
+test was rejected, for the reason below.** Every other test name in this
+document resolves to a live `fn`; this one is the single intentional exception. It compiles, it passes, it is named correctly - and
 it binds NOTHING. Mutating each of the six `release.shutdown()` call sites to
 `/* mutated */` in turn leaves it green every time:
 

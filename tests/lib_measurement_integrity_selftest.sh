@@ -79,6 +79,32 @@ expect_detect no "out of memory is a different resource" \
 expect_detect no "os error 2 is not os error 28" \
   'error: opening file: No such file or directory (os error 2)'
 
+# --- log_is_binary, both directions ---------------------------------------
+#
+# Same discipline as above: it must fire on a NUL, and it must NOT fire on a log
+# that merely contains multibyte UTF-8. compio-postgres has a deliberate
+# dollar-quote fixture with non-ASCII bytes, and valid UTF-8 does not blind grep,
+# so treating it as unreadable would relabel healthy logs.
+expect_binary() {
+  local expected="$1" label="$2"; shift 2
+  local f="$TMP/bin_$pass$fail.log"
+  printf "$@" > "$f"
+  if log_is_binary "$f"; then got=yes; else got=no; fi
+  if [ "$got" = "$expected" ]; then
+    pass=$((pass+1)); echo "  ok   log_is_binary=$got  $label"
+  else
+    fail=$((fail+1)); echo "  FAIL log_is_binary=$got expected=$expected  $label" >&2
+  fi
+}
+
+expect_binary yes "a NUL from a wire-protocol dump" \
+  'PostgreSQL specifies: p\000(md55d57ce5b45b131e\ntest result: ok. 9 passed\n'
+expect_binary no  "ordinary cargo output" \
+  'test result: FAILED. 900 passed; 555 failed; 0 ignored\n'
+expect_binary no  "empty log" ''
+expect_binary no  "multibyte UTF-8 is not binary" \
+  'SELECT $\303\251$ dollar quote fixture\ntest result: ok. 1 passed\n'
+
 echo
 echo "------------------------------------------------------------------"
 echo "passed=$pass failed=$fail"
