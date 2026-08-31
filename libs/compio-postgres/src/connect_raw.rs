@@ -3364,6 +3364,39 @@ mod tests {
     }
 
     #[compio::test]
+    async fn replication_handshake_uses_the_configured_user_in_an_md5_response() {
+        let mut md5_request = 5i32.to_be_bytes().to_vec();
+        md5_request.extend_from_slice(&[5, 6, 7, 8]);
+        let (stream, client_bytes) = scripted_password_auth_server(md5_request, true).await;
+
+        let mut config = Config::new();
+        config
+            .user("replication-md5-user")
+            .password("replication-md5-password")
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(5));
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(stream);
+        let (stream, _, _, _) = handshake_for_replication(stream, &config)
+            .await
+            .expect("the scripted replication MD5 exchange must complete");
+
+        let client_bytes = compio::time::timeout(Duration::from_secs(5), client_bytes)
+            .await
+            .expect("scripted replication MD5 server did not finish")
+            .expect("scripted replication MD5 server dropped its observation")
+            .expect("scripted replication MD5 server failed");
+        const EXPECTED: &[u8] = b"md538b05cef655ccdf8f933eb51f8cd2ef6";
+        assert!(
+            client_bytes
+                .windows(EXPECTED.len())
+                .any(|window| window == EXPECTED),
+            "the replication handshake used the wrong MD5 user: {}",
+            String::from_utf8_lossy(&client_bytes)
+        );
+        drop(stream);
+    }
+
+    #[compio::test]
     async fn none_and_negated_none_control_whether_authentication_may_be_skipped() {
         let mut none = scram_config();
         none.require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::None)));
