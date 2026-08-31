@@ -274,12 +274,26 @@ exact thing this decision removes. It follows the shipped precedent of `schema_p
 (`crates/zeroship-control/src/api.rs:167`): a `remedy` field the CLI prints raw. The refusal must also
 precede the ledger open, or a refused apply pollutes the head the deploy gate reads.
 
-**STILL OPEN, AND NAMED SO IT IS NOT DISCOVERED LATER.** The corpus does not assign the executor for
-bind DDL, and it points both ways: section 2.2b puts granting and revoking in "one control-plane
-transaction" and cost 6 says every bind, unbind and epoch rotation is "serialized through the control
-plane", while sections 4 and 9 put the same role minting inside the migration service's apply
-transaction. Cost 6 names the one service the compose file says holds no provisioning DSN. Both
-reviews found this independently. Whoever implements bind corrects 2.2b and cost 6 in the same change.
+**STILL OPEN, AND NAMED SO IT IS NOT DISCOVERED LATER.** This paragraph originally said the corpus
+"does not assign the executor for bind DDL, and points both ways". Two reviews said so independently
+and a third refuted it; re-reading the passages myself, the refutation is right about the substance
+and wrong about one detail, and the corrected version is sharper than either:
+
+- The corpus DOES assign, and it assigns two DIFFERENT events to two different executors. Section
+  2.2b mints a grant's CURRENT `zs_bind_<gid>_e<E>` at BIND time in "one control-plane transaction".
+  Section 4's T4 mints every `zs_bind_<gid>_e<E+1>` at EPOCH ROTATION, inside the migration service's
+  apply transaction, together with the epoch write, the publication widen and the marker. Different
+  role instances, different lifecycle events - not a contradiction about who mints one role.
+- Cost 6 IS loose, and that is the part the refutation got wrong by reading a distinction into it.
+  It says "Every bind, unbind **and epoch rotation** is shared-catalog DDL serialized through the
+  control plane" - a conjunction that sweeps rotation into control, contradicting section 4's T4 in
+  the same document.
+
+So the real finding is not internal contradiction, it is this: **section 2.2b assigns bind-time
+`CREATE ROLE` to a control-plane transaction, and this decision forbids control from executing DDL.**
+Decision 17 overrides that half. Bind-time minting moves to the migration service, which also removes
+the race that splitting it would create against the apply's T1/T4 bracket. Whoever implements bind
+corrects 2.2b, and corrects cost 6's rotation clause, in the same change.
 
 Graceful delete is the second open seam: the teardown's subscription gate needs a cluster-wide count
 only control can aggregate today, so `delete` either consults a control-maintained aggregate (a read,
