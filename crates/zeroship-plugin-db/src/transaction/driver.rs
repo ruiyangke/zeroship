@@ -458,9 +458,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                         match disposition {
                             SessionSetupDisposition::Preserve => BeginOutcome::SetupFailed,
                             SessionSetupDisposition::ReResolve => BeginOutcome::ReResolve,
-                            SessionSetupDisposition::Denied(reason) => {
-                                BeginOutcome::Denied(reason)
-                            }
+                            SessionSetupDisposition::Denied(reason) => BeginOutcome::Denied(reason),
                             SessionSetupDisposition::Failed => BeginOutcome::Failed,
                         }
                     }
@@ -689,8 +687,7 @@ impl From<SessionSetupError> for OpenSessionError {
 /// which `Pool::return_client` handles: it rolls back any session it cannot
 /// prove `Idle` before publishing it.
 async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     match &backend {
         crate::backend::BackendHandle::Postgres(pg) => {

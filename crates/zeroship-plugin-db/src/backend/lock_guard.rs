@@ -10,9 +10,9 @@
 //! [`LockGuard::acquire`] taking a [`crate::backend::LockScope`] (the
 //! typed classifier introduced alongside it).
 //!
-//! The four-phase register-model pipeline holds a session-scoped
-//! `pg_advisory_lock(hashtext('<app_id>:register_model'),
-//!  hashtext('register_model'))` on a single pooled client (key
+//! Snapshot and restore hold a session-scoped
+//! `pg_advisory_lock(hashtext('<app_id>:snapshot_restore'),
+//!  hashtext('snapshot_restore'))` on a single pooled client (key
 //! derivation via [`crate::backend::LockScope::to_keys`]). The
 //! invariant is: *every* exit path from the locked region — Ok, Err,
 //! panic — must either explicitly issue `pg_advisory_unlock` before
@@ -20,12 +20,10 @@
 //! ownership of the still-locked client to the next stage that will
 //! release it.
 //!
-//! Before this guard existed, that invariant was plugged in inline at three
-//! different sites. Those sites were the stages of the register-model DDL
-//! pipeline, which
-//! is deleted. What remains is `backend/postgres.rs`, which acquires around
-//! its schema-pending work and releases on every exit arm, and `lib.rs`'s
-//! probe. One invariant, open-coded `pg_advisory_unlock` sequences at each
+//! Before this guard existed, that invariant was open-coded at several schema
+//! and backup sites. What remains is `backend/postgres.rs`, which acquires
+//! around its schema-pending work and releases on every exit arm, and
+//! `lib.rs`'s probe. One invariant, open-coded unlock sequences at each
 //! exit: this module centralises the pattern so an early return cannot skip
 //! the unlock.
 //!
@@ -61,8 +59,8 @@ use compio_postgres::OwnedPooledClient;
 use crate::backend::{LockManager, LockScope};
 use crate::error::DbError;
 
-/// Session-scoped advisory-lock guard for the register-model
-/// orchestrator. See module docs for the lifecycle contract.
+/// Session-scoped advisory-lock guard. See module docs for the lifecycle
+/// contract.
 ///
 /// **Must be consumed via `release().await` or `into_held()`.**
 /// `Drop` cannot await the unlock SQL, so a guard dropped without
@@ -121,9 +119,8 @@ impl LockGuard {
     /// (~1.75s worst case) and surfaces `DbError::LockContention`
     /// on exhaustion, rather than calling `acquire_advisory_lock`
     /// directly and stalling indefinitely on `pg_advisory_lock`,
-    /// which would give any app that held its own lock a within-app
-    /// DoS lever against its own subsequent `register_model`
-    /// invocations. The guard's lifecycle invariants
+    /// which would give any app that held its own lock a within-app DoS lever
+    /// against subsequent operations using the same scope. The guard's lifecycle invariants
     /// are unaffected: on `Ok` the lock is held by `self.client` and
     /// will be released via [`Self::release`] / [`Self::into_held`];
     /// on `Err` no lock is held and `client` drops back to the pool.
@@ -176,8 +173,7 @@ impl LockGuard {
         // cancellation here silently leaks the lock with no Drop log.
         // Defer the state flip to AFTER the await completes.
         if let Some(client) = self.client.as_ref() {
-            let unlock_sql =
-                "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
+            let unlock_sql = "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
             // A bare `let _ =` here would silently swallow runtime
             // errors from the unlock SQL — the operator would never
             // see that the lock might still be held. Log warnings on
@@ -279,14 +275,17 @@ mod tests {
         // Build a guard with no client (test helper). Calling
         // `release()` should flip `released` and return `Ok(None)`
         // rather than panicking.
-        let guard = LockGuard::for_test_no_client("zs_reg:app_42", "register_model");
+        let guard = LockGuard::for_test_no_client("zs_reg:app_42", "snapshot_restore");
         assert!(!guard.released);
         // Use compio's local runtime to drive the async release.
         let out = compio::runtime::Runtime::new()
             .unwrap()
             .block_on(async move { guard.release().await });
         let client_opt = out.expect("release should not error when no client present");
-        assert!(client_opt.is_none(), "no client was attached, so none returned");
+        assert!(
+            client_opt.is_none(),
+            "no client was attached, so none returned"
+        );
     }
 
     #[test]
@@ -299,8 +298,7 @@ mod tests {
         // what the impl does before `.expect()`-ing the client out.
         // This test pins the *flag transition* that suppresses
         // Drop's warning.
-        let mut guard =
-            LockGuard::for_test_no_client("zs_reg:app_43", "register_model");
+        let mut guard = LockGuard::for_test_no_client("zs_reg:app_43", "snapshot_restore");
         assert!(!guard.released);
         // Manually mirror the prefix of `into_held`'s body:
         guard.released = true;
@@ -318,8 +316,7 @@ mod tests {
         // observe tracing output without a capture layer, so this
         // test instead verifies the field state transition that
         // *gates* the warning.
-        let mut guard =
-            LockGuard::for_test_no_client("zs_reg:app_44", "register_model");
+        let mut guard = LockGuard::for_test_no_client("zs_reg:app_44", "snapshot_restore");
         // Simulate a successful release: flip the flag manually
         // (the async path does this under the hood).
         guard.released = true;
@@ -333,18 +330,18 @@ mod tests {
         // (the tracing::error path doesn't panic). We can't capture
         // the log line without a tracing subscriber, but exercising
         // the branch ensures the message format compiles and runs.
-        let guard = LockGuard::for_test_no_client("zs_reg:app_45", "register_model");
+        let guard = LockGuard::for_test_no_client("zs_reg:app_45", "snapshot_restore");
         assert!(!guard.released);
         drop(guard);
     }
 
     #[test]
     fn released_flag_starts_false() {
-        let guard = LockGuard::for_test_no_client("zs_reg:app_46", "register_model");
+        let guard = LockGuard::for_test_no_client("zs_reg:app_46", "snapshot_restore");
         assert!(!guard.released);
         assert!(guard.client.is_none());
         assert_eq!(guard.key, "zs_reg:app_46");
-        assert_eq!(guard.tag, "register_model");
+        assert_eq!(guard.tag, "snapshot_restore");
     }
 
     /// Structural invariant pin:

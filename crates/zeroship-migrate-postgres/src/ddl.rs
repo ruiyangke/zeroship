@@ -2,9 +2,9 @@
 
 use std::fmt::Write as _;
 use zeroship_migrate_backend::ddl::{
-    default_clause, fk_local_columns, fk_policy_tail, fk_referenced_columns, fk_target_table,
-    generated_clause, inline_checks_clause, inline_pk_for_column, render_index_order_suffix,
-    should_render_table_pk, CreateTableRequest, DdlEmitter,
+    CreateTableRequest, DdlEmitter, default_clause, fk_local_columns, fk_policy_tail,
+    fk_referenced_columns, fk_target_table, generated_clause, inline_checks_clause,
+    inline_pk_for_column, render_index_order_suffix, should_render_table_pk,
 };
 use zeroship_migrate_backend::schema::SchemaRenderer;
 use zeroship_migrate_backend::snapshot::{
@@ -96,19 +96,11 @@ fn pg_identity_clause(c: &ColumnSnapshot) -> String {
 }
 
 fn primary_key_clause(inline_pk: bool) -> &'static str {
-    if inline_pk {
-        " PRIMARY KEY"
-    } else {
-        ""
-    }
+    if inline_pk { " PRIMARY KEY" } else { "" }
 }
 
 fn null_clause(c: &ColumnSnapshot) -> &'static str {
-    if c.nullable {
-        ""
-    } else {
-        " NOT NULL"
-    }
+    if c.nullable { "" } else { " NOT NULL" }
 }
 
 fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String {
@@ -455,7 +447,7 @@ impl DdlEmitter for PgEmitter {
             // the inline `/* zero-migrate:enc:... */` sentinel rides between
             // the type and the constraints, exactly as the shared kernel's
             // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
-            // column is byte-identical to a `registerModel`-created one.
+            // column is byte-identical to one created by schema application.
             let enc = c
                 .encryption_sentinel
                 .as_deref()

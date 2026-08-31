@@ -181,10 +181,9 @@ pub(crate) async fn client_exec_on_tx(
     use crate::context::TxConnection;
 
     match (backend, client) {
-        (
-            crate::backend::BackendHandle::Postgres(pg),
-            TxConnection::Postgres(client),
-        ) => pg.client_exec(client, sql, params).await,
+        (crate::backend::BackendHandle::Postgres(pg), TxConnection::Postgres(client)) => {
+            pg.client_exec(client, sql, params).await
+        }
         (crate::backend::BackendHandle::Sqlite(sq), TxConnection::Sqlite(client)) => {
             sq.client_exec(client, sql, params).await
         }
@@ -203,7 +202,7 @@ pub(crate) async fn client_exec_on_tx(
 /// LOCAL` auto-reverts at COMMIT / ROLLBACK, so a pooled / dedicated
 /// connection can never leak the role to a later use.
 ///
-/// The per-app role is provisioned by `register_model`. The WAL
+/// The per-app role is provisioned by the migration service. The WAL
 /// consumer + §17.6 watchdog + §17.7 drop step 3 deliberately do NOT
 /// call this — they stay on the platform role (the only connection
 /// crossing the per-app trust boundary).
@@ -220,8 +219,7 @@ pub(crate) async fn apply_per_app_role(
     let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id)
         .map_err(crate::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
-        let mut classified =
-            crate::error::DbError::classify_pg_per_app_session_setup(&e, app_id);
+        let mut classified = crate::error::DbError::classify_pg_per_app_session_setup(&e, app_id);
         crate::error::prefix_message(
             classified.error_mut(),
             "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
@@ -836,9 +834,7 @@ fn run_begin_continuation(
             Some(v) => Ok(v8::Global::new(tc, v)),
             None => {
                 // Synchronous throw — capture the exception verbatim.
-                let exc = tc
-                    .exception()
-                    .map(|e| v8::Global::new(tc, e));
+                let exc = tc.exception().map(|e| v8::Global::new(tc, e));
                 Err(exc)
             }
         }
@@ -1138,12 +1134,10 @@ async fn exec_settle(
             };
             let driven = driver::settle_root(app_id, intent).await;
             let Some(outcome) = driven.outcome() else {
-                let error = driven
-                    .refusal()
-                    .map_or_else(
-                        || DbError::internal("db.transaction: the settle produced no outcome"),
-                        |refusal| driver::protocol_error(refusal, None),
-                    );
+                let error = driven.refusal().map_or_else(
+                    || DbError::internal("db.transaction: the settle produced no outcome"),
+                    |refusal| driver::protocol_error(refusal, None),
+                );
                 return SettleOutcome::SettleErr(error);
             };
             // The driver's mapping already carries the RIGHT code for each
@@ -1154,9 +1148,7 @@ async fn exec_settle(
             // established.
             match driver::outcome_error(outcome, intent, driven.error) {
                 None => SettleOutcome::Ok,
-                Some(error)
-                    if matches!(outcome, reducer::TerminalOutcome::Indeterminate(_)) =>
-                {
+                Some(error) if matches!(outcome, reducer::TerminalOutcome::Indeterminate(_)) => {
                     SettleOutcome::CommitIndeterminate(error)
                 }
                 Some(error) => SettleOutcome::SettleErr(error),
@@ -1242,8 +1234,8 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use crate::backend::sqlite::SqliteBackend;
     use crate::backend::SqlExecutor;
+    use crate::backend::sqlite::SqliteBackend;
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
@@ -1267,9 +1259,8 @@ mod tests {
 
     fn install_sqlite_backend_for_test() -> (Rc<SqliteBackend>, tempfile::TempDir, ContextReset) {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let backend = Rc::new(
-            SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
-        );
+        let backend =
+            Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"));
         let reset = ContextReset;
         crate::context::with_mut(|c| {
             let _ = c.take_tx_client_for("app_sqlite");
@@ -1446,8 +1437,7 @@ mod tests {
         }
 
         assert!(
-            driver::outcome_error(TerminalOutcome::Committed, SettleIntent::Commit, None)
-                .is_none(),
+            driver::outcome_error(TerminalOutcome::Committed, SettleIntent::Commit, None).is_none(),
             "a confirmed commit is not an error"
         );
         let rolled_back =
@@ -1767,8 +1757,7 @@ mod tests {
                 "dropping an unsettled frame must roll back its writes"
             );
             assert!(!crate::context::with(|context| {
-                context.has_tx_for("app_sqlite")
-                    || context.tx_claimed_by("app_sqlite")
+                context.has_tx_for("app_sqlite") || context.tx_claimed_by("app_sqlite")
             }));
         });
     }

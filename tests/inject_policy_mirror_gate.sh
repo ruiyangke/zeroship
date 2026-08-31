@@ -128,7 +128,7 @@ SELF="tests/inject_policy_mirror_gate.sh"
 #
 # LOWERED 5 -> 3 when plugin-db stopped depending on the migration engine. Two
 # Rust consumers were DELETED, not silently dropped:
-#   register_model/sqlite_engine.rs  the dev-tier engine driver, deleted whole
+#   the per-collection SQLite engine driver, deleted whole
 #   tests/parity/mod.rs              its ceiling fed a policy to the engine; both
 #                                    legs of the matrix build tables directly now
 # Neither still injects anything, which is the case this count exists to catch;

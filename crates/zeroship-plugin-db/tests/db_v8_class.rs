@@ -20,8 +20,8 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use zeroship_plugin_db::v8_classes::collection::Collection;
-use zeroship_plugin_db::v8_classes::db::{mint_db, Db};
-use zeroship_runtime::{init_v8, RuntimeState, SharedState};
+use zeroship_plugin_db::v8_classes::db::{Db, mint_db};
+use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
 fn install_runtime_state(scope: &mut v8::PinScope<'_, '_>) {
     let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None, None)));
@@ -54,7 +54,9 @@ fn db_is_v8_class_instance() {
     // Sanity: the wrapper has internal field 0 set to an External
     // (the boxed Db state). Without it the brand check would reject
     // any method call.
-    let ext = db.get_internal_field(scope, 0).expect("missing internal field 0");
+    let ext = db
+        .get_internal_field(scope, 0)
+        .expect("missing internal field 0");
     let _: v8::Local<v8::External> = ext
         .try_into()
         .expect("internal field 0 is not an External — Db state never installed");
@@ -71,7 +73,9 @@ fn db_collection_caches_by_name() {
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let collection_key = v8::String::new(scope, "collection").unwrap();
-    let collection_fn_v = db.get(scope, collection_key.into()).expect("collection prop");
+    let collection_fn_v = db
+        .get(scope, collection_key.into())
+        .expect("collection prop");
     let collection_fn: v8::Local<v8::Function> = collection_fn_v
         .try_into()
         .expect("collection is not a function");
@@ -187,7 +191,6 @@ fn db_brand_check_rejects_non_db() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // Native Db.transaction surface
 // ---------------------------------------------------------------------------
@@ -241,8 +244,8 @@ fn db_begin_transaction_is_not_exposed() {
 // `__platform` capability handle fence tests
 // ---------------------------------------------------------------------------
 //
-// The platform-internal callables (`registerModel`, `setMaskPolicy`,
-// `migrations`, `replication`) moved off the
+// The platform-internal callables (`setMaskPolicy`, `migrations`,
+// `replication`) moved off the
 // `Db` v8_class to a `DbPlatform` handle stashed under a V8 private
 // symbol. These tests prove the fence holds: creator JS cannot reach the
 // handle through any reflection path, the moved names are gone from
@@ -272,7 +275,7 @@ fn eval_with_db(scope: &mut v8::PinScope, db: v8::Local<v8::Object>, src: &str) 
     result.to_rust_string_lossy(scope)
 }
 
-/// The five platform-internal members are GONE from `env.db` — not on
+/// The platform-internal members are gone from `env.db`, not on
 /// the instance, not up the prototype chain (`get` walks the chain).
 #[test]
 fn db_platform_internals_removed_from_env_db() {
@@ -284,12 +287,7 @@ fn db_platform_internals_removed_from_env_db() {
     install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
-    for name in [
-        "registerModel",
-        "setMaskPolicy",
-        "migrations",
-        "replication",
-    ] {
+    for name in ["setMaskPolicy", "migrations", "replication"] {
         let key = v8::String::new(scope, name).unwrap();
         let v = db.get(scope, key.into()).expect("get");
         assert!(
@@ -340,8 +338,14 @@ fn db_platform_string_access_is_denied() {
         v8::tc_scope!(let tc, scope);
         let result = db.get(tc, key.into());
         // The getter throws — `get` returns None with a pending exception.
-        assert!(result.is_none(), "env.db.__platform must throw, not return a value");
-        assert!(tc.has_caught(), "expected a pending exception from the __platform trap");
+        assert!(
+            result.is_none(),
+            "env.db.__platform must throw, not return a value"
+        );
+        assert!(
+            tc.has_caught(),
+            "expected a pending exception from the __platform trap"
+        );
         let exc = tc.exception().unwrap();
         let msg = exc.to_rust_string_lossy(tc);
         // The thrown Error carries `.code === "platform_internal_only"`.
@@ -398,11 +402,7 @@ fn db_platform_invisible_to_reflection() {
     let db = mint_db(scope, "test_app").expect("mint_db");
 
     // Own string property names — must NOT contain "__platform".
-    let names = eval_with_db(
-        scope,
-        db,
-        "JSON.stringify(Object.getOwnPropertyNames(db))",
-    );
+    let names = eval_with_db(scope, db, "JSON.stringify(Object.getOwnPropertyNames(db))");
     assert!(
         !names.contains("__platform"),
         "Object.getOwnPropertyNames(env.db) must not surface __platform; got {names}"
@@ -412,22 +412,14 @@ fn db_platform_invisible_to_reflection() {
     // it must not appear. (Db installs Symbol.toStringTag on the
     // prototype, not as an own symbol of the instance, so the instance's
     // own-symbol set is empty.)
-    let sym_count = eval_with_db(
-        scope,
-        db,
-        "String(Object.getOwnPropertySymbols(db).length)",
-    );
+    let sym_count = eval_with_db(scope, db, "String(Object.getOwnPropertySymbols(db).length)");
     assert_eq!(
         sym_count, "0",
         "env.db must expose no own symbols (the platform slot is a v8::Private, not a Symbol)"
     );
 
     // Reflect.ownKeys — union of string + symbol own keys. No __platform.
-    let own_keys = eval_with_db(
-        scope,
-        db,
-        "Reflect.ownKeys(db).map(String).join(',')",
-    );
+    let own_keys = eval_with_db(scope, db, "Reflect.ownKeys(db).map(String).join(',')");
     assert!(
         !own_keys.contains("__platform"),
         "Reflect.ownKeys(env.db) must not surface __platform; got {own_keys}"
@@ -444,9 +436,8 @@ fn db_platform_invisible_to_reflection() {
 }
 
 /// Bootstrap-can-reach: the `DbPlatform` handle IS present in the private
-/// slot under `ZS_PLATFORM`, and exposes the moved callables
-/// (`registerModel` is a function on it). This is the path the runtime's
-/// `__zsDbPlatform` resolver reads (via `get_private`).
+/// slot under `ZS_PLATFORM`, and exposes the platform callables. This is the
+/// path the runtime's `__zsDbPlatform` resolver reads (via `get_private`).
 #[test]
 fn db_platform_handle_reachable_via_private_symbol() {
     init_v8();
@@ -467,15 +458,13 @@ fn db_platform_handle_reachable_via_private_symbol() {
     );
     let handle_obj: v8::Local<v8::Object> = handle.try_into().unwrap();
 
-    // The handle carries the moved platform callables.
-    for name in ["registerModel", "setMaskPolicy"] {
-        let key = v8::String::new(scope, name).unwrap();
-        let v = handle_obj.get(scope, key.into()).expect("get");
-        assert!(
-            v.is_function(),
-            "__platform.{name} must be a function on the capability handle"
-        );
-    }
+    // The handle carries the remaining platform callable.
+    let key = v8::String::new(scope, "setMaskPolicy").unwrap();
+    let value = handle_obj.get(scope, key.into()).expect("get");
+    assert!(
+        value.is_function(),
+        "__platform.setMaskPolicy must be a function on the capability handle"
+    );
     // And the namespace getters resolve to objects. `replication` is the only
     // one left: the migrations namespace went away with the SDK that backed it,
     // and migrations are now applied by the migration service rather than
@@ -522,11 +511,7 @@ fn db_platform_private_slot_unreachable_by_named_symbol() {
 /// Run a JS expression that may throw; returns Ok(value-as-string) or
 /// Err(()) when an exception was thrown. Used by the bracket-access
 /// fence test.
-fn eval_try(
-    tc: &mut v8::PinScope,
-    db: v8::Local<v8::Object>,
-    src: &str,
-) -> Result<String, ()> {
+fn eval_try(tc: &mut v8::PinScope, db: v8::Local<v8::Object>, src: &str) -> Result<String, ()> {
     let global = tc.get_current_context().global(tc);
     let key = v8::String::new(tc, "db").unwrap();
     global.set(tc, key.into(), db.into());

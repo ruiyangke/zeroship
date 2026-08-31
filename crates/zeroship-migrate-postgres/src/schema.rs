@@ -3,9 +3,9 @@
 use zeroship_migrate_backend::ddl::ExclusionConstraintRequest;
 use zeroship_migrate_backend::renderer::DmlRenderer;
 use zeroship_migrate_backend::schema::{
-    build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
-    decimal_precision_scale, max_length, AddColumnDefinition, AddColumnIfNotExistsRequest,
-    CreateIndexIfNotExistsRequest, SchemaRenderer,
+    AddColumnDefinition, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
+    SchemaRenderer, build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
+    decimal_precision_scale, max_length,
 };
 use zeroship_migrate_backend::snapshot::ColumnSnapshot;
 use zeroship_migrate_ir::dialect::DialectId;
@@ -238,11 +238,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     }
 
     fn empty_json_expr(&self, object: bool) -> &'static str {
-        if object {
-            "'{}'::jsonb"
-        } else {
-            "'[]'::jsonb"
-        }
+        if object { "'{}'::jsonb" } else { "'[]'::jsonb" }
     }
 
     fn empty_text_array_expr(&self) -> Option<&'static str> {
@@ -353,15 +349,17 @@ impl SchemaRenderer for PostgresSchemaRenderer {
             self.quote_ident(request.schema),
             self.quote_ident(request.table)
         );
-        let mut statements = vec![format!(
-            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
-            table,
-            self.quote_ident(request.column),
-            data_type,
-            constraints
-        )
-        .trim()
-        .to_string()];
+        let mut statements = vec![
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
+                table,
+                self.quote_ident(request.column),
+                data_type,
+                constraints
+            )
+            .trim()
+            .to_string(),
+        ];
         if let Some(sentinel) = request.comment_sentinel {
             let escaped = sentinel.replace('\'', "''");
             statements.push(format!(
@@ -527,7 +525,7 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         Some("real") => "REAL",
         // `int`/`integer` are first-class integer tokens (the SQLite arm of
         // `def_to_column_type_for_dialect` already maps them to `INTEGER`; the dev
-        // `registerModel` JSON declares `{ type: "int" }`). Before this arm the PG
+        // descriptor JSON declares `{ type: "int" }`). Before this arm the PG
         // map degraded them to the `_ => TEXT` fallback, so the engine's
         // dialect-agnostic `desired_snapshot` (which spells types via the PG map)
         // recorded `integer` while this emitter would have written TEXT - a
@@ -606,7 +604,7 @@ fn exclusion_operator_sql(operator: ExclusionOperator) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddColumnDefinition, AddColumnIfNotExistsRequest, SchemaRenderer, RENDERER};
+    use super::{AddColumnDefinition, AddColumnIfNotExistsRequest, RENDERER, SchemaRenderer};
 
     #[test]
     fn nullable_unbounded_text_addition_keeps_exact_postgres_bytes() {

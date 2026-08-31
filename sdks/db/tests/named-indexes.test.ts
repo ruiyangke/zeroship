@@ -121,58 +121,6 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
 });
 
 // ---------------------------------------------------------------------------
-// Runtime: registerModel wire format carries the indexes
-// ---------------------------------------------------------------------------
-
-describe("installSchema — passes named indexes through to native registerModel", () => {
-  test("emits an indexes argument with mapped column names per declaration", async () => {
-    const calls: { collection: string; schema: ZeroshipDbSchema; indexes: ZeroshipDbNamedIndex[] }[] = [];
-    const native = {
-      registerModel: (collection: string, sch: ZeroshipDbSchema, indexes?: ZeroshipDbNamedIndex[]) => {
-        calls.push({ collection, schema: sch, indexes: indexes ?? [] });
-        return Promise.resolve();
-      },
-      collection() {
-        return {
-          async find() { return []; },
-          async findOne() { return null; },
-        };
-      },
-    } as unknown as NativeDb;
-
-    installSchemaForTest(
-      {
-        users: schema({
-          email: t.string().required(),
-          firstName: t.string(),
-          done: t.boolean(),
-        })
-          .index("by_email", ["email"])
-          .index("by_first_done", ["firstName", "done"]),
-      },
-      { native },
-    );
-
-    // Drain the microtask the chained registerModel promise rides on.
-    await Promise.resolve();
-    await Promise.resolve();
-
-    assert.equal(calls.length, 1);
-    const got = calls[0];
-    assert.equal(got.collection, "users");
-    assert.equal(got.indexes.length, 2);
-    assert.equal(got.indexes[0].name, "by_email");
-    // `naming.asIs` is the default, so a JS field name IS its column name.
-    // This line used to expect `first_name`: the default was `naming.snakeCase`
-    // until install-schema.ts:1067-1091 changed it deliberately, so that both
-    // installSchema and collection.ts construct the same mapping. The test kept
-    // asserting the abandoned strategy and had been red ever since.
-    assert.deepEqual(got.indexes[0].fields, ["email"]);
-    assert.deepEqual(got.indexes[1].fields, ["firstName", "done"]);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Runtime: warning suppression by prefix coverage
 // ---------------------------------------------------------------------------
 
@@ -196,7 +144,6 @@ describe("Collection — unindexed-query warning honours declared indexes", () =
 
   function makeDb() {
     const native = {
-      registerModel: () => Promise.resolve(),
       collection() {
         return {
           async find() { return []; },

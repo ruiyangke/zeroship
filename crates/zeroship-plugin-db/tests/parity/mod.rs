@@ -1,13 +1,13 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 pub struct MatrixSnapshot {
     pub seed: Value,
@@ -32,8 +32,8 @@ thread_local! {
     /// PG dispatch submits a pooled query on sockets registered with an io_uring
     /// that no longer exists, and it never completes.
     ///
-    /// Measured on this matrix, not inferred: `setup` returned 200 and `seed`
-    /// died on the 15s `pending timeout` with `pg_stat_activity` showing two
+    /// Measured on this matrix, not inferred: `seed` died on the 15s `pending
+    /// timeout` with `pg_stat_activity` showing two
     /// connections sitting `idle`/`ClientRead` for the whole window - the runtime
     /// never issued the INSERT. `crates/plugin-db/tests/native_transaction.rs`
     /// hit the identical wall and carries the same thread-local; its header is
@@ -60,9 +60,8 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
 /// `<db_dir>/zs-default.sqlite` a `pnpm dev` app does.
 const MATRIX_APP_ID: &str = "default";
 
-/// The declared shape `matrix_source`'s `setup` registers. Kept beside the JS so
-/// the two cannot drift: the pre-apply below must create exactly the columns the
-/// procedures then read, and `registerModel` no longer reconciles them.
+/// The matrix's deployed field shape. Kept beside the JS so the pre-apply, the
+/// runtime descriptor, and the procedures cannot drift.
 fn matrix_schema() -> Value {
     json!({
         "_meta": {"strictness": "lenient"},
@@ -79,12 +78,9 @@ fn matrix_schema() -> Value {
 
 /// Create the matrix collection's table BEFORE the runtime boots.
 ///
-/// `registerModel` applies no DDL on either dialect since the 2026-08-10
-/// cutover, so a migration process has to have run first - on the dev tier the
-/// vite dev-server's apply-ahead, on Postgres the `migrated` service at deploy.
-/// Without this the `setup` dispatch still returns 200 (it registers metadata)
-/// and every later dispatch fails with `no such table`, which is exactly how
-/// these three tests broke.
+/// A migration process must have run first - on the dev tier the Vite
+/// dev-server's apply-ahead, on Postgres the migration service at deploy.
+/// Without this every dispatch fails with a missing-table error.
 fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
     let Some(path) = url.strip_prefix("sqlite:") else {
         // The Postgres leg. Same engine, same confined ceiling, same declared
@@ -97,7 +93,11 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
         .parent()
         .expect("the sqlite parity url names a file inside a directory")
         .to_path_buf();
-    crate::support::tables::create_sqlite_table(&db_dir, MATRIX_APP_ID, &matrix_ddl_sqlite(collection));
+    crate::support::tables::create_sqlite_table(
+        &db_dir,
+        MATRIX_APP_ID,
+        &matrix_ddl_sqlite(collection),
+    );
 }
 
 /// Raw SQLite DDL for [`matrix_schema`].
@@ -167,58 +167,11 @@ CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{MATRIX_APP_ID}"."{
     )
 }
 
-// THE CONFINED CEILING AND ITS BINDER ARE GONE FROM THIS FILE.
-//
-// They existed to hand an `EffectivePolicy` to the migration engine, which this
-// matrix used to drive on both legs. plugin-db no longer depends on the engine
-// in any profile, so there is nothing here to hand a policy to: both legs build
-// their table from `zeroship-schema` now.
-//
-// That drops one consumer of the platform `[[inject]]` system-shape fragment
-// under `policies/`, and `tests/inject_policy_mirror_gate.sh` counts consumers
-// on purpose, so its EXPECTED_RUST_CONSUMERS is lowered in the same commit with
-// this as the reason. (The fragment's filename is deliberately NOT spelled here:
-// the gate finds consumers by grepping files that hold both `include_str!` and
-// that exact path, so a comment naming it would become a phantom consumer the
-// day this file gains an unrelated `include_str!`.)
-// The gate's own guidance is to do exactly that for a deliberate deletion; what
-// it must never absorb silently is a consumer that stopped taking the fragment
-// while still injecting.
-//
-// WHAT THIS MATRIX STOPPED PROVING. Both legs no longer take the seven system
-// columns from a policy document, so this file can no longer be read as evidence
-// that a creator's deployed table and the dev table agree. The fragment's own
-// header (see that same fragment) already said `zeroship-schema` is a producer
-// it cannot reach and that
-// the two "differ on purpose" (varchar(255) vs text on id / created_by /
-// updated_by), so that reading was already narrower than it looked. What the
-// matrix still proves is what its assertions actually compare: one declared
-// shape, two dialects, identical JSON projection.
-
 /// Create the matrix collection's table on POSTGRES before the runtime boots.
 ///
-/// # Why this builds the table instead of driving the engine
-///
-/// It used to drive `zeroship-migrate` under plugin-db's confined ceiling, on
-/// the argument that the system columns then arrived from the same policy
-/// document on both legs. plugin-db no longer depends on the engine in any
-/// profile, so that option is gone, and the argument was weaker than it read:
-/// `policies/confined-system-shape.inject.toml` says outright that
-/// `zeroship-schema` is a producer it CANNOT reach and that the two "already
-/// differ on purpose". Both legs now take the same `zeroship-schema` emitter,
-/// which is what the matrix actually needs - one shape, two dialects.
-///
-/// # What this reproduces, and what it does NOT
-///
-/// Same caveat as the SQLite helper, in the same direction, plus one more.
-/// `crates/zeroship-migrate-server` replays AUTHORED migration-IR envelopes; this
-/// runs a rendered CREATE. So a defect in envelope lowering, in journal
-/// versioning, or in the recorder is invisible on both legs. AND, since the
-/// engine left: this table's `id` / `created_by` / `updated_by` are `text`,
-/// where a deployed creator's are `varchar(255)`. What the matrix still pins is
-/// everything downstream of the applied table - types, defaults, ordering,
-/// transaction nesting and the JSON projection `env.db` hands back - and it
-/// pins them identically on both dialects, which is its purpose.
+/// Like the SQLite leg, this fixture uses a matching hand-authored table. The
+/// matrix proves runtime behavior downstream of schema application; it does not
+/// cover migration recording, lowering, policy, or journal behavior.
 ///
 /// # Why it drops the app schema first
 ///
@@ -338,9 +291,6 @@ pub fn matrix_source(collection: &str) -> String {
     r#"
 import { env } from "zeroship";
 
-const __plat = (typeof globalThis.__zsDbPlatform === "function")
-    ? globalThis.__zsDbPlatform(env.db)
-    : undefined;
 const COLLECTION = "__COLLECTION__";
 const TYPED_DATE_ISO = "__TYPED_DATE_ISO__";
 const TYPED_BYTES_B64 = "__TYPED_BYTES_B64__";
@@ -370,21 +320,6 @@ function projectTypedRow(row) {
         payload_json: row.payload_json,
     };
 }
-
-async function setup(_input, _ctx) {
-    await __plat.registerModel(COLLECTION, {
-        title: { type: "string", required: true },
-        flag: { type: "boolean", required: true },
-        meta: { type: "object", required: true },
-        optional: { type: "string" },
-        rank: { type: "int", required: true },
-        occurred_at: { type: "date" },
-        payload_bytes: { type: "bytes" },
-        payload_json: { type: "json" },
-    });
-    return { ok: true };
-}
-setup.config = { kind: "action" };
 
 async function seed(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
@@ -490,7 +425,7 @@ async function typedRoundTrip(_input, _ctx) {
 }
 typedRoundTrip.config = { kind: "action" };
 
-const _procedures = { setup, seed, transactionMatrix, typedRoundTrip };
+const _procedures = { seed, transactionMatrix, typedRoundTrip };
 "#
     .replace("__COLLECTION__", collection)
     .replace("__TYPED_DATE_ISO__", TYPED_DATE_ISO)
@@ -498,7 +433,40 @@ const _procedures = { setup, seed, transactionMatrix, typedRoundTrip };
         + SHIM
 }
 
-pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
+pub fn runtime_descriptor(collection: &str, schema: &Value) -> String {
+    let mut fields = schema.clone();
+    let strictness = fields
+        .as_object_mut()
+        .and_then(|map| map.remove("_meta"))
+        .and_then(|meta| {
+            meta.get("strictness")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "strict".to_string());
+    serde_json::to_string(&json!({
+        "version": 2,
+        "collections": {
+            (collection): {
+                "fields": fields,
+                "options": {
+                    "softDelete": false,
+                    "versioning": false,
+                    "strictness": strictness,
+                },
+                "indexes": [],
+            },
+        },
+    }))
+    .expect("runtime descriptor serializes")
+}
+
+pub fn dispatch_zs_with_descriptor(
+    url: &str,
+    source: &str,
+    name: &str,
+    descriptor: &str,
+) -> (u16, Value) {
     init_v8();
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
@@ -513,7 +481,11 @@ pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
         .expect("db service")
         .plugin(),
     ];
-    let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .plugins(plugins)
+        .runtime_descriptor(Some(descriptor.to_string()))
+        .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let url_ep = format!("http://localhost/__zeroship/v1/{name}");
@@ -527,24 +499,21 @@ pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
     );
     let (status, body) = match outcome {
         FetchOutcome::Response { status, body, .. } => (status, body),
-        FetchOutcome::Pending { rx, cancel: _ } => {
-            block_on(async {
-                runtime.start_pump();
-                let settled = compio::time::timeout(Duration::from_secs(15), rx.recv())
-                    .await
-                    .expect("pending timeout")
-                    .expect("settled error");
-                match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
-                    _ => panic!("expected Response variant"),
-                }
-            })
-        }
+        FetchOutcome::Pending { rx, cancel: _ } => block_on(async {
+            runtime.start_pump();
+            let settled = compio::time::timeout(Duration::from_secs(15), rx.recv())
+                .await
+                .expect("pending timeout")
+                .expect("settled error");
+            match settled {
+                SettledFetch::Response { status, body, .. } => (status, body),
+                _ => panic!("expected Response variant"),
+            }
+        }),
         _ => panic!("unexpected outcome variant"),
     };
     let body = String::from_utf8_lossy(&body).into_owned();
-    let json: Value =
-        serde_json::from_str(&body).unwrap_or_else(|_| Value::String(body.clone()));
+    let json: Value = serde_json::from_str(&body).unwrap_or_else(|_| Value::String(body.clone()));
     (status, json)
 }
 
@@ -556,21 +525,20 @@ pub fn run_matrix(url: &str) -> MatrixSnapshot {
         MATRIX_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let source = matrix_source(&collection);
+    let descriptor = runtime_descriptor(&collection, &matrix_schema());
 
     apply_matrix_schema_ahead_of_runtime(url, &collection);
 
-    let (status, body) = dispatch_zs(url, &source, "setup");
-    assert_eq!(status, 200, "setup failed: {body}");
-
-    let (status, body) = dispatch_zs(url, &source, "seed");
+    let (status, body) = dispatch_zs_with_descriptor(url, &source, "seed", &descriptor);
     assert_eq!(status, 200, "seed failed: {body}");
     let seed = extract_json(&body);
 
-    let (status, body) = dispatch_zs(url, &source, "transactionMatrix");
+    let (status, body) =
+        dispatch_zs_with_descriptor(url, &source, "transactionMatrix", &descriptor);
     assert_eq!(status, 200, "transactionMatrix failed: {body}");
     let tx = extract_json(&body);
 
-    let (status, body) = dispatch_zs(url, &source, "typedRoundTrip");
+    let (status, body) = dispatch_zs_with_descriptor(url, &source, "typedRoundTrip", &descriptor);
     assert_eq!(status, 200, "typedRoundTrip failed: {body}");
     let typed = extract_json(&body);
 
@@ -670,4 +638,3 @@ pub fn expected_typed_projection() -> Value {
         }
     })
 }
-

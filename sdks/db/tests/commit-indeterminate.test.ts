@@ -29,7 +29,6 @@ type AnyRec = Record<string, unknown>;
 function makeCommitFailingNative(commitErr: Error) {
   let txCount = 0;
   const native = {
-    registerModel: () => Promise.resolve(),
     async transaction(cb: (raw: unknown) => unknown, _opts?: { isolationLevel?: string }) {
       txCount += 1;
       // begin → callback resolves (the body succeeded) → COMMIT fails.

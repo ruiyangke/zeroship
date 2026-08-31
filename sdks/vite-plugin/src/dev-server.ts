@@ -321,11 +321,13 @@ async function regenTypesDev(
   root: string,
   migrations: MigrationPaths,
   fatal: boolean,
-): Promise<string | undefined> {
+): Promise<{ descriptorJson: string | undefined; generated: boolean }> {
   const migrationsDir = resolve(root, migrations.dir);
   const outDir = resolve(root, migrations.out);
+  let generated = false;
   try {
     await genTypesFromMigrations(migrationsDir, outDir, { check: false });
+    generated = true;
     console.log(
       "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
     );
@@ -367,7 +369,10 @@ async function regenTypesDev(
       }
     }
   }
-  return readGeneratedRuntimeDescriptor(root, migrations);
+  return {
+    descriptorJson: readGeneratedRuntimeDescriptor(root, migrations),
+    generated,
+  };
 }
 
 /**
@@ -551,13 +556,13 @@ export function devServerPlugin(
   let serverProcess: ChildProcess | null = null;
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
+  let restartRuntimeForDescriptorChange: (() => void) | null = null;
 
   // Migration-first gen-types. The absolute migrations dir is resolved in
   // configureServer (once `root` is known) so the `hotUpdate` branch can match
   // changed files against it.
   let migrationsAbs: string | null = null;
   let runtimeDescriptorJson: string | undefined;
-  let pendingRuntimeDescriptorJson: string | null | undefined;
   // The boot-time gen-types regen (async, in-process). `spawnRuntime` awaits it
   // so the runtime is spawned WITH a fresh descriptor (the pre-in-process CLI
   // path was synchronous; awaiting here preserves that ordering).
@@ -634,7 +639,9 @@ export function devServerPlugin(
         // `regenTypesDev` never throws: a malformed migration is logged and
         // survived, a PLATFORM fault exits the process here (`fatal: true`)
         // rather than serving a stale descriptor for the rest of the session.
-        bootRegenDone = regenTypesDev(root, projectConfig.migrations, true).then(async (json) => {
+        bootRegenDone = regenTypesDev(root, projectConfig.migrations, true).then(async ({
+          descriptorJson: json,
+        }) => {
           runtimeDescriptorJson = json;
           // Report — do NOT apply. Migrating is `pnpm migrate`, a separate step
           // run ahead of `pnpm dev`; see `reportDevSchemaState`.
@@ -770,19 +777,9 @@ export function devServerPlugin(
 
           const changed = [...pendingHmrChanges];
           pendingHmrChanges.clear();
-          const descriptorJson = pendingRuntimeDescriptorJson;
-          pendingRuntimeDescriptorJson = undefined;
-
-          const payload: {
-            changed: string[];
-            runtimeDescriptorJson?: string | null;
-          } = { changed };
-          if (descriptorJson !== undefined) {
-            payload.runtimeDescriptorJson = descriptorJson;
-          }
 
           res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify(payload));
+          res.end(JSON.stringify({ changed }));
         }
       );
 
@@ -808,6 +805,8 @@ export function devServerPlugin(
       } else {
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
         let healthyTimer: ReturnType<typeof setTimeout> | null = null;
+        let descriptorRestartPending = false;
+        let spawnInFlight = false;
         let tornDown = false;
 
         /**
@@ -835,13 +834,35 @@ export function devServerPlugin(
           runtimeStatus.health = "ok";
         };
 
+        const resetSupervisorForDescriptorChange = () => {
+          if (restartTimer) {
+            clearTimeout(restartTimer);
+            restartTimer = null;
+          }
+          runtimeStatus.rapidFailures = 0;
+          runtimeStatus.health = "ok";
+        };
+
         const attachRestartHandler = (child: ChildProcess, spawnedAt: number) => {
           child.once("exit", (code, signal) => {
             if (healthyTimer) {
               clearTimeout(healthyTimer);
               healthyTimer = null;
             }
-            if (tornDown || signal === "SIGTERM" || signal === "SIGKILL") return;
+            if (serverProcess === child) {
+              serverProcess = null;
+            }
+            if (tornDown) return;
+
+            if (descriptorRestartPending) {
+              descriptorRestartPending = false;
+              resetSupervisorForDescriptorChange();
+              console.log("[zeroship] runtime descriptor changed - starting a fresh runtime");
+              runSpawn();
+              return;
+            }
+
+            if (signal === "SIGTERM" || signal === "SIGKILL") return;
 
             const uptimeMs = Date.now() - spawnedAt;
             const reason = `code=${code}, signal=${signal}`;
@@ -956,9 +977,6 @@ export function devServerPlugin(
             [ENV_DIE_WITH_PARENT]: String(process.pid),
             [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
-            ...(runtimeDescriptorJson !== undefined
-              ? { [ENV_RUNTIME_DESCRIPTOR]: runtimeDescriptorJson }
-              : {}),
             // Dev-tier auth: when enabled, hand the child the dev-user config +
             // the cookie HMAC secret. The runtime's `dev_auth.rs` reads the
             // secret to verify the `__zeroship_dev_session` cookie → server-side
@@ -971,6 +989,13 @@ export function devServerPlugin(
                 }
               : {}),
           };
+          if (runtimeDescriptorJson === undefined) {
+            // A schema-less project must not inherit a descriptor that happened
+            // to be present in the Vite parent's environment.
+            delete childEnv[ENV_RUNTIME_DESCRIPTOR];
+          } else {
+            childEnv[ENV_RUNTIME_DESCRIPTOR] = runtimeDescriptorJson;
+          }
 
           try {
             // Reset the captured tail so a terminal verdict quotes THIS
@@ -1017,10 +1042,46 @@ export function devServerPlugin(
         // Defer spawn until server is listening. spawnRuntime is async —
         // wrap with a void handler so unhandled rejections surface in logs.
         const runSpawn = () => {
-          if (tornDown) return;
+          if (tornDown || spawnInFlight) return;
+          spawnInFlight = true;
           spawnRuntime().catch((err) => {
             console.warn(`[zeroship] runtime spawn failed: ${(err as Error).message}`);
+          }).finally(() => {
+            spawnInFlight = false;
           });
+        };
+
+        // A runtime descriptor is immutable for the lifetime of an isolate.
+        // Native plugins bind the validated descriptor during runtime boot, so
+        // a successful migration regeneration replaces the child instead of
+        // mutating JavaScript globals in the live isolate.
+        restartRuntimeForDescriptorChange = () => {
+          if (tornDown || descriptorRestartPending) return;
+
+          const child = serverProcess;
+          if (
+            !child ||
+            child.exitCode !== null ||
+            child.signalCode !== null
+          ) {
+            // An initial or crash-restart spawn reads runtimeDescriptorJson at
+            // spawn time, so it already receives the latest value. A corrected
+            // descriptor also starts a fresh failure budget: otherwise a child
+            // that exhausted the old descriptor's budget can start cleanly
+            // while the proxy remains permanently marked fatal.
+            resetSupervisorForDescriptorChange();
+            if (!spawnInFlight) runSpawn();
+            return;
+          }
+
+          descriptorRestartPending = true;
+          runtimeStatus.health = "failing";
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              child.kill("SIGKILL");
+            }
+          }, 3000).unref();
         };
         if (server.httpServer?.listening) {
           runSpawn();
@@ -1049,6 +1110,7 @@ export function devServerPlugin(
           killChild();
           cleanupListeners();
           disposeRuntime = null;
+          restartRuntimeForDescriptorChange = null;
         };
         disposeRuntime = dispose;
         server.httpServer?.once("close", dispose);
@@ -1136,17 +1198,28 @@ export function devServerPlugin(
 
     async hotUpdate({ file }: { file: string }) {
       // Migration-first gen-types: a change under the migrations dir regenerates
-      // the typed `env.db` surface. Awaited so the HMR poll that follows sees the
-      // re-injected descriptor. `regenTypesDev` never throws, and is NOT fatal
-      // here: a bad migration must not crash dev, and on a hot update even a
-      // platform fault leaves a live session whose in-memory descriptor was
-      // serving a moment ago.
+      // the typed `env.db` surface. A successfully generated descriptor is
+      // immutable runtime input, so replace the child and let native boot bind
+      // it into a fresh isolate. `regenTypesDev` never throws, and is NOT fatal
+      // here: a bad migration leaves the last valid runtime serving unchanged.
       if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
-        const json = await regenTypesDev(root, projectConfig.migrations, false);
-        runtimeDescriptorJson = json;
-        pendingRuntimeDescriptorJson = json ?? null;
-        // Don't return — a migration `.ts` is still a `.ts`; fall through to the
-        // HMR-queue path below so the runtime re-fetches if it imported one.
+        // Serialize behind the boot fold. Otherwise a fast hot fold can publish
+        // a new descriptor while the first spawn is still awaiting the boot
+        // fold, only for that older boot result to overwrite it. Once this
+        // promise settles, spawnRuntime has no asynchronous gap before it
+        // captures the descriptor and installs serverProcess, so the update is
+        // either in the first child or forces the live child to restart.
+        await bootRegenDone;
+        const { descriptorJson, generated } = await regenTypesDev(
+          root,
+          projectConfig.migrations,
+          false,
+        );
+        if (generated && descriptorJson !== runtimeDescriptorJson) {
+          runtimeDescriptorJson = descriptorJson;
+          restartRuntimeForDescriptorChange?.();
+        }
+        return;
       }
 
       if (

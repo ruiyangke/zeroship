@@ -140,9 +140,8 @@ export type InferInsertSchema<S> = S extends infer T
  * `Row<S>`. Mirrors `SYSTEM_FIELD_NAMES` on the Rust side
  * (`crates/zeroship-schema/src/query.rs`). Creator schemas cannot declare
  * fields with these names — the SDK-side reservation in
- * `@zeroship/bootstrap/install-schema` and the Rust-side validator
- * in `validate_field_name_for_declaration` enforce the fence at
- * register-model time.
+ * `@zeroship/bootstrap/install-schema` and the migration policy enforce the
+ * fence before runtime CRUD can address a collection.
  *
  * Wire types (PR 3 — canonical typed_id + ISO-8601-friendly shape;
  * PR 1 stub of `number` for `id` is widened here in lockstep with
@@ -1056,7 +1055,7 @@ export interface FieldDef {
    *
    * Present iff a chain method set it; absent on bare `t.timestamp()`.
    * The chain method refuses any non-timestamp type at SDK time so
-   * the discriminator stays well-formed at register-model.
+   * the discriminator stays well-formed in the generated descriptor.
    */
   timestampAuto?: "now" | "now_on_update";
   /**
@@ -1626,8 +1625,7 @@ export const t = {
    * `crud::read_pipeline` re-encodes what the column returns.
    *
    * A bare `t.bytes()` outside `t.encrypted({ wraps: ... })` is
-   * supported. This doc used to say it was "an error at register-model
-   * time today" and that bytes columns outside an encrypted wrap
+   * supported. This doc used to say bytes columns outside an encrypted wrap
    * "aren't yet supported in plugin-db"; both were false by the time
    * anyone read them - what was actually missing was the write-side
    * decode, so the column accepted the value and stored the ASCII of
@@ -1866,8 +1864,7 @@ export const t = {
       }
       // `usr` is the platform user-id prefix (`crates/core/src/typed_id.rs`);
       // reserve it so a creator id can never collide with a platform user id.
-      // The Rust register-model validator mirrors this fence so a hand-built
-      // wire payload can't bypass it.
+      // The generated migration surface mirrors this fence.
       if (prefix === "usr") {
         throw Object.assign(
           new Error(

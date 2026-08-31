@@ -49,7 +49,7 @@ import type { NativeDb } from "../src/native.js";
  * which carries only fields and takes the installer's defaults.
  *
  * Exported for tests that call `installSchema` directly to exercise install
- * mechanics (reserved names, re-entrancy, DDL failure propagation) rather
+ * mechanics (reserved names and re-entrancy) rather
  * than Collection behaviour. Those still need a descriptor, or the installer
  * has no collections to apply the mechanics to and the assertions pass
  * vacuously.

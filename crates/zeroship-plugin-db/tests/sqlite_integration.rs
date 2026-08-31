@@ -30,16 +30,15 @@ mod support;
 mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
-use zeroship_plugin_db::binding::DbBinding;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
-    BackendHandle, ChangeStream, LockManager, LockScope,
-    SchemaIntrospect, SqlExecutor,
+    BackendHandle, ChangeStream, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
-use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
+use zeroship_plugin_db::binding::DbBinding;
+use zeroship_plugin_db::broker::{ChangeOp, Subscription, SubscriptionMessage, subscribe};
 use zeroship_plugin_db::error::DbError;
-use zeroship_plugin_db::query::{raw_column_name, IndexKind, IndexSpec};
+use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -49,8 +48,7 @@ use zeroship_plugin_db::query::{raw_column_name, IndexKind, IndexSpec};
 /// connection on drop, which writes the final WAL checkpoint).
 fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let backend =
-        SqliteBackend::new(PathBuf::from(dir.path())).expect("open SqliteBackend");
+    let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open SqliteBackend");
     (backend, dir)
 }
 
@@ -146,10 +144,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
              BLOB-affinity column, which round-trips through env.db while \
              storing the wrong thing"
         );
-        assert_eq!(
-            hex, expected_hex,
-            "the BLOB must hold the caller's bytes"
-        );
+        assert_eq!(hex, expected_hex, "the BLOB must hold the caller's bytes");
     });
 }
 
@@ -169,10 +164,7 @@ async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
         .await
         .expect("acquire client");
     let sql = format!("PRAGMA {pragma}");
-    let rows = client
-        .query(&sql, &[])
-        .await
-        .expect("PRAGMA query");
+    let rows = client.query(&sql, &[]).await.expect("PRAGMA query");
     assert_eq!(rows.len(), 1, "PRAGMA {pragma} must return exactly one row");
     rows[0][0].clone().unwrap_or_default()
 }
@@ -483,12 +475,9 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
     // exhaust and surface `DbError::LockContention`, which `to_op_error`
     // maps to the wire-code `lock_not_available`.
     //
-    // We use `LockScope::GlobalApp` (the only production-shaped
-    // variant) so the `to_keys` derivation matches what
-    // register-model bootstrap would emit; `LockScope::LocalApp`
-    // would derive identical keys (the visibility class is a
-    // backend-arm classification, not a key-shape one — see the
-    // `LockScope::to_keys` rustdoc).
+    // We use `LockScope::GlobalApp` (the only production-shaped variant) so
+    // the key derivation matches snapshot/restore. `LockScope::LocalApp`
+    // derives identical keys; visibility does not alter their shape.
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
@@ -497,7 +486,7 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
             .expect("acquire client");
         let scope = LockScope::GlobalApp {
             app_id: "app_demo".to_string(),
-            name: "register_model".to_string(),
+            name: "snapshot_restore".to_string(),
         };
 
         // Hold the slot via the underlying primitive — the typed
@@ -526,13 +515,13 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
                     "contention message should mention the scope's app_id: {message}"
                 );
                 assert!(
-                    message.contains("register_model"),
+                    message.contains("snapshot_restore"),
                     "contention message should mention the scope name: {message}"
                 );
             }
-            other => panic!(
-                "expected DbError::LockContention after backoff exhaustion, got {other:?}"
-            ),
+            other => {
+                panic!("expected DbError::LockContention after backoff exhaustion, got {other:?}")
+            }
         }
 
         // Sanity: the wire code surfaces as `lock_not_available`
@@ -621,7 +610,12 @@ fn introspect_after_create_table_round_trip() {
             .tables
             .get("items")
             .expect("items table must be present in LiveSchema");
-        assert_eq!(cols.len(), 3, "items has 3 columns, got {:?}", cols.keys().collect::<Vec<_>>());
+        assert_eq!(
+            cols.len(),
+            3,
+            "items has 3 columns, got {:?}",
+            cols.keys().collect::<Vec<_>>()
+        );
 
         // Type strings: SQLite returns the declared affinity uppercase
         // ("INTEGER" / "TEXT"). The diff classifier reads these
@@ -701,14 +695,20 @@ fn cross_app_fk_rejected_at_parse() {
     let err = reject_cross_app_fk(&schema, "app_demo")
         .expect_err("cross-app ref must reject at parse time");
     match err {
-        DbError::Configuration { code, message, hint } => {
+        DbError::Configuration {
+            code,
+            message,
+            hint,
+        } => {
             assert_eq!(code, "cross_app_fk_forbidden");
             assert!(
                 message.contains("other_app.users"),
                 "message must name the offending target: {message}"
             );
             assert!(
-                hint.as_deref().map(|h| h.contains("Drop the")).unwrap_or(false),
+                hint.as_deref()
+                    .map(|h| h.contains("Drop the"))
+                    .unwrap_or(false),
                 "hint must point at remediation: {hint:?}"
             );
         }
@@ -1006,10 +1006,7 @@ fn rollback_does_not_publish() {
         // the session actor (same worker thread; serialised by the
         // mpsc queue). The rollback_hook clears the buffer; no packet
         // ships.
-        backend
-            .pool_exec("BEGIN", &[])
-            .await
-            .expect("BEGIN");
+        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
         backend
             .pool_exec(
                 "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('alice')",
@@ -1017,10 +1014,7 @@ fn rollback_does_not_publish() {
             )
             .await
             .expect("INSERT inside tx");
-        backend
-            .pool_exec("ROLLBACK", &[])
-            .await
-            .expect("ROLLBACK");
+        backend.pool_exec("ROLLBACK", &[]).await.expect("ROLLBACK");
 
         drain_publisher().await;
 
@@ -1068,10 +1062,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
         // Each statement fires the preupdate hook once; the commit
         // hook ships a single CommitPacket with all 4 events in
         // buffer order.
-        backend
-            .pool_exec("BEGIN", &[])
-            .await
-            .expect("BEGIN");
+        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
         backend
             .pool_exec(
                 "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (1, 'a')",
@@ -1087,10 +1078,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
             .await
             .expect("UPDATE b");
         backend
-            .pool_exec(
-                "DELETE FROM \"app_cdc\".\"items\" WHERE id = 20",
-                &[],
-            )
+            .pool_exec("DELETE FROM \"app_cdc\".\"items\" WHERE id = 20", &[])
             .await
             .expect("DELETE c");
         backend
@@ -1100,10 +1088,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
             )
             .await
             .expect("INSERT d");
-        backend
-            .pool_exec("COMMIT", &[])
-            .await
-            .expect("COMMIT");
+        backend.pool_exec("COMMIT", &[]).await.expect("COMMIT");
 
         drain_publisher().await;
 
@@ -1178,30 +1163,24 @@ fn subscription_fanout_under_load() {
         // Subscribe 10 times to the same (app, collection). Each
         // returned `Subscription` is a fresh routing-table entry — the
         // broker fans the same Rc<ChangeEvent> out to each.
-        let subs: Vec<Subscription> =
-            (0..10).map(|_| subscribe_local("app_fanout", "items")).collect();
+        let subs: Vec<Subscription> = (0..10)
+            .map(|_| subscribe_local("app_fanout", "items"))
+            .collect();
 
         // BEGIN; 100×INSERT; COMMIT. Each statement routes through the
         // session actor in order, so the buffer accumulates events in
         // INSERT order. The commit_hook then ships one CommitPacket
         // with all 100 events; the publisher iterates and fans out.
-        backend
-            .pool_exec("BEGIN", &[])
-            .await
-            .expect("BEGIN");
+        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
         for i in 0..100 {
-            let sql = format!(
-                "INSERT INTO \"app_fanout\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
-            );
+            let sql =
+                format!("INSERT INTO \"app_fanout\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend
                 .pool_exec(&sql, &[])
                 .await
                 .expect("INSERT inside tx");
         }
-        backend
-            .pool_exec("COMMIT", &[])
-            .await
-            .expect("COMMIT");
+        backend.pool_exec("COMMIT", &[]).await.expect("COMMIT");
 
         // Generous drain — 100 publishes × 10 subscribers under the
         // single-threaded compio runtime + one PRAGMA round-trip on
@@ -1232,13 +1211,12 @@ fn subscription_fanout_under_load() {
                         );
                         // The `id` column carries the per-row index. We
                         // assert ordering through that field.
-                        let id_str = ev
-                            .new_tuple
-                            .get("id")
-                            .unwrap_or_else(|| panic!(
+                        let id_str = ev.new_tuple.get("id").unwrap_or_else(|| {
+                            panic!(
                                 "subscriber #{i} event {idx} missing `id`: {:?}",
                                 ev.new_tuple
-                            ));
+                            )
+                        });
                         let id: i64 = id_str
                             .parse()
                             .unwrap_or_else(|_| panic!("non-numeric id: {id_str}"));
@@ -1247,9 +1225,7 @@ fn subscription_fanout_under_load() {
                             "subscriber #{i} event {idx} must carry id={idx}; got id={id}"
                         );
                     }
-                    other => panic!(
-                        "subscriber #{i} event {idx} must be Change; got {other:?}"
-                    ),
+                    other => panic!("subscriber #{i} event {idx} must be Change; got {other:?}"),
                 }
             }
         }
@@ -1353,10 +1329,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
 
         // Single transaction touching both tables. The shadow write
         // is filtered at the hook; the regular write reaches the broker.
-        backend
-            .pool_exec("BEGIN", &[])
-            .await
-            .expect("BEGIN");
+        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
         backend
             .pool_exec(
                 "INSERT INTO \"app_mv_mixed\".\"items\" (id, name) VALUES (1, 'alice')",
@@ -1371,10 +1344,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
             )
             .await
             .expect("INSERT shadow");
-        backend
-            .pool_exec("COMMIT", &[])
-            .await
-            .expect("COMMIT");
+        backend.pool_exec("COMMIT", &[]).await.expect("COMMIT");
 
         drain_publisher().await;
 
@@ -1535,9 +1505,8 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         // publisher receives the packet, sees `is_app_suppressed`,
         // drops the event + emits a debug-level trace, moves on.
         for i in 0..100 {
-            let sql = format!(
-                "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
-            );
+            let sql =
+                format!("INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend
                 .pool_exec(&sql, &[])
                 .await
@@ -1642,9 +1611,8 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // INSERT 50 rows under the schema-pending window. Same shape
         // as the backfill test above — packets ship, publisher drops.
         for i in 0..50 {
-            let sql = format!(
-                "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
-            );
+            let sql =
+                format!("INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend
                 .pool_exec(&sql, &[])
                 .await
@@ -1658,10 +1626,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // callers); the SDK boundary that lands later wires
         // `try_subscribe` so the JS layer can branch on
         // `e.code === "schema_pending"`.
-        let attempt = zeroship_plugin_db::broker::try_subscribe(
-            "app_pending",
-            "other_collection",
-        );
+        let attempt = zeroship_plugin_db::broker::try_subscribe("app_pending", "other_collection");
         match &attempt {
             Err(DbError::Coded { code, .. }) => {
                 assert_eq!(
@@ -1670,9 +1635,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
                      with code=schema_pending; got code={code}"
                 );
             }
-            other => panic!(
-                "expected Err(Coded {{ code: schema_pending }}); got {other:?}"
-            ),
+            other => panic!("expected Err(Coded {{ code: schema_pending }}); got {other:?}"),
         }
 
         // Let the publisher drain the 50 dropped packets so the
@@ -1727,9 +1690,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
                     ev.new_tuple
                 );
             }
-            other => panic!(
-                "second message must be Change(post-disengage); got {other:?}"
-            ),
+            other => panic!("second message must be Change(post-disengage); got {other:?}"),
         }
 
         // Defensive: zero Change events came from the pre-disengage
@@ -1838,9 +1799,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         // owned guard's contract: the publisher drops every packet for
         // `app_orch` until the guard's Drop runs.
         for i in 0..100 {
-            let sql = format!(
-                "INSERT INTO \"app_orch\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
-            );
+            let sql = format!("INSERT INTO \"app_orch\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend_ref
                 .pool_exec(&sql, &[])
                 .await
@@ -1925,12 +1884,8 @@ fn backend_with_secrets(
     secret_prev: Option<Vec<u8>>,
 ) -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let backend = SqliteBackend::new_with_secrets(
-        PathBuf::from(dir.path()),
-        secret,
-        secret_prev,
-    )
-    .expect("open SqliteBackend with secrets");
+    let backend = SqliteBackend::new_with_secrets(PathBuf::from(dir.path()), secret, secret_prev)
+        .expect("open SqliteBackend with secrets");
     (backend, dir)
 }
 
@@ -2049,16 +2004,13 @@ fn session_grace_window() {
         let k_old = key_of(0xd);
 
         // Old-key signer (mints tokens under K_old).
-        let (backend_old, _dir_old) =
-            backend_with_secrets(k_old.clone(), None);
+        let (backend_old, _dir_old) = backend_with_secrets(k_old.clone(), None);
         // New-key + grace acceptor (verifies tokens under either K_new
         // OR K_old).
-        let (backend_new, _dir_new) =
-            backend_with_secrets(k_new.clone(), Some(k_old.clone()));
+        let (backend_new, _dir_new) = backend_with_secrets(k_new.clone(), Some(k_old.clone()));
         // Strict new-key-only acceptor (no grace — must reject the
         // K_old-signed token).
-        let (backend_strict, _dir_strict) =
-            backend_with_secrets(k_new.clone(), None);
+        let (backend_strict, _dir_strict) = backend_with_secrets(k_new.clone(), None);
 
         // Mint under K_old; init under K_new+prev → accepted.
         let token_a = backend_old
@@ -2324,8 +2276,8 @@ fn session_canonical_payload_byte_pin() {
 
         // Independent HMAC-SHA256.
         type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(&secret)
-            .expect("HMAC-SHA256 accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(&secret).expect("HMAC-SHA256 accepts any key length");
         mac.update(payload.as_bytes());
         let expected = mac.finalize().into_bytes().to_vec();
 
@@ -2524,8 +2476,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         for i in 0..100usize {
             let v = mk_unit_vec(i, dims);
             let hex = vec_to_hex_lit(&v);
-            let sql =
-                format!("INSERT INTO \"vector_topk\".\"docs\" (embedding) VALUES ({hex})");
+            let sql = format!("INSERT INTO \"vector_topk\".\"docs\" (embedding) VALUES ({hex})");
             backend.pool_exec(&sql, &[]).await.expect("INSERT");
         }
 
@@ -2624,9 +2575,7 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
                     "expected check_violation, got {code}"
                 );
             }
-            other => panic!(
-                "expected SchemaRefused {{ check_violation }}, got {other:?}"
-            ),
+            other => panic!("expected SchemaRefused {{ check_violation }}, got {other:?}"),
         }
     });
 }
@@ -2855,13 +2804,11 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
 // exercise the haversine flat scan against `(lat, lng)` 16-byte BLOB
 // payloads.
 //
-// Like the vector tests, we construct table DDL inline - the
-// orchestrator's column-DDL emitter is PG-flavoured today; a follow-up
-// change will teach `register_model::apply` to dispatch by dialect via
-// the `sqlite_geopoint_column_ddl` / `sqlite_vector_column_ddl` helpers.
+// Like the vector tests, we construct table DDL inline and exercise the
+// SQLite geopoint encoding directly.
 
-use zeroship_plugin_db::backend::SpatialIndex;
 use zeroship_plugin_db::backend::GeoPoint;
+use zeroship_plugin_db::backend::SpatialIndex;
 
 /// Encode a `GeoPoint` as a SQLite `x'<hex>'` blob literal — 2× LE
 /// f64 = 16 bytes. Mirrors `vec_to_hex_lit` for vectors. We use this
@@ -2919,7 +2866,10 @@ fn near_returns_within_radius() {
             serde_json::json!({ "location": { "type": "geoPoint" } }),
         );
 
-        let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
+        let london = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
         // 10 points: 5 within ~1km (small lat/lng offsets) and 5
         // well outside (several km away). One degree of latitude is
         // ~111km, so 0.005 deg ≈ 555m and 0.05 deg ≈ 5.5km.
@@ -2942,9 +2892,7 @@ fn near_returns_within_radius() {
                 lng: london.lng + dlng,
             };
             let hex = point_to_hex_lit(p);
-            let sql = format!(
-                "INSERT INTO \"near_radius\".\"places\" (location) VALUES ({hex})"
-            );
+            let sql = format!("INSERT INTO \"near_radius\".\"places\" (location) VALUES ({hex})");
             backend.pool_exec(&sql, &[]).await.expect("INSERT location");
             if *within_1km {
                 expected_within.push((i + 1) as i64);
@@ -2966,12 +2914,9 @@ fn near_returns_within_radius() {
 
         let returned_ids: std::collections::BTreeSet<i64> = rows
             .iter()
-            .filter_map(|r| {
-                r.get("id").and_then(serde_json::Value::as_i64)
-            })
+            .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
             .collect();
-        let expected: std::collections::BTreeSet<i64> =
-            expected_within.into_iter().collect();
+        let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
         assert_eq!(
             returned_ids, expected,
             "near(1km) membership mismatch: returned={returned_ids:?} expected={expected:?}"
@@ -3098,18 +3043,14 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
 // ---------------------------------------------------------------------------
-// The runtime-dispatch fixtures below register a collection and then CRUD it.
-// Since the 2026-08-10 cutover (d84cbbd84) `registerModel` applies NO DDL on
-// either dialect, so each of them has to get its table the way a real app does
-// - from a migration that ran before the process serving the request existed.
-// `apply_schema_ahead_of_runtime` is that step; `sqlite_runtime_source` builds
-// the module that registers the SAME shape as metadata afterwards, which is
-// what supplies the declared-only encrypted / mask facets the CRUD passes read.
+// The runtime-dispatch fixtures below receive their table from a migration that
+// ran before the serving process existed. `apply_schema_ahead_of_runtime` is
+// that step; `sqlite_runtime_source` gives the runtime the same shape as a
+// native descriptor so encrypted and masked facets reach the CRUD passes.
 //
-// The schema is authored ONCE, in Rust, and interpolated into the JS. Holding
-// it twice - a `json!` for the apply and a literal in the module source - is
-// how the apply and the register drift into describing different tables while
-// both look right in isolation.
+// The schema is authored once in Rust and used for both the apply-ahead fixture
+// and the descriptor. Holding it twice is how those shapes drift while both
+// look right in isolation.
 // ---------------------------------------------------------------------------
 
 /// `email` unique + plaintext, `ssn` randomised-encrypted with a `last4` mask.
@@ -3169,9 +3110,8 @@ fn users_encrypted_secret_schema(key_id: &str) -> serde_json::Value {
 //
 // The seven system columns, the `["id"]` PK and the three system indexes are the
 // platform's confined table shape. `_masked` companions and the `zsenc:` /
-// `__zsmask:` comment sentinels are the data plane's own catalog markers - it
-// reads them back to learn which columns are encrypted or masked, so they are
-// load-bearing, not decoration.
+// `__zsmask:` comment sentinels preserve the migrated table shape exercised by
+// these fixtures. Runtime field metadata comes from the deployed descriptor.
 // ---------------------------------------------------------------------------
 
 /// The seven system columns and the `["id"]` primary key, SQLite spelling.
@@ -3278,34 +3218,39 @@ fn apply_schema_ahead_of_runtime(dir: &tempfile::TempDir, ddl: &str) {
     crate::support::tables::create_sqlite_table(dir.path(), "default", ddl);
 }
 
-fn sqlite_runtime_source(collection: &str, schema: &serde_json::Value, body: &str) -> String {
-    let schema_js = serde_json::to_string(schema).expect("schema serialises");
-    format!(
+struct SqliteRuntimeSource {
+    source: String,
+    descriptor: String,
+}
+
+fn sqlite_runtime_source(
+    collection: &str,
+    schema: &serde_json::Value,
+    body: &str,
+) -> SqliteRuntimeSource {
+    let source = format!(
         r#"
 import {{ env }} from "zeroship";
 
-const __plat = (typeof globalThis.__zsDbPlatform === "function")
-    ? globalThis.__zsDbPlatform(env.db)
-    : undefined;
 const COLLECTION = "{collection}";
-
-function setup(_input, _ctx) {{
-    return __plat.registerModel(COLLECTION, {schema_js});
-}}
-setup.config = {{ kind: "action" }};
 
 {body}
 "#
-    ) + SQLITE_RUNTIME_RPC_SHIM
+    ) + SQLITE_RUNTIME_RPC_SHIM;
+    SqliteRuntimeSource {
+        source,
+        descriptor: parity::runtime_descriptor(collection, schema),
+    }
 }
 
 fn dispatch_sqlite_runtime(
     dir: &tempfile::TempDir,
-    source: &str,
+    source: &SqliteRuntimeSource,
     name: &str,
 ) -> serde_json::Value {
     let url = parity::sqlite_url(dir);
-    let (status, body) = parity::dispatch_zs(&url, source, name);
+    let (status, body) =
+        parity::dispatch_zs_with_descriptor(&url, &source.source, name, &source.descriptor);
     assert_eq!(status, 200, "{name} failed: {body}");
     body
 }
@@ -3313,13 +3258,11 @@ fn dispatch_sqlite_runtime(
 fn assert_write_path_fast_path(label: &str) {
     let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
     assert_eq!(
-        counters.target_row_resolution_calls,
-        0,
+        counters.target_row_resolution_calls, 0,
         "{label}: plain write must not resolve row ids: {counters:?}",
     );
     assert_eq!(
-        counters.upsert_conflict_probe_calls,
-        0,
+        counters.upsert_conflict_probe_calls, 0,
         "{label}: plain write must not run an upsert conflict probe: {counters:?}",
     );
 }
@@ -3334,8 +3277,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
         use zeroship_plugin_db::encryption;
         use zeroship_plugin_db::query::{
-            build_create_table_with_fks_for_dialect, build_insert_many_with_dialect, FkEmission,
-            SqlDialect,
+            FkEmission, SqlDialect, build_create_table_with_fks_for_dialect,
+            build_insert_many_with_dialect,
         };
 
         let key_id = "c1_insert_many";
@@ -3350,8 +3293,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let (backend, _dir) =
-            unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         let ddl = build_create_table_with_fks_for_dialect(
             app_id,
             collection,
@@ -3520,11 +3462,10 @@ async function upsertInsert(_input, _ctx) {
 }
 upsertInsert.config = { kind: "action" };
 
-const _procedures = { setup, upsertInsert };
+const _procedures = { upsertInsert };
 "#,
         );
 
-        let setup = dispatch_sqlite_runtime(&dir, &source, "setup");
         let result = dispatch_sqlite_runtime(&dir, &source, "upsertInsert");
         let row = parity::extract_json(&result);
         let id = row
@@ -3558,9 +3499,16 @@ const _procedures = { setup, upsertInsert };
             .await
             .expect("SELECT runtime upsert row");
         assert_eq!(rows.len(), 1, "exactly one runtime-upsert row");
-        assert_eq!(rows[0][0].as_deref(), Some(id), "stored row keeps minted id");
-        assert_eq!(rows[0][1].as_deref(), Some("1"), "stored row version defaults to 1");
-        drop(setup);
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some(id),
+            "stored row keeps minted id"
+        );
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("1"),
+            "stored row version defaults to 1"
+        );
     });
 }
 
@@ -3608,11 +3556,10 @@ async function upsertConflict(_input, _ctx) {
 }
 upsertConflict.config = { kind: "action" };
 
-const _procedures = { setup, upsertConflict };
+const _procedures = { upsertConflict };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         let result = dispatch_sqlite_runtime(&dir, &source, "upsertConflict");
         let payload = parity::extract_json(&result);
         let first = payload.get("first").expect("first response row");
@@ -3768,11 +3715,10 @@ async function upsertConflict(_input, _ctx) {
 }
 upsertConflict.config = { kind: "action" };
 
-const _procedures = { setup, upsertConflict };
+const _procedures = { upsertConflict };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         let result = dispatch_sqlite_runtime(&dir, &source, "upsertConflict");
         let payload = parity::extract_json(&result);
         let second = payload.get("second").expect("second response row");
@@ -3815,7 +3761,9 @@ const _procedures = { setup, upsertConflict };
         };
         let ssn_blob = match &row[2] {
             TypedCell::Blob(bytes) => bytes.clone(),
-            other => panic!("{raw_ssn} must be stored as randomised ciphertext BLOB, got {other:?}"),
+            other => {
+                panic!("{raw_ssn} must be stored as randomised ciphertext BLOB, got {other:?}")
+            }
         };
         match &row[3] {
             TypedCell::Text(masked) => {
@@ -3898,11 +3846,10 @@ async function updateByEmail(_input, _ctx) {
 }
 updateByEmail.config = { kind: "action" };
 
-const _procedures = { setup, seed, updateByEmail };
+const _procedures = { seed, updateByEmail };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
         let updated = dispatch_sqlite_runtime(&dir, &source, "updateByEmail");
         let row = parity::extract_json(&updated);
@@ -4033,14 +3980,14 @@ async function updateManyByName(_input, _ctx) {
 }
 updateManyByName.config = { kind: "action" };
 
-const _procedures = { setup, seed, updateManyByName };
+const _procedures = { seed, updateManyByName };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
         zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
-        let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
+        let updated =
+            parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
         assert_eq!(
             updated.as_f64(),
             Some(2.0),
@@ -4055,10 +4002,7 @@ const _procedures = { setup, seed, updateManyByName };
             !counters.target_row_resolution_sql.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(
-            " LIMIT {}",
-            zeroship_plugin_db::query::MAX_QUERY_LIMIT + 1
-        );
+        let expected_limit = format!(" LIMIT {}", zeroship_plugin_db::query::MAX_QUERY_LIMIT + 1);
         for sql in &counters.target_row_resolution_sql {
             assert!(
                 sql.ends_with(&expected_limit),
@@ -4147,11 +4091,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
             .expect("MAX_QUERY_LIMIT must fit usize");
         let seeded = target_cap + 1;
         let values = (0..seeded)
-            .map(|index| {
-                format!(
-                    "('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"
-                )
-            })
+            .map(|index| format!("('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"))
             .collect::<Vec<_>>();
         assert!(!values.is_empty(), "overflow fixture must seed target rows");
         let mut ddl = users_encrypted_ssn_ddl(key_id);
@@ -4183,11 +4123,10 @@ async function overflow(_input, _ctx) {
 }
 overflow.config = { kind: "action" };
 
-const _procedures = { setup, overflow };
+const _procedures = { overflow };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "overflow"));
         assert_eq!(
@@ -4228,7 +4167,11 @@ const _procedures = { setup, overflow };
             )
             .await
             .expect("inspect rows after overflowing updateMany");
-        assert_eq!(state.rows.len(), 1, "aggregate must return one non-empty row");
+        assert_eq!(
+            state.rows.len(),
+            1,
+            "aggregate must return one non-empty row"
+        );
         let expected_seeded = i64::try_from(seeded).expect("fixture count must fit i64");
         for (cell, expected, label) in [
             (&state.rows[0][0], expected_seeded, "row count"),
@@ -4323,18 +4266,21 @@ async function failBulkInsideTransaction(_input, _ctx) {
 }
 failBulkInsideTransaction.config = { kind: "action" };
 
-const _procedures = { setup, seed, failBulk, failBulkInsideTransaction };
+const _procedures = { seed, failBulk, failBulkInsideTransaction };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
         zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "failBulk"));
         let after = result["after"]
             .as_array()
             .expect("caught failure must leave an inspectable result set");
-        assert_eq!(after.len(), 2, "the exercised target set must be non-empty: {result}");
+        assert_eq!(
+            after.len(),
+            2,
+            "the exercised target set must be non-empty: {result}"
+        );
         let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
         assert_eq!(
             counters.target_row_resolution_calls, 1,
@@ -4345,8 +4291,7 @@ const _procedures = { setup, seed, failBulk, failBulkInsideTransaction };
             "the failing fan-out SQL witness must be non-empty: {counters:?}"
         );
         assert_eq!(
-            result["failure"]["code"],
-            "unique_violation",
+            result["failure"]["code"], "unique_violation",
             "the second conflicting row must reject in creator vocabulary: {result}"
         );
         let mut caller_visible: Vec<(String, i64)> = after
@@ -4431,7 +4376,11 @@ const _procedures = { setup, seed, failBulk, failBulkInsideTransaction };
             )
             .await
             .expect("inspect rows after nested failed updateMany");
-        assert_eq!(after_nested.rows.len(), 2, "nested target set must be non-empty");
+        assert_eq!(
+            after_nested.rows.len(),
+            2,
+            "nested target set must be non-empty"
+        );
         for (index, row) in after_nested.rows.iter().enumerate() {
             match &row[0] {
                 TypedCell::Text(email) => assert_eq!(email, expected[index]),
@@ -4516,11 +4465,10 @@ async function updateManyPlain(_input, _ctx) {
 }
 updateManyPlain.config = { kind: "action" };
 
-const _procedures = { setup, seed, updatePlain, updateManyPlain };
+const _procedures = { seed, updatePlain, updateManyPlain };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
 
         zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
@@ -4582,16 +4530,18 @@ async function upsertPlainConflict(_input, _ctx) {
 }
 upsertPlainConflict.config = { kind: "action" };
 
-const _procedures = { setup, seed, upsertPlainConflict };
+const _procedures = { seed, upsertPlainConflict };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
 
         zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
-        let updated =
-            parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "upsertPlainConflict"));
+        let updated = parity::extract_json(&dispatch_sqlite_runtime(
+            &dir,
+            &source,
+            "upsertPlainConflict",
+        ));
         assert_eq!(
             updated.get("id").and_then(|v| v.as_str()),
             Some("user_seed"),
@@ -4645,11 +4595,10 @@ async function nestedCasUpdate(_input, _ctx) {
 }
 nestedCasUpdate.config = { kind: "action" };
 
-const _procedures = { setup, seed, nestedCasUpdate };
+const _procedures = { seed, nestedCasUpdate };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
         let row = parity::extract_json(&seeded);
         assert_eq!(
@@ -4658,8 +4607,12 @@ const _procedures = { setup, seed, nestedCasUpdate };
             "seed row must start at version 1"
         );
 
-        let (status, body) =
-            parity::dispatch_zs(&parity::sqlite_url(&dir), &source, "nestedCasUpdate");
+        let (status, body) = parity::dispatch_zs_with_descriptor(
+            &parity::sqlite_url(&dir),
+            &source.source,
+            "nestedCasUpdate",
+            &source.descriptor,
+        );
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
@@ -4736,15 +4689,18 @@ async function nestedCasUpdateMany(_input, _ctx) {
 }
 nestedCasUpdateMany.config = { kind: "action" };
 
-const _procedures = { setup, seed, nestedCasUpdateMany };
+const _procedures = { seed, nestedCasUpdateMany };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
 
-        let (status, body) =
-            parity::dispatch_zs(&parity::sqlite_url(&dir), &source, "nestedCasUpdateMany");
+        let (status, body) = parity::dispatch_zs_with_descriptor(
+            &parity::sqlite_url(&dir),
+            &source.source,
+            "nestedCasUpdateMany",
+            &source.descriptor,
+        );
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
@@ -4830,9 +4786,8 @@ fn encrypted_column_round_trip_sqlite_randomised() {
         // literals are how we inject BLOB values without widening the
         // protocol.
         let blob_lit = sqlite_blob_literal(&ct);
-        let insert_sql = format!(
-            "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
-        );
+        let insert_sql =
+            format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
         backend
             .pool_exec(&insert_sql, &["row_a"])
             .await
@@ -4856,9 +4811,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             )
             .await
             .expect("SELECT");
-        let hex_str = rows[0][0]
-            .clone()
-            .expect("ssn column must be present");
+        let hex_str = rows[0][0].clone().expect("ssn column must be present");
         let raw: Vec<u8> = (0..hex_str.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
@@ -4907,9 +4860,8 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
             .expect("encrypt");
 
         let blob_lit = sqlite_blob_literal(&ct);
-        let insert_sql = format!(
-            "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
-        );
+        let insert_sql =
+            format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
         backend
             .pool_exec(&insert_sql, &["row_a"])
             .await
@@ -5022,10 +4974,12 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             let ct = &ciphertexts[i % 5];
             let blob_lit = sqlite_blob_literal(ct);
             let id = format!("row_{i:03}");
-            let sql = format!(
-                "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
-            );
-            backend.pool_exec(&sql, &[id.as_str()]).await.expect("INSERT");
+            let sql =
+                format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
+            backend
+                .pool_exec(&sql, &[id.as_str()])
+                .await
+                .expect("INSERT");
         }
 
         // Equality lookup on P0's ciphertext should match exactly 20
@@ -5035,28 +4989,23 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             .await
             .expect("acquire client");
         let p0_lit = sqlite_blob_literal(&ciphertexts[0]);
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p0_lit}"
-        );
-        let rows = client
-            .query(&count_sql, &[])
-            .await
-            .expect("SELECT COUNT");
+        let count_sql =
+            format!("SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p0_lit}");
+        let rows = client.query(&count_sql, &[]).await.expect("SELECT COUNT");
         let n: i64 = rows[0][0]
             .as_deref()
             .and_then(|s| s.parse().ok())
             .expect("count must parse");
-        assert_eq!(n, 20, "equality on shared ciphertext must match every 5th row");
+        assert_eq!(
+            n, 20,
+            "equality on shared ciphertext must match every 5th row"
+        );
 
         // P1's ciphertext should also match 20 rows.
         let p1_lit = sqlite_blob_literal(&ciphertexts[1]);
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p1_lit}"
-        );
-        let rows = client
-            .query(&count_sql, &[])
-            .await
-            .expect("SELECT COUNT");
+        let count_sql =
+            format!("SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p1_lit}");
+        let rows = client.query(&count_sql, &[]).await.expect("SELECT COUNT");
         let n: i64 = rows[0][0].as_deref().and_then(|s| s.parse().ok()).unwrap();
         assert_eq!(n, 20);
     });
@@ -5110,17 +5059,14 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .unwrap();
         for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
             let blob_lit = sqlite_blob_literal(ct);
-            let sql = format!(
-                "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
-            );
+            let sql =
+                format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
             backend.pool_exec(&sql, &[id]).await.unwrap();
         }
 
         // Attacker move: UPDATE row_b's ssn slot with row_a's ciphertext.
         let blob_a = sqlite_blob_literal(&ct_a);
-        let sql = format!(
-            "UPDATE \"app_demo\".\"enc_notes\" SET ssn = {blob_a} WHERE id = ?"
-        );
+        let sql = format!("UPDATE \"app_demo\".\"enc_notes\" SET ssn = {blob_a} WHERE id = ?");
         backend.pool_exec(&sql, &["row_b"]).await.unwrap();
 
         // Read row B's ssn back and try to decrypt with row B's AAD.
@@ -5148,9 +5094,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "encryption_aead_failed");
             }
-            other => panic!(
-                "expected ValidationFailed/encryption_aead_failed, got {other:?}"
-            ),
+            other => panic!("expected ValidationFailed/encryption_aead_failed, got {other:?}"),
         }
     });
 }
@@ -5184,8 +5128,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
         assert_eq!(key_a.k_siv, key_b.k_siv);
 
         let plaintext = b"cross-instance-payload";
-        let aad =
-            encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
+        let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
         let ct = backend_a
             .encrypt(&key_a, EncryptionMode::Randomised, plaintext, &aad)
             .expect("encrypt on A");
@@ -5247,7 +5190,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
     use zeroship_plugin_db::backend::SqlExecutor as _;
     use zeroship_plugin_db::backend::sqlite::session::TypedCell;
     use zeroship_plugin_db::crud::encryption_pass::{decrypt_row_on_read, encrypt_row_on_write};
-    use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
 
     let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
     run(async {
@@ -5321,9 +5264,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             bq.sql,
         );
         assert!(
-            bq.params
-                .iter()
-                .any(|p| p.starts_with("__zsbin_blob__:")),
+            bq.params.iter().any(|p| p.starts_with("__zsbin_blob__:")),
             "SQLite dialect must tag the encrypted param with the sentinel: {:?}",
             bq.params,
         );
@@ -5434,7 +5375,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 /// SQLite-flavoured `CREATE TABLE` path.
 #[test]
 fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
-    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+    use zeroship_plugin_db::query::{FkEmission, build_create_table_with_fks};
     let schema = serde_json::json!({
         "ssn": {
             "type": "string",
@@ -5480,7 +5421,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 /// alongside the plaintext.
 #[test]
 fn dual_write_insert_persists_parent_and_sibling_sqlite() {
-    use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -5538,10 +5479,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 
         // Verify both columns landed atomically.
         let rows = client
-            .query(
-                "SELECT ssn, ssn_masked FROM \"app_demo\".\"users\"",
-                &[],
-            )
+            .query("SELECT ssn, ssn_masked FROM \"app_demo\".\"users\"", &[])
             .await
             .expect("SELECT both columns");
         assert_eq!(rows.len(), 1, "exactly one row inserted");
@@ -5565,7 +5503,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     use zeroship_plugin_db::query::{
-        build_find_with_schema, build_insert_with_dialect, SqlDialect,
+        SqlDialect, build_find_with_schema, build_insert_with_dialect,
     };
 
     run(async {
@@ -5586,7 +5524,7 @@ fn a_select_serves_the_masked_column_sqlite() {
                      )"
                 ),
                 &[],
-                )
+            )
             .await
             .expect("CREATE TABLE ok");
 
@@ -5617,10 +5555,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
-        client
-            .query(&bq.sql, &param_refs)
-            .await
-            .expect("INSERT");
+        client.query(&bq.sql, &param_refs).await.expect("INSERT");
 
         // Build a default read with schema awareness: the SELECT must
         // name the field's own column directly AND must NOT reference the
@@ -5663,14 +5598,13 @@ fn a_select_serves_the_masked_column_sqlite() {
         // string under the field's own column, and the real value is
         // nowhere in the row.
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = client
-            .query(&bq.sql, &param_refs)
-            .await
-            .expect("SELECT");
+        let rows = client.query(&bq.sql, &param_refs).await.expect("SELECT");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(
-            row.iter().filter_map(|c| c.as_deref()).find(|s| *s == "***-**-6789"),
+            row.iter()
+                .filter_map(|c| c.as_deref())
+                .find(|s| *s == "***-**-6789"),
             Some("***-**-6789"),
             "row must include the masked string: {row:?}"
         );
@@ -5724,7 +5658,8 @@ fn aliased_select_skips_kind_none_sqlite() {
         bq.sql,
     );
     assert!(
-        bq.sql.contains("SELECT \"id\", \"created_at\", \"updated_at\"")
+        bq.sql
+            .contains("SELECT \"id\", \"created_at\", \"updated_at\"")
             && bq.sql.contains("\"ssn\"")
             && bq.sql.contains("\"name\""),
         "schema-backed reads must project the public column set: {}",
@@ -5783,7 +5718,7 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
 //      (c) no SQLITE_BUSY under Retry policy.
 //   3. `pitr_pg_only_returns_configuration_on_sqlite` (gate #6).
 //   4. `snapshot_during_migration_returns_typed_error_sqlite`: hold
-//      register_model lock; snapshot must refuse w/ `migration_in_progress`.
+//      snapshot_restore lock; snapshot must refuse w/ `migration_in_progress`.
 //   5. `restore_hash_mismatch_rejected_sqlite`: corrupt snapshot;
 //      restore must refuse with `snapshot_hash_mismatch` BEFORE touching
 //      the live DB.
@@ -5819,8 +5754,7 @@ fn snapshot_restore_round_trip_sqlite() {
             .expect("CREATE TABLE notes");
         const ROW_COUNT: i64 = 10;
         for i in 0..ROW_COUNT {
-            let sql =
-                format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'row-{i}')");
+            let sql = format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'row-{i}')");
             backend.pool_exec(&sql, &[]).await.expect("INSERT row");
         }
         // Sanity: row count is N.
@@ -5877,10 +5811,7 @@ fn snapshot_restore_round_trip_sqlite() {
         // Restore. After this call the per-app file is replaced with
         // the snapshot content and the session re-ATTACHed against
         // the new file.
-        backend
-            .restore("app_demo", &handle)
-            .await
-            .expect("restore");
+        backend.restore("app_demo", &handle).await.expect("restore");
 
         // Rows are back.
         let rows_restored = client
@@ -5914,8 +5845,8 @@ fn snapshot_restore_round_trip_sqlite() {
 /// keeps inserting throughout.
 #[test]
 fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     run(async {
@@ -5934,9 +5865,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
         // Seed an initial baseline so the snapshot is not empty.
         const INITIAL_ROWS: usize = 50;
         for i in 0..INITIAL_ROWS {
-            let sql = format!(
-                "INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'initial-{i}')"
-            );
+            let sql = format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'initial-{i}')");
             backend.pool_exec(&sql, &[]).await.expect("INSERT initial");
         }
 
@@ -5953,8 +5882,8 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
         let writer_stop = stop.clone();
         let writer_observed = writes_observed.clone();
         let writer = std::thread::spawn(move || {
-            let conn = rusqlite::Connection::open(&app_file)
-                .expect("writer-thread connection open");
+            let conn =
+                rusqlite::Connection::open(&app_file).expect("writer-thread connection open");
             // Match the session's WAL mode so we are in the right
             // concurrency regime; busy_timeout absorbs short-term
             // contention.
@@ -5964,9 +5893,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             // collision with seeded rows.
             let mut i = INITIAL_ROWS;
             while !writer_stop.load(Ordering::Relaxed) {
-                let sql = format!(
-                    "INSERT INTO \"notes\" VALUES ({i}, 'concurrent-{i}')"
-                );
+                let sql = format!("INSERT INTO \"notes\" VALUES ({i}, 'concurrent-{i}')");
                 match conn.execute(&sql, []) {
                     Ok(_) => {
                         writer_observed.fetch_add(1, Ordering::Relaxed);
@@ -6010,9 +5937,8 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             .await;
 
         // (c) — no SQLITE_BUSY classification leaked out.
-        let _handle = snap_result.expect(
-            "VACUUM INTO under concurrent writer must succeed (Retry absorbs busy)",
-        );
+        let _handle = snap_result
+            .expect("VACUUM INTO under concurrent writer must succeed (Retry absorbs busy)");
 
         // Stop the writer thread and join.
         stop.store(true, Ordering::Relaxed);
@@ -6026,8 +5952,8 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
         );
 
         // (a) — open snap file standalone and count rows.
-        let snap_conn = rusqlite::Connection::open(&snap_path)
-            .expect("open snapshot file standalone");
+        let snap_conn =
+            rusqlite::Connection::open(&snap_path).expect("open snapshot file standalone");
         let snap_count: i64 = snap_conn
             .query_row("SELECT COUNT(*) FROM \"notes\"", [], |r| r.get(0))
             .expect("count snap rows");
@@ -6072,9 +5998,9 @@ fn pitr_pg_only_returns_configuration_on_sqlite() {
             DbError::Configuration { code, .. } => {
                 assert_eq!(code, "pitr_pg_only");
             }
-            other => panic!(
-                "expected Configuration {{ code: \"pitr_pg_only\", .. }}, got {other:?}"
-            ),
+            other => {
+                panic!("expected Configuration {{ code: \"pitr_pg_only\", .. }}, got {other:?}")
+            }
         }
         // TimeMillis form — same refusal.
         let err2 = backend
@@ -6085,14 +6011,14 @@ fn pitr_pg_only_returns_configuration_on_sqlite() {
             DbError::Configuration { code, .. } => {
                 assert_eq!(code, "pitr_pg_only");
             }
-            other => panic!(
-                "expected Configuration {{ code: \"pitr_pg_only\", .. }}, got {other:?}"
-            ),
+            other => {
+                panic!("expected Configuration {{ code: \"pitr_pg_only\", .. }}, got {other:?}")
+            }
         }
     });
 }
 
-/// When the per-app `register_model` advisory lock is
+/// When the per-app `snapshot_restore` advisory lock is
 /// already held in this process, `snapshot()` surfaces the typed
 /// `Coded { code: "migration_in_progress" }` rather than blocking
 /// indefinitely. Mirrors the PG arm's `snapshot_during_migration_returns_typed_error`
@@ -6108,7 +6034,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
         let (backend, _dir) = fresh_backend();
         let app_id = "app_miglock";
 
-        // Hold the register_model lock through the typed LockManager
+        // Hold the snapshot_restore lock through the typed LockManager
         // surface — exactly the slot the snapshot pre-flight tries to
         // acquire. The `to_keys` derivation is identical to what the
         // snapshot impl computes.
@@ -6118,12 +6044,12 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
             .expect("acquire client");
         let scope = LockScope::GlobalApp {
             app_id: app_id.to_string(),
-            name: "register_model".to_string(),
+            name: "snapshot_restore".to_string(),
         };
         let acquired = backend
             .try_acquire(&client, &scope)
             .await
-            .expect("try_acquire register_model");
+            .expect("try_acquire snapshot_restore");
         assert!(acquired, "test must hold the slot to set up the contention");
 
         // Snapshot must refuse at pre-flight. We deliberately do NOT
@@ -6139,7 +6065,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
                 },
             )
             .await
-            .expect_err("snapshot must refuse while register_model lock is held");
+            .expect_err("snapshot must refuse while snapshot_restore lock is held");
         match err {
             DbError::Coded { code, .. } => {
                 assert_eq!(
@@ -6147,9 +6073,9 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
                     "expected Coded migration_in_progress, got code={code:?}"
                 );
             }
-            other => panic!(
-                "expected Coded {{ code: \"migration_in_progress\", .. }}, got {other:?}"
-            ),
+            other => {
+                panic!("expected Coded {{ code: \"migration_in_progress\", .. }}, got {other:?}")
+            }
         }
 
         // Dest file must not exist — pre-flight refusal runs before
@@ -6164,7 +6090,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
         backend
             .release(&client, &scope)
             .await
-            .expect("release register_model");
+            .expect("release snapshot_restore");
     });
 }
 
@@ -6236,9 +6162,9 @@ fn restore_hash_mismatch_rejected_sqlite() {
                     "expected Coded snapshot_hash_mismatch, got code={code:?}"
                 );
             }
-            other => panic!(
-                "expected Coded {{ code: \"snapshot_hash_mismatch\", .. }}, got {other:?}"
-            ),
+            other => {
+                panic!("expected Coded {{ code: \"snapshot_hash_mismatch\", .. }}, got {other:?}")
+            }
         }
 
         // The live DB must be untouched — the sentinel row still
@@ -6250,10 +6176,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
             .await
             .expect("acquire client");
         let rows = client
-            .query(
-                "SELECT body FROM \"app_demo\".\"notes\" WHERE id = 1",
-                &[],
-            )
+            .query("SELECT body FROM \"app_demo\".\"notes\" WHERE id = 1", &[])
             .await
             .expect("post-refuse query");
         assert_eq!(rows.len(), 1);
@@ -6271,7 +6194,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
-    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+    use zeroship_plugin_db::query::{FkEmission, build_create_table_with_fks};
 
     let schema = serde_json::json!({
         "name": {"type": "string"},
@@ -6289,7 +6212,7 @@ fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
-    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+    use zeroship_plugin_db::query::{FkEmission, build_create_table_with_fks};
 
     let schema = serde_json::json!({
         "name": {"type": "string"},
@@ -6334,8 +6257,7 @@ async fn unmask_setup_with_schema(
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(
-        SqliteBackend::new(std::path::PathBuf::from(dir.path()))
-            .expect("SqliteBackend::new"),
+        SqliteBackend::new(std::path::PathBuf::from(dir.path())).expect("SqliteBackend::new"),
     );
     backend
         .attach_app_file(app_id)
@@ -6371,12 +6293,24 @@ async fn unmask_setup_with_schema(
     (backend, dir)
 }
 
+/// Drop the fixture-installed backend while preserving its on-disk databases,
+/// then leave only the production SQLite URL and descriptor inputs that a cold
+/// first operation receives.
+fn configure_cold_sqlite_unmask_fixture(
+    dir: &tempfile::TempDir,
+    app_id: &str,
+    collection: &str,
+    schema: serde_json::Value,
+) {
+    zeroship_plugin_db::reset_context_for_tests();
+    let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::cache_schema_for_tests(app_id, collection, schema);
+}
+
 /// Read every row from `__zeroship_audit_unmask` for a given app.
 /// Returns `Vec<(outcome, actor_role, classification)>`.
-async fn read_audit_rows(
-    backend: &SqliteBackend,
-    app_id: &str,
-) -> Vec<(String, String, String)> {
+async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, String, String)> {
     use zeroship_plugin_db::backend::DialectBuilder as _;
     // A read: it belongs on `op_conn`, not on the exclusive `tx_conn`
     // reservation. Asking for the transaction lane here contends with whatever
@@ -6404,7 +6338,7 @@ async fn read_audit_rows(
 /// masked column recovers plaintext, and a `granted` audit row is
 /// emitted with the right classification.
 #[test]
-fn unmask_with_auto_actor_returns_plaintext() {
+fn cold_unmask_with_auto_actor_initializes_and_attaches_before_read() {
     let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
     let schema = serde_json::json!({
         "id": { "type": "string" },
@@ -6422,7 +6356,7 @@ fn unmask_with_auto_actor_returns_plaintext() {
     let collection = "users";
 
     run(async {
-        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         // Manually create the table — the encryption pass + dual-write
         // pipeline lives in CRUD, but the unmask SELECT only needs
         // `id TEXT PRIMARY KEY, "<raw ssn>" BLOB, ssn TEXT`. Mirrors the
@@ -6447,16 +6381,23 @@ fn unmask_with_auto_actor_returns_plaintext() {
 
         // Encrypt + insert one row inline.
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
-        use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+        use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
         let row_pk = "usr_auto_01";
         let plaintext = "123-45-6789";
         let mut doc = serde_json::json!({
             "id": row_pk,
             "ssn": plaintext,
         });
-        encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
-            .await
-            .expect("encrypt_row_on_write");
+        encrypt_row_on_write(
+            backend.as_ref(),
+            app_id,
+            collection,
+            &schema,
+            row_pk,
+            &mut doc,
+        )
+        .await
+        .expect("encrypt_row_on_write");
         // `encrypt_row_on_write` alone (no `mask_pass` call - that pass is
         // crate-private) leaves the ciphertext under the LOGICAL key, plus
         // an `__zsbin__ssn` binary-bind marker so the SQL builder base64
@@ -6469,7 +6410,10 @@ fn unmask_with_auto_actor_returns_plaintext() {
             .expect("doc object")
             .remove("ssn")
             .expect("ciphertext produced by encrypt_row_on_write");
-        let bin_marker = doc.as_object_mut().expect("doc object").remove("__zsbin__ssn");
+        let bin_marker = doc
+            .as_object_mut()
+            .expect("doc object")
+            .remove("__zsbin__ssn");
         {
             let obj = doc.as_object_mut().expect("doc object");
             obj.insert(raw_ssn.clone(), ciphertext);
@@ -6489,6 +6433,11 @@ fn unmask_with_auto_actor_returns_plaintext() {
             .query_typed(&bq.sql, &param_refs)
             .await
             .expect("INSERT");
+
+        // Remove the fixture-installed backend. The dispatch must lazily open a
+        // fresh one and ATTACH the existing app file before its direct SELECT.
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema.clone());
+        let _cold_keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
 
         // Dispatch unmask with `kind: "auto"` actor — must succeed.
         let args = unmask::UnmaskFieldArgs {
@@ -6774,16 +6723,23 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 
         // Encrypt + insert one row.
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
-        use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+        use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
         let row_pk = "usr_grant_01";
         let plaintext = "alice@example.com";
         let mut doc = serde_json::json!({
             "id": row_pk,
             "email": plaintext,
         });
-        encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
-            .await
-            .expect("encrypt_row_on_write");
+        encrypt_row_on_write(
+            backend.as_ref(),
+            app_id,
+            collection,
+            &schema,
+            row_pk,
+            &mut doc,
+        )
+        .await
+        .expect("encrypt_row_on_write");
         // `encrypt_row_on_write` alone (no `mask_pass` call - that pass is
         // crate-private) leaves the ciphertext under the LOGICAL key, plus
         // an `__zsbin__email` binary-bind marker so the SQL builder base64
@@ -6796,7 +6752,10 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .expect("doc object")
             .remove("email")
             .expect("ciphertext produced by encrypt_row_on_write");
-        let bin_marker = doc.as_object_mut().expect("doc object").remove("__zsbin__email");
+        let bin_marker = doc
+            .as_object_mut()
+            .expect("doc object")
+            .remove("__zsbin__email");
         {
             let obj = doc.as_object_mut().expect("doc object");
             obj.insert(raw_email.clone(), ciphertext);
@@ -6977,7 +6936,9 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
             zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "invalid_mask_classification");
             }
-            other => panic!("expected ValidationFailed::invalid_mask_classification, got {other:?}"),
+            other => {
+                panic!("expected ValidationFailed::invalid_mask_classification, got {other:?}")
+            }
         }
     });
 }
@@ -7075,10 +7036,8 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 // ===========================================================================
 //
 // These tests build a SQLite-shaped table by hand, INSERT rows, then
-// exercise the diff classifier + mask sentinel parse round-trip.
-// We can't drive the orchestrator's `register_model::apply` on SQLite
-// (PG-only today); the production-side equivalent for SQLite ships
-// separately. The integration-level coverage these tests provide:
+// exercise the diff classifier + mask sentinel parse round-trip. The
+// integration-level coverage these tests provide:
 //
 // 1. The DDL emitter (`build_create_table_with_fks`) attaches the
 //    `/* __zsmask:... */` sentinel to the sibling column.
@@ -7112,7 +7071,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 /// against that end state emits zero mask ops.
 #[test]
 fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
-    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+    use zeroship_plugin_db::query::{FkEmission, build_create_table_with_fks};
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -7134,8 +7093,7 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
         // SQLite rejects — strip down to a SQLite-friendly CREATE
         // TABLE for this test since we're exercising the diff layer's
         // contract, not the dialect emitter.
-        let sqlite_v1 =
-            "CREATE TABLE \"app_demo\".\"users\" (id INTEGER PRIMARY KEY, ssn TEXT)";
+        let sqlite_v1 = "CREATE TABLE \"app_demo\".\"users\" (id INTEGER PRIMARY KEY, ssn TEXT)";
         backend.pool_exec(sqlite_v1, &[]).await.expect("CREATE v1");
 
         // INSERT a row - the column already holds data, which is
@@ -7158,7 +7116,10 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let live = backend.introspect_schema("app_demo").await.expect("introspect");
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect");
         let ops = zeroship_plugin_db::diff::compute_diff(
             &live,
             "app_demo",
@@ -7195,8 +7156,10 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
             "the refusal reason must be recorded in details: {ops:?}"
         );
         assert!(
-            !ops.iter()
-                .any(|o| matches!(o.change_kind, zeroship_plugin_db::diff::ChangeKind::AddColumn)),
+            !ops.iter().any(|o| matches!(
+                o.change_kind,
+                zeroship_plugin_db::diff::ChangeKind::AddColumn
+            )),
             "the refused transition must not ALSO emit an AddColumn for the raw column: {ops:?}"
         );
 
@@ -7260,8 +7223,10 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
         let add_ops: Vec<&zeroship_plugin_db::diff::DiffOp> = ops_new_field
             .iter()
             .filter(|o| {
-                matches!(o.change_kind, zeroship_plugin_db::diff::ChangeKind::AddColumn)
-                    && o.field.as_deref() == Some("new_ssn")
+                matches!(
+                    o.change_kind,
+                    zeroship_plugin_db::diff::ChangeKind::AddColumn
+                ) && o.field.as_deref() == Some("new_ssn")
             })
             .collect();
         assert_eq!(
@@ -7330,7 +7295,10 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
         // Step 4 - re-introspect: the field's own column now carries
         // `mask: Some({last4, spi})`, and its sibling_column names the
         // raw column.
-        let live = backend.introspect_schema("app_demo").await.expect("introspect v2");
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect v2");
         let users = live.tables.get("users").expect("users table");
         let parent = users.get("ssn").expect("ssn parent col");
         let meta = parent.mask.as_ref().expect("mask sentinel recovered");
@@ -7345,14 +7313,8 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
         );
 
         // Step 5 — a stable-shape re-deploy emits zero mask ops.
-        let ops = zeroship_plugin_db::diff::compute_diff(
-            &live,
-            "app_demo",
-            "users",
-            &schema_v2,
-            "",
-            &[],
-        );
+        let ops =
+            zeroship_plugin_db::diff::compute_diff(&live, "app_demo", "users", &schema_v2, "", &[]);
         assert!(
             !ops.iter().any(|o| matches!(
                 o.change_kind,
@@ -7413,7 +7375,10 @@ fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
 
         // Introspect: the field's own column carries mask = full/pii,
         // and its sibling_column names the raw column.
-        let live = backend.introspect_schema("app_demo").await.expect("intro v_full");
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("intro v_full");
         let users = live.tables.get("users").expect("users");
         let parent = users.get("ssn").expect("ssn column");
         let m = parent.mask.as_ref().expect("mask sentinel");
@@ -7430,9 +7395,8 @@ fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let ops = zeroship_plugin_db::diff::compute_diff(
-            &live, "app_demo", "users", &schema_v2, "", &[],
-        );
+        let ops =
+            zeroship_plugin_db::diff::compute_diff(&live, "app_demo", "users", &schema_v2, "", &[]);
         let rewrites: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
             .iter()
             .filter(|o| {
@@ -7442,17 +7406,16 @@ fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
                 )
             })
             .collect();
-        assert_eq!(
-            rewrites.len(),
-            1,
-            "expected one MaskRewrite: {ops:?}"
-        );
+        assert_eq!(rewrites.len(), 1, "expected one MaskRewrite: {ops:?}");
         assert_eq!(
             rewrites[0].class,
             zeroship_plugin_db::diff::ChangeClass::Compatible
         );
         assert_eq!(
-            rewrites[0].details.get("raw_column").and_then(|v| v.as_str()),
+            rewrites[0]
+                .details
+                .get("raw_column")
+                .and_then(|v| v.as_str()),
             Some(raw_ssn.as_str()),
             "the rewrite's details must name the raw column, not a `_masked` sibling: {ops:?}"
         );
@@ -7461,8 +7424,10 @@ fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
         let add_ssn: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
             .iter()
             .filter(|o| {
-                matches!(o.change_kind, zeroship_plugin_db::diff::ChangeKind::AddColumn)
-                    && o.field.as_deref() == Some("ssn")
+                matches!(
+                    o.change_kind,
+                    zeroship_plugin_db::diff::ChangeKind::AddColumn
+                ) && o.field.as_deref() == Some("ssn")
             })
             .collect();
         assert!(
@@ -7522,7 +7487,12 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
             "ssn": { "type": "string" }
         });
         let ops = zeroship_plugin_db::diff::compute_diff(
-            &live, "app_demo", "users", &schema_post, "", &[],
+            &live,
+            "app_demo",
+            "users",
+            &schema_post,
+            "",
+            &[],
         );
         let removes: Vec<&zeroship_plugin_db::diff::DiffOp> = ops
             .iter()
@@ -7546,7 +7516,10 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
             "MaskRemove must name the LOGICAL field: {ops:?}"
         );
         assert_eq!(
-            removes[0].details.get("raw_column").and_then(|v| v.as_str()),
+            removes[0]
+                .details
+                .get("raw_column")
+                .and_then(|v| v.as_str()),
             Some(raw_ssn.as_str()),
             "MaskRemove's details must name the raw column, not a `_masked` sibling: {ops:?}"
         );
@@ -7622,7 +7595,7 @@ use zeroship_plugin_db::crud::mask_drift;
 /// after the insert so the stored value differs from
 /// `apply_mask_kind(plaintext)`. The drift sweep MUST flag it.
 #[test]
-fn drift_end_to_end_seeded_mismatch_detected() {
+fn cold_drift_check_initializes_and_attaches_before_sampling() {
     let schema = serde_json::json!({
         "id": { "type": "string" },
         "email": {
@@ -7634,7 +7607,7 @@ fn drift_end_to_end_seeded_mismatch_detected() {
     let collection = "users";
 
     run(async {
-        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         backend
             .pool_exec(
                 "CREATE TABLE \"app_drift_seeded\".\"users\" (\
@@ -7670,12 +7643,12 @@ fn drift_end_to_end_seeded_mismatch_detected() {
             .await
             .expect("INSERT drifted row");
 
-        // Run at 100% sample to guarantee both rows are inspected.
-        let report = mask_drift::run_drift_check_for_column(
-            app_id, collection, "email", 100.0,
-        )
-        .await
-        .expect("drift check");
+        // Run cold at 100% sample to guarantee both rows are inspected. The
+        // drift checker bypasses ordinary CRUD, so it must attach for itself.
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        let report = mask_drift::run_drift_check_for_column(app_id, collection, "email", 100.0)
+            .await
+            .expect("drift check");
         assert_eq!(report.sampled, 2, "both rows must be sampled: {report:?}");
         assert_eq!(report.drifted, 1, "exactly one row drifted: {report:?}");
         assert_eq!(report.samples.len(), 1);
@@ -7737,11 +7710,9 @@ fn drift_check_returns_zero_when_aligned() {
             );
             backend.pool_exec(&sql, &[]).await.expect("INSERT");
         }
-        let report = mask_drift::run_drift_check_for_column(
-            app_id, collection, "email", 100.0,
-        )
-        .await
-        .expect("drift check");
+        let report = mask_drift::run_drift_check_for_column(app_id, collection, "email", 100.0)
+            .await
+            .expect("drift check");
         assert_eq!(report.sampled, 3, "all rows sampled: {report:?}");
         assert_eq!(report.drifted, 0, "no drift expected: {report:?}");
         let audit = mask_drift::read_drift_audit_rows_for_tests(app_id)
@@ -7788,11 +7759,9 @@ fn drift_check_handles_null_sibling_drift() {
             )
             .await
             .expect("INSERT NULL sibling");
-        let report = mask_drift::run_drift_check_for_column(
-            app_id, collection, "email", 100.0,
-        )
-        .await
-        .expect("drift check");
+        let report = mask_drift::run_drift_check_for_column(app_id, collection, "email", 100.0)
+            .await
+            .expect("drift check");
         assert_eq!(report.drifted, 1, "null sibling must drift: {report:?}");
         assert_eq!(report.samples[0].stored, "__null__");
     });
@@ -7845,11 +7814,9 @@ fn drift_check_handles_plaintext_column() {
             )
             .await
             .expect("INSERT drifted");
-        let report = mask_drift::run_drift_check_for_column(
-            app_id, collection, "ssn", 100.0,
-        )
-        .await
-        .expect("drift check");
+        let report = mask_drift::run_drift_check_for_column(app_id, collection, "ssn", 100.0)
+            .await
+            .expect("drift check");
         assert_eq!(report.sampled, 2);
         assert_eq!(report.drifted, 1);
         assert_eq!(report.samples[0].row_pk, "u_drift");
@@ -7897,7 +7864,7 @@ fn drift_check_handles_encrypted_column() {
         // Insert one row via the production encryption pass so the
         // BLOB is genuine AES-GCM ciphertext under the expected AAD.
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
-        use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+        use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
         let row_pk = "usr_drift_enc";
         let plaintext = "555-00-1234";
         let raw_col = zeroship_plugin_db::query::raw_column_name("ssn");
@@ -7905,9 +7872,16 @@ fn drift_check_handles_encrypted_column() {
             "id":  row_pk,
             "ssn": plaintext,
         });
-        encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
-            .await
-            .expect("encrypt_row_on_write");
+        encrypt_row_on_write(
+            backend.as_ref(),
+            app_id,
+            collection,
+            &schema,
+            row_pk,
+            &mut doc,
+        )
+        .await
+        .expect("encrypt_row_on_write");
         // Stand in for `mask_pass::relocate_masked_columns`: move the ciphertext
         // (and its binary-bind marker) to the raw column and put an
         // intentionally WRONG mask in the field's own column, which is the drift
@@ -7934,11 +7908,9 @@ fn drift_check_handles_encrypted_column() {
 
         // The correct mask for `555-00-1234` under `last4` is
         // `***-**-1234`; stored is `***-**-9999`. Drift expected.
-        let report = mask_drift::run_drift_check_for_column(
-            app_id, collection, "ssn", 100.0,
-        )
-        .await
-        .expect("drift check");
+        let report = mask_drift::run_drift_check_for_column(app_id, collection, "ssn", 100.0)
+            .await
+            .expect("drift check");
         assert_eq!(report.sampled, 1, "one row sampled: {report:?}");
         assert_eq!(report.drifted, 1, "drift expected: {report:?}");
         let s = &report.samples[0];
@@ -7952,15 +7924,13 @@ fn drift_check_handles_encrypted_column() {
 // Bulk unmask end-to-end (SQLite)
 // ---------------------------------------------------------------------------
 
-use zeroship_plugin_db::crud::unmask::{
-    dispatch_bulk_unmask, BulkUnmaskArgs, BulkUnmaskItem,
-};
+use zeroship_plugin_db::crud::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
 
 /// **bulk gate #1**: authorised actor unmasks many columns
 /// across many rows in one call; the result map carries plaintext
 /// for every pair, and exactly ONE audit row lands.
 #[test]
-fn bulk_unmask_end_to_end() {
+fn cold_bulk_unmask_initializes_and_attaches_before_read() {
     let schema = serde_json::json!({
         "id":    { "type": "string" },
         "email": {
@@ -7976,7 +7946,7 @@ fn bulk_unmask_end_to_end() {
     let collection = "users";
 
     run(async {
-        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         // Post-storage-flip layout: each field's own column holds the
         // mask; the raw sibling (named via `raw_column_name`, never
@@ -8017,11 +7987,21 @@ fn bulk_unmask_end_to_end() {
             .await
             .expect("set_mask_policy");
 
+        // The policy sidecar and app database now exist, but no backend remains
+        // in the isolate. Bulk dispatch must initialize, reload, and attach.
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+
         let args = BulkUnmaskArgs {
             collection: collection.to_string(),
             items: vec![
-                BulkUnmaskItem { row_pk: "u1".into(), columns: vec!["email".into(), "ssn".into()] },
-                BulkUnmaskItem { row_pk: "u2".into(), columns: vec!["email".into()] },
+                BulkUnmaskItem {
+                    row_pk: "u1".into(),
+                    columns: vec!["email".into(), "ssn".into()],
+                },
+                BulkUnmaskItem {
+                    row_pk: "u2".into(),
+                    columns: vec!["email".into()],
+                },
             ],
             actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
             reason: Some("ops dashboard".into()),
@@ -8031,7 +8011,10 @@ fn bulk_unmask_end_to_end() {
             .expect("bulk unmask");
         // Plaintext recovered for every pair.
         let u1 = result.results.get("u1").expect("u1 row");
-        assert_eq!(u1.get("email").map(String::as_str), Some("alice@example.com"));
+        assert_eq!(
+            u1.get("email").map(String::as_str),
+            Some("alice@example.com")
+        );
         assert_eq!(u1.get("ssn").map(String::as_str), Some("123-45-6789"));
         let u2 = result.results.get("u2").expect("u2 row");
         assert_eq!(u2.get("email").map(String::as_str), Some("bob@example.com"));
@@ -8128,7 +8111,11 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 
         // Single `denied` audit row covers the whole call.
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
-        assert_eq!(audit.len(), 1, "atomic refuse → single audit row: {audit:?}");
+        assert_eq!(
+            audit.len(),
+            1,
+            "atomic refuse -> single audit row: {audit:?}"
+        );
         assert_eq!(audit[0].0, "denied");
     });
 }
@@ -8183,7 +8170,7 @@ use zeroship_plugin_db::crud::unmask::{
 /// hint sees plaintext in the listed columns; non-listed masked
 /// columns keep their `__zsmask__` wrapping.
 #[test]
-fn per_query_unmask_hint_end_to_end() {
+fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
     let schema = serde_json::json!({
         "id":    { "type": "string" },
         "email": {
@@ -8199,7 +8186,7 @@ fn per_query_unmask_hint_end_to_end() {
     let collection = "users";
 
     run(async {
-        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         // Post-storage-flip layout: each field's own column holds the
         // mask; the raw sibling (named via `raw_column_name`, never
@@ -8240,6 +8227,10 @@ fn per_query_unmask_hint_end_to_end() {
             .await
             .expect("set_mask_policy");
 
+        // Authorization is the first operation after a cold boot. It must open
+        // and attach before loading policy or writing a denied audit row.
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+
         // Simulate the row shape `dispatch_find` would produce
         // AFTER `apply_mask_wrap_on_read` has wrapped the masked
         // columns. We're driving `dispatch_unmask_for_query` directly
@@ -8249,9 +8240,15 @@ fn per_query_unmask_hint_end_to_end() {
         let reason = Some("dashboard view".to_string());
 
         // Step 1 — upfront auth fence.
-        authorize_query_hint(&DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &actor, &reason)
-            .await
-            .expect("authorize_query_hint must succeed");
+        authorize_query_hint(
+            &DbBinding::cold_start(app_id),
+            collection,
+            &["ssn".to_string()],
+            &actor,
+            &reason,
+        )
+        .await
+        .expect("authorize_query_hint must succeed");
 
         // Step 2 — simulate post-wrap row + run unmask-for-query.
         let mut rows = vec![serde_json::json!({
@@ -8269,9 +8266,14 @@ fn per_query_unmask_hint_end_to_end() {
                 "_meta": { "collection": "users", "row_pk": "u1", "column": "ssn" },
             },
         })];
-        dispatch_unmask_for_query(&DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &mut rows)
-            .await
-            .expect("dispatch_unmask_for_query");
+        dispatch_unmask_for_query(
+            &DbBinding::cold_start(app_id),
+            collection,
+            &["ssn".to_string()],
+            &mut rows,
+        )
+        .await
+        .expect("dispatch_unmask_for_query");
 
         // `ssn` slot now carries plaintext; `email` slot keeps the
         // sentinel-wrapped form.
@@ -8281,7 +8283,10 @@ fn per_query_unmask_hint_end_to_end() {
             Some("123-45-6789"),
             "ssn must be plaintext: {row:?}"
         );
-        let email = row.get("email").and_then(|v| v.as_object()).expect("email obj");
+        let email = row
+            .get("email")
+            .and_then(|v| v.as_object())
+            .expect("email obj");
         assert_eq!(
             email.get("sentinel").and_then(|v| v.as_str()),
             Some("__zsmask__"),
@@ -8289,9 +8294,15 @@ fn per_query_unmask_hint_end_to_end() {
         );
 
         // Step 3 — granted audit row lands.
-        audit_query_hint_granted(&DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &actor, &reason)
-            .await
-            .expect("audit");
+        audit_query_hint_granted(
+            &DbBinding::cold_start(app_id),
+            collection,
+            &["ssn".to_string()],
+            &actor,
+            &reason,
+        )
+        .await
+        .expect("audit");
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
         assert_eq!(audit.len(), 1, "one audit row for the query: {audit:?}");
         assert_eq!(audit[0].0, "granted");
@@ -8343,7 +8354,11 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 
         let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
         let err = authorize_query_hint(
-            &DbBinding::cold_start(app_id), collection, &["ssn".to_string()], &actor, &None,
+            &DbBinding::cold_start(app_id),
+            collection,
+            &["ssn".to_string()],
+            &actor,
+            &None,
         )
         .await
         .expect_err("must refuse");
@@ -8406,19 +8421,18 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 // and `PRAGMA table_info` / `sqlite_master` confirm the seven columns
 // and three indexes are present.
 //
-// The production register_model orchestrator is PG-only today - these
-// tests drive the dialect emitter directly and `pool_exec` the result,
-// the same pattern the introspection tests use for SQLite elsewhere in
-// this file.
+// These tests drive the dialect emitter directly and `pool_exec` the result,
+// the same pattern the introspection tests use for SQLite elsewhere in this
+// file.
 // ---------------------------------------------------------------------------
 
 /// `build_create_table_with_fks_for_dialect(Sqlite)` produces DDL the
 /// SQLite engine accepts, and PRAGMA `table_info` reports all 7 system
 /// fields after execution.
 #[test]
-fn freshly_registered_model_has_seven_system_field_columns_end_to_end() {
+fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, FkEmission, SqlDialect,
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect,
     };
 
     run(async {
@@ -8444,11 +8458,8 @@ fn freshly_registered_model_has_seven_system_field_columns_end_to_end() {
         // actor — `pool_exec` routes through `sqlite3_exec` which
         // accepts multi-statement SQL.
         // SQLite's `Connection::execute` runs ONE statement per call
-        // (unlike PG's libpq simple-query); the production register_model
-        // orchestrator is PG-only today, so this test splits the
-        // multi-statement payload and executes each piece individually,
-        // exercising the canonical per-statement DDL the SQLite arm
-        // would see once a dialect-aware orchestrator lands.
+        // (unlike PG's libpq simple-query), so this test splits the
+        // multi-statement payload and executes each piece individually.
         for stmt in sql.split(";\n") {
             let trimmed = stmt.trim();
             if trimmed.is_empty() {
@@ -8498,9 +8509,9 @@ fn freshly_registered_model_has_seven_system_field_columns_end_to_end() {
 /// The `id` PK uses ROWID (no autoindex entry) and `version` is
 /// intentionally unindexed (see `create_table_does_not_emit_index_for_version`).
 #[test]
-fn freshly_registered_model_has_three_indexes_end_to_end() {
+fn freshly_created_table_has_three_indexes_end_to_end() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, index_name, FkEmission, SqlDialect,
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, index_name,
     };
 
     run(async {
@@ -8519,11 +8530,8 @@ fn freshly_registered_model_has_three_indexes_end_to_end() {
         )
         .expect("build sqlite DDL");
         // SQLite's `Connection::execute` runs ONE statement per call
-        // (unlike PG's libpq simple-query); the production register_model
-        // orchestrator is PG-only today, so this test splits the
-        // multi-statement payload and executes each piece individually,
-        // exercising the canonical per-statement DDL the SQLite arm
-        // would see once a dialect-aware orchestrator lands.
+        // (unlike PG's libpq simple-query), so this test splits the
+        // multi-statement payload and executes each piece individually.
         for stmt in sql.split(";\n") {
             let trimmed = stmt.trim();
             if trimmed.is_empty() {
@@ -8564,7 +8572,7 @@ fn freshly_registered_model_has_three_indexes_end_to_end() {
 #[test]
 fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, FkEmission, SqlDialect,
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect,
     };
 
     run(async {
@@ -8627,7 +8635,11 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
         assert_eq!(row[0].as_deref(), Some("post_01"), "id round-trip");
         assert_eq!(row[1].as_deref(), Some("1"), "version default = 1");
         assert_eq!(row[2].as_deref(), Some("1"), "deleted_at IS NULL default");
-        assert_eq!(row[3].as_deref(), Some("1"), "created_at IS NOT NULL default");
+        assert_eq!(
+            row[3].as_deref(),
+            Some("1"),
+            "created_at IS NOT NULL default"
+        );
     });
 }
 
@@ -8644,8 +8656,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
 fn insert_end_to_end_populates_system_fields_sqlite() {
     use zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_insert;
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect, FkEmission,
-        SqlDialect,
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, build_insert_with_dialect,
     };
 
     run(async {
@@ -8661,7 +8672,8 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8707,8 +8719,9 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         // 3. Build + execute the INSERT. `RETURNING *` returns rows,
         // so route through the dedicated client's `query` path (the
         // pool's `pool_exec` rejects result-bearing statements).
-        let built = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
-            .expect("build_insert");
+        let built =
+            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+                .expect("build_insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
             .acquire_dedicated_client("app_demo")
@@ -8770,8 +8783,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
     use zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_insert;
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect, FkEmission,
-        SqlDialect,
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, build_insert_with_dialect,
     };
 
     run(async {
@@ -8838,8 +8850,9 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             "posts",
             None,
         );
-        let built = build_insert_with_dialect("app_demo", "posts", &schema, &post_doc, SqlDialect::Sqlite)
-            .expect("build posts insert");
+        let built =
+            build_insert_with_dialect("app_demo", "posts", &schema, &post_doc, SqlDialect::Sqlite)
+                .expect("build posts insert");
         let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
         let client = backend
             .acquire_dedicated_client("app_demo")
@@ -8881,8 +8894,8 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
 #[test]
 fn update_end_to_end_bumps_version_by_one_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_update_many_with_system_fields,
     };
 
     run(async {
@@ -8897,7 +8910,8 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8915,8 +8929,8 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             "id": "post_v1bump",
             "title": "original",
         });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.expect("INSERT");
@@ -8971,8 +8985,8 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
 #[test]
 fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_update_many_with_system_fields,
     };
 
     run(async {
@@ -8982,7 +8996,8 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8996,8 +9011,8 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_cas_ok", "title": "v1" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9031,7 +9046,11 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             )
             .await
             .unwrap();
-        assert_eq!(rows[0][0].as_deref(), Some("2"), "version bumped on CAS hit");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("2"),
+            "version bumped on CAS hit"
+        );
     });
 }
 
@@ -9042,8 +9061,8 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 #[test]
 fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_update_many_with_system_fields,
     };
 
     run(async {
@@ -9053,7 +9072,8 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9067,8 +9087,8 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_cas_stale", "title": "v1" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9114,8 +9134,8 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 #[test]
 fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_update_many_with_system_fields,
     };
 
     run(async {
@@ -9125,7 +9145,8 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9139,8 +9160,8 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_race", "title": "v0" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9202,8 +9223,8 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 #[test]
 fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_update_many_with_system_fields,
     };
 
     run(async {
@@ -9213,7 +9234,8 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         let schema = serde_json::json!({ "title": {"type": "string"} });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9227,8 +9249,8 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_blind", "title": "v0" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &ins_params).await.unwrap();
@@ -9286,8 +9308,8 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 #[test]
 fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_soft_delete_many_with_system_fields,
     };
 
     run(async {
@@ -9296,7 +9318,8 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
         let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9310,8 +9333,8 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_sd1", "title": "to be deleted" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9355,8 +9378,8 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 #[test]
 fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_soft_delete_many_with_system_fields,
     };
 
     run(async {
@@ -9365,7 +9388,8 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
         let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9379,8 +9403,8 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_idem", "title": "x" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9410,9 +9434,9 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 #[test]
 fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_find_with_schema_and_unmask_and_soft_delete,
-        build_insert_with_dialect, build_soft_delete_many_with_system_fields, FkEmission,
-        SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_find_with_schema_and_unmask_and_soft_delete, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields,
     };
 
     run(async {
@@ -9421,7 +9445,8 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9437,7 +9462,8 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         for id in &["post_alive_a", "post_alive_b", "post_dead"] {
             let doc = serde_json::json!({ "id": id, "title": id });
             let ins =
-                build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+                build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+                    .unwrap();
             let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
             let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
             client.query(&ins.sql, &p).await.unwrap();
@@ -9496,9 +9522,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
 #[test]
 fn restore_clears_deleted_at_and_bumps_version_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
-        FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_restore_many_with_system_fields,
+        build_soft_delete_many_with_system_fields,
     };
 
     run(async {
@@ -9507,7 +9533,8 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9521,8 +9548,8 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_rs", "title": "x" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9571,8 +9598,8 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 #[test]
 fn restore_on_already_live_row_affects_zero_rows_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_restore_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_restore_many_with_system_fields,
     };
 
     run(async {
@@ -9581,7 +9608,8 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
         let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9595,8 +9623,8 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_live", "title": "x" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9631,9 +9659,9 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 #[test]
 fn soft_delete_then_restore_full_lifecycle_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_find_with_schema_and_unmask_and_soft_delete,
-        build_insert_with_dialect, build_restore_many_with_system_fields,
-        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_find_with_schema_and_unmask_and_soft_delete, build_insert_with_dialect,
+        build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
     };
 
     run(async {
@@ -9642,7 +9670,8 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         let schema = serde_json::json!({ "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9656,8 +9685,8 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         }
 
         let doc = serde_json::json!({ "id": "post_lc", "title": "lifecycle" });
-        let ins =
-            build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        let ins = build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+            .unwrap();
         let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query(&ins.sql, &p).await.unwrap();
@@ -9742,17 +9771,19 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 #[test]
 fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
     use zeroship_plugin_db::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+        FkEmission, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks_for_dialect,
+        build_insert_with_dialect, build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "author": { "type": "string" }, "title": { "type": "string" } });
+        let schema =
+            serde_json::json!({ "author": { "type": "string" }, "title": { "type": "string" } });
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
-            "posts", &schema,
+            "posts",
+            &schema,
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -9774,7 +9805,8 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
         ] {
             let doc = serde_json::json!({ "id": id, "author": author, "title": id });
             let ins =
-                build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite).unwrap();
+                build_insert_with_dialect("app_demo", "posts", &schema, &doc, SqlDialect::Sqlite)
+                    .unwrap();
             let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
             let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
             client.query(&ins.sql, &p).await.unwrap();
@@ -9840,7 +9872,11 @@ fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
     // assertion to the statement before `RETURNING`, which is what the test
     // means and what `contains` over the whole string used to imply only
     // because that clause was `*`.
-    let body = q.sql.split_once(" RETURNING ").expect("a RETURNING clause").0;
+    let body = q
+        .sql
+        .split_once(" RETURNING ")
+        .expect("a RETURNING clause")
+        .0;
     assert!(!body.contains("deleted_at"));
     assert!(!q.sql.contains("RETURNING *"));
     assert!(q.sql.contains(r#"RETURNING "id""#));
@@ -9871,12 +9907,19 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
             .expect("acquire client");
 
         backend
-            .client_exec(&client, "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)", &[])
+            .client_exec(
+                &client,
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                &[],
+            )
             .await
             .expect("create table");
 
         // Top-level BEGIN (what the orchestrator emits for a non-nested tx).
-        backend.client_exec(&client, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&client, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
         backend
             .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer')", &[])
             .await
@@ -9887,9 +9930,16 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
         // minted by `reducer::frames::FrameStack`, which never derives a name
         // from the depth and never reuses one. What this arm rules on is the
         // SQLite engine's savepoint semantics, which are name-agnostic.
-        backend.client_exec(&client, "SAVEPOINT zs_sp_1", &[]).await.expect("SAVEPOINT");
         backend
-            .client_exec(&client, "INSERT INTO notes (title) VALUES ('inner-doomed')", &[])
+            .client_exec(&client, "SAVEPOINT zs_sp_1", &[])
+            .await
+            .expect("SAVEPOINT");
+        backend
+            .client_exec(
+                &client,
+                "INSERT INTO notes (title) VALUES ('inner-doomed')",
+                &[],
+            )
             .await
             .expect("inner insert");
         // Inner callback rejected → ROLLBACK TO SAVEPOINT (inner reverts,
@@ -9904,7 +9954,10 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
             .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer-2')", &[])
             .await
             .expect("outer insert 2 after savepoint rollback");
-        backend.client_exec(&client, "COMMIT", &[]).await.expect("COMMIT");
+        backend
+            .client_exec(&client, "COMMIT", &[])
+            .await
+            .expect("COMMIT");
 
         // Only the two outer rows survive; the inner row was rolled back
         // to the savepoint.
@@ -9938,17 +9991,28 @@ fn nested_savepoint_release_keeps_both_sqlite() {
             .expect("acquire client");
 
         backend
-            .client_exec(&client, "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)", &[])
+            .client_exec(
+                &client,
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                &[],
+            )
             .await
             .expect("create table");
 
-        backend.client_exec(&client, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&client, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
         backend
             .client_exec(&client, "SAVEPOINT zs_sp_1", &[])
             .await
             .expect("SAVEPOINT");
         backend
-            .client_exec(&client, "INSERT INTO notes (title) VALUES ('inner-kept')", &[])
+            .client_exec(
+                &client,
+                "INSERT INTO notes (title) VALUES ('inner-kept')",
+                &[],
+            )
             .await
             .expect("inner insert");
         // Inner callback resolved → RELEASE SAVEPOINT.
@@ -9957,10 +10021,17 @@ fn nested_savepoint_release_keeps_both_sqlite() {
             .await
             .expect("RELEASE SAVEPOINT");
         backend
-            .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer-kept')", &[])
+            .client_exec(
+                &client,
+                "INSERT INTO notes (title) VALUES ('outer-kept')",
+                &[],
+            )
             .await
             .expect("outer insert");
-        backend.client_exec(&client, "COMMIT", &[]).await.expect("COMMIT");
+        backend
+            .client_exec(&client, "COMMIT", &[])
+            .await
+            .expect("COMMIT");
 
         let rows = client
             .query("SELECT COUNT(*) FROM notes", &[])
@@ -9974,200 +10045,13 @@ fn nested_savepoint_release_keeps_both_sqlite() {
     });
 }
 
-
 // ---------------------------------------------------------------------------
-// registerModel on the SQLite dev tier: METADATA ONLY, NO DDL.
-//
-// Until the 2026-08-10 cutover (d84cbbd84 "feat(dev): apply migrations before
-// the worker serves on SQLite") this arm drove the migration engine from the
-// runtime descriptor, and the three tests that follow this one asserted it. It
-// does not any more: the vite dev-server applies the committed migrations to
-// `<db_dir>/zs-<app>.sqlite` through the addon's `applyIrSqlite` BEFORE it
-// spawns the runtime, and the arm keeps only `ensure_app_schema` (the ATTACH
-// the data plane needs) plus the readiness / declared-cache stamps the caller
-// puts on its `Ok(())`.
-//
-// This test pins that contract from the other side, and is the control for the
-// three below: they all now create their table with an apply-ahead step, so a
-// change that quietly re-armed the DDL in `registerModel` would leave every one
-// of them green. This one goes red.
+// The data plane must attach an app file on demand. The table is applied ahead
+// of the runtime, then production mutation and query entry points address it
+// without any separate boot-time database operation.
 // ---------------------------------------------------------------------------
 #[test]
-fn p5_sqlite_register_model_applies_no_ddl() {
-    run(async {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let backend = Rc::new(
-            SqliteBackend::new(PathBuf::from(dir.path())).expect("open SqliteBackend"),
-        );
-        let app = "p5_sqlite_no_ddl";
-        let collection = "tasks";
-
-        // Install ONLY the SQLite backend handle (no PG url) so the production
-        // dispatch resolves the SQLite arm. `init_pool_async` short-circuits to
-        // Ready when a backend is already present (no PG connect attempted).
-        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
-
-        let schema = serde_json::json!({
-            "_meta": {"strictness": "lenient"},
-            "title": {"type": "string", "required": true},
-            "done": {"type": "boolean"},
-        });
-
-        // The PRODUCTION dialect dispatch. It must SUCCEED - the register is not
-        // refused, it simply has nothing to build.
-        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
-            app,
-            collection,
-            &schema,
-            &serde_json::json!([]),
-        )
-        .await
-        .expect("SQLite registerModel must succeed as a metadata-only register");
-
-        // PROOF 1: the app file was ATTACHed (so the data plane can read it) and
-        // carries NO table for the declared collection.
-        let client = backend
-            .acquire_dedicated_client(app)
-            .await
-            .expect("acquire client");
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT name FROM \"{app}\".sqlite_master \
-                     WHERE type = 'table' AND name = '{collection}'"
-                ),
-                &[],
-            )
-            .await
-            .expect("query sqlite_master");
-        assert!(
-            rows.is_empty(),
-            "registerModel must create NO table on SQLite; sqlite_master rows: {rows:?}"
-        );
-
-        // PROOF 2: no engine journal either. `zs-<app>.migrations.sqlite` is
-        // written by the migration apply; a register that touched the engine at
-        // all would leave one behind even if the plan turned out empty.
-        let mig_path = dir.path().join(format!("zs-{app}.migrations.sqlite"));
-        assert!(
-            !mig_path.exists(),
-            "registerModel must not open the migration journal; found {}",
-            mig_path.display()
-        );
-
-        // PROOF 3: the consequence a creator would see. Without a migration
-        // having run first, the very next read fails - which is why every
-        // runtime-dispatch fixture in this file applies ahead of the runtime.
-        let err = client
-            .query(&format!(r#"SELECT id FROM "{app}"."{collection}""#), &[])
-            .await
-            .expect_err("reading an unmigrated collection must fail");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("no such table"),
-            "expected a missing-table error, got: {msg}"
-        );
-    });
-}
-
-// ---------------------------------------------------------------------------
-// The dev sequence, end to end: a migration applies to the app file, the
-// runtime then registers the model as metadata, and the data plane reads the
-// table on its own connection.
-//
-// This is the rewritten `p6b_barrier_crud_on_a_sees_the_fully_migrated_schema`.
-// The barrier it used to assert - that the whole apply completed inside the
-// awaited register dispatch, before any CRUD - is gone with the arm that did
-// the applying. What replaces it is stronger and needs no ordering argument:
-// the apply finishes before the runtime exists at all. What is still worth
-// pinning is the half `registerModel` kept, `ensure_app_schema`: connection A
-// has to ATTACH a file another connection created, and read the tables in it.
-//
-// NOT covered: the dev server's apply runs in a different PROCESS (the vite
-// dev-server, before it spawns the worker). Here it is a different connection
-// in the same process, so a cross-process file-locking regression would not
-// show up.
-// ---------------------------------------------------------------------------
-#[test]
-fn p6b_apply_ahead_then_register_lets_the_data_plane_read_the_table() {
-    run(async {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let app = "p6b_barrier";
-        let collection = "notes";
-
-        let schema = serde_json::json!({
-            "_meta": {"strictness": "lenient"},
-            "body": {"type": "string", "required": true},
-            "pinned": {"type": "boolean"},
-        });
-
-        // The table, ahead of the runtime, on a connection of its own - the
-        // stand-in for the dev server's `applyMigrationsToDevSqlite`. Dropped
-        // before the runtime's connection opens the file. Raw SQL matching the
-        // `schema` registered just above; see `support::tables`.
-        crate::support::tables::create_sqlite_table(
-            dir.path(),
-            app,
-            &format!(
-                r#"CREATE TABLE IF NOT EXISTS "{app}"."{collection}" ({SYSTEM_COLUMNS_SQLITE},
-  "body" TEXT NOT NULL,
-  "pinned" INTEGER
-);
-{}"#,
-                system_indexes_sqlite(app, collection)
-            ),
-        );
-
-        // Now the runtime side: a FRESH data-plane backend, the production
-        // register dispatch (metadata + ATTACH), then CRUD.
-        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
-        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
-        zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
-            app, collection, &schema, &serde_json::json!([]),
-        )
-        .await
-        .expect("the metadata-only register succeeds against the migrated file");
-
-        backend
-            .pool_exec(
-                &format!(
-                    r#"INSERT INTO "{app}"."{collection}" (id, body, pinned)
-                       VALUES ('note_1', 'hello', 1)"#
-                ),
-                &[],
-            )
-            .await
-            .expect("the data plane must WRITE the table the migration created");
-
-        let client = backend.acquire_dedicated_client(app).await.expect("client");
-        let rows = client
-            .query(
-                &format!(r#"SELECT body, pinned FROM "{app}"."{collection}" WHERE id = 'note_1'"#),
-                &[],
-            )
-            .await
-            .expect("the data plane must READ the table the migration created");
-        assert_eq!(rows.len(), 1, "the row A wrote is readable through the migrated schema");
-        assert_eq!(rows[0][0].as_deref(), Some("hello"), "body column resolves");
-        assert_eq!(rows[0][1].as_deref(), Some("1"), "pinned column resolves");
-    });
-}
-
-// ---------------------------------------------------------------------------
-// The data plane must reach an app file WITHOUT registerModel having run.
-//
-// registerModel is metadata. It happens to hold the only production
-// `attach_app_file` call, which makes SQLite CRUD silently depend on a
-// metadata call having happened first - a session that never registered has no
-// alias, and nothing re-attaches on its own. That is an ordering coupling, not
-// a contract: nothing about reading a row requires a prior registration.
-//
-// This test is the p6b test above with the register REMOVED. Everything else
-// is identical, so the only thing it can measure is whether the data plane can
-// bind the app file by itself.
-// ---------------------------------------------------------------------------
-#[test]
-fn p6c_data_plane_reaches_the_app_file_without_a_register() {
+fn p6c_data_plane_reaches_the_app_file_on_demand() {
     run(async {
         let dir = tempfile::tempdir().expect("create tempdir");
         let app = "p6c_no_register";
@@ -10188,8 +10072,6 @@ fn p6c_data_plane_reaches_the_app_file_without_a_register() {
         let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
         zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
 
-        // NO registerModel here. That is the whole point of the test.
-        //
         // Both statements go through `exec::exec_*_for_tests`, which is the
         // PRODUCTION data-plane entry - the same `TxRoute` -> `exec_sqlite_json`
         // path a CRUD op takes. Calling `backend.pool_exec` directly would test
@@ -10208,20 +10090,22 @@ fn p6c_data_plane_reaches_the_app_file_without_a_register() {
             ChangeOp::Insert,
         )
         .await
-        .expect("the data plane must WRITE without a prior registerModel");
+        .expect("the data plane must write after attaching the app file");
 
         let rows = zeroship_plugin_db::exec::exec_query_for_tests(
             app,
             zeroship_plugin_db::query::BuiltQuery {
-                sql: format!(
-                    r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#
-                ),
+                sql: format!(r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#),
                 params: Vec::new(),
             },
         )
         .await
-        .expect("the data plane must READ without a prior registerModel");
-        assert_eq!(rows.len(), 1, "the row is readable with no register in the way");
+        .expect("the data plane must read after attaching the app file");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the row is readable with no register in the way"
+        );
         assert_eq!(
             rows[0].get("body").and_then(|v| v.as_str()),
             Some("hello"),
@@ -10257,9 +10141,9 @@ fn p6c_data_plane_reaches_the_app_file_without_a_register() {
 // It asserted that an app file with tables but an EMPTY `_mig` journal - the
 // shape the retired `run_sqlite_pipeline` left behind - is adopted by the
 // engine on first boot rather than drift-aborting. Nothing in the tree produces
-// that shape any more. `registerModel` creates no tables, so the only writer of
-// `zs-<app>.sqlite` is the migration apply, and it writes the journal in the
-// same pass; a journal-less file with tables is now unreachable. The baseline
+// that shape any more. The only writer of `zs-<app>.sqlite` is the migration
+// apply, and it writes the journal in the same pass; a journal-less file with
+// tables is now unreachable. The baseline
 // arm it exercised (`sqlite_engine::maybe_baseline`) has no production caller
 // either, for the same reason.
 //
@@ -10818,8 +10702,14 @@ fn writes_on_both_connections_reach_the_broker() {
 fn two_apps_hold_transactions_at_the_same_time() {
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.attach_app_file("app_a").await.expect("attach app_a");
-        backend.attach_app_file("app_b").await.expect("attach app_b");
+        backend
+            .attach_app_file("app_a")
+            .await
+            .expect("attach app_a");
+        backend
+            .attach_app_file("app_b")
+            .await
+            .expect("attach app_b");
         for app in ["app_a", "app_b"] {
             backend
                 .pool_exec(
@@ -10834,7 +10724,10 @@ fn two_apps_hold_transactions_at_the_same_time() {
             .acquire_dedicated_client("app_a")
             .await
             .expect("app_a acquires its transaction connection");
-        backend.client_exec(&a, "BEGIN", &[]).await.expect("BEGIN a");
+        backend
+            .client_exec(&a, "BEGIN", &[])
+            .await
+            .expect("BEGIN a");
         backend
             .client_exec(&a, "INSERT INTO \"app_a\".\"t\" (v) VALUES ('a')", &[])
             .await
@@ -10846,7 +10739,10 @@ fn two_apps_hold_transactions_at_the_same_time() {
             .acquire_dedicated_client("app_b")
             .await
             .expect("app_b must get its own transaction connection while app_a holds one");
-        backend.client_exec(&b, "BEGIN", &[]).await.expect("BEGIN b");
+        backend
+            .client_exec(&b, "BEGIN", &[])
+            .await
+            .expect("BEGIN b");
         backend
             .client_exec(&b, "INSERT INTO \"app_b\".\"t\" (v) VALUES ('b')", &[])
             .await
@@ -10893,8 +10789,14 @@ fn two_apps_hold_transactions_at_the_same_time() {
 fn a_transaction_lane_cannot_address_another_apps_tables() {
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.attach_app_file("app_a").await.expect("attach app_a");
-        backend.attach_app_file("app_b").await.expect("attach app_b");
+        backend
+            .attach_app_file("app_a")
+            .await
+            .expect("attach app_a");
+        backend
+            .attach_app_file("app_b")
+            .await
+            .expect("attach app_b");
         backend
             .pool_exec(
                 "CREATE TABLE \"app_a\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)",
@@ -10903,7 +10805,10 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
             .await
             .expect("create app_a.secret");
         backend
-            .pool_exec("INSERT INTO \"app_a\".\"secret\" (v) VALUES ('tenant-a')", &[])
+            .pool_exec(
+                "INSERT INTO \"app_a\".\"secret\" (v) VALUES ('tenant-a')",
+                &[],
+            )
             .await
             .expect("seed app_a.secret");
 
@@ -10911,7 +10816,10 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
             .acquire_dedicated_client("app_b")
             .await
             .expect("acquire app_b's transaction connection");
-        backend.client_exec(&b, "BEGIN", &[]).await.expect("BEGIN b");
+        backend
+            .client_exec(&b, "BEGIN", &[])
+            .await
+            .expect("BEGIN b");
         let leaked = backend
             .client_exec(&b, "DELETE FROM \"app_a\".\"secret\"", &[])
             .await
@@ -10945,7 +10853,10 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
 fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.attach_app_file("app_a").await.expect("attach app_a");
+        backend
+            .attach_app_file("app_a")
+            .await
+            .expect("attach app_a");
         let first = backend
             .acquire_dedicated_client("app_a")
             .await
@@ -10960,7 +10871,11 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
             .await
             .expect_err("a second transaction for the same app must be refused");
         match &err {
-            DbError::ValidationFailed { code, message, hint } => {
+            DbError::ValidationFailed {
+                code,
+                message,
+                hint,
+            } => {
                 assert_eq!(*code, "transaction_connection_busy", "got {err:?}");
                 assert!(
                     message.contains("app_a"),
@@ -11025,7 +10940,10 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
                 .acquire_dedicated_client(&app)
                 .await
                 .expect("acquire under the cap");
-            backend.client_exec(&client, "BEGIN", &[]).await.expect("BEGIN");
+            backend
+                .client_exec(&client, "BEGIN", &[])
+                .await
+                .expect("BEGIN");
             held.push(client);
         }
         let app = format!("cap_b{cap}");
@@ -11182,4 +11100,3 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
         );
     });
 }
-

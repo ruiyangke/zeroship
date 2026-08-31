@@ -104,7 +104,6 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
   const calls = { find: 0, openSubscription: 0, ready: 0 };
 
   const native = {
-    registerModel: async () => undefined,
     // P9 PR 3: native `transaction(callback)` orchestrator stub. The
     // bootstrap wrapper bumps `_txDepth` before invoking this, so the
     // callback (run synchronously here) sees the in-tx state that makes
