@@ -142,12 +142,67 @@ fn load_opt() -> Option<FileConfig> {
 /// scratch database name down (`tests/lib/scratch_db.sh`) and how two
 /// concurrent runs stay disjoint - a per-run value cannot live in a file both
 /// of them read.
+/// THE RESOLUTION ANNOUNCES ITSELF, and that is the whole of what the printing
+/// below is for. `env -u PG_TEST_URL cargo test ...` LOOKS like a no-database
+/// arm and is not: it falls through to the overlay, which points at the auth
+/// suite's server, and that suite DROPS A FIXED-NAME DATABASE. A run that
+/// believes it is testing "no database" is instead pointed at a server another
+/// suite is actively destroying, and nothing said so.
+///
+/// MEASURED, so nobody re-derives it: the empty-string arm is already taken.
+/// `.filter(|url| !url.is_empty())` runs BEFORE the `or_else`, so
+/// `PG_TEST_URL=""` behaves exactly like unset. THERE IS NO VALUE OF
+/// `PG_TEST_URL` THAT MEANS "NO DATABASE".
+///
+/// The fallback is NOT the bug and must not be deleted - see the paragraph
+/// above it. Making the choice audible is the fix a trap deserves: a trap that
+/// announces itself is not a trap.
+///
+/// ONCE PER PROCESS, not per call. This is called from test setup paths that
+/// run per test; a per-call print would bury the signal it exists to give.
+///
+/// THE DSN IS NEVER PRINTED. Every DSN leaf in the schema is `secret`-classed
+/// (see this module's header) because it carries a password, and
+/// `tests/config_name_alignment_gate.sh` refuses literals at those leaves. The
+/// announcement therefore carries the SOURCE and a redacted authority - enough
+/// to see which server answered, never the credential.
 #[must_use]
 pub fn database_url_opt() -> Option<String> {
-    crate::test_env!("PG_TEST_URL")
-        .filter(|url| !url.is_empty())
+    let from_env = crate::test_env!("PG_TEST_URL").filter(|url| !url.is_empty());
+    let source = if from_env.is_some() {
+        "PG_TEST_URL"
+    } else {
+        TEST_OVERLAY_PATH
+    };
+    let resolved = from_env
         .or_else(|| load_opt().and_then(|config| config.control.database_url))
-        .filter(|url| !url.is_empty())
+        .filter(|url| !url.is_empty());
+
+    static ANNOUNCE: std::sync::Once = std::sync::Once::new();
+    ANNOUNCE.call_once(|| match resolved.as_deref() {
+        Some(url) => eprintln!("test PG DSN resolved from {source} -> {}", redact_dsn(url)),
+        None => eprintln!(
+            "test PG DSN: none configured (PG_TEST_URL unset or empty, and no {TEST_OVERLAY_PATH})"
+        ),
+    });
+
+    resolved
+}
+
+/// Everything after the credential, or the whole authority when there is none.
+///
+/// Deliberately crude: this exists to make a wrong SERVER visible, not to parse
+/// URLs. A string with no `@` and no `//` is returned unchanged, because a value
+/// this function cannot understand is one the reader should see verbatim rather
+/// than have silently emptied.
+fn redact_dsn(url: &str) -> &str {
+    if let Some((_, after_credential)) = url.rsplit_once('@') {
+        return after_credential;
+    }
+    if let Some((_, after_scheme)) = url.split_once("//") {
+        return after_scheme;
+    }
+    url
 }
 
 /// The one Redis every test in this workspace dials, or `None`.
@@ -198,8 +253,47 @@ pub fn kv_url() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_path, TEST_OVERLAY_PATH};
+    use super::{overlay_path, redact_dsn, TEST_OVERLAY_PATH};
     use crate::config::file::FileConfig;
+
+    /// The announcement must never carry the credential.
+    ///
+    /// This is the arm that matters: every DSN leaf in the schema is
+    /// `secret`-classed because it holds a password, so a resolution notice that
+    /// printed the raw URL would put one on every test run's stderr and into
+    /// every CI log. The assertions below are written as "the password is
+    /// ABSENT" rather than "the output equals X", because an equality check
+    /// passes for the wrong reason the day the format changes.
+    #[test]
+    fn the_resolution_notice_shows_the_server_and_never_the_password() {
+        let with_credential = "postgres://postgres:hunter2@127.0.0.1:5440/zeroship";
+        let shown = redact_dsn(with_credential);
+        assert!(
+            !shown.contains("hunter2"),
+            "the password reached the notice: {shown}"
+        );
+        assert!(
+            !shown.contains("postgres:"),
+            "the credential pair reached the notice: {shown}"
+        );
+        assert_eq!(
+            shown, "127.0.0.1:5440/zeroship",
+            "the server must stay visible - seeing WHICH host answered is the \
+             entire point of the notice"
+        );
+
+        // No credential at all: the authority still has to survive, or a run
+        // against the wrong host would be announced as nothing.
+        assert_eq!(
+            redact_dsn("postgres://127.0.0.1:5490/dbbind_corpus_18"),
+            "127.0.0.1:5490/dbbind_corpus_18"
+        );
+
+        // Something this function cannot parse is returned VERBATIM rather than
+        // silently emptied. A notice that prints "" for an unrecognised value is
+        // worse than no notice, because it reads as "nothing configured".
+        assert_eq!(redact_dsn("not-a-url"), "not-a-url");
+    }
 
     #[test]
     fn overlay_path_points_at_the_workspace_root() {
