@@ -106,6 +106,62 @@ not relay-side lifecycle at all: it bridges V8 subscription leases to one consum
 (`cdc_lifecycle.rs:1`, `:69`), and the V8 wrapper owns and drops that lease (`subscription.rs:42`).
 It stays. See Track B for what actually moves.
 
+## The backends: PostgreSQL and SQLite
+
+Measured 2026-08-31. The data plane's backend layer is 13,560 lines:
+
+| | lines | tier |
+| --- | --- | --- |
+| `backend/sqlite/` | 9,485 | **dev only** |
+| `backend/mod.rs` (trait + shared) | 2,201 | both |
+| `backend/postgres.rs` | 1,477 | production |
+
+**The dev-only backend is 6.4x the production one, and the production worker compiles all of it.**
+`zeroship-plugin-db` declares exactly two features, `test-helpers` and `live-db-tests`
+(`Cargo.toml:180-188`); neither gates a backend. The `cfg(feature = "test-helpers")` at
+`backend/mod.rs:85` only widens `pub(crate) mod sqlite` to `pub mod sqlite` - it changes visibility,
+never whether the module is built.
+
+**And the worker already refuses SQLite at RUNTIME, which is the argument for gating it at compile
+time.** `zeroship-worker/src/main.rs:314-325`: "SQLite is the DEV TIER ONLY - refuse it on the
+worker … N replicas fed a `sqlite:`/`file:` DSN would each open their own SqliteBackend on a
+(possibly shared-volume) file with the engine's project-lock a no-op - concurrent cross-process apply
+with zero serialization (a data-corruption class)." The guard is deliberate and its own comment
+states the principle: "The authority is the worker's IDENTITY, not an env flag - this refuses SQLite
+even if someone exported `ZEROSHIP_DEV=1` into a prod worker."
+
+**A cargo feature keyed to the binary IS identity.** The worker went to real trouble to build a
+runtime refusal for a backend it has no reason to contain. Gating it removes 9,485 lines from the
+production binary and from the attack surface of the process that executes creator code, and it
+strengthens exactly the guard that already exists rather than duplicating it.
+
+### The split is right, and it is blocked by a measurable cycle
+
+The target is the engine's own shape - `zeroship-migrate-backend` is a contract that
+`-postgres`/`-sqlite`/`-mysql` implement without depending on the engine or each other. The data
+plane should match it: `zeroship-data-backend` + `zeroship-data-postgres` + `zeroship-data-sqlite`.
+
+**It cannot be done by moving files today, because the backends reach back up into the plugin.**
+Counting `crate::<module>` references out of each backend into non-backend modules:
+
+| from | into `broker` | `crud` | `context` | `descriptor` | `exec` |
+| --- | --- | --- | --- | --- | --- |
+| `backend/sqlite/` | 6 | 3 | 2 | 2 | 0 |
+| `backend/postgres.rs` | 0 | 1 | 1 | 2 | 2 |
+
+Extracting either as a peer crate is circular: `plugin-db -> sqlite` for the backend, `sqlite ->
+plugin-db` for the broker. The `broker` edge is the load-bearing one and it is all in the CDC path
+(`sqlite/cdc.rs` publishes into the broker directly, `:646`).
+
+**So the ORDER is: invert the broker edge, then split.** A backend must not know the broker; it
+should emit into a sink the plugin injects - the same contract-in-the-middle move the engine already
+made. Until that inversion exists, "extract the backends" is a rename that will not compile.
+
+**The cheap win does not wait for any of it.** Feature-gating the SQLite backend inside today's
+`plugin-db` is a much smaller change than extraction and delivers the whole production-binary
+benefit. Do that first; it is also the forcing function that will surface every place the dev backend
+is reachable from a production path.
+
 ## Measured starting point
 
 | crate | src lines | |
