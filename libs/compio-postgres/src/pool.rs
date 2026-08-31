@@ -3800,6 +3800,52 @@ mod tests {
     }
 
     #[test]
+    fn panicking_borrower_returns_its_connection_exactly_once() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(34);
+        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = held;
+            panic!("borrower panicked while holding a pooled connection");
+        }));
+        assert!(panic.is_err(), "the borrower fixture did not panic");
+        assert_eq!(pool.active_count(), 0, "unwind leaked the active lease");
+        assert_eq!(pool.idle_count(), 1, "unwind did not return the connection");
+        assert_eq!(
+            pool.total_count(),
+            1,
+            "unwind discarded a reusable connection"
+        );
+        assert_eq!(pool.metrics.evictions.get(), 0);
+
+        let mut acquire = Box::pin(pool.get_inner());
+        let reused = match poll_once(acquire.as_mut()) {
+            Poll::Ready(Ok(client)) => client,
+            Poll::Ready(Err(error)) => panic!("reacquiring after unwind failed: {error}"),
+            Poll::Pending => panic!("reacquiring the returned connection unexpectedly waited"),
+        };
+        assert_eq!(
+            reused.process_id(),
+            34,
+            "unwind did not preserve the session"
+        );
+        assert_eq!(pool.active_count(), 1);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 1);
+        drop(reused);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(pool.total_count(), 1);
+    }
+
+    #[test]
     fn panicking_handoff_waker_does_not_unaccount_a_deposited_entry() {
         let config = PoolConfig {
             max_size: 1,
