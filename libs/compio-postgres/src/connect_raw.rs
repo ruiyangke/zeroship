@@ -3365,6 +3365,8 @@ mod tests {
 
     #[compio::test]
     async fn replication_handshake_uses_the_configured_user_in_an_md5_response() {
+        const EXPECTED: &[u8] = b"md538b05cef655ccdf8f933eb51f8cd2ef6";
+
         let mut md5_request = 5i32.to_be_bytes().to_vec();
         md5_request.extend_from_slice(&[5, 6, 7, 8]);
         let (stream, client_bytes) = scripted_password_auth_server(md5_request, true).await;
@@ -3385,7 +3387,6 @@ mod tests {
             .expect("scripted replication MD5 server did not finish")
             .expect("scripted replication MD5 server dropped its observation")
             .expect("scripted replication MD5 server failed");
-        const EXPECTED: &[u8] = b"md538b05cef655ccdf8f933eb51f8cd2ef6";
         assert!(
             client_bytes
                 .windows(EXPECTED.len())
