@@ -1049,6 +1049,63 @@ mod tests {
         );
     }
 
+    fn endpoint_error(config: &Config) -> String {
+        let error = match endpoints(config) {
+            Ok(_) => panic!("the invalid endpoint lists were accepted"),
+            Err(error) => error,
+        };
+        let mut text = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            text.push_str(" | ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        text
+    }
+
+    #[test]
+    fn multiple_ports_must_match_the_host_count() {
+        for dsn in [
+            "host=first.example,second.example,third.example port=5432,5433",
+            "host=first.example,second.example port=5432,5433,5434",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .expect("host and port lists parse before endpoint validation");
+            let error = endpoint_error(&config);
+
+            assert!(
+                error.contains("invalid number of ports"),
+                "the mismatched port refusal was unclear for {dsn:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_and_hostaddr_lists_must_have_equal_counts() {
+        for (dsn, counts) in [
+            (
+                "host=first.example,second.example hostaddr=127.0.0.1",
+                "number of hosts (2) is different from number of hostaddrs (1)",
+            ),
+            (
+                "host=first.example hostaddr=127.0.0.1,127.0.0.2",
+                "number of hosts (1) is different from number of hostaddrs (2)",
+            ),
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .expect("host and hostaddr lists parse before endpoint validation");
+            let error = endpoint_error(&config);
+
+            assert!(
+                error.contains(counts),
+                "the mismatched hostaddr refusal was unclear for {dsn:?}: {error}"
+            );
+        }
+    }
+
     fn refused_handshake() -> Vec<u8> {
         frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
     }
