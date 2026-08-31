@@ -339,12 +339,12 @@ echo "------------------------------------------------------------------"
 # does not run, and it looks exactly like a test that passes.
 
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
-# `zeroship-authn` is here because it was in NO gate at all. Its one target,
-# crates/authn/tests/service_replay_pg_test.rs, gates all six of its tests on
-# AUTH_DB_URL and announces a skip for each; the string "zeroship-authn"
-# appeared nowhere under tests/ or .github/. It is not feature-gated, so the
-# `rust` job DID build and run it - with no database, six announced skips, six
-# counted passes, and a census that reports rather than fails.
+# `zeroship-authn` is here because it was in NO gate at all. Its PostgreSQL
+# integration targets announce a skip for every test that cannot reach their
+# database; the string "zeroship-authn" appeared nowhere under tests/ or
+# .github/. It is not feature-gated, so the `rust` job DID build and run the
+# original target with no database, six announced skips, six counted passes,
+# and a census that reports rather than fails.
 #
 # This list is hand-maintained and that is its weakness: a new AUTH_DB_URL-gated
 # binary anywhere in the workspace is covered only if someone remembers to add

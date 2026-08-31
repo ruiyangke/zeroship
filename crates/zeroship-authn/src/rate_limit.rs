@@ -297,7 +297,10 @@ impl RateLimiter {
 
     /// Try to consume one process-local token for `ip`.
     pub fn check(&self, ip: IpAddr) -> bool {
-        let now = Instant::now();
+        self.check_at(ip, Instant::now())
+    }
+
+    fn check_at(&self, ip: IpAddr, now: Instant) -> bool {
         let mut buckets = self.lock_buckets();
         buckets.retain(|_, bucket| now.duration_since(bucket.last_access) < IDLE_TTL);
 
@@ -357,6 +360,39 @@ mod tests {
         assert!(limiter.check(first));
         assert!(!limiter.check(first));
         assert!(limiter.check(second));
+    }
+
+    #[test]
+    fn process_local_limiter_refills_at_configured_rate() {
+        let limiter = RateLimiter::new(Quota::per_minute(1, 60));
+        let addr = ip("203.0.113.2");
+        let started_at = Instant::now();
+
+        assert!(limiter.check_at(addr, started_at));
+        assert!(!limiter.check_at(addr, started_at));
+        assert!(!limiter.check_at(addr, started_at + Duration::from_millis(500)));
+        assert!(limiter.check_at(addr, started_at + Duration::from_secs(1)));
+        assert!(!limiter.check_at(addr, started_at + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn process_local_limiter_caps_tokens_after_long_idle() {
+        let limiter = RateLimiter::new(Quota::per_minute(3, 60));
+        let addr = ip("203.0.113.3");
+        let started_at = Instant::now();
+        let after_long_idle = started_at + Duration::from_secs(30);
+
+        assert!(limiter.check_at(addr, started_at));
+        for request in 1..=3 {
+            assert!(
+                limiter.check_at(addr, after_long_idle),
+                "request {request} within the capacity should pass"
+            );
+        }
+        assert!(
+            !limiter.check_at(addr, after_long_idle),
+            "an idle bucket must not bank more than its capacity"
+        );
     }
 
     #[test]
