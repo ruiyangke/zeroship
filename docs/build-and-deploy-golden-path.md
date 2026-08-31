@@ -122,14 +122,15 @@ harness's platform OP and passes it on `--token=`.
    bad bearer is refused. Under `--provision=dev-provision` none of that runs:
    the registry row and blob store are written directly and the step says so.
 
-   **The chain as a whole does NOT pass, deliberately.** Measured 2026-08-21 on a
-   four-service run at HEAD: **126 passed, 15 failed, exit 1** over nineteen steps,
-   141 outcomes, with `--provision=deploy`. The fifteen are the by-design reds the
-   harness names on every run and classifies against a declared set: step 10's six
-   scaffold comparisons (#260), step 11's two collation reds (#255), step 13's
-   three log-visibility reds (#332/#333) and step 12's four app-delete reds (#331).
-   The same tree with `--provision=dev-provision` scores **122 passed, 15 failed**;
-   the four are step 3's deploy assertions, and the reds are identical.
+   **The chain as a whole does NOT pass, deliberately.** The last full four-service
+   run before the typed-id collation fix measured **126 passed, 15 failed, exit 1**
+   over nineteen steps and 141 outcomes with `--provision=deploy`. This fix retires
+   step 11's two collation reds without changing the outcome count, so the expected
+   result is **128 passed, 13 failed** until a new full-stack measurement replaces
+   this delta. The remaining declared reds are step 10's six scaffold comparisons
+   (#260), step 13's three log-visibility reds (#332/#333), and step 12's four
+   app-delete reds (#331). The corresponding pre-fix `--provision=dev-provision`
+   run was **122 passed, 15 failed**; its expected delta is **124 passed, 13 failed**.
    The "9/9" this line carried was the count when only the first three steps
    existed, and it survived every step added since - stating "passes" about a
    script that exits non-zero. The 2026-08-11 figure that replaced it (67/8, twelve
@@ -201,13 +202,12 @@ For the **real agent flow** against a deployed platform, the path is
 - ✅ Durable workflow starter (`examples/workflows-order/`) covering steps,
   sleeps, signals, child calls, and compensation.
 - ✅ Real build → `.zship` (vite-plugin) — proven.
-- ⚠️ In-monorepo chain: migrate → stack → deploy → serve + RPC + dev-vs-deployed.
-  **67 passed, 8 failed, exit 1** (`tests/golden_path.sh`, measured 2026-08-11).
-  The eight are RED AT HEAD BY DESIGN and the harness names them on every run:
-  step 10's six scaffold comparisons (#260) and step 11's two collation reds
-  (#255). Everything the chain covers works; the two open decisions are what keep
-  it non-zero, so the CI `golden-path` job is red until they land. This row said
-  `✅ ... 9/9` long after both were true.
+- Warning: In-monorepo chain: migrate -> stack -> deploy -> serve + RPC + dev-vs-deployed.
+  A historical 2026-08-11 run measured **67 passed, 8 failed**. The typed-id
+  collation fix retires that run's two step 11 failures; step 10's six scaffold
+  comparisons (#260) remain. Later steps have added other independently tracked
+  reds, so the current classifier in `tests/golden_path.sh`, not this historical
+  total, is authoritative.
 - ❌ External build: registry-installed SDKs, scaffolded app builds outside the
   monorepo — **FAILS at `npm install`** (`tests/external_chain.sh`). Published
   `@zeroship/vite-plugin` requires `zero-migrate@0.1.0` +

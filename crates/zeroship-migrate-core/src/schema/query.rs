@@ -14,7 +14,7 @@
 //! Column and table names are quoted with double-quotes to prevent injection.
 
 use crate::model::expr::{Expr, SynthFn};
-use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
+use crate::model::ir::{ColType, ColumnCollation, IndexElement, IrColumn, IrDefault, IrIndex};
 use crate::model::table_shape::ResolvedInject;
 use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_migrate_backend::registry::VendorSet;
@@ -989,7 +989,12 @@ fn build_injected_columns(
     let mut columns =
         Vec::with_capacity(inject.columns().len() + usize::from(primary_key.is_some()));
     for column in inject.columns() {
-        let data_type = injected_column_type(column, backend)?;
+        let mut data_type = injected_column_type(column, backend)?;
+        if matches!(column.collation, Some(ColumnCollation::Bytewise)) {
+            data_type =
+                crate::render::value_format::bytewise_column_metadata(vendors, &data_type, dialect)
+                    .0;
+        }
         let inline_primary_key = primary_key
             .is_some_and(|pk| pk.len() == 1 && pk.first().is_some_and(|name| name == &column.name));
         let primary_key_clause = if inline_primary_key {
@@ -1366,7 +1371,7 @@ pub fn build_add_column(
     validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
     let backend = renderer(vendors, dialect);
-    let data_type = backend.column_type(&column_snapshot_for_type_def(def), false);
+    let data_type = ddl_column_type_for_def(vendors, def, backend);
     // The declared type and constraints go on the column that holds the REAL
     // value - `__zs_raw__<field>` when masked, the field's own name otherwise.
     let raw = raw_column_for_field(field, def);
@@ -2078,7 +2083,7 @@ fn field_to_column_for_dialect(
     } else {
         ""
     };
-    let sql_type = backend.column_type(&column_snapshot_for_type_def(def), false);
+    let sql_type = ddl_column_type_for_def(vendors, def, backend);
     let constraints = def_to_constraints_for_dialect(&physical, def, backend);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
@@ -2119,6 +2124,27 @@ pub(crate) fn def_to_column_type_for_backend(
     backend: &dyn SchemaRenderer,
 ) -> String {
     backend.column_type(&column_snapshot_for_type_def(def), false)
+}
+
+/// Render a column type for DDL, including physical comparison contracts that
+/// are implied by a closed logical type rather than authored as a free-form
+/// collation name.
+fn ddl_column_type_for_def(
+    vendors: VendorSet,
+    def: &serde_json::Value,
+    backend: &dyn SchemaRenderer,
+) -> String {
+    let rendered = backend.column_type(&column_snapshot_for_type_def(def), false);
+    if def.get("type").and_then(serde_json::Value::as_str) == Some("ref") {
+        crate::render::value_format::bytewise_column_metadata(
+            vendors,
+            &rendered,
+            &backend.dialect(),
+        )
+        .0
+    } else {
+        rendered
+    }
 }
 
 /// Emit per-variant CHECK constraints for a flat-expanded
@@ -2562,6 +2588,23 @@ columns = [
 "#,
         )
         .expect("explicit-default test policy composes")
+    }
+
+    fn bytewise_id_policy() -> EffectivePolicy {
+        crate::model::table_shape::effective_policy_from_charter_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id", type = "text", nullable = false, collation = "bytewise" },
+]
+"#,
+        )
+        .expect("bytewise-id test policy composes")
     }
 
     fn confined_inject(table: &str) -> ResolvedInject {
@@ -3153,9 +3196,12 @@ columns = [
         });
         let sql =
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
-        // TEXT column for the FK (cascades to match the
-        // `id TEXT PRIMARY KEY`).
-        assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
+        // Bytewise TEXT column for the FK, matching the comparison domain of
+        // the injected typed-id primary key.
+        assert!(
+            sql.contains("\"authorId\" TEXT COLLATE \"C\""),
+            "{sql}"
+        );
         // Inline FK clause with SQL/Postgres defaults omitted.
         assert!(sql.contains("CONSTRAINT \"posts_authorId_fkey\""), "{sql}");
         assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
@@ -3375,8 +3421,11 @@ columns = [
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Deferred(&existing))
                 .unwrap();
         // FK is deferred - column still present but no FOREIGN KEY clause.
-        // TEXT (cascades to match the `id TEXT PRIMARY KEY`).
-        assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
+        // The ref storage domain matches the injected id's bytewise collation.
+        assert!(
+            sql.contains("\"authorId\" TEXT COLLATE \"C\""),
+            "{sql}"
+        );
         assert!(!sql.contains("FOREIGN KEY"), "FK should be deferred: {sql}");
     }
 
@@ -3422,7 +3471,7 @@ columns = [
         );
     }
 
-    /// `build_add_column` for a ref field emits a TEXT column type so
+    /// `build_add_column` for a ref field emits a bytewise TEXT column so
     /// ALTER TABLE ADD COLUMN runs on a column that matches the
     /// referenced table's PK (TEXT typed_id).
     #[test]
@@ -3437,8 +3486,8 @@ columns = [
         )
         .expect("build_add_column");
         assert!(
-            sql.contains("ADD COLUMN IF NOT EXISTS \"authorId\" TEXT"),
-            "expected ADD COLUMN ... TEXT, got: {sql}"
+            sql.contains("ADD COLUMN IF NOT EXISTS \"authorId\" TEXT COLLATE \"C\""),
+            "expected a bytewise ref column, got: {sql}"
         );
     }
 
@@ -3460,8 +3509,8 @@ columns = [
         )
         .expect("build sqlite DDL");
         assert!(
-            sql.contains("\"authorId\" TEXT"),
-            "sqlite DDL must declare authorId TEXT, got: {sql}"
+            sql.contains("\"authorId\" TEXT COLLATE BINARY"),
+            "SQLite DDL must declare a bytewise authorId, got: {sql}"
         );
     }
 
@@ -4850,6 +4899,37 @@ columns = [
         assert_eq!(sql.matches("\"updated_at\"").count(), 1, "{sql}");
         assert!(!sql.contains("\"id\""), "{sql}");
         assert!(!sql.contains("CREATE INDEX"), "{sql}");
+    }
+
+    #[test]
+    fn injected_bytewise_id_survives_the_schema_builder() {
+        let effective = bytewise_id_policy();
+        for (dialect, expected) in [
+            (
+                &POSTGRES,
+                r#"id character varying(255) COLLATE "C" PRIMARY KEY"#,
+            ),
+            (&SQLITE, "id TEXT COLLATE BINARY PRIMARY KEY"),
+            (
+                &MYSQL,
+                "`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin PRIMARY KEY",
+            ),
+        ] {
+            let sql = super::build_create_table_with_fks_for_dialect(
+                crate::test_fixtures::VENDORS,
+                "app1",
+                "posts",
+                &serde_json::json!({}),
+                &FkEmission::Inline,
+                dialect,
+                &effective,
+            )
+            .expect("the selected backend renders a bytewise injected id");
+            assert!(
+                sql.contains(expected),
+                "{dialect:?} dropped the injected id collation; SQL was:\n{sql}"
+            );
+        }
     }
 
     #[test]

@@ -1646,9 +1646,36 @@ pub(crate) fn column_snapshot_for_field(
         comment_sentinel,
         ..Default::default()
     };
+    // A `ref` is the storage copy of another creator row's typed id. Once the
+    // parent id is bytewise-collated, leaving this copy on the database default
+    // prevents PostgreSQL from using its ordinary B-tree index in joins. Make
+    // byte ordering part of the ref type's physical contract, just as it is for
+    // TypeID and ULID value formats. Arbitrary text references retain their
+    // authored comparison semantics; this applies only to the closed `ref` type.
+    if f.ty == "ref" {
+        apply_bytewise_column_metadata(vendors, &mut column, dialect);
+    }
     crate::render::backends::schema_renderer(vendors, dialect)
         .finalize_column_snapshot(&mut column);
     Ok(column)
+}
+
+/// Pin one text column to the vendor's bytewise comparison contract.
+///
+/// This helper is shared by closed creator `ref` fields and policy-injected
+/// typed-ID fields so desired snapshots cannot describe a different physical
+/// type from the DDL/lower/fold paths that create the same column.
+fn apply_bytewise_column_metadata(
+    vendors: VendorSet,
+    column: &mut ColumnSnapshot,
+    dialect: &DialectId,
+) {
+    let backend = crate::render::backends::schema_renderer(vendors, dialect);
+    let rendered = backend.column_type(column, false);
+    let (ddl_type, collation) =
+        crate::render::value_format::bytewise_column_metadata(vendors, &rendered, dialect);
+    column.ddl_type_override = Some(ddl_type);
+    column.collation = collation;
 }
 
 /// Stamp a named primary-key constraint and its backing index onto a snapshot.
@@ -2010,6 +2037,14 @@ fn injected_column_snapshot(
             crate::render::lower::render_ir_default_for_type(vendors, default, &column.ty, dialect)
                 .map_err(|error| DeclarativeError::Invalid(error.to_string()))?,
         );
+    }
+    if matches!(
+        column.collation,
+        Some(crate::model::ir::ColumnCollation::Bytewise)
+    ) {
+        apply_bytewise_column_metadata(vendors, &mut snapshot, dialect);
+        crate::render::backends::schema_renderer(vendors, dialect)
+            .finalize_column_snapshot(&mut snapshot);
     }
     Ok(snapshot)
 }
@@ -7296,12 +7331,12 @@ mod snapshot_builder_refactor_safety_tests {
         ResolvedInject::for_table(&effective, schema, table).expect("empty inject shape")
     }
     use super::{
-        CollectionDescriptor, ColumnSnapshot, CreateTableRequest, DeclarativeAuthor,
-        FieldDescriptor, IndexDescriptor, ResolvedInject, TableRuntimeOptions, TableSnapshot,
         build_resolved_table_snapshot, build_table_snapshot, check_constraint_name,
-        enum_check_names, injected_index_names,
+        enum_check_names, injected_index_names, CollectionDescriptor, ColumnSnapshot,
+        CreateTableRequest, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, ResolvedInject,
+        SnapshotResolvedShape, TableRuntimeOptions, TableSnapshot,
     };
-    use crate::test_fixtures::{POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     fn rich_descriptor() -> CollectionDescriptor {
         CollectionDescriptor {
@@ -7433,6 +7468,62 @@ mod snapshot_builder_refactor_safety_tests {
         )
         .expect("rich descriptor builds a snapshot");
         assert_eq!(format!("{snap:#?}"), GOLDEN_SQLITE.trim_end_matches('\n'));
+    }
+
+    #[test]
+    fn injected_bytewise_collation_survives_the_direct_desired_snapshot() {
+        let effective = crate::effective_policy_from_charter_toml(
+            r#"policy_version = 1
+
+[[inject]]
+scope = "all"
+columns = [
+  { name = "id", type = "text", nullable = false, collation = "bytewise" },
+]
+"#,
+        )
+        .expect("bytewise injected-column policy composes");
+        let inject = ResolvedInject::for_table(&effective, "app", "notes")
+            .expect("bytewise injected shape resolves");
+
+        for (dialect, expected_type, expected_collation) in [
+            (
+                &POSTGRES,
+                r#"character varying(255) COLLATE "C""#,
+                Some("pg_catalog.C"),
+            ),
+            (&SQLITE, "TEXT COLLATE BINARY", None),
+            (
+                &MYSQL,
+                "VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin",
+                None,
+            ),
+        ] {
+            let shape = SnapshotResolvedShape::from_inject(
+                crate::test_fixtures::VENDORS,
+                "notes",
+                &inject,
+                dialect,
+            )
+            .unwrap_or_else(|error| panic!("build {dialect:?} injected snapshot: {error}"));
+            let id = shape
+                .columns
+                .iter()
+                .find(|column| column.name == "id")
+                .expect("the resolved injected id survives snapshot construction");
+            assert_eq!(
+                id.ddl_type_override.as_deref(),
+                Some(expected_type),
+                "{dialect:?} dropped the injected bytewise DDL contract"
+            );
+            assert_eq!(
+                id.collation
+                    .as_ref()
+                    .map(|collation| collation.display_name()),
+                expected_collation.map(str::to_string),
+                "{dialect:?} retained the wrong drift-comparable collation identity"
+            );
+        }
     }
 
     #[test]
