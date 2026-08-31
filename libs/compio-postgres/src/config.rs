@@ -3498,8 +3498,13 @@ mod tests {
                 "keepalives_interval",
                 "keepalives_count",
             ] {
-                if format!("host=h {key}=' 1 '").parse::<Config>().is_err() {
-                    whitespace_refused.push(key);
+                for whitespace in [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'] {
+                    if format!("host=h {key}='{whitespace}1{whitespace}'")
+                        .parse::<Config>()
+                        .is_err()
+                    {
+                        whitespace_refused.push(format!("{key} with U+{:04X}", whitespace as u32));
+                    }
                 }
                 for value in ["2147483648", "-2147483649"] {
                     if format!("host=h {key}={value}").parse::<Config>().is_ok() {

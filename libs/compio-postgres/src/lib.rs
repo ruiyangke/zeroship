@@ -38,6 +38,7 @@
 //!
 //!     // And then check that we got back the same string we sent over.
 //!     let value: &str = rows[0].get(0);
+//!     // The no_run fence compiles this assertion but does not execute it.
 //!     assert_eq!(value, "hello world");
 //!
 //!     Ok(())

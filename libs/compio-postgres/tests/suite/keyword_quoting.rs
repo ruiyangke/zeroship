@@ -62,6 +62,12 @@ fn a_backslash_escapes_the_next_character() {
 }
 
 #[test]
+fn an_options_backslash_survives_conninfo_lexing() {
+    let parsed = ok(r"host=h options='-c search_path=a\\ b'");
+    assert_eq!(parsed.get_options(), Some(r"-c search_path=a\ b"));
+}
+
+#[test]
 fn an_equals_sign_is_ordinary_inside_a_value() {
     assert_eq!(
         ok("user=u application_name==P7").get_application_name(),
