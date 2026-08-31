@@ -512,6 +512,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cancel_token_debug_redacts_socket_config_and_secret_key() {
+        const SOCKET_SECRET: &str = "cancel-token-socket-config-material-7f4ca91d";
+        const KEY_SECRET: &[u8] = b"cancel-token-bearer-key-material-c83de2a6";
+
+        let socket_exposed = format!("{SOCKET_SECRET:?}");
+        let key_slice_exposed = format!("{KEY_SECRET:?}");
+        let key_bytes = Bytes::copy_from_slice(KEY_SECRET);
+        let key_bytes_exposed = format!("{key_bytes:?}");
+        let mut token = network_token("127.0.0.1:9".parse().expect("valid loopback address"));
+        token
+            .socket_config
+            .as_mut()
+            .expect("network token has a socket config")
+            .hostname = Some(SOCKET_SECRET.to_owned());
+        token.secret_key = Some(CancelKey::new(key_bytes).expect("valid sentinel cancel key"));
+
+        let debug = format!("{token:?}");
+
+        assert!(
+            debug.contains("CancelToken"),
+            "cancel token Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("socket_config: Some(\"<redacted>\")"),
+            "cancel token Debug did not mark the socket config redaction: {debug}"
+        );
+        assert!(
+            debug.contains("secret_key: Some(\"<redacted>\")"),
+            "cancel token Debug did not mark the bearer key redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&socket_exposed) && !debug.contains(SOCKET_SECRET),
+            "cancel token Debug leaked socket configuration material: {debug}"
+        );
+        assert!(
+            !debug.contains(&key_slice_exposed)
+                && !debug.contains(&key_bytes_exposed)
+                && !debug.contains("cancel-token-bearer-key-material-c83de2a6"),
+            "cancel token Debug leaked its bearer key: {debug}"
+        );
+    }
+
     struct ParkedCancelStream {
         written: Arc<parking_lot::Mutex<Vec<u8>>>,
         fail_read: bool,
