@@ -3481,6 +3481,23 @@ mod tests {
         eof_after: Option<Arc<StatusRecordingWake>>,
     }
 
+    /// A scripted split stream whose reader stays parked until either the
+    /// opening COPY flush or a test-observed producer poll establishes the
+    /// exact main-loop state under test.
+    struct GatedScriptedReadSplitStream {
+        chunks: VecDeque<Vec<u8>>,
+        read_gate: Arc<AtomicBool>,
+    }
+
+    struct GatedScriptedReadHalf {
+        chunks: VecDeque<Vec<u8>>,
+        read_gate: Arc<AtomicBool>,
+    }
+
+    struct GateOpeningWriteHalf {
+        read_gate: Arc<AtomicBool>,
+    }
+
     /// Bounds the control's spin so a harness that never delivers fails on its
     /// assertion instead of hanging the suite.
     const SCRIPTED_EOF_YIELD_LIMIT: usize = 64;
@@ -3560,6 +3577,47 @@ mod tests {
         fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
             let Self { chunks, eof_after } = self;
             Ok((ScriptedReadHalf { chunks, eof_after }, SuccessfulWriteHalf))
+        }
+    }
+
+    impl AsyncRead for GatedScriptedReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            while !self.read_gate.load(Ordering::Acquire) {
+                yield_once().await;
+            }
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for GateOpeningWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.read_gate.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SplitStream for GatedScriptedReadSplitStream {
+        type ReadHalf = GatedScriptedReadHalf;
+        type WriteHalf = GateOpeningWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            let Self { chunks, read_gate } = self;
+            Ok((
+                GatedScriptedReadHalf {
+                    chunks,
+                    read_gate: Arc::clone(&read_gate),
+                },
+                GateOpeningWriteHalf { read_gate },
+            ))
         }
     }
 

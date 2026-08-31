@@ -23,6 +23,10 @@ use postgres_protocol::message::frontend::CopyData;
 use std::future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 
 /// Internal message type flowing from user code to the connection task.
@@ -67,6 +71,13 @@ enum CopyInState {
 pub struct CopyInReceiver {
     receiver: mpsc::Receiver<CopyInMessage>,
     state: CopyInState,
+    #[cfg(test)]
+    poll_observed: Option<Arc<AtomicBool>>,
+}
+
+#[cfg(test)]
+pub(crate) struct CopyInTestProducer {
+    _sender: mpsc::Sender<CopyInMessage>,
 }
 
 impl CopyInReceiver {
@@ -74,7 +85,36 @@ impl CopyInReceiver {
         CopyInReceiver {
             receiver,
             state: CopyInState::Streaming,
+            #[cfg(test)]
+            poll_observed: None,
         }
+    }
+
+    /// Build an open COPY producer channel for connection-state fixtures.
+    ///
+    /// `initial` distinguishes a request whose first frontend batch is ready
+    /// from the real publication-before-send interval in `copy_in_inner`. The
+    /// optional observer lets a scripted reader wait until the connection has
+    /// registered the request and polled that still-empty producer.
+    #[cfg(test)]
+    pub(crate) fn for_connection_test(
+        initial: Option<FrontendMessage>,
+        poll_observed: Option<Arc<AtomicBool>>,
+    ) -> (Self, CopyInTestProducer) {
+        let (mut sender, receiver) = mpsc::channel(1);
+        if let Some(initial) = initial {
+            sender
+                .try_send(CopyInMessage::Message(initial))
+                .expect("a new test COPY channel accepts its initial frame");
+        }
+        (
+            Self {
+                receiver,
+                state: CopyInState::Streaming,
+                poll_observed,
+            },
+            CopyInTestProducer { _sender: sender },
+        )
     }
 
     /// Build a connection-owned COPY producer for an API which can execute a
@@ -90,6 +130,8 @@ impl CopyInReceiver {
         Self {
             receiver: Self::producerless_receiver(initial),
             state: CopyInState::ExtendedFailing { reason },
+            #[cfg(test)]
+            poll_observed: None,
         }
     }
 
@@ -103,6 +145,8 @@ impl CopyInReceiver {
         Self {
             receiver: Self::producerless_receiver(initial),
             state: CopyInState::SimpleFailing { reason },
+            #[cfg(test)]
+            poll_observed: None,
         }
     }
 
@@ -141,6 +185,10 @@ impl Stream for CopyInReceiver {
     type Item = FrontendMessage;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
+        #[cfg(test)]
+        if let Some(observer) = &self.poll_observed {
+            observer.store(true, Ordering::Release);
+        }
         if self.is_done() {
             return Poll::Ready(None);
         }
