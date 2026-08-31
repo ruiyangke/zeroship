@@ -114,8 +114,28 @@ two causes both change the sequencing above:
 - **The DDL builders and the differ are ONE dead cluster, not two regions.** `diff.rs:998-1184` -
   inside `compute_diff` - calls `build_add_column`, `build_add_foreign_key`, `normalize_fk_action`
   and `build_drop_foreign_key`. They are transitively dead TOGETHER; neither deletes alone.
-- **`SqliteEmitScope` is defined in the DDL region and used by the LIVE renderer** at `query.rs:139`,
-  `:225`, `:339`, `:469`. It must be kept and rehomed, not deleted with its neighbours.
+- **`SqliteEmitScope` is named from the renderer trait** at `query.rs:135`, `:221`, `:335`, `:465`.
+
+**AND THAT SECOND BULLET WAS WRONG - CORRECTED 2026-08-31 BY REVIEW, AFTER RE-DERIVING IT.** It
+previously read "used by the LIVE renderer … must be kept and rehomed, not deleted with its
+neighbours." The four sites are not four users: they are ONE method - `system_field_indexes`, its
+trait declaration plus its three dialect impls - and that method emits `CREATE INDEX IF NOT EXISTS`,
+which is DDL, not query rendering. Its only caller is `build_system_field_indexes` (`:1556`, calling
+at `:1562`), whose only caller is `:1469`, which sits inside
+`build_create_table_with_fks_for_dialect_scoped_statements` (`:1241`) - inside the dead region.
+Nothing outside `query.rs` names `system_field_indexes` at all.
+
+So the cut is **larger** than this plan said, not smaller, and it reaches UP out of the region table:
+delete `SqliteEmitScope`, the trait method and its three impls, `build_system_field_indexes`, and the
+`:1469` call. "Keep and rehome" was exactly backwards.
+
+**The lesson is about my instrument, and it revises the claim this section ends on.** The experiment
+deleted a region and read 16 compile errors as "these symbols are live". A compile error proves only
+that *something names the symbol* - it cannot tell you whether the NAMER is itself dead. Four of
+those errors came from a dead method sitting in a region I had labelled live, so the boundary at
+`:1056` is a region marker, not a liveness boundary. The compiler settles **reachability from a
+root**; it does not settle **which roots are real**. That still has to be answered by walking the
+call chain to something production calls - which is what finally settled this one.
 
 So the grep-derived plan would have broken the build. Anyone executing step 0 should repeat this
 experiment per cut rather than trusting the region table: **"no callers found" and "nothing can call
