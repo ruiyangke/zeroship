@@ -5792,6 +5792,93 @@ mod tests {
     }
 
     #[compio::test]
+    async fn backpressured_flush_nested_drain_preserves_the_read_error() {
+        let read_half_dropped = Rc::new(Cell::new(false));
+        let stream = BufStream::new(WriteFailingSplitStream {
+            read_half_dropped: Rc::clone(&read_half_dropped),
+        });
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the nested-drain fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Terminal(Error::io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "scripted reset during nested drain",
+            ))))
+            .expect("queue the terminal read for the nested drain");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
+        for _ in 0..2 {
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("the pending response sender filled too early");
+        }
+        assert!(
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the pending response sender was not backpressured"
+        );
+        let mut pending_responses = VecDeque::from([PendingResponse {
+            sender: blocked_sender,
+            messages: ResponseMessages::Raw(BackendMessages::empty()),
+            disposition: RequestDisposition::Awaited,
+        }]);
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        write_result.expect("the terminal read did not outrank the failed flush");
+        let terminal = terminal
+            .expect("the nested drain discarded the terminal read")
+            .expect("the nested drain downgraded the read error to channel closure");
+        assert_eq!(
+            terminal.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionReset)
+        );
+        assert_eq!(
+            pending_responses.len(),
+            1,
+            "the backpressure gate cleared before the nested drain"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the fixture did not drive the flush-failure path"
+        );
+        assert!(read_half_dropped.get());
+    }
+
+    #[compio::test]
     async fn backpressured_flush_fatal_records_the_terminal_slot() {
         let messages = BackendMessages::from_test_bytes(BytesMut::from(
             fatal_error_frame("57P01", "scripted backend shutdown").as_slice(),
