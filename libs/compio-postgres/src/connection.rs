@@ -5081,6 +5081,86 @@ mod tests {
         );
     }
 
+    #[compio::test]
+    async fn read_timeout_during_a_parked_flush_preserves_its_diagnosis() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let (read_half, mut write_half) = match stream.try_into_split() {
+                Ok(halves) => halves,
+                Err(_) => panic!("the parked-flush timeout fixture did not split"),
+            };
+            drop(read_half);
+            write_frontend(
+                &mut write_half,
+                FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+            )
+            .expect("buffer the scripted request");
+
+            let (mut read_tx, mut read_rx) = mpsc::channel(1);
+            let (read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            let mut responses = VecDeque::new();
+            let mut pending_responses = VecDeque::new();
+            let parameters = Mutex::new(HashMap::new());
+            let tx_status = AtomicU8::new(b'I');
+            let in_flight_requests = AtomicUsize::new(0);
+            let terminal_server_error = Mutex::new(None);
+
+            let publish_after_flush_parks = {
+                let write_started = Rc::clone(&write_started);
+                async move {
+                    while !write_started.get() {
+                        yield_once().await;
+                    }
+                    publish_reader_failure(
+                        Error::read_timeout(Duration::from_millis(75)),
+                        &mut read_tx,
+                        &read_terminal_tx,
+                    )
+                    .await;
+                }
+            };
+            let ((write_result, terminal), ()) = futures_util::future::join(
+                flush_with_read_draining(
+                    &mut write_half,
+                    &mut read_rx,
+                    &mut read_terminal_rx,
+                    &parameters,
+                    &mut responses,
+                    &mut pending_responses,
+                    None,
+                    &tx_status,
+                    &in_flight_requests,
+                    &terminal_server_error,
+                    &Cell::new(false),
+                    true,
+                ),
+                publish_after_flush_parks,
+            )
+            .await;
+
+            write_result.expect("the read timeout surfaced a write failure");
+            let terminal = terminal
+                .expect("the parked flush discarded the read timeout")
+                .expect("the parked flush downgraded the timeout to channel closure");
+            assert!(terminal.is_read_timeout());
+            assert!(
+                write_started.get(),
+                "the timeout arrived before the flush parked"
+            );
+            assert!(
+                write_future_dropped.get(),
+                "the timeout left the parked write future alive"
+            );
+        })
+        .await
+        .expect("parked-flush timeout test exceeded its watchdog");
+    }
+
     /// The serialized fallback used to stop on the unsupported ParameterStatus
     /// and drop the SQLSTATE for the second request which it had already
     /// flushed. A CommandComplete prefix gives the loop a dispatch point at
