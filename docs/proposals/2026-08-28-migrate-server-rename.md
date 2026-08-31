@@ -33,12 +33,11 @@ depend on plugin-db, so there is no cycle.
 | crate and binary | `zeroship-migrate-server` |
 | config scope | `migrate_server` (`src/config.rs:21`), settings `migrate_server.*` |
 | compose service / network DNS | `migrate-server`, port 9091 |
-| control setting | `control.migrate_server_url`, flag `--migrate-server-url`, default `http://localhost:9091` |
+| creator endpoint | the configured control URL, with the edge routing `/v1/*` to `migrate-server:9091` |
 | database objects | `zeroship.app_schema_applies`, plus the per-app engine journals |
 
-The compose service name and `ZEROSHIP_CONTROL_MIGRATE_SERVER_URL` are one fact
-in two places (`deploy/compose/docker-compose.yml:340` sets the latter to
-`http://migrate-server:9091`). They move together or compose resolves nothing.
+The compose service name is also the edge upstream in
+`deploy/ops/Caddyfile`. Control has no migration-service URL or outbound call.
 
 There is no `zeroship_migrated` database role, so no grant migration was needed.
 `db/migrations-ts/20260816000100_service_assertion_replay.ts:112-113` records the

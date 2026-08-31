@@ -37,7 +37,7 @@ whose honest answer was that we did not, and that the argument the proposal gave
 **11. The control plane does not forward migrations, and is not responsible for them.** "no forward,
 and the control service is not responsible for the migration."
 
-Today `crates/zeroship-control/src/migrations_api.rs` (214 lines) authorizes the caller for the app
+The now-DELETED `crates/zeroship-control/src/migrations_api.rs` (214 lines) authorized the caller for the app
 and re-issues the request to `zeroship-migrate-server`. That proxy is deleted; the CLI calls the
 migration service directly.
 
@@ -94,7 +94,7 @@ iff principal owns N", so the project/ownership row is still required - it was t
 depended on `(project, name)`, not the authorization. Read this decision as unblocking the route
 shape, never as unblocking authz.
 
-**14. The CLI reuses the control URL; the EDGE routes `/v1/databases/*` to the migration service.**
+**14. The CLI reuses the control URL; the EDGE routes `/v1/*` to the migration service.**
 "can we reuse the control url?" Yes, and investigating it surfaced a gap decisions 11-13 had left
 open.
 
@@ -115,7 +115,7 @@ control host gains the same shape:
 
 ```
 http://control.{$ZEROSHIP_DOMAIN} {
-	handle /v1/databases/* { reverse_proxy migrate-server:9091 }
+	handle /v1/*           { reverse_proxy migrate-server:9091 }
 	handle                 { reverse_proxy control:9090 }
 }
 ```
@@ -134,7 +134,7 @@ go to control.<domain>" and concludes control should proxy them is rebuilding wh
 - **The edge config becomes load-bearing.** Deploy without that rule and `zeroship migrate` receives
   control's 404. Combined with the empty-apply ledger write (task #74), a migrate that reaches nothing
   can still look like it did something, so the two failure modes compound.
-- **A path-collision invariant appears.** The control plane must never define a `/v1/databases/*`
+- **A path-collision invariant appears.** The control plane must never define a `/v1/*`
   route, and nothing enforces that. It gets a gate arm rather than a convention.
 
 `deploy/ops/Caddyfile` is the LOCAL edge; production may be Kubernetes, so the same rule has to exist
@@ -198,8 +198,13 @@ that performed the deletion, arguing against its own change:
 
 - **A per-IP rate limit on the one endpoint that runs `CREATE SCHEMA` and `CREATE ROLE` as superuser.**
   `migrations_api.rs:90` called `admin_rate_limit`, which is `http_util::rate_limit` over the `admin`
-  bucket at 30 requests per minute (`crates/zeroship-control/src/main.rs:999`,
-  `Quota::per_minute(30, 60)`), Postgres-backed and proxy-aware. Direct applies are otherwise
+  bucket at a BURST OF 30 WITH A STEADY 60 PER MINUTE (`crates/zeroship-control/src/main.rs:999`,
+  `Quota::per_minute(30, 60)`). THIS PARAGRAPH SAID "30 requests per minute" UNTIL 2026-08-31, and so
+  did every task record and status report that quoted it. The two constructor arguments are
+  `per_minute(burst, per_minute)`, which becomes `capacity: burst` and `refill_per_sec: per_minute /
+  60.0` - so the pair is a capacity of 30 refilling at one token per second, not a rate of 30. The
+  error was caught by the agent that rebuilt the limiter, arguing against the brief that carried the
+  wrong gloss. Postgres-backed and proxy-aware. Direct applies are otherwise
   unthrottled. The limiter is portable - it takes a request, a PG handle, a bucket name, a quota and a
   trust-proxy flag, and the migration service already holds its own `control_pg` client.
 - **Source-IP propagation.** The migration service sets `request_ip: None`, losing IP-policy input and

@@ -5,6 +5,7 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde_json::json;
 use uuid::Uuid;
+use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
 
 use crate::apply::{
@@ -27,20 +28,19 @@ use crate::MigrationServiceState;
 /// creator's repository and folded at build time, so there is nothing to store
 /// and nothing to mutate at runtime.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::resource("/v1/apps/{app_id}/migrations/apply").route(web::post().to(apply)),
-    )
-    .service(
-        web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)),
-    )
-    .service(
-        web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)),
-    )
-    .service(
-        web::resource("/v1/apps/{app_id}/migrations/rollback").route(web::post().to(stub_phase2)),
-    )
-    .service(web::resource("/healthz").route(web::get().to(healthz)))
-    .service(web::resource("/readyz").route(web::get().to(readyz)));
+    cfg.service(web::resource("/v1/apps/{app_id}/migrations/apply").route(web::post().to(apply)))
+        .service(
+            web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)),
+        )
+        .service(
+            web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)),
+        )
+        .service(
+            web::resource("/v1/apps/{app_id}/migrations/rollback")
+                .route(web::post().to(rollback)),
+        )
+        .service(web::resource("/healthz").route(web::get().to(healthz)))
+        .service(web::resource("/readyz").route(web::get().to(readyz)));
 }
 
 /// Liveness. Constant 200 by design: it must not touch Postgres, or a database
@@ -89,17 +89,10 @@ pub async fn apply(
     app_id: Path<Uuid>,
     body: Json<ApplyMigrationsRequest>,
 ) -> web::HttpResponse {
-    let Some(token) = bearer_token(&req) else {
-        return web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"}));
-    };
     let app_id = app_id.into_inner();
-    let caller = match state
-        .authenticator
-        .verify_action(token, app_id, Action::AppsDeploy, &request_id(&req))
-        .await
-    {
+    let caller = match authorize_mutation(&req, &state, app_id).await {
         Ok(caller) => caller,
-        Err(err) => return auth_error_response(err),
+        Err(response) => return response,
     };
 
     match apply_ir_documents(
@@ -127,6 +120,46 @@ pub async fn apply(
     }
 }
 
+/// The Phase 2 rollback implementation is absent, but its mutating route is
+/// already protected so replacing the stub cannot silently publish a new DDL
+/// path without bearer authorization and shared throttling.
+pub async fn rollback(
+    req: web::HttpRequest,
+    state: State<Arc<MigrationServiceState>>,
+    app_id: Path<Uuid>,
+) -> web::HttpResponse {
+    if let Err(response) = authorize_mutation(&req, &state, app_id.into_inner()).await {
+        return response;
+    }
+    stub_phase2().await
+}
+
+async fn authorize_mutation(
+    req: &web::HttpRequest,
+    state: &MigrationServiceState,
+    app_id: Uuid,
+) -> Result<crate::auth::VerifiedCaller, web::HttpResponse> {
+    let Some(token) = bearer_token(&req) else {
+        return Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"})));
+    };
+    let request_id = request_id(&req);
+    let source_ip = source_ip(&req, state.trust_proxy);
+    let caller = match state
+        .authenticator
+        .verify_action(token, app_id, Action::AppsDeploy, source_ip, &request_id)
+        .await
+    {
+        Ok(caller) => caller,
+        Err(err) => return Err(auth_error_response(err)),
+    };
+    if let Some(response) = mutation_rate_limit_response(
+        state.mutation_rate_limiter.consume(source_ip).await,
+        source_ip,
+    ) {
+        return Err(response);
+    }
+    Ok(caller)
+}
 
 pub async fn stub_phase2() -> web::HttpResponse {
     web::HttpResponse::build(StatusCode::NOT_IMPLEMENTED).json(&json!({
@@ -161,6 +194,56 @@ fn bearer_token(req: &web::HttpRequest) -> Option<&str> {
     zeroship_core::auth::extract_bearer(header)
 }
 
+/// Resolve one source identity for both authorization and mutation throttling.
+///
+/// With proxy trust disabled, an inbound forwarding header is ignored. With it
+/// enabled, the rightmost usable address is the one-hop proxy's claim about its
+/// peer; the client-controlled left edge is never trusted.
+fn source_ip(req: &web::HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
+    let forwarded_for = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok());
+    zeroship_core::client_ip::resolve_client_ip(
+        forwarded_for,
+        req.peer_addr().map(|address| address.ip()),
+        trust_proxy,
+    )
+}
+
+fn mutation_rate_limit_response(
+    decision: Result<RateLimitDecision, String>,
+    source_ip: Option<std::net::IpAddr>,
+) -> Option<web::HttpResponse> {
+    match decision {
+        Ok(RateLimitDecision::Allowed) => None,
+        Ok(RateLimitDecision::Throttled(limited)) => Some(
+            web::HttpResponse::TooManyRequests()
+                .header("retry-after", retry_after_header(limited.retry_after_secs))
+                .json(&json!({"error": "rate_limited"})),
+        ),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                source_ip = ?source_ip,
+                "migrated: shared mutation rate-limit consume failed"
+            );
+            Some(
+                web::HttpResponse::ServiceUnavailable()
+                    .header("retry-after", "1")
+                    .json(&json!({"error": "rate_limit_unavailable"})),
+            )
+        }
+    }
+}
+
+fn retry_after_header(seconds: f64) -> String {
+    if seconds.is_finite() {
+        format!("{:.0}", seconds.ceil().clamp(1.0, 3600.0))
+    } else {
+        "60".to_string()
+    }
+}
 
 fn auth_error_response(err: AuthError) -> web::HttpResponse {
     match err {
@@ -196,4 +279,3 @@ fn apply_error_response(err: ApplyRequestError) -> web::HttpResponse {
         "detail": err.to_string(),
     }))
 }
-

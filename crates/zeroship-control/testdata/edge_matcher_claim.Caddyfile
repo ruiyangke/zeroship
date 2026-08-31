@@ -58,10 +58,17 @@ http://auth.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 	}
 }
 
-# control.<domain> - creator control plane (app CRUD, deploy, environment,
-# secrets, and billing).
+# control.<domain> - shared creator API edge. The migration service owns the
+# complete /v1 namespace, including today's /v1/apps routes and a future
+# database-id re-key. Control declares no /v1 routes; deploy_scripts_gate.sh
+# enforces that collision boundary. The catch-all is the control plane.
 http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
-	reverse_proxy control:9090
+	handle /v1/* {
+		reverse_proxy migrate-server:9091
+	}
+	handle {
+		reverse_proxy control:9090
+	}
 }
 
 # console.<domain> - the creator console.

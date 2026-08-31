@@ -28,14 +28,17 @@ Cloudflare (terminates TLS)
   -> host:80  Caddy            deploy/ops/Caddyfile, host-based routing
        -> gateway:8000         creator apps, {app}.<domain>
        -> auth:9092            OIDC provider, auth.<domain>
-       # control:9090          STAGED, disabled until security prerequisites
-  host:9090 -> control:9090    LOOPBACK override, SSH fallback only
+       -> control:9090         control.<domain> catch-all
+       -> migrate-server:9091  control.<domain>/v1/*
+  host:9090 -> control:9090    optional LOOPBACK override, SSH fallback
+  host:9091 -> migrate-server  LOOPBACK publish, operator access only
 ```
 
 Every base host publication except Caddy's `:80` binds to loopback. Control has
-no host publication in the base file. Caddy reaches gateway and auth by compose
-service name over the internal network, so publishing their ports would only
-add a second entrance that bypasses the edge (and therefore bypasses TLS).
+no host publication in the base file. Caddy reaches gateway, auth, control, and
+migrate-server by compose service name over the internal network, so publishing
+their raw ports would only add a second entrance that bypasses the edge (and
+therefore bypasses TLS).
 Nothing enforces this: `tests/compose_port_exposure_gate.sh` was DELETED on
 2026-08-21. Check the compose file directly.
 
@@ -254,6 +257,25 @@ can reach it; every protected route still requires the generated control-key or
 creator authentication. If an operator also needs a raw port for an SSH tunnel,
 bind it to loopback with a **server-only** override:
 
+`control.<domain>` has two edge-owned upstreams. Route `/v1/*`
+directly to `zeroship-migrate-server` on port 9091, then route every other path
+to `zeroship-control` on port 9090. The tracked Compose deployment implements
+this ordering in `deploy/ops/Caddyfile`. Kubernetes Ingress, ALB, nginx,
+Cloudflare Worker, and every other production edge must reproduce the same path
+rule before its control catch-all. Do not proxy or redirect migrations through
+control: `zeroship migrate` reuses the control URL, but the edge selects
+migrate-server directly.
+
+The complete namespace matcher includes the current
+`/v1/apps/{app_id}/migrations/apply` route and remains valid if that route is
+later re-keyed by database id. Control must not declare a `/v1` route;
+`tests/deploy_scripts_gate.sh` enforces that collision boundary.
+
+Verify a migration through the public ingress and inspect both the HTTP response
+and `applied_versions`. A successful idempotent request can write a
+`zeroship.app_schema_applies` row with `applied_versions = []`, so a fresh ledger
+row alone does not prove that DDL ran.
+
 ```yaml
 # /opt/zeroship-deploy/compose/docker-compose.override.yml
 services:
@@ -271,8 +293,8 @@ ssh -L 9090:127.0.0.1:9090 root@<host>
 zeroship deploy ./dist/app.zship --app=<uuid> --control=http://127.0.0.1:9090 --token=<PAT>
 ```
 
-After BOTH prerequisites land, remove this loopback override, uncomment the
-staged Caddy block, and deploy directly without SSH:
+The public Caddy block is already active. Deploy directly without SSH when the
+edge is the intended entrance:
 
 ```bash
 zeroship deploy ./dist/app.zship --app=<uuid> \
@@ -398,16 +420,19 @@ starting the stack; never copy one value into the other slot.
 
 ## Deploying a creator app
 
-`zeroship deploy` needs the control plane, which is bound to loopback with no
-Caddy route -- so from a dev machine it is unreachable, by design. Do not
-publish it to fix that. Forward a port over the SSH you already have:
+`zeroship deploy` reaches control through `control.<domain>`. When the public
+edge is unavailable, the helper below opens separate loopback SSH forwards to
+raw control for deploy and raw migrate-server for apply. It passes each URL
+through the CLI's existing `--control` argument; it does not add a second
+project setting or endpoint flag:
 
 ```bash
 deploy/scripts/deploy-app.sh --host root@<host> --app <app-id> \
   --dir examples/db-todos --probe https://<app>.<domain>
 ```
 
-The forward is torn down by PID from a trap. If you write your own, note that
+The forwards share one SSH process and are torn down by PID from a trap. If you
+write your own, note that
 `ControlMaster auto` in `~/.ssh/config` makes a backgrounded `ssh -L` hand the
 forward to the mux master and exit immediately: the pid you captured is already
 dead, your kill is a no-op, and the port outlives the script by `ControlPersist`
@@ -442,7 +467,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: auth.<domain>' \
 curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: auth.<domain>' \
   http://127.0.0.1/login                                       # 200
 
-# control, loopback only. /readyz (not /healthz) is the one worth curling
+# raw control port, loopback only. /readyz (not /healthz) is worth curling
 # here: it answers 200 only once control can reach Postgres, so a 503 tells
 # you the container is up and the database is not. /healthz is a constant
 # 200 and only proves the process is alive.

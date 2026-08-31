@@ -381,11 +381,6 @@ impl ServiceEndpoint {
 pub mod endpoints {
     use super::ServiceEndpoint;
 
-    pub const MIGRATE_SERVER_APPLY_MIGRATIONS: ServiceEndpoint = ServiceEndpoint::new(
-        "migrate-server",
-        "POST",
-        "/v1/apps/{app_id}/migrations/apply",
-    );
     pub const GATEWAY_BACKCHANNEL_LOGOUT: ServiceEndpoint =
         ServiceEndpoint::new("gateway", "POST", "/oidc/backchannel-logout");
     pub const GATEWAY_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
@@ -466,8 +461,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/control"),
                 &[
-                    // The migration service also requires delegated creator AppsDeploy.
-                    endpoints::MIGRATE_SERVER_APPLY_MIGRATIONS,
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
                     endpoints::WORKER_APP_LOGS,
                 ],

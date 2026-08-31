@@ -8,9 +8,10 @@
 //! The choice is no longer "approval path vs authz path", it is "authz path vs
 //! nowhere".
 //!
-//! What that header was protecting survives: [`ensure_platform_creator_grants`]
-//! is guarded on the `identity_links` marker, so the write is attempted once
-//! per principal and the hot path settles into a pure read.
+//! What that header was protecting survives in
+//! [`zeroship_authn::platform_cli::materialize_default_grants`], guarded on the
+//! `identity_links` marker so the write is attempted once per principal and
+//! the hot path settles into a pure read.
 //!
 //! Supabase provisioning is untouched and still happens at device approval.
 
@@ -22,7 +23,7 @@ use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
-use zeroship_core::device_grant::{PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_PROVIDER};
+use zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES;
 
 const DEFAULT_SUPABASE_EMAIL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 // Device-provisioned creators need apps:write for deploy auto-create and
@@ -60,74 +61,6 @@ fn source_chain(err: &dyn StdError) -> Option<String> {
         cur = e.source();
     }
     (!out.is_empty()).then_some(out)
-}
-
-/// Seed the default creator grants for a principal the platform OP already
-/// owns, once.
-///
-/// The GoTrue arm gets its grants through [`provision_or_link`], which seeds
-/// them for a principal it just created. A PLATFORM principal has no such
-/// moment: `zeroship.users` rows are written by the auth service
-/// (`crates/auth/src/store/users.rs`, `crates/auth/src/identity/linker.rs`),
-/// which has SELECT but no write privilege on `zeroship.principal_grants`.
-/// Auth uses that read to cap platform-token issuance independently, while
-/// grants.ts reserves grant mutation for `zeroship_control`. So a creator who
-/// signed up through the platform OP reached device approval with an EMPTY
-/// grant set, `deploy_scopes_for_principal` intersected to nothing, and the
-/// deploy token minted with `scope: ""` for a `zeroship deploy` that then 403s.
-///
-/// The `identity_links` row is the marker, not a count of existing grants: a
-/// principal whose grants an operator has REVOKED must not have them restored
-/// by logging in again, and "revoked all defaults" is indistinguishable from
-/// "never provisioned" if you only look at `principal_grants`.
-///
-/// The insert is guarded on the principal having NO link at all, which keeps
-/// the row a true statement rather than just a flag. `provider = 'platform'`
-/// with `provider_subject = principal_id` says "the platform OP's subject for
-/// this principal is its own id", which is exactly what the OP mints
-/// (`issue_principal_access_token` sets `sub` to the principal id) - but only
-/// for a principal that IS platform-native. A principal that arrived through
-/// GoTrue already carries a `provider = 'supabase'` link and got its grants
-/// from [`provision_or_link`] at approval time, so stamping a second,
-/// contradictory link on it would be a false claim about where it came from.
-///
-/// # Errors
-///
-/// Returns [`IdentityBridgeError::Database`] on PG failure.
-pub async fn ensure_platform_creator_grants(
-    pg: &(impl compio_postgres::GenericClient + ?Sized),
-    principal_id: Uuid,
-) -> Result<(), IdentityBridgeError> {
-    let provider_subject = principal_id.to_string();
-    let linked = pg
-        .query_opt(
-            "INSERT INTO zeroship.identity_links \
-                (principal_id, provider, provider_subject, email) \
-             SELECT $1, $2, $3, u.email::text \
-             FROM zeroship.users u \
-             WHERE u.id = $1 \
-               AND NOT EXISTS ( \
-                 SELECT 1 FROM zeroship.identity_links il \
-                 WHERE il.principal_id = $1 \
-               ) \
-             ON CONFLICT (provider, provider_subject) DO NOTHING \
-             RETURNING principal_id",
-            &[&principal_id, &PLATFORM_PROVIDER, &provider_subject],
-        )
-        .await?;
-    if linked.is_none() {
-        return Ok(());
-    }
-    for grant in PLATFORM_CLI_ISSUABLE_SCOPES {
-        pg.execute(
-            "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
-             VALUES ($1, $2) \
-             ON CONFLICT (principal_id, grant_name) DO NOTHING",
-            &[&principal_id, &grant],
-        )
-        .await?;
-    }
-    Ok(())
 }
 
 /// Link a verified provider subject to a platform principal, creating one when

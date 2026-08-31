@@ -32,7 +32,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password, verification};
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
@@ -134,7 +134,7 @@ pub async fn post(
     //    global bucket). Matches link.rs and the audit RequestContext.
     let ip = crate::headers::client_ip(&req);
     let signup_ip_key = format!("signup_ip:{ip}");
-    match ratelimit::consume_or_throttle(db.as_ref(), &signup_ip_key, Bucket::SIGNUP_IP).await {
+    match rate_limit::consume(db.as_ref(), &signup_ip_key, Quota::SIGNUP_IP).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
             audit::emit(

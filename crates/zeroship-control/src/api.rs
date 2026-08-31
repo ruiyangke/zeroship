@@ -592,7 +592,7 @@ pub async fn deploy(
     if has_legacy_deploy_migration_query(req.query_string()) {
         return web::HttpResponse::BadRequest().json(&serde_json::json!({
             "error": "migration_approval_removed",
-            "detail": "deploy no longer applies migrations; use the migration service /v1/apps/{id}/migrations/apply",
+            "detail": "deploy no longer applies migrations; run zeroship migrate against /v1/apps/{id}/migrations/apply",
         }));
     }
 

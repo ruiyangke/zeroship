@@ -35,7 +35,6 @@ pub mod identity_bridge;
 pub mod internal;
 pub mod invoice_payments;
 pub mod metering;
-pub mod migrations_api;
 pub mod egress_rules;
 pub mod notify;
 pub mod oauth_grants_handlers;
@@ -45,7 +44,6 @@ pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
 pub mod proration;
-pub mod rate_limit;
 pub mod refund;
 pub mod registry;
 pub mod reserved_names;
@@ -97,9 +95,9 @@ use zeroship_bundle::{BlobStore, WorkflowBlobStore};
 use zeroship_stream::{StreamConfig, StreamError, StreamRegistry, StreamTransport};
 
 pub use env_store::EnvStore;
-pub use rate_limit::{Quota, RateLimiter};
 pub use registry::Registry;
 pub use stripe_store::StripeStore;
+pub use zeroship_authn::rate_limit::{Quota, RateLimiter};
 
 // Trusted first-party OAuth client resolution lives in `zeroship-core` so it
 // can be shared without a control → core cycle. Re-exported here so control's
@@ -495,12 +493,6 @@ pub struct AppState {
     /// claimed runs through the spend/account-gated edge before they reach a
     /// worker replay host.
     pub gateway_url: String,
-    /// Migration-service base URL. `POST /api/apps/{id}/migrations/apply`
-    /// forwards the creator's request here after authorizing it. Internal by
-    /// construction: `migrated` holds the superuser provisioning DSN and binds
-    /// loopback everywhere we ship it, so this hop is the only creator-reachable
-    /// route to the migration service.
-    pub migrate_server_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Shared secret for worker admin endpoints.

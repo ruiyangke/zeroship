@@ -48,7 +48,8 @@ use ntex::web::{
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
-use crate::store::{ratelimit, relay};
+use crate::store::relay;
+use zeroship_authn::rate_limit::{self, Quota};
 use zeroship_mailer::bounce::{bounce_type_is_permanent, verify_basic_auth, PostmarkEvent};
 use zeroship_mailer::forward::{build_bounce, build_forward, BounceReason};
 use zeroship_mailer::inbound::{normalize_alias, InboundMessage, RELAY_MAX_HOPS, SPAM_SCORE_THRESHOLD};
@@ -558,11 +559,13 @@ pub async fn relay_inbound(
     //    BOOL (it does not itself produce a 429); we branch on `consumed`.
     let alias_key = format!("relay:alias:{alias}");
     let app_key = format!("relay:app:{}", target.app_client_id);
-    let alias_ok = match ratelimit::consume(
+    let alias_ok = match rate_limit::consume_state(
         db.as_ref(),
         &alias_key,
-        RELAY_ALIAS_CAPACITY,
-        RELAY_ALIAS_REFILL_PER_SEC,
+        Quota {
+            capacity: RELAY_ALIAS_CAPACITY,
+            refill_per_sec: RELAY_ALIAS_REFILL_PER_SEC,
+        },
     )
     .await
     {
@@ -572,11 +575,13 @@ pub async fn relay_inbound(
             return HttpResponse::ServiceUnavailable().finish();
         }
     };
-    let app_ok = match ratelimit::consume(
+    let app_ok = match rate_limit::consume_state(
         db.as_ref(),
         &app_key,
-        RELAY_APP_CAPACITY,
-        RELAY_APP_REFILL_PER_SEC,
+        Quota {
+            capacity: RELAY_APP_CAPACITY,
+            refill_per_sec: RELAY_APP_REFILL_PER_SEC,
+        },
     )
     .await
     {
@@ -769,8 +774,17 @@ async fn bump_abuse_streak(db: &compio_postgres::Client, alias: &str) -> f64 {
     // so (capacity - tokens) is the count of over-limit windows since reset.
     const ABUSE_CAP: f64 = 1_000_000.0;
     let key = format!("relay:abuse:{alias}");
-    match ratelimit::consume(db, &key, ABUSE_CAP, 0.0).await {
-        Ok(r) => ABUSE_CAP - r.state.tokens,
+    match rate_limit::consume_state(
+        db,
+        &key,
+        Quota {
+            capacity: ABUSE_CAP,
+            refill_per_sec: 0.0,
+        },
+    )
+    .await
+    {
+        Ok(result) => ABUSE_CAP - result.remaining_tokens,
         Err(e) => {
             tracing::error!(error = %e, "relay-inbound: abuse-streak bump error");
             0.0

@@ -30,7 +30,7 @@ use crate::csrf;
 use crate::headers;
 use crate::identity::eligibility;
 use crate::oidc::device_token::{self, DeviceApproval};
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{DevicePage, DeviceScopeView};
@@ -285,22 +285,22 @@ async fn rate_limit_failed_user_code_attempt(
     let ip = headers::client_ip(req);
     if let Some(session) = session {
         let key = format!("device:user_ip:{}:{ip}", session.user_id);
-        if let Some(resp) = consume_failed_attempt_bucket(db, &key, Bucket::LOGIN_EIP).await
+        if let Some(resp) = consume_failed_attempt_bucket(db, &key, Quota::LOGIN_EIP).await
         {
             return Some(resp);
         }
     }
 
     let key = format!("device:ip:{ip}");
-    consume_failed_attempt_bucket(db, &key, Bucket::LOGIN_IP).await
+    consume_failed_attempt_bucket(db, &key, Quota::LOGIN_IP).await
 }
 
 async fn consume_failed_attempt_bucket(
     db: &compio_postgres::Client,
     key: &str,
-    bucket: Bucket,
+    bucket: Quota,
 ) -> Option<HttpResponse> {
-    match ratelimit::consume(db, key, bucket).await {
+    match rate_limit::consume(db, key, bucket).await {
         Ok(RateLimitDecision::Allowed) => None,
         Ok(RateLimitDecision::Throttled(_)) => Some(render_form(
             "",

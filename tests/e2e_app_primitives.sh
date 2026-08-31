@@ -201,7 +201,6 @@ e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" \
-  --migrate-server-url "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -213,8 +212,8 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pas
 # step in the harness, not a defect in the app or the runtime, and no amount of
 # re-reading the worker log was going to say so - the error it prints
 # (`role "app_..._role" does not exist`) names a role whose only producer is
-# this service. It takes no signing key of its own: `zeroship migrate` posts to
-# control, which authorizes the caller's bearer and forwards the apply.
+# this service. It takes no signing key of its own: the service verifies the
+# creator's bearer and authorizes the apply itself.
 "$BIN/zeroship-migrate-server" --port $ZEROSHIP_MIGRATE_SERVER_PORT \
   --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 &
@@ -369,14 +368,14 @@ fi
 
 # THE STEP THIS HARNESS WAS MISSING. Deploy does not apply migrations, so
 # without this the app runs against a schema that does not exist and every
-# env.db arm below fails on the absent per-app role. Driven through the CLI and
-# the control plane, exactly as a creator drives it.
+# env.db arm below fails on the absent per-app role. This harness has no edge,
+# so it drives the CLI directly against migrate-server's loopback URL.
 IR_JSON="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 [ -f "$IR_JSON" ] || { echo "missing $IR_JSON — run: pnpm gen-types"; exit 2; }
 MIG="$("$BIN/zeroship" migrate "$IR_JSON" --app="$APP_ID" \
-  --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
+  --control="http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 if grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG"; then
-  pass "zeroship migrate applied db-todos' schema through control ($(head -c 60 <<<"$MIG"))"
+  pass "zeroship migrate applied db-todos' schema through migrate-server ($(head -c 60 <<<"$MIG"))"
 else
   fail "zeroship migrate failed: $MIG"
   tail -20 "$WORK/migrated.log"
