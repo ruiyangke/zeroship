@@ -1,7 +1,7 @@
 //! Live-Postgres integration tests for the per-app native OAuth client
 //! lifecycle. These tests exercise the authoritative
 //! `zeroship.oauth_clients` + `zeroship.app_oauth_clients` store, scope
-//! registry, route exposure, and delete cascade without any remote
+//! registry, route exposure, and archive retention without any remote
 //! OAuth-admin dependency.
 
 use std::sync::Arc;
@@ -10,9 +10,7 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, ScopeDef};
 use zeroship_control::app_oauth_client::{self, client_id_for_app, redirect_uris_for_hosts};
-use zeroship_control::{
-    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
-};
+use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
 use zeroship_core::config::OriginScheme;
 
 use crate::common;
@@ -271,7 +269,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     assert_eq!(preserved.len(), 4, "ensure_app_client merges existing URIs");
     assert!(preserved.iter().any(|uri| uri.contains(&custom)));
 
-    registry.delete_app(&app_id).await.expect("delete app");
+    registry.archive_app(&app_id).await.expect("archive app");
 
     // Teardown: `raw`, `conn`, and `registry` each hold a Postgres connection,
     // and locals are dropped only after the body returns - by which point the
@@ -348,7 +346,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
 }
 
 #[compio::test]
-async fn appstate_origin_scheme_provisions_urls_then_purge_deletes_oauth_rows() {
+async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_rows() {
     let url = db_url();
 
     let app_base_domain = "zeroship.localhost";
@@ -388,10 +386,13 @@ async fn appstate_origin_scheme_provisions_urls_then_purge_deletes_oauth_rows() 
     );
     assert_eq!(count_oauth_client(&state.control_pg, &client_id).await, 1);
 
-    assert!(api::purge_app(&state, &app_id)
+    state
+        .registry
+        .archive_app(&app_id)
         .await
-        .expect("purge app"));
-    assert_eq!(count_oauth_client(&state.control_pg, &client_id).await, 0);
+        .expect("archive app")
+        .expect("app exists");
+    assert_eq!(count_oauth_client(&state.control_pg, &client_id).await, 1);
     let ext_count: i64 = state
         .control_pg
         .query(
@@ -401,7 +402,19 @@ async fn appstate_origin_scheme_provisions_urls_then_purge_deletes_oauth_rows() 
         .await
         .expect("count app_oauth_clients")[0]
         .get("n");
-    assert_eq!(ext_count, 0, "app_oauth_clients row cascaded with app delete");
+    assert_eq!(ext_count, 1, "archive retains the per-app OAuth binding");
+    assert!(
+        !state.registry.get_routes().await.expect("routes").contains_key(&app_id),
+        "archive removes the app from the gateway projection"
+    );
+
+    state
+        .registry
+        .unarchive_app(&app_id)
+        .await
+        .expect("restore app")
+        .expect("app exists");
+    assert!(state.registry.get_routes().await.expect("routes").contains_key(&app_id));
 
     drop(state);
     common::drain_pg().await;

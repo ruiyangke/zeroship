@@ -699,13 +699,16 @@ async fn active_deploy_for_workflow<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
+    ensure_app_workflows_enabled(conn, app_id).await?;
     let rows = conn
         .query(
-            "SELECT id, manifest_json \
-               FROM zeroship.app_deploys \
-              WHERE app_id = $1 \
-                AND activated_at IS NOT NULL \
-              ORDER BY activated_at DESC, created_at DESC, id DESC \
+            "SELECT d.id, d.manifest_json \
+               FROM zeroship.app_deploys d \
+               JOIN zeroship.apps app ON app.id = d.app_id \
+              WHERE d.app_id = $1 \
+                AND app.archived_at IS NULL \
+                AND d.activated_at IS NOT NULL \
+              ORDER BY d.activated_at DESC, d.created_at DESC, d.id DESC \
               LIMIT 1",
             &[app_id],
         )
@@ -735,13 +738,16 @@ async fn active_deploy_id_for_app<C>(conn: &C, app_id: &Uuid) -> Result<String, 
 where
     C: compio_postgres::GenericClient + Sync,
 {
+    ensure_app_workflows_enabled(conn, app_id).await?;
     let rows = conn
         .query(
-            "SELECT id \
-               FROM zeroship.app_deploys \
-              WHERE app_id = $1 \
-                AND activated_at IS NOT NULL \
-              ORDER BY activated_at DESC, created_at DESC, id DESC \
+            "SELECT d.id \
+               FROM zeroship.app_deploys d \
+               JOIN zeroship.apps app ON app.id = d.app_id \
+              WHERE d.app_id = $1 \
+                AND app.archived_at IS NULL \
+                AND d.activated_at IS NOT NULL \
+              ORDER BY d.activated_at DESC, d.created_at DESC, d.id DESC \
               LIMIT 1",
             &[app_id],
         )
@@ -2052,6 +2058,9 @@ pub async fn signal_run(
         Ok(tx) => tx,
         Err(e) => return workflow_pg_error(e).response(),
     };
+    if let Err(e) = ensure_app_workflows_enabled(&tx, &app_id).await {
+        return e.response();
+    }
     let tables = match provision_workflow_journal(&tx, &app_id).await {
         Ok(tables) => tables,
         Err(e) => return e.response(),
@@ -2165,6 +2174,7 @@ async fn create_run_signal_token_inner(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
     let run_sql = format!(
         "SELECT state, signal_epoch \
@@ -2430,6 +2440,7 @@ async fn deliver_ingress_run_signal(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
     let payload_journal_bytes = pg::json_column_size(&tx, payload)
         .await
@@ -2666,6 +2677,7 @@ async fn restart_run_inner(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
 
     tx.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&run_id])
@@ -2938,6 +2950,11 @@ async fn control_transition(
         Ok(tx) => tx,
         Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
     };
+    if op == "resume" {
+        if let Err(e) = ensure_app_workflows_enabled(&tx, &app_id).await {
+            return e.response();
+        }
+    }
     let tables = match provision_workflow_journal(&tx, &app_id).await {
         Ok(tables) => tables,
         Err(e) => return e.response(),

@@ -256,7 +256,7 @@ async fn deploy_round_trip() {
         row.deploy_hash.as_deref(),
         Some(success2.deploy_hash.as_str())
     );
-    registry.delete_app(&app_id2).await.ok();
+    registry.archive_app(&app_id2).await.ok();
 
     let _ = std::fs::remove_dir_all(&root);
 

@@ -497,6 +497,7 @@ mod tests {
             client_id: String::new(),
             client_name: String::new(),
             scopes: vec![
+                "apps:archive".to_string(),
                 "apps:deploy".to_string(),
                 "apps:read".to_string(),
                 "apps:write".to_string(),
@@ -507,7 +508,7 @@ mod tests {
 
         let body = render_body(&pending);
         assert!(body.contains("Authorize the zeroship CLI"), "{body}");
-        for scope in ["apps:deploy", "apps:read", "apps:write"] {
+        for scope in ["apps:archive", "apps:deploy", "apps:read", "apps:write"] {
             assert!(body.contains(scope), "scope {scope} missing from {body}");
         }
         assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");

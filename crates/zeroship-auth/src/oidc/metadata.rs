@@ -124,6 +124,7 @@ pub fn discovery_metadata(issuer: &str) -> Value {
             "profile",
             "email",
             "offline_access",
+            "apps:archive",
             "apps:deploy",
             "apps:read",
             "apps:write",

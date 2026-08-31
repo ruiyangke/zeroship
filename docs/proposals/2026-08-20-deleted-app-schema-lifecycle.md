@@ -1,9 +1,9 @@
 # Who drops a deleted app's schemas, and when
 
 **Date:** 2026-08-20
-**Status:** PROPOSED. Section 7 is a recommendation, not a decision. Section 6
-carries one question the evidence does not answer and that the operator must
-settle before section 7 can be built.
+**Status:** SUPERSEDED 2026-08-31. The control-plane lifecycle is now archive,
+not hard delete. This document remains as the historical teardown analysis;
+teardown still requires a database-binding-keyed design in migrate-server.
 **Scope:** the lifecycle of an app's Postgres schemas, per-app role, and
 key-value/object residue after `DELETE /api/apps/{id}`. Explicitly NOT: the
 account-erasure lifecycle in `crates/zeroship-auth/src/cron/account_reaper.rs`, which is

@@ -11,6 +11,7 @@ pub struct AppRecord {
     pub name: String,
     pub plan_id: String,
     pub deploy_hash: Option<String>,
+    pub archived_at: Option<String>,
     #[serde(skip_serializing)]
     pub api_key: String,
     pub created_at: String,

@@ -1,18 +1,19 @@
-//! Orphaned-app reaper (ISS-12b): purges apps that the ISS-12 account-erase
+//! Orphaned-app reaper (ISS-12b): archives apps that the ISS-12 account-erase
 //! reaper left behind.
 //!
 //! When the auth service hard-deletes an erased user (`auth::cron::
 //! account_reaper`), the `zeroship.app_members` owner link cascade-deletes — but
 //! `zeroship.apps` has NO FK to `zeroship.users`, so the user's apps are left
 //! OWNER-LESS. Auth has no call path to control and no access to the blob store,
-//! so the orphaned apps row (plus its bundle/blobs in object storage and its
-//! native per-app OAuth rows) is never torn down. This control-side cron is the
-//! cleanup: it owns apps + the blob VFS + native per-app OAuth rows.
+//! so the orphaned app would otherwise keep serving. This control-side cron
+//! applies the same archive marker as the creator-facing lifecycle route.
+//! The erased owner cannot authorize a restore, so these rows and their names
+//! remain retained until a future operator-owned database lifecycle handles
+//! them. This reaper does not silently substitute privileged teardown.
 //!
 //! Each tick finds apps that are **owner-less AND NOT system AND past a short
-//! grace** and purges each via the shared [`crate::api::purge_app`] — the SAME
-//! teardown path the `DELETE /apps/{id}` handler uses (VFS delete → atomic DB
-//! cascade).
+//! grace** and archives it. Billing evidence, manifests, OAuth state, database
+//! schema, and database grants remain attached to the retained app row.
 //!
 //! ## The platform-console-safety guarantee
 //!
@@ -32,7 +33,6 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::api::{self, PurgeError};
 use crate::registry::RegistryError;
 use crate::AppState;
 
@@ -47,15 +47,15 @@ pub const DEFAULT_CHECK_SECS: u64 = 3600;
 const GRACE_INTERVAL: &str = "5 minutes";
 
 /// Outcome of one reaper [`tick`]: how many orphaned apps were found and how
-/// many were successfully purged. `found > purged` means one or more per-app
-/// purges failed and were skipped (logged, isolated — a single failure never
+/// many were successfully archived. `found > archived` means one or more per-app
+/// transitions failed and were skipped (logged, isolated - a single failure never
 /// stalls the rest).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReaperReport {
     /// Owner-less, non-system, past-grace apps detected this tick.
     pub found: usize,
-    /// Of those, successfully purged (DB row + blobs).
-    pub purged: usize,
+    /// Of those, successfully archived.
+    pub archived: usize,
 }
 
 /// Cron entry point. Loops forever; each iteration runs one [`tick`] then sleeps
@@ -74,7 +74,7 @@ pub async fn run(state: Arc<AppState>, check_secs: u64) {
             Ok(report) if report.found > 0 => {
                 tracing::info!(
                     found = report.found,
-                    purged = report.purged,
+                    archived = report.archived,
                     "control orphaned_app_reaper sweep completed"
                 );
             }
@@ -91,35 +91,27 @@ pub async fn run(state: Arc<AppState>, check_secs: u64) {
 /// single tick deterministically without sitting on the cron sleep.
 ///
 /// Detection: an app is a reap candidate iff it is NOT `system`, is past the
-/// grace window, and has NO `owner` member. Each candidate is purged via the
-/// shared [`api::purge_app`]; per-app failures are isolated (logged, counted as
-/// found-not-purged) so one bad app never stalls the rest.
+/// grace window, has NO `owner` member, and is not already archived. Per-app
+/// failures are isolated so one bad app never stalls the rest.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<ReaperReport, RegistryError> {
     let ids = find_orphaned_apps(state).await?;
     let mut report = ReaperReport {
         found: ids.len(),
-        purged: 0,
+        archived: 0,
     };
     for id in ids {
-        match api::purge_app(state, &id).await {
-            Ok(true) => report.purged += 1,
-            Ok(false) => {
-                // Already gone (raced with an explicit delete) — nothing to do.
+        match state.registry.archive_app(&id).await {
+            Ok(Some(_)) => report.archived += 1,
+            Ok(None) => {
+                // The row disappeared through operator SQL after detection.
                 tracing::debug!(app_id = %id, "orphaned_app_reaper: app already gone");
             }
-            Err(PurgeError::Manifests(e)) => {
+            Err(e) => {
                 tracing::error!(
                     app_id = %id,
                     error = %e,
-                    "orphaned_app_reaper: manifest delete failed; skipping (retried next tick)"
-                );
-            }
-            Err(PurgeError::Registry(e)) => {
-                tracing::error!(
-                    app_id = %id,
-                    error = %e,
-                    "orphaned_app_reaper: DB delete failed; skipping (retried next tick)"
+                    "orphaned_app_reaper: archive failed; skipping (retried next tick)"
                 );
             }
         }
@@ -134,6 +126,7 @@ async fn find_orphaned_apps(state: &AppState) -> Result<Vec<Uuid>, RegistryError
         .query(
             "SELECT a.id FROM zeroship.apps a \
              WHERE a.system = false \
+               AND a.archived_at IS NULL \
                AND a.created_at < NOW() - ($1::text)::interval \
                AND NOT EXISTS ( \
                    SELECT 1 FROM zeroship.app_members m \

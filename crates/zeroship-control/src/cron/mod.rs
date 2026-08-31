@@ -104,7 +104,7 @@ pub fn spawn_all_with_options(
     .detach();
 
     // Orphaned-app reaper — needs the full `AppState` (registry + blob VFS +
-    // native per-app OAuth rows) to run the shared `api::purge_app` teardown.
+    // app registry) to archive owner-less apps without erasing retained state.
     let reaper_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         orphaned_app_reaper::run(reaper_state, orphaned_app_reaper::DEFAULT_CHECK_SECS).await;

@@ -3,7 +3,7 @@
 #
 # Tests:
 #   1. Health checks (all components)
-#   2. App lifecycle (create, deploy, delete)
+#   2. App lifecycle (create, deploy, archive, unarchive)
 #   3. Identity verification (each app returns its own response)
 #   4. Routing consistency (CHWBL: same app → same worker)
 #   5. Isolation (app-01 state doesn't leak into app-02)
@@ -317,11 +317,32 @@ if [ -n "$APP_ID" ]; then
         fail "/internal/versions unreachable"
     fi
 
-    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
-        && printf '%s' "$HTTP_BODY" | grep -q "true"; then
-        pass "delete app"
+    if http_ok PUT "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/archive" -H "Authorization: Bearer $ADMIN_TOKEN" \
+        && printf '%s' "$HTTP_BODY" | jq -e --arg id "$APP_ID" '.id == $id and .archived_at != null' > /dev/null 2>&1; then
+        pass "archive app"
     else
-        fail "delete app (HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+        fail "archive app (HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+    fi
+
+    if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/internal/versions" -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" \
+        && printf '%s' "$HTTP_BODY" | jq -e ".[\"$APP_ID\"]" > /dev/null 2>&1; then
+        pass "archived app retained in internal versions for database lifecycle"
+    else
+        fail "archived app missing from retained /internal/versions entry: $(printf '%s' "$HTTP_BODY" | cut -c1-200)"
+    fi
+
+    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/archive" -H "Authorization: Bearer $ADMIN_TOKEN" \
+        && printf '%s' "$HTTP_BODY" | jq -e --arg id "$APP_ID" '.id == $id and .archived_at == null' > /dev/null 2>&1; then
+        pass "unarchive app"
+    else
+        fail "unarchive app (HTTP $HTTP_STATUS: $(printf '%s' "$HTTP_BODY" | cut -c1-200))"
+    fi
+
+    if http_ok GET "http://localhost:$ZEROSHIP_CONTROL_PORT/internal/versions" -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" \
+        && printf '%s' "$HTTP_BODY" | jq -e ".[\"$APP_ID\"]" > /dev/null 2>&1; then
+        pass "unarchived app remains in internal versions"
+    else
+        fail "unarchived app missing from /internal/versions: $(printf '%s' "$HTTP_BODY" | cut -c1-200)"
     fi
 fi
 
@@ -627,11 +648,11 @@ if [ -n "$EDGE_APP_ID" ]; then
     fi
     rm -f "$edge_zship"
 
-    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
-        && printf '%s' "$HTTP_BODY" | grep -q "true"; then
-        pass "9.4: cleanup edge-case app"
+    if http_ok PUT "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/archive" -H "Authorization: Bearer $ADMIN_TOKEN" \
+        && printf '%s' "$HTTP_BODY" | jq -e --arg id "$EDGE_APP_ID" '.id == $id and .archived_at != null' >/dev/null; then
+        pass "9.4: archive edge-case app"
     else
-        fail "9.4: cleanup edge-case app (HTTP $HTTP_STATUS)"
+        fail "9.4: archive edge-case app (HTTP $HTTP_STATUS)"
     fi
 fi
 

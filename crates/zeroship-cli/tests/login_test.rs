@@ -107,7 +107,7 @@ fn device_authorization_body(device_code: &str) -> String {
 
 fn op_token_body(refresh_token: &str) -> String {
     format!(
-        r#"{{"access_token":"{PRINCIPAL_JWT}","token_type":"Bearer","expires_in":900,"scope":"apps:deploy apps:read apps:write secrets:read offline_access","refresh_token":"{refresh_token}"}}"#
+        r#"{{"access_token":"{PRINCIPAL_JWT}","token_type":"Bearer","expires_in":900,"scope":"apps:archive apps:deploy apps:read apps:write secrets:read offline_access","refresh_token":"{refresh_token}"}}"#
     )
 }
 
@@ -171,6 +171,7 @@ fn device_grant_flow_polls_the_op_until_approved_and_stores_a_refresh_token() {
         "the CLI must ask for a refresh token; body={}",
         requests[1].body
     );
+    assert!(requests[1].body.contains("apps%3Aarchive"), "body={}", requests[1].body);
     assert!(requests[1].body.contains("apps%3Adeploy"), "body={}", requests[1].body);
     assert!(requests[1].body.contains("secrets%3Aread"), "body={}", requests[1].body);
     assert!(

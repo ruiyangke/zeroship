@@ -122,15 +122,30 @@ harness's platform OP and passes it on `--token=`.
    bad bearer is refused. Under `--provision=dev-provision` none of that runs:
    the registry row and blob store are written directly and the step says so.
 
-   **The chain as a whole does NOT pass, deliberately.** The last full four-service
-   run before the typed-id collation fix measured **126 passed, 15 failed, exit 1**
-   over nineteen steps and 141 outcomes with `--provision=deploy`. This fix retires
-   step 11's two collation reds without changing the outcome count, so the expected
-   result is **128 passed, 13 failed** until a new full-stack measurement replaces
-   this delta. The remaining declared reds are step 10's six scaffold comparisons
-   (#260), step 13's three log-visibility reds (#332/#333), and step 12's four
-   app-delete reds (#331). The corresponding pre-fix `--provision=dev-provision`
-   run was **122 passed, 15 failed**; its expected delta is **124 passed, 13 failed**.
+   **The chain as a whole does NOT pass, deliberately, and the totals below are a
+   BASELINE, not a current result.** Measured 2026-08-21, before both the typed-id
+   collation fix and the app-archive change: **126 passed, 15 failed, exit 1** over
+   nineteen steps and 141 outcomes with `--provision=deploy`. The same tree with
+   `--provision=dev-provision` scored **122 passed, 15 failed**, the four-outcome
+   difference being step 3's deploy assertions; the reds were identical.
+
+   The fifteen were the by-design reds the harness named and classified:
+
+   | step | reds | issue | status |
+   | --- | --- | --- | --- |
+   | 10 | six scaffold comparisons | #260 | still red |
+   | 11 | two collation reds | #255 | RETIRED by the typed-id collation fix |
+   | 12 | four app-delete reds | #331 | REPLACED by archive/unarchive assertions |
+   | 13 | three log-visibility reds | #332/#333 | still red |
+
+   **No total is stated for the current tree, on purpose.** Two changes landed
+   between that measurement and this one, and they are not the same kind. The
+   collation fix flips two reds to green and leaves the outcome count at 141. The
+   archive change REPLACES step 12's four delete assertions with different
+   assertions, so it moves the denominator as well as the numerator. Adding two
+   deltas to one baseline would produce a number nobody measured. Nine by-design
+   reds are expected to remain (step 10's six and step 13's three); the passed and
+   failed counts wait on a fresh full four-service run.
    The "9/9" this line carried was the count when only the first three steps
    existed, and it survived every step added since - stating "passes" about a
    script that exits non-zero. The 2026-08-11 figure that replaced it (67/8, twelve

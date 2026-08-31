@@ -52,6 +52,42 @@ test("request forwards cookies and mirrors set-cookie", async () => {
   assert.deepEqual(mirrored, ["session=token; HttpOnly"]);
 });
 
+test("apps archive and unarchive use the idempotent archive resource", async () => {
+  const requests: Request[] = [];
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return json({
+        id: "app_1",
+        name: "demo",
+        plan_id: "free",
+        deploy_hash: null,
+        archived_at:
+          request.method === "PUT" ? "2026-08-31T12:00:00Z" : null,
+        created_at: "2026-08-31T10:00:00Z",
+        updated_at: "2026-08-31T12:00:00Z",
+      });
+    },
+  });
+
+  const archived = await client.apps.archive("app 1");
+  const restored = await client.apps.unarchive("app 1");
+
+  assert.equal(archived.archived_at, "2026-08-31T12:00:00Z");
+  assert.equal(restored.archived_at, null);
+  assert.deepEqual(
+    requests.map(
+      (request) => `${request.method} ${new URL(request.url).pathname}`,
+    ),
+    [
+      "PUT /api/apps/app%201/archive",
+      "DELETE /api/apps/app%201/archive",
+    ],
+  );
+});
+
 test("env mutations treat 204 as void", async () => {
   const seen: string[] = [];
   const client = createControlClient({

@@ -1112,12 +1112,12 @@ is that the first live query pays the provisioning and startup latency.
 
 Closing the last subscription in a worker stops its consumer and drops that
 worker's slot. Other workers keep their independent slots and the shared
-publication. When an app is deleted, each worker notices it leaving the route
-feed, stops its local consumers, and drops the slots it owns for that app; the
-teardown is idempotent and retried when a removal poll fails. Deleting an app
-does NOT drop the publication, the app's schema, or its per-app role: those
-outlive the app today. See
-`docs/proposals/2026-08-20-deleted-app-schema-lifecycle.md`.
+publication. Archiving an app does not remove it from the worker version feed,
+because feed removal currently means database and CDC teardown. The gateway
+route and new workflow admission stop, but existing local subscriptions and
+their CDC resources are retained until they close normally. Archive also keeps
+the publication, app schema, and per-app role. Privileged database teardown is
+a separate migrate-server lifecycle and is not implemented by archive.
 
 ## Errors
 

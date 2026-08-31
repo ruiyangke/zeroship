@@ -1,6 +1,6 @@
 # @zeroship/mcp
 
-`@zeroship/mcp` is a stdio MCP server that exposes the zeroship control plane as agent-native tools. Agents can list, create, inspect, deploy, tail logs for, and delete zeroship apps without shelling out to `zeroship deploy`.
+`@zeroship/mcp` is a stdio MCP server that exposes the zeroship control plane as agent-native tools. Agents can list, create, inspect, deploy, tail logs for, archive, and restore zeroship apps without shelling out to `zeroship deploy`.
 
 The server wraps `@zeroship/control` and reads configuration from environment variables:
 
@@ -38,4 +38,5 @@ Make sure the process environment includes `ZEROSHIP_TOKEN`, and set `ZEROSHIP_C
 - `create_app` - create an app.
 - `deploy_app` - deploy a local `.zship`, creating a missing named app first.
 - `app_logs` - read recent worker logs for an app.
-- `delete_app` - delete an app by UUID or name.
+- `archive_app` - stop serving an app while preserving its history and data.
+- `restore_app` - restore an archived app by UUID or name.

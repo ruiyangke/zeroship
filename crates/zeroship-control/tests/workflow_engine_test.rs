@@ -18,6 +18,7 @@ mod common;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -1001,6 +1002,31 @@ struct BlockingDispatcher {
     releases: Arc<Mutex<VecDeque<oneshot::Receiver<()>>>>,
 }
 
+#[derive(Clone, Default)]
+struct CountingDispatcher {
+    dispatches: Arc<AtomicUsize>,
+}
+
+impl CountingDispatcher {
+    fn dispatches(&self) -> usize {
+        self.dispatches.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for CountingDispatcher {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        self.dispatches.fetch_add(1, Ordering::SeqCst);
+        DispatchOutcome::Completed(WorkflowAdvanceResponse::ack(
+            request.run_id.clone(),
+            vec![WorkflowAdvanceRegistration::preserve(
+                request.run_id,
+                request.app_id,
+            )],
+        ))
+    }
+}
+
 impl BlockingDispatcher {
     fn with_capacity(state: Arc<AppState>, n: usize) -> (Self, Vec<oneshot::Sender<()>>) {
         let mut receivers = VecDeque::new();
@@ -1918,6 +1944,163 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     // holds a Postgres connection, and locals are dropped only after the body
     // returns - by which point the runtime is gone and the socket can no
     // longer be closed. Drop them explicitly, then wait for the close to land.
+    drop(fx);
+    common::drain_pg().await;
+}
+
+#[compio::test]
+#[serial]
+async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
+    let Some(fx) = isolated_fixture("archived-timer").await else {
+        return;
+    };
+    workflow_engine::reset_inflight_dispatches_for_test();
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-timer").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("archive app");
+
+    let dispatcher = CountingDispatcher::default();
+    let fired = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(dispatcher.clone()),
+        config("archived-timer"),
+    )
+    .await
+    .expect("fire archived timer");
+    assert_eq!(fired, 1, "the scheduler should consume the stale timer once");
+    assert_eq!(
+        dispatcher.dispatches(),
+        0,
+        "an archived app must not reach the dispatch seam"
+    );
+    assert!(
+        fx.scheduler_store
+            .timer(&run_id)
+            .await
+            .expect("load archived timer")
+            .is_none(),
+        "archive should remove the scheduler timer, not the journal row"
+    );
+    assert!(
+        fx.scheduler_store
+            .inflight(&run_id)
+            .await
+            .expect("load archived inflight row")
+            .is_none(),
+        "archive should not leave an inflight retry behind"
+    );
+    let journal_state: String = fx
+        .pg
+        .query_one(
+            "SELECT state FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load archived journal row")
+        .get("state");
+    assert_eq!(journal_state, "queued", "archive must preserve workflow history");
+
+    let archived_reconcile = workflow_engine::reconcile_scheduler_from_journal(&fx.state)
+        .await
+        .expect("reconcile archived app");
+    assert_eq!(
+        archived_reconcile.registered, 0,
+        "reconciliation must not re-arm archived apps"
+    );
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = NULL WHERE id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("unarchive app");
+    let restored = workflow_engine::reconcile_scheduler_from_journal(&fx.state)
+        .await
+        .expect("reconcile unarchived app");
+    assert_eq!(restored.registered, 1);
+    assert!(
+        fx.scheduler_store
+            .timer(&run_id)
+            .await
+            .expect("load restored timer")
+            .is_some(),
+        "unarchive should rebuild the timer from the retained journal"
+    );
+
+    drop(fx);
+    common::drain_pg().await;
+}
+
+#[compio::test]
+async fn archived_app_is_rejected_at_the_worker_claim_boundary() {
+    let Some(fx) = isolated_fixture("archived-worker-claim").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-worker-claim").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("archive app before worker claim");
+
+    let outcome = claim_workflow_run_on_conn(
+        fx.pg.inner.as_ref(),
+        &WorkflowRunDispatchRequest {
+            run_id: run_id.clone(),
+            app_id,
+        },
+        &config("archived-worker-claim"),
+    )
+    .await
+    .expect("claim archived workflow run");
+    assert!(
+        matches!(outcome, WorkflowClaimOutcome::ClaimLost),
+        "the final worker boundary must reject an archived app"
+    );
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT claimed_by, dispatch_nonce FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load unclaimed archived run");
+    assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
+    assert_eq!(row.get::<_, Option<String>>("dispatch_nonce"), None);
+
     drop(fx);
     common::drain_pg().await;
 }
@@ -4554,6 +4737,236 @@ async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
     common::drain_pg().await;
 }
 
+#[compio::test]
+async fn archived_app_schedule_remains_due_until_unarchive() {
+    let Some(fx) = isolated_fixture("archived-schedule").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-schedule").await;
+    let planned = aligned_planned_instant(2, 1_000);
+    let schedule_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "archived-schedule",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        1_000,
+        planned,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("archive scheduled app");
+
+    let fired = workflow_schedules::tick_with_config(
+        &fx.state,
+        schedule_policy_config("archived-schedule"),
+    )
+    .await
+    .expect("sweep archived schedule");
+    assert_eq!(fired, 0);
+    assert_eq!(schedule_run_count(&fx, &schedule_id).await, 0);
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT next_fire_at, claimed_by FROM zeroship.workflow_schedules WHERE id = $1",
+            &[&schedule_id],
+        )
+        .await
+        .expect("load retained archived schedule");
+    assert_eq!(row.get::<_, DateTime<Utc>>("next_fire_at"), planned);
+    assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = NULL WHERE id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("unarchive scheduled app");
+    let restored = workflow_schedules::tick_with_config(
+        &fx.state,
+        schedule_policy_config("unarchived-schedule"),
+    )
+    .await
+    .expect("sweep unarchived schedule");
+    assert_eq!(restored, 1);
+    assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
+
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// Schedule fire, archive, and deploy use one global lock order: lifecycle
+/// advisory lock before either the app or schedule row. Holding the exclusive
+/// lifecycle lock below models archive immediately before its UPDATE. Schedule
+/// fire must hold no row while it waits: app-first deploy can otherwise wait on
+/// its schedule row while archive waits on deploy's app row, closing a
+/// three-transaction deadlock cycle.
+#[compio::test]
+async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
+    let Some(fx) = isolated_fixture("schedule-archive-lock-order").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-archive-lock-order").await;
+    let planned = aligned_planned_instant(2, 1_000);
+    let schedule_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "schedule-archive-lock-order",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        1_000,
+        planned,
+    )
+    .await;
+
+    let mut lifecycle_conn = pg(&fx.db_url).await;
+    let lifecycle_tx = lifecycle_conn
+        .transaction()
+        .await
+        .expect("begin archive-side transaction");
+    lifecycle_tx
+        .query_one(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
+             )",
+            &[&app_id],
+        )
+        .await
+        .expect("hold archive lifecycle lock");
+
+    let owner_id = format!("schedule-archive-lock-order-{}", Uuid::new_v4().simple());
+    let config = workflow_schedules::ScheduleSweepConfig {
+        batch_size: 1,
+        claim_ttl_ms: 5_000,
+        backfill_hard_max: 4,
+        owner_id: owner_id.clone(),
+    };
+    let state = Arc::clone(&fx.state);
+    let (done_tx, done_rx) = oneshot::channel();
+    compio::runtime::spawn(async move {
+        let _ = done_tx.send(workflow_schedules::tick_with_config(&state, config).await);
+    })
+    .detach();
+
+    let observer = pg(&fx.db_url).await;
+    let mut lifecycle_waiter = false;
+    for _ in 0..200 {
+        let row = observer
+            .query_one(
+                "SELECT EXISTS ( \
+                     SELECT 1 FROM pg_locks \
+                      WHERE locktype = 'advisory' \
+                        AND mode = 'ShareLock' \
+                        AND NOT granted \
+                        AND database = ( \
+                            SELECT oid FROM pg_database WHERE datname = current_database() \
+                        ) \
+                        AND classid = ( \
+                            (hashtextextended( \
+                                'zeroship:app-lifecycle:' || ($1::uuid)::text, 0 \
+                             ) >> 32) & 4294967295 \
+                        )::oid \
+                        AND objid = ( \
+                            hashtextextended( \
+                                'zeroship:app-lifecycle:' || ($1::uuid)::text, 0 \
+                            ) & 4294967295 \
+                        )::oid \
+                        AND objsubid = 1 \
+                 ) AS waiting",
+                &[&app_id],
+            )
+            .await
+            .expect("observe lifecycle lock waiter");
+        if row.get::<_, bool>("waiting") {
+            lifecycle_waiter = true;
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut app_probe_conn = pg(&fx.db_url).await;
+    let app_row_probe = if lifecycle_waiter {
+        let probe_tx = app_probe_conn.transaction().await.expect("begin app-row probe");
+        let result = probe_tx
+            .query(
+                "SELECT id FROM zeroship.apps WHERE id = $1 FOR UPDATE NOWAIT",
+                &[&app_id],
+            )
+            .await;
+        probe_tx.rollback().await.expect("rollback app-row probe");
+        Some(result)
+    } else {
+        None
+    };
+    let mut schedule_probe_conn = pg(&fx.db_url).await;
+    let schedule_row_probe = if lifecycle_waiter {
+        let probe_tx = schedule_probe_conn
+            .transaction()
+            .await
+            .expect("begin schedule-row probe");
+        let result = probe_tx
+            .query(
+                "SELECT id FROM zeroship.workflow_schedules WHERE id = $1 FOR UPDATE NOWAIT",
+                &[&schedule_id],
+            )
+            .await;
+        probe_tx.rollback().await.expect("rollback schedule-row probe");
+        Some(result)
+    } else {
+        None
+    };
+
+    lifecycle_tx
+        .commit()
+        .await
+        .expect("release archive lifecycle lock");
+
+    let fired = compio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .expect("schedule sweep remained blocked after lifecycle commit")
+        .expect("schedule sweep task dropped its result")
+        .expect("schedule sweep failed");
+    assert!(
+        lifecycle_waiter,
+        "schedule fire never reached the shared lifecycle lock"
+    );
+    let app_row_probe = app_row_probe.expect("app-row probe did not run");
+    assert!(
+        app_row_probe.is_ok(),
+        "schedule fire locked the joined app row before lifecycle: {}",
+        app_row_probe
+            .err()
+            .map_or_else(|| "unknown probe failure".to_string(), |error| error.to_string())
+    );
+    let schedule_row_probe = schedule_row_probe.expect("schedule-row probe did not run");
+    assert!(
+        schedule_row_probe.is_ok(),
+        "schedule fire locked its schedule row before lifecycle: {}",
+        schedule_row_probe
+            .err()
+            .map_or_else(|| "unknown probe failure".to_string(), |error| error.to_string())
+    );
+    assert_eq!(fired, 1);
+    assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
+
+    drop(observer);
+    drop(app_probe_conn);
+    drop(schedule_probe_conn);
+    drop(fx);
+    common::drain_pg().await;
+}
+
 /// No `compio::time::timeout` wrapper - see
 /// [`schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess`].
 #[compio::test]
@@ -6806,9 +7219,9 @@ async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
 /// NO PRODUCTION PATH REACHES THIS. `PgStore::provision` sends all five
 /// `CREATE TABLE`s as one simple-query batch, so a failure leaves none of them,
 /// and it creates `runs` first, so a hypothetical partial could only lack the
-/// LATER tables. Nothing in the tree drops a journal table - `delete_app`
-/// deletes `zeroship` rows and `drop_namespace` drops the app's DATA schema, the
-/// bare `<uuid>`, not `app_<uuid>` - and creator migrations cannot reach
+/// LATER tables. Nothing in the tree drops a journal table: archive retains the
+/// app and its journal, while `drop_namespace` addresses the app's DATA schema,
+/// the bare `<uuid>`, not `app_<uuid>`. Creator migrations cannot reach
 /// `app_<uuid>` at all. It is seeded by hand here because "the census cannot see
 /// this state" and "this state cannot happen" are different claims, and only the
 /// second one is the code's.
