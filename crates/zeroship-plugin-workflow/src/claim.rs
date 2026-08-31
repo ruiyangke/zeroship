@@ -79,6 +79,16 @@ pub async fn claim_workflow_run_on_conn<C>(
 where
     C: GenericClient + Sync,
 {
+    // This shared transaction lock closes the scheduler-check-to-worker-claim
+    // race. Archive takes the exclusive form before setting archived_at, so a
+    // claim either commits before archive returns or observes the marker.
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock_shared( \
+             hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
+         )",
+        &[&request.app_id],
+    )
+    .await?;
     let tables = WorkflowTables::for_app_id(&request.app_id);
     let select_sql = format!(
         "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
@@ -91,6 +101,7 @@ where
            JOIN zeroship.app_deploys d ON d.id = r.deploy_id \
           WHERE r.id = $1 \
             AND r.app_id = $2 \
+            AND app.archived_at IS NULL \
             AND app.workflows_enabled \
             AND plan.workflows_allowed \
             AND NOT plan.archived",

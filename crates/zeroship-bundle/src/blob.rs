@@ -151,15 +151,14 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError>;
 
     /// Delete every manifest object owned by `app_id` (the
-    /// `manifests/<app_id>/` keyspace). Called by control's `purge_app`
-    /// BEFORE the registry cascade, replacing the legacy VFS delete.
+    /// `manifests/<app_id>/` keyspace). App archive deliberately does not call
+    /// this: retained manifests are required for reversible restore.
     ///
     /// Idempotent: an empty/absent prefix, a repeated call after a full
     /// success, and objects disappearing between list and delete all return
     /// `Ok(())`. Content-addressed blobs under `blobs/` are NOT app-owned and
     /// are never deleted here (shared-blob GC is a separate design). A
-    /// partial failure after bounded retries is [`BlobError::Backend`], and
-    /// the caller aborts the purge before the DB cascade.
+    /// partial failure after bounded retries is [`BlobError::Backend`].
     async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError>;
 }
 

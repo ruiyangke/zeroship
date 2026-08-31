@@ -476,7 +476,7 @@ TOKEN_IAT="$(jwt_claim "$TOKEN" iat)"
 TOKEN_TTL=$((TOKEN_EXP - TOKEN_IAT))
 echo "  token: sub=$TOKEN_SUB aud=$TOKEN_AUD client_id=$TOKEN_CLIENT_ID scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
 REFRESH_TOKEN="$(jget '.refresh_token' < "$CREDS")"
-[ "$TOKEN_SCOPE" = "apps:deploy apps:read apps:write secrets:read offline_access" ] \
+[ "$TOKEN_SCOPE" = "apps:archive apps:deploy apps:read apps:write secrets:read offline_access" ] \
   && pass "the deploy token carries the creator scopes plus offline_access" \
   || fail "deploy token scope was '$TOKEN_SCOPE'"
 [ "$TOKEN_SUB" = "$USER_ID" ] && pass "the token's subject is the approving user" \
@@ -526,9 +526,9 @@ APP_ID="$(curl -sS -X POST "$CONTROL_URL/api/apps" -H "Authorization: Bearer $TO
 # every creator's first command. Control materializes the defaults on the way
 # through, which is what gives an operator rows to delete below.
 GRANTS_MATERIALIZED="$(psql_q "SELECT string_agg(grant_name, ',' ORDER BY grant_name) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
-[ "$GRANTS_MATERIALIZED" = "apps:deploy,apps:read,apps:write,secrets:read" ] \
+[ "$GRANTS_MATERIALIZED" = "apps:archive,apps:deploy,apps:read,apps:write,secrets:read" ] \
   && pass "control materialized the default CLI grants on first contact" \
-  || fail "expected the four default grants after the first control request, got '$GRANTS_MATERIALIZED'"
+  || fail "expected the five default grants after the first control request, got '$GRANTS_MATERIALIZED'"
 
 DEPLOY_OUT="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="$CONTROL_URL" 2>&1)"
 DEPLOY_RC=$?

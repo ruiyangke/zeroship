@@ -286,7 +286,7 @@ being duplicated into the shared crate.
 
 Section 4.1 as written would have capped EVERY OAuth token to
 `principal_grants`. That is wrong, and it would have broken more than it fixed:
-`PLATFORM_CLI_ISSUABLE_SCOPES` is four scopes, so once a principal is seeded,
+`PLATFORM_CLI_ISSUABLE_SCOPES` is five scopes, so once a principal is seeded,
 any token needing `env:write`, `billing:read`, `team:write` or `account:*` -
 the console's surface, not the CLI's - would be silently narrowed to nothing.
 The constant's own doc comment in `crates/core/src/device_grant.rs:55-58` says
@@ -298,13 +298,10 @@ is also the faithful restoration rather than a widening: the behaviour
 control's CLI device flow. Restoring exactly that and nothing more is the
 smaller and better-supported change.
 
-I caught this from an existing test rather than by reasoning (see 6.2 for the
-one I nearly did not catch):
-`user_without_admin_role_oauth_scope_does_not_grant_apps_delete` mints
-`apps:delete`, which is outside the CLI set, and would have started passing for
-the wrong reason - a 403 from an emptied policy instead of from the role check
-it exists to test. It now seeds that grant explicitly so the assertion still
-measures what its name claims.
+The archive lifecycle adds `apps:archive` to that CLI ceiling. The
+`viewer_role_cannot_use_granted_apps_archive_scope` test still seeds the grant
+explicitly so its 403 measures the app-member role check instead of depending
+on just-in-time default-grant materialization.
 
 ---
 

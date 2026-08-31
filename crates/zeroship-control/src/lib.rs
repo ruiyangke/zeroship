@@ -470,8 +470,9 @@ pub struct AppState {
     pub stripe_store: StripeStore,
     /// Content-addressed blob store. The SOLE deploy-artifact store: backs
     /// `.zship` ingestion (blobs + manifests) and is the SAME store the
-    /// gateway and worker read. App purge deletes the per-app manifest
-    /// keyspace via `BlobStore::delete_app_manifests`.
+    /// gateway and worker read. App archive preserves the per-app manifest
+    /// keyspace so unarchive can restore the retained live deploy without a
+    /// second upload. Database and blob teardown are separate lifecycles.
     pub blob_store: Arc<dyn BlobStore>,
     /// Content-addressed workflow output store. This is intentionally separate
     /// from deploy bundle blobs so workflow-output GC can never delete deploy

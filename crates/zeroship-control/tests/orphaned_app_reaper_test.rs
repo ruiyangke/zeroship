@@ -1,15 +1,15 @@
 //! Integration tests for ISS-12b: the control-side orphaned-app reaper that
-//! cleans up apps left owner-less by the ISS-12 account-erase reaper (auth).
+//! archives apps left owner-less by the ISS-12 account-erase reaper (auth).
 //!
 //! Why control owns this: when auth hard-deletes a user, `app_members` cascade-
 //! deletes the owner link, but `zeroship.apps` has no FK to users — so the app
-//! row (and its bundle/blobs in object storage) is never torn down. Auth has no
-//! call path to control and no access to the blob store, so cleanup lives here,
-//! where apps + the blob VFS + the native per-app OAuth client are owned.
+//! row can keep serving. Auth has no call path to control, so lifecycle cleanup
+//! lives here. Archive retains the app row, manifests, billing attribution, and
+//! database state.
 //!
 //! These run the REAL path: a real `Registry` (PG-backed), a real `LocalFs`
-//! VFS with a bundle written to disk, and the actual `cron::orphaned_app_reaper`
-//! tick + the shared `api::purge_app`. No shims.
+//! VFS with a bundle written to disk, and the actual
+//! `cron::orphaned_app_reaper` tick. No shims.
 //!
 //! All cases gate on a configured test database
 //! (`common::require_control_db`); an absent or unmigrated one REFUSES
@@ -20,11 +20,9 @@ use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
-use zeroship_bundle::{BlobError, BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::orphaned_app_reaper;
-use zeroship_control::{
-    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
-};
+use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
 
 use crate::common;
 
@@ -35,7 +33,7 @@ fn db_url() -> String {
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 // These tests all exercise the production sweep against the same live test
-// database. Serialize them so one test's sweep cannot purge another test's
+// database. Serialize them so one test's sweep cannot archive another test's
 // freshly inserted ownerless app before that test asserts its own report.
 static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -171,6 +169,27 @@ async fn app_exists(state: &AppState, id: &Uuid) -> bool {
     !rows.is_empty()
 }
 
+async fn app_is_archived(state: &AppState, id: &Uuid) -> bool {
+    state
+        .control_pg
+        .query(
+            "SELECT archived_at IS NOT NULL AS archived FROM zeroship.apps WHERE id = $1",
+            &[id],
+        )
+        .await
+        .expect("query app archive state")
+        .first()
+        .is_some_and(|row| row.get("archived"))
+}
+
+async fn cleanup_app_row(state: &AppState, id: &Uuid) {
+    state
+        .control_pg
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
+        .await
+        .expect("test cleanup app");
+}
+
 async fn seed_owner_user(state: &AppState) -> Uuid {
     let user_id = Uuid::new_v4();
     state
@@ -189,7 +208,7 @@ async fn seed_owner_user(state: &AppState) -> Uuid {
 }
 
 // ---------------------------------------------------------------------------
-// (a) owner-less app + a bundle in the VFS → reaper deletes BOTH
+// (a) owner-less app + a bundle in the VFS -> archive row, retain bundle
 // ---------------------------------------------------------------------------
 // REAPER_TEST_LOCK guards `Mutex<()>` - a pure test-serialization token,
 // not shared mutable data accessed across the await. compio::test runs
@@ -198,7 +217,7 @@ async fn seed_owner_user(state: &AppState) -> Uuid {
 // executor.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
-async fn reaper_deletes_ownerless_app_and_its_bundle() {
+async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "ownerless").await;
@@ -208,7 +227,7 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
     let name = format!("orphan-{}", &app_id.simple().to_string()[..12]);
     insert_app(state, &app_id, &name, false, "10 minutes").await;
 
-    // Write a manifest for this app so purge has an artifact to delete.
+    // Write a manifest for this app so archive retention is observable.
     state
         .blob_store
         .put_manifest(&app_id, "deployone", br#"{"v":1}"#)
@@ -221,22 +240,23 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
 
     let report = orphaned_app_reaper::tick(state).await.expect("reaper tick");
     assert!(
-        report.purged >= 1,
-        "reaper should report at least the one orphan purged, got {}",
-        report.purged
+        report.archived >= 1,
+        "reaper should report at least the one orphan archived, got {}",
+        report.archived
     );
 
     assert!(
-        !app_exists(state, &app_id).await,
-        "owner-less app row must be deleted"
+        app_exists(state, &app_id).await && app_is_archived(state, &app_id).await,
+        "owner-less app row must be retained and archived"
     );
     assert!(
-        matches!(
-            state.blob_store.get_manifest(&app_id, "deployone").await,
-            Err(BlobError::NotFound(_))
-        ),
-        "owner-less app manifests must be deleted from the blob store"
+        state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
+        "archive must retain the app's manifests"
     );
+    let retry = orphaned_app_reaper::tick(state).await.expect("retry reaper tick");
+    assert_eq!(retry.archived, 0, "an archived orphan is not selected again");
+
+    cleanup_app_row(state, &app_id).await;
 
     // Teardown: the fixture holds the only handle to this test's Postgres
     // connection, and locals are dropped only after the body returns - by which
@@ -249,7 +269,7 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
 // ---------------------------------------------------------------------------
 // (b) app WITH an owner member → untouched
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_leaves_owned_app_untouched() {
@@ -276,7 +296,7 @@ async fn reaper_leaves_owned_app_untouched() {
     );
 
     // cleanup
-    let _ = state.registry.delete_app(&app).await;
+    cleanup_app_row(state, &app).await;
     let _ = state
         .control_pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner])
@@ -289,7 +309,7 @@ async fn reaper_leaves_owned_app_untouched() {
 // ---------------------------------------------------------------------------
 // (c) THE CONSOLE-SAFETY TEST: system = true, owner-less → NEVER reaped
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_never_touches_system_app() {
@@ -313,7 +333,7 @@ async fn reaper_never_touches_system_app() {
     );
 
     // cleanup
-    let _ = state.registry.delete_app(&app_id).await;
+    cleanup_app_row(state, &app_id).await;
 
     drop(fx);
     common::drain_pg().await;
@@ -322,7 +342,7 @@ async fn reaper_never_touches_system_app() {
 // ---------------------------------------------------------------------------
 // (d) owner-less app YOUNGER than the grace → not yet reaped
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_respects_grace_window() {
@@ -344,19 +364,19 @@ async fn reaper_respects_grace_window() {
     );
 
     // cleanup
-    let _ = state.registry.delete_app(&app_id).await;
+    cleanup_app_row(state, &app_id).await;
 
     drop(fx);
     common::drain_pg().await;
 }
 
 // ---------------------------------------------------------------------------
-// (e) shared-path test: api::purge_app removes BOTH the DB row and the VFS blob
+// (e) direct archive is the same retained-state transition used by the reaper
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_deletes_ownerless_app_and_its_bundle` above.
+// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
-async fn purge_app_removes_db_row_and_vfs_blob() {
+async fn direct_archive_retains_db_row_and_vfs_blob() {
     let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "purge").await;
@@ -372,20 +392,23 @@ async fn purge_app_removes_db_row_and_vfs_blob() {
         .await
         .expect("put manifest");
 
-    let deleted = api::purge_app(state, &app_id).await.expect("purge_app");
-    assert!(deleted, "purge_app reports the DB row was deleted");
+    state
+        .registry
+        .archive_app(&app_id)
+        .await
+        .expect("archive app")
+        .expect("app exists");
 
     assert!(
-        !app_exists(state, &app_id).await,
-        "purge_app must delete the DB row"
+        app_exists(state, &app_id).await && app_is_archived(state, &app_id).await,
+        "archive retains the DB row"
     );
     assert!(
-        matches!(
-            state.blob_store.get_manifest(&app_id, "deployone").await,
-            Err(BlobError::NotFound(_))
-        ),
-        "purge_app must delete the app's manifests"
+        state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
+        "archive retains the app's manifests"
     );
+
+    cleanup_app_row(state, &app_id).await;
 
     drop(fx);
     common::drain_pg().await;

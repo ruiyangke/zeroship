@@ -222,11 +222,11 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-plugin-db/src/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
 | Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
 | WAL replication consumer | green | `Subscription.ready()` auto-start | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `wal_consumer.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | One slot per app per worker process; starts on first live subscription and stops on last close. |
-| Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close and app-delete teardown. |
+| Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close teardown. Archive retains the worker feed and does not request CDC teardown. |
 | Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | internal (SQL-readable) | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Admin-written append-only events in the per-app schema. |
 | Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
 | Mask drift audit log (__zeroship_audit_mask_drift) | 🟡 | internal (SQL-readable) | `crates/zeroship-plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Drift cron not scheduled. |
-| App namespace drop (drop_namespace) | 🟢 | internal (control-plane) | `crates/zeroship-plugin-db/src/drop_namespace.rs` | — | — | DROP SCHEMA CASCADE; PG-only. |
+| App namespace drop (drop_namespace) | &#x1F7E2; | internal library (no app-archive caller) | `crates/zeroship-plugin-db/src/drop_namespace.rs` | &mdash; | &mdash; | DROP SCHEMA CASCADE; PG-only. Archive never calls it; privileged database teardown belongs to zeroship-migrate-server. |
 | Dual-backend support (PG + SQLite) | 🟢 | internal (`DbService::new`) | `crates/zeroship-plugin-db/src/service.rs` | `docs/reference/sqlite-divergences.md` | `crates/zeroship-plugin-db/tests/sqlite_integration.rs` | URL-driven; the backend is selected once at composition. SQLite dev/test only. |
 | Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-plugin-db/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
@@ -536,7 +536,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 
 ## 10. Control plane (crates/control)
 
-The creator API server: app CRUD, deploy ingest, env/secrets, route and version feeds,
+The creator API server: app lifecycle, deploy ingest, env/secrets, route and version feeds,
 billing/Stripe Connect, Cedar authz, per-app OAuth client management,
 audit, and crons. There is no platform admin surface: the staff roles and their
 policies are deleted, and there is no super admin. It is a pure REST resource server (no OIDC RP of its own after R5); every
@@ -546,11 +546,11 @@ no second issuance authority.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| App CRUD — create/get/list/delete | 🟢 | POST/GET/DELETE /api/apps | `crates/zeroship-control/src/api.rs` | `docs/reference/control.md` | `crates/zeroship-control/tests/registry_schema_test.rs` | list scoped to ownership (C1 fix). |
+| App lifecycle - create/get/list/archive/unarchive | &#x1F7E2; | POST/GET /api/apps; PUT/DELETE /api/apps/{id}/archive | `crates/zeroship-control/src/api.rs` | `docs/reference/control.md` | `crates/zeroship-control/tests/archive_app_billing_history_test.rs` | Archive is reversible, keeps the unique name and retained state, removes the gateway route, and blocks workflow scheduling. Deploys may land while archived but stay unrouted until unarchive. The worker version feed is retained. |
 | Deploy ingest (.zship) | 🟢 | POST /api/apps/{id}/deploy | `crates/zeroship-control/src/api.rs`, `deploy.rs` | `docs/architecture/control-plane.md` | `crates/zeroship-control/tests/deploy_test.rs` | Scope validation before provisioning. |
 | Route feed for gateway | 🟢 | GET /internal/routes | `crates/zeroship-control/src/internal.rs`, `registry.rs` | `docs/architecture/control-plane.md` | — | Passthrough fallback on null manifest. |
 | Version feed for workers | 🟢 | GET /internal/versions, /internal/apps/{id} | `crates/zeroship-control/src/internal.rs`, `registry.rs` | `docs/architecture/control-plane.md` | — | env_version is lazy refetch trigger. |
-| Env feed for workers | 🟢 | GET /internal/apps/{id}/env | `crates/zeroship-control/src/internal.rs`, `env_store.rs` | `docs/architecture/control-plane.md` | `crates/zeroship-control/tests/env_store.rs` | 404 on deleted app. |
+| Env feed for workers | &#x1F7E2; | GET /internal/apps/{id}/env | `crates/zeroship-control/src/internal.rs`, `env_store.rs` | `docs/architecture/control-plane.md` | `crates/zeroship-control/tests/env_store.rs` | Archived apps remain in the worker version feed so archive cannot trigger database or CDC teardown. Retained env state is unchanged. |
 | Usage ingest from workers | 🟢 | POST /internal/usage | `crates/zeroship-control/src/internal.rs`, `registry.rs` | `docs/reference/billing-metering.md` | — | Upsert; positive deltas only. |
 | Usage read for creators | 🟢 | GET /api/apps/{id}/usage | `crates/zeroship-control/src/api.rs`, `registry.rs` | `docs/reference/billing-metering.md` | — | JSON by resource. |
 | Plan management | 🟢 | PUT /api/apps/{id}/plan | `crates/zeroship-control/src/api.rs`, `registry.rs` | `docs/reference/control.md` | — | Limits hardcoded in runtime_limits_for_plan. |

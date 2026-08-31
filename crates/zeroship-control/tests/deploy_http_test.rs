@@ -441,7 +441,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
 
     // Cleanup: drop the app row so reruns under the same DB don't
     // collect noise.
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 
     // Teardown: the service and the fixture both hold connections, and locals
@@ -636,7 +636,7 @@ async fn deploy_manifest_not_first_returns_400() {
         "deploy_tmp_dir must be empty after a rejected deploy",
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 
     drop(app);
@@ -731,7 +731,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
         "deploy_tmp_dir must be empty after a rejected deploy",
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 
     drop(app);
@@ -799,7 +799,7 @@ async fn deploy_noncolliding_scope_returns_200() {
         "deploy committed with a sha256 deploy_hash"
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 
     drop(app);
@@ -921,7 +921,7 @@ async fn deploy_rejects_legacy_migration_approval_query() {
         Some("migration_approval_removed")
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 
     drop(app);
@@ -971,7 +971,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
         "deploy must not create/apply the per-app schema from a legacy migration-bearing bundle"
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
 
     drop(app);
@@ -1333,7 +1333,7 @@ async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
         "the refused deploy must not be live in the projection the gateway reads",
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
     drop(app);
     drop(fx);
@@ -1375,7 +1375,7 @@ async fn deploy_matching_the_applied_descriptor_goes_live() {
         "the accepted deploy is live in the projection the gateway reads",
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
     drop(app);
     drop(fx);
@@ -1419,7 +1419,7 @@ async fn deploy_without_a_descriptor_is_refused_when_the_app_has_applied_schema(
         "a descriptor-less deploy over a schema'd app must not go live",
     );
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
     drop(app);
     drop(fx);
@@ -1491,7 +1491,7 @@ async fn deploy_rolling_back_to_a_previously_applied_descriptor_is_refused() {
     assert_eq!(status, StatusCode::OK, "expected 200, body: {body}");
     assert!(live_deploy_hash(&fx.state, &app_id).await.is_some());
 
-    let _ = fx.state.registry.delete_app(&app_id).await;
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
     drop(app);
     drop(fx);

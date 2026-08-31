@@ -122,12 +122,14 @@ harness's platform OP and passes it on `--token=`.
    bad bearer is refused. Under `--provision=dev-provision` none of that runs:
    the registry row and blob store are written directly and the step says so.
 
-   **The chain as a whole does NOT pass, deliberately.** Measured 2026-08-21 on a
-   four-service run at HEAD: **126 passed, 15 failed, exit 1** over nineteen steps,
-   141 outcomes, with `--provision=deploy`. The fifteen are the by-design reds the
-   harness names on every run and classifies against a declared set: step 10's six
-   scaffold comparisons (#260), step 11's two collation reds (#255), step 13's
-   three log-visibility reds (#332/#333) and step 12's four app-delete reds (#331).
+   **Pre-archive baseline.** Measured 2026-08-21 before the app lifecycle shape
+   changed: **126 passed, 15 failed, exit 1** over nineteen steps, 141 outcomes,
+   with `--provision=deploy`. The fifteen were the by-design reds the harness
+   named and classified: step 10's six scaffold comparisons (#260), step 11's
+   two collation reds (#255), step 13's three log-visibility reds (#332/#333),
+   and step 12's four app-delete reds (#331). Those four delete reds are the TDD
+   baseline replaced by the archive/unarchive assertions; do not treat these
+   historical totals as the current run result.
    The same tree with `--provision=dev-provision` scores **122 passed, 15 failed**;
    the four are step 3's deploy assertions, and the reds are identical.
    The "9/9" this line carried was the count when only the first three steps

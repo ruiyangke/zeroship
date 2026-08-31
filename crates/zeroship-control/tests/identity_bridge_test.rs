@@ -182,6 +182,7 @@ async fn first_login_creates_principal_link_and_default_grants() {
     assert_eq!(
         grants(&fx.conn, principal_id).await,
         vec![
+            "apps:archive".to_string(),
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
@@ -221,6 +222,7 @@ async fn idempotent_relogin_returns_same_principal_without_duplicate_rows() {
     assert_eq!(
         grants(&fx.conn, first).await,
         vec![
+            "apps:archive".to_string(),
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
@@ -286,6 +288,7 @@ async fn unverified_email_collision_creates_distinct_principal_not_victim_takeov
     assert_eq!(
         grants(&fx.conn, attacker).await,
         vec![
+            "apps:archive".to_string(),
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),
@@ -323,6 +326,7 @@ async fn concurrent_first_logins_for_same_subject_collapse_to_one_link() {
     assert_eq!(
         grants(&fx.conn, a).await,
         vec![
+            "apps:archive".to_string(),
             "apps:deploy".to_string(),
             "apps:read".to_string(),
             "apps:write".to_string(),

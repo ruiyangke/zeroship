@@ -48,7 +48,7 @@ fn action_cedar_ids_are_canonical() {
         (Action::AppsRead, "apps:read"),
         (Action::AppsWrite, "apps:write"),
         (Action::AppsDeploy, "apps:deploy"),
-        (Action::AppsDelete, "apps:delete"),
+        (Action::AppsArchive, "apps:archive"),
         (Action::DeploymentsRead, "deployments:read"),
         (Action::DeploymentsRollback, "deployments:rollback"),
         (Action::EnvRead, "env:read"),

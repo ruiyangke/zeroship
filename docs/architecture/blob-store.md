@@ -14,7 +14,7 @@ Current `BlobStore` methods:
 - `get_blob_to_file(hash, out, expected_size, max_bytes) -> Result<u64, BlobError>` — streams a blob into an already-open temp file while byte-verifying SHA-256; the gateway's hot-path refill primitive (no whole-object buffering)
 - `put_manifest(app_id, deploy_hash, json)`
 - `get_manifest(app_id, deploy_hash)`
-- `delete_app_manifests(app_id)` — deletes the app's `manifests/<app_id>/` keyspace (shared `blobs/` are untouched); used by control's `purge_app`
+- `delete_app_manifests(app_id)` - deletes the app's `manifests/<app_id>/` keyspace (shared `blobs/` are untouched); archive does not call it
 
 `PutOutcome` is part of the current contract. Ingest uses it to count fresh writes vs dedupe hits without a separate preflight call. There are no default trait methods: every backend implements every method.
 
@@ -42,6 +42,7 @@ Two shipping backends, selected per process by `--blob-store` / `ZEROSHIP_BLOB_S
 Important behavior:
 
 - Blob keys are global by hash. There is no per-app blob namespace, so identical bytes (a shared dependency, an unchanged asset across deploys) are stored once and deduped across every app.
+- App archive preserves both `manifests/<app_id>/` and the shared content-addressed blobs. Unarchive can therefore restore the retained live deploy without uploading it again. Database and blob teardown are separate lifecycle operations; app archive performs neither.
 - `put_blob_stream` re-hashes bytes while reading and rejects size/hash mismatches. On `S3BlobStore` it streams the single-pass reader through **multipart** in `PART_SIZE` (8 MiB) chunks while running a whole-object SHA-256 hasher, verifies `sha256(stream) == hash` BEFORE `complete_multipart` (aborting on mismatch so nothing is ever committed under the wrong key), and uses a single `PutObject` for objects below one part. This preserves the same content-addressing integrity guarantee `LocalDiskBlobStore` gives, across parts.
 - `LocalDiskBlobStore::local_path` is a cheap path computation; it does not check whether the file exists. `S3BlobStore::local_path` is always `None` — the gateway hot path uses the disk-cache refill below, not `local_path`.
 - Reads validate the stored bytes again (re-hash) and return `BlobError::HashMismatch` if content is corrupt. `get_blob_to_file` re-verifies SHA-256 on the way out before the caller publishes.
@@ -88,7 +89,7 @@ The control plane is not on the hot path for asset bytes.
 
 All three services build their store from the SAME `--blob-store` grammar via `zeroship_bundle::build_blob_store` (`StoreUrl::parse` → `LocalDiskBlobStore` or `S3BlobStore`), so control's deploy ingest writes through exactly the store gateway and worker read.
 
-- [crates/zeroship-control/src/main.rs](../../crates/zeroship-control/src/main.rs): builds the store; the deploy ingest writes blobs + manifests through it. There is no separate per-app `BundleStore`/VFS — `purge_app` deletes the app's manifest keyspace via `delete_app_manifests`.
+- [crates/zeroship-control/src/main.rs](../../crates/zeroship-control/src/main.rs): builds the store; the deploy ingest writes blobs + manifests through it. There is no separate per-app `BundleStore`/VFS. App archive only changes lifecycle state and deliberately leaves the manifest keyspace intact.
 - [crates/zeroship-gateway/src/main.rs](../../crates/zeroship-gateway/src/main.rs): builds the store plus memory/disk caches; refills the disk cache by streaming `get_blob_to_file`.
 - [crates/zeroship-worker/src/main.rs](../../crates/zeroship-worker/src/main.rs): builds the store.
 - [crates/zeroship-worker/src/sync.rs](../../crates/zeroship-worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
@@ -122,7 +123,7 @@ and a > part-size multipart `env.storage` round-trip is byte-compared.
 
 - No blob-serving API shaped like `GET /blobs/<hash>`
 - No blob-store-specific routing logic; URL/path/variant selection stays in the gateway
-- No shared-blob GC/refcounting: content-addressed blobs under `blobs/` are not app-owned and are not deleted on app purge
+- No shared-blob GC/refcounting: content-addressed blobs under `blobs/` are not app-owned and are not deleted on app archive
 
 ## Related docs
 

@@ -304,8 +304,8 @@ impl JournalledApp {
 /// `CREATE TABLE`s as one simple-query batch - one implicit transaction, so a
 /// failure leaves none of them - and it creates `runs` FIRST, so even a
 /// hypothetical non-atomic partial could only lack the LATER tables, never that
-/// one. Nothing drops a journal table: `delete_app` deletes `zeroship` rows and
-/// `plugin-db`'s `drop_namespace` drops the app's DATA schema, the bare
+/// one. Nothing drops a journal table: archive retains every `zeroship` row and
+/// `plugin-db`'s currently unwired `drop_namespace` drops the app's DATA schema, the bare
 /// `<uuid>`, which is not this one. Creator migrations cannot reach `app_<uuid>`
 /// at all; it is owned by `zeroship_workflow_owner`
 /// (`migrated::provisioning::workflow_journal_schema_name`). The state this
@@ -515,6 +515,80 @@ where
         }
     }
     Ok(fleet)
+}
+
+/// The journalled apps that may acquire new background execution work.
+///
+/// Archive is not an error and therefore is not counted as an excluded app in
+/// [`SweepCoverage`]. Its journal remains readable and intact, but timer repair
+/// and parked-cancel selection deliberately leave it alone until the app is
+/// unarchived. Other journal sweeps use [`journalled_fleet`] and keep their
+/// existing retention and integrity semantics.
+pub(crate) async fn dispatchable_journalled_fleet<C>(
+    conn: &C,
+) -> Result<JournalledFleet, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let mut fleet = journalled_fleet(conn).await?;
+    let app_ids: Vec<Uuid> = fleet
+        .usable
+        .iter()
+        .chain(&fleet.excluded)
+        .copied()
+        .collect();
+    let dispatchable = dispatchable_app_ids(conn, &app_ids).await?;
+    fleet.usable.retain(|app_id| dispatchable.contains(app_id));
+    fleet
+        .excluded
+        .retain(|app_id| dispatchable.contains(app_id));
+    Ok(fleet)
+}
+
+async fn dispatchable_app_ids<C>(
+    conn: &C,
+    app_ids: &[Uuid],
+) -> Result<HashSet<Uuid>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    if app_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let app_ids = app_ids.to_vec();
+    let rows = conn
+        .query(
+            "SELECT id \
+               FROM zeroship.apps \
+              WHERE id = ANY($1) \
+                AND archived_at IS NULL",
+            &[&app_ids],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+async fn app_accepts_background_dispatch<C>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    Ok(conn
+        .query_one(
+            "SELECT EXISTS ( \
+                 SELECT 1 \
+                   FROM zeroship.apps \
+                  WHERE id = $1 \
+                    AND archived_at IS NULL \
+             ) AS accepted",
+            &[app_id],
+        )
+        .await
+        .map_err(RegistryError::from)?
+        .get("accepted"))
 }
 
 /// Locate the journal holding `run_id` by searching every app's journal.
@@ -849,7 +923,7 @@ async fn reconcile_scheduler_from_journal_with_store(
     due_only: bool,
 ) -> Result<SchedulerReconcile, RegistryError> {
     let conn = registry.conn().await?;
-    let fleet = journalled_fleet(&conn).await?;
+    let fleet = dispatchable_journalled_fleet(&conn).await?;
     let mut reconcile = SchedulerReconcile {
         registered: 0,
         coverage: SweepCoverage::opened_over(&fleet),
@@ -927,7 +1001,7 @@ pub async fn reap_parked_cancel_requested_batch(
     }
 
     let conn = registry.conn().await?;
-    let fleet = journalled_fleet(&conn).await?;
+    let fleet = dispatchable_journalled_fleet(&conn).await?;
     let mut reap = ParkedCancelReap {
         registered: 0,
         coverage: SweepCoverage::opened_over(&fleet),
@@ -1040,11 +1114,9 @@ pub async fn fire_once<D>(
 where
     D: StepDispatcher + 'static,
 {
-    {
-        let conn = state.registry.conn().await?;
-        if workflow_rollout::dispatch_paused(&conn).await? {
-            return Ok(0);
-        }
+    let conn = state.registry.conn().await?;
+    if workflow_rollout::dispatch_paused(&conn).await? {
+        return Ok(0);
     }
 
     let fair_limit = config
@@ -1100,9 +1172,27 @@ where
         if fired.is_empty() {
             break;
         }
+        let app_ids: Vec<Uuid> = fired.iter().map(|timer| timer.app_id).collect();
+        let dispatchable = dispatchable_app_ids(&conn, &app_ids).await?;
 
         for timer in fired {
             claimed += 1;
+            if !dispatchable.contains(&timer.app_id) {
+                // The journal remains the durable source of truth. Removing
+                // both scheduler rows prevents an already-selected timer from
+                // being dispatched after archive; the periodic journal
+                // reconcile recreates it after unarchive.
+                scheduler_store
+                    .ack_terminal(&timer.run_id)
+                    .await
+                    .map_err(scheduler_store_error_to_registry)?;
+                tracing::info!(
+                    app_id = %timer.app_id,
+                    run_id = %timer.run_id,
+                    "workflow engine parked timer for archived app"
+                );
+                continue;
+            }
             spawn_dispatch(
                 scheduler_store.clone(),
                 state.registry.clone(),
@@ -1124,7 +1214,7 @@ where
 #[allow(clippy::future_not_send)]
 pub async fn reap_lapsed_inflight_once<D>(
     scheduler_store: &WorkflowSchedulerStore,
-    _state: &AppState,
+    state: &AppState,
     dispatcher: Arc<D>,
     config: WorkflowEngineConfig,
     limit: i64,
@@ -1141,12 +1231,27 @@ where
         .claim_lapsed_inflight(now, limit, next_deadline)
         .await
         .map_err(scheduler_store_error_to_registry)?;
+    let conn = state.registry.conn().await?;
+    let app_ids: Vec<Uuid> = lapsed.iter().map(|timer| timer.app_id).collect();
+    let dispatchable = dispatchable_app_ids(&conn, &app_ids).await?;
     let mut redispatched = 0usize;
     for timer in lapsed {
+        if !dispatchable.contains(&timer.app_id) {
+            scheduler_store
+                .ack_terminal(&timer.run_id)
+                .await
+                .map_err(scheduler_store_error_to_registry)?;
+            tracing::info!(
+                app_id = %timer.app_id,
+                run_id = %timer.run_id,
+                "workflow inflight reaper parked run for archived app"
+            );
+            continue;
+        }
         redispatched = redispatched.saturating_add(1);
         spawn_dispatch(
             scheduler_store.clone(),
-            _state.registry.clone(),
+            state.registry.clone(),
             dispatcher.clone(),
             WorkflowRunDispatchRequest {
                 run_id: timer.run_id,
@@ -1640,6 +1745,16 @@ async fn sync_scheduler_after_apply(
             .map_err(scheduler_store_error_to_registry)?;
         return Ok(());
     };
+    if !app_accepts_background_dispatch(&conn, &tables.app_id).await? {
+        // Applying an in-flight worker response must not re-arm an app that
+        // was archived while that response was running. The journal commit is
+        // retained; unarchive reconciliation can reconstruct its timer.
+        scheduler_store
+            .ack_terminal(run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+        return Ok(());
+    }
     let sql = journal_sql(
         &tables,
         "WITH RECURSIVE ancestors AS ( \
@@ -1751,6 +1866,9 @@ where
     let Some(tables) = find_run_tables(conn, run_id).await? else {
         return ack_terminal(scheduler_store, exec, conn, run_id).await;
     };
+    if !app_accepts_background_dispatch(conn, &tables.app_id).await? {
+        return ack_terminal(scheduler_store, exec, conn, run_id).await;
+    }
     let sql = journal_sql(
         &tables,
         "SELECT id, app_id, state, wake_at, cancel_requested, claimed_by, dispatch_nonce, waiting_step_key \

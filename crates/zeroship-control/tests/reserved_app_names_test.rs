@@ -214,7 +214,7 @@ async fn app_row_count(fx: &Fixture, name: &str) -> i64 {
     rows[0].get("n")
 }
 
-async fn delete_app(fx: &Fixture, id: Uuid) {
+async fn cleanup_app(fx: &Fixture, id: Uuid) {
     // `app_members.app_id` is a `uuid` column - bind the `Uuid` directly, the
     // way `Registry::create_app` does.
     let _ = fx
@@ -283,7 +283,7 @@ async fn every_reserved_name_is_refused_and_an_ordinary_name_is_accepted() {
         .parse()
         .expect("app id parses");
 
-    delete_app(&fx, created_id).await;
+    cleanup_app(&fx, created_id).await;
     creator.cleanup(&fx.state).await;
     drop(control);
     drop(fx);
@@ -328,7 +328,7 @@ async fn a_reserved_name_is_refused_in_every_letter_case() {
         .parse()
         .expect("app id parses");
 
-    delete_app(&fx, created_id).await;
+    cleanup_app(&fx, created_id).await;
     creator.cleanup(&fx.state).await;
     drop(control);
     drop(fx);
@@ -401,7 +401,7 @@ async fn registry_refuses_a_reserved_name_directly() {
         .await
         .expect("an unreserved name is created by the same call");
 
-    delete_app(&fx, record.id).await;
+    cleanup_app(&fx, record.id).await;
     creator.cleanup(&fx.state).await;
     drop(fx);
     common::drain_pg().await;

@@ -187,7 +187,7 @@ echo "=== mint an admin platform bearer and create its app ==="
 # The scope string is the deleted permission_tokens policy's action list,
 # one-for-one: it becomes the token policy control intersects with the
 # owner's own authority.
-SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
+SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
 OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)

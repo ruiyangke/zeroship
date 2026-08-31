@@ -445,60 +445,18 @@ pub async fn get_app(
     }
 }
 
-/// Why a single `purge_app`-delete failed. Lets the HTTP handler map a faithful
-/// status code while the cron reaper logs + isolates per-app.
-///
-/// `pub` (not `pub(crate)`): the orphaned-app reaper integration test drives the
-/// REAL shared `purge_app` path (no shim), so the symbol must cross the crate
-/// boundary into the test crate.
-#[derive(Debug)]
-pub enum PurgeError {
-    /// Deleting the app's manifest keyspace failed. A `NotFound`/empty prefix
-    /// is success inside `delete_app_manifests`, so this only surfaces real
-    /// auth/config/transport failures that must block the DB cascade.
-    Manifests(zeroship_bundle::BlobError),
-    /// The atomic DB cascade delete failed.
-    Registry(RegistryError),
-}
-
-/// Tear down an app and all of its side-effecting state, in the ONE canonical
-/// order used by both the `delete_app` HTTP handler and the orphaned-app reaper:
-///
-///   1. Manifest-keyspace delete — `BlobStore::delete_app_manifests` removes
-///      every `manifests/<app_id>/…` object (empty/absent prefix is success).
-///      Content-addressed blobs under `blobs/` are shared and NOT deleted
-///      here. This preserves today's "artifact purge first, DB cascade
-///      second" ordering: a manifest-delete failure blocks the DB cascade.
-///   2. `registry.delete_app` — the ATOMIC DB cascade (apps row + per-app
-///      `oauth_clients` row in one txn; the real FK chain tears down every
-///      dependent row in the `zeroship` schema). Returns `false` if the row was
-///      already gone.
-///
-/// Returns `Ok(true)` if a DB row was deleted, `Ok(false)` if it was already
-/// gone. There is ONE deletion path; two callers (the `delete_app` HTTP handler
-/// and the `orphaned_app_reaper` cron).
-pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeError> {
-    // 1. Delete the app's manifest keyspace first. `delete_app_manifests`
-    //    swallows empty/absent prefixes (the app may never have deployed) and
-    //    only returns an error on real auth/config/transport failures, which
-    //    must block the DB cascade so we never orphan live artifacts.
-    state
-        .blob_store
-        .delete_app_manifests(app_id)
-        .await
-        .map_err(PurgeError::Manifests)?;
-
-    // 2. Atomic DB cascade.
-    let deleted = state
-        .registry
-        .delete_app(app_id)
-        .await
-        .map_err(PurgeError::Registry)?;
-
-    Ok(deleted)
-}
-
-pub async fn delete_app(
+/// Archive an app. This is a single retry-safe database transition: it does
+/// not delete manifests, billing evidence, migration history, or database
+/// state. Active-route and background-workflow projections enforce the marker.
+/// Route invalidation is pull-based: a stale gateway snapshot can continue to
+/// serve until a successful poll, and archive does not terminate requests or
+/// long-lived connections that were already admitted.
+/// The worker version feed, OAuth identities, and relay aliases are retained;
+/// archive does not independently disable those retained identity surfaces.
+/// Metering ingest also remains active so late and in-flight usage is not lost.
+/// A deploy may update retained code while archived, but cannot become routable
+/// or acquire workflow work until this marker is removed.
+pub async fn archive_app(
     req: web::HttpRequest,
     id: Path<String>,
     authz: AuthzGuard,
@@ -515,22 +473,52 @@ pub async fn delete_app(
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsDelete, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::AppsArchive, Resource::App { id: uid.to_string() }, &state)
         .await
     {
         return resp;
     }
-    match purge_app(&state, &uid).await {
-        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true})),
-        Ok(false) => {
+    match state.registry.archive_app(&uid).await {
+        Ok(Some(record)) => web::HttpResponse::Ok().json(&record),
+        Ok(None) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
-        Err(PurgeError::Manifests(e)) => infrastructure_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "delete app manifests",
-            e,
-        ),
-        Err(PurgeError::Registry(e)) => error_response(e),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Restore an archived app. Normally the retained name and manifest let the
+/// route-sync and workflow polling paths restore service without reconstruction.
+/// An app whose manifest keyspace was already removed by the former partial
+/// hard-delete path needs a staged redeploy; restore contains no repair shim.
+pub async fn unarchive_app(
+    req: web::HttpRequest,
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::AppsArchive, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+    match state.registry.unarchive_app(&uid).await {
+        Ok(Some(record)) => web::HttpResponse::Ok().json(&record),
+        Ok(None) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+        }
+        Err(e) => error_response(e),
     }
 }
 

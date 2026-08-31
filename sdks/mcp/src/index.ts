@@ -32,7 +32,8 @@ export const TOOL_NAMES = [
   "create_app",
   "deploy_app",
   "app_logs",
-  "delete_app",
+  "archive_app",
+  "restore_app",
 ] as const;
 
 export interface ZeroshipMcpServerOptions {
@@ -45,10 +46,19 @@ type ToolResult = {
   isError?: boolean;
 };
 
-type AppListItem = Pick<AppRecord, "id" | "name" | "deploy_hash">;
+type AppListItem = Pick<
+  AppRecord,
+  "id" | "name" | "deploy_hash" | "archived_at"
+>;
 type AppDetails = Pick<
   AppRecord,
-  "id" | "name" | "plan_id" | "deploy_hash" | "created_at" | "updated_at"
+  | "id"
+  | "name"
+  | "plan_id"
+  | "deploy_hash"
+  | "archived_at"
+  | "created_at"
+  | "updated_at"
 >;
 
 export function createZeroshipMcpServer(
@@ -167,18 +177,28 @@ export function createZeroshipMcpServer(
   );
 
   server.registerTool(
-    "delete_app",
+    "archive_app",
     {
-      description: "Delete a zeroship app by UUID or name.",
+      description: "Archive a zeroship app by UUID or name.",
       inputSchema: appInput,
     },
     async ({ app }) =>
       withClient(client, async (control) => {
         const id = await resolveAppId(control, app);
-        return jsonResult({
-          app_id: id,
-          ...(await control.apps.delete(id)),
-        });
+        return jsonResult(appDetails(await control.apps.archive(id)));
+      }),
+  );
+
+  server.registerTool(
+    "restore_app",
+    {
+      description: "Restore an archived zeroship app by UUID or name.",
+      inputSchema: appInput,
+    },
+    async ({ app }) =>
+      withClient(client, async (control) => {
+        const id = await resolveAppId(control, app);
+        return jsonResult(appDetails(await control.apps.unarchive(id)));
       }),
   );
 
@@ -257,6 +277,7 @@ function appListItem(app: AppRecord): AppListItem {
     id: app.id,
     name: app.name,
     deploy_hash: app.deploy_hash,
+    archived_at: app.archived_at,
   };
 }
 
@@ -266,6 +287,7 @@ function appDetails(app: AppRecord): AppDetails {
     name: app.name,
     plan_id: app.plan_id,
     deploy_hash: app.deploy_hash,
+    archived_at: app.archived_at,
     created_at: app.created_at,
     updated_at: app.updated_at,
   };

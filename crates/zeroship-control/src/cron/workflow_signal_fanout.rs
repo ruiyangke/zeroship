@@ -226,6 +226,7 @@ async fn drain_one_broadcast(
                    JOIN zeroship.apps app ON app.id = b.app_id \
                    JOIN zeroship.plans plan ON plan.id = app.plan_id \
                   WHERE b.fanout_state = 'pending' \
+                    AND app.archived_at IS NULL \
                     AND app.workflows_enabled \
                     AND plan.workflows_allowed \
                     AND NOT plan.archived \

@@ -462,7 +462,7 @@ echo "=== Stage 2: mint admin platform bearer (offline) + create creator + deplo
 # The scope string is the deleted permission_tokens policy's action list,
 # one-for-one: it becomes the token policy control intersects with the
 # owner's own authority.
-SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write billing:read billing:write"
+SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write billing:read billing:write"
 # The bearer's subject is ALSO the creator that owns the deployed app (so the
 # billing reconciler groups the app under this creator).
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
