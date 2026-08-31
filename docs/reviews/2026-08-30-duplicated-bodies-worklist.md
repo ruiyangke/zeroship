@@ -49,7 +49,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 1 Query RowDescription | 2 | BOUND (`25712160b`) | pre-existing |
 | 5 Column metadata | 4 | BOUND (`25712160b`) | pre-existing |
 | 6 Cached statement replay family | 6 | BOUND, each independently | agent table, one distinct failure per copy |
-| 8 Flush/read terminal polling | 3 | 1 BOUND; **2 EXECUTED BY NOTHING** - see the open item below | `flush_retirement_terminal_arm_preserves_the_read_error` (the bound one) |
+| 8 Flush/read terminal polling | 3 | CLOSED: all 3 BOUND (2 were executed by nothing) | `flush_retirement_terminal_arm_...`, `read_timeout_during_a_parked_flush_...`, `backpressured_flush_nested_drain_...` |
 | 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
 | 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
@@ -87,7 +87,7 @@ finding here.** Six groups so far had more copies than claimed:
     28  said two   had five    the uncounted copies included the only unbound one
     18  said three had four    extra copy was bound
     38  said four  had five    the fifth is a guard arm in different syntax
-    44  said two   had three   third copy is the `Weak` variant - unprobed
+    44  said two   had three   third copy is the `Weak` variant - probed, BOUND
     remember_server_error  said two  had EIGHT
 
 In group 17 and group 28 the UNCOUNTED copy was the only unbound one. Always
@@ -138,12 +138,12 @@ Treat a three-figure failure count as "the mutation was too coarse to be
 informative", not as "well covered". The useful probe changes one decision, not
 one precondition the whole driver rests on.
 
-### OPEN: two mid-flush terminal recorders that no test executes
+### CLOSED 2026-08-31: the two mid-flush terminal recorders now have tests
 
-Unlike the unbindable copies below, these are NOT provably unreachable - they
-are simply untested, and each names a real scenario. Measured 2026-08-31:
-replacing either with `panic!` leaves all 1449 tests green, so nothing runs
-them.
+Unlike the unbindable copies below, these were NOT provably unreachable - just
+untested. Both now have tests, each verified TWICE: a `panic!` at the target
+line fails the new test and only it (so the test truly reaches the line), and
+the `Some(None)` mutation fails the new test and only it.
 
 - **`flush_with_read_draining`'s ReadTimeout poll** (`read_terminal = Some(terminal)`
   under the comment "ReadTimeout is out-of-band and outranks every FIFO gate").
