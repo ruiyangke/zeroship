@@ -53,3 +53,46 @@ that makes the cast exact, at the cast.
 deny, so none of these are enforced. Raising that lint to deny would require
 either a justification or an explicit `try_into()` at each site - a reasonable
 end state, but it is 22 edits and should be its own change, not a drive-by.
+
+## The 30 production `expect`s: a strength, not a gap
+
+I listed these alongside the casts as an unaudited risk. Audited 2026-08-30,
+they are the opposite: **25 of 30 state the invariant that makes the call
+infallible**, which is exactly what the standard library recommends an `expect`
+message to do - say why the value is expected, not what went wrong.
+
+    fill(5) guarantees 5 bytes are buffered
+    a guard holds its name until it is disarmed exactly once
+    Endpoint::addresses rejects an empty address list
+    async header implies full message is buffered
+    the first ErrorResponse was parsed above
+    a live TLS lease owns a session
+    the guard proved the path is present
+
+The five that do not follow the pattern are terse rather than wrong -
+`"checked above"` (three sites in `connection.rs`) points at a check without
+naming it, and `"read obligation overflow"` names the failure instead of the
+invariant. Worth tightening if that code is touched; not worth a sweep.
+
+## Scanning production-only code: use one tool, with a self-check
+
+Four separate attempts at "count X in production code" were wrong four
+different ways this session:
+
+    truncate at the first `^#[cfg(test)]`   read 499 of 3651 lines of client.rs
+    truncate at the first `#[cfg(test)]` anywhere   cut at a COMMENT mentioning it
+    strip comments with re.sub, then use offsets   every line number shifted early
+    `#\[cfg\([^)]*\btest\b[^)]*\)\]`        cannot match `#[cfg(all(test, ..))]`
+                                            because `[^)]*` stops at the first `)`
+
+The last one silently pulled 48 test-only `expect`s from `connect_socket.rs`
+into a "production" count, turning 30 into 78.
+
+What works: blank `//` comments IN PLACE (preserving length so offsets stay
+valid), match `#\[cfg\([^\]]*\btest\b[^\]]*\]` so nested `all(..)`/`any(..)`
+still matches, brace-match each annotated item, and test membership by span.
+
+**And give it a self-check with a known answer.** `connect_socket.rs` is one
+large `#[cfg(all(test, target_os = "linux"))]` block, so any production scan
+that attributes even one line to it is broken. That single assertion catches
+every failure above.
