@@ -5433,6 +5433,114 @@ mod tests {
         drop(request_tx);
     }
 
+    async fn queued_error_slots_after_backpressured_flush(
+        messages: BackendMessages,
+    ) -> (RequestServerError, Arc<Mutex<Option<DbError>>>) {
+        let read_half_dropped = Rc::new(Cell::new(false));
+        let stream = BufStream::new(WriteFailingSplitStream {
+            read_half_dropped: Rc::clone(&read_half_dropped),
+        });
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the flush-failure fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages,
+                    request_complete: false,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the decoded server error");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let request_server_error = Arc::default();
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&request_server_error),
+        }]);
+
+        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
+        for _ in 0..2 {
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("the pending response sender filled too early");
+        }
+        assert!(
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the pending response sender was not backpressured"
+        );
+        let mut pending_responses = VecDeque::from([PendingResponse {
+            sender: blocked_sender,
+            messages: ResponseMessages::Raw(BackendMessages::empty()),
+            disposition: RequestDisposition::Awaited,
+        }]);
+        let terminal_server_error = Arc::new(Mutex::new(None));
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(1),
+            &terminal_server_error,
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
+        assert_eq!(
+            write_error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        assert!(read_half_dropped.get());
+
+        (request_server_error, terminal_server_error)
+    }
+
+    #[compio::test]
+    async fn backpressured_flush_fatal_records_the_terminal_slot() {
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(
+            fatal_error_frame("57P01", "scripted backend shutdown").as_slice(),
+        ));
+        let (_, terminal_server_error) =
+            queued_error_slots_after_backpressured_flush(messages).await;
+
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("57P01"),
+            "the queued FATAL did not reach the terminal slot"
+        );
+    }
+
     #[compio::test]
     async fn queued_server_error_outranks_a_simultaneous_flush_failure() {
         let read_half_dropped = Rc::new(Cell::new(false));
