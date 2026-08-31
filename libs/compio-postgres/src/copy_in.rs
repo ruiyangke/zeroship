@@ -1,11 +1,10 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// COPY FROM STDIN. The frontend pipes frames through an mpsc channel; the
-// connection task drains that channel directly, writing CopyData / CopyDone /
-// CopyFail frames onto the wire. Logic mirrors tokio-postgres exactly - the
-// only compio-specific bit is in `connection.rs`, where the request-handler
-// branch reads the `CopyInReceiver` with `next().await` instead of
-// `poll_next_unpin(cx)`.
+// COPY FROM STDIN retains tokio-postgres's channel-fed framing and buffered
+// sink, but startup, abort, and completion have diverged.
+// `CopyInMessage::Abort` can suppress a pre-COPY terminal; explicit receiver
+// states distinguish simple from extended CopyFail framing; format/copy-mode
+// tracking and ReadyForQuery draining preserve diagnostics and synchronization.
 
 use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::codec::FrontendMessage;
