@@ -3092,7 +3092,9 @@ impl<'a> UrlParser<'a> {
         // decodes to empty is still EXPLICIT, however: libpq stores that empty
         // option and therefore does not let a service replace it.
         let mut it = creds.splitn(2, ':');
-        let user = it.next().unwrap();
+        let user = it
+            .next()
+            .expect("str::splitn yields a user field even for empty credentials");
         if !user.is_empty() {
             let user = Self::decode(user)?;
             self.config.user(user);
@@ -3154,7 +3156,12 @@ impl<'a> UrlParser<'a> {
                 (host, port)
             } else {
                 let mut it = chunk.splitn(2, ':');
-                (it.next().unwrap(), it.next())
+                (
+                    it.next().expect(
+                        "str::splitn yields a host field even for an empty authority chunk",
+                    ),
+                    it.next(),
+                )
             };
 
             hosts.push(host);
