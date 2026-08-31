@@ -786,3 +786,49 @@ This is the measured scope of the SCC error corrected above. It is also why the
 correction changed the SCC by two members rather than shuffling edges: with
 2689 lines of `client.rs` invisible, whole dependencies were absent, not
 mis-weighted.
+
+## The 10-module cycle rests on THREE edges, and one of them is trivially removable
+
+Re-probed 2026-08-30 with the corrected scanner (the earlier per-edge probe used
+the truncating parser and its results are void). Baseline SCC 10, **34
+intra-cycle edges, only 3 load-bearing**:
+
+    prepare     -> statement    SCC 10 -> 9
+    transaction -> portal       SCC 10 -> 9
+    client      -> transaction  SCC 10 -> 8     <- the big lever
+
+31 of 34 edges are redundant: the cycle survives their removal because another
+path already closes it. Cutting edges for the metric is pointless. Cutting one
+of these three is not.
+
+### `client -> transaction` is one call to a pure function
+
+`client.rs:3364` is the ONLY `crate::transaction` reference in `client.rs`:
+
+    Some(name) => crate::transaction::rollback_savepoint(name),
+
+and the callee (`transaction.rs:99`) depends on nothing in its own module:
+
+    pub(crate) fn rollback_savepoint(name: &str) -> String {
+        let name = quote_identifier(name);
+        format!("ROLLBACK TO {name}; RELEASE {name}")
+    }
+
+`quote_identifier` lives in `escape.rs`, which IS a leaf - its only `crate::`
+mentions are two rustdoc intra-doc links in `//!` comments, and with comments
+stripped it has no production dependencies at all.
+
+**So the move is: `rollback_savepoint` -> `escape.rs`.** Three call sites
+update (`client.rs:3364`, `transaction.rs:184`, `transaction.rs:236`), the
+function lands beside the `quote_identifier` it already calls, and
+`transaction.rs` LOSES a dependency rather than gaining one. Behaviour cannot
+change - it is a pure `&str -> String`. Expected result: SCC 10 -> 8.
+
+This is the same shape as the `encryption.rs` extraction earlier in this
+document: a leaf-bound helper sitting in a cycle member, pulling an entire
+module into the cycle for one call.
+
+**The convergence worth noting:** this edge is exactly the one the truncating
+parser could not see, because it lives at line 3364 of `client.rs` and the
+parser stopped at 499. The single most load-bearing edge in the graph was
+invisible to the instrument measuring the graph.
