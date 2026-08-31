@@ -710,11 +710,10 @@ where
     ///
     /// The userspace `read_buf` travels with the read half and the
     /// `write_buf` with the write half, so no buffered bytes are lost
-    /// across the split. The split decision depends SOLELY on whether the
-    /// inner stream is splittable: a plain socket always splits, TLS never
-    /// does. If the inner stream cannot be split (TLS), the `BufStream` is
-    /// reconstructed and returned in `Err` so the caller can keep using the
-    /// serialized loop.
+    /// across the split. The split decision depends solely on whether the
+    /// inner stream is splittable. If the inner stream cannot be split, the
+    /// `BufStream` is reconstructed and returned in `Err` so the caller can
+    /// keep using the serialized loop.
     ///
     /// A non-empty `write_buf` does NOT force the serialized fallback - those
     /// bytes are simply carried onto the new write half and flushed with the
