@@ -690,3 +690,61 @@ a naive grep and would invent edges that do not exist).
 Run this in BASH, not zsh: the `for`/`read` pipeline above depends on word
 splitting that zsh does not do by default, and the failure mode is a silent
 count of zero rather than an error.
+
+## CORRECTION, same day: the number just above is WRONG. SCC is 10, not 8.
+
+The section above reports 164 edges and an SCC of 8, and says the shape is
+unchanged. **Both figures are artifacts of a parser that discarded most of two
+files.** Corrected by cross-checking with a second implementation:
+
+    modules                    44
+    production-only edges     169
+    largest SCC                10
+    SCC members               client connection copy_in copy_out portal
+                              prepare query simple_query statement transaction
+
+`portal` and `transaction` belong in the cycle. They were never absent; the
+measurement could not see them.
+
+### What the bug was
+
+The awk pipeline stops at the first line matching `^#\[cfg\(test\)\]` and
+discards the rest of the file. That is correct only when a file has exactly one
+test module, at the end. `client.rs` has **six** column-0 `#[cfg(test)]`
+attributes - lines 499, 559, 613, 890, 3352, 3554 - because test-only helpers
+sit beside the production code they support. Stopping at the first one read
+**499 of 3650 lines, discarding 86% of the file**, including line 3289:
+
+    Some(name) => crate::transaction::rollback_savepoint(name),
+
+inside `pub fn __private_api_rollback` (line 3276) - production code on the
+rollback-on-drop path. That single unseen edge is what pulls `transaction`, and
+through it `portal`, into the cycle.
+
+### The right way to do it
+
+Strip `//` comments FIRST, then excise each `#[cfg(test)]` item by brace
+matching and keep everything else. Comment-stripping matters on its own:
+`replication.rs` and `test_utils.rs` merely MENTION `#[cfg(test)]` inside
+comments, and a cutoff that honours those truncates at a sentence.
+`$SCRATCH/scc3.py` in the session scratch does this; `nix run nixpkgs#python3`
+provides the interpreter (there is none on PATH).
+
+### The lesson, which is the reusable part
+
+Three implementations gave three answers - 164/8, 156/8, 169/10 - and the two
+that agreed on the SCC were both wrong about it. Agreement between instruments
+is not correctness when they share a blind spot: the awk and the naive python
+both keyed on "the first `#[cfg(test)]`", differing only in whether the match
+had to be at column 0. The disagreement in the EDGE COUNT is what exposed it.
+
+So: when two measurements of the same thing differ, do not pick the one you
+like or split the difference. Find the input each one is reading and diff those.
+`comm` on the two edge lists named the five missing edges in one command, and
+one of them was the whole story.
+
+**Earlier figures in this document are suspect for the same reason.** The
+16 -> 10 -> 8 progression recorded above was measured with the truncating
+method, so its absolute values are probably understated by a similar amount.
+The DIRECTION - that extracting `encryption.rs` broke a cycle - was verified by
+the edge that disappeared, and that part stands.
