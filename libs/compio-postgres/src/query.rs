@@ -1,9 +1,10 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Near-verbatim from tokio-postgres. The Bind/Execute state machine,
-// parameter encoding, and `RowStream` implementation are purely
-// protocol-level, so only the imports change. `pin_project_lite` is used
-// identically, and `InnerClient::send` is the real request path.
+// Derived from tokio-postgres's extended-query framing, but local execution
+// adds text-parameter and statement-cache paths, portal liveness,
+// pre-/post-BindComplete error tracking, and connection-owned COPY recovery.
+// Bind conversion falls back through domain base types; `RowStream` adds COPY
+// draining, empty-query counts, and described-column access.
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;

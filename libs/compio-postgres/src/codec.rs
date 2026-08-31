@@ -144,9 +144,12 @@ impl BackendMessages {
 
     /// Return the tag of the first frame without consuming it.
     ///
-    /// The prepare path uses this at the connection boundary to decide
-    /// whether a cancelled `Parse` created its named statement. The response
-    /// still has to be delivered intact when its caller is alive.
+    /// Two connection-boundary consumers inspect this without parsing the
+    /// batch. Prepare cleanup uses the first tag to decide whether a cancelled
+    /// `Parse` created its named statement, then must deliver the batch intact
+    /// when its caller is alive. COPY-IN error recovery uses a bare leading
+    /// `ReadyForQuery` to recognize the duplicate completion and must consume
+    /// and drop that batch before it reaches the next response slot.
     pub(crate) fn first_tag(&self) -> Option<u8> {
         self.0.first().copied()
     }
@@ -1120,6 +1123,46 @@ mod tests {
         frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
         frame.extend_from_slice(body);
         frame
+    }
+
+    #[test]
+    fn first_matching_tag_advances_past_the_entire_leading_frame() {
+        let bytes = [
+            copy_response_frame(backend::PARSE_COMPLETE_TAG, b""),
+            copy_response_frame(backend::COPY_IN_RESPONSE_TAG, b"\x00\x00\x00"),
+        ]
+        .concat();
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice()));
+
+        assert_eq!(
+            messages.first_matching_tag(&[
+                backend::COPY_IN_RESPONSE_TAG,
+                backend::COPY_OUT_RESPONSE_TAG,
+            ]),
+            Some(backend::COPY_IN_RESPONSE_TAG),
+            "the scan did not advance by the leading frame's tag plus declared length"
+        );
+    }
+
+    #[test]
+    fn error_response_before_advances_past_the_entire_leading_frame() {
+        let bytes = [
+            copy_response_frame(backend::PARSE_COMPLETE_TAG, b""),
+            error_response("26000", "scripted stale statement"),
+        ]
+        .concat();
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice()));
+
+        let body = messages
+            .error_response_before(backend::BIND_COMPLETE_TAG)
+            .expect("the frame scan rejected a valid batch")
+            .expect("the scan did not reach the later ErrorResponse");
+        let error = Error::db(body);
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("26000"),
+            "the later ErrorResponse was not decoded intact"
+        );
     }
 
     /// CopyInResponse and CopyOutResponse are not opaque transition tags. The

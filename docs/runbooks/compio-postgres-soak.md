@@ -831,3 +831,62 @@ test items; `cancel_query_raw.rs:233` is the blank line before its module; and
 `copy_out.rs` has no test module at all and changed only comments. **Every
 verdict stands** - the shortcut happened to be right because those files have
 one test module, or their last one, near the end. It was luck, not method.
+
+## RE-RUN 2026-08-31 at `3983a4e5d`: soak plus all three chaos shapes
+
+Re-run because another session had merged 187 commits since the last
+measurement, so no figure above had been exercised against the code in the
+tree. All four reproduce. Each was run on a DEDICATED container, never on 5455
+or 5459, and never on the port a codex job held at the time.
+
+**Soak** (5470, 180s):
+
+```text
+counts pooled_queries=34246 pool_acquires=34837 pool_releases=34837 ... total_operations=42654
+rss_rule samples=37 rises=7 falls=5 delta_kib=116 verdict=stable
+pool connections_created=101 evictions=94 acquire_timeouts=0 peak_server_backends=9
+soak result=ok elapsed_ms=215378
+```
+
+`pool_acquires == pool_releases` exactly, and `falls=5` matters: the RSS rule
+degenerates on a perfectly flat series, so a run with zero falls proves less
+than this one does.
+
+**Chaos 1, restart** (5470, restart issued 40s into `phase=measure`):
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+Zero watchdog messages, zero panics. Same three signals as 2026-08-26 and
+2026-08-27.
+
+**Chaos 2, freeze** (5473 - NOT the documented 5475, which a codex job held;
+`docker pause` on a container another job is querying corrupts that job and
+makes its failures look like driver bugs):
+
+```text
+PROBE query ended after 5.00048493s is_closed=false err=socket read timeout expired
+PROBE live_connections=0
+PROBE reuse=refused is_closed=true err=connection closed
+```
+
+Within half a millisecond of the 5s bound. `is_closed=false` on the timeout
+error is the CORRECT value per the 2026-08-28 correction above - the error
+carries `Kind::ReadTimeout`, not `Kind::Closed`. All three unambiguous signals
+hold.
+
+**Chaos 3, no free slots** (a throwaway `zs-cpg-small-5461` at
+`max_connections=15`, removed afterwards):
+
+```text
+SLOTS held=15 then refused: db error | FATAL: sorry, too many clients already
+SLOTS connect refused after 1.497474ms: db error | FATAL: sorry, too many clients already
+SLOTS pool build refused after 505.132266ms: db error | FATAL: sorry, too many clients already
+SLOTS recovered: SELECT 42 = 42, live=1
+```
+
+505.13ms against 504.74ms (2026-08-27) and 505.33ms (2026-08-26). The FATAL is
+still reachable through the source chain in all three arms, which is the part
+worth checking - `Error`'s own `Display` stays the terse `db error` by design.

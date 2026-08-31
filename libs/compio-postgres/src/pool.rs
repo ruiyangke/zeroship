@@ -3956,7 +3956,11 @@ mod tests {
         );
         assert_eq!(pool.metrics.evictions.get(), 0);
 
-        let mut acquire = Box::pin(pool.get_inner());
+        // `get_inner_leased`, not `get_inner`: the assertions below drop this
+        // and require the entry to go BACK to the pool, which is
+        // `PooledClient`'s Drop. A bare `PoolEntry` has no such Drop, so
+        // `get_inner` would leave active_count at 1 forever.
+        let mut acquire = Box::pin(pool.get_inner_leased());
         let reused = match poll_once(acquire.as_mut()) {
             Poll::Ready(Ok(client)) => client,
             Poll::Ready(Err(error)) => panic!("reacquiring after unwind failed: {error}"),

@@ -4510,6 +4510,15 @@ mod tests {
         assert_eq!(1, 1);
     }
 
+    #[test]
+    fn unquoted_conninfo_backslash_escapes_the_next_character() {
+        let config = r"application_name=a\b"
+            .parse::<Config>()
+            .expect("unquoted backslash escape did not parse");
+
+        assert_eq!(config.get_application_name(), Some("ab"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn at_prefixed_hosts_use_the_abstract_unix_namespace() {

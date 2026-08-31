@@ -133,3 +133,21 @@ fn decode_format(code: u16) -> io::Result<CopyFormat> {
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_formats_rejects_binary_columns_in_a_text_response() {
+        let formats = fallible_iterator::convert([Ok::<u16, io::Error>(1)].into_iter());
+        let error = CopyResponse::from_formats(0, formats)
+            .expect_err("a binary column was accepted in a textual COPY response");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "binary column format in a textual COPY response"
+        );
+    }
+}

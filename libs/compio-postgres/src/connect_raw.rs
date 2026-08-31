@@ -10,11 +10,12 @@
 //   AuthenticationMd5Password
 //   AuthenticationSasl { SCRAM-SHA-256, SCRAM-SHA-256-PLUS }
 //
-// The `StartupStream` struct in the source wraps `Framed` + a
-// `BackendMessages` iterator + a `delayed` VecDeque of async messages
-// captured mid-handshake. Our equivalent is `Handshake`: same three
-// fields, but `stream` is a `BufStream` and `buf` is unused because
-// `read_backend` always returns a fresh batch.
+// The source's `StartupStream` has three fields: framed transport, the current
+// backend batch, and delayed async messages. `Handshake` keeps those roles as
+// `stream`, `pending`, and `delayed`, but has ten fields: direct buffered I/O
+// and parsed delayed messages are joined by delayed-byte accounting, four
+// protocol-negotiation fields, the backend key, and an explicit phase.
+// `pending` preserves unread messages from each fresh `read_backend` batch.
 
 use crate::Error;
 use crate::buf_stream::BufStream;
@@ -314,6 +315,9 @@ where
                     }
                 },
                 BackendMessage::Normal { messages, .. } => {
+                    // `deferred_error` is gated by `saw_error_response`, so this
+                    // batch already makes startup fail before `ReadyForQuery`;
+                    // the server's ErrorResponse is the better diagnostic.
                     // Stash the iterator; the top of the loop will drain
                     // it one call at a time.
                     self.pending = messages;

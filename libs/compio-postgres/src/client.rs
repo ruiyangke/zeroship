@@ -1,9 +1,9 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// The user-facing query/prepare/execute/simple_query methods dispatch to
-// the real `query.rs`/`prepare.rs`/`simple_query.rs` modules. Transaction
-// and COPY helpers are still stubbed until `transaction.rs`,
-// `copy_in.rs`, and `copy_out.rs` land.
+// User-facing query/prepare/execute/simple-query methods dispatch to their
+// dedicated modules. Transaction creation runs through `TransactionBuilder`,
+// and COPY helpers call `copy_in.rs`/`copy_out.rs` with local statement-cache
+// finalization and one-shot stale-cache replay.
 
 use crate::cancel_token::{CancelKey, PoolCancelLease};
 use crate::codec::{BackendMessages, FrontendMessage};
