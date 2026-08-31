@@ -7700,6 +7700,59 @@ mod tests {
         );
     }
 
+    /// `Connection`'s `Debug` had 53 counted regions and zero executed ones:
+    /// nothing in the crate had ever formatted a `Connection`.
+    ///
+    /// That matters more than a missing smoke test usually would, because this
+    /// impl TAKES TWO LOCKS - `parameters` and `terminal_server_error`. A
+    /// `dbg!(&connection)` from code already holding either one deadlocks, and
+    /// an unexecuted formatter is where that would hide. Running it under a
+    /// watchdog is what turns the hazard from unmeasured into bounded.
+    #[compio::test]
+    async fn connection_debug_reports_its_counters_without_deadlocking() {
+        let (_request_sender, request_receiver) = mpsc::unbounded();
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::new(),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(HashMap::new())),
+            request_receiver,
+            Arc::new(AtomicU8::new(b'T')),
+            Arc::new(AtomicUsize::new(3)),
+            Arc::default(),
+            None,
+        );
+
+        // Formatting takes both locks. A deadlock here would hang the suite
+        // rather than fail it, so bound it and report the hang as a failure.
+        let rendered =
+            compio::time::timeout(Duration::from_secs(5), async { format!("{connection:?}") })
+                .await
+                .expect("formatting a Connection exceeded its watchdog, which means it deadlocked");
+
+        assert!(
+            rendered.starts_with("Connection {"),
+            "Connection Debug did not name its type: {rendered}"
+        );
+        // `tx_status` was seeded with `T`, so the mapped label must be the
+        // in-transaction one and not the `_ => "unknown"` fallback.
+        assert!(
+            rendered.contains("transaction_status: \"in_transaction\""),
+            "Connection Debug mislabelled its transaction status: {rendered}"
+        );
+        assert!(
+            rendered.contains("in_flight_request_count: 3"),
+            "Connection Debug did not report the in-flight count it was given: {rendered}"
+        );
+        assert!(
+            rendered.contains("has_terminal_server_error: false")
+                && rendered.contains("notifications_enabled: false"),
+            "Connection Debug did not report its optional state: {rendered}"
+        );
+    }
+
     #[compio::test]
     async fn serialized_client_shutdown_preserves_a_buffered_server_error() {
         let (request_sender, request_receiver) = mpsc::unbounded();
