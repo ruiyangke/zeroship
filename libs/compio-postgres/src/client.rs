@@ -1317,9 +1317,11 @@ pub struct InnerClient {
     statement_cache_execution_threshold: NonZeroUsize,
     statement_cache: Mutex<StatementCache>,
 
-    /// Scratch buffer for encoding frontend messages. `with_buf` locks
-    /// this, hands the caller a `&mut BytesMut`, and clears on drop so
-    /// the next caller sees a fresh buffer.
+    /// Scratch buffer for encoding frontend messages. See `with_buf`: it takes
+    /// the buffer out and releases the lock before running the closure because
+    /// caller-supplied `ToSql` code can re-enter through
+    /// `Client::__private_api_rollback`. After the closure returns, `with_buf`
+    /// explicitly clears and returns the buffer.
     buffer: Mutex<BytesMut>,
 
     /// Set when a fire-and-forget ROLLBACK has been queued (e.g. by
