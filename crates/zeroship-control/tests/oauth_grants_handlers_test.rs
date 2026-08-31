@@ -1122,16 +1122,11 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     common::drain_pg().await;
 }
 
-/// Atomic app-delete cascade (new FK design): deleting an app drops the per-app
-/// `zeroship.oauth_clients` row in the SAME transaction as the `apps` row, so
-/// `zeroship.app_user_identities` (FK `app_client_id` → `oauth_clients(client_id)`
-/// ON DELETE CASCADE) is REMOVED — not merely flagged `revoked_at`. With the
-/// rows gone there are no orphaned live aliases to forward, which is exactly the
-/// guarantee the old best-effort companion UPDATE tried (and could fail) to
-/// provide. This test would fail if `delete_app` skipped the oauth_clients
-/// delete or the FK lost its ON DELETE CASCADE.
+/// Archive removes runtime routing but preserves OAuth identity and grant rows.
+/// Restore therefore recovers the same origin and pairwise identity rather than
+/// minting a second security domain for the same app.
 #[compio::test]
-async fn app_delete_cascades_away_relay_identities() {
+async fn app_archive_preserves_relay_identities() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "appdel").await;
     // Two users with aliases on the SAME app (same client_id). Both also hold an
@@ -1140,48 +1135,51 @@ async fn app_delete_cascades_away_relay_identities() {
     // with the grant present (the realistic deployed-app state).
     let user_a = insert_user(&fx.state, "appdel-a").await;
     let user_b = insert_user(&fx.state, "appdel-b").await;
-    let app_uuid = Uuid::new_v4();
-    let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_uuid);
+    let client_id = format!("client-{}", Uuid::new_v4().simple());
     insert_client(&fx.state, &client_id, user_a).await;
+    let sector = format!("https://{client_id}.zeroship.localhost");
+    let app_uuid = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
     insert_grant(&fx.state, user_a, &client_id, &["email"]).await;
     insert_grant(&fx.state, user_b, &client_id, &["email"]).await;
     let alias_a = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     let alias_b = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    let sector = format!("https://{client_id}.zeroship.localhost");
     insert_identity_with_alias(&fx.state, &client_id, &sector, user_a, &alias_a).await;
     insert_identity_with_alias(&fx.state, &client_id, &sector, user_b, &alias_b).await;
 
     assert!(alias_is_active(&fx.state, &alias_a).await);
     assert!(alias_is_active(&fx.state, &alias_b).await);
 
-    // Atomic delete: drops the apps row (none here — random uuid) AND the per-app
-    // oauth_clients row in one txn, cascading away the identity rows.
     fx.state
         .registry
-        .delete_app(&app_uuid)
+        .archive_app(&app_uuid)
         .await
-        .expect("atomic delete_app");
+        .expect("archive app")
+        .expect("app exists");
 
-    // The per-app oauth_clients row is gone, so its app_user_identities children
-    // cascade-deleted — both aliases are now unknown, the strongest possible
-    // "no longer forwarding" state (no row at all, not just revoked_at set).
     assert!(
-        !alias_is_active(&fx.state, &alias_a).await,
-        "user A's alias must not resolve after the app is deleted"
+        alias_is_active(&fx.state, &alias_a).await,
+        "archive retains user A's identity binding"
     );
     assert!(
-        !alias_is_active(&fx.state, &alias_b).await,
-        "user B's alias must not resolve after the app is deleted"
+        alias_is_active(&fx.state, &alias_b).await,
+        "archive retains user B's identity binding"
     );
     assert_eq!(
         identity_row_count(&fx.state, &client_id).await,
-        0,
-        "all app_user_identities rows for the app's client_id cascade-deleted"
+        2,
+        "archive preserves app_user_identities"
     );
-    // The grants cascade-deleted with the oauth_clients row too.
-    assert_eq!(count_grant(&fx.state, user_a, &client_id).await, 0);
-    assert_eq!(count_grant(&fx.state, user_b, &client_id).await, 0);
+    assert_eq!(count_grant(&fx.state, user_a, &client_id).await, 1);
+    assert_eq!(count_grant(&fx.state, user_b, &client_id).await, 1);
+    assert!(!fx.state.registry.get_routes().await.unwrap().contains_key(&app_uuid));
 
+    cleanup_identities(&fx.state, &client_id).await;
+    fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
+    fx.state
+        .control_pg
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid])
+        .await
+        .ok();
     cleanup_user(&fx.state, user_a).await;
     cleanup_user(&fx.state, user_b).await;
 
@@ -1189,17 +1187,15 @@ async fn app_delete_cascades_away_relay_identities() {
     common::drain_pg().await;
 }
 
-/// App-delete happy path: the handler returns 200 `{deleted: true}`. Deletion is
-/// now atomic at the DB layer (registry deletes apps + per-app oauth_clients in
-/// one txn, FK cascades the rest), so there is no best-effort companion and no
-/// failure arm to surface — just a clean 200.
+/// App archive happy path: the handler returns the retained app record with its
+/// archive timestamp.
 #[compio::test]
-async fn app_delete_returns_200_atomic() {
+async fn app_archive_returns_200_with_retained_record() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "atomic-ok").await;
 
     // The caller OWNS the app: `create_app` binds the owner `app_members` row,
-    // and that row is the only thing that authorizes `apps:delete` now. This
+    // and that row is the only thing that authorizes `apps:archive` now. This
     // used to seed an unrelated owner and delete as a platform admin, which
     // worked only because of the deleted universal-allow policy.
     let caller = common::authz_fixture::seeded_principal(&fx.state).await;
@@ -1219,12 +1215,15 @@ async fn app_delete_returns_200_atomic() {
     let app = test::init_service(
         web::App::new()
             .state(fx.state.clone())
-            .service(web::resource("/api/apps/{id}").route(web::delete().to(api::delete_app))),
+            .service(
+                web::resource("/api/apps/{id}/archive")
+                    .route(web::put().to(api::archive_app)),
+            ),
     )
     .await;
 
-    let req = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{app_id}"))
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/apps/{app_id}/archive"))
         .header("authorization", caller.bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1232,15 +1231,20 @@ async fn app_delete_returns_200_atomic() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "atomic delete returns a clean 200 {{deleted: true}}"
+        "archive returns a clean 200"
     );
     let body: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("delete body json");
-    assert_eq!(body.get("deleted").and_then(Value::as_bool), Some(true));
+        serde_json::from_slice(&test::read_body(resp).await).expect("archive body json");
+    assert!(body.get("archived_at").and_then(Value::as_str).is_some());
+    assert_eq!(body.get("id").and_then(Value::as_str), Some(app_id.to_string().as_str()));
 
     caller.cleanup(&fx.state).await;
-    // App delete cascaded the membership; remove the orphan owner user.
     cleanup_user(&fx.state, caller.user_id).await;
+    fx.state
+        .control_pg
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
 
     drop(app);
     drop(fx);

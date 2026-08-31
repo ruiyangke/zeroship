@@ -2419,7 +2419,7 @@ impl StripeApi for CrashOnFinalize {
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
-async fn crash_before_finalize_finalizes_original_draft_after_24h() {
+async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2453,11 +2453,19 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
         "no finalized provider ref yet",
     );
 
+    fx.state
+        .registry
+        .archive_app(&app)
+        .await
+        .expect("archive app with open invoice")
+        .expect("billed app exists");
+
     // Simulate >24h: Stripe's create Idempotency-Key window has expired.
     fx.mock.disable_dedupe();
 
-    // Re-drive with a healthy client: it must FINALIZE the EXISTING draft, NOT
-    // create a new empty one.
+    // Re-drive with a healthy client after archive: billing retains the app's
+    // usage, ownership, line, and draft identity, so it must FINALIZE the
+    // EXISTING draft rather than create a new empty one.
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("re-drive tick");

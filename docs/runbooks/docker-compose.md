@@ -394,10 +394,11 @@ container are worth knowing about before sizing it.
 | Pool | Where | Opened | Size | Released |
 | --- | --- | --- | --- | --- |
 | `env.db` data plane | per worker THREAD (`--threads N`) | lazily, on that thread's first `env.db` operation | `max_size` 8, `min_idle` 2 | never; it is the app's database handle |
-| operator lifecycle | the worker's ONE version-poller thread | lazily, on the first app deletion this process reconciles | 2, and all 2 are held - see below | when the poller's pending-deletion set drains |
+| operator lifecycle | the worker's ONE version-poller thread | lazily, when an app first disappears from this process's version feed | 2, and all 2 are held - see below | when the poller's pending-deprovision set drains |
 
 The floor a worker sits at is therefore `2 x (threads that have served an
-`env.db` op)`, plus 2 more while it is reconciling app deletions. Nothing here
+`env.db` op)`, plus 2 more while it is reconciling apps removed from the
+runtime feed. Nothing here
 is a ceiling an operator sets: there is no connection-budget flag, and the two
 sizes are compile-time constants (`Pool::connect(&url, 8)` in
 `zeroship-plugin-db`'s `init_pool_async`, `OPERATOR_POOL_SIZE` in its
@@ -409,12 +410,14 @@ idle connection only while the idle count EXCEEDS `min_idle` - so an operator
 pool never shrinks below two while it is installed, however long it sits unused.
 
 The operator pool is the one to watch, because it is the one that is easy to
-mis-model as free. It exists so that reconciling a batch of deleted apps costs
-one pool rather than one pool per app; the version poller runs on a thread that
-hosts no isolate, so it has no data-plane pool to borrow. It used to have no
-release path at all, which meant a container that had ever deleted an app held
-two extra backends until it exited. It is now closed when the poller has nothing
-left pending, so a steady-state worker holds none.
+mis-model as free. It exists so that reconciling a batch of apps removed from
+the version feed costs one pool rather than one pool per app; the version
+poller runs on a thread that hosts no isolate, so it has no data-plane pool to
+borrow. Archive deliberately retains the version-feed entry and does not open
+this pool. It used to have no release path at all, which meant a container that
+had ever deprovisioned an app held two extra backends until it exited. It is now
+closed when the poller has nothing left pending, so a steady-state worker holds
+none.
 
 If `max_connections` is the constraint, the lever is `--threads`, not a pool
 setting: the data-plane pool is per thread.

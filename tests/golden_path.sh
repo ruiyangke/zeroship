@@ -3037,12 +3037,9 @@ else
   # key it publishes. The .zship carries the DESCRIPTOR only; migrations travel through
   # zeroship-migrate-server, which is the real deployed path -- a hand-rolled CREATE
   # TABLE here would test nothing.
-  # `apps:delete` is here for step 12 (teardown) and for nothing else. It was
-  # ABSENT until 2026-08-11 and its absence read as a product defect: step 12's
-  # DELETE came back `403 {"error":"forbidden"}` and the harness reported "a
-  # creator cannot delete their own app", which would have been a serious and
-  # entirely false finding. The token simply did not carry the action. The four
-  # assertions after the DELETE all cascaded off that 403 and measured nothing.
+  # `apps:archive` is here for step 12's reversible lifecycle transition and for
+  # nothing else. The scope is explicit so a 403 cannot be misread as archive
+  # enforcement or as a failure to restore the retained app.
   #
   # `deployments:read` is here for the same reason, added BEFORE the step that
   # needs it rather than after a run misread its absence. GET /api/apps/{id}/logs
@@ -3054,7 +3051,7 @@ else
   # "creators cannot read their own logs". They can; the token could not ask.
   # See #332. The scope string below is that same action list, one scope per
   # Cedar action, now carried as the bearer's `scope` claim.
-  SC_SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read billing:read billing:write"
+  SC_SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read billing:read billing:write"
   SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$SC_CREATOR','golden-scaffold-$SC_CREATOR@zeroship.test'::citext,'Golden Scaffold',NOW());
@@ -4179,214 +4176,156 @@ fi
 
 gp_close_step
 
-# --- 12. The creator DELETES the app, and everything it created goes away ---
+# --- 12. The creator archives and restores the app without erasing state ----
 #
-# Rows 1-18 of docs/pilot/e2e-scenarios.md all cover an app being created,
-# deployed, driven or enforced. NOTHING covered tearing one down, and nothing in
-# tests/ has ever called `DELETE /api/apps/<id>` -- the only two `-X DELETE` in
-# this tree hit Stripe's own API from e2e_stripe_connect_live.sh.
+# Archive is the app lifecycle verb. It stops new public and scheduled
+# execution through the gateway route projection and workflow schedulers. It
+# deliberately retains the worker version-feed entry because removing that
+# entry requests database and CDC teardown. It also retains the app row,
+# routable name, deploy manifests, database schemas, runtime-role grants,
+# migration ledger, and billing history. DELETE on the archive subresource is
+# the inverse transition; it is not a hard delete.
 #
-# `purge_app` (crates/control/src/api.rs) opens with "Tear down an app and all
-# of its side-effecting state" and then enumerates exactly two steps: the
-# manifest keyspace, and `registry.delete_app` (which DELETEs zeroship.apps +
-# zeroship.oauth_clients in one txn and nothing else). The app's own Postgres
-# schema -- the creator's tables and rows, created by zeroship-migrate-server -- is
-# named in neither step. The teardown that WOULD remove it exists
-# (crates/plugin-db/src/drop_namespace.rs, 7 steps, slot -> publication ->
-# schema -> role) and has no production caller: its only callers are plugin-db's
-# own integration tests.
-#
-# So this step asserts what a creator is entitled to assume, not what the code
-# currently does. The schema assertion is EXPECTED RED at HEAD; the expected-
-# failure block below carries it, so a run stays classifiable.
-#
-# THE VEHICLE IS scaffoldapp, deliberately, and it must be the LAST thing this
-# file touches: it is the only app here that has a real per-app schema applied
-# through the real zeroship-migrate-server (step 10c) AND an owner bearer that can
-# authorize AppsDelete (SC_TOKEN, the app_members row written at step 10c).
-step 12 "Teardown: the creator deletes the app, and its state goes with it"
-if [ -z "${SC_APP_ID:-}" ] || [ -z "${SC_TOKEN:-}" ]; then
-  fail "no scaffold app id or bearer, so the deletion path could not be exercised at all --
-      this is a FAILED SETUP, not a passing teardown check"
+# The plan_change_events row below is load-bearing. Before archive replaced hard
+# delete, that append-only row made the apps cascade fail after manifest cleanup.
+# Archive must succeed with the row present and must retain it, proving that the
+# lifecycle transition never enters the destructive cascade.
+step 12 "Lifecycle: archive stops dispatch, and unarchive restores retained state"
+if [ -z "$SC_APP_ID" ] || [ -z "$SC_TOKEN" ]; then
+  fail "no scaffold app id or bearer, so the archive path could not be exercised at all --
+      this is a FAILED SETUP, not a passing lifecycle check"
 else
-  # --- BEFORE: prove the vehicle can discriminate ---------------------------
-  # Without these three, every assertion after the DELETE would pass over an app
-  # that was already gone, or a schema that never existed.
-  DEL_ROW_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  # An app gets THREE schemas, and the pattern has to name all three or the
-  # residue this step reports is smaller than the residue that exists:
-  #   `<app_id>`             the creator's tables (crates/zeroship-migrate-server apply)
-  #   `<app_id>_migrations`  the engine journal
-  #                          (third_party/zero-migrate .../conn.rs, `{schema}_migrations`)
-  #   `app_<app_id>`         the workflow journal's 5 __zeroship_workflow_* tables
-  #                          (crates/zeroship-migrate-server/src/provisioning.rs:214)
-  # A `like '<app_id>%'` matches the first two and NOT the third, because the
-  # third is PREFIXED. It undercounted for that reason until 2026-08-20.
-  # MEASURED on the golden database: 2 tables in the first and 5 in the second.
-  # MEASURED separately on the test databases at :5440: an `app_<uuid>` journal
-  # holding ZERO runs is 5 tables and 376 kB, so the third schema is never empty
-  # once the app has run one workflow, and is 376 kB even if it never has.
-  #
-  # WHAT THIS COUNT STILL DOES NOT CATCH: the per-app role `app_<uuid>_role`
-  # (cluster-scoped, so it outlives even a DROP DATABASE), the app's env.kv keys
-  # (`{<app_id>}:<key>`), its env.storage prefix, and its rows in
-  # workflow_scheduler_timers / _inflight (app_id with no FK). None of those are
-  # schemas or tables, so no query of this shape can see them. See
-  # docs/proposals/2026-08-20-deleted-app-schema-lifecycle.md section 2.
-  DEL_TBL_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from information_schema.tables
+  ARC_ROLE="app_${SC_APP_ID}_role"
+  ARC_ROW_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.apps where id = '$SC_APP_ID' and archived_at is null" 2>/dev/null | tr -d ' ')
+  ARC_TBL_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from information_schema.tables
       where table_schema like '$SC_APP_ID%' or table_schema = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  DEL_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
-  echo "  before delete: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE gateway=$DEL_SRV_PRE"
+  ARC_NSP_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from pg_namespace
+      where nspname like '$SC_APP_ID%' or nspname = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  ARC_NAME_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select name from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null)
+  ARC_MAN_PRE=$(ls -1 "/tmp/gp-bundles/manifests/$SC_APP_ID" 2>/dev/null | wc -l | tr -d ' ')
+  ARC_LEDGER_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.app_schema_applies where app_id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  ARC_ROLE_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select case
+       when not exists (select 1 from pg_roles where rolname = '$ARC_ROLE') then 0
+       when pg_has_role('zeroship_worker', '$ARC_ROLE', 'MEMBER')
+        and has_schema_privilege('$ARC_ROLE', '$SC_APP_ID', 'USAGE') then 1
+       else 0 end" 2>/dev/null | tr -d ' ')
+  ARC_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+  echo "  before archive: row=$ARC_ROW_PRE name=$ARC_NAME_PRE manifests=$ARC_MAN_PRE schemas=$ARC_NSP_PRE tables=$ARC_TBL_PRE ledger=$ARC_LEDGER_PRE runtime_role=$ARC_ROLE_PRE gateway=$ARC_SRV_PRE"
 
-  if [ "${DEL_ROW_PRE:-0}" = "1" ] && [ "${DEL_TBL_PRE:-0}" -ge 1 ] 2>/dev/null; then
-    pass "vehicle discriminates: the app row exists and its per-app schema holds $DEL_TBL_PRE table(s)"
+  if [ "$ARC_ROW_PRE" = "1" ]       && [ "$ARC_NAME_PRE" = "$SC_APP" ]       && [ "${ARC_MAN_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "${ARC_NSP_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "${ARC_TBL_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "${ARC_LEDGER_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "$ARC_ROLE_PRE" = "1" ]       && [ "$ARC_SRV_PRE" = "200" ]; then
+    pass "archive vehicle is active and carries every state class this step checks"
   else
-    fail "vehicle does NOT discriminate: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE.
-      Every assertion below would pass over an app that was already gone or a
-      schema that was never created. FAILED SETUP, not a pass. If this recurs,
-      the per-app schema is no longer named by app_id -- check
-      crates/zeroship-plugin-db/src/drop_namespace.rs and the migrated apply path."
+    fail "archive vehicle does not discriminate: row=$ARC_ROW_PRE name=$ARC_NAME_PRE manifests=$ARC_MAN_PRE schemas=$ARC_NSP_PRE tables=$ARC_TBL_PRE ledger=$ARC_LEDGER_PRE runtime_role=$ARC_ROLE_PRE gateway=$ARC_SRV_PRE"
   fi
 
-  # ARM THE CASCADE BLOCKER, so this step observes the real refusal rather than
-  # an app that happened to carry no blocking rows.
-  #
-  # THERE USED TO BE TWO append-only triggers on cascade edges out of
-  # zeroship.apps, and neither honoured the `zeroship.audit_retention` GUC hatch
-  # that the three platform audit tables have:
-  #   migrated_migration_audit_append_only   <- DELETED 2026-08-28 with the table
-  #   plan_change_events_immutable_trg       <- only fires if the app has rows
-  #
-  # The first is gone: `zeroship.migrated_migration_audit` was removed when the
-  # migration records were consolidated onto the engine journal, so the only
-  # blocker left is the one this block arms. That makes arming it load-bearing
-  # rather than belt-and-braces - without the insert below the DELETE would now
-  # SUCCEED for this app while apps that have changed plan stayed broken.
-  #
-  # MEASURED 2026-08-12 on a scratch database, one variable, isolated from the
-  # first blocker (no migrated_migration_audit rows in either arm):
-  #   app with NO plan_change_events row  -> DELETE succeeds, 0 rows remaining
-  #   identical app WITH one such row     -> ERROR: plan_change_events is
-  #     append-only (no UPDATE/DELETE) - the proration timeline is frozen
-  #     CONTEXT: DELETE FROM ONLY "zeroship"."plan_change_events" WHERE $1 = "app_id"
-  # Postgres names the cascade edge itself, so which trigger fired is observed.
-  #
-  # WHY SEED IT HERE. crates/control/src/proration.rs:188 INSERTs one of these on
-  # every plan change, so ANY app that has been on a paid plan carries them. The
-  # scaffold app has never changed plan, so without this line the harness would
-  # go GREEN the moment blocker 1 is fixed -- while real apps with plan changes
-  # stayed broken. That is a false all-clear, not missing coverage, and it is the
-  # more dangerous of the two.
-  #
-  # to_plan_id is taken from the app's OWN plan_id so this cannot fail on the
-  # plans FK, and the SELECT form inserts nothing if the app is already gone.
-  docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "insert into zeroship.plan_change_events (id, app_id, period, to_plan_id, effective_at)
+  docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "insert into zeroship.plan_change_events (id, app_id, period, to_plan_id, effective_at)
      select 'gp_pce_$SC_APP_ID', id, DATE '2026-08-01', plan_id, NOW()
      from zeroship.apps where id='$SC_APP_ID' on conflict (id) do nothing" >/dev/null 2>&1
-  DEL_PCE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from zeroship.plan_change_events where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  [ "${DEL_PCE:-0}" -ge 1 ] 2>/dev/null \
-    && pass "cascade blocker armed: app carries $DEL_PCE plan_change_events row(s)" \
-    || fail "could not arm the cascade blocker (plan_change_events rows=$DEL_PCE).
-      It is now the ONLY one left, so without it this step goes GREEN over an app
-      that carries no blocking rows while real apps that have changed plan stay
-      broken. Check the insert above:
-      billing_period is a DOMAIN OVER DATE, not an enum, and to_plan_id must
-      reference an existing zeroship.plans row."
+  ARC_PCE_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.plan_change_events where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  [ "${ARC_PCE_PRE:-0}" -ge 1 ] 2>/dev/null     && pass "append-only billing history armed: $ARC_PCE_PRE plan-change row(s)"     || fail "could not seed append-only billing history; archive would not prove it avoids the old cascade"
 
-  # --- THE DELETE, over the real HTTP surface with the creator's own bearer -
-  DEL_BODY=$(curl -s -o /tmp/gp-delete.json -w '%{http_code}' --max-time 20 \
-    -X DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID" \
-    -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
-  echo "  DELETE /api/apps/$SC_APP_ID -> $DEL_BODY $(head -c 120 /tmp/gp-delete.json)"
-  if [ "$DEL_BODY" = "200" ] && grep -q '"deleted":true' /tmp/gp-delete.json 2>/dev/null; then
-    pass "the creator's own bearer can delete the creator's own app (200 deleted:true)"
+  ARC_CODE=$(curl -s -o /tmp/gp-archive.json -w '%{http_code}' --max-time 20     -X PUT "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID/archive"     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
+  ARC_ID=$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/gp-archive.json 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  ARC_AT=$(grep -oE '"archived_at"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/gp-archive.json 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  echo "  PUT /api/apps/$SC_APP_ID/archive -> $ARC_CODE $(head -c 160 /tmp/gp-archive.json)"
+  if [ "$ARC_CODE" = "200" ] && [ "$ARC_ID" = "$SC_APP_ID" ] && [ -n "$ARC_AT" ]; then
+    pass "the owner archived the app and received its archived AppRecord"
   else
-    fail "DELETE /api/apps/<id> did not succeed for the app's OWNER (http=$DEL_BODY): $(head -c 200 /tmp/gp-delete.json)
-      A creator who cannot delete their own app has no workaround, so this is a
-      finding about the creator path, not about this harness."
+    fail "PUT /api/apps/<id>/archive failed for the owner (http=$ARC_CODE): $(head -c 200 /tmp/gp-archive.json)"
   fi
 
-  # --- AFTER: four things the creator is entitled to assume are gone --------
-  DEL_ROW_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  [ "${DEL_ROW_POST:-1}" = "0" ] \
-    && pass "the zeroship.apps row is gone" \
-    || fail "the zeroship.apps row SURVIVED the delete (count=$DEL_ROW_POST)"
+  ARC_RETRY_CODE=$(curl -s -o /tmp/gp-archive-retry.json -w '%{http_code}' --max-time 20     -X PUT "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID/archive"     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
+  ARC_RETRY_AT=$(grep -oE '"archived_at"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/gp-archive-retry.json 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  if [ "$ARC_RETRY_CODE" = "200" ] && [ -n "$ARC_AT" ] && [ "$ARC_RETRY_AT" = "$ARC_AT" ]; then
+    pass "archive retry is idempotent and preserves the original archive timestamp"
+  else
+    fail "archive retry changed state or failed (http=$ARC_RETRY_CODE): $(head -c 200 /tmp/gp-archive-retry.json)"
+  fi
 
-  # The gateway pulls routes from control on a 5s poll, so this is a WAIT, not a
-  # single probe -- a one-shot check here would measure the poll interval rather
-  # than the product. 30s is 6 polls.
-  DEL_SRV_POST=""
+  ARC_ROW_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.apps where id = '$SC_APP_ID' and archived_at is not null" 2>/dev/null | tr -d ' ')
+  [ "$ARC_ROW_POST" = "1" ]     && pass "archive retained the app row and marked it archived"     || fail "archive did not retain exactly one archived app row (count=$ARC_ROW_POST)"
+
+  ARC_SRV_POST=""
   for _i in $(seq 1 30); do
-    DEL_SRV_POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-      "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
-    [ "$DEL_SRV_POST" = "200" ] || break
+    ARC_SRV_POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+    [ "$ARC_SRV_POST" = "200" ] || break
     command sleep 1
   done
-  if [ "$DEL_SRV_PRE" = "200" ] && [ "$DEL_SRV_POST" != "200" ]; then
-    pass "the gateway stopped serving the deleted app (was $DEL_SRV_PRE, now $DEL_SRV_POST)"
-  elif [ "$DEL_SRV_PRE" != "200" ]; then
-    fail "the gateway was NOT serving this app before the delete (got $DEL_SRV_PRE), so
-      'it stopped' proves nothing. FAILED SETUP, not a pass."
+  if [ "$ARC_SRV_PRE" = "200" ] && [ "$ARC_SRV_POST" = "404" ]; then
+    pass "the gateway stopped serving the archived app with a route-miss 404"
   else
-    fail "the gateway is STILL serving the deleted app after 30s (6 route-sync polls):
-      before=$DEL_SRV_PRE after=$DEL_SRV_POST"
+    fail "the gateway did not converge from 200 to the archived route-miss 404: before=$ARC_SRV_PRE after=$ARC_SRV_POST"
   fi
 
-  DEL_MAN=$(ls -1 "/tmp/gp-bundles/manifests/$SC_APP_ID" 2>/dev/null | wc -l | tr -d ' ')
-  [ "${DEL_MAN:-1}" = "0" ] \
-    && pass "the app's manifest keyspace is gone from the blob store" \
-    || fail "manifests/$SC_APP_ID still holds $DEL_MAN object(s) after the delete"
+  ARC_MAN_POST=$(ls -1 "/tmp/gp-bundles/manifests/$SC_APP_ID" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$ARC_MAN_POST" = "$ARC_MAN_PRE" ] && [ "${ARC_MAN_POST:-0}" -ge 1 ] 2>/dev/null     && pass "archive retained the app manifest keyspace"     || fail "archive changed the manifest keyspace: before=$ARC_MAN_PRE after=$ARC_MAN_POST"
 
-  # THE ONE THAT IS RED AT HEAD. Deleting an app leaves the creator's own tables
-  # and every row in them in Postgres forever, because no production code path
-  # calls drop_namespace. See #330.
-  #
-  # READ THIS BEFORE CONCLUDING THAT A FIX FOR #331 DID NOT WORK. The cascade
-  # aborts the whole transaction on the first trigger that raises, so this step
-  # can only ever observe ONE blocker at a time. MEASURED against the live golden
-  # database by walking the FK graph: two DELETE-firing triggers were reachable
-  # from a `DELETE FROM zeroship.apps` cascade, and NEITHER honoured the
-  # `zeroship.audit_retention` GUC (only 3 of the 17 append-only triggers in the
-  # schema do -- app_audit, audit_events, authz_decisions):
-  #   migrated_migration_audit_append_only   <- DELETED 2026-08-28 with the table
-  #   plan_change_events_immutable_trg       <- the one this run hits, armed above
-  # crates/control/src/proration.rs:188 INSERTs a plan_change_events row on every
-  # plan change, so an app that has been on a paid plan carries them; the block
-  # above seeds one for THIS app so the refusal is observed rather than assumed.
-  # Same three-schema pattern as the BEFORE count. The two must stay identical:
-  # a POST query narrower than the PRE query reports residue shrinking when only
-  # the instrument did.
-  DEL_TBL_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from information_schema.tables
+  ARC_TBL_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from information_schema.tables
       where table_schema like '$SC_APP_ID%' or table_schema = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  DEL_NSP_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from pg_namespace
+  ARC_NSP_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from pg_namespace
       where nspname like '$SC_APP_ID%' or nspname = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  if [ "${DEL_NSP_POST:-1}" = "0" ] && [ "${DEL_TBL_POST:-1}" = "0" ]; then
-    pass "the app's per-app Postgres schema was dropped with the app"
+  if [ "$ARC_TBL_POST" = "$ARC_TBL_PRE" ] && [ "$ARC_NSP_POST" = "$ARC_NSP_PRE" ]; then
+    pass "archive retained every per-app database schema and table"
   else
-    fail "the per-app Postgres schema SURVIVED the delete -- schema(s)=$DEL_NSP_POST table(s)=$DEL_TBL_POST
-      (was $DEL_TBL_PRE before). purge_app deletes the manifest keyspace and the
-      zeroship.apps/oauth_clients rows and stops; nothing calls
-      crates/zeroship-plugin-db/src/drop_namespace.rs, whose only callers are plugin-db's
-      own integration tests. The creator's data outlives the app. See #330.
-      AND IT IS NOT MERELY THAT THE DELETE FAILED FIRST. MEASURED directly on
-      the golden database, in a transaction that was rolled back: with both
-      blocking triggers disabled the cascade RUNS TO COMPLETION (DELETE 1,
-      apps 1 -> 0) and the schema count stays 2 and the table count stays 7.
-      A DB cascade cannot drop a schema -- a schema is not a row - so fixing
-      #331 will make the delete succeed and leave this residue exactly as it
-      is. This assertion will still be the last one red.
-      AND WIRING drop_namespace WOULD NOT CLEAR IT EITHER: its step 4 is
-      DROP SCHEMA CASCADE on the BARE <app_id> only, so <app_id>_migrations and
-      app_<app_id> would still be here. See
-      docs/proposals/2026-08-20-deleted-app-schema-lifecycle.md section 2."
+    fail "archive changed database state: schemas $ARC_NSP_PRE->$ARC_NSP_POST tables $ARC_TBL_PRE->$ARC_TBL_POST"
+  fi
+
+  ARC_ROLE_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select case
+       when not exists (select 1 from pg_roles where rolname = '$ARC_ROLE') then 0
+       when pg_has_role('zeroship_worker', '$ARC_ROLE', 'MEMBER')
+        and has_schema_privilege('$ARC_ROLE', '$SC_APP_ID', 'USAGE') then 1
+       else 0 end" 2>/dev/null | tr -d ' ')
+  [ "$ARC_ROLE_POST" = "$ARC_ROLE_PRE" ] && [ "$ARC_ROLE_POST" = "1" ]     && pass "archive retained the runtime database role and worker membership"     || fail "archive changed the runtime database role or grants: before=$ARC_ROLE_PRE after=$ARC_ROLE_POST"
+
+  ARC_PCE_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.plan_change_events where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  ARC_LEDGER_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.app_schema_applies where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  if [ "$ARC_PCE_POST" = "$ARC_PCE_PRE" ] && [ "$ARC_LEDGER_POST" = "$ARC_LEDGER_PRE" ]; then
+    pass "archive retained billing history and the migration ledger"
+  else
+    fail "archive changed retained history: plan changes $ARC_PCE_PRE->$ARC_PCE_POST ledger $ARC_LEDGER_PRE->$ARC_LEDGER_POST"
+  fi
+
+  ARC_NAME_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select name from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null)
+  [ "$ARC_NAME_POST" = "$ARC_NAME_PRE" ]     && pass "the archived app still holds its unique routable name"     || fail "archive changed or released the app name: before=$ARC_NAME_PRE after=$ARC_NAME_POST"
+
+  RST_CODE=$(curl -s -o /tmp/gp-unarchive.json -w '%{http_code}' --max-time 20     -X DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID/archive"     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
+  RST_ID=$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/gp-unarchive.json 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  echo "  DELETE /api/apps/$SC_APP_ID/archive -> $RST_CODE $(head -c 160 /tmp/gp-unarchive.json)"
+  if [ "$RST_CODE" = "200" ] && [ "$RST_ID" = "$SC_APP_ID" ]       && grep -Eq '"archived_at"[[:space:]]*:[[:space:]]*null' /tmp/gp-unarchive.json; then
+    pass "the owner unarchived the app and received its active AppRecord"
+  else
+    fail "DELETE /api/apps/<id>/archive failed to unarchive for the owner (http=$RST_CODE): $(head -c 200 /tmp/gp-unarchive.json)"
+  fi
+
+  RST_RETRY_CODE=$(curl -s -o /tmp/gp-unarchive-retry.json -w '%{http_code}' --max-time 20     -X DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID/archive"     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
+  RST_RETRY_ID=$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/gp-unarchive-retry.json 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  if [ "$RST_RETRY_CODE" = "200" ] && [ "$RST_RETRY_ID" = "$SC_APP_ID" ]       && grep -Eq '"archived_at"[[:space:]]*:[[:space:]]*null' /tmp/gp-unarchive-retry.json; then
+    pass "unarchive retry is idempotent"
+  else
+    fail "unarchive retry changed state or failed (http=$RST_RETRY_CODE): $(head -c 200 /tmp/gp-unarchive-retry.json)"
+  fi
+
+  RST_ROW=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.apps where id = '$SC_APP_ID' and archived_at is null" 2>/dev/null | tr -d ' ')
+  [ "$RST_ROW" = "1" ]     && pass "unarchive restored the retained app row to active state"     || fail "unarchive did not restore exactly one active app row (count=$RST_ROW)"
+
+  RST_SRV=""
+  for _i in $(seq 1 30); do
+    RST_SRV=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+    [ "$RST_SRV" = "200" ] && break
+    command sleep 1
+  done
+  [ "$RST_SRV" = "200" ]     && pass "the gateway resumed the retained deploy after unarchive"     || fail "the gateway did not resume the app after unarchive (http=$RST_SRV)"
+
+  RST_MAN=$(ls -1 "/tmp/gp-bundles/manifests/$SC_APP_ID" 2>/dev/null | wc -l | tr -d ' ')
+  RST_TBL=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from information_schema.tables
+      where table_schema like '$SC_APP_ID%' or table_schema = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  RST_PCE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.plan_change_events where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  RST_LEDGER=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select count(*) from zeroship.app_schema_applies where app_id='$SC_APP_ID'" 2>/dev/null | tr -d ' ')
+  RST_NAME=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc     "select name from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null)
+  if [ "$RST_MAN" = "$ARC_MAN_PRE" ]       && [ "$RST_TBL" = "$ARC_TBL_PRE" ]       && [ "$RST_PCE" = "$ARC_PCE_PRE" ]       && [ "$RST_LEDGER" = "$ARC_LEDGER_PRE" ]       && [ "$RST_NAME" = "$ARC_NAME_PRE" ]; then
+    pass "unarchive restored execution without changing retained manifests, data, history, ledger, or name"
+  else
+    fail "unarchive changed retained state: manifests $ARC_MAN_PRE->$RST_MAN tables $ARC_TBL_PRE->$RST_TBL plan_changes $ARC_PCE_PRE->$RST_PCE ledger $ARC_LEDGER_PRE->$RST_LEDGER name $ARC_NAME_PRE->$RST_NAME"
   fi
 fi
 
@@ -4771,7 +4710,14 @@ gp_close_step
 # and git does not track. That was true before this change and is true of CI,
 # which is why the golden-path job now builds that example. Of the +5 over 121,
 # +4 is step 3's new arm and +1 was already there, unreachable.
-GOLDEN_MIN_PASSED=$((126 - GP_ARM_PASS_DELTA))
+#
+# 126 -> 139, 2026-08-31, derived from the step 12 shape change. The former
+# hard-delete step produced seven outcomes at HEAD: three green setup/manifest
+# checks and four ticketed reds. The archive/unarchive step produces sixteen
+# green outcomes, so the passing floor moves by +13 and the four #331 patterns
+# leave GOLDEN_EXPECTED_FAILURES. This is a counted delta, not a full-run
+# measurement; replace it with the real pair after the next complete run.
+GOLDEN_MIN_PASSED=$((139 - GP_ARM_PASS_DELTA))
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4844,11 +4790,10 @@ echo "            and is what to check."
 echo "            The 2026-08-11 measurement was 67/8 unmutated -> 73/2 mutated,"
 echo "            and its 'only step 11 collation reds are left' reading was true"
 echo "            OF THAT SUITE. It is not true now: steps 12-14 have since added"
-echo "            9 more expected reds (3 log-visibility #332/#333, 4 app-delete"
-echo "            #331, 2 id-ordering #236). MEASURED unmutated at HEAD 2026-08-12"
-echo "            is 119/15, so the mutated arm should read 125/9 -- DERIVED by"
-echo "            subtraction, NOT measured; nobody has run the mutated arm since"
-echo "            the suite grew. If you run it, replace this with the real pair."
+echo "            5 more expected reds (3 log-visibility #332/#333 and 2"
+echo "            id-ordering #236). Archive removed the former four #331 reds."
+echo "            No current absolute mutation pair is claimed; if you run the"
+echo "            mutation, record the real pair rather than deriving one."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
   echo "  NOTE: step 10's six scaffold comparisons are RED AT HEAD BY DESIGN -- the template"
   echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
@@ -4879,20 +4824,15 @@ rc=0
 #   - a pattern matching NO failure means the defect was FIXED and the list was
 #     not updated, which is a bookkeeping error the same way an unexplained drop
 #     below GOLDEN_MIN_PASSED is
-# Both set rc=1. The second will fire the day #260, #255 or #331 lands, and
+# Both set rc=1. The second will fire when one of the remaining documented
+# defects lands, and
 # updating this list belongs in that same change - exactly as lowering the floor
 # does.
 #
-# NOT ALL FOUR CATEGORIES ARE "BY DESIGN". #260 and #255 are decisions waiting on
-# an operator. Step 12's four are a KNOWN DEFECT (#331) that this harness found:
-# an app that carries a plan-change row cannot be deleted at all, because
-# `plan_change_events.app_id -> zeroship.apps` is ON DELETE CASCADE and that
-# table carries a BEFORE DELETE append-only trigger, so the cascade aborts the
-# whole transaction. Until 2026-08-28 the trigger this step hit was
-# `migrated_migration_audit_append_only`; that table is gone, the defect is not.
-# They are listed here for the same reason as the others
-# -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
+# Step 12 is no longer in this set. Archive is green only if the append-only
+# plan-change row survives while serving stops, and unarchive restores serving
+# from the same retained state.
+GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is

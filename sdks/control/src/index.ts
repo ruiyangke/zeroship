@@ -78,6 +78,8 @@ export interface AppRecord {
   name: string;
   plan_id: string;
   deploy_hash: string | null;
+  /** Non-null while the app is out of service; null while it is active. */
+  archived_at: string | null;
   /** Present on create/admin get responses; intentionally omitted from public list responses. */
   api_key?: string;
   created_at: string;
@@ -87,10 +89,6 @@ export interface AppRecord {
 export interface CreateAppInput {
   name: string;
   plan_id?: string;
-}
-
-export interface DeleteAppResult {
-  deleted: boolean;
 }
 
 export interface DeployAppResult {
@@ -308,8 +306,10 @@ export class ControlClient {
           plan_id: input.plan_id ?? "free",
         },
       }),
-    delete: (id: string): Promise<DeleteAppResult> =>
-      this.request(`/api/apps/${pathPart(id)}`, { method: "DELETE" }),
+    archive: (id: string): Promise<AppRecord> =>
+      this.request(`/api/apps/${pathPart(id)}/archive`, { method: "PUT" }),
+    unarchive: (id: string): Promise<AppRecord> =>
+      this.request(`/api/apps/${pathPart(id)}/archive`, { method: "DELETE" }),
     deploy: (
       id: string,
       artifact: DeployBody,

@@ -50,6 +50,8 @@ await control.apps.create({ name: "demo", plan_id: "free" });
 await control.apps.deploy(appId, zshipBytes);
 await control.apps.setPlan(appId, { plan_id: "pro" });
 await control.apps.logs(appId);
+await control.apps.archive(appId);
+await control.apps.unarchive(appId);
 
 await control.env.setVar(appId, { key: "PUBLIC_URL", value: "https://..." });
 await control.env.setSecret(appId, { key: "OPENAI_API_KEY", value: "sk-..." });
@@ -64,6 +66,47 @@ await control.egressRules.set(appId, {
 await control.egressRules.list(appId);
 await control.egressRules.remove(appId, { destination: "db.example.com", port: 5432 });
 ```
+
+### App archive lifecycle
+
+Apps are archived, not hard-deleted. `control.apps.archive(appId)` sends
+`PUT /api/apps/{id}/archive`; `control.apps.unarchive(appId)` sends `DELETE` to
+the same resource. Both return the current `AppRecord`. Its `archived_at` is a
+timestamp after archive and `null` after unarchive, and both operations are
+safe to retry.
+
+After the gateway route feed and workflow schedulers converge, archive stops
+new gateway dispatch and scheduled workflow dispatch. Work already admitted
+during that convergence window may finish and be metered. Route invalidation is
+pull-based, so a gateway that cannot complete another control-plane poll keeps
+its stale route snapshot; archive also does not terminate an already-open HTTP
+stream, WebSocket, or other in-flight request. A deploy may still land while
+the app is archived and replace its retained current code, but the new deploy
+is not routed or scheduled until unarchive. The worker version feed deliberately
+retains archived apps: removing one from that feed means database deprovisioning
+and CDC teardown, which archive must not request. An idle isolate may therefore
+remain cached, but it has no public gateway route after a successful route poll
+and receives no new control-scheduled workflow work.
+
+Archive does not erase the app row, name, deploy manifests, database schemas,
+migration ledger, usage history, billing evidence, OAuth identity rows, or
+relay aliases. OAuth and relay state is retained for restore and is not
+independently disabled by this lifecycle marker. An archived app therefore
+continues to hold its unique routable name. Unarchive restores the retained
+route and workflow eligibility from the latest deploy, including one staged
+while archived; it does not normally require another deploy. The old
+hard-delete path could remove the per-app manifest keyspace before its database
+cascade failed. Retrying archive after that already-observed partial failure is
+safe, but a later cold or deploy-pinned load may need a staged redeploy to
+restore the missing manifest keys before unarchive. There is no legacy repair
+mode.
+
+Database lifecycle is separate from app lifecycle. Archive does not drop a
+schema or revoke the runtime database role. Privileged database teardown
+belongs to `zeroship-migrate-server`, not control. Metering ingest remains
+enabled so late and in-flight reports are not lost, and storage or other
+retained resources may continue to accrue charges. Billing may still finalize
+an open invoice from usage recorded before archive.
 
 ### `egressRules` is the raw-stream rule set
 
