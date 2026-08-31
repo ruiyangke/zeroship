@@ -1499,8 +1499,10 @@ impl Pool {
         // session; closing it also rolls back any open transaction.
         let keep = self.config.run_after_release(&entry.client);
         // Re-check after arbitrary hook code. Re-entry is forbidden by the
-        // hook contract, but preserving shutdown accounting is cheap and keeps
-        // a violating hook from depositing an entry after close linearized.
+        // hook contract, and the synchronous hook cannot otherwise interleave
+        // a close on this single-threaded path. Only forbidden re-entry can
+        // make this arm observable; keeping it preserves shutdown accounting
+        // if a violating hook closes the pool before returning.
         if self.closed.get() {
             drop(entry);
             drop(permit);
