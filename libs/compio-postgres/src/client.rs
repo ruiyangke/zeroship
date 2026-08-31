@@ -913,6 +913,10 @@ mod type_cache_tests {
     }
 
     fn client_with_statement_cache() -> Client {
+        client_with_statement_cache_capacity(1)
+    }
+
+    fn client_with_statement_cache_capacity(capacity: usize) -> Client {
         let (sender, _receiver) = mpsc::unbounded();
         Client::new_with_statement_cache(
             sender,
@@ -922,8 +926,28 @@ mod type_cache_tests {
             Some(0.into()),
             None,
             ProtocolVersion::V3_0,
-            StatementCacheSettings::new(1, NonZeroUsize::MIN),
+            StatementCacheSettings::new(capacity, NonZeroUsize::MIN),
         )
+    }
+
+    fn install_cached_statement(client: &Client, query: &str, name: &str) -> Statement {
+        let statement = Statement::new(
+            client.inner(),
+            name.to_string(),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+        let winner = client.inner().cache_statement(
+            query,
+            statement.clone(),
+            client.inner().type_cache_generation(),
+        );
+        assert!(
+            winner.same_instance(&statement),
+            "a new cache entry did not keep its candidate"
+        );
+        winner
     }
 
     fn invalid_statement_name_error() -> Error {
@@ -1183,6 +1207,57 @@ mod type_cache_tests {
             client.inner().statement_cache_admission("SELECT fresh_a"),
             StatementCacheAdmission::PrepareNamed
         ));
+    }
+
+    #[test]
+    fn statement_cache_admission_hit_promotes_its_lru_entry() {
+        const SQL_A: &str = "SELECT admission_a";
+        const SQL_B: &str = "SELECT admission_b";
+
+        let client = client_with_statement_cache_capacity(2);
+        let cached_a = install_cached_statement(&client, SQL_A, "admission_a");
+        let _cached_b = install_cached_statement(&client, SQL_B, "admission_b");
+
+        let promoted = match client.inner().statement_cache_admission(SQL_A) {
+            StatementCacheAdmission::Cached(statement) => statement,
+            StatementCacheAdmission::PrepareNamed | StatementCacheAdmission::ExecuteUnnamed => {
+                panic!("the installed statement was not admitted as cached")
+            }
+        };
+        assert!(promoted.same_instance(&cached_a));
+
+        let cache = client.inner().statement_cache.lock();
+        let lru = cache.lru.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        assert_eq!(lru, [SQL_B, SQL_A]);
+    }
+
+    #[test]
+    fn cache_statement_existing_winner_promotes_its_lru_entry() {
+        const SQL_A: &str = "SELECT winner_a";
+        const SQL_B: &str = "SELECT winner_b";
+
+        let client = client_with_statement_cache_capacity(2);
+        let cached_a = install_cached_statement(&client, SQL_A, "winner_a");
+        let _cached_b = install_cached_statement(&client, SQL_B, "winner_b");
+        let loser = Statement::new(
+            client.inner(),
+            "winner_a_loser".to_string(),
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+
+        let winner = client.inner().cache_statement(
+            SQL_A,
+            loser.clone(),
+            client.inner().type_cache_generation(),
+        );
+        assert!(winner.same_instance(&cached_a));
+        assert!(!winner.same_instance(&loser));
+
+        let cache = client.inner().statement_cache.lock();
+        let lru = cache.lru.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        assert_eq!(lru, [SQL_B, SQL_A]);
     }
 }
 

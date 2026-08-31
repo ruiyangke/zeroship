@@ -7016,6 +7016,78 @@ async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
 
 /// If server-side state is cleared behind the cache, the first use reparses
 /// the missing Statement on the same still-usable connection.
+///
+/// This is the `query_raw` replay arm for an operation which STARTED as a
+/// probationary unnamed statement, then found a cache winner when it resumed.
+/// Holding the first prepare future unpolled makes that provenance
+/// deterministic rather than a scheduler race.
+#[compio::test]
+async fn query_raw_probationary_cache_winner_reprepares_after_deallocate() {
+    use futures_util::TryStreamExt;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let client = connect_with_statement_cache(&test_url(), 2).await.unwrap();
+    const SQL: &str = "SELECT 87::int4 AS cpg_cache_probationary_query_replay";
+
+    let mut held = Box::pin(client.query_raw(SQL, std::iter::empty::<&i32>()));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        held.as_mut().poll(&mut context).is_pending(),
+        "the first poll completed unnamed preparation instead of preserving its cold origin"
+    );
+
+    let warm = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(warm[0].get::<_, i32>(0), 87);
+    drop(warm);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    let rows: Vec<Row> = held.await.unwrap().try_collect().await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 87);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await.len(),
+        1,
+        "the probationary query did not replace its stale cache winner"
+    );
+}
+
+/// `execute_raw` duplicates the probationary-to-cache-winner recovery arm.
+/// Keep its held future independent from the query test above so mutating
+/// either body fails only the test named for that body.
+#[compio::test]
+async fn execute_raw_probationary_cache_winner_reprepares_after_deallocate() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let client = connect_with_statement_cache(&test_url(), 2).await.unwrap();
+    const SQL: &str = "SELECT 88::int4 AS cpg_cache_probationary_execute_replay";
+
+    let mut held = Box::pin(client.execute_raw(SQL, std::iter::empty::<&i32>()));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        held.as_mut().poll(&mut context).is_pending(),
+        "the first poll completed unnamed preparation instead of preserving its cold origin"
+    );
+
+    assert_eq!(client.execute(SQL, &[]).await.unwrap(), 1);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    assert_eq!(held.await.unwrap(), 1);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await.len(),
+        1,
+        "the probationary execute did not replace its stale cache winner"
+    );
+}
+
+/// If server-side state is cleared behind the cache, the first use reparses
+/// the missing Statement on the same still-usable connection.
 #[compio::test]
 async fn statement_cache_retries_a_statement_missing_after_deallocate_all() {
     let url = test_url();
