@@ -257,12 +257,42 @@ from.
 
 ## The rename
 
-`zeroship-plugin-db` -> `zeroship-data-binding`: **1,467 references across 159 files**, mostly
-mechanical. Two things make it safer than it sounds: `deploy/Dockerfile` uses `COPY crates/ crates/`
+`zeroship-plugin-db` -> `zeroship-data-binding`. Re-measured 2026-08-31 with the pattern stated, so
+the next reader can reproduce it rather than inherit it:
+
+```
+grep -rIoP 'zeroship[-_]plugin[-_]db' crates libs sdks tests docs deploy db schema | wc -l   # 1520
+grep -rIlP 'zeroship[-_]plugin[-_]db' crates libs sdks tests docs deploy db schema | wc -l   # 159
+grep -rIoP '(?<!zeroship[-_])plugin[-_]db' ...                                               # 675 more, bare
+```
+
+**1,520 occurrences of the full crate name across 159 files**, plus 675 bare `plugin-db` mentions in
+prose and comments. And the breakdown is the part that matters, because it is not what "1,520
+references" suggests:
+
+| root | files carrying the crate name |
+| --- | --- |
+| `docs` | 97 |
+| `crates` | 49 |
+| `tests` | 9 |
+| `libs` | 3 |
+| `sdks` | 1 |
+
+**61% of the affected files are documentation.** This is a prose edit with a code edit inside it, not
+a refactor with some docs to fix - which changes who should do it and what "mostly mechanical" is
+claiming. The compiler covers the 49; nothing covers the 97 except `doc_citation_gate.sh`, and that
+checks path citations, not the 675 bare prose mentions.
+
+Two things still make it safer than it sounds: `deploy/Dockerfile` uses `COPY crates/ crates/`
 wholesale rather than a curated list, so #64's failure mode is already gone; and
 `doc_citation_gate.sh` checks 139 `AGENTS.md` paths, so broken doc references fail loudly.
 
-**Ride it with Track B's extraction, never alone.** Renaming first means 1,467 edits to a crate you
+*This document said "1,467 references" until it was re-measured.* The file count (159) was and is
+exact; the occurrence count drifted by 53 - and the drift is self-inflicted, because writing THIS
+DOCUMENT added `crates/zeroship-plugin-db/...` citations to the corpus being counted. A measurement
+of a corpus you are actively writing into goes stale as you write.
+
+**Ride it with Track B's extraction, never alone.** Renaming first means 1,520 edits to a crate you
 are about to reshape.
 
 ## Not decided
