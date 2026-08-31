@@ -1373,6 +1373,31 @@ mod tests {
         assert!(peer_has_closed, "the TLS write half sent no close_notify");
     }
 
+    /// The OTHER panic-poisoning copy. `with` blocks for the lease and is
+    /// covered by `a_panicking_rustls_callback_poisons_the_shared_session`;
+    /// `try_with` takes the lease only when it is free and reaches its own
+    /// `catch_unwind` arm, which no test entered - the whole 1438-test suite
+    /// passed with its `lease.poisoned = true` flipped to `false`. A rustls
+    /// session half-unwound through THIS path must be refused just the same,
+    /// or the next caller resumes a session whose internal state was abandoned
+    /// mid-mutation.
+    #[test]
+    fn a_panicking_callback_under_try_with_poisons_the_shared_session() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = session
+                .try_with(|_| -> io::Result<()> { panic!("scripted try_with callback panic") });
+        }));
+        assert!(panic.is_err(), "the try_with callback did not panic");
+
+        let error = session
+            .with(|_| Ok(()))
+            .expect_err("a partially unwound rustls session was reused after try_with");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
     #[compio::test]
     async fn cancelling_a_tls_write_poisons_the_reused_stream() {
         let (client, _server) = handshaken_pair();
