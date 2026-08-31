@@ -61,6 +61,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 35 Simple-query column scanning | 2 | BOUND; one sub-branch **unbindable** | `copy_in_classifier_scans_past_doubled_quoted_identifier_delimiters` |
 | 36 Binary COPY rejection | 2 | BOUND | `bytes_after_the_binary_copy_trailer_are_refused` + sibling |
 | 37 Frame-offset guard | 2 | was UNBOUND, now BOUND each | `{first_matching_tag,error_response_before}_advances_past_the_entire_leading_frame` |
+| 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
@@ -75,6 +76,32 @@ below was re-run by the pilot against the FULL seven-target gate
 finding here.** Group 17 said two and had three; group 28 said two and had five;
 `remember_server_error` said two and had eight. In group 17 and group 28 the
 UNCOUNTED copy was the only unbound one. Always enumerate by content first.
+
+### "More than one failure" is not automatically a gap
+
+Group 38 is the worked example. Mutating each of the four
+`if saw_error_response {` copies in `codec.rs` fails 3, 3, 3 and 2 tests -
+never exactly one, so the acceptance rule flags all four. They are fine.
+Each copy has its OWN named test:
+
+    421 message ceiling  -> a_message_ceiling_failure_after_error_response_is_deferred
+    434 startup limit    -> a_startup_limit_failure_after_error_response_is_deferred
+    451 copy metadata    -> a_copy_metadata_failure_after_error_response_is_deferred
+    465 ready for query  -> a_ready_for_query_failure_after_error_response_is_deferred
+
+The extra failures are `a_leading_error_response_survives_every_later_validation_failure`,
+a DELIBERATE cross-cutting test cited in a source comment beside these arms,
+plus each validator's own non-deferred test. That is stronger coverage than
+one-test-per-copy, not weaker.
+
+So read a multi-failure result by NAME, never by count: if one failing test is
+specific to the mutated copy, the copy is bound and the rest are aggregates
+doing their job. Only when no failing test is specific to the copy - or when
+zero fail - is there anything to fix.
+
+The worklist also under-counted here: the `Err(error) if saw_error_response =>`
+guard arm on `Header::parse` is a fifth copy of the same decision in a different
+syntactic shape, and the group entry lists four.
 
 ### Two copies are unbindable by construction, and no test should be written
 
