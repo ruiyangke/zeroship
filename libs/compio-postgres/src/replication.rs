@@ -1902,10 +1902,11 @@ fn missing_identify_field(name: &str) -> Error {
 
 /// Parse a Postgres text LSN like `"0/16B3750"` into a `u64`.
 ///
-/// Returns `None` on malformed input rather than erroring - the
-/// callers that need correctness gate on the input source (the slot
-/// setup outcome) and a malformed value just means we resume from
-/// `0/0`, which Postgres treats as "use the slot's flush_lsn".
+/// Returns `None` when either hex half is malformed or cannot fit in 32 bits.
+/// [`ReplicationConnection::start_logical_replication`] treats that as a
+/// configuration error and refuses the request before writing a command. An
+/// explicit `"0/0"` remains valid and asks Postgres to resume from the slot's
+/// `confirmed_flush_lsn`; malformed input is never converted to it.
 pub fn parse_lsn(s: &str) -> Option<u64> {
     let (hi, lo) = s.split_once('/')?;
     let hi = u32::from_str_radix(hi.trim(), 16).ok()?;
