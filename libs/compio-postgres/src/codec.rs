@@ -1125,6 +1125,46 @@ mod tests {
         frame
     }
 
+    #[test]
+    fn first_matching_tag_advances_past_the_entire_leading_frame() {
+        let bytes = [
+            copy_response_frame(backend::PARSE_COMPLETE_TAG, b""),
+            copy_response_frame(backend::COPY_IN_RESPONSE_TAG, b"\x00\x00\x00"),
+        ]
+        .concat();
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice()));
+
+        assert_eq!(
+            messages.first_matching_tag(&[
+                backend::COPY_IN_RESPONSE_TAG,
+                backend::COPY_OUT_RESPONSE_TAG,
+            ]),
+            Some(backend::COPY_IN_RESPONSE_TAG),
+            "the scan did not advance by the leading frame's tag plus declared length"
+        );
+    }
+
+    #[test]
+    fn error_response_before_advances_past_the_entire_leading_frame() {
+        let bytes = [
+            copy_response_frame(backend::PARSE_COMPLETE_TAG, b""),
+            error_response("26000", "scripted stale statement"),
+        ]
+        .concat();
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice()));
+
+        let body = messages
+            .error_response_before(backend::BIND_COMPLETE_TAG)
+            .expect("the frame scan rejected a valid batch")
+            .expect("the scan did not reach the later ErrorResponse");
+        let error = Error::db(body);
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("26000"),
+            "the later ErrorResponse was not decoded intact"
+        );
+    }
+
     /// CopyInResponse and CopyOutResponse are not opaque transition tags. The
     /// body declares a bounded column count followed by exactly that many
     /// format codes, and every code has protocol meaning. Validate at the
