@@ -336,7 +336,9 @@ fn verifier_for(
     let verifier: Arc<dyn ServerCertVerifier> = match policy {
         ServerVerification::Chain => Arc::new(ChainOnlyServerCert { verifier }),
         ServerVerification::ChainAndHostname => verifier,
-        ServerVerification::None => unreachable!("handled above"),
+        ServerVerification::None => {
+            unreachable!("ServerVerification::None returns before WebPki verifier construction")
+        }
     };
     Ok((verifier, policy))
 }
