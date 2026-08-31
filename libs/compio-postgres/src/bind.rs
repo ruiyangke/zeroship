@@ -333,6 +333,68 @@ mod tests {
         );
     }
 
+    /// The OTHER invalidation copy. `finish_bind` waits for ParseComplete only
+    /// when the statement is unnamed, so a named bind never enters that arm and
+    /// the test above cannot reach it. An unnamed re-parse that fails must
+    /// invalidate the cache exactly as the BindComplete slot does, or a stale
+    /// entry survives to be replayed against a statement the server dropped.
+    #[compio::test]
+    async fn unnamed_bind_parse_error_invalidates_cached_statement() {
+        const SQL: &str = "SELECT 1";
+        let (sender, mut receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            ProtocolVersion::V3_0,
+            StatementCacheSettings::new(1, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+        let statement = Statement::new(&inner, String::new(), vec![], vec![], false);
+        let statement = inner.cache_statement(SQL, statement, inner.type_cache_generation());
+
+        let bind = super::bind(
+            &inner,
+            statement,
+            std::iter::empty::<i32>(),
+            Some(SQL),
+            crate::portal::PortalScope::new(),
+        );
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("unnamed bind did not enqueue its protocol request");
+            let bytes = backend_frame(
+                b'E',
+                b"SERROR\0C26000\0Mscripted stale unnamed parse\0RFetchPreparedStatement\0\0",
+            );
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(bytes.as_slice()),
+                )))
+                .expect("deliver the unnamed parse error");
+        };
+
+        let (result, ()) = futures_util::join!(bind, respond);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("stale unnamed bind unexpectedly succeeded"),
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("26000")
+        );
+        assert!(
+            inner.cached_statement(SQL).is_none(),
+            "the ParseComplete-slot error left its stale statement cached"
+        );
+    }
+
     #[test]
     fn dropping_armed_portal_cleanup_enqueues_close() {
         let (sender, mut receiver) = mpsc::unbounded();
