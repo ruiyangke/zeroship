@@ -41,3 +41,42 @@ the crate names alone.
 entirely upstream of that crate, so a postgres change cannot be judged by the
 workspace gate - run the per-crate one, and read a workspace red as "the migrate
 crates are still red", not as a regression.
+
+## The doc gate is red the same way, and it refuses rather than lying
+
+Measured 2026-08-30 at `00e31cf10`. `./tests/run_doc_gate.sh` exits 1:
+
+    error: could not document `zeroship-migrate-adapter`
+    error: could not compile `zeroship-migrate-adapter` (lib) due to 22 previous errors
+    error: could not document `zeroship-config-contract`
+
+**`compio-postgres` is not implicated.** `cargo doc -p compio-postgres --no-deps
+--all-features` exits 0 with zero errors and zero unresolved links. And the
+twenty commits of this session touched exactly four directories -
+`docs/reviews`, `docs/runbooks`, `libs/compio-postgres/src`,
+`libs/compio-postgres/tests/suite` - with nothing outside them, so they cannot
+have broken another crate. Check that with
+
+    git log <base>..HEAD --name-only --pretty=format: | sort -u \
+      | grep -vE '^(libs/compio-postgres/|docs/)'
+
+rather than asserting it.
+
+### What this gate does RIGHT, and why it is worth copying
+
+Its two arms report a census against a floor:
+
+    arm=doc_default_features examined=37 floor=38
+    arm=doc_all_features     examined=28 floor=38
+
+Both came in UNDER the floor - ten crates short under `--all-features` - so the
+gate refused. It did not report "no doc errors found". That distinction is the
+whole point: a deny-level compile error aborts cargo's scheduling, so every
+crate downstream of the failure is never documented and contributes no errors.
+Without the floor, a run that examined 28 of 38 crates and found nothing wrong
+in those 28 prints exactly what a clean workspace prints.
+
+The clippy gate above has the same guard for the same reason, which is why its
+284 is a FLOOR and not a total. When adding a gate here, make it count what it
+ruled on and compare that against cargo's own inventory - "found no problems"
+and "never looked" are indistinguishable otherwise.
