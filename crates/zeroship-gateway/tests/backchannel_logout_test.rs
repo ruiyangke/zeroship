@@ -1,3 +1,10 @@
+// This test target is its own crate ROOT and overflows rustc's layout query.
+// `recursion_limit` is per crate root, so the gateway's lib and its sibling
+// test targets do not cover this one. Caught by `tests/clippy_gate.sh`, which
+// lints `--all-targets`; a bare `cargo test -p zeroship-gateway --lib` never
+// builds this file, which is why it compiled clean until the gate ran.
+#![recursion_limit = "256"]
+
 //! Live-PG coverage for `gateway::sessions::revoke_app_sessions_for_user` —
 //! the per-app, RLS-scoped session-revocation path used by the OIDC
 //! Back-Channel Logout 1.0 handler.
