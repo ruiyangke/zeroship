@@ -95,3 +95,35 @@ The rest are open. Line ranges are as of 2026-08-30 and drift; locate by content
 48. Transaction drop  -  `transaction.rs:88-103`, `transaction_builder.rs:117-125`
 49. Row panic mapping  -  `row.rs:219-224`, `415-420`
 50. COPY format validation  -  `copy_format.rs:56-59`, `112-115`
+
+## Group B (replication `release.shutdown()`): 5 of 6 bound, and the 6th is not exotic
+
+Measured by mutating each copy to `/* mutated */` individually on a quiescent
+tree and counting which named tests fail. State at `a1ff36efe`:
+
+    line  542  bound   identify_system_write_failure_shuts_down_its_release_handle
+    line  588  bound   identify_system_response_read_failure_shuts_down_its_release_handle
+    line 1154  bound   next_read_timeout_shuts_down_its_release_handle
+    line 1297  bound   automatic_keepalive_write_failure_shuts_down_its_release_handle
+    line 1322  bound   copy_done_with_a_body_shuts_down_its_release_handle
+    line  528  UNBOUND
+
+Every bound copy fails exactly ONE test, which is the acceptance bar.
+
+**Why 528 survived the others.** It sits in `identify_system`, in a branch
+guarded by `result.as_ref().is_err_and(Error::is_read_timeout)` - so a plain
+read FAILURE does not reach it, and neither does a write failure. It needs a
+genuine `Kind::ReadTimeout`, which is why the two identify-system tests next to
+it both miss.
+
+**It is bindable; the technique already exists in the tree.**
+`tests/serialized_loop.rs:400-451` drives a real read timeout and asserts
+`error.is_read_timeout()`. A test that gives `identify_system` a transport which
+accepts the query and then never answers, under a short command timeout, reaches
+line 528. That is the last copy in this group.
+
+**Do not "simplify" 528 and 542 into one arm.** They are textually similar and
+behaviourally different: 542 is a send failure that may have left PostgreSQL
+holding a frontend fragment, 528 is a timeout that leaves the read boundary
+unknown. Both poison and shut down, for unrelated reasons, and the comments
+above each say so.
