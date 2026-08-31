@@ -1420,14 +1420,15 @@ async fn as_app_runtime_identity(
     out
 }
 
-/// A real apply must preserve column-level SELECT as the runtime authority.
+/// Explicit database creation followed by a real apply must leave the creator
+/// table usable through the production worker-to-app role chain.
 ///
-/// The runtime role is granted only `title`; `body` differs in exactly that it
-/// is absent from the column grant. A table-level grant from either the
-/// pre-apply default privileges or the post-apply existing-table snapshot makes
-/// both reads succeed and therefore fails this case on the property itself.
+/// There is deliberately no fixture grant here. The create endpoint and apply
+/// endpoint are the complete public lifecycle that must establish runtime
+/// authority. A test that grants columns itself proves only that PostgreSQL
+/// honors the test's grant, not that the migration service produced one.
 #[ntex::test]
-async fn a_real_apply_preserves_the_column_level_read_fence_pg() {
+async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
     let conn = admin_conn().await;
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
@@ -1456,15 +1457,6 @@ async fn a_real_apply_preserves_the_column_level_read_fence_pg() {
     let table = format!("{}.{}", quote_ident(&schema), quote_ident("notes"));
     let runtime_role =
         zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
-    conn.batch_execute(&format!(
-        "GRANT SELECT (title) ON {table} TO {}; \
-         INSERT INTO {table} (id, title, body) \
-         VALUES ('note-1', 'readable', 'must stay fenced')",
-        quote_ident(&runtime_role),
-    ))
-    .await
-    .expect("grant one readable column and seed the control row");
-
     let app_table_privileges = table_privileges(&conn, &runtime_role, &schema, "notes").await;
     let audit_name = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
     let audit_table_privileges = table_privileges(&conn, &runtime_role, &schema, audit_name).await;
@@ -1497,41 +1489,47 @@ async fn a_real_apply_preserves_the_column_level_read_fence_pg() {
         schema_privileges[0].get::<_, bool>(1),
     );
     println!(
-        "information_schema.table_privileges for {runtime_role}: \
-         notes={app_table_privileges:?}, {audit_name}={audit_table_privileges:?}"
+        "information_schema.table_privileges for {runtime_role}.notes: \
+         {app_table_privileges:?}"
     );
     println!(
-        "audit sequence privileges for {runtime_role}: \
-         USAGE={}, SELECT={}, UPDATE={}",
-        sequence_privileges.0, sequence_privileges.1, sequence_privileges.2
+        "audit privileges for {runtime_role}: table={audit_table_privileges:?}, \
+         sequence={sequence_privileges:?}, schema={schema_privileges:?}"
     );
-    println!(
-        "schema privileges for {runtime_role}: USAGE={}, CREATE={}",
-        schema_privileges.0, schema_privileges.1
-    );
-
-    let granted =
-        as_app_runtime_identity(&conn, &schema, &format!("SELECT title FROM {table}")).await;
-    let ungranted =
-        as_app_runtime_identity(&conn, &schema, &format!("SELECT body FROM {table}")).await;
+    let insert = as_app_runtime_identity(
+        &conn,
+        &schema,
+        &format!(
+            "INSERT INTO {table} (id, title, body) \
+             VALUES ('note-1', 'runtime write', 'created then migrated')"
+        ),
+    )
+    .await;
+    let select = as_app_runtime_identity(
+        &conn,
+        &schema,
+        &format!("SELECT title, body FROM {table} WHERE id = 'note-1'"),
+    )
+    .await;
+    println!("runtime INSERT result: {insert:?}");
+    println!("runtime SELECT result: {select:?}");
 
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
 
     assert!(
-        granted.is_ok(),
-        "the explicitly granted title column must remain readable: {granted:?}"
+        insert.is_ok(),
+        "created-then-migrated runtime role could not INSERT its own table: {insert:?}"
     );
-    assert_eq!(
-        app_table_privileges,
-        Vec::<String>::new(),
-        "creator tables must receive no table-level privilege from runtime provisioning"
+    assert!(
+        select.is_ok(),
+        "created-then-migrated runtime role could not SELECT its own table: {select:?}"
     );
     assert_eq!(
         audit_table_privileges,
         vec!["INSERT"],
-        "the runtime role must hold exactly INSERT on its audit table"
+        "the interim table grant must still leave the audit table INSERT-only"
     );
     assert_eq!(
         sequence_privileges,
@@ -1542,13 +1540,6 @@ async fn a_real_apply_preserves_the_column_level_read_fence_pg() {
         schema_privileges,
         (true, false),
         "the runtime role must enter its schema but cannot author objects"
-    );
-    let err = ungranted
-        .expect_err("the runtime role read body even though it was granted SELECT only on title");
-    assert_eq!(
-        err.code(),
-        Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
-        "the ungranted column must be refused by PostgreSQL: {err}"
     );
 }
 
