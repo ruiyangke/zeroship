@@ -189,11 +189,11 @@ async fn authorize_mutation(
     state: &MigrationServiceState,
     app_id: Uuid,
 ) -> Result<crate::auth::VerifiedCaller, web::HttpResponse> {
-    let Some(token) = bearer_token(&req) else {
+    let Some(token) = bearer_token(req) else {
         return Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"})));
     };
-    let request_id = request_id(&req);
-    let source_ip = source_ip(&req, state.trust_proxy);
+    let request_id = request_id(req);
+    let source_ip = source_ip(req, state.trust_proxy);
     let caller = match state
         .authenticator
         .verify_action(token, app_id, Action::AppsDeploy, source_ip, &request_id)

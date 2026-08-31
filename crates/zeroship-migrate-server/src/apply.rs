@@ -1798,8 +1798,7 @@ mod live_audit_unmask_provisioning {
         crate::provisioning::provision_database(admin, schema)
             .await
             .expect("create scratch app database");
-        let role = migrator_role_name(schema).expect("derive migrator role");
-        role
+        migrator_role_name(schema).expect("derive migrator role")
     }
 
     async fn probe(admin: &compio_postgres::Client, sql: &str) -> bool {
