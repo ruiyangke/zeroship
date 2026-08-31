@@ -242,25 +242,43 @@ The composer must refuse a name it would have truncated.
 `Datastore` is a different thing: the physical PostgreSQL database a Database is *placed on*,
 operator-owned and never named by a creator. Many Databases sit on one Datastore.
 
-**The database id is INTERNAL and is never exposed to creators** (operator decision, 2026-08-29).
-It is an implementation identity. What a creator names, sees and types is the database's
-**workspace-local name** - the key in the `databases` map of `zeroship.jsonc` - and the control
-plane resolves `(workspace, name) -> database_id`. Nothing in the creator surface, the CLI output,
-the generated types or an error message should contain a `dbs_...` string.
+**A DATABASE IS ADDRESSED BY ITS ID, ALWAYS** (operator decision 13, 2026-08-30). There is no
+`(workspace, name) -> database_id` resolution anywhere. The creator writes the `dbs_...` id, the CLI
+sends it, and the migration service takes it in the URL.
 
-That is a requirement with two sharp edges, both easy to violate by accident:
+**THIS REVERSES OPERATOR DECISION 6 OF 2026-08-29**, which held the opposite - that the id is an
+internal implementation identity, that a creator addresses a database by a workspace-local name, and
+that nothing in the creator surface, the CLI output, the generated types or an error message may
+contain a `dbs_...` string. That paragraph stood here for one day and is withdrawn.
 
-1. **The physical schema IS named `db_<dbsid>`, so PostgreSQL will put it in error text.** A
-   constraint violation, a permission denial or a failed migration surfaces the schema name in the
-   server's own message. Anything that relays a database error to a creator has to map the physical
-   name back to the workspace-local one, or the id leaks through the one path nobody writes by
-   hand. This is the same discipline `DbResourceKey` already applies to DSN passwords - chosen as a
-   digest precisely so the secret "cannot reach `Debug` or a log line"
-   (`crates/zeroship-plugin-db/src/service.rs:46`).
-2. **A route that takes the id in its URL is an exposure.** See section 4: the apply route as
-   currently written is `POST /v1/databases/{database_id}/migrations/apply`, which a creator
-   cannot call without holding the id. Either that route is control-plane-internal and the
-   creator-facing surface addresses the database by name, or the decision above is not being kept.
+**The reversal is a consequence, not a change of mind about the same facts.** Decision 6 rested on
+this argument, which was the second of its two "sharp edges":
+
+> A route that takes the id in its URL is an exposure. The apply route as currently written is
+> `POST /v1/databases/{database_id}/migrations/apply`, which a creator cannot call without holding
+> the id. Either that route is control-plane-internal and the creator-facing surface addresses the
+> database by name, or the decision above is not being kept.
+
+That reasoning only held while the control plane stood in front and forwarded. **Operator decision 11
+removes the forward** (section 4), so the premise is gone: there is no control-plane-internal route
+for the id to hide behind, and inventing one purely to keep the id hidden would be building a service
+boundary to serve a naming preference.
+
+It is also worth being precise about what the id is not. **An id is not a capability.** Authorization
+is "principal may migrate N iff principal owns N", evaluated on the database itself, so a creator
+learning a `dbs_...` string gains nothing. Hiding it was only ever ergonomics.
+
+**This matches the pattern already shipped for apps rather than inventing a second one.**
+`schema/project-v1.json` defines `app` as the deploy target's app id (uuid) or name, absent on a
+fresh project and appended by the first `zeroship deploy`. A database now works the same way, in the
+same file, with the same lifecycle.
+
+**What survives from the withdrawn decision is one narrower point, and it is an ergonomic one.** The
+physical schema is named `db_<dbsid>`, so PostgreSQL puts it in error text on a constraint violation,
+a permission denial or a failed migration. That is no longer a leak to prevent - the id is public -
+but a raw physical schema name is still a poor thing to show a creator, and mapping it to something
+readable remains worthwhile. It is now a message-quality item, not a security requirement, and it
+must not be cited as one.
 
 **The grant key is `(app_id)`.** An app binds to exactly one database, so the app id alone
 identifies the row and the database cannot be ambiguous at any call site. There is no
@@ -607,23 +625,41 @@ creators it is, and no role fixes it.
 
   So `Database` carries the **creator's** ownership and no app column at all: schema authority never
   passes through an app identity, and the migrator role is named by no app.
-- **Two routes, because the database id must not reach a creator** (see section 1). The
-  creator-facing one addresses the database by its **workspace-local name**; the id-bearing one is
-  control-plane-internal.
+- **ONE route, and the control plane is not on it** (operator decisions 11 and 13, 2026-08-30). The
+  CLI calls the migration service directly, addressing the database by id.
 
   ```
-  creator  ->  POST /v1/projects/{project}/databases/{name}/migrations/apply
-  internal ->  POST /v1/databases/{database_id}/migrations/apply
+  creator -> POST /v1/databases/{database_id}/migrations/apply    (on zeroship-migrate-server)
   ```
 
-  The control plane resolves name to id and forwards.
+  **THIS REPLACES A TWO-ROUTE SPLIT** in which a creator-facing
+  `POST /v1/projects/{project}/databases/{name}/migrations/apply` was resolved to an id and forwarded
+  to a control-plane-internal id-bearing route. Both the split and the forward are deleted.
+  `crates/zeroship-control/src/migrations_api.rs` (214 lines) goes with them.
+
+  **Deleting the forward costs nothing in authorization, because it was never the authorization.**
+  `crates/zeroship-migrate-server/src/api.rs:98` already calls
+  `verify_action(token, app_id, Action::AppsDeploy, ...)` against `ControlPlaneAuthenticator`, which
+  holds its own `control_pg` client, its own `PolicySet` and its own `BearerVerifier`
+  (`crates/zeroship-migrate-server/src/auth.rs:42-46`) and reads the creator's own bearer. The
+  control hop performed an authorization that the migration service then performed again. Removing it
+  removes the duplicate, not the check.
+
+  It also retires a hazard the split created. An "internal" route invites the belief that it is a
+  privileged plane, and the day one accepts the control key instead of the caller's bearer, every
+  creator holding a `dbs_...` inherits platform authority over that database. There is now no internal
+  route to confuse, and the surviving route demands the caller's own bearer.
 
   `crates/zeroship-authz/src/resource.rs:14-16` gains `Resource::Database { id }` - it is `App { id }`
   and `Any` today - with the policy **"principal may migrate N iff principal owns N"**, checked
-  against the creator directly with no app indirection. Authorization is still evaluated on the
-  resolved database, not on the name: a name is a workspace-local label and must never be the
-  thing a permission is checked against. The control-plane forwarding hop re-verifies the caller's
-  own bearer and adds no authority, which is already the right posture; only the resource type is new.
+  against the creator directly with no app indirection. **This is the load-bearing change in the whole
+  re-key**, not the 116 `app_id` occurrences across the migration service's seven files: those are
+  mechanical, and `crates/zeroship-migrate-server/src/auth.rs:79` building `Resource::App { id }` is
+  not.
+
+  **The addressing decision does NOT unblock authorization.** "Principal owns N" still requires an
+  owner, so the project/workspace row below is still required. It was the ADDRESSING that depended on
+  `(project, name)`; the authorization never did.
   There is one `zeroship.jsonc` for the whole workspace, so a `Database` hangs off the
   **project/workspace** row rather than a bare creator account, and "the apps that share this schema"
   is a structural fact of the config rather than a convention several files have to agree on. See
@@ -1242,13 +1278,13 @@ of scope here, and named as cost 11 in section 13.
 ## 9. The creator-facing `env.db` surface
 
 **One `zeroship.jsonc` for the whole workspace** (operator decision, 2026-08-29). The databases are
-declared once, at workspace level; the apps are declared beside them and bind to them by name.
+declared once, at workspace level; the apps are declared beside them and bind to them.
 
 ```jsonc
 // zeroship.jsonc -- ONE file for the workspace
 "databases": {
-  "main":      { "migrations": "./db/main",      "out": "./generated/zeroship/main" },
-  "analytics": { "migrations": "./db/analytics", "out": "./generated/zeroship/analytics" }
+  "main":      { "id": "dbs_...", "migrations": "./db/main",      "out": "./generated/zeroship/main" },
+  "analytics": { "id": "dbs_...", "migrations": "./db/analytics", "out": "./generated/zeroship/analytics" }
 },
 "apps": {
   "storefront": { "app": "<uuid>", "database": "main"      },  // SINGULAR - one db per app
@@ -1256,6 +1292,19 @@ declared once, at workspace level; the apps are declared beside them and bind to
   "reporting":  { "app": "<uuid>", "database": "analytics" }
 }
 ```
+
+**Each database entry carries its `dbs_...` id, and that is what goes on the wire** (operator
+decision 13, 2026-08-30). It is absent on a fresh project and appended by the first create, exactly
+as `schema/project-v1.json` already specifies for `app`: "the deploy target's app id (uuid) or name.
+Absent on a fresh project: the first `zeroship deploy` auto-creates the app and appends its id here."
+One lifecycle, one pattern, one file.
+
+**The map key is a LOCAL LABEL, not a resolvable name, and the difference is the whole of decision
+13.** `"main"` exists so `"database": "main"` can refer to an entry a few lines above it, the same way
+`"storefront"` labels an app whose real identity is the uuid beside it. Nothing sends `"main"` to a
+server and nothing resolves it there. The withdrawn design had the control plane resolve
+`(workspace, name) -> database_id` over the wire; this is a reference inside one file that the CLI
+dereferences locally before it makes any request.
 
 The workspace may declare several databases; **an app binds to exactly one**. That is the whole of
 the "single schema" decision, and it is what keeps `env.db.users` alive.
