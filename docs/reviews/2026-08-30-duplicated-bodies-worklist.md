@@ -61,6 +61,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 22/27 Housekeeping close (EOF clean-close family) | 4 across the file | 2 covered by 24 each; step C DEAD; **step D was UNBOUND** | `serialized_eof_with_only_housekeeping_in_flight_closes_cleanly` (new) |
 | 23 COPY refusal drain | 2 | BOUND (visible only in the full suite) | agent-reported |
 | 25 Bind cache invalidation | 2 | 1 pre-bound, 1 was UNBOUND | `unnamed_bind_parse_error_invalidates_cached_statement` (new) |
+| 26 Plaintext TLS shortcut | 2 | covered, but by a BLUNT probe - see note | 42 and 216 failures respectively |
 | 28 Terminal classification | **5**, not 2 | flush-path copy was UNBOUND | `eof_during_write_classifies_the_captured_terminal` (new) |
 | 29 COPY encoding selection | 2 | BOUND | `probationary_copy_in_reparses_immediately_before_bind` |
 | 30 COPY IN pre-Bind abort | 2 | BOUND, each independently | `unexpected_{parse,bind}_slot_message_suppresses_copy_terminal` |
@@ -110,6 +111,22 @@ zero fail - is there anything to fix.
 The worklist also under-counted here: the `Err(error) if saw_error_response =>`
 guard arm on `Header::parse` is a fifth copy of the same decision in a different
 syntactic shape, and the group entry lists four.
+
+### A mutation that breaks 216 tests has not isolated anything
+
+Group 26 is the counter-example to reading big failure counts as strong
+coverage. Inverting `if encryption == Encryption::Plaintext { return Ok(()) }`
+in `connect_raw.rs` fails **216** tests, because every plaintext connection then
+runs TLS validation and the driver stops working at all. That says the line is
+load-bearing; it says almost nothing about whether the specific decision - skip
+validation when the transport is plaintext - is checked by anything.
+
+The `cancel_query.rs` twin fails 42, including the four cancel TLS-policy tests
+that ARE specific to it, so that copy is genuinely covered.
+
+Treat a three-figure failure count as "the mutation was too coarse to be
+informative", not as "well covered". The useful probe changes one decision, not
+one precondition the whole driver rests on.
 
 ### OPEN: two mid-flush terminal recorders that no test executes
 
