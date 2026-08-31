@@ -56,14 +56,17 @@ struct Cli {
     /// An app whose `.zship` carries a runtime schema descriptor cannot be made
     /// live until its migrations are applied - `Registry::set_deploy_with_manifest`
     /// refuses it, the same way the deploy API refuses a creator. But the
-    /// migration service needs the app row to exist before it will apply
-    /// anything, and this tool is what creates it. So a schema-carrying app is
-    /// provisioned in two calls:
+    /// migration service needs the app row to exist before it will authorize
+    /// database creation or apply anything, and this tool is what creates that
+    /// row. So a schema-carrying app is provisioned in two dev-provision calls
+    /// with two explicit database operations between them:
     ///
     ///   dev-provision --defer-deploy ...   # app_id + api_key, nothing live
+    ///   POST /v1/databases/<app_id>
     ///   <apply migrations through zeroship-migrate-server>
     ///   dev-provision ...                  # same command, now activates
     ///
+    /// This tool deliberately does not create the database or apply migrations.
     /// The second call reuses the existing app by name and re-ingests the same
     /// content-addressed blobs, so running it is idempotent. An app with no
     /// descriptor needs neither the flag nor the second call.
@@ -152,9 +155,10 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         .map_err(|e| err(format!("zship ingest: {e:?}")))?;
     if cli.defer_deploy {
         eprintln!(
-            "dev-provision: --defer-deploy: app {} created and blobs ingested; the deploy is \
-             NOT live. Apply its migrations, then re-run without the flag.",
-            app.id
+            "dev-provision: --defer-deploy: app {0} created and blobs ingested; the deploy is \
+             NOT live. Create its database with POST /v1/databases/{0}, apply its migrations, \
+             then re-run without the flag.",
+            app.id,
         );
         return Ok(app);
     }
@@ -179,10 +183,11 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
             // sentence this reads as a bug in the artifact.
             RegistryError::SchemaNotApplied { .. } => err(format!(
                 "deploy commit refused: {e}\n\
-                 app {} exists and its blobs are ingested. Apply its migrations through \
-                 zeroship-migrate-server, then re-run this command. To create the app WITHOUT \
-                 this failure, pass --defer-deploy on the first call.",
-                app.id
+                 app {0} exists and its blobs are ingested. Create its database with POST \
+                 /v1/databases/{0}, apply its migrations through zeroship-migrate-server, then \
+                 re-run this command. To create the app WITHOUT this failure, pass \
+                 --defer-deploy on the first call.",
+                app.id,
             )),
             other => err(format!("deploy commit: {other}")),
         })?;

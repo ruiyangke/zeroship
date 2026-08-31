@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::database_role::{PerAppRoleNameError, per_app_role_name};
+use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
-    Approval, ApprovalScope, DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, LockMode, LoweredArtifact, MigrationBackend, MigrationEngine,
-    MigrationIr, PlanStatusManifest, SealError, SealedPolicy, StatusError,
-    resolve_create_table_policy,
+    resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, LoweredArtifact, MigrationBackend,
+    MigrationEngine, MigrationIr, PlanStatusManifest, SealError, SealedPolicy, StatusError,
 };
 // PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
 // them off the facade, so this PostgreSQL host names PostgreSQL rather than
@@ -18,9 +17,7 @@ use zeroship_migrate::{
 use crate::session::CompioPgSession;
 use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
-use zeroship_migrate_postgres::role::migrator_role_name;
-use zeroship_migrate_postgres::{DIALECT as POSTGRES, PostgresBackend};
+use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 
 /// The backends this host hands to every engine entry point.
 ///
@@ -34,14 +31,14 @@ use zeroship_migrate_postgres::{DIALECT as POSTGRES, PostgresBackend};
 const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
 use crate::policy::{
-    CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError, SealVerifier,
-    confined_guard_policy_for_schema,
+    confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
+    ManagedPolicyError, SealVerifier,
 };
 use crate::provisioning::{
-    AUDIT_UNMASK_TABLE, ProvisionRoleError, exec_retry, provision_audit_unmask_table,
-    provision_migrator,
+    exec_retry, migrator_executor_config, provision_audit_unmask_table, provision_migrator,
+    ProvisionRoleError, AUDIT_UNMASK_TABLE,
 };
-use crate::publication::{PublicationError, reconcile_app_publication};
+use crate::publication::{reconcile_app_publication, PublicationError};
 use crate::schema_apply_store::{
     SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
 };
@@ -203,8 +200,10 @@ pub enum ApplyRequestError {
     EncodeRequest(String),
     #[error("migration database connect: {0}")]
     Connect(compio_postgres::Error),
-    #[error("migration schema provision: {0}")]
-    ProvisionSchema(compio_postgres::Error),
+    #[error("inspect migration database schema: {0}")]
+    InspectSchema(compio_postgres::Error),
+    #[error("database {database_id} has not been created")]
+    DatabaseNotCreated { database_id: Uuid },
     #[error("migration role provision: {0}")]
     ProvisionRole(#[from] ProvisionRoleError),
     #[error("runtime app role provision: {0}")]
@@ -282,38 +281,42 @@ pub async fn apply_ir_documents(
         return Err(ApplyRequestError::Empty);
     }
 
-    let dir = write_ir_documents(tmp_root, request)?;
-    let request_body = serde_json::to_value(request)
-        .map_err(|err| ApplyRequestError::EncodeRequest(err.to_string()))?;
     let schema = app_id.to_string();
 
     // (a) DRIVER: open a native compio session, wrap it in the adapter's
     // `CompioPgSession`, and drive the published engine over it. Provisioning
-    // (schema + role) runs over the SAME raw compio `Client`, borrowed back via
-    // `session.client()`.
+    // runs over the SAME raw compio `Client`, borrowed back via `session.client()`.
     let session = CompioPgSession::connect(provision_dsn)
         .await
         .map_err(ApplyRequestError::Connect)?;
-    session
+    let schema_exists: bool = session
         .client()
-        .batch_execute(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            quote_ident(&schema)
-        ))
+        .query_one(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1\
+             )",
+            &[&schema],
+        )
         .await
-        .map_err(ApplyRequestError::ProvisionSchema)?;
-    let role =
-        migrator_role_name(&schema).map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
+        .map_err(ApplyRequestError::InspectSchema)?
+        .get(0);
+    if !schema_exists {
+        return Err(ApplyRequestError::DatabaseNotCreated {
+            database_id: *app_id,
+        });
+    }
+
+    // The existence fence is above all filesystem, role, audit, lock, and
+    // ledger side effects. A refused apply therefore leaves no database state
+    // for a retry or deploy gate to mistake for a completed lifecycle step.
+    let dir = write_ir_documents(tmp_root, request)?;
+    let request_body = serde_json::to_value(request)
+        .map_err(|err| ApplyRequestError::EncodeRequest(err.to_string()))?;
     // The executor re-vets rendered SQL at apply time from its own policy, so it must
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
     // resolution and `IrAuthor` below.
-    let mut exec_cfg = ExecutorConfig::new(
-        schema.clone(),
-        schema.clone(),
-        guard_policy_for_managed(&schema),
-    )
-    .with_migrator_role(role.clone());
+    let (exec_cfg, role) = migrator_executor_config(&schema)?;
     // THE MIGRATION JOURNAL LIVES IN THE APP'S OWN SCHEMA. `ExecutorConfig::new`
     // derives `meta_schema` as `<project_schema>_migrations`; this host points it at
     // the project schema itself, so the engine writes
@@ -326,7 +329,6 @@ pub async fn apply_ir_documents(
     // declaring a table called `schema_migrations` in their own schema would have it
     // silently ADOPTED as the journal. The prefix moves the names into a namespace
     // creator-declared collections are refused from.
-    exec_cfg.confinement.meta_schema = schema.clone();
     provision_migrator(session.client(), &exec_cfg).await?;
     // The per-app unmask audit table, which the worker WRITES and creates no
     // longer. Until this change `crud/unmask.rs` emitted its `CREATE TABLE` and
@@ -1047,6 +1049,9 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
             ntex::http::StatusCode::CONFLICT,
             "migration_history_incomplete",
         ),
+        ApplyRequestError::DatabaseNotCreated { .. } => {
+            (ntex::http::StatusCode::CONFLICT, "database_not_created")
+        }
         ApplyRequestError::HistoryAttestation(
             StatusError::Ordering(_) | StatusError::PlanManifest(_),
         ) => (
@@ -1061,7 +1066,7 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::SchemaApplyStore(_)
         | ApplyRequestError::EncodeRequest(_)
         | ApplyRequestError::Connect(_)
-        | ApplyRequestError::ProvisionSchema(_)
+        | ApplyRequestError::InspectSchema(_)
         | ApplyRequestError::ProvisionRole(_)
         | ApplyRequestError::ProvisionRuntimeRole(_)
         | ApplyRequestError::ProvisionAuditUnmask(_)
@@ -1709,6 +1714,7 @@ mod tests {
 mod live_audit_unmask_provisioning {
     use super::*;
     use compio_postgres::NoTls;
+    use zeroship_migrate_postgres::role::migrator_role_name;
 
     /// The database these cases dial. The DSN is typed config
     /// (`zeroship_core::config::test_database_url`, backed by the overlay at
@@ -1768,31 +1774,17 @@ mod live_audit_unmask_provisioning {
         }
     }
 
-    /// The production prelude of `apply_ir_request`: `CREATE SCHEMA`, then
-    /// `provision_migrator`. Returns the migrator role name, which is what the
-    /// apply path passes on to `provision_runtime_app_role`.
+    /// The explicit database-create operation: data schema, then migrator role.
+    /// Returns the migrator role name, which is what the apply path passes on to
+    /// `provision_runtime_app_role` after it verifies the schema exists.
     async fn provision_schema_and_migrator(
         admin: &compio_postgres::Client,
         schema: &str,
     ) -> String {
-        admin
-            .batch_execute(&format!(
-                "CREATE SCHEMA IF NOT EXISTS {}",
-                quote_ident(schema)
-            ))
+        crate::provisioning::provision_database(admin, schema)
             .await
-            .expect("create scratch app schema");
+            .expect("create scratch app database");
         let role = migrator_role_name(schema).expect("derive migrator role");
-        let mut cfg = ExecutorConfig::new(
-            schema.to_string(),
-            schema.to_string(),
-            guard_policy_for_managed(schema),
-        )
-        .with_migrator_role(role.clone());
-        cfg.confinement.meta_schema = schema.to_string();
-        provision_migrator(admin, &cfg)
-            .await
-            .expect("provision migrator role");
         role
     }
 

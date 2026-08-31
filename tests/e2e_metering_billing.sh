@@ -487,11 +487,18 @@ INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP', '$CREAT
 ON CONFLICT (app_id, user_id) DO UPDATE SET role='owner';
 SQL
 
-# MIGRATIONS FIRST, THEN DEPLOY. Control refuses a deploy whose runtime schema
-# descriptor is not the one the app's newest applied migration recorded, so the
-# order here is the product's rather than this harness's preference. The app row
-# still has to exist first - the migration service will not create one, and the
-# POST /api/apps above is what does.
+# DATABASE CREATE, THEN MIGRATIONS, THEN DEPLOY. Control refuses a deploy whose
+# runtime schema descriptor is not the one the app's newest applied migration
+# recorded, so the order here is the product's rather than this harness's
+# preference. The app row still has to exist first - the database create route
+# authorizes against it, and POST /api/apps above is what wrote it.
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
+  -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -30 "$WORK/migrated.log"; exit 1
+fi
 write_apply_request || { fail "could not record migration IR"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' \
   -X POST "$MIGRATE_SERVER_URL/v1/apps/$APP/migrations/apply" \
