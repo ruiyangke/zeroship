@@ -315,6 +315,9 @@ where
                     }
                 },
                 BackendMessage::Normal { messages, .. } => {
+                    // `deferred_error` is gated by `saw_error_response`, so this
+                    // batch already makes startup fail before `ReadyForQuery`;
+                    // the server's ErrorResponse is the better diagnostic.
                     // Stash the iterator; the top of the loop will drain
                     // it one call at a time.
                     self.pending = messages;
