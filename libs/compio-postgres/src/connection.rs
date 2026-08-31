@@ -636,7 +636,7 @@ where
     ///
     /// # An idle connection delivers, on either transport
     ///
-    /// The socket is read by a detached task, so a notification arrives
+    /// The socket is read by a dedicated read task, so a notification arrives
     /// whether or not the connection is doing anything else. This holds over
     /// TLS as well as plaintext.
     ///
@@ -2134,7 +2134,7 @@ async fn flush_with_read_draining<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    // The cancel-unsafe primitive is the socket read in the detached read
+    // The cancel-unsafe primitive is the socket read in the dedicated read
     // task; here we only own the WRITE flush plus channel ops. The flush is
     // the only future we hold across polls, and we retain it until it resolves
     // unless a terminal read has already made the session unreusable.
@@ -2479,7 +2479,7 @@ impl<S, T> Connection<S, T>
 where
     S: AsyncRead + AsyncWrite + Unpin + SplitStream,
     T: AsyncRead + AsyncWrite + Unpin + SplitStream,
-    // The read half is moved into a detached read task, which must be
+    // The read half is moved into a dedicated read task, which must be
     // `'static`. Always satisfied by the real socket halves
     // (`OwnedReadHalf<TcpStream>` / `OwnedReadHalf<UnixStream>`) and by the
     // TLS half, which is those plus a refcounted session. Both transports
@@ -2885,7 +2885,7 @@ where
                 // ---- Single-event select. Every branch is a channel op or a
                 // `poll_ready` - all cancel-safe, so a not-ready branch being
                 // dropped here loses nothing (the cancel-unsafe socket read lives
-                // in the detached read task, never here).
+                // in the dedicated read task, never here).
                 let event = poll_fn(|cx| -> Poll<MuxEvent> {
                     // (1) ReadTimeout bypasses both the normal frame queue and
                     // response-consumer backpressure. Ordinary I/O errors stay
