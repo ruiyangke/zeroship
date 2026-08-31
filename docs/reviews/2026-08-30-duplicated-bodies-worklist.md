@@ -48,9 +48,13 @@ below was re-run by the pilot against the FULL seven-target gate
 | ---: | ---: | --- | --- |
 | 1 Query RowDescription | 2 | BOUND (`25712160b`) | pre-existing |
 | 5 Column metadata | 4 | BOUND (`25712160b`) | pre-existing |
+| 6 Cached statement replay family | 6 | BOUND, each independently | agent table, one distinct failure per copy |
+| 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
 | 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
 | 17 Cancel confirmation | **3**, not 2 | 2 pre-bound, 1 was UNBOUND | `raw_cancel_success_keeps_pool_lease_reusable` (new) |
+| 15 Scalar row arity | 3 | BOUND | `query_scalar` / `query_one_scalar` / `query_opt_scalar` arity tests |
+| 18 Statement-cache LRU updates | **4**, not 3 | BOUND, including the uncounted candidate-LRU copy | LRU eviction tests |
 | 19 Config value lexer | 2 | 1 pre-bound, 1 was UNBOUND | `unquoted_conninfo_backslash_escapes_the_next_character` |
 | 21 Serialized terminal handling | 2 (+2 siblings elsewhere) | SPLIT: step B covered by 24; **step C is DEAD** | see below |
 | 22/27 Housekeeping close (EOF clean-close family) | 4 across the file | 2 covered by 24 each; step C DEAD; **step D was UNBOUND** | `serialized_eof_with_only_housekeeping_in_flight_closes_cleanly` (new) |
@@ -76,7 +80,8 @@ below was re-run by the pilot against the FULL seven-target gate
 
 **The worklist's copy COUNTS are unreliable, and that is the most reusable
 finding here.** Group 17 said two and had three; group 28 said two and had five;
-`remember_server_error` said two and had eight. In group 17 and group 28 the
+group 18 said three and had four; `remember_server_error` said two and had
+eight. In group 17 and group 28 the
 UNCOUNTED copy was the only unbound one. Always enumerate by content first.
 
 ### "More than one failure" is not automatically a gap
