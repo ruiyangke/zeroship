@@ -1,8 +1,10 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Near-verbatim port of tokio-postgres's `transaction.rs`. The only
-// adaptation is the `tokio::io::{AsyncRead, AsyncWrite}` bound on the
-// deprecated `cancel_query_raw` method - swapped for compio's counterparts.
+// The client-forwarding surface retains its tokio-postgres lineage, but the
+// transaction lifecycle has diverged. This version scopes portals across
+// savepoints, quotes and cancellation-guards savepoint commands, disarms
+// rollback-on-drop only after enqueue, handles failed nested commits and
+// COMMIT-as-ROLLBACK, and tracks pooled-session dirtiness.
 
 use crate::Socket;
 use crate::copy_out::CopyOutStream;

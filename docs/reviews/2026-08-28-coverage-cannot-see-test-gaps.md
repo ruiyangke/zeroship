@@ -211,3 +211,45 @@ Net +8 tests; binding went from 1 arm-agnostic assertion to 5 arm-specific
 ones. A reviewer watching the total would see a smaller number than expected
 and could read it as a regression. The count is not the measurement - the
 one-copy-one-failure result is.
+
+## AMENDMENT 2026-08-31: coverage WOULD have found one of this week's gaps
+
+The conclusion above is correct but its title overstates it. It holds for
+**surviving mutants in code that already executes**, which is what those five
+gaps were. It does not hold for every gap this crate has.
+
+Measured at `3983a4e5d`. `finish_bind` carries two copies of
+`statement.invalidate_cache_on_error(&error)` - one in the `if unnamed` arm
+guarding the `ParseComplete` wait, one guarding the `BindComplete` wait. A
+mutation sweep found the unnamed copy unbound: replacing it with a no-op left
+all **1434** tests passing across all seven targets.
+
+The interesting part is what happened when the same line was replaced with a
+`panic!` instead of a no-op:
+
+    targets=7 passed=1434 failed=1
+        bind::tests::unnamed_bind_parse_error_invalidates_cached_statement
+
+Only the newly written test fired. **Nothing in the entire suite executed that
+line.** It was not an unasserted behaviour, it was dead code - and a missed line
+is exactly what coverage reports.
+
+So the two instruments are complementary, not one strictly better:
+
+- **Coverage finds lines nothing REACHES.** It would have pointed at this one.
+- **Mutation finds lines nothing CHECKS.** Coverage is structurally blind to
+  those, as the five cases above prove.
+
+Mutation caught both kinds here, which is why it stays the primary tool. But
+"coverage cannot see this crate's real test gaps" should be read as "cannot see
+the gaps that dominate this crate", not as a claim that a coverage report is
+worthless. Use it to pick where to look, as the original conclusion says - and
+note that a file's MISSED-LINE list, not its percentage, is the part that
+carries that signal.
+
+**A methodology note from the same measurement.** The first attempt at the panic
+probe reported `targets=1 passed=599 failed=1`. Cargo stops scheduling after a
+target fails, so six targets never ran and their silence said nothing at all;
+concluding "only my test reaches it" from that run would have been unfounded
+even though the conclusion turned out right. `--no-fail-fast` is what makes the
+question answerable.

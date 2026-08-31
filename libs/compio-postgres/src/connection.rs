@@ -636,7 +636,7 @@ where
     ///
     /// # An idle connection delivers, on either transport
     ///
-    /// The socket is read by a detached task, so a notification arrives
+    /// The socket is read by a dedicated read task, so a notification arrives
     /// whether or not the connection is doing anything else. This holds over
     /// TLS as well as plaintext.
     ///
@@ -1798,17 +1798,6 @@ impl Error {
     }
 }
 
-/// Map a terminal read event (I/O error or reader-channel close) observed by the
-/// multiplexed loop into the `Result` the loop should return. Shared by the
-/// main `select` and the in-flush read-draining
-/// ([`flush_with_read_draining`]) so both classify EOF / error / close
-/// identically.
-///
-/// `Some(e)` -> clean close (`Ok(())`) iff EOF with no awaited response, else
-/// propagate `e`. `None` (channel closed without a terminal error) ->
-/// clean iff no awaited response is in flight, else `Error::closed()`. A
-/// decoded backend frames and ordinary I/O errors share one FIFO channel;
-/// ReadTimeout alone arrives on the acknowledged out-of-band path.
 /// Hand the error that is killing this connection to everyone waiting on it.
 ///
 /// Without this a waiting request learns only that its response channel was
@@ -1845,6 +1834,18 @@ fn publish_terminal_error(error: &Error, responses: &mut VecDeque<Response>) {
     }
 }
 
+/// Map a terminal read event (I/O error or reader-channel close) observed by the
+/// multiplexed loop into the `Result` the loop should return. Shared by the
+/// main `select` and the in-flush read-draining
+/// ([`flush_with_read_draining`]) so both classify EOF / error / close
+/// identically.
+///
+/// `Some(e)` -> clean close (`Ok(())`) iff EOF with no awaited response, else
+/// propagate `e`. `None` (channel closed without a terminal error) ->
+/// clean iff no awaited response is in flight, else `Error::closed()`.
+///
+/// Decoded backend frames and ordinary I/O errors share one FIFO channel;
+/// `ReadTimeout` alone arrives on the acknowledged out-of-band path.
 fn classify_read_terminal(
     terminal: Option<Error>,
     responses: &mut VecDeque<Response>,
@@ -2134,7 +2135,7 @@ async fn flush_with_read_draining<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    // The cancel-unsafe primitive is the socket read in the detached read
+    // The cancel-unsafe primitive is the socket read in the dedicated read
     // task; here we only own the WRITE flush plus channel ops. The flush is
     // the only future we hold across polls, and we retain it until it resolves
     // unless a terminal read has already made the session unreusable.
@@ -2479,7 +2480,7 @@ impl<S, T> Connection<S, T>
 where
     S: AsyncRead + AsyncWrite + Unpin + SplitStream,
     T: AsyncRead + AsyncWrite + Unpin + SplitStream,
-    // The read half is moved into a detached read task, which must be
+    // The read half is moved into a dedicated read task, which must be
     // `'static`. Always satisfied by the real socket halves
     // (`OwnedReadHalf<TcpStream>` / `OwnedReadHalf<UnixStream>`) and by the
     // TLS half, which is those plus a refcounted session. Both transports
@@ -2885,7 +2886,7 @@ where
                 // ---- Single-event select. Every branch is a channel op or a
                 // `poll_ready` - all cancel-safe, so a not-ready branch being
                 // dropped here loses nothing (the cancel-unsafe socket read lives
-                // in the detached read task, never here).
+                // in the dedicated read task, never here).
                 let event = poll_fn(|cx| -> Poll<MuxEvent> {
                     // (1) ReadTimeout bypasses both the normal frame queue and
                     // response-consumer backpressure. Ordinary I/O errors stay
