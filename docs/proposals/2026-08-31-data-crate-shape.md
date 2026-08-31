@@ -668,6 +668,52 @@ Extract the right-hand column into the relay crate, hosted by a process that nev
 code - plausibly the relay that #5 builds, which would make the extraction its prerequisite rather
 than a separate job.
 
+### The blocker no round found until now: moving `wal_consumer` severs the dedup fence
+
+**Full extraction breaks local-emit suppression, and would double-deliver every change to every
+subscriber.** Traced 2026-08-31 from a call site a reviewer noticed but did not follow.
+
+`change_stream_pg.rs:202` calls `wal_consumer::run_supervised_controlled`, whose signature
+(`wal_consumer.rs:771-775`) is already not RPC-shaped - it takes a live `WalConsumer` plus a
+`flume::Sender` and `flume::Receiver`, in-process channels. But the fatal line is the next one:
+
+```rust
+let _suppression = SuppressGuard::activate(&app_id);   // wal_consumer.rs:781
+```
+
+held, per its own comment, "for the supervisor's full lifetime, including reconnect backoff", because
+"allowing local emit during the gap would deliver once locally and again when WAL replay catches up"
+(`:777-781`).
+
+That guard writes **`static SUPPRESSED_APPS: LazyLock<Mutex<HashMap<String, usize>>>`**
+(`wal_consumer.rs:72`) - a PROCESS-GLOBAL refcount. And its reader is `exec.rs:485`, on the mutation
+path, which stays in the worker:
+
+```
+relay process                          worker process
+  run_supervised_controlled              exec.rs:485  is_app_suppressed(app_id) -> FALSE
+    SuppressGuard -> SUPPRESSED_APPS       (nothing populates the worker's map)
+                                         -> local emit RESUMES
+                                         + relay also delivers the same change over WAL
+                                         = every change delivered TWICE
+```
+
+**This is not a cross-process call to price. It is a process-global invariant that a process split
+severs**, and it fails OPEN - no error, no refusal, just duplicate events reaching app JS. It is
+exactly the hazard the guard was written to prevent, reintroduced by moving the guard's owner into a
+different process from the code it guards.
+
+So Track B's "Full" option acquires a third requirement, alongside the wire protocol and the
+`db_posture` inversion: **the relay must drive the worker's suppression state remotely** - the worker
+has to learn "app X is now WAL-fed, stop emitting locally" and, critically, "app X's stream is
+disconnected but its slot is retaining, KEEP suppressing" - which is the reconnect-backoff case the
+comment singles out. A naive "suppress while connected" signal gets the backoff window wrong and
+double-delivers exactly there.
+
+**This strengthens the case for extracting the CDC tier FIRST and alone**, because the suppression
+fence is the one piece of the WAL side that is genuinely entangled with the worker, and it is far
+easier to see and design when nothing else is moving at the same time.
+
 Hazards this track inherits, all measured:
 
 - **#25** - the CDC path has no executor-side fence and cannot have one. `SET LOCAL ROLE` is
