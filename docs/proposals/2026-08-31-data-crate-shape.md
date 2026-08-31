@@ -14,6 +14,28 @@ Three choices, taken by the operator on 2026-08-31:
    diverge from the upstream `zero-migrate` project, accepting that zeroship targets only PostgreSQL
    (production) and SQLite (dev). This is a stated trade, not drift.
 
+   **The trade is cheaper than it looks, because keeping the CODE and paying the BUILD are separable
+   - measured 2026-08-31.** `zeroship-migrate/Cargo.toml` declares no `[features]` section and no
+   optional dependencies, so all three dialects compile unconditionally and 20,018 lines of MySQL are
+   built by every dependant. Nothing in zeroship selects that dialect: the addon's only two callers
+   hardcode `dialect: "postgres"` (`sdks/vite-plugin/src/gen-types/index.ts:271`, `:326`), and every
+   `mysql` occurrence in `crates/zeroship-migrate-node/src/` is a doc comment, never a dispatch. The
+   dialect string resolves through a *registry* - `preview_dialect` searches `shipping_backends()`
+   and returns `Err("unknown dialect …")` at `crates/zeroship-migrate-node/src/verbs.rs:105` - so a
+   default-off `mysql` feature degrades to a runtime rejection, not a compile error, and
+   `--all-features` (what `clippy_gate.sh` lints under) still covers the code.
+
+   **The cost is two hardcoded counts, and it lands in the one file designed to name vendors once.**
+   `crates/zeroship-migrate/src/lib.rs:65` is `static SHIPPING: [&BackendVendor; 3]` - a fixed-size
+   array, so the length becomes conditional (or the const becomes a slice), and
+   `tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs:15,:21` hardcode
+   `REGISTERED_VENDOR_FLOOR = 3` and `-> [&'static BackendVendor; 3]`. Both must become
+   feature-conditional or a default-feature build fails to compile that test.
+
+   *A near-miss worth recording:* `:161` of that test says "three is a promise to" drift, which reads
+   as an argument against reducing three to two. It is not - it is about three SPELLINGS of the
+   partition-capability fact, not three dialects. The sentence survives gating untouched.
+
 And one shape converged in discussion: a `zeroship-data-*` family, with `zeroship-schema` and
 `zeroship-data-plan` merged, and `zeroship-plugin-db` renamed.
 
