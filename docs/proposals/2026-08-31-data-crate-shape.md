@@ -406,10 +406,21 @@ answered that "the broker stays, so LOCAL writes still short-circuit in-process 
 all", which is false: `exec.rs:485` suppresses the local emit for exactly the apps whose WAL consumer
 is running. The correct answer is stronger than either. **On PostgreSQL a subscriber's own write is
 ALREADY WAL-bound today**, so extraction cannot add a round trip to a path that never had one - it
-adds one process hop to a path already going through WAL. The worker needs no new client machinery,
-because the relay would feed `broker::publish` over a transport exactly where `wal_consumer` feeds it
-in-process now. The broker is already the merge point and does not care which side an event came
-from.
+adds one process hop to a path already going through WAL.
+
+**But "the worker needs no new client machinery" was ALSO wrong, and this is the hidden cost of the
+whole track.** That claim rested on the relay feeding `broker::publish` over a transport exactly
+where `wal_consumer` feeds it in-process. The event cannot cross a process boundary as it stands:
+`ChangeEvent` derives `Debug, Clone` and nothing else (`broker.rs:80`), and its own doc records that
+"`schema` is conflated with `app_id`" (`:78`) - a conflation the decoupling work exists to undo.
+
+So Track B owns a **new security-sensitive wire protocol**, not an adapter: authenticated framing,
+versioning, event identity and deduplication, reconnect and replay, backpressure, subscriber
+registration, and grant-revision queue purging - plus resolving datastore/schema/database/grant/app
+at the relay and enforcing a revision barrier on both sides
+(`2026-08-28-app-database-decoupling.md:980`, `:992`). Feeding `broker::publish` is the LAST adapter
+in that chain, not the design. Any estimate of Track B that prices it as "move three modules" is
+pricing the wrong work.
 
 ## The rename
 
@@ -455,12 +466,14 @@ are about to reshape.
 
 - **`zeroship-migrate-server`** is a service HOST, not engine. Left in the `migrate-*` family for
   now; a `-service` suffix is arguable.
-- **The `plugin-*` family breaks.** kv (3,019), storage (3,808) and workflow (10,847) stay
-  `plugin-*` while db (57,427) leaves. `AGENTS.md`'s "Adding a native primitive" table points at
-  `crates/plugin-{db,kv,storage}/`, which stops being true. Either accept the asymmetry explicitly
-  in `AGENTS.md` - db is 15x kv and is a family where the others are single crates - or move all
-  four. An unstated asymmetry is the worse option.
+- ~~**The `plugin-*` family breaks.**~~ **CLOSED - it does not.** This entry asked whether to accept
+  an asymmetry or rename four crates, because db (57,427) was leaving while kv (3,019), storage
+  (3,808) and workflow (10,847) stayed. Since `plugin-db` keeps its name, `AGENTS.md`'s "Adding a
+  native primitive" table stays true and there is no asymmetry to declare. *The entry also said db is
+  "15x kv"; 57,427/3,019 is 19.0. Fifteen is the db/storage ratio - two ratios, one sentence.*
 - **Whether the worker keeps decoding WAL** (above).
+- **Feature-gating the SQLite backend** (above) - a decision, not a discovery: it removes 9,485 lines
+  from the production worker and hardens a guard the worker already implements at runtime.
 - **`AGENTS.md:143`** needs correcting with this work, saying "present but uncalled" rather than
   deleting the clauses, so the next reader does not re-add them. Its four contents clauses are true
   as descriptions of what the file HOLDS; the "reused by the migration engine" clause is false.
