@@ -5451,12 +5451,13 @@ mod tests {
         )
         .expect("buffer the scripted request");
 
+        let request_complete = messages.ready_for_query_status().is_some();
         let (mut read_tx, mut read_rx) = mpsc::channel(1);
         read_tx
             .try_send(ReadEvent::Message(ReadEnvelope {
                 message: BackendMessage::Normal {
                     messages,
-                    request_complete: false,
+                    request_complete,
                     deferred_error: None,
                 },
                 acknowledgement: None,
@@ -5538,6 +5539,23 @@ mod tests {
                 .map(|error: &DbError| error.code().code()),
             Some("57P01"),
             "the queued FATAL did not reach the terminal slot"
+        );
+    }
+
+    #[compio::test]
+    async fn backpressured_flush_error_records_the_request_slot() {
+        let (request_server_error, _) = queued_error_slots_after_backpressured_flush(
+            error_response_batch("23505", "scripted unique violation"),
+        )
+        .await;
+
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("23505"),
+            "the queued ErrorResponse did not reach its request slot"
         );
     }
 
