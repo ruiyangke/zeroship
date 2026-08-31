@@ -688,7 +688,7 @@ async fn send_initial_copy_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{CopyInReceiver, CopyInSink, SinkState, send_initial_copy_message};
+    use super::{CopyInReceiver, CopyInSink, SinkState, copy_in_inner, send_initial_copy_message};
     use crate::client::{Client, CopyMode, ResponseMessages};
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
@@ -700,9 +700,12 @@ mod tests {
     use bytes::{BufMut, BytesMut};
     use futures_channel::mpsc;
     use futures_util::StreamExt;
+    use futures_util::task::noop_waker;
     use postgres_protocol::message::backend::Message;
     use std::collections::VecDeque;
+    use std::future::Future;
     use std::marker::PhantomData;
+    use std::task::{Context, Poll};
 
     fn admin_shutdown() -> DbError {
         let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
@@ -717,6 +720,50 @@ mod tests {
             }
             _ => panic!("scripted 57P01 did not decode as ErrorResponse"),
         }
+    }
+
+    #[test]
+    fn probationary_copy_in_reparses_immediately_before_bind() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let statement = Statement::unnamed_with_copy_in(Vec::new(), Vec::new(), true);
+        let mut copy = Box::pin(copy_in_inner::<Bytes>(
+            client.inner(),
+            statement,
+            Some("COPY cpg_encoding_selection FROM STDIN"),
+        ));
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(copy.as_mut().poll(&mut context), Poll::Pending));
+
+        let crate::connection::Request { messages, .. } = requests
+            .try_recv()
+            .expect("probationary COPY IN did not enqueue its request");
+        let mut receiver = match messages {
+            RequestMessages::CopyIn(receiver) => receiver,
+            RequestMessages::Single(_) => panic!("probationary COPY IN was not streaming"),
+        };
+        let initial = match receiver.poll_next_unpin(&mut context) {
+            Poll::Ready(Some(initial)) => initial,
+            Poll::Ready(None) => panic!("the initial COPY batch was missing"),
+            Poll::Pending => panic!("the initial COPY batch was not ready"),
+        };
+        let FrontendMessage::Raw(bytes) = initial else {
+            panic!("the initial COPY batch was encoded as COPY data");
+        };
+
+        assert_eq!(
+            bytes[0], b'P',
+            "probationary COPY IN did not re-Parse immediately before Bind"
+        );
     }
 
     #[compio::test]
