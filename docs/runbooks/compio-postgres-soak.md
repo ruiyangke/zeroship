@@ -756,3 +756,47 @@ done
 
 The empty `max_connections=` line is what exposed it. Echo the value you are
 depending on, not just the fact that you waited.
+
+## Deciding whether the soak and chaos runs need re-running at all
+
+The soak, the three chaos scenarios and the pgbouncer residue classification all
+measure the behaviour of BUILT production code. A tree whose only changes are
+tests, comments and docs produces a byte-identical binary path, so re-running
+them measures the same thing and costs ~20 minutes. Prove it instead of
+assuming it - and prove it mechanically, because "I only added tests" is exactly
+the claim that turns out to be wrong.
+
+For each changed `src/` file, two numbers settle it:
+
+    f=libs/compio-postgres/src/config.rs
+    since=<ref the runs were last done at>
+
+    # 1. how many changed lines are NOT comments
+    git diff "$since"..HEAD -- "$f" \
+      | grep -E '^[+-][^+-]' | grep -vcE '^[+-]\s*(//|///|//!)'
+
+    # 2. where the test module starts, and the lowest line the diff touched
+    grep -n '#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1
+    git diff -U0 "$since"..HEAD -- "$f" \
+      | grep -oE '^@@ -[0-9,]+ \+[0-9]+' | sed 's/.*+//' | sort -n | head -1
+
+A file is production-inert if (1) is `0`, or if the lowest touched line is at or
+after the `#[cfg(test)]` marker.
+
+Measured 2026-08-30, `bf8517d0b..5bb482384` (nine commits):
+
+    cancel_query_raw.rs  171 non-comment   cfg(test)@234   lowest touched 233
+    config.rs              9 non-comment   cfg(test)@3387  lowest touched 3501
+    copy_out.rs            0 non-comment   -               lowest touched 135
+    lib.rs                 0 non-comment   -               lowest touched 41
+
+`copy_out.rs` and `lib.rs` are comment-only. `config.rs` is entirely inside its
+test module. `cancel_query_raw.rs`'s one line below its marker, 233, is the
+blank separator before `#[cfg(test)]` - confirm that by reading it, do not
+assume it. Conclusion: production behaviour unchanged, so the soak and chaos
+results from `bf8517d0b` still describe this tree.
+
+**Do not stretch this.** It licenses skipping a RE-RUN when the diff is inert;
+it says nothing once a single production line moves. And it is not a substitute
+for the per-crate test gate, which is cheap and must run on every merge
+regardless - a test-only change can still break tests.
