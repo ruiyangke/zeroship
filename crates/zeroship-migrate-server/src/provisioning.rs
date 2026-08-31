@@ -39,6 +39,10 @@
 use compio_postgres::Client;
 use uuid::Uuid;
 use zeroship_migrate::ExecutorConfig;
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::role::migrator_role_name;
+
+use crate::policy::confined_guard_policy_for_schema;
 
 /// The narrow, precreated role that owns every app's workflow journal schema.
 ///
@@ -58,12 +62,63 @@ pub enum ProvisionRoleError {
     BadRoleName(String),
 }
 
+/// Error creating the data schema and its least-privilege migrator role.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionDatabaseError {
+    /// PostgreSQL refused creation of the data schema.
+    #[error("database schema provision: {0}")]
+    Schema(#[source] compio_postgres::Error),
+    /// PostgreSQL refused or could not derive the migrator role.
+    #[error(transparent)]
+    Role(#[from] ProvisionRoleError),
+}
+
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 fn quote_lit(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+/// Build the executor identity shared by explicit database creation and apply.
+///
+/// The runtime journal stays in the data schema, so `meta_schema` must be reset
+/// after `ExecutorConfig::new` derives its default companion schema.
+pub(crate) fn migrator_executor_config(
+    schema: &str,
+) -> Result<(ExecutorConfig, String), ProvisionRoleError> {
+    let role = migrator_role_name(schema)
+        .map_err(|_| ProvisionRoleError::BadRoleName(schema.to_string()))?;
+    let mut config = ExecutorConfig::new(
+        schema.to_string(),
+        schema.to_string(),
+        confined_guard_policy_for_schema(schema)
+            .expect("embedded no-inject confined guard charter must bind and compose"),
+    )
+    .with_migrator_role(role.clone());
+    config.confinement.meta_schema = schema.to_string();
+    Ok((config, role))
+}
+
+/// Idempotently create one database's data schema and migrator role.
+///
+/// This is the complete create verb. Runtime roles, audit tables, workflow
+/// schemas, publications, and apply-ledger rows remain apply-time concerns.
+pub async fn provision_database(
+    admin: &Client,
+    schema: &str,
+) -> Result<(), ProvisionDatabaseError> {
+    let (config, _) = migrator_executor_config(schema)?;
+    admin
+        .batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            quote_ident(schema)
+        ))
+        .await
+        .map_err(ProvisionDatabaseError::Schema)?;
+    provision_migrator(admin, &config).await?;
+    Ok(())
 }
 
 /// Retry a batch statement over the brief `tuple concurrently updated` catalog
@@ -106,7 +161,7 @@ pub async fn provision_migrator(
     admin: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<(), ProvisionRoleError> {
-    let role = zeroship_migrate_postgres::role::migrator_role_name(&cfg.project_id)
+    let role = migrator_role_name(&cfg.project_id)
         .map_err(|_| ProvisionRoleError::BadRoleName(cfg.project_id.clone()))?;
     let role_q = quote_ident(&role);
     let role_lit = quote_lit(&role);
@@ -199,7 +254,11 @@ pub async fn provision_migrator(
             continue;
         }
         let ext_q = quote_ident(ext);
-        exec_retry(admin, &format!("REVOKE ALL ON SCHEMA {ext_q} FROM {role_q}")).await?;
+        exec_retry(
+            admin,
+            &format!("REVOKE ALL ON SCHEMA {ext_q} FROM {role_q}"),
+        )
+        .await?;
         exec_retry(admin, &format!("GRANT USAGE ON SCHEMA {ext_q} TO {role_q}")).await?;
     }
 
@@ -419,6 +478,9 @@ mod audit_unmask_tests {
     #[test]
     fn ddl_creates_the_table_the_constant_names() {
         let sql = audit_unmask_table_sql("app");
-        assert!(sql.contains(&format!(r#""app"."{AUDIT_UNMASK_TABLE}""#)), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""app"."{AUDIT_UNMASK_TABLE}""#)),
+            "{sql}"
+        );
     }
 }

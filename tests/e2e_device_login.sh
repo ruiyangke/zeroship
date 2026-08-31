@@ -599,13 +599,23 @@ step "Migrate the same app with the same login credential"
 # It does NOT cover this app's own schema: `examples/auth-probe` has no
 # `migrations/`, so there is nothing of its own to apply. The IR posted below is
 # BORROWED from `examples/db-todos`. The tables it creates are incidental; only
-# the 200 is the claim. If you are looking for "a deployed app's env.db works
-# after migrating", that is `tests/e2e_db_app_end_to_end.sh`, which drives the
-# app's own migrations and then reads a row back.
+# the successful explicit database creation and apply are the claim. If you are
+# looking for "a deployed app's env.db works after migrating", that is
+# `tests/e2e_db_app_end_to_end.sh`, which drives the app's own migrations and
+# then reads a row back.
 BORROWED_IR="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 if [ ! -f "$BORROWED_IR" ]; then
   fail "missing $BORROWED_IR - run: pnpm gen-types"
 else
+  DB_CREATE_BODY="$WORK/database-create.json"
+  DB_CREATE_CODE="$(curl -sS -o "$DB_CREATE_BODY" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $TOKEN" \
+    "$MIGRATE_SERVER_URL/v1/databases/$APP_ID" 2>/dev/null || true)"
+  case "$DB_CREATE_CODE" in
+    2??) pass "database creation succeeded on the saved login credential" ;;
+    *) fail "database creation failed on the login credential (HTTP ${DB_CREATE_CODE:-none}): $(head -c 300 "$DB_CREATE_BODY" 2>/dev/null)" ;;
+  esac
+
   MIG_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$APP_ID" --control="$MIGRATE_SERVER_URL" 2>&1)"
   MIG_RC=$?
   echo "  zeroship migrate (no --token; it used the saved login):"

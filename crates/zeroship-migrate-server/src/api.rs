@@ -12,6 +12,8 @@ use crate::apply::{
     apply_error_kind, apply_ir_documents, ApplyMigrationsRequest, ApplyRequestError,
 };
 use crate::auth::AuthError;
+use crate::provisioning::provision_database;
+use crate::session::CompioPgSession;
 use crate::MigrationServiceState;
 
 /// THE APPROVAL AND POLICY ENDPOINTS ARE GONE, and their absence is the change
@@ -28,19 +30,67 @@ use crate::MigrationServiceState;
 /// creator's repository and folded at build time, so there is nothing to store
 /// and nothing to mutate at runtime.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::resource("/v1/apps/{app_id}/migrations/apply").route(web::post().to(apply)))
-        .service(
-            web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)),
-        )
-        .service(
-            web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)),
-        )
-        .service(
-            web::resource("/v1/apps/{app_id}/migrations/rollback")
-                .route(web::post().to(rollback)),
-        )
-        .service(web::resource("/healthz").route(web::get().to(healthz)))
-        .service(web::resource("/readyz").route(web::get().to(readyz)));
+    cfg.service(
+        web::resource("/v1/databases/{database_id}").route(web::post().to(create_database)),
+    )
+    .service(web::resource("/v1/apps/{app_id}/migrations/apply").route(web::post().to(apply)))
+    .service(web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)))
+    .service(web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)))
+    .service(web::resource("/v1/apps/{app_id}/migrations/rollback").route(web::post().to(rollback)))
+    .service(web::resource("/healthz").route(web::get().to(healthz)))
+    .service(web::resource("/readyz").route(web::get().to(readyz)));
+}
+
+/// Explicitly create the data schema and migrator role for an app-derived
+/// database id.
+///
+/// The UUID is still the app id in this pre-rekey step. Keeping the database
+/// route now lets the later database-entity change replace only id resolution,
+/// without moving lifecycle authority or adding a compatibility route.
+pub async fn create_database(
+    req: web::HttpRequest,
+    state: State<Arc<MigrationServiceState>>,
+    database_id: Path<Uuid>,
+) -> web::HttpResponse {
+    let database_id = database_id.into_inner();
+    let caller = match authorize_mutation(&req, &state, database_id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let session = match CompioPgSession::connect(&state.provision_dsn).await {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                database_id = %database_id,
+                "migrate-server: database create connection failed"
+            );
+            return database_infrastructure_response();
+        }
+    };
+    if let Err(error) = provision_database(session.client(), &database_id.to_string()).await {
+        tracing::error!(
+            error = %error,
+            database_id = %database_id,
+            principal_id = %caller.principal_id,
+            "migrate-server: database create failed"
+        );
+        return database_infrastructure_response();
+    }
+
+    tracing::info!(
+        database_id = %database_id,
+        principal_id = %caller.principal_id,
+        "migrate-server: database created"
+    );
+    web::HttpResponse::Ok().json(&json!({"database_id": database_id}))
+}
+
+fn database_infrastructure_response() -> web::HttpResponse {
+    web::HttpResponse::ServiceUnavailable().json(&json!({
+        "error": "database_infrastructure",
+        "detail": "database service unavailable",
+    }))
 }
 
 /// Liveness. Constant 200 by design: it must not touch Postgres, or a database
@@ -268,6 +318,13 @@ fn apply_error_response(err: ApplyRequestError) -> web::HttpResponse {
         }));
     } else {
         tracing::debug!(error = %err, "migrated: migration request rejected");
+    }
+    if let ApplyRequestError::DatabaseNotCreated { database_id } = &err {
+        return web::HttpResponse::build(status).json(&json!({
+            "error": kind,
+            "detail": err.to_string(),
+            "remedy": format!("POST /v1/databases/{database_id}"),
+        }));
     }
     // `migration_id` and `gated_versions` used to ride along here, and both existed
     // only for the approval refusals: the id so an operator could approve that row,

@@ -21,9 +21,9 @@
 # on the box; the port stayed open with no process anyone was looking for.
 # The PID is captured and killed from a trap that runs on every exit path.
 #
-# THE TOKEN IS NEVER AN ARGUMENT. It is read from ZEROSHIP_TOKEN or a file and
-# passed to the CLI through the environment, so it cannot be read out of `ps`
-# by any other user on this machine.
+# THE TOKEN IS NEVER AN ARGUMENT. It is read from ZEROSHIP_TOKEN or a file,
+# passed to the CLI through the environment, and fed to curl as a header on
+# stdin, so it cannot be read out of `ps` by any other user on this machine.
 #
 # WHAT THIS DOES NOT DO: it does not create the app or manage DNS. With --dir,
 # it applies a committed migration artifact when one exists. `--probe` alone
@@ -192,6 +192,15 @@ echo "ok  deploy accepted"
 IR_JSON=""
 [ -n "$APP_DIR" ] && IR_JSON="$APP_DIR/generated/zeroship/migrations.ir.json"
 if [ -n "$IR_JSON" ] && [ -f "$IR_JSON" ]; then
+  say "creating database for app $APP_ID"
+  if printf 'Authorization: Bearer %s\n' "$ZEROSHIP_TOKEN" \
+      | curl -fsS -o /dev/null -X POST --header @- \
+          "$MIGRATE/v1/databases/$APP_ID"; then
+    echo "ok  database exists"
+  else
+    fail "database create failed - migrations were not attempted"
+  fi
+
   say "applying migrations for app $APP_ID"
   "$CLI" migrate "$IR_JSON" --app="$APP_ID" --control="$MIGRATE" \
     || fail "zeroship migrate failed - the app is deployed but its schema is not applied, so every env.db call will fail"

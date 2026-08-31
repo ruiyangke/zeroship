@@ -366,10 +366,19 @@ else
   fail "unmigrated streaming response lost remediation: HTTP $STREAM_CODE body=$STREAM_BODY"
 fi
 
-# THE STEP THIS HARNESS WAS MISSING. Deploy does not apply migrations, so
-# without this the app runs against a schema that does not exist and every
-# env.db arm below fails on the absent per-app role. This harness has no edge,
-# so it drives the CLI directly against migrate-server's loopback URL.
+# The three diagnostics above intentionally ran before the database existed.
+# Create it explicitly only now, then apply migrations as a separate operation.
+# This harness has no edge, so both requests go directly to migrate-server's
+# loopback URL.
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/v1/databases/$APP_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -20 "$WORK/migrated.log"
+  exit 1
+fi
+
 IR_JSON="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 [ -f "$IR_JSON" ] || { echo "missing $IR_JSON — run: pnpm gen-types"; exit 2; }
 MIG="$("$BIN/zeroship" migrate "$IR_JSON" --app="$APP_ID" \

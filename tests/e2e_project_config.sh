@@ -249,6 +249,18 @@ grep -q "\"out\":\"generated/elsewhere\"" "$WORK/config-show.txt" \
   && pass "config show resolves migrations.out from the file" \
   || fail "config show did not resolve migrations.out: $(cat "$WORK/config-show.txt")"
 
+# Database creation is explicit and uses the same shared edge origin as the
+# config-driven migrate below. The edge's /v1/* split must carry both route
+# shapes to migrate-server.
+CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_EDGE_PORT/v1/databases/$APP_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
+if [[ "$CREATE_CODE" != 2?? ]]; then
+  fail "database create failed through the shared edge (http=$CREATE_CODE): $(cat "$WORK/create-database-response.json")"
+  tail -20 "$WORK/migrated.log"
+  exit 1
+fi
+
 echo ""
 echo "--- transcript: zeroship migrate (no flags) ---"
 # The local edge above sends the CLI's current /v1/apps/* route directly to
