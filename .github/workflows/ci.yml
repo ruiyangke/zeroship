@@ -1822,17 +1822,21 @@ jobs:
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
       # dev-provision (from -p zeroship-control --bins) is what stream/kv/storage/
-      # workflows deploy with; `-p zeroship` produces the binary `pnpm dev` runs
+      # workflows deploy with; `-p zeroship-cli` produces the binary `pnpm dev` runs
       # as the dev tier on every one of the six.
       - name: Build the release binaries the harnesses start
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
-            -p zeroship-gateway -p zeroship --bins
+            -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
           # The platform schema is applied by the `zero-migrate` CLI now, which is
           # a Node program. `pnpm build` earlier in this job builds the napi addon
           # and the DSL; this builds the CLI itself, which the root build script
           # deliberately does not (package.json's `build` filters to ./sdks/*).
           pnpm --filter zero-migrate-cli build
+      # Account-status and spend-state both deploy the migration-first metering
+      # probe. Build its ignored .zship and refresh its tracked IR together.
+      - name: Build the metering probe
+        run: pnpm --filter metering-probe build
       # ZS_FRESHNESS_STRICT=1 addresses the hazard tests/lib/binary_freshness.sh
       # describes: the dev tier runs `target/release/zeroship` and the deployed
       # tier runs the three server binaries, so a partial rebuild leaves the two
@@ -2198,16 +2202,16 @@ jobs:
       #
       # Scenario 17's harness (#311) - Active / PastDue / Suspended enforced at
       # the gateway. Re-run on this branch 2026-08-20 against the flag fix:
-      # 18 passed, 0 failed, rc=0. It was 16/0 when wired; the two added checks
-      # are the worker's and the gateway's usage-outbox assertions.
+      # 18 passed, 0 failed, rc=0. Database provisioning adds two mandatory rows,
+      # so the harness now requires a 20-assertion denominator.
       - name: Account status enforcement (scenario 17)
         run: |
           set -o pipefail
           tests/e2e_account_status_enforcement.sh 2>&1 | tee "$RUNNER_TEMP/dvd-acctstatus.log"
       # Scenario 16's harness (#306) - the spend ladder, Allow -> Warn ->
       # Degrade -> Block and recovery, enforced at the gateway. Re-run on this
-      # branch 2026-08-20: 30 passed, 0 failed, rc=0 (28/0 when wired, plus the
-      # same two outbox assertions).
+      # branch 2026-08-20: 30 passed, 0 failed, rc=0. Database provisioning adds
+      # two mandatory rows, so the harness now requires a 32-assertion denominator.
       #
       # Worth keeping because the commercial ladder is the one place a bug is
       # silently expensive: a broken Block arm serves traffic nobody is paying
