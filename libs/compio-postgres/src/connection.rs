@@ -4822,6 +4822,97 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_time_encoding_retirement_preserves_a_terminal_server_error() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the yielding-write fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let mut parameter_frame =
+            BytesMut::from(parameter_status_frame("client_encoding", "LATIN1").as_slice());
+        let frame_len = parameter_frame.len();
+        let parameter_status = Message::parse(&mut parameter_frame)
+            .expect("decode the scripted ParameterStatus")
+            .expect("the scripted ParameterStatus was incomplete");
+        let (mut read_tx, mut read_rx) = mpsc::channel(4);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Async {
+                    message: parameter_status,
+                    frame_len,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the encoding change");
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        server_error_frame("FATAL", "57P01", "scripted administrator shutdown")
+                            .as_slice(),
+                    )),
+                    request_complete: false,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the terminal server diagnosis behind the encoding change");
+        read_tx
+            .try_send(ReadEvent::Terminal(Error::io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "scripted reset after FATAL",
+            ))))
+            .expect("queue the server disconnect after FATAL");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("57P01"),
+            "flush-time client_encoding retirement discarded the terminal SQLSTATE"
+        );
+        let local = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(local.is_config());
+        assert!(
+            terminal.is_some(),
+            "the fixture did not drive retirement through the FATAL batch"
+        );
+    }
+
+    #[compio::test]
     async fn flush_retirement_terminal_arm_preserves_the_read_error() {
         let stream = BufStream::new(YieldingWriteSplitStream);
         let (read_half, mut write_half) = match stream.try_into_split() {
