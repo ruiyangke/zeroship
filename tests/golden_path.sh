@@ -3259,11 +3259,9 @@ fi
 # is `<prefix>_<base62(uuidv7)>`, so its BYTE order IS its creation order --
 # that is the entire reason `sort({ id: -1 })` is spelled "newest first" in
 # every example and doc we ship. Whether a backend honours that depends on the
-# collation the `id` column sorts under. SQLite sorts `BINARY`. Postgres sorts
-# under the DATABASE collation, `en_US.utf8`, which orders base62's uppercase
-# and lowercase runs differently from bytes. So dev is right and deployed is
-# wrong, and each tier is judged against the byte order of its OWN ids rather
-# than against the other tier -- a relative check alone would call two
+# collation the `id` column sorts under. The schema now pins `BINARY` on SQLite
+# and `C` on Postgres. Each tier is judged against the byte order of its OWN ids
+# rather than against the other tier: a relative check alone would call two
 # identically-broken tiers "agreed".
 #
 # WHY THIS IS CONSTRUCTED AND NOT SAMPLED, which is the whole difficulty. The
@@ -3618,10 +3616,9 @@ else
       pass "deployed: sort({id:-1}) returned byte order over a population that discriminates collations" ;;
     *)
       fail "deployed: sort({id:-1}) is NOT creation order -- $ORD_DEP_V
-      The deployed \`id\` column is created by zeroship-migrate-server and inherits the
-      database collation (en_US.utf8); SQLite sorts BINARY. Fix is COLLATE \"C\"
-      on typed-id text columns in the DDL. See #255 and
-      docs/reference/sqlite-divergences.md." ;;
+      The deployed \`id\` DDL contract pins COLLATE \"C\". Inspect the effective
+      migration policy and the applied column collation; a locale-collated id is
+      a schema regression. See docs/reference/sqlite-divergences.md." ;;
   esac
 fi
 
@@ -4542,9 +4539,9 @@ gp_close_step
 # (ORD_ROUNDS) rather than accepting one. A gate that scores HIGHER when it
 # measures LESS is the failure mode this floor exists to make visible.
 #
-# WHEN THE ENGINE GAINS A COLLATION SLOT (#255) the deployed verdict and the
-# diff both go green with no edit here, and the total becomes 48 passed, 6
-# failed (step 10's scaffold six). Raising the floor to 48 is that change's job.
+# The collation fix later made both verdicts green. The current floor raise is
+# recorded at the end of this ledger; this historical 48/6 projection was for
+# the smaller suite that existed here in 2026-08-10.
 #
 # RAISED 46 -> 54 on 2026-08-10 when step 9 grew a deployed leg (docs/pilot/
 # e2e-scenarios.md row 2 said "Deployed half not compared - see row 11", and
@@ -4771,7 +4768,14 @@ gp_close_step
 # and git does not track. That was true before this change and is true of CI,
 # which is why the golden-path job now builds that example. Of the +5 over 121,
 # +4 is step 3's new arm and +1 was already there, unreachable.
-GOLDEN_MIN_PASSED=$((126 - GP_ARM_PASS_DELTA))
+#
+# 126 -> 128, 2026-08-31. The production creator-table policy now pins a
+# bytewise id collation. Step 11's deployed absolute verdict and tier-relative
+# verdict therefore move from the expected-failure set to passes without adding
+# or removing an outcome. The last full pre-fix run was 126/15; this exact
+# two-outcome transition makes the new expected shape 128/13. A later full run
+# should replace the delta with a measurement, not adjust the assertions to it.
+GOLDEN_MIN_PASSED=$((128 - GP_ARM_PASS_DELTA))
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4833,30 +4837,26 @@ done
 echo "  MUTATION: MUTATE_DEV_DIVERGE=1 must turn step 6 RED"
 # Stated as a DELTA and a cause, not an absolute pair. "(49 passed, 0 failed)"
 # stood here until 2026-08-11 and was unreachable by then: it was measured when
-# step 10's six were the only failures, and step 11's two collation reds (#255)
-# landed afterwards and are untouched by a scaffold policy. Someone running the
+# step 10's six were the only failures, and step 11's two historical collation
+# reds landed afterwards and were untouched by a scaffold policy. Someone running the
 # control to check this gate is load-bearing got a mismatch and had to decide
 # whether the gate or the platform was wrong. An absolute total rots on every
 # step that lands; +6 and "only step 11 survives" does not.
 echo "  MUTATION: MUTATE_SCAFFOLD_POLICY=1 must clear step 10's SIX comparisons --"
 echo "            passed rises by exactly 6. That delta is the load-bearing part"
 echo "            and is what to check."
-echo "            The 2026-08-11 measurement was 67/8 unmutated -> 73/2 mutated,"
-echo "            and its 'only step 11 collation reds are left' reading was true"
-echo "            OF THAT SUITE. It is not true now: steps 12-14 have since added"
-echo "            9 more expected reds (3 log-visibility #332/#333, 4 app-delete"
-echo "            #331, 2 id-ordering #236). MEASURED unmutated at HEAD 2026-08-12"
-echo "            is 119/15, so the mutated arm should read 125/9 -- DERIVED by"
+echo "            The 2026-08-11 measurement was 67/8 unmutated -> 73/2 mutated."
+echo "            Step 11's two collation reds are now fixed. Steps 12-14 later added"
+echo "            7 remaining expected reds (3 log-visibility #332/#333 and 4"
+echo "            app-delete #331). The last pre-fix unmutated measurement was"
+echo "            119/15, so after both independent fixes the mutated arm should"
+echo "            read 127/7 -- DERIVED by"
 echo "            subtraction, NOT measured; nobody has run the mutated arm since"
 echo "            the suite grew. If you run it, replace this with the real pair."
 if [ "$FAIL" -gt 0 ] && [ "${MUTATE_SCAFFOLD_POLICY:-0}" != "1" ]; then
   echo "  NOTE: step 10's six scaffold comparisons are RED AT HEAD BY DESIGN -- the template"
   echo "        ships no RPC policy, so its procedures answer 200 in dev and 401 deployed."
   echo "        That is the defect, not a broken gate. See docs/pilot/e2e-scenarios.md."
-  echo "  NOTE: step 11's two reds are RED AT HEAD BY DESIGN too -- the deployed \`id\` column is"
-  echo "        created by zeroship-migrate-server and inherits the database collation, so ORDER BY id"
-  echo "        is not creation order there. Blocked on the engine (#255); see the mail"
-  echo "        ZEROSHIP-2026-08-10-189 in ~/.claude/inter-projects.md."
 fi
 echo "============================================"
 
@@ -4879,11 +4879,11 @@ rc=0
 #   - a pattern matching NO failure means the defect was FIXED and the list was
 #     not updated, which is a bookkeeping error the same way an unexplained drop
 #     below GOLDEN_MIN_PASSED is
-# Both set rc=1. The second will fire the day #260, #255 or #331 lands, and
+# Both set rc=1. The second will fire the day #260 or #331 lands, and
 # updating this list belongs in that same change - exactly as lowering the floor
 # does.
 #
-# NOT ALL FOUR CATEGORIES ARE "BY DESIGN". #260 and #255 are decisions waiting on
+# NOT ALL THREE CATEGORIES ARE "BY DESIGN". #260 is a decision waiting on
 # an operator. Step 12's four are a KNOWN DEFECT (#331) that this harness found:
 # an app that carries a plan-change row cannot be deleted at all, because
 # `plan_change_events.app_id -> zeroship.apps` is ON DELETE CASCADE and that
@@ -4892,7 +4892,7 @@ rc=0
 # `migrated_migration_audit_append_only`; that table is gone, the defect is not.
 # They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
+GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is

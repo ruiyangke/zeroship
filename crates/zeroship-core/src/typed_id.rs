@@ -5,22 +5,20 @@
 //! - UUIDv7: timestamp-ordered, globally unique, sortable by creation time
 //! - Base62: `0-9A-Za-z`, 22 chars for 128 bits, case-sensitive
 //! - Prefix: entity type (`usr`, `app`, `ses`) for debuggability
-//! - Storage: MOSTLY the typed-id STRING, not a raw UUID. Measured against the
-//!   live `zeroship` database 2026-08-10: of the columns named `id`, 312 are
-//!   `text`, 10 are `uuid`, 4 `bigint`, 1 `integer`. Every one of the 312 has
-//!   `collation_name` NULL, i.e. it inherits the database default — which is
-//!   `en_US.utf8`. See the sort-order caveat on [`BASE62`].
+//! - Storage: MOSTLY the typed-id STRING, not a raw UUID. A 2026-08-10
+//!   pre-fix measurement found 312 text `id` columns inheriting `en_US.utf8`.
+//!   Creator entity-id DDL now pins byte ordering, and the finite platform
+//!   entity-id population is pinned by its own schema migration. See [`BASE62`].
 
 /// Base62 alphabet — sorted so that under a BYTE-ordering collation,
 /// lexicographic order matches numeric order for the high bits (timestamp),
 /// preserving UUIDv7 sort order.
 ///
-/// **That property does NOT hold on the deployed tier**, and the qualifier is
-/// the whole point: it holds under SQLite's BINARY (the `pnpm dev` tier) and
-/// under `COLLATE "C"`, but the deployed Postgres database is `en_US.utf8`,
-/// which collates case-insensitively at the primary level — so `a` sorts
-/// before `B`, and `ORDER BY id` is not creation order. Measured (task #255,
-/// 2026-08-10), 50 batches of 6 ids each:
+/// The qualifier is load-bearing. The property holds under SQLite BINARY and
+/// PostgreSQL `COLLATE "C"`; it does not hold under the database's
+/// `en_US.utf8` default, which interleaves base62's uppercase and lowercase
+/// runs. Before entity-id DDL pinned byte ordering, the defect was measured
+/// over 50 batches of 6 ids each:
 ///
 /// ```text
 ///                                       dev SQLite   deployed Postgres
@@ -34,8 +32,8 @@
 /// straddles the case boundary every query is wrong. Re-running a failing
 /// ordering test is therefore not evidence the failure was spurious.
 ///
-/// Not fixed here — the fix is a `COLLATE "C"` on typed-id text columns in the
-/// schema DDL, tracked as #255.
+/// The schema contract therefore pins bytewise collation on sortable entity-id
+/// columns. The encoder alone cannot provide this guarantee to a database.
 const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Reverse lookup table: ASCII byte → base62 digit (255 = invalid)
@@ -734,10 +732,8 @@ mod tests {
     fn sort_order_preserved_under_byte_ordering() {
         // IDs generated later should sort after earlier ones.
         //
-        // Rust's `>` on `String` is BYTE order, so this exercises SQLite's
-        // BINARY collation — the `pnpm dev` tier — and nothing else. It is
-        // named for the qualifier because the unqualified claim is false on
-        // the deployed tier; see the test below and `BASE62`'s docs.
+        // Rust's `>` on `String` is byte order, the same comparison that the
+        // schema pins as BINARY on SQLite and C on PostgreSQL.
         let id1 = generate("usr");
         // Small delay to ensure different timestamp
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -745,12 +741,10 @@ mod tests {
         assert!(id2 > id1, "id2 ({id2}) should sort after id1 ({id1})");
     }
 
-    /// The companion to `sort_order_preserved_under_byte_ordering`: it pins
-    /// WHY that test's guarantee stops at the dev tier. `BASE62` is ascending
-    /// in byte value, which is what makes UUIDv7 order survive a byte
-    /// collation — but it interleaves cases, and a case-insensitive primary
-    /// collation (`en_US.utf8`, which is what the deployed database is)
-    /// reorders exactly those pairs.
+    /// The companion to `sort_order_preserved_under_byte_ordering`: it pins why
+    /// the schema's bytewise collation is necessary. `BASE62` is ascending in
+    /// byte value, but it interleaves cases, and a locale collation such as
+    /// `en_US.utf8` reorders exactly those pairs.
     ///
     /// The `Q`/`a` pair below is not invented: it is the discriminating
     /// character pair from a batch measured to sort wrongly on a live
@@ -762,11 +756,10 @@ mod tests {
     /// measured against a live en_US.utf8 database and is recorded on #255,
     /// not reproduced here. It also says nothing about which tier is *correct*.
     #[test]
-    fn base62_is_byte_ascending_but_interleaves_case() {
+    fn base62_requires_byte_ordering_across_case_runs() {
         assert!(
             BASE62.windows(2).all(|w| w[0] < w[1]),
-            "BASE62 must be ascending in byte value — this is the property the \
-             dev tier's BINARY collation relies on"
+            "BASE62 must be ascending in byte value; database ordering relies on it"
         );
 
         // Both characters are reachable in a real id.
@@ -779,13 +772,13 @@ mod tests {
             .position(|&c| c == b'a')
             .expect("'a' must be reachable in a real id");
 
-        // Byte order (dev): 'Q' (0x51) before 'a' (0x61). Asserted against
+        // Byte order: 'Q' (0x51) before 'a' (0x61). Asserted against
         // BASE62's own contents rather than the two literals, so it is a claim
         // a reordering of the alphabet would break; `assert!(b'Q' < b'a')` only
         // restates ASCII and can never fail.
         assert!(q < a, "BASE62 must place 'Q' before 'a' in byte order");
 
-        // Case-insensitive primary order (deployed): 'a' before 'q'.
+        // A locale's case-folded primary order can put 'a' before 'q'.
         assert!(b'a'.to_ascii_lowercase() < b'Q'.to_ascii_lowercase());
     }
 

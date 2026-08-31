@@ -208,11 +208,11 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     fn system_field_columns(&self) -> Vec<String> {
         let (ts_type, ts_default) = ("TIMESTAMPTZ", "NOW()");
         vec![
-            "id TEXT PRIMARY KEY".to_string(),
+            "id TEXT COLLATE \"C\" PRIMARY KEY".to_string(),
             format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
             format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-            "created_by TEXT NULL".to_string(),
-            "updated_by TEXT NULL".to_string(),
+            "created_by TEXT COLLATE \"C\" NULL".to_string(),
+            "updated_by TEXT COLLATE \"C\" NULL".to_string(),
             "version INTEGER NOT NULL DEFAULT 1".to_string(),
             format!("deleted_at {ts_type} NULL"),
         ]
@@ -322,11 +322,11 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     fn system_field_columns(&self) -> Vec<String> {
         let (ts_type, ts_default) = ("TEXT", "CURRENT_TIMESTAMP");
         vec![
-            "id TEXT PRIMARY KEY".to_string(),
+            "id TEXT COLLATE BINARY PRIMARY KEY".to_string(),
             format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
             format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
-            "created_by TEXT NULL".to_string(),
-            "updated_by TEXT NULL".to_string(),
+            "created_by TEXT COLLATE BINARY NULL".to_string(),
+            "updated_by TEXT COLLATE BINARY NULL".to_string(),
             "version INTEGER NOT NULL DEFAULT 1".to_string(),
             format!("deleted_at {ts_type} NULL"),
         ]
@@ -449,11 +449,14 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     fn system_field_columns(&self) -> Vec<String> {
         let (ts_type, ts_default) = ("DATETIME(6)", "CURRENT_TIMESTAMP(6)");
         vec![
-            "`id` VARCHAR(191) PRIMARY KEY".to_string(),
+            "`id` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin PRIMARY KEY"
+                .to_string(),
             format!("`created_at` {ts_type} NOT NULL DEFAULT {ts_default}"),
             format!("`updated_at` {ts_type} NOT NULL DEFAULT {ts_default}"),
-            "`created_by` VARCHAR(191) NULL".to_string(),
-            "`updated_by` VARCHAR(191) NULL".to_string(),
+            "`created_by` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL"
+                .to_string(),
+            "`updated_by` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL"
+                .to_string(),
             "`version` INT NOT NULL DEFAULT 1".to_string(),
             format!("`deleted_at` {ts_type} NULL"),
         ]
@@ -1163,9 +1166,9 @@ pub fn build_create_table_with_fks(
 ///   `/* __zsmask:... */` comment on the sibling column is the
 ///   SQLite-side wire).
 ///
-/// The `id TEXT PRIMARY KEY` is identical on both backends; the FK
-/// column type cascades to `TEXT` so ref columns match the PK type —
-/// see [`def_to_pg_type`].
+/// The `id` and closed `ref` comparison domains are bytewise on both
+/// backends (`COLLATE "C"` on PostgreSQL and `COLLATE BINARY` on SQLite),
+/// so base62 typed IDs retain their sortable contract. See [`def_to_pg_type`].
 pub fn build_create_table_with_fks_for_dialect(
     app_id: &str,
     collection: &str,
@@ -1705,7 +1708,7 @@ pub fn build_add_column(
     validate_schema(app_id)?;
 
     let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
-    let pg_type = def_to_pg_type(def);
+    let pg_type = ddl_column_type_for_dialect(def, SqlDialect::Postgres);
     // The declared type and constraints go on the column that holds the REAL
     // value - `__zs_raw__<field>` when masked, the field's own name otherwise.
     let raw = raw_column_for_field(field, def);
@@ -2485,7 +2488,7 @@ fn field_to_column_named_for_dialect(
     } else {
         ""
     };
-    let sql_type = def_to_column_type_for_dialect(def, dialect);
+    let sql_type = ddl_column_type_for_dialect(def, dialect);
     let constraints = def_to_constraints_for_dialect(physical, def, dialect);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zsenc:... */
@@ -2515,6 +2518,26 @@ fn field_to_column_named_for_dialect(
 /// `information_schema.data_type` spelling translate it themselves.
 pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
     renderer(dialect).column_type(def)
+}
+
+/// Add the bytewise physical comparison contract implied by a creator `ref`.
+/// Keeping the target id on `C` while leaving the reference on the database
+/// default makes their B-tree indexes incompatible for PostgreSQL joins.
+fn ddl_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
+    let rendered = def_to_column_type_for_dialect(def, dialect);
+    if def.get("type").and_then(serde_json::Value::as_str) != Some("ref") {
+        return rendered;
+    }
+    match dialect {
+        SqlDialect::Postgres => format!("{rendered} COLLATE \"C\""),
+        SqlDialect::Sqlite => format!("{rendered} COLLATE BINARY"),
+        SqlDialect::Mysql => {
+            let base = rendered
+                .split_once(" CHARACTER SET ")
+                .map_or(rendered.as_str(), |(base, _)| base);
+            format!("{base} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
+        }
+    }
 }
 
 fn char_len(def: &serde_json::Value) -> Option<u64> {
@@ -9514,12 +9537,12 @@ mod tests {
         });
         let create =
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
-        // The system PK is emitted as `id TEXT PRIMARY KEY` (unquoted —
+        // The system PK is emitted as `id TEXT COLLATE "C" PRIMARY KEY` (unquoted -
         // see `build_system_field_columns`). The prefix declaration must
         // NOT add a second column (which would appear as a quoted
         // `"id"` from the field loop's `quote_ident`).
         assert!(
-            create.contains("id TEXT PRIMARY KEY"),
+            create.contains("id TEXT COLLATE \"C\" PRIMARY KEY"),
             "system id PK column present: {create}"
         );
         assert_eq!(
@@ -9875,41 +9898,85 @@ mod tests {
         );
     }
 
-    /// `build_add_column` for a ref field emits a TEXT column type so
-    /// ALTER TABLE ADD COLUMN runs on a column that matches the
-    /// referenced table's PK (TEXT typed_id).
+    /// `build_add_column` for a ref field emits the same bytewise comparison
+    /// domain as the referenced system id.
     #[test]
-    fn fk_ref_field_build_add_column_emits_text() {
+    fn fk_ref_field_build_add_column_emits_bytewise_text() {
         let def = json!({"type": "ref", "refTarget": "users"});
         let sql = build_add_column("app1", "posts", "authorId", &def).expect("build_add_column");
         assert!(
-            sql.contains("ADD COLUMN IF NOT EXISTS \"authorId\" TEXT"),
-            "expected ADD COLUMN ... TEXT, got: {sql}"
+            sql.contains("ADD COLUMN IF NOT EXISTS \"authorId\" TEXT COLLATE \"C\""),
+            "expected a bytewise ref column, got: {sql}"
         );
     }
 
-    /// SQLite dialect: the CREATE TABLE DDL also carries `"<col>" TEXT`
-    /// for ref columns. SQLite's type affinity rules treat TEXT
-    /// literally (BLOB/INTEGER/etc affinities are inferred from the
-    /// declared type), so a typed_id round-trips as a string.
+    /// Ref columns share the system id's comparison domain on every dialect.
+    /// This keeps both sides of an FK usable as one ordered B-tree domain.
     #[test]
-    fn fk_ref_field_emits_text_column_type_sqlite() {
+    fn fk_ref_field_create_table_emits_bytewise_text_per_dialect() {
         let schema = json!({
             "authorId": {"type": "ref", "refTarget": "users"},
         });
         let existing: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let sql = build_create_table_with_fks_for_dialect(
-            "app1",
-            "posts",
-            &schema,
-            &FkEmission::Deferred(&existing),
-            SqlDialect::Sqlite,
-        )
-        .expect("build sqlite DDL");
-        assert!(
-            sql.contains("\"authorId\" TEXT"),
-            "sqlite DDL must declare authorId TEXT, got: {sql}"
-        );
+        for (dialect, expected) in [
+            (
+                SqlDialect::Postgres,
+                r#""authorId" TEXT COLLATE "C""#,
+            ),
+            (SqlDialect::Sqlite, r#""authorId" TEXT COLLATE BINARY"#),
+            (
+                SqlDialect::Mysql,
+                "`authorId` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin",
+            ),
+        ] {
+            let sql = build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &schema,
+                &FkEmission::Deferred(&existing),
+                dialect,
+            )
+            .unwrap_or_else(|error| panic!("build {dialect:?} DDL: {error}"));
+            assert!(
+                sql.contains(expected),
+                "{dialect:?} ref comparison domain was not bytewise: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_text_field_keeps_the_dialect_default_comparison_domain() {
+        let schema = json!({ "label": { "type": "string" } });
+        for (dialect, expected, bytewise) in [
+            (
+                SqlDialect::Postgres,
+                r#""label" TEXT"#,
+                r#""label" TEXT COLLATE "C""#,
+            ),
+            (
+                SqlDialect::Sqlite,
+                r#""label" TEXT"#,
+                r#""label" TEXT COLLATE BINARY"#,
+            ),
+            (
+                SqlDialect::Mysql,
+                "`label` VARCHAR(191)",
+                "`label` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin",
+            ),
+        ] {
+            let sql = build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &schema,
+                &FkEmission::Inline,
+                dialect,
+            )
+            .unwrap_or_else(|error| panic!("build {dialect:?} DDL: {error}"));
+            assert!(
+                sql.contains(expected) && !sql.contains(bytewise),
+                "{dialect:?} plain text left its ordinary comparison domain: {sql}"
+            );
+        }
     }
 
     /// Negative pin: NO ref column anywhere in the DDL should emit
@@ -10993,29 +11060,78 @@ mod tests {
         }
     }
 
-    /// `id TEXT PRIMARY KEY` — identical on both engines. Replaces the
-    /// legacy `id SERIAL PRIMARY KEY`.
+    /// Every typed-id system field uses the same bytewise comparison domain.
+    /// `id` preserves UUIDv7/base62 order, while the actor fields remain
+    /// comparison-compatible with typed-id indexes and references.
     #[test]
-    fn create_table_emits_id_text_primary_key() {
+    fn create_table_emits_bytewise_typed_id_system_fields() {
         let schema = serde_json::json!({});
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let sql = build_create_table_with_fks_for_dialect(
-                "app1",
-                "posts",
-                &schema,
-                &FkEmission::Inline,
-                dialect,
-            )
-            .expect("build ok");
-            assert!(
-                sql.contains("id TEXT PRIMARY KEY"),
-                "missing `id TEXT PRIMARY KEY` for {dialect:?}: {sql}"
-            );
-            assert!(
-                !sql.contains("id SERIAL"),
-                "must not emit legacy `id SERIAL` for {dialect:?}: {sql}"
-            );
-        }
+        let postgres = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build Postgres DDL");
+        assert!(
+            postgres.contains("id TEXT COLLATE \"C\" PRIMARY KEY"),
+            "Postgres id must use byte ordering: {postgres}"
+        );
+        assert!(
+            postgres.contains("created_by TEXT COLLATE \"C\" NULL")
+                && postgres.contains("updated_by TEXT COLLATE \"C\" NULL"),
+            "Postgres actor ids must use byte ordering: {postgres}"
+        );
+        assert!(
+            !postgres.contains("id SERIAL"),
+            "legacy id type: {postgres}"
+        );
+
+        let sqlite = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build SQLite DDL");
+        assert!(
+            sqlite.contains("id TEXT COLLATE BINARY PRIMARY KEY"),
+            "SQLite id must pin its byte-ordering default: {sqlite}"
+        );
+        assert!(
+            sqlite.contains("created_by TEXT COLLATE BINARY NULL")
+                && sqlite.contains("updated_by TEXT COLLATE BINARY NULL"),
+            "SQLite actor ids must pin byte ordering: {sqlite}"
+        );
+        assert!(
+            !sqlite.contains("COLLATE \"C\""),
+            "Postgres syntax leaked: {sqlite}"
+        );
+
+        let mysql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Mysql,
+        )
+        .expect("build MySQL DDL");
+        assert!(
+            mysql.contains(
+                "`id` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin PRIMARY KEY"
+            ),
+            "MySQL id must use byte ordering: {mysql}"
+        );
+        assert!(
+            mysql.contains(
+                "`created_by` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL"
+            ) && mysql.contains(
+                "`updated_by` VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL"
+            ),
+            "MySQL actor ids must use byte ordering: {mysql}"
+        );
     }
 
     /// PG: `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
@@ -11285,8 +11401,12 @@ mod tests {
             sql.contains("REFERENCES \"app1\".\"users\" (id)"),
             "FK target must still reference id: {sql}"
         );
-        // FK target IS the new TEXT id; the FK clause itself unchanged.
-        assert!(sql.contains("id TEXT PRIMARY KEY"), "{sql}");
+        assert!(
+            sql.contains("\"authorId\" TEXT COLLATE \"C\""),
+            "FK source must share the target id's comparison domain: {sql}"
+        );
+        // FK target is the collated system id; the FK clause itself is unchanged.
+        assert!(sql.contains("id TEXT COLLATE \"C\" PRIMARY KEY"), "{sql}");
     }
 
     /// SQLite places the schema name on the INDEX, not the TABLE:

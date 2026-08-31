@@ -158,7 +158,7 @@ fn provision_sql(tables: &WorkflowTables) -> String {
     format!(
         r#"
 CREATE TABLE IF NOT EXISTS {runs} (
-  id text PRIMARY KEY,
+  id text COLLATE "C" PRIMARY KEY,
   workflow_name text NOT NULL,
   app_id uuid NOT NULL,
   deploy_id text NOT NULL,
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS {runs} (
   wake_at timestamptz,
   claimed_by text,
   lease_expires timestamptz,
-  dispatch_nonce text,
+  dispatch_nonce text COLLATE "C",
   last_dispatch_at timestamptz,
   concurrency smallint NOT NULL DEFAULT 1,
   next_ordinal integer NOT NULL DEFAULT 0,
@@ -186,7 +186,7 @@ CREATE TABLE IF NOT EXISTS {runs} (
   waiting_step_key text,
   paused_from_status text,
   signal_epoch integer NOT NULL DEFAULT 0,
-  parent_run_id text,
+  parent_run_id text COLLATE "C",
   parent_wait_step_key text,
   parent_cascade boolean NOT NULL DEFAULT false,
   tree_depth smallint NOT NULL DEFAULT 0,
@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS {runs} (
   restarted_at timestamptz,
   restarted_from_ordinal integer,
   restarted_by text,
-  continued_as_new_run_id text,
+  continued_as_new_run_id text COLLATE "C",
   dedup_key text,
   started_at timestamptz NOT NULL,
   terminal_at timestamptz,
@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS {blobs} (
 CREATE INDEX IF NOT EXISTS workflow_blobs_gc_idx ON {blobs} (last_referenced_at) WHERE refcount = 0;
 
 CREATE TABLE IF NOT EXISTS {steps} (
-  run_id text NOT NULL,
+  run_id text COLLATE "C" NOT NULL,
   ordinal integer NOT NULL,
   name text NOT NULL,
   name_occurrence integer NOT NULL DEFAULT 0,
@@ -246,9 +246,9 @@ CREATE TABLE IF NOT EXISTS {steps} (
   wake_at timestamptz,
   signal_type text,
   max_signal_age_ms bigint,
-  consumed_signal_id text,
-  child_run_id text,
-  batch_id text NOT NULL,
+  consumed_signal_id text COLLATE "C",
+  child_run_id text COLLATE "C",
+  batch_id text COLLATE "C" NOT NULL,
   batch_width smallint NOT NULL DEFAULT 1,
   started_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz,
@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS {steps} (
   compensation_max_attempts integer NOT NULL DEFAULT 1,
   compensation_wake_at timestamptz,
   compensation_error jsonb,
-  compensation_batch_id text,
+  compensation_batch_id text COLLATE "C",
   compensation_finished_at timestamptz,
   PRIMARY KEY (run_id, ordinal),
   CONSTRAINT workflow_steps_run_id_fkey FOREIGN KEY (run_id) REFERENCES {runs}(id) ON DELETE CASCADE,
@@ -273,8 +273,8 @@ CREATE INDEX IF NOT EXISTS workflow_steps_compensation_frontier_idx ON {steps} (
 CREATE INDEX IF NOT EXISTS workflow_steps_compensation_wake_idx ON {steps} (run_id, compensation_wake_at) WHERE compensation_state = 'running' AND compensation_wake_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS {signals} (
-  id text PRIMARY KEY,
-  run_id text NOT NULL,
+  id text COLLATE "C" PRIMARY KEY,
+  run_id text COLLATE "C" NOT NULL,
   type text NOT NULL,
   payload jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -282,7 +282,7 @@ CREATE TABLE IF NOT EXISTS {signals} (
   origin text NOT NULL DEFAULT 'app',
   delivery text NOT NULL DEFAULT 'direct',
   topic text,
-  broadcast_id text,
+  broadcast_id text COLLATE "C",
   idempotency_key text,
   provider text,
   CONSTRAINT workflow_signals_run_id_fkey FOREIGN KEY (run_id) REFERENCES {runs}(id) ON DELETE CASCADE,
@@ -295,10 +295,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS workflow_signals_ext_idem_uidx ON {signals} (r
 CREATE UNIQUE INDEX IF NOT EXISTS workflow_signals_bcast_run_uidx ON {signals} (broadcast_id, run_id) WHERE broadcast_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS {subscriptions} (
-  id text PRIMARY KEY,
+  id text COLLATE "C" PRIMARY KEY,
   app_id uuid NOT NULL,
   topic text NOT NULL,
-  run_id text NOT NULL,
+  run_id text COLLATE "C" NOT NULL,
   signal_name text NOT NULL,
   type_filter text,
   ordinal integer NOT NULL,
@@ -2015,6 +2015,44 @@ mod tests {
         assert!(
             owner_sql.contains("\"zeroship_workflow_owner\""),
             "workflow tables must use the dedicated narrow owner: {owner_sql}"
+        );
+    }
+
+    #[test]
+    fn provisioned_typed_id_domain_is_bytewise() {
+        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let table_sql = provision_sql(&tables);
+        let collated = table_sql
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(" COLLATE \"C\""))
+            .collect::<Vec<_>>();
+
+        let expected = [
+            "id text COLLATE \"C\" PRIMARY KEY,",
+            "dispatch_nonce text COLLATE \"C\",",
+            "parent_run_id text COLLATE \"C\",",
+            "continued_as_new_run_id text COLLATE \"C\",",
+            "run_id text COLLATE \"C\" NOT NULL,",
+            "consumed_signal_id text COLLATE \"C\",",
+            "child_run_id text COLLATE \"C\",",
+            "batch_id text COLLATE \"C\" NOT NULL,",
+            "compensation_batch_id text COLLATE \"C\",",
+            "id text COLLATE \"C\" PRIMARY KEY,",
+            "run_id text COLLATE \"C\" NOT NULL,",
+            "broadcast_id text COLLATE \"C\",",
+            "id text COLLATE \"C\" PRIMARY KEY,",
+            "run_id text COLLATE \"C\" NOT NULL,",
+        ];
+        assert_eq!(
+            collated, expected,
+            "only canonical workflow typed IDs and their storage copies may use bytewise comparison"
+        );
+        assert!(
+            table_sql.contains("workflow_name text NOT NULL")
+                && table_sql.contains("restarted_by text,")
+                && table_sql.contains("consumed_by text,"),
+            "ordinary workflow text must remain in the database comparison domain: {table_sql}"
         );
     }
 

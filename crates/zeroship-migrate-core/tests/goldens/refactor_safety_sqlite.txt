@@ -28,6 +28,9 @@ TableSnapshot {
             data_type: "text",
             nullable: true,
             default: None,
+            ddl_type_override: Some(
+                "TEXT COLLATE BINARY",
+            ),
             generated: None,
             generated_kind: Some(
                 NotGenerated,
