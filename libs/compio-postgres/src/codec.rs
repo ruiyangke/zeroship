@@ -157,27 +157,35 @@ impl BackendMessages {
     /// possibly backpressured consumer: PostgreSQL owes no further bytes after
     /// `CopyInResponse` until the caller supplies input.
     pub(crate) fn contains_tag(&self, tag: u8) -> bool {
+        self.first_matching_tag(&[tag]).is_some()
+    }
+
+    /// Return the first frame tag in wire order which appears in `tags`.
+    ///
+    /// COPY direction responses can share a decoded batch. Their order still
+    /// decides which protocol state the backend entered first.
+    pub(crate) fn first_matching_tag(&self, tags: &[u8]) -> Option<u8> {
         let mut offset = 0usize;
         while let Some(header_end) = offset.checked_add(5) {
             let Some(header) = self.0.get(offset..header_end) else {
-                return false;
+                return None;
             };
             let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
             let Some(next) = offset
                 .checked_add(1)
                 .and_then(|value| value.checked_add(length))
             else {
-                return false;
+                return None;
             };
             if length < 4 || next > self.0.len() {
-                return false;
+                return None;
             }
-            if header[0] == tag {
-                return true;
+            if tags.contains(&header[0]) {
+                return Some(header[0]);
             }
             offset = next;
         }
-        false
+        None
     }
 
     /// Clone and decode an error only when it precedes `stop_tag`.
@@ -315,6 +323,35 @@ pub async fn read_backend<S>(stream: &mut S) -> Result<BackendMessage, Error>
 where
     S: ReadFramer + ?Sized,
 {
+    read_backend_with_async_storage(stream, AsyncFrameStorage::Shared).await
+}
+
+/// Decode like [`read_backend`], but copy an async frame out of the stream's
+/// read allocation before parsing it. Handshake notices can outlive later
+/// buffer growth; detaching keeps their retained allocation proportional to
+/// their charged wire size instead of pinning an obsolete read high-watermark.
+pub(crate) async fn read_backend_detached_async_frames<S>(
+    stream: &mut S,
+) -> Result<BackendMessage, Error>
+where
+    S: ReadFramer + ?Sized,
+{
+    read_backend_with_async_storage(stream, AsyncFrameStorage::Detached).await
+}
+
+#[derive(Clone, Copy)]
+enum AsyncFrameStorage {
+    Shared,
+    Detached,
+}
+
+async fn read_backend_with_async_storage<S>(
+    stream: &mut S,
+    async_storage: AsyncFrameStorage,
+) -> Result<BackendMessage, Error>
+where
+    S: ReadFramer + ?Sized,
+{
     loop {
         // Ensure we have at least one full message header (1-byte tag + 4-byte length).
         stream.fill(5).await?;
@@ -438,9 +475,16 @@ where
                         // Measured BEFORE the parse consumes it: `header.len()` counts
                         // itself but not the tag, so the frame is one more.
                         let frame_len = header.len() as usize + 1;
-                        let message = backend::Message::parse(stream.buf())
-                            .map_err(Error::io)?
-                            .expect("async header implies full message is buffered");
+                        let message = match async_storage {
+                            AsyncFrameStorage::Shared => backend::Message::parse(stream.buf()),
+                            AsyncFrameStorage::Detached => {
+                                let mut frame = BytesMut::from(&stream.buf()[..frame_len]);
+                                stream.buf().advance(frame_len);
+                                backend::Message::parse(&mut frame)
+                            }
+                        }
+                        .map_err(Error::io)?
+                        .expect("async header implies full message is buffered");
                         return Ok(BackendMessage::Async { message, frame_len });
                     } else {
                         // Normal batch terminates at this async boundary;
@@ -774,6 +818,120 @@ mod tests {
             "coalesced local validation outranked the server diagnosis:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// Rediscovering a malformed tail on a later decode cannot substitute for
+    /// attaching its failure to the valid prefix. The split reader may publish
+    /// the first batch before it reads again, so dispatch needs this side
+    /// channel immediately to retire the session in the same turn.
+    async fn assert_coalesced_failure_is_deferred(
+        case: &str,
+        malformed: Vec<u8>,
+        max_message_size: usize,
+        expected_error: &str,
+    ) {
+        let mut batch = error_response("23505", "queued unique violation");
+        batch.extend_from_slice(&malformed);
+        let mut framer = ScriptedFramer::new(vec![batch]);
+        framer.max_message_size = max_message_size;
+
+        let mut decoded = match read_backend(&mut framer).await {
+            Ok(decoded) => decoded,
+            Err(error) => panic!(
+                "{case} outranked the wire-earlier ErrorResponse: {}",
+                error_chain(&error)
+            ),
+        };
+        let deferred = decoded
+            .take_deferred_error()
+            .unwrap_or_else(|| panic!("{case} was not attached to the first decoded batch"));
+        let chain = error_chain(&deferred);
+        assert!(
+            chain.contains(expected_error),
+            "{case} attached the wrong deferred failure: {chain}"
+        );
+    }
+
+    /// `Header::parse` has a separate deferred-error arm from all semantic
+    /// validators below it. Keep this non-group case when splitting the former
+    /// aggregate test.
+    #[compio::test]
+    async fn a_malformed_header_after_error_response_is_deferred() {
+        let malformed = [vec![b'D'], 3u32.to_be_bytes().to_vec()].concat();
+        assert_coalesced_failure_is_deferred(
+            "invalid header",
+            malformed,
+            usize::MAX,
+            "invalid message length",
+        )
+        .await;
+    }
+
+    /// Bind the generic per-frame message ceiling's deferred-error copy.
+    #[compio::test]
+    async fn a_message_ceiling_failure_after_error_response_is_deferred() {
+        assert_coalesced_failure_is_deferred(
+            "message ceiling",
+            data_row(&[b'x'; 192]),
+            128,
+            "message too large",
+        )
+        .await;
+    }
+
+    /// Bind the startup-tag-specific length validator's deferred-error copy.
+    #[compio::test]
+    async fn a_startup_limit_failure_after_error_response_is_deferred() {
+        let mut malformed = vec![b'K'];
+        malformed.extend_from_slice(&265u32.to_be_bytes());
+        malformed.extend_from_slice(&vec![0u8; 265 - 4]);
+        assert_coalesced_failure_is_deferred(
+            "startup limit",
+            malformed,
+            usize::MAX,
+            "BackendKeyData",
+        )
+        .await;
+    }
+
+    /// CopyInResponse and CopyOutResponse share one metadata-validation body;
+    /// exercise both tags without coupling that body to the other validators.
+    #[compio::test]
+    async fn a_copy_metadata_failure_after_error_response_is_deferred() {
+        let cases = [
+            ("CopyInResponse", backend::COPY_IN_RESPONSE_TAG),
+            ("CopyOutResponse", backend::COPY_OUT_RESPONSE_TAG),
+        ];
+        let mut ruled_on = 0;
+        for (case, tag) in cases {
+            assert_coalesced_failure_is_deferred(
+                case,
+                copy_response_frame(tag, b""),
+                usize::MAX,
+                "COPY response",
+            )
+            .await;
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 2, "both COPY response tags must be ruled on");
+    }
+
+    /// Bind ReadyForQuery's length/status validator's deferred-error copy.
+    #[compio::test]
+    async fn a_ready_for_query_failure_after_error_response_is_deferred() {
+        let malformed = [
+            vec![backend::READY_FOR_QUERY_TAG],
+            5u32.to_be_bytes().to_vec(),
+            vec![b'X'],
+        ]
+        .concat();
+        assert_coalesced_failure_is_deferred(
+            "ReadyForQuery",
+            malformed,
+            usize::MAX,
+            "ReadyForQuery",
+        )
+        .await;
     }
 
     /// Every frame in a coalesced batch is measured, not just the first.

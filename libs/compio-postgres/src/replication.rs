@@ -75,7 +75,8 @@ use crate::connect::{
     with_connect_timeout,
 };
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::{Encryption, negotiate_tls};
+use crate::connect_tls::negotiate_tls;
+use crate::encryption::Encryption;
 use crate::escape::{escape_literal_body, quote_identifier};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;
@@ -87,6 +88,8 @@ use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::{DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
 // Wire tags
@@ -291,9 +294,9 @@ where
         );
     }
 
-    // Run the normal startup + auth handshake - connect_raw_into
-    // exposes the post-handshake BufStream that the replication
-    // connection then owns.
+    // Run the normal startup + auth handshake and retain its BufStream. A
+    // backend can send an idle-session message immediately after startup's
+    // ReadyForQuery, and the handshake read may already have buffered it.
     let (stream, process_id, secret_key, parameters) = handshake_replication(stream, cfg).await?;
     let server_verification = if negotiated == Encryption::Plaintext {
         ServerVerification::None
@@ -333,19 +336,20 @@ where
         process_id,
         secret_key,
         pool_lease: None,
+        drop_target: Some(crate::cancel_token::CancelDropTarget::Replication(
+            Arc::new(AtomicBool::new(false)),
+        )),
     };
 
-    let mut stream = BufStream::new(stream);
+    let mut stream = stream;
     stream.set_read_timeout(cfg.get_read_timeout().copied());
-    // The ceiling has to be reapplied here for the same reason the read
-    // timeout does: this is a FRESH `BufStream`, so it starts at
-    // `DEFAULT_MAX_MESSAGE_SIZE` and anything the caller configured is lost.
-    // Applied after the handshake, exactly as `connect_raw` does it, so a
-    // caller's limit governs the data phase without making authentication
-    // unreachable. Leaving it out made `Config::max_message_size` accepted and
-    // ignored on replication connections in BOTH directions: a lowered ceiling
-    // still admitted 64 MiB, and a raised one still tore the stream down at
-    // 64 MiB when a legitimate large frame arrived.
+    // The handshake intentionally uses `DEFAULT_MAX_MESSAGE_SIZE`; apply the
+    // caller's ceiling now, exactly as `connect_raw` does, so it governs the
+    // data phase without making authentication unreachable. Leaving it out
+    // made `Config::max_message_size` accepted and ignored on replication
+    // connections in BOTH directions: a lowered ceiling still admitted 64
+    // MiB, and a raised one still tore the stream down at 64 MiB when a
+    // legitimate large frame arrived.
     if let Some(max) = cfg.get_max_message_size() {
         stream.set_max_message_size(max);
     }
@@ -358,8 +362,8 @@ where
     })
 }
 
-/// Run the startup + auth handshake through a wrapper that hands us
-/// back the raw, post-handshake stream - not a Client/Connection pair.
+/// Run the startup + auth handshake through a wrapper that hands us back the
+/// buffered post-handshake stream - not a Client/Connection pair.
 ///
 /// We can't reuse [`crate::connect_raw::connect_raw`] verbatim because
 /// it constructs a `Connection` (which immediately wants to be
@@ -375,7 +379,7 @@ async fn handshake_replication<S, T>(
     config: &Config,
 ) -> Result<
     (
-        MaybeTlsStream<S, T>,
+        BufStream<MaybeTlsStream<S, T>>,
         i32,
         Option<CancelKey>,
         HashMap<String, String>,
@@ -405,6 +409,18 @@ pub struct ReplicationConnection<S, T> {
     /// cancelled partial read cannot leave a live walsender behind.
     release: Option<ConnectionRelease>,
     cancel_token: CancelToken,
+}
+
+impl<S, T> std::fmt::Debug for ReplicationConnection<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplicationConnection")
+            .field("parameter_count", &self.parameters.len())
+            .field("in_flight", &self.in_flight)
+            .field("has_release", &self.release.is_some())
+            .field("cancel_token", &self.cancel_token)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Records that an I/O call owns the stream, so that a call which never
@@ -448,8 +464,8 @@ struct InFlight {
 impl InFlight {
     /// Claim the stream for one I/O call, or refuse because a previous call
     /// never gave it back, or because the stream is unusable.
-    fn enter(&mut self) -> Result<(), Error> {
-        if self.busy || self.poisoned {
+    fn enter(&mut self, cancel_token: &CancelToken) -> Result<(), Error> {
+        if cancel_token.target_was_abandoned() || self.busy || self.poisoned {
             return Err(Error::cancelled());
         }
         self.busy = true;
@@ -500,13 +516,23 @@ where
     ///
     /// Returns `{systemid, timeline, xlogpos, dbname}` per the docs.
     pub async fn identify_system(&mut self) -> Result<IdentifySystem, Error> {
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         self.stream.begin_read_response();
         let result = self.identify_system_inner().await;
         self.stream.finish_read_response();
         if result.as_ref().is_err_and(Error::is_read_timeout) {
             // A timeout cancels a possibly partial frame read. Retrying on the
             // same replication session would parse from an unknown boundary.
+            //
+            // UNBINDABLE BY PEER OBSERVATION, unlike the other five
+            // `release.shutdown()` sites in this file, which each fail exactly
+            // one test when removed. `ConnectionDropRelease::drop` shuts the
+            // handle down unconditionally, and on THIS path there is no window
+            // where the explicit call is the only thing that could have closed
+            // the peer: the sibling arms shut down and then keep the connection
+            // alive, so their peer observation lands strictly before `Drop`.
+            // Measured 2026-08-31 - a scripted read-timeout test stayed green
+            // with this line removed, so it was rejected rather than merged.
             self.in_flight.poison();
             if let Some(release) = &self.release {
                 release.shutdown();
@@ -708,7 +734,7 @@ where
             }
         }
 
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         self.stream.begin_read_response();
 
         // Both names below are IDENTIFIERS the server parses, not opaque
@@ -985,6 +1011,19 @@ pub struct ReplicationStream<S, T> {
     cancel_token: CancelToken,
 }
 
+impl<S, T> std::fmt::Debug for ReplicationStream<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplicationStream")
+            .field("lsn", &self.lsn)
+            .field("copy_response", &self.copy_response)
+            .field("in_flight", &self.in_flight)
+            .field("has_release", &self.release.is_some())
+            .field("cancel_token", &self.cancel_token)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Tracks the two distinct LSN positions a logical-replication client
 /// reports back to the walsender in a `StandbyStatusUpdate`:
 ///
@@ -1027,8 +1066,16 @@ impl LsnTracker {
     }
 
     /// Record that the caller has durably processed up to `lsn`.
-    /// Advances ONLY the flush position. Monotonic: never regresses.
+    /// Advances ONLY the flush position. Monotonic, but never past the
+    /// received position: `PostgreSQL` trusts `flush_lsn` enough to recycle WAL,
+    /// and a flush beyond `write_lsn` is a protocol state this stream cannot
+    /// truthfully report.
     const fn advance_processed(&mut self, lsn: u64) {
+        let lsn = if lsn > self.received {
+            self.received
+        } else {
+            lsn
+        };
         if lsn > self.processed {
             self.processed = lsn;
         }
@@ -1109,7 +1156,7 @@ where
     /// has begun. Once the first byte arrives, it bounds completion of that
     /// frame; indefinite WAL silence at a frame boundary remains healthy.
     pub async fn next(&mut self) -> Result<Option<ReplicationMessage>, Error> {
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         let result = self.next_inner().await;
         if result.as_ref().is_err_and(Error::is_read_timeout) {
             self.in_flight.poison();
@@ -1366,6 +1413,9 @@ where
 
     async fn drain_copy_both_completion(&mut self) -> Result<(), Error> {
         let mut failure: Option<Error> = None;
+        let mut confirmation_failure: Option<Error> = None;
+        let confirmations = ["COPY 0", "START_REPLICATION"];
+        let mut next_confirmation = 0usize;
 
         loop {
             let message = match read_one_message(&mut self.stream).await {
@@ -1377,9 +1427,31 @@ where
             };
 
             match message {
+                Message::CommandComplete(body)
+                    if failure.is_none() && confirmation_failure.is_none() =>
+                {
+                    confirmation_failure = match confirmations.get(next_confirmation) {
+                        Some(expected) => match body.tag() {
+                            Ok(tag) if tag == *expected => {
+                                next_confirmation += 1;
+                                None
+                            }
+                            Ok(_) => Some(Error::unexpected_message()),
+                            Err(error) => Some(Error::parse(error)),
+                        },
+                        None => Some(Error::unexpected_message()),
+                    };
+                }
                 Message::CommandComplete(_) => {}
                 Message::ReadyForQuery(_) => {
-                    return failure.map_or(Ok(()), Err);
+                    if let Some(error) = failure.or(confirmation_failure) {
+                        return Err(error);
+                    }
+                    return if next_confirmation == confirmations.len() {
+                        Ok(())
+                    } else {
+                        Err(Error::unexpected_message())
+                    };
                 }
                 Message::ErrorResponse(body) => failure = failure.or(Some(Error::db(body))),
                 Message::NoticeResponse(_)
@@ -1416,6 +1488,10 @@ where
     /// *after* a durable hand-off (persisted / acknowledged), never on
     /// mere receipt - a concern that lives in the consumer
     /// (`wal_consumer.rs`), intentionally out of scope of this driver.
+    /// A value above [`last_received_lsn`](Self::last_received_lsn) is capped
+    /// there: `flush_lsn` and `apply_lsn` cannot truthfully exceed the
+    /// `write_lsn` this stream reports, and `PostgreSQL` uses an overreported
+    /// flush position to advance `confirmed_flush_lsn` and recycle WAL.
     pub fn advance_lsn(&mut self, lsn: u64) {
         self.lsn.advance_processed(lsn);
     }
@@ -1438,7 +1514,7 @@ where
     /// fraction of the frame on the wire, which no later frame can repair;
     /// every later call on the stream then fails. See [`InFlight`].
     pub async fn send_standby_status_update(&mut self, reply_requested: bool) -> Result<(), Error> {
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         let result = self.send_standby_status_update_inner(reply_requested).await;
         if result.is_err() {
             // ANY write failure retires the stream, not just a cancelled one.
@@ -2875,6 +2951,7 @@ mod tests {
     use super::*;
     use crate::NoTls;
     use crate::config::{SslCertMode, SslMode, SslNegotiation, SslRootCert};
+    use crate::test_utils::paired_loopback_port;
     use crate::tls::{NoTlsStream, TlsConnect};
     use compio::io::{AsyncReadExt, AsyncWriteExt};
     use pgoutput::{OldTuple, PgOutputMessage, TupleColumn};
@@ -2894,6 +2971,9 @@ mod tests {
             process_id: 0,
             secret_key: Some(0.into()),
             pool_lease: None,
+            drop_target: Some(crate::cancel_token::CancelDropTarget::Replication(
+                Arc::new(AtomicBool::new(false)),
+            )),
         }
     }
 
@@ -3174,9 +3254,12 @@ mod tests {
     /// through to plaintext.
     #[compio::test]
     async fn replication_tls_failure_advances_to_second_resolved_address() {
-        let (first, first_opening) =
-            replication_tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
-        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_opening) = replication_tls_handshake_server_bound(
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        )
+        .await;
+        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_opening) = replication_tls_handshake_server_bound(second_bind).await;
 
         let mut config = Config::new();
@@ -3220,12 +3303,13 @@ mod tests {
     /// already produced a valid PostgreSQL startup error.
     #[compio::test]
     async fn replication_connect_succeeds_via_second_resolved_address() {
+        let port = paired_loopback_port();
         let (first, first_seen) = scripted_replication_server_bound(
-            "127.0.0.1:0".parse().unwrap(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             refused_replication_handshake(),
         )
         .await;
-        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_seen) =
             scripted_replication_server_bound(second_bind, successful_replication_handshake())
                 .await;
@@ -3281,8 +3365,10 @@ mod tests {
     /// pass here.
     #[compio::test]
     async fn replication_connect_timeout_restarts_for_each_resolved_address() {
-        let (first, first_seen) = stalled_replication_server("127.0.0.1:0".parse().unwrap()).await;
-        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_seen) =
+            stalled_replication_server(std::net::SocketAddr::from(([127, 0, 0, 1], port))).await;
+        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_seen) = stalled_replication_server(second_bind).await;
 
         let mut config = Config::new();
@@ -3615,6 +3701,12 @@ mod tests {
         assert_eq!(t.processed, 80, "observe_received must not touch processed");
         assert_eq!(t.standby_lsns(), (100, 80, 80));
 
+        // A caller-supplied checkpoint cannot make flush/apply overtake
+        // write. PostgreSQL trusts flush enough to recycle WAL, so emitting
+        // (100, 120, 120) would turn a local bookkeeping error into data loss.
+        t.advance_processed(120);
+        assert_eq!(t.standby_lsns(), (100, 100, 100));
+
         // A fresh tracker seeded at a non-zero resume LSN reports it in
         // all three slots until something advances.
         let seeded = LsnTracker::new(0x016B_3750);
@@ -3723,6 +3815,22 @@ mod tests {
             }
             other => panic!("expected Relation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pgoutput_relation_type_modifier_reinterprets_the_signed_i32_boundary() {
+        let bytes = pgoutput::encode::relation(
+            16384,
+            "public",
+            "boundary",
+            b'd',
+            &[(0, "value", 25, i32::MIN)],
+        );
+        let PgOutputMessage::Relation { columns, .. } = pgoutput::decode(&bytes).unwrap() else {
+            panic!("expected Relation");
+        };
+
+        assert_eq!(columns[0].type_modifier, i32::MIN);
     }
 
     #[test]
@@ -4393,6 +4501,139 @@ mod tests {
         }
     }
 
+    /// A real socket whose first write fails locally while its read direction
+    /// remains live. `ConnectionRelease` duplicates this socket before it is
+    /// wrapped, so a test can distinguish logical poison from physical
+    /// shutdown while the owning replication object is still alive.
+    struct ReleaseBackedWriteFailure {
+        socket: compio::net::TcpStream,
+        failed: bool,
+    }
+
+    impl compio::io::AsyncRead for ReleaseBackedWriteFailure {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            self.socket.read(buf).await
+        }
+    }
+
+    impl compio::io::AsyncWrite for ReleaseBackedWriteFailure {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            if !self.failed {
+                self.failed = true;
+                return compio::buf::BufResult(
+                    Err(std::io::Error::other("scripted socket write failure")),
+                    buf,
+                );
+            }
+            self.socket.write(buf).await
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.socket.flush().await
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.socket.shutdown().await
+        }
+    }
+
+    /// A transport whose frontend writes succeed without reaching the peer,
+    /// then whose first backend read fails while the real socket stays open.
+    /// The duplicated socket in `ConnectionRelease` is therefore the only
+    /// thing that can make the peer observe a physical shutdown.
+    struct ReleaseBackedReadFailure {
+        socket: compio::net::TcpStream,
+    }
+
+    impl compio::io::AsyncRead for ReleaseBackedReadFailure {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            compio::buf::BufResult(
+                Err(std::io::Error::other("scripted socket read failure")),
+                buf,
+            )
+        }
+    }
+
+    impl compio::io::AsyncWrite for ReleaseBackedReadFailure {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            compio::buf::BufResult(Ok(compio::buf::IoBuf::buf_len(&buf)), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.socket.shutdown().await
+        }
+    }
+
+    async fn release_backed_failing_transport() -> (
+        ReleaseBackedWriteFailure,
+        ConnectionRelease,
+        compio::net::TcpStream,
+    ) {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind release-backed writer listener");
+        let address = listener
+            .local_addr()
+            .expect("release-backed writer address");
+        let accepting = compio::runtime::spawn(async move {
+            listener
+                .accept()
+                .await
+                .expect("accept release-backed writer peer")
+                .0
+        });
+        let socket = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect release-backed writer");
+        let peer = accepting.await.expect("accept release-backed writer task");
+        let release =
+            ConnectionRelease::dup_of(&socket).expect("duplicate release-backed writer socket");
+        (
+            ReleaseBackedWriteFailure {
+                socket,
+                failed: false,
+            },
+            release,
+            peer,
+        )
+    }
+
+    async fn assert_release_shut_down_peer(peer: &mut compio::net::TcpStream, arm: &str) {
+        let compio::buf::BufResult(result, _) =
+            compio::time::timeout(std::time::Duration::from_secs(1), peer.read(vec![0u8; 1]))
+                .await
+                .unwrap_or_else(|_| panic!("{arm} left its release-backed peer open"));
+        match result {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                ) => {}
+            Ok(read) => panic!("{arm} sent {read} byte(s) instead of shutting down"),
+            Err(error) => panic!("{arm} peer shutdown produced {error}"),
+        }
+    }
+
     /// CopyBoth remains an ordinary protocol response boundary for
     /// asynchronous backend messages. A status change or notification can be
     /// coalesced ahead of the ErrorResponse which actually ends replication;
@@ -4425,6 +4666,176 @@ mod tests {
             error.code().map(crate::error::SqlState::code),
             Some("55000"),
             "replication stream discarded SQLSTATE 55000 behind asynchronous messages: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn identify_system_write_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let mut connection = ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedWriteFailure>::Raw(
+                transport,
+            )),
+            parameters: HashMap::new(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+
+        let error = connection
+            .identify_system()
+            .await
+            .expect_err("the scripted IDENTIFY_SYSTEM write succeeded");
+        assert!(!error.is_cancelled(), "the first failure must be the write");
+        assert_release_shut_down_peer(&mut peer, "IDENTIFY_SYSTEM write failure").await;
+        assert!(
+            connection.in_flight.poisoned,
+            "the connection was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn identify_system_response_read_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let ReleaseBackedWriteFailure { socket, .. } = transport;
+        let mut connection = ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedReadFailure>::Raw(
+                ReleaseBackedReadFailure { socket },
+            )),
+            parameters: HashMap::new(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+
+        let error = connection
+            .identify_system()
+            .await
+            .expect_err("the scripted IDENTIFY_SYSTEM response read succeeded");
+        assert!(
+            !error.is_read_timeout(),
+            "the inner response-read arm must own this non-timeout failure"
+        );
+        assert_release_shut_down_peer(&mut peer, "IDENTIFY_SYSTEM response read failure").await;
+        assert!(
+            connection.in_flight.poisoned,
+            "the connection was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn next_read_timeout_shuts_down_its_release_handle() {
+        let (mut stream, mut peer) = silent_peer().await;
+        stream
+            .stream
+            .set_read_timeout(Some(std::time::Duration::ZERO));
+        let compio::buf::BufResult(written, _) = peer.write_all(vec![COPY_DATA_TAG]).await;
+        written.expect("write the first byte of a partial CopyBoth frame");
+        peer.flush()
+            .await
+            .expect("flush the first byte of a partial CopyBoth frame");
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the partial CopyBoth frame did not time out");
+        assert!(error.is_read_timeout(), "unexpected read failure: {error}");
+        assert_release_shut_down_peer(&mut peer, "CopyBoth frame read timeout").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn copy_done_with_a_body_shuts_down_its_release_handle() {
+        let (mut stream, mut peer) = silent_peer().await;
+        let compio::buf::BufResult(written, _) =
+            peer.write_all(startup_frame(COPY_DONE_TAG, &[0xAA])).await;
+        written.expect("write malformed CopyDone");
+        peer.flush().await.expect("flush malformed CopyDone");
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("CopyDone with a body was accepted");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("CopyDone") && chain.contains("empty body"),
+            "the malformed CopyDone was not refused by name: {chain}"
+        );
+        assert_release_shut_down_peer(&mut peer, "malformed CopyDone").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn automatic_keepalive_write_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let mut stream = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedWriteFailure>::Raw(
+                transport,
+            )),
+            lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+        let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+        keepalive.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        keepalive.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        keepalive.push(1);
+        let compio::buf::BufResult(written, _) = peer
+            .write_all(startup_frame(COPY_DATA_TAG, &keepalive))
+            .await;
+        written.expect("write reply-requesting keepalive");
+        peer.flush()
+            .await
+            .expect("flush reply-requesting keepalive");
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the automatic keepalive reply write succeeded");
+        assert!(!error.is_cancelled(), "the first failure must be the write");
+        assert_release_shut_down_peer(&mut peer, "automatic keepalive write failure").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
+        );
+    }
+
+    #[compio::test]
+    async fn manual_status_write_failure_shuts_down_its_release_handle() {
+        let (transport, release, mut peer) = release_backed_failing_transport().await;
+        let mut stream = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::<_, ReleaseBackedWriteFailure>::Raw(
+                transport,
+            )),
+            lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: Some(release),
+            cancel_token: test_cancel_token(),
+        };
+
+        let error = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("the scripted manual status write succeeded");
+        assert!(!error.is_cancelled(), "the first failure must be the write");
+        assert_release_shut_down_peer(&mut peer, "manual status write failure").await;
+        assert!(
+            stream.in_flight.poisoned,
+            "the stream was dropped before its release handle was observed"
         );
     }
 
@@ -4996,6 +5407,45 @@ mod tests {
         );
     }
 
+    /// Logical replication ends with two distinct confirmations: one closes
+    /// COPY and one closes START_REPLICATION. ReadyForQuery cannot make a
+    /// missing, reordered, changed, or extra tag into a clean exchange.
+    #[compio::test]
+    async fn copy_both_completion_requires_exact_server_confirmations() {
+        let invalid = [
+            ("missing one CommandComplete", vec![b"COPY 0\0".as_slice()]),
+            (
+                "wrong COPY confirmation",
+                vec![b"COPY 1\0".as_slice(), b"START_REPLICATION\0".as_slice()],
+            ),
+            (
+                "wrong START_REPLICATION confirmation",
+                vec![b"COPY 0\0".as_slice(), b"SELECT 1\0".as_slice()],
+            ),
+            (
+                "an extra CommandComplete",
+                vec![
+                    b"COPY 0\0".as_slice(),
+                    b"START_REPLICATION\0".as_slice(),
+                    b"START_REPLICATION\0".as_slice(),
+                ],
+            ),
+        ];
+
+        for (description, confirmations) in invalid {
+            let mut wire = startup_frame(COPY_DONE_TAG, b"");
+            for confirmation in confirmations {
+                wire.extend_from_slice(&startup_frame(b'C', confirmation));
+            }
+            wire.extend_from_slice(&startup_frame(b'Z', b"I"));
+
+            let mut stream = stream_over(wire);
+            if let Ok(None) = stream.next().await {
+                panic!("a CopyBoth exchange {description} was accepted as clean");
+            }
+        }
+    }
+
     /// CopyDone is exactly a tag plus Int32(4); it has no body. Accepting a
     /// payload silently changes malformed bytes into a clean CopyBoth state
     /// transition, so reject it by name and retire the stream.
@@ -5302,6 +5752,74 @@ mod tests {
             },
             server,
         )
+    }
+
+    #[compio::test]
+    async fn an_abandoned_cancel_poisons_the_target_replication_stream() {
+        let (mut stream, _wal_peer) = silent_peer().await;
+
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replication CancelRequest listener");
+        let address = listener
+            .local_addr()
+            .expect("replication CancelRequest address");
+        let accepting = compio::runtime::spawn(async move {
+            listener
+                .accept()
+                .await
+                .expect("accept replication CancelRequest")
+                .0
+        });
+        let cancel_socket = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect replication CancelRequest");
+        let mut cancel_peer = accepting.await.expect("accept CancelRequest task");
+        let (packet_seen_tx, packet_seen_rx) = futures_channel::oneshot::channel();
+        let (release_peer_tx, release_peer_rx) = futures_channel::oneshot::channel();
+        let peer = compio::runtime::spawn(async move {
+            let compio::BufResult(result, packet) = cancel_peer.read_exact(vec![0; 16]).await;
+            result.expect("read replication CancelRequest packet");
+            packet_seen_tx
+                .send(packet)
+                .expect("report replication CancelRequest packet");
+            release_peer_rx
+                .await
+                .expect("release replication CancelRequest peer");
+        });
+
+        let token = stream.cancel_token();
+        let cancel = Box::pin(token.cancel_query_raw(cancel_socket, NoTls));
+        let packet_seen = Box::pin(packet_seen_rx);
+        let cancel = match futures_util::future::select(cancel, packet_seen).await {
+            futures_util::future::Either::Left((result, _)) => {
+                panic!("replication CancelRequest returned before peer EOF: {result:?}")
+            }
+            futures_util::future::Either::Right((packet, cancel)) => {
+                assert_eq!(
+                    packet
+                        .expect("CancelRequest peer dropped its packet report")
+                        .len(),
+                    16
+                );
+                cancel
+            }
+        };
+        drop(cancel);
+
+        let result = stream.send_standby_status_update(false).await;
+        release_peer_tx
+            .send(())
+            .expect("release replication CancelRequest peer");
+        peer.await.expect("replication CancelRequest peer panicked");
+
+        let error = result.expect_err(
+            "dropping an in-flight replication CancelRequest left the target stream usable",
+        );
+        assert!(
+            error.is_cancelled(),
+            "the abandoned CancelRequest refusal was not cancellation: {error}"
+        );
     }
 
     /// A read dropped while its operation is in flight must leave the stream

@@ -98,10 +98,13 @@
 //! and "right bytes, slowly" break different things: the first tests framing
 //! validation, the second tests reassembly across short reads.
 //!
-//! NOT covered here: TLS policy, authentication, or replication framing.
+//! NOT covered here: TLS policy or replication framing.
 
 use compio_postgres::Config;
-use compio_postgres::config::SslMode;
+use compio_postgres::config::{
+    AuthMethod, AuthMethods, ChannelBinding as ChannelBindingPolicy, ProtocolVersion, RequireAuth,
+    SslMode, TargetSessionAttrs,
+};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -186,6 +189,1025 @@ fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// Read the startup packet without assuming which protocol version the test
+/// configured. Returns the requested wire version.
+fn read_startup_protocol(stream: &mut (impl Read + Write)) -> u32 {
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read startup packet length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 8, "startup packet is shorter than its header");
+    assert!(length <= 1024 * 1024, "startup packet is implausibly large");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read startup packet body");
+    u32::from_be_bytes(body[..4].try_into().expect("startup protocol version"))
+}
+
+fn authentication_sasl_frame(mechanisms: &[u8]) -> Vec<u8> {
+    let mut body = 10i32.to_be_bytes().to_vec();
+    body.extend_from_slice(mechanisms);
+    backend_frame(b'R', &body)
+}
+
+fn protocol_negotiation_frame(version: u32, option_count: i32, options: &[u8]) -> Vec<u8> {
+    let mut body = version.to_be_bytes().to_vec();
+    body.extend_from_slice(&option_count.to_be_bytes());
+    body.extend_from_slice(options);
+    backend_frame(b'v', &body)
+}
+
+fn notification_frame(process_id: i32, channel: &str, payload: &str) -> Vec<u8> {
+    let mut body = process_id.to_be_bytes().to_vec();
+    body.extend_from_slice(channel.as_bytes());
+    body.push(0);
+    body.extend_from_slice(payload.as_bytes());
+    body.push(0);
+    backend_frame(b'A', &body)
+}
+
+fn notice_frame(message: &str) -> Vec<u8> {
+    let mut body = b"SNOTICE\0VNOTICE\0C00000\0M".to_vec();
+    body.extend_from_slice(message.as_bytes());
+    body.extend_from_slice(&[0, 0]);
+    backend_frame(b'N', &body)
+}
+
+/// A syntactically valid notice padded after its field terminator to retain
+/// exactly `frame_len` bytes. The parser ignores that padding, but the delayed
+/// queue owns it and therefore has to charge it.
+fn padded_notice_frame(frame_len: usize) -> Vec<u8> {
+    let mut body = b"SNOTICE\0VNOTICE\0C00000\0Mbudget notice\0\0".to_vec();
+    let body_len = frame_len
+        .checked_sub(5)
+        .expect("notice wire length includes its five-byte header");
+    assert!(
+        body.len() <= body_len,
+        "padded notice target is shorter than its required fields"
+    );
+    body.resize(body_len, b'x');
+    let frame = backend_frame(b'N', &body);
+    assert_eq!(frame.len(), frame_len);
+    frame
+}
+
+fn parameter_status_frame(name: &str, value: &str) -> Vec<u8> {
+    let mut body = name.as_bytes().to_vec();
+    body.push(0);
+    body.extend_from_slice(value.as_bytes());
+    body.push(0);
+    backend_frame(b'S', &body)
+}
+
+fn error_response_frame(severity: &str, code: &str, message: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(b'S');
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
+    body.push(b'V');
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
+    body.push(b'C');
+    body.extend_from_slice(code.as_bytes());
+    body.push(0);
+    body.push(b'M');
+    body.extend_from_slice(message.as_bytes());
+    body.extend_from_slice(&[0, 0]);
+    backend_frame(b'E', &body)
+}
+
+fn successful_startup_frames(process_id: i32, secret_key: &[u8]) -> Vec<u8> {
+    let mut response = backend_frame(b'R', &0i32.to_be_bytes());
+    let mut key_data = process_id.to_be_bytes().to_vec();
+    key_data.extend_from_slice(secret_key);
+    response.extend_from_slice(&backend_frame(b'K', &key_data));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    response
+}
+
+fn expect_frontend_frame_from(stream: &mut (impl Read + Write), expected_tag: u8) -> Vec<u8> {
+    let mut tag = [0u8; 1];
+    stream.read_exact(&mut tag).expect("read frontend tag");
+    assert_eq!(tag[0], expected_tag, "unexpected frontend frame tag");
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 4, "frontend frame length is below its header");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read frontend frame body");
+    body
+}
+
+fn assert_no_frontend_response(stream: &mut TcpStream) {
+    let mut byte = [0u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => {}
+        Ok(_) => panic!(
+            "the client answered a refused authentication request with frontend tag {}",
+            byte[0]
+        ),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::ConnectionReset | ErrorKind::BrokenPipe | ErrorKind::NotConnected
+            ) => {}
+        Err(error) => panic!("client did not close after refusing authentication: {error}"),
+    }
+}
+
+fn io_error_kind(error: &compio_postgres::Error) -> Option<ErrorKind> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            return Some(error.kind());
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// A deliberately TLS-labelled pass-through stream with no channel-binding
+/// material. It isolates the selector's "TLS is up, endpoint is unavailable"
+/// arm without changing the production connector or inventing a certificate
+/// backend that cannot export its peer certificate.
+#[derive(Clone, Copy)]
+struct NoEndpointTls;
+
+struct NoEndpointTlsStream<S>(S);
+
+impl<S> compio::io::AsyncRead for NoEndpointTlsStream<S>
+where
+    S: compio::io::AsyncRead + Unpin,
+{
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        self.0.read(buf).await
+    }
+}
+
+impl<S> compio::io::AsyncWrite for NoEndpointTlsStream<S>
+where
+    S: compio::io::AsyncWrite + Unpin,
+{
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        self.0.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.0.shutdown().await
+    }
+}
+
+impl<S> compio_postgres::SplitStream for NoEndpointTlsStream<S>
+where
+    S: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+{
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Err(self)
+    }
+}
+
+impl<S> compio_postgres::tls::TlsStream for NoEndpointTlsStream<S>
+where
+    S: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+{
+    fn channel_binding(&self) -> compio_postgres::tls::ChannelBinding {
+        compio_postgres::tls::ChannelBinding::none()
+    }
+}
+
+impl<S> compio_postgres::tls::MakeTlsConnect<S> for NoEndpointTls
+where
+    S: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+{
+    type Stream = NoEndpointTlsStream<S>;
+    type TlsConnect = Self;
+    type Error = std::convert::Infallible;
+
+    fn make_tls_connect(&mut self, _: &str) -> Result<Self::TlsConnect, Self::Error> {
+        Ok(*self)
+    }
+}
+
+impl<S> compio_postgres::tls::TlsConnect<S> for NoEndpointTls
+where
+    S: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+{
+    type Stream = NoEndpointTlsStream<S>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Stream, Self::Error>>;
+
+    fn connect(self, stream: S) -> Self::Future {
+        std::future::ready(Ok(NoEndpointTlsStream(stream)))
+    }
+}
+
+#[cfg(feature = "tls")]
+const TLS_HANDSHAKE_WRITE_SENTINEL: &str = "scripted TLS handshake socket write failure";
+#[cfg(feature = "tls")]
+const TLS_HANDSHAKE_FLUSH_SENTINEL: &str = "scripted TLS handshake socket flush failure";
+
+/// A transport that accepts no reads and fails exactly one outbound handshake
+/// operation. A swallowed error therefore leaves the handshake parked rather
+/// than manufacturing a second diagnosis that could make the test pass.
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy)]
+enum TlsHandshakeIoFailure {
+    Write,
+    Flush,
+}
+
+#[cfg(feature = "tls")]
+struct FailingTlsHandshakeTransport {
+    failure: TlsHandshakeIoFailure,
+}
+
+#[cfg(feature = "tls")]
+impl compio::io::AsyncRead for FailingTlsHandshakeTransport {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, _buf: B) -> compio::BufResult<usize, B> {
+        std::future::pending().await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl compio::io::AsyncWrite for FailingTlsHandshakeTransport {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.failure {
+            TlsHandshakeIoFailure::Write => compio::BufResult(
+                Err(std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    TLS_HANDSHAKE_WRITE_SENTINEL,
+                )),
+                buf,
+            ),
+            TlsHandshakeIoFailure::Flush => {
+                let len = buf.buf_len();
+                compio::BufResult(Ok(len), buf)
+            }
+        }
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        match self.failure {
+            TlsHandshakeIoFailure::Write => Ok(()),
+            TlsHandshakeIoFailure::Flush => Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                TLS_HANDSHAKE_FLUSH_SENTINEL,
+            )),
+        }
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tls")]
+impl compio_postgres::SplitStream for FailingTlsHandshakeTransport {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Err(self)
+    }
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::future_not_send)]
+async fn tls_handshake_io_failure(failure: TlsHandshakeIoFailure) -> std::io::Error {
+    use compio_postgres::tls::{MakeTlsConnect, TlsConnect};
+
+    let config = "host=localhost sslmode=require"
+        .parse::<Config>()
+        .expect("parse direct TLS handshake config");
+    let mut make = compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("build direct rustls connector");
+    let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+        FailingTlsHandshakeTransport,
+    >>::make_tls_connect(&mut make, "localhost")
+    .expect("make direct rustls connection");
+
+    let result = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        connector.connect(FailingTlsHandshakeTransport { failure }),
+    )
+    .await
+    .expect("a swallowed TLS handshake I/O error left the handshake parked");
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("the TLS handshake succeeded after its socket operation failed"),
+    }
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_tls_handshake_socket_write_error_is_preserved() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let error = tls_handshake_io_failure(TlsHandshakeIoFailure::Write).await;
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), TLS_HANDSHAKE_WRITE_SENTINEL);
+    })
+    .await
+    .expect("TLS handshake write-error test exceeded its outer watchdog");
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_tls_handshake_socket_flush_error_is_preserved() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let error = tls_handshake_io_failure(TlsHandshakeIoFailure::Flush).await;
+        assert_eq!(error.kind(), ErrorKind::ConnectionAborted);
+        assert_eq!(error.to_string(), TLS_HANDSHAKE_FLUSH_SENTINEL);
+    })
+    .await
+    .expect("TLS handshake flush-error test exceeded its outer watchdog");
+}
+
+/// A socket wrapper whose steady-state read half returns one ciphertext byte
+/// at a time. The shared switch stays off through TLS and `PostgreSQL` startup,
+/// so a test can isolate record fragmentation from handshake progress.
+#[cfg(feature = "tls")]
+struct OneByteTlsReads<S> {
+    inner: S,
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    nonempty_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(feature = "tls")]
+impl<S> compio::io::AsyncRead for OneByteTlsReads<S>
+where
+    S: compio::io::AsyncRead + Unpin,
+{
+    async fn read<B: compio::buf::IoBufMut>(&mut self, mut buf: B) -> compio::BufResult<usize, B> {
+        use std::sync::atomic::Ordering;
+
+        if !self.armed.load(Ordering::SeqCst) {
+            return self.inner.read(buf).await;
+        }
+        if buf.buf_capacity() == 0 {
+            return compio::BufResult(Ok(0), buf);
+        }
+
+        let compio::BufResult(result, scratch) = self.inner.read(vec![0u8; 1]).await;
+        match result {
+            Ok(read) => {
+                assert!(read <= 1, "the one-byte TLS read returned {read} bytes");
+                assert!(
+                    buf.buf_len() >= read,
+                    "the TLS reader passed an uninitialized socket buffer"
+                );
+                if read != 0 {
+                    buf.as_mut_slice()[..read].copy_from_slice(&scratch[..read]);
+                    self.nonempty_reads.fetch_add(1, Ordering::SeqCst);
+                }
+                compio::BufResult(Ok(read), buf)
+            }
+            Err(error) => compio::BufResult(Err(error), buf),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<S> compio::io::AsyncWrite for OneByteTlsReads<S>
+where
+    S: compio::io::AsyncWrite + Unpin,
+{
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        self.inner.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<S> compio_postgres::SplitStream for OneByteTlsReads<S>
+where
+    S: compio_postgres::SplitStream,
+{
+    type ReadHalf = OneByteTlsReads<S::ReadHalf>;
+    type WriteHalf = S::WriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        let Self {
+            inner,
+            armed,
+            nonempty_reads,
+        } = self;
+        match inner.try_into_split() {
+            Ok((read, write)) => Ok((
+                OneByteTlsReads {
+                    inner: read,
+                    armed,
+                    nonempty_reads,
+                },
+                write,
+            )),
+            Err(inner) => Err(Self {
+                inner,
+                armed,
+                nonempty_reads,
+            }),
+        }
+    }
+}
+
+/// An unsplittable socket whose next read can be made to gather an exact
+/// ciphertext prefix. This removes TCP packet boundaries from the refused-
+/// split fixture: the TLS reader receives one known coalesced chunk, then the
+/// socket refuses to split while part of that chunk is still buffered.
+#[cfg(feature = "tls")]
+struct RefusingBufferedTlsTransport {
+    socket: compio::net::TcpStream,
+    coalesce_next: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    split_attempted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncRead for RefusingBufferedTlsTransport {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, mut buf: B) -> compio::BufResult<usize, B> {
+        use std::sync::atomic::Ordering;
+
+        let minimum = self.coalesce_next.swap(0, Ordering::AcqRel);
+        if minimum == 0 {
+            return self.socket.read(buf).await;
+        }
+        assert!(
+            minimum <= buf.buf_capacity(),
+            "the requested TLS coalescing prefix does not fit the read buffer"
+        );
+
+        let mut collected = Vec::with_capacity(minimum);
+        while collected.len() < minimum {
+            let wanted = minimum - collected.len();
+            let compio::BufResult(result, chunk) = self.socket.read(vec![0u8; wanted]).await;
+            match result {
+                Ok(0) => {
+                    return compio::BufResult(
+                        Err(std::io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            "TLS coalescing peer closed before its promised prefix",
+                        )),
+                        buf,
+                    );
+                }
+                Ok(read) => collected.extend_from_slice(&chunk[..read]),
+                Err(error) => return compio::BufResult(Err(error), buf),
+            }
+        }
+
+        let mut source = collected.as_slice();
+        compio::io::AsyncRead::read(&mut source, buf).await
+    }
+}
+
+#[cfg(feature = "tls")]
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncWrite for RefusingBufferedTlsTransport {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        self.socket.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.socket.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.socket.shutdown().await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl compio_postgres::SplitStream for RefusingBufferedTlsTransport {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        self.split_attempted
+            .store(true, std::sync::atomic::Ordering::Release);
+        Err(self)
+    }
+}
+
+struct FailThirdFlushPeer {
+    startup: Option<Vec<u8>>,
+    response: Option<Vec<u8>>,
+    flushes: usize,
+}
+
+impl compio::io::AsyncRead for FailThirdFlushPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        if let Some(startup) = self.startup.take() {
+            return copy_scripted_read(startup, buf).await;
+        }
+        if let Some(response) = self.response.take() {
+            return copy_scripted_read(response, buf).await;
+        }
+        std::future::pending().await
+    }
+}
+
+impl compio::io::AsyncWrite for FailThirdFlushPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.flushes += 1;
+        if self.flushes == 3 {
+            return Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "scripted third flush failure",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for FailThirdFlushPeer {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Err(self)
+    }
+}
+
+#[derive(Default)]
+struct SplitFailureGate {
+    flushes: usize,
+    third_flush_started: bool,
+    fail_third_flush: bool,
+    reader_waker: Option<std::task::Waker>,
+    flush_waker: Option<std::task::Waker>,
+}
+
+type SharedSplitFailureGate = std::rc::Rc<std::cell::RefCell<SplitFailureGate>>;
+
+struct GatedSplitPeer {
+    startup: Option<Vec<u8>>,
+    response: Option<Vec<u8>>,
+    gate: SharedSplitFailureGate,
+}
+
+struct GatedSplitReadHalf {
+    response: Option<Vec<u8>>,
+    gate: SharedSplitFailureGate,
+}
+
+struct GatedSplitWriteHalf {
+    gate: SharedSplitFailureGate,
+}
+
+/// A splittable in-memory transport that returns exactly one scripted backend
+/// batch per read and then EOF. Keeping the batches separate makes response
+/// channel backpressure deterministic instead of depending on TCP coalescing.
+struct OrderedBatchPeer {
+    startup: Option<Vec<u8>>,
+    responses: std::collections::VecDeque<Vec<u8>>,
+}
+
+struct OrderedBatchReadHalf {
+    responses: std::collections::VecDeque<Vec<u8>>,
+}
+
+struct OrderedBatchWriteHalf;
+
+/// An unsplittable scripted transport that records every nonempty frontend
+/// flush. Returning one backend vector per read lets a test force a protocol
+/// boundary into one decoder batch while still observing the next request.
+struct RecordedBatchPeer {
+    startup: Option<Vec<u8>>,
+    responses: std::collections::VecDeque<Vec<u8>>,
+    current_write: Vec<u8>,
+    flushed_writes: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
+}
+
+/// An in-memory `PostgreSQL` peer whose read granularity is exact rather than a
+/// property of TCP coalescing. It can either refuse splitting or return two
+/// handles over the same script, so one fixture drives both buffered paths.
+struct ScriptedChunkPeer {
+    state: std::rc::Rc<std::cell::RefCell<ScriptedChunkState>>,
+    allow_split: bool,
+    response_chunk: usize,
+    current_write: Vec<u8>,
+}
+
+struct ScriptedChunkState {
+    startup: std::collections::VecDeque<u8>,
+    response: std::collections::VecDeque<u8>,
+    response_enabled: bool,
+    closed: bool,
+    startup_read_sizes: Vec<usize>,
+    response_read_sizes: Vec<usize>,
+    reader_waker: Option<std::task::Waker>,
+    split_attempts: usize,
+    split_succeeded: bool,
+}
+
+impl ScriptedChunkPeer {
+    fn new(
+        startup: Vec<u8>,
+        response: Vec<u8>,
+        allow_split: bool,
+        response_chunk: usize,
+    ) -> (Self, std::rc::Rc<std::cell::RefCell<ScriptedChunkState>>) {
+        assert!(
+            response_chunk > 0,
+            "a scripted response chunk must make progress"
+        );
+        let state = std::rc::Rc::new(std::cell::RefCell::new(ScriptedChunkState {
+            startup: startup.into(),
+            response: response.into(),
+            response_enabled: false,
+            closed: false,
+            startup_read_sizes: Vec::new(),
+            response_read_sizes: Vec::new(),
+            reader_waker: None,
+            split_attempts: 0,
+            split_succeeded: false,
+        }));
+        (
+            Self {
+                state: std::rc::Rc::clone(&state),
+                allow_split,
+                response_chunk,
+                current_write: Vec::new(),
+            },
+            state,
+        )
+    }
+}
+
+async fn copy_scripted_read<B: compio::buf::IoBufMut>(
+    bytes: Vec<u8>,
+    buf: B,
+) -> compio::BufResult<usize, B> {
+    let expected = bytes.len();
+    let mut bytes = bytes.as_slice();
+    let result = compio::io::AsyncRead::read(&mut bytes, buf).await;
+    match result.0.as_ref() {
+        Ok(read) => assert_eq!(
+            *read, expected,
+            "the scripted frame did not fit in one transport read"
+        ),
+        Err(error) => panic!("the in-memory scripted read failed: {error}"),
+    }
+    result
+}
+
+async fn gated_flush(gate: &SharedSplitFailureGate) -> std::io::Result<()> {
+    let flush = {
+        let mut gate = gate.borrow_mut();
+        gate.flushes += 1;
+        gate.flushes
+    };
+    if flush != 3 {
+        return Ok(());
+    }
+
+    std::future::poll_fn(|cx| {
+        let mut gate = gate.borrow_mut();
+        if !gate.third_flush_started {
+            gate.third_flush_started = true;
+            if let Some(waker) = gate.reader_waker.take() {
+                waker.wake();
+            }
+        }
+        if gate.fail_third_flush {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "scripted gated flush failure",
+            )))
+        } else {
+            gate.flush_waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+impl compio::io::AsyncRead for GatedSplitPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.startup.take() {
+            Some(startup) => copy_scripted_read(startup, buf).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl compio::io::AsyncWrite for GatedSplitPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        gated_flush(&self.gate).await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for GatedSplitPeer {
+    type ReadHalf = GatedSplitReadHalf;
+    type WriteHalf = GatedSplitWriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Ok((
+            GatedSplitReadHalf {
+                response: self.response,
+                gate: std::rc::Rc::clone(&self.gate),
+            },
+            GatedSplitWriteHalf { gate: self.gate },
+        ))
+    }
+}
+
+impl compio::io::AsyncRead for GatedSplitReadHalf {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        std::future::poll_fn(|cx| {
+            let mut gate = self.gate.borrow_mut();
+            if gate.third_flush_started {
+                std::task::Poll::Ready(())
+            } else {
+                gate.reader_waker = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+
+        let Some(response) = self.response.take() else {
+            return std::future::pending().await;
+        };
+        let result = copy_scripted_read(response, buf).await;
+        let mut gate = self.gate.borrow_mut();
+        gate.fail_third_flush = true;
+        if let Some(waker) = gate.flush_waker.take() {
+            waker.wake();
+        }
+        drop(gate);
+        result
+    }
+}
+
+impl compio::io::AsyncWrite for GatedSplitWriteHalf {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        gated_flush(&self.gate).await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio::io::AsyncRead for OrderedBatchPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.startup.take() {
+            Some(startup) => copy_scripted_read(startup, buf).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl compio::io::AsyncWrite for OrderedBatchPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for OrderedBatchPeer {
+    type ReadHalf = OrderedBatchReadHalf;
+    type WriteHalf = OrderedBatchWriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Ok((
+            OrderedBatchReadHalf {
+                responses: self.responses,
+            },
+            OrderedBatchWriteHalf,
+        ))
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncRead for RecordedBatchPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        if let Some(startup) = self.startup.take() {
+            return copy_scripted_read(startup, buf).await;
+        }
+        match self.responses.pop_front() {
+            Some(response) => copy_scripted_read(response, buf).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncWrite for RecordedBatchPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        self.current_write.extend_from_slice(buf.as_init());
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        if !self.current_write.is_empty() {
+            self.flushed_writes
+                .borrow_mut()
+                .push(std::mem::take(&mut self.current_write));
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for RecordedBatchPeer {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Err(self)
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncRead for ScriptedChunkPeer {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, mut buf: B) -> compio::BufResult<usize, B> {
+        let capacity = buf.buf_capacity();
+        assert!(capacity > 0, "the driver submitted a zero-capacity read");
+        let next = std::future::poll_fn(|cx| {
+            let mut state = self.state.borrow_mut();
+            if state.closed {
+                return std::task::Poll::Ready(Vec::new());
+            }
+            if !state.startup.is_empty() {
+                let take = capacity.min(state.startup.len());
+                let bytes = state.startup.drain(..take).collect::<Vec<_>>();
+                state.startup_read_sizes.push(take);
+                return std::task::Poll::Ready(bytes);
+            }
+            if state.response_enabled {
+                if state.response.is_empty() {
+                    state.reader_waker = Some(cx.waker().clone());
+                    return std::task::Poll::Pending;
+                }
+                let take = self.response_chunk.min(capacity).min(state.response.len());
+                let bytes = state.response.drain(..take).collect::<Vec<_>>();
+                state.response_read_sizes.push(take);
+                return std::task::Poll::Ready(bytes);
+            }
+            state.reader_waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        })
+        .await;
+
+        copy_scripted_read(next, buf).await
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl compio::io::AsyncWrite for ScriptedChunkPeer {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        self.current_write.extend_from_slice(&buf.as_init()[..len]);
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        let enables_response = self.current_write.first() == Some(&b'Q');
+        let closes = self.current_write.first() == Some(&b'X');
+        self.current_write.clear();
+        let waker = if enables_response || closes {
+            let mut state = self.state.borrow_mut();
+            state.response_enabled |= enables_response;
+            state.closed |= closes;
+            state.reader_waker.take()
+        } else {
+            None
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        let waker = {
+            let mut state = self.state.borrow_mut();
+            state.closed = true;
+            state.reader_waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+}
+
+impl compio_postgres::SplitStream for ScriptedChunkPeer {
+    type ReadHalf = Self;
+    type WriteHalf = Self;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        {
+            let mut state = self.state.borrow_mut();
+            state.split_attempts += 1;
+            state.split_succeeded = self.allow_split;
+        }
+        if !self.allow_split {
+            return Err(self);
+        }
+
+        let Self {
+            state,
+            response_chunk,
+            current_write,
+            ..
+        } = self;
+        Ok((
+            Self {
+                state: std::rc::Rc::clone(&state),
+                allow_split: false,
+                response_chunk,
+                current_write: Vec::new(),
+            },
+            Self {
+                state,
+                allow_split: false,
+                response_chunk,
+                current_write,
+            },
+        ))
+    }
+}
+
+impl compio::io::AsyncRead for OrderedBatchReadHalf {
+    async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        match self.responses.pop_front() {
+            Some(response) => copy_scripted_read(response, buf).await,
+            None => compio::BufResult(Ok(0), buf),
+        }
+    }
+}
+
+impl compio::io::AsyncWrite for OrderedBatchWriteHalf {
+    async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+        let len = buf.buf_len();
+        compio::BufResult(Ok(len), buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A frame whose declared length is a lie. `declared` replaces the real one, so
 /// a value below the payload truncates it and a value above it makes the driver
 /// wait for bytes that are never coming.
@@ -195,6 +1217,23 @@ fn lying_frame(tag: u8, body: &[u8], declared: u32) -> Vec<u8> {
     frame.extend_from_slice(&declared.to_be_bytes());
     frame.extend_from_slice(body);
     frame
+}
+
+fn frontend_batch_tags(mut batch: &[u8]) -> Vec<u8> {
+    let mut tags = Vec::new();
+    while !batch.is_empty() {
+        assert!(batch.len() >= 5, "frontend batch ended inside a header");
+        let length = u32::from_be_bytes(batch[1..5].try_into().unwrap()) as usize;
+        assert!(length >= 4, "frontend frame length is below its header");
+        let frame_len = length + 1;
+        assert!(
+            frame_len <= batch.len(),
+            "frontend batch ended inside a frame"
+        );
+        tags.push(batch[0]);
+        batch = &batch[frame_len..];
+    }
+    tags
 }
 
 fn complete_startup(stream: &mut (impl Read + Write), process_id: i32) {
@@ -227,6 +1266,44 @@ fn complete_startup(stream: &mut (impl Read + Write), process_id: i32) {
     stream.flush().expect("flush scripted startup response");
 }
 
+/// Send startup's terminal sequence and one post-ReadyForQuery frame in a
+/// single socket write, then answer one query as a wire-order barrier.
+fn startup_with_trailing_frame_server(process_id: i32, trailing: Vec<u8>) -> StubServer {
+    StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+        let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+        response.extend_from_slice(&parameter_status_frame("application_name", "before_ready"));
+        let mut key_data = process_id.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&1234i32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &key_data));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        response.extend_from_slice(&trailing);
+
+        let written = stream
+            .write(&response)
+            .expect("write coalesced scripted startup response");
+        assert_eq!(
+            written,
+            response.len(),
+            "the startup response did not fit in one socket write"
+        );
+        stream
+            .flush()
+            .expect("flush coalesced scripted startup response");
+
+        assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+        let mut query_response = backend_frame(b'C', b"SELECT 1\0");
+        query_response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        stream
+            .write_all(&query_response)
+            .expect("write startup-tail barrier response");
+        stream.flush().expect("flush startup-tail barrier response");
+        thread::sleep(Duration::from_millis(300));
+    })
+}
+
 fn expect_simple_query(stream: &mut (impl Read + Write)) -> Vec<u8> {
     let mut tag = [0u8; 1];
     stream.read_exact(&mut tag).expect("read frontend tag");
@@ -253,6 +1330,1799 @@ fn stub_config(addr: SocketAddr) -> Config {
         .ssl_mode(SslMode::Disable)
         .connect_timeout(Duration::from_secs(1));
     config
+}
+
+/// `Config::connect_raw` has no descriptor-release handle, so dropping the
+/// last client leaves the connection task able to deliver `PostgreSQL`'s clean
+/// shutdown frame. A completed query is the control that the multiplexed loop
+/// was live before teardown began.
+#[compio::test]
+async fn dropping_a_raw_client_sends_terminate_after_a_completed_query() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 913);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+
+            let mut response = backend_frame(b'C', b"SELECT 1\0");
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write successful query response");
+            stream.flush().expect("flush successful query response");
+
+            assert!(
+                expect_frontend_frame_from(&mut stream, b'X').is_empty(),
+                "Terminate declared a body instead of PostgreSQL's exact length 4"
+            );
+        });
+
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting to the Terminate peer hung")
+        .expect("connect to the Terminate peer");
+        let config = stub_config(server.addr);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("raw startup for the Terminate test hung")
+        .expect("complete raw startup for the Terminate test");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the Terminate control query hung")
+            .expect("the Terminate control query failed");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the control query returned extra messages"
+        );
+        assert!(
+            matches!(
+                messages.first(),
+                Some(compio_postgres::SimpleQueryMessage::CommandComplete(1))
+            ),
+            "the control query did not complete successfully: {messages:?}"
+        );
+
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the raw connection did not shut down after Terminate")
+            .expect("the raw connection task panicked")
+            .expect("the raw connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("raw Terminate test exceeded its outer watchdog");
+}
+
+/// An execution error after `BindComplete` cannot prove that the named
+/// statement itself is stale. Force all three frames into one decoder read and
+/// then inspect the next frontend batch: retaining the cache sends Bind +
+/// Execute + Sync, while scanning past `BindComplete` evicts it and sends
+/// statement cleanup before a reprepare.
+#[compio::test]
+async fn an_error_after_coalesced_bind_complete_keeps_the_cached_statement() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        const SQL: &str = "UPDATE scripted_table SET value = 1";
+
+        let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+        let mut key = 404i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1234i32.to_be_bytes());
+        startup.extend_from_slice(&backend_frame(b'K', &key));
+        startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut prepared = backend_frame(b'1', b"");
+        prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        prepared.extend_from_slice(&backend_frame(b'n', b""));
+        prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let stale_body = b"SERROR\0VERROR\0C26000\0Mscripted failure after BindComplete\0\
+                           RFetchPreparedStatement\0\0";
+        let mut failed = backend_frame(b'2', b"");
+        failed.extend_from_slice(&backend_frame(b'E', stale_body));
+        failed.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut succeeded = backend_frame(b'2', b"");
+        succeeded.extend_from_slice(&backend_frame(b'C', b"UPDATE 1\0"));
+        succeeded.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let flushed_writes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let peer = RecordedBatchPeer {
+            startup: Some(startup),
+            responses: std::collections::VecDeque::from([
+                prepared.clone(),
+                prepared,
+                failed,
+                succeeded,
+            ]),
+            current_write: Vec::new(),
+            flushed_writes: std::rc::Rc::clone(&flushed_writes),
+        };
+        let mut config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse cache-boundary config");
+        config
+            .statement_cache_capacity(1)
+            .statement_cache_execution_threshold(std::num::NonZeroUsize::MIN);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("scripted cache-boundary startup hung")
+        .expect("connect scripted cache-boundary transport");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, client.execute(SQL, &[]))
+            .await
+            .expect("the coalesced post-BindComplete error hung")
+            .expect_err("the scripted post-BindComplete SQLSTATE became success");
+        assert_eq!(
+            first.code().map(compio_postgres::error::SqlState::code),
+            Some("26000"),
+            "the first execution lost its scripted SQLSTATE: {}",
+            common::error_chain(&first)
+        );
+
+        {
+            let writes = flushed_writes.borrow();
+            assert_eq!(
+                writes.len(),
+                4,
+                "cache setup emitted an unexpected number of frontend batches"
+            );
+            assert_eq!(frontend_batch_tags(&writes[1]), b"PDS");
+            assert_eq!(frontend_batch_tags(&writes[2]), b"PDS");
+            assert_eq!(frontend_batch_tags(&writes[3]), b"BES");
+        }
+
+        let second =
+            async { compio::time::timeout(OPERATION_WATCHDOG, client.execute(SQL, &[])).await };
+        let next_batch = async {
+            compio::time::timeout(OPERATION_WATCHDOG, async {
+                loop {
+                    if let Some(batch) = flushed_writes.borrow().get(4).cloned() {
+                        break batch;
+                    }
+                    compio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the second cached execution emitted no frontend batch")
+        };
+        let (second, next_batch) = futures_util::join!(second, next_batch);
+        assert_eq!(
+            frontend_batch_tags(&next_batch),
+            b"BES",
+            "an ErrorResponse after BindComplete evicted the cached statement"
+        );
+        assert_eq!(
+            second
+                .expect("the second cached execution hung")
+                .expect("the retained cached statement was not reusable"),
+            1,
+            "the retained cached statement returned the wrong command count"
+        );
+
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the cache-boundary connection did not shut down")
+            .expect("the cache-boundary connection task panicked")
+            .expect("the cache-boundary connection did not close cleanly");
+    }))
+    .await
+    .expect("coalesced BindComplete boundary test exceeded its outer watchdog");
+}
+
+/// A response sender has capacity one, so a burst of separately-read command
+/// batches must use the connection's pending-response FIFO. The terminal EOF
+/// is deliberately queued behind that burst: it must not cancel a stashed
+/// batch before the caller receives every command in wire order.
+#[compio::test]
+async fn multiplexed_pending_batches_arrive_before_the_terminal_read() {
+    use futures_util::StreamExt;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        const BATCHES: u64 = 128;
+
+        let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+        let mut key_data = 914i32.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&1234i32.to_be_bytes());
+        startup.extend_from_slice(&backend_frame(b'K', &key_data));
+        startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut responses = std::collections::VecDeque::new();
+        for count in 1..=BATCHES {
+            responses.push_back(backend_frame(b'C', format!("SELECT {count}\0").as_bytes()));
+        }
+        responses.push_back(backend_frame(b'Z', b"I"));
+
+        let peer = OrderedBatchPeer {
+            startup: Some(startup),
+            responses,
+        };
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse ordered-batch config");
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("ordered-batch startup hung")
+        .expect("connect ordered-batch transport");
+        let stream = client
+            .simple_query_raw("SELECT scripted_batch")
+            .await
+            .expect("enqueue the ordered-batch query");
+        let mut stream = Box::pin(stream);
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let driver_result = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the ordered-batch connection task did not stop after EOF")
+            .expect("the ordered-batch connection task panicked");
+
+        let mut delivered = Vec::new();
+        while let Some(message) = stream.next().await {
+            match message.expect("a terminal read overtook a stashed response batch") {
+                compio_postgres::SimpleQueryMessage::CommandComplete(count) => {
+                    delivered.push(count);
+                }
+                other => panic!("the scripted command burst produced {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            (1..=BATCHES).collect::<Vec<_>>(),
+            "multiplexed response batches did not stay in wire order"
+        );
+
+        drop(client);
+        driver_result.expect("the ordered-batch connection did not close cleanly");
+    }))
+    .await
+    .expect("multiplexed pending-response FIFO test exceeded its outer watchdog");
+}
+
+async fn plaintext_sasl_refusal(
+    mechanisms: Vec<u8>,
+    channel_binding: ChannelBindingPolicy,
+) -> String {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+        stream
+            .write_all(&authentication_sasl_frame(&mechanisms))
+            .expect("write scripted SASL request");
+        stream.flush().expect("flush scripted SASL request");
+        assert_no_frontend_response(&mut stream);
+    });
+
+    let mut config = stub_config(server.addr);
+    config
+        .password("scripted-password")
+        .channel_binding(channel_binding);
+    let result = compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+        .await
+        .expect("the hostile SASL exchange hung");
+    let error = match result {
+        Ok(_) => panic!("the driver accepted a hostile SASL mechanism list"),
+        Err(error) => error,
+    };
+    server.finish();
+    common::error_chain(&error)
+}
+
+fn assert_sasl_initial_response(body: &[u8], mechanism: &str, gs2_prefix: &[u8]) {
+    let mechanism_end = body
+        .iter()
+        .position(|byte| *byte == 0)
+        .expect("SASL mechanism is not terminated");
+    assert_eq!(&body[..mechanism_end], mechanism.as_bytes());
+    let length_start = mechanism_end + 1;
+    let length_end = length_start + 4;
+    let declared = i32::from_be_bytes(
+        body.get(length_start..length_end)
+            .expect("SASL response length")
+            .try_into()
+            .unwrap(),
+    );
+    let response = body
+        .get(length_end..)
+        .expect("SASL initial response payload");
+    assert_eq!(
+        usize::try_from(declared).expect("nonnegative SASL response length"),
+        response.len(),
+        "SASL initial response length disagrees with its payload"
+    );
+    assert!(
+        response.starts_with(gs2_prefix),
+        "SASL client-first message did not start with {:?}: {:?}",
+        String::from_utf8_lossy(gs2_prefix),
+        String::from_utf8_lossy(response)
+    );
+}
+
+fn sasl_initial_payload(body: &[u8]) -> &[u8] {
+    let mechanism_end = body
+        .iter()
+        .position(|byte| *byte == 0)
+        .expect("SASL mechanism is not terminated");
+    let length_start = mechanism_end + 1;
+    let payload_start = length_start + 4;
+    let declared = i32::from_be_bytes(
+        body.get(length_start..payload_start)
+            .expect("SASL response length")
+            .try_into()
+            .unwrap(),
+    );
+    let payload = body
+        .get(payload_start..)
+        .expect("SASL initial response payload");
+    assert_eq!(
+        usize::try_from(declared).expect("nonnegative SASL response length"),
+        payload.len(),
+        "SASL initial response length disagrees with its payload"
+    );
+    payload
+}
+
+#[derive(Clone, Copy)]
+enum ScramTerminalFrame {
+    InvalidVerifier,
+    AuthenticationOkBeforeFinal,
+}
+
+/// Drive a valid bare-SCRAM exchange through the client's proof, then replace
+/// the server-final frame. The otherwise-valid startup tail makes either
+/// mutation become connection success rather than merely a different error.
+fn scram_server_through_client_final(terminal: ScramTerminalFrame) -> StubServer {
+    StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+        stream
+            .write_all(&authentication_sasl_frame(b"SCRAM-SHA-256\0\0"))
+            .expect("offer scripted SCRAM");
+        stream.flush().expect("flush scripted SCRAM offer");
+
+        let initial = expect_frontend_frame_from(&mut stream, b'p');
+        assert_sasl_initial_response(&initial, "SCRAM-SHA-256", b"n,,n=");
+        let client_first = std::str::from_utf8(sasl_initial_payload(&initial))
+            .expect("SCRAM client-first is not UTF-8");
+        let client_nonce = client_first
+            .strip_prefix("n,,n=,r=")
+            .expect("SCRAM client-first did not carry its nonce");
+
+        let server_first = format!("r={client_nonce}scripted-server,s=c2FsdA==,i=4096");
+        let mut auth_continue = 11i32.to_be_bytes().to_vec();
+        auth_continue.extend_from_slice(server_first.as_bytes());
+        stream
+            .write_all(&backend_frame(b'R', &auth_continue))
+            .expect("write AuthenticationSaslContinue");
+        stream.flush().expect("flush AuthenticationSaslContinue");
+
+        let client_final = expect_frontend_frame_from(&mut stream, b'p');
+        let client_final =
+            std::str::from_utf8(&client_final).expect("SCRAM client-final is not UTF-8");
+        assert!(
+            client_final.starts_with("c=biws,r=") && client_final.contains(",p="),
+            "client did not send a complete SCRAM proof: {client_final}"
+        );
+
+        let mut response = Vec::new();
+        match terminal {
+            ScramTerminalFrame::InvalidVerifier => {
+                // Correct base64 width for a 32-byte verifier, but deliberately
+                // unrelated to the exchange above.
+                let mut final_body = 12i32.to_be_bytes().to_vec();
+                final_body.extend_from_slice(b"v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+                response.extend_from_slice(&backend_frame(b'R', &final_body));
+            }
+            ScramTerminalFrame::AuthenticationOkBeforeFinal => {
+                response.extend_from_slice(&backend_frame(b'R', &0i32.to_be_bytes()));
+            }
+        }
+
+        // For the early-Ok case this is a second AuthenticationOk. An
+        // accepting mutant consumes the first in the server-final slot and
+        // this one in authenticate's ordinary completion slot.
+        response.extend_from_slice(&backend_frame(b'R', &0i32.to_be_bytes()));
+        let mut key = 915i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1234i32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &key));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        stream
+            .write_all(&response)
+            .expect("write scripted SCRAM terminal sequence");
+        stream
+            .flush()
+            .expect("flush scripted SCRAM terminal sequence");
+        thread::sleep(Duration::from_millis(100));
+    })
+}
+
+#[compio::test]
+async fn an_invalid_scram_server_verifier_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = scram_server_through_client_final(ScramTerminalFrame::InvalidVerifier);
+        let mut config = stub_config(server.addr);
+        config.password("scripted-password");
+
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("invalid-verifier SCRAM exchange hung");
+        server.finish();
+        let error = match result {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("the driver accepted an invalid SCRAM server verifier")
+            }
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("SCRAM verification error"),
+            "invalid SCRAM verifier reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("invalid SCRAM verifier test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn authentication_ok_cannot_replace_scram_final() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server =
+            scram_server_through_client_final(ScramTerminalFrame::AuthenticationOkBeforeFinal);
+        let mut config = stub_config(server.addr);
+        config
+            .password("scripted-password")
+            .require_auth(RequireAuth::Require(AuthMethods::new(
+                AuthMethod::ScramSha256,
+            )));
+
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("early AuthenticationOk SCRAM exchange hung");
+        server.finish();
+        let error = match result {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("AuthenticationOk completed SCRAM without a server-final proof")
+            }
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("scram-sha-256") && chain.contains("did not complete authentication"),
+            "early AuthenticationOk reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("post-continue AuthenticationOk test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn duplicate_scram_plus_over_plaintext_is_refused_without_a_response() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = plaintext_sasl_refusal(
+            b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0".to_vec(),
+            ChannelBindingPolicy::Disable,
+        )
+        .await;
+        assert!(
+            chain.contains("non-TLS"),
+            "duplicate plaintext PLUS offers reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("duplicate plaintext PLUS test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn an_empty_sasl_mechanism_list_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = plaintext_sasl_refusal(b"\0".to_vec(), ChannelBindingPolicy::Prefer).await;
+        assert!(
+            chain.contains("unsupported SASL mechanism"),
+            "an empty mechanism list reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("empty SASL-list test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn an_unterminated_sasl_mechanism_list_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain =
+            plaintext_sasl_refusal(b"SCRAM-SHA-256\0".to_vec(), ChannelBindingPolicy::Prefer).await;
+        assert!(
+            chain.contains("unexpected EOF"),
+            "an unterminated mechanism list reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("unterminated SASL-list test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_nul_only_sasl_entry_before_trailing_bytes_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = plaintext_sasl_refusal(
+            b"SCRAM-SHA-256\0\0IGNORED\0\0".to_vec(),
+            ChannelBindingPolicy::Prefer,
+        )
+        .await;
+        assert!(
+            chain.contains("expected to be at end of iterator for sasl"),
+            "a NUL-only mechanism entry reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("NUL-only SASL-entry test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_64k_unknown_sasl_mechanism_does_not_hide_bare_scram() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut mechanisms = vec![b'X'; 64 * 1024];
+        mechanisms.extend_from_slice(b"\0SCRAM-SHA-256\0\0");
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+            stream
+                .write_all(&authentication_sasl_frame(&mechanisms))
+                .expect("write long SASL mechanism list");
+            stream.flush().expect("flush long SASL mechanism list");
+            let response = expect_frontend_frame_from(&mut stream, b'p');
+            assert_sasl_initial_response(&response, "SCRAM-SHA-256", b"n,,n=");
+            stream
+                .write_all(&error_response_frame(
+                    "FATAL",
+                    "28P01",
+                    "scripted SCRAM stop",
+                ))
+                .expect("stop scripted SCRAM exchange");
+            stream.flush().expect("flush scripted SCRAM stop");
+        });
+
+        let mut config = stub_config(server.addr);
+        config.password("scripted-password");
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("the 64 KiB SASL list hung");
+        assert!(
+            result.is_err(),
+            "the peer deliberately stopped before SCRAM completed"
+        );
+        server.finish();
+    })
+    .await
+    .expect("64 KiB SASL-list test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn scram_plus_without_endpoint_does_not_fallback_to_bare_scram() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            stream
+                .read_exact(&mut ssl_request)
+                .expect("read PostgreSQL SSLRequest");
+            stream.write_all(b"S").expect("accept fake TLS negotiation");
+            stream.flush().expect("flush fake TLS acceptance");
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+            stream
+                .write_all(&authentication_sasl_frame(
+                    b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0",
+                ))
+                .expect("write PLUS and bare SCRAM offers");
+            stream.flush().expect("flush scripted SASL request");
+            assert_no_frontend_response(&mut stream);
+        });
+
+        let mut config = stub_config(server.addr);
+        config
+            .ssl_mode(SslMode::Require)
+            .password("scripted-password")
+            .channel_binding(ChannelBindingPolicy::Prefer);
+        let result = compio::time::timeout(OPERATION_WATCHDOG, config.connect(NoEndpointTls))
+            .await
+            .expect("PLUS without endpoint material hung");
+        let error = match result {
+            Ok(_) => panic!("PLUS without endpoint material fell back to bare SCRAM"),
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("tls-server-end-point channel binding is unavailable"),
+            "PLUS without endpoint material reported the wrong error: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("missing TLS endpoint test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn tls_without_endpoint_bare_scram_sends_the_y_downgrade_sentinel() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            stream
+                .read_exact(&mut ssl_request)
+                .expect("read PostgreSQL SSLRequest");
+            stream.write_all(b"S").expect("accept fake TLS negotiation");
+            stream.flush().expect("flush fake TLS acceptance");
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+            stream
+                .write_all(&authentication_sasl_frame(b"SCRAM-SHA-256\0\0"))
+                .expect("offer bare SCRAM without endpoint material");
+            stream.flush().expect("flush bare SCRAM offer");
+            let response = expect_frontend_frame_from(&mut stream, b'p');
+            assert_sasl_initial_response(&response, "SCRAM-SHA-256", b"y,,n=");
+            stream
+                .write_all(&error_response_frame(
+                    "FATAL",
+                    "28P01",
+                    "scripted SCRAM stop",
+                ))
+                .expect("stop scripted SCRAM exchange");
+            stream.flush().expect("flush scripted SCRAM stop");
+        });
+
+        let mut config = stub_config(server.addr);
+        config
+            .ssl_mode(SslMode::Require)
+            .password("scripted-password")
+            .channel_binding(ChannelBindingPolicy::Prefer);
+        let result = compio::time::timeout(OPERATION_WATCHDOG, config.connect(NoEndpointTls))
+            .await
+            .expect("bare SCRAM without endpoint material hung");
+        assert!(
+            result.is_err(),
+            "the peer deliberately stopped before SCRAM completed"
+        );
+        server.finish();
+    })
+    .await
+    .expect("TLS-without-endpoint sentinel test exceeded its outer watchdog");
+}
+
+/// The endpoint-backed `prefer` selector must take PLUS even when the server
+/// lists bare SCRAM first. This asserts only the selected mechanism; the full
+/// channel-binding exchange remains the live TLS suite's responsibility.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn tls_endpoint_prefers_scram_plus_when_both_mechanisms_are_offered() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read PostgreSQL SSLRequest");
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+                8,
+                "SSLRequest length"
+            );
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+                80_877_103,
+                "SSLRequest code"
+            );
+            socket.write_all(b"S").expect("accept TLS negotiation");
+            socket.flush().expect("flush TLS negotiation acceptance");
+
+            let mut tls =
+                rustls::ServerConnection::new(server_config).expect("build TLS server session");
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+            stream
+                .write_all(&authentication_sasl_frame(
+                    b"SCRAM-SHA-256\0SCRAM-SHA-256-PLUS\0\0",
+                ))
+                .expect("offer bare SCRAM and SCRAM-PLUS");
+            stream.flush().expect("flush TLS SASL offer");
+
+            let initial = expect_frontend_frame_from(&mut stream, b'p');
+            let mechanism_end = initial
+                .iter()
+                .position(|byte| *byte == 0)
+                .expect("SASL mechanism is not terminated");
+            assert_eq!(
+                &initial[..mechanism_end],
+                b"SCRAM-SHA-256-PLUS",
+                "endpoint-backed channel_binding=prefer selected the weaker mechanism"
+            );
+
+            stream
+                .write_all(&error_response_frame(
+                    "FATAL",
+                    "28P01",
+                    "scripted stop after SCRAM-PLUS selection",
+                ))
+                .expect("stop endpoint-backed SCRAM exchange");
+            stream.flush().expect("flush endpoint-backed SCRAM stop");
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let mut config = dsn.parse::<Config>().expect("parse TLS SCRAM config");
+        config
+            .password("scripted-password")
+            .channel_binding(ChannelBindingPolicy::Prefer);
+        let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build unverified rustls connector");
+
+        let result = Box::pin(compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect(tls),
+        ))
+        .await;
+        server.finish();
+        let error = match result.expect("endpoint-backed SCRAM selection hung") {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("the scripted endpoint-backed peer never completed SCRAM")
+            }
+        };
+        assert_eq!(
+            error.code().map(compio_postgres::error::SqlState::code),
+            Some("28P01"),
+            "the scripted FATAL did not end the selected SCRAM exchange"
+        );
+    }))
+    .await
+    .expect("endpoint-backed SCRAM-PLUS test exceeded its outer watchdog");
+}
+
+async fn protocol_negotiation_rejection(requested: ProtocolVersion, response: Vec<u8>) -> String {
+    let expected_wire = match requested {
+        ProtocolVersion::V3_0 => 0x0003_0000,
+        ProtocolVersion::V3_2 => 0x0003_0002,
+        _ => panic!("the hostile fixture does not know this protocol version"),
+    };
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), expected_wire);
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let mut config = stub_config(server.addr);
+    config.max_protocol_version(requested);
+    let result = compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+        .await
+        .expect("protocol negotiation hung");
+    let error = match result {
+        Ok(_) => panic!("the driver accepted malformed protocol negotiation"),
+        Err(error) => error,
+    };
+    server.finish();
+    common::error_chain(&error)
+}
+
+#[compio::test]
+async fn the_first_delayed_frame_crossing_the_byte_budget_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        // Literal contract values: two frames total exactly 1 MiB in the
+        // control and one byte more in the hostile case.
+        let cases = [
+            ("exact budget", 524_288usize, 916i32, true),
+            ("one byte over", 524_289usize, 917i32, false),
+        ];
+        let mut ruled_on = 0;
+
+        for (label, second_len, process_id, accepted) in cases {
+            let server = StubServer::spawn(move |listener| {
+                let mut stream = accept_bounded(&listener);
+                assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+                let mut response = padded_notice_frame(524_288);
+                response.extend_from_slice(&padded_notice_frame(second_len));
+                response.extend_from_slice(&successful_startup_frames(
+                    process_id,
+                    &1234i32.to_be_bytes(),
+                ));
+                stream
+                    .write_all(&response)
+                    .expect("write byte-budget startup response");
+                stream.flush().expect("flush byte-budget startup response");
+                thread::sleep(Duration::from_millis(100));
+            });
+
+            let result = compio::time::timeout(
+                OPERATION_WATCHDOG,
+                stub_config(server.addr).connect(compio_postgres::NoTls),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{label} handshake hung"));
+            server.finish();
+
+            match (accepted, result) {
+                (true, Ok((client, connection))) => {
+                    assert_eq!(client.process_id(), process_id);
+                    drop((client, connection));
+                }
+                (true, Err(error)) => {
+                    panic!("messages totaling exactly 1 MiB were refused: {error}")
+                }
+                (false, Err(error)) => {
+                    let chain = common::error_chain(&error);
+                    assert!(
+                        chain.contains("exceed 1048576 bytes"),
+                        "the first crossing frame reported the wrong error: {chain}"
+                    );
+                }
+                (false, Ok(pair)) => {
+                    drop(pair);
+                    panic!("the handshake retained byte 1048577")
+                }
+            }
+            ruled_on += 1;
+        }
+
+        assert_eq!(ruled_on, 2, "the byte-budget boundary ruled on no cases");
+    }))
+    .await
+    .expect("delayed-byte boundary test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn duplicate_backend_key_data_during_startup_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut first = 918i32.to_be_bytes().to_vec();
+        first.extend_from_slice(&1111i32.to_be_bytes());
+        let mut second = 919i32.to_be_bytes().to_vec();
+        second.extend_from_slice(&2222i32.to_be_bytes());
+
+        let mut response = backend_frame(b'R', &0i32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &first));
+        response.extend_from_slice(&backend_frame(b'K', &second));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let chain = protocol_negotiation_rejection(ProtocolVersion::V3_2, response).await;
+        assert!(
+            chain.contains("BackendKeyData more than once"),
+            "duplicate BackendKeyData reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("duplicate BackendKeyData test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn backend_key_data_after_keyless_startup_completion_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+            // Deliberately keyless: if the phase check is removed, the late
+            // key cannot be rejected by the independent duplicate-key guard.
+            let mut startup = backend_frame(b'R', &0i32.to_be_bytes());
+            startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream.write_all(&startup).expect("write keyless startup");
+            stream.flush().expect("flush keyless startup");
+
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"SHOW transaction_read_only\0"
+            );
+            let mut late_key = 920i32.to_be_bytes().to_vec();
+            late_key.extend_from_slice(&4321i32.to_be_bytes());
+            let mut response = backend_frame(b'K', &late_key);
+
+            let mut row = 1u16.to_be_bytes().to_vec();
+            row.extend_from_slice(&3i32.to_be_bytes());
+            row.extend_from_slice(b"off");
+            response.extend_from_slice(&backend_frame(
+                b'T',
+                &row_description(&["transaction_read_only"]),
+            ));
+            response.extend_from_slice(&backend_frame(b'D', &row));
+            response.extend_from_slice(&backend_frame(b'C', b"SHOW\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write late key and target-session response");
+            stream
+                .flush()
+                .expect("flush late key and target-session response");
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let mut config = stub_config(server.addr);
+        config.target_session_attrs(TargetSessionAttrs::ReadWrite);
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("post-startup BackendKeyData hung");
+        server.finish();
+        let error = match result {
+            Err(error) => error,
+            Ok(pair) => {
+                drop(pair);
+                panic!("BackendKeyData after ReadyForQuery was accepted")
+            }
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("BackendKeyData after startup completed"),
+            "late BackendKeyData reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("post-startup BackendKeyData test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn malformed_protocol_negotiations_are_refused_before_the_valid_tail() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let cases = [
+            (
+                "negative option count",
+                protocol_negotiation_frame(0x0003_0000, -1, b""),
+                "negative unsupported-option count",
+                921i32,
+            ),
+            (
+                "unknown protocol 3.1",
+                protocol_negotiation_frame(0x0003_0001, 0, b""),
+                "unsupported protocol version 3.1",
+                922i32,
+            ),
+        ];
+        let mut ruled_on = 0;
+
+        for (label, mut response, expected, process_id) in cases {
+            response.extend_from_slice(&successful_startup_frames(
+                process_id,
+                &1234i32.to_be_bytes(),
+            ));
+            let chain = protocol_negotiation_rejection(ProtocolVersion::V3_2, response).await;
+            assert!(
+                chain.contains(expected),
+                "{label} reported the wrong error: {chain}"
+            );
+            ruled_on += 1;
+        }
+
+        assert_eq!(
+            ruled_on, 2,
+            "the malformed-negotiation matrix ruled on no cases"
+        );
+    }))
+    .await
+    .expect("malformed negotiation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_without_backend_key_data_is_usable_but_not_cancellable() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+            let mut startup = backend_frame(b'R', &0i32.to_be_bytes());
+            startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream.write_all(&startup).expect("write keyless startup");
+            stream.flush().expect("flush keyless startup");
+
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            let mut query = backend_frame(b'C', b"SELECT 1\0");
+            query.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream.write_all(&query).expect("answer keyless query");
+            stream.flush().expect("flush keyless query");
+
+            assert!(
+                expect_frontend_frame_from(&mut stream, b'X').is_empty(),
+                "Terminate declared a body instead of PostgreSQL's exact length 4"
+            );
+        });
+
+        // Use the caller-owned-stream path so dropping `Client` does not race
+        // the connection task's Terminate write with the normal socket-release
+        // guard's synchronous shutdown.
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting to the keyless peer hung")
+        .expect("connect to the keyless peer");
+        let config = stub_config(server.addr);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("keyless startup hung")
+        .unwrap_or_else(|error| panic!("keyless startup was refused: {error}"));
+        assert_eq!(client.process_id(), 0);
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        compio::time::timeout(OPERATION_WATCHDOG, client.batch_execute("SELECT 1"))
+            .await
+            .expect("query on keyless connection hung")
+            .expect("keyless connection was unusable");
+
+        let cancellation = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.cancel_token().cancel_query(compio_postgres::NoTls),
+        )
+        .await
+        .expect("missing-key cancellation hung")
+        .expect_err("a cancellation request was fabricated without a key");
+        let chain = common::error_chain(&cancellation);
+        assert!(
+            chain.contains("did not provide BackendKeyData"),
+            "missing-key cancellation reported the wrong error: {chain}"
+        );
+
+        drop(client);
+        compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("keyless connection did not shut down after Terminate")
+            .expect("keyless connection task panicked")
+            .expect("keyless connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("keyless-startup test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_post_write_cancel_confirmation_error_retires_the_bare_session() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (packet_seen_tx, packet_seen_rx) = futures_channel::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut primary = accept_bounded(&listener);
+            complete_startup(&mut primary, 924);
+
+            let mut cancel = accept_bounded(&listener);
+            let mut packet = [0u8; 16];
+            cancel
+                .read_exact(&mut packet)
+                .expect("read the complete CancelRequest");
+            assert_eq!(u32::from_be_bytes(packet[..4].try_into().unwrap()), 16);
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                80_877_102,
+                "the second connection did not carry a CancelRequest"
+            );
+            assert_eq!(i32::from_be_bytes(packet[8..12].try_into().unwrap()), 924);
+            assert_eq!(i32::from_be_bytes(packet[12..].try_into().unwrap()), 1234);
+            packet_seen_tx
+                .send(())
+                .expect("report the complete CancelRequest");
+
+            release_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("release the stalled cancel-confirmation peer");
+        });
+
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(compio_postgres::NoTls),
+        )
+        .await
+        .expect("startup for the post-write cancel test hung")
+        .expect("connect to the post-write cancel peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let token = client.cancel_token();
+        let cancel = Box::pin(token.cancel_query(compio_postgres::NoTls));
+        let packet_seen = Box::pin(packet_seen_rx);
+        let cancel = match futures_util::future::select(cancel, packet_seen).await {
+            futures_util::future::Either::Left((result, _)) => {
+                panic!("cancel returned before its packet reached the peer: {result:?}")
+            }
+            futures_util::future::Either::Right((seen, cancel)) => {
+                seen.expect("the cancel peer dropped its packet report");
+                cancel
+            }
+        };
+        let error = compio::time::timeout(OPERATION_WATCHDOG, cancel)
+            .await
+            .expect("post-write cancel confirmation exceeded its operation watchdog")
+            .expect_err("a stalled cancel confirmation unexpectedly succeeded");
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("connection timed out"),
+            "the stalled cancel returned the wrong error: {chain}"
+        );
+
+        let retired = client.is_closed();
+        let reuse_failed_without_waiting = matches!(
+            compio::time::timeout(Duration::from_millis(250), client.simple_query("SELECT 1"))
+                .await,
+            Ok(Err(_))
+        );
+
+        release_tx
+            .send(())
+            .expect("release the stalled cancel-confirmation peer");
+        drop(client);
+        server.finish();
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the retired primary connection did not stop")
+            .expect("the primary connection task panicked");
+
+        assert!(
+            retired,
+            "a possibly delivered CancelRequest left its bare session reusable"
+        );
+        assert!(
+            reuse_failed_without_waiting,
+            "work queued after the uncertain cancel did not fail immediately"
+        );
+    }))
+    .await
+    .expect("post-write cancel retirement test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_cancel_connect_error_before_write_leaves_the_bare_session_usable() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut primary = accept_bounded(&listener);
+            drop(listener);
+            complete_startup(&mut primary, 925);
+
+            assert_eq!(expect_simple_query(&mut primary), b"SELECT 1\0");
+            let mut response = backend_frame(b'C', b"SELECT 1\0");
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            primary
+                .write_all(&response)
+                .expect("answer the query after the refused cancel connection");
+            primary
+                .flush()
+                .expect("flush the query after the refused cancel connection");
+
+            release_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("release the pre-write cancel peer");
+        });
+
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(compio_postgres::NoTls),
+        )
+        .await
+        .expect("startup for the pre-write cancel test hung")
+        .expect("connect to the pre-write cancel peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.cancel_token().cancel_query(compio_postgres::NoTls),
+        )
+        .await
+        .expect("the refused cancel connection hung")
+        .expect_err("the cancel connected after the peer dropped its listener");
+        let error_kind = io_error_kind(&error);
+        let remained_open = !client.is_closed();
+        let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the query after a pre-write cancel failure hung")
+            .expect("the pre-write cancel failure poisoned the primary session");
+
+        release_tx
+            .send(())
+            .expect("release the pre-write cancel peer");
+        drop(client);
+        server.finish();
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the pre-write control connection did not stop")
+            .expect("the pre-write control connection task panicked");
+
+        assert_eq!(
+            error_kind,
+            Some(ErrorKind::ConnectionRefused),
+            "the cancel failed at an unexpected transport boundary"
+        );
+        assert!(
+            remained_open,
+            "a provably unsent CancelRequest retired its healthy bare session"
+        );
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [compio_postgres::SimpleQueryMessage::CommandComplete(1)]
+            ),
+            "the primary session returned the wrong query result: {messages:?}"
+        );
+    }))
+    .await
+    .expect("pre-write cancel usability test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn protocol_3_0_refuses_a_variable_cancel_key_without_negotiation() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let response = successful_startup_frames(923, &[0x5a; 32]);
+        let chain = protocol_negotiation_rejection(ProtocolVersion::V3_0, response).await;
+        assert!(
+            chain.contains("32-byte cancel key") && chain.contains("protocol 3.0"),
+            "protocol 3.0 variable key reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("protocol 3.0 cancel-key test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_protocol_option_count_larger_than_its_payload_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = protocol_negotiation_rejection(
+            ProtocolVersion::V3_2,
+            protocol_negotiation_frame(0x0003_0000, 2, b"_pq_.one\0"),
+        )
+        .await;
+        assert!(
+            chain.contains("before protocol option 2 of 2"),
+            "a short option list reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("short negotiation-option test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_zero_protocol_option_count_with_trailing_bytes_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = protocol_negotiation_rejection(
+            ProtocolVersion::V3_2,
+            protocol_negotiation_frame(0x0003_0000, 0, b"_pq_.ghost\0"),
+        )
+        .await;
+        assert!(
+            chain.contains("trailing bytes in NegotiateProtocolVersion"),
+            "a zero count with bytes reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("zero-count trailing-byte test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_huge_protocol_option_count_fails_on_the_bounded_payload() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = protocol_negotiation_rejection(
+            ProtocolVersion::V3_2,
+            protocol_negotiation_frame(0x0003_0000, i32::MAX, b""),
+        )
+        .await;
+        assert!(
+            chain.contains("before protocol option 1 of 2147483647"),
+            "a huge option count reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("huge negotiation-count test exceeded its outer watchdog");
+}
+
+/// Startup-only frame limits must be decided from the five-byte header. A peer
+/// that declares an impossible body and then stays silent must not make the
+/// unauthenticated handshake wait for bytes `PostgreSQL` cannot legally send.
+///
+/// The literals are deliberate contract values. Deriving either side of these
+/// cases from the decoder's constants would let a changed limit move the test
+/// with it while ruling on nothing.
+#[compio::test]
+async fn startup_header_lengths_are_rejected_without_their_bodies() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let cases = [
+            (
+                "oversized negotiation",
+                b'v',
+                10_241,
+                "invalid NegotiateProtocolVersion length 10241; expected 12 to 10240",
+            ),
+            (
+                "short negotiation",
+                b'v',
+                11,
+                "invalid NegotiateProtocolVersion length 11; expected 12 to 10240",
+            ),
+            (
+                "short cancel key",
+                b'K',
+                11,
+                "invalid BackendKeyData length 11; expected 12 to 264",
+            ),
+        ];
+
+        let mut ruled_on = 0;
+        for (label, tag, declared, expected) in cases {
+            let chain = protocol_negotiation_rejection(
+                ProtocolVersion::V3_2,
+                lying_frame(tag, b"", declared),
+            )
+            .await;
+            assert!(
+                chain.contains(expected),
+                "the {label} header reported the wrong error: {chain}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 3, "the startup-header matrix ruled on no cases");
+    }))
+    .await
+    .expect("startup-header length test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn protocol_negotiation_during_password_authentication_is_accepted() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+            stream
+                .write_all(&backend_frame(b'R', &3u32.to_be_bytes()))
+                .expect("request a cleartext password");
+            stream.flush().expect("flush password request");
+            assert_eq!(
+                expect_frontend_frame_from(&mut stream, b'p'),
+                b"scripted-password\0"
+            );
+
+            let mut response = protocol_negotiation_frame(0x0003_0000, 0, b"");
+            response.extend_from_slice(&backend_frame(b'R', &0u32.to_be_bytes()));
+            let mut key = 901i32.to_be_bytes().to_vec();
+            key.extend_from_slice(&1234i32.to_be_bytes());
+            response.extend_from_slice(&backend_frame(b'K', &key));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("finish password authentication after negotiation");
+            stream.flush().expect("flush negotiated startup");
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        let mut config = stub_config(server.addr);
+        config.password("scripted-password");
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("negotiation during password authentication hung");
+        let (client, connection) = result
+            .unwrap_or_else(|error| panic!("valid authentication negotiation failed: {error}"));
+        assert_eq!(client.protocol_version(), ProtocolVersion::V3_0);
+        drop((client, connection));
+        server.finish();
+    })
+    .await
+    .expect("authentication-phase negotiation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn post_authentication_negotiation_revalidates_an_earlier_cancel_key() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut key = 902i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&[0x5a; 32]);
+        let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b'K', &key));
+        response.extend_from_slice(&protocol_negotiation_frame(0x0003_0000, 0, b""));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let chain = protocol_negotiation_rejection(ProtocolVersion::V3_2, response).await;
+        assert!(
+            chain.contains("32-byte cancel key") && chain.contains("protocol 3.0"),
+            "the earlier cancel key was not revalidated by name: {chain}"
+        );
+    })
+    .await
+    .expect("cancel-key revalidation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn duplicate_protocol_negotiations_across_startup_phases_are_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = protocol_negotiation_frame(0x0003_0000, 0, b"");
+        response.extend_from_slice(&backend_frame(b'R', &0u32.to_be_bytes()));
+        response.extend_from_slice(&protocol_negotiation_frame(0x0003_0000, 0, b""));
+        let chain = protocol_negotiation_rejection(ProtocolVersion::V3_2, response).await;
+        assert!(
+            chain.contains("NegotiateProtocolVersion more than once"),
+            "duplicate negotiations reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("duplicate negotiation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_known_protocol_newer_than_requested_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = protocol_negotiation_rejection(
+            ProtocolVersion::V3_0,
+            protocol_negotiation_frame(0x0003_0002, 0, b""),
+        )
+        .await;
+        assert!(
+            chain.contains("protocol 3.2")
+                && chain.contains("above the requested")
+                && chain.contains("max_protocol_version=3.0"),
+            "a known newer version reported the wrong error: {chain}"
+        );
+    })
+    .await
+    .expect("newer protocol test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn protocol_negotiation_after_startup_completion_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 903);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"SHOW transaction_read_only\0"
+            );
+            stream
+                .write_all(&protocol_negotiation_frame(0x0003_0000, 0, b""))
+                .expect("write post-startup negotiation");
+            stream.flush().expect("flush post-startup negotiation");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let mut config = stub_config(server.addr);
+        config.target_session_attrs(TargetSessionAttrs::ReadWrite);
+        let result =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("post-startup negotiation hung");
+        let error = match result {
+            Ok(_) => panic!("negotiation after ReadyForQuery was accepted"),
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("NegotiateProtocolVersion after startup completed"),
+            "post-startup negotiation reported the wrong error: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("post-startup negotiation test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_handoff_preserves_a_trailing_notification() {
+    use futures_util::StreamExt;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = startup_with_trailing_frame_server(
+            910,
+            notification_frame(910, "startup_tail", "notification_payload"),
+        );
+        let (client, mut connection) = stub_config(server.addr)
+            .connect(compio_postgres::NoTls)
+            .await
+            .expect("connect to startup-tail notification peer");
+        let mut messages = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        client
+            .batch_execute("SELECT 1")
+            .await
+            .expect("cross the startup-tail wire-order barrier");
+        match messages.next().await {
+            Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                assert_eq!(notification.process_id(), 910);
+                assert_eq!(notification.channel(), "startup_tail");
+                assert_eq!(notification.payload(), "notification_payload");
+            }
+            other => panic!("the trailing startup notification was lost: {other:?}"),
+        }
+
+        drop(client);
+        driver
+            .await
+            .expect("startup-tail notification connection task panicked")
+            .expect("startup-tail notification connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("startup-tail notification test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_handoff_applies_a_trailing_parameter_status() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = startup_with_trailing_frame_server(
+            911,
+            parameter_status_frame("application_name", "after_ready"),
+        );
+        let (client, connection) = stub_config(server.addr)
+            .connect(compio_postgres::NoTls)
+            .await
+            .expect("connect to startup-tail parameter peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        client
+            .batch_execute("SELECT 1")
+            .await
+            .expect("cross the startup-tail wire-order barrier");
+        assert_eq!(
+            client.parameter("application_name").as_deref(),
+            Some("after_ready"),
+            "the trailing ParameterStatus left the startup value stale"
+        );
+
+        drop(client);
+        driver
+            .await
+            .expect("startup-tail parameter connection task panicked")
+            .expect("startup-tail parameter connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("startup-tail parameter test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn startup_handoff_preserves_a_trailing_notice() {
+    use futures_util::StreamExt;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = startup_with_trailing_frame_server(
+            912,
+            notice_frame("notice after startup ReadyForQuery"),
+        );
+        let (client, mut connection) = stub_config(server.addr)
+            .connect(compio_postgres::NoTls)
+            .await
+            .expect("connect to startup-tail notice peer");
+        let mut messages = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        client
+            .batch_execute("SELECT 1")
+            .await
+            .expect("cross the startup-tail wire-order barrier");
+        match messages.next().await {
+            Some(compio_postgres::AsyncMessage::Notice(notice)) => {
+                assert_eq!(notice.severity(), "NOTICE");
+                assert_eq!(notice.message(), "notice after startup ReadyForQuery");
+            }
+            other => panic!("the trailing startup notice was lost: {other:?}"),
+        }
+
+        drop(client);
+        driver
+            .await
+            .expect("startup-tail notice connection task panicked")
+            .expect("startup-tail notice connection did not close cleanly");
+        server.finish();
+    }))
+    .await
+    .expect("startup-tail notice test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn serialized_write_failure_drains_complete_frames_before_a_partial_tail() {
+    use futures_util::StreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+        let mut key = 904i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1234i32.to_be_bytes());
+        startup.extend_from_slice(&backend_frame(b'K', &key));
+        startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut response = backend_frame(b'C', b"SELECT 1\0");
+        response.extend_from_slice(&notification_frame(
+            904,
+            "buffered_channel",
+            "buffered_payload",
+        ));
+        response.extend_from_slice(&parameter_status_frame(
+            "application_name",
+            "buffered_application",
+        ));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        response.extend_from_slice(&error_response_frame(
+            "FATAL",
+            "57P01",
+            "scripted backend shutdown",
+        ));
+        response.extend_from_slice(&lying_frame(b'N', b"SNOTICE", 64));
+
+        let stream = FailThirdFlushPeer {
+            startup: Some(startup),
+            response: Some(response),
+            flushes: 0,
+        };
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse serialized scripted config");
+        let (client, mut connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("serialized scripted startup hung")
+        .expect("connect serialized scripted transport");
+        let mut notifications = connection.notifications();
+        let mut first = Box::pin(
+            client
+                .simple_query_raw("SELECT 1")
+                .await
+                .expect("enqueue first serialized query"),
+        );
+        let mut second = Box::pin(
+            client
+                .simple_query_raw("SELECT 2")
+                .await
+                .expect("enqueue second serialized query"),
+        );
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let first_response = async {
+            assert!(matches!(
+                first.as_mut().next().await,
+                Some(Ok(compio_postgres::SimpleQueryMessage::CommandComplete(1)))
+            ));
+            assert!(
+                first.as_mut().next().await.is_none(),
+                "the buffered ReadyForQuery did not complete the first response"
+            );
+        };
+        let second_response = async {
+            let error = match second.as_mut().next().await {
+                Some(Err(error)) => error,
+                other => panic!("the second response lost terminal SQLSTATE 57P01: {other:?}"),
+            };
+            assert_eq!(
+                error.code().map(|code| code.code()),
+                Some("57P01"),
+                "the local flush error replaced the buffered server diagnosis: {}",
+                common::error_chain(&error)
+            );
+        };
+        let notification = async {
+            match notifications.next().await {
+                Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                    assert_eq!(notification.process_id(), 904);
+                    assert_eq!(notification.channel(), "buffered_channel");
+                    assert_eq!(notification.payload(), "buffered_payload");
+                }
+                other => panic!("the complete buffered notification was dropped: {other:?}"),
+            }
+        };
+        futures_util::join!(first_response, second_response, notification);
+
+        assert_eq!(
+            client.parameter("application_name").as_deref(),
+            Some("buffered_application"),
+            "the complete buffered ParameterStatus was dropped"
+        );
+        let driver_result = driver.await.expect("serialized connection task panicked");
+        let error = driver_result.expect_err("the scripted third flush unexpectedly succeeded");
+        assert!(
+            common::error_chain(&error).contains("scripted third flush failure"),
+            "the connection task reported the wrong local write failure: {}",
+            common::error_chain(&error)
+        );
+
+        drop(client);
+    })
+    .await
+    .expect("serialized buffered-drain test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn split_write_failure_gives_buffered_dispatch_one_scheduling_turn() {
+    use futures_util::StreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut startup = backend_frame(b'R', &0u32.to_be_bytes());
+        let mut key = 905i32.to_be_bytes().to_vec();
+        key.extend_from_slice(&1234i32.to_be_bytes());
+        startup.extend_from_slice(&backend_frame(b'K', &key));
+        startup.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let mut response = backend_frame(b'C', b"SELECT 1\0");
+        response.extend_from_slice(&notification_frame(905, "parked_channel", "parked_payload"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        response.extend_from_slice(&lying_frame(b'N', b"S", 64));
+
+        let peer = GatedSplitPeer {
+            startup: Some(startup),
+            response: Some(response),
+            gate: std::rc::Rc::new(std::cell::RefCell::new(SplitFailureGate::default())),
+        };
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse gated split config");
+        let (client, mut connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("gated split startup hung")
+        .expect("connect gated split transport");
+        let mut notifications = connection.notifications();
+
+        let mut first = Box::pin(
+            client
+                .simple_query_raw("SELECT 1")
+                .await
+                .expect("enqueue first split query"),
+        );
+        let mut second = Box::pin(
+            client
+                .simple_query_raw("SELECT 2")
+                .await
+                .expect("enqueue second split query"),
+        );
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        assert!(matches!(
+            first.as_mut().next().await,
+            Some(Ok(compio_postgres::SimpleQueryMessage::CommandComplete(1)))
+        ));
+        assert!(
+            first.as_mut().next().await.is_none(),
+            "the scheduling turn did not dispatch the buffered ReadyForQuery"
+        );
+        match notifications.next().await {
+            Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                assert_eq!(notification.process_id(), 905);
+                assert_eq!(notification.channel(), "parked_channel");
+                assert_eq!(notification.payload(), "parked_payload");
+            }
+            other => panic!("the parked notification was dropped: {other:?}"),
+        }
+        assert!(
+            matches!(second.as_mut().next().await, Some(Err(_)) | None),
+            "the failed second flush produced a successful response"
+        );
+
+        let driver_result = driver.await.expect("split connection task panicked");
+        let error = driver_result.expect_err("the gated third flush unexpectedly succeeded");
+        assert!(
+            common::error_chain(&error).contains("scripted gated flush failure"),
+            "the split loop reported the wrong write failure: {}",
+            common::error_chain(&error)
+        );
+        drop(client);
+    })
+    .await
+    .expect("split reader-yield test exceeded its outer watchdog");
 }
 
 /// What one hostile exchange reported, from BOTH places an error can land.
@@ -353,6 +3223,328 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
         query: common::error_chain(&error),
         connection,
     }
+}
+
+/// The application-data ceiling is enforced from the head frame's header,
+/// before the decoder waits for its body. Complete frames also encounter the
+/// batch-walk validator, so a header-only peer is what distinguishes this
+/// early bound from that later check.
+#[compio::test]
+async fn an_oversized_application_header_is_refused_without_its_body() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 401);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            stream
+                .write_all(&lying_frame(b'D', b"", 128))
+                .expect("write oversized application header");
+            stream.flush().expect("flush oversized application header");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let mut config = stub_config(server.addr);
+        config.max_message_size(64);
+        let (client, connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+                .await
+                .expect("startup for the application-limit test hung")
+                .expect("connect to the application-limit peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let query = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the oversized header made the query wait for its absent body")
+            .expect_err("the driver accepted a message above the configured ceiling");
+        let query_chain = common::error_chain(&query);
+        let driver_chain = match compio::time::timeout(OPERATION_WATCHDOG, driver).await {
+            Ok(Ok(Err(error))) => common::error_chain(&error),
+            other => panic!("the oversized header did not retire the connection: {other:?}"),
+        };
+        let expected = "message too large: 129 bytes (max 64)";
+        assert!(
+            query_chain.contains(expected) || driver_chain.contains(expected),
+            "the header ceiling lost its exact diagnosis; query: {query_chain}; driver: \
+             {driver_chain}"
+        );
+
+        drop(client);
+        server.finish();
+    }))
+    .await
+    .expect("application-header limit test exceeded its outer watchdog");
+}
+
+/// Run one exact-boundary frame through the post-startup reader. The four-byte
+/// first read is deliberately one byte short of a backend header, so this also
+/// proves that `fill(5)` cannot report success after a single short read.
+#[allow(clippy::future_not_send)]
+async fn exact_limit_frame_survives_short_header_reads(allow_split: bool) {
+    use futures_util::StreamExt;
+
+    const LIMIT: usize = 64;
+    let startup = successful_startup_frames(407, &1234i32.to_be_bytes());
+    let startup_len = startup.len();
+    let notice_message = format!(
+        "budget notice{}",
+        "x".repeat(LIMIT - notice_frame("budget notice").len())
+    );
+    let notice = notice_frame(&notice_message);
+    assert_eq!(notice.len(), LIMIT);
+    let mut response = notice;
+    response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+    let (peer, state) = ScriptedChunkPeer::new(startup, response, allow_split, 4);
+    let mut config: Config = "user=scripted-user sslmode=disable"
+        .parse()
+        .expect("parse exact-limit scripted config");
+    config.max_message_size(LIMIT);
+    let (client, mut connection) = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        config.connect_raw(peer, compio_postgres::NoTls),
+    )
+    .await
+    .expect("exact-limit scripted startup hung")
+    .expect("connect exact-limit scripted transport");
+    let mut async_messages = connection.notifications();
+    let mut driver = Some(compio::runtime::spawn(
+        async move { connection.run().await },
+    ));
+
+    let query = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+        .await
+        .expect("short reads made the exact-limit query hang");
+    let messages = match query {
+        Ok(messages) => messages,
+        Err(error) => {
+            let driver_result = compio::time::timeout(
+                OPERATION_WATCHDOG,
+                driver.take().expect("exact-limit driver handle"),
+            )
+            .await;
+            panic!(
+                "an exact-limit frame was rejected; query: {}; driver: {driver_result:?}; reads: \
+                 {:?}",
+                common::error_chain(&error),
+                state.borrow().response_read_sizes
+            );
+        }
+    };
+    assert_eq!(
+        messages.len(),
+        1,
+        "the exact-limit response returned extra query messages"
+    );
+    assert!(
+        matches!(
+            messages.first(),
+            Some(compio_postgres::SimpleQueryMessage::CommandComplete(1))
+        ),
+        "the exact-limit response lost its CommandComplete: {messages:?}"
+    );
+
+    let notice = compio::time::timeout(OPERATION_WATCHDOG, async_messages.next())
+        .await
+        .expect("the exact-limit notice was not delivered before the watchdog");
+    match notice {
+        Some(compio_postgres::AsyncMessage::Notice(notice)) => {
+            assert_eq!(notice.severity(), "NOTICE");
+            assert_eq!(notice.message(), notice_message);
+        }
+        other => panic!("the exact-limit frame did not decode as its notice: {other:?}"),
+    }
+
+    {
+        let state = state.borrow();
+        assert_eq!(state.startup_read_sizes, [startup_len]);
+        assert!(
+            state.response_read_sizes.len() > 1,
+            "the framing control did not exercise repeated short reads"
+        );
+        assert!(
+            state.response_read_sizes.iter().all(|read| *read == 4),
+            "the application response was not read in exact four-byte chunks: {:?}",
+            state.response_read_sizes
+        );
+        assert_eq!(state.split_attempts, 1);
+        assert_eq!(state.split_succeeded, allow_split);
+        assert!(state.response.is_empty(), "the response was not consumed");
+    }
+
+    drop(async_messages);
+    drop(client);
+    compio::time::timeout(
+        OPERATION_WATCHDOG,
+        driver.take().expect("exact-limit driver handle"),
+    )
+    .await
+    .expect("the exact-limit connection did not shut down")
+    .expect("the exact-limit connection task panicked")
+    .expect("the exact-limit connection did not close cleanly");
+}
+
+/// The configured ceiling counts the one-byte tag. Refusing the stream split
+/// also proves that reconstructing the serialized `BufStream` retains the
+/// configured ceiling, and the unread body proves rejection happened from the
+/// five-byte header rather than after buffering the whole frame.
+#[compio::test]
+async fn a_serialized_frame_one_byte_over_the_limit_is_refused_from_its_header() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        const LIMIT: usize = 64;
+        let startup = successful_startup_frames(406, &1234i32.to_be_bytes());
+        let startup_len = startup.len();
+        let notice_message = format!(
+            "budget notice{}",
+            "x".repeat(LIMIT + 1 - notice_frame("budget notice").len())
+        );
+        let oversized = notice_frame(&notice_message);
+        assert_eq!(oversized.len(), LIMIT + 1);
+        let mut response = oversized;
+        response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let response_len = response.len();
+
+        let (peer, state) = ScriptedChunkPeer::new(startup, response, false, 5);
+        let mut config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse over-limit scripted config");
+        config.max_message_size(LIMIT);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(peer, compio_postgres::NoTls),
+        )
+        .await
+        .expect("over-limit scripted startup hung")
+        .expect("connect over-limit scripted transport");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let query = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the over-limit header made the query hang")
+            .expect_err("the driver accepted a frame one byte above its ceiling");
+        let query_chain = common::error_chain(&query);
+        let driver_error = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the over-limit connection did not retire")
+            .expect("the over-limit connection task panicked")
+            .expect_err("the over-limit connection closed without its framing error");
+        let driver_chain = common::error_chain(&driver_error);
+        let expected = "message too large: 65 bytes (max 64)";
+        assert!(
+            query_chain.contains(expected) || driver_chain.contains(expected),
+            "the tag-inclusive ceiling lost its diagnosis; query: {query_chain}; driver: \
+             {driver_chain}"
+        );
+
+        {
+            let state = state.borrow();
+            assert_eq!(state.startup_read_sizes, [startup_len]);
+            assert_eq!(state.response_read_sizes, [5]);
+            assert_eq!(state.response.len(), response_len - 5);
+            assert_eq!(state.split_attempts, 1);
+            assert!(!state.split_succeeded);
+        }
+        drop(client);
+    }))
+    .await
+    .expect("serialized over-limit test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_serialized_frame_at_the_exact_limit_survives_short_reads() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        exact_limit_frame_survives_short_header_reads(false).await;
+    }))
+    .await
+    .expect("serialized exact-limit test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_split_frame_at_the_exact_limit_survives_short_reads() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        exact_limit_frame_survives_short_header_reads(true).await;
+    }))
+    .await
+    .expect("split exact-limit test exceeded its outer watchdog");
+}
+
+/// `ReadyForQuery` has exactly one status byte. A longer, otherwise complete
+/// frame must fail in the decoder instead of reaching the response state
+/// machine under a generic diagnosis.
+#[compio::test]
+async fn an_overlong_ready_for_query_is_rejected_before_dispatch() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'C', b"SELECT 1\0");
+        response.extend_from_slice(&backend_frame(b'Z', b"Ix"));
+        let outcome = hostile_response_retires_session(402, response).await;
+        outcome.names("invalid ReadyForQuery length 6; expected 5");
+    }))
+    .await
+    .expect("overlong ReadyForQuery test exceeded its outer watchdog");
+}
+
+/// Once an `ErrorResponse` has entered a coalesced batch, a later local framing
+/// failure is deferred even when a valid synchronous frame lies between them.
+/// The server's wire-earlier SQLSTATE belongs to the query; the malformed tail
+/// still belongs to the connection task and retires the session.
+#[compio::test]
+async fn a_server_error_remains_sticky_across_an_intervening_frame() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = error_response_frame("ERROR", "23505", "queued unique violation");
+        response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+        response.extend_from_slice(&lying_frame(b'D', b"", 3));
+
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 403);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            stream
+                .write_all(&response)
+                .expect("write coalesced server error and malformed tail");
+            stream
+                .flush()
+                .expect("flush coalesced server error and malformed tail");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(compio_postgres::NoTls),
+        )
+        .await
+        .expect("startup for the sticky-error test hung")
+        .expect("connect to the sticky-error peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the sticky-error query hung")
+            .expect_err("the peer's ErrorResponse unexpectedly became success");
+        assert_eq!(
+            error.code().map(compio_postgres::error::SqlState::code),
+            Some("23505"),
+            "the malformed tail replaced SQLSTATE 23505: {}",
+            common::error_chain(&error)
+        );
+
+        let driver_error = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("the malformed tail did not retire the connection")
+            .expect("the sticky-error connection task panicked")
+            .expect_err("the malformed tail left the connection reusable");
+        assert!(
+            common::error_chain(&driver_error)
+                .contains("invalid message length: header length < 4"),
+            "the deferred malformed-tail diagnosis disappeared: {}",
+            common::error_chain(&driver_error)
+        );
+
+        drop(client);
+        server.finish();
+    }))
+    .await
+    .expect("sticky server-error test exceeded its outer watchdog");
 }
 
 /// A byte that is not any backend message type must be refused, not skipped.
@@ -624,6 +3816,585 @@ fn expect_close_notify(tls: &mut rustls::ServerConnection, socket: &mut TcpStrea
             break;
         }
     }
+}
+
+/// `Config::connect_raw` owns no descriptor-release handle. Dropping its last
+/// client therefore leaves the connection task responsible for ending TLS:
+/// the multiplexed loop sends `Terminate`, then `TlsWriteHalf::shutdown` must
+/// serialize AND flush `close_notify` before it shuts down the caller's socket.
+///
+/// The ordinary `Config::connect` close tests cannot isolate that path. Their
+/// synchronous `ConnectionRelease` sends the alert during `drop(client)`, so
+/// they remain green if the write half's own shutdown silently does nothing.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn dropping_a_caller_owned_tls_client_sends_close_notify() {
+    use compio_postgres::tls::MakeTlsConnect;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read caller-owned PostgreSQL SSLRequest");
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+                8,
+                "SSLRequest length"
+            );
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+                80_877_103,
+                "SSLRequest code"
+            );
+            socket
+                .write_all(b"S")
+                .expect("accept caller-owned TLS negotiation");
+            socket
+                .flush()
+                .expect("flush caller-owned TLS negotiation response");
+
+            let mut tls = rustls::ServerConnection::new(server_config)
+                .expect("build caller-owned TLS server session");
+            {
+                let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+                complete_startup(&mut stream, 908);
+                assert_eq!(
+                    expect_simple_query(&mut stream),
+                    b"SELECT 1\0",
+                    "caller-owned TLS control query"
+                );
+
+                let mut response = backend_frame(b'C', b"SELECT 1\0");
+                response.extend_from_slice(&backend_frame(b'Z', b"I"));
+                stream
+                    .write_all(&response)
+                    .expect("answer caller-owned TLS control query");
+                stream
+                    .flush()
+                    .expect("flush caller-owned TLS control query");
+            }
+
+            expect_close_notify(&mut tls, &mut socket);
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let config = dsn
+            .parse::<Config>()
+            .expect("parse caller-owned TLS config");
+        let mut make = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build caller-owned rustls connector");
+        let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+            compio::net::TcpStream,
+        >>::make_tls_connect(&mut make, "localhost")
+        .expect("make caller-owned rustls connection");
+        let socket = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting the caller-owned TLS socket hung")
+        .expect("connect the caller-owned TLS socket");
+        let (client, connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect_raw(socket, connector))
+                .await
+                .expect("caller-owned TLS startup hung")
+                .expect("complete caller-owned TLS startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("caller-owned TLS control query hung")
+            .expect("run caller-owned TLS control query");
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [compio_postgres::SimpleQueryMessage::CommandComplete(1)]
+            ),
+            "caller-owned TLS control query returned {messages:?}"
+        );
+
+        // There is no synchronous release guard on this entry point. Keep the
+        // connection task running after the last client goes away so its write
+        // half is the only code that can deliver the alert under test.
+        drop(client);
+        let driver_result = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+        driver_result
+            .expect("caller-owned TLS teardown left the connection task wedged")
+            .expect("caller-owned TLS connection task panicked")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "caller-owned TLS connection task failed during clean teardown: {}",
+                    common::error_chain(&error)
+                )
+            });
+    }))
+    .await
+    .expect("caller-owned TLS close-notify test exceeded its outer watchdog");
+}
+
+/// TCP may split the five-byte TLS record header at any byte. Finish startup
+/// before enabling the wrapper so this proves steady-state record reassembly,
+/// not merely that the handshake happened to tolerate a short read.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_tls_record_fragmented_below_its_header_is_reassembled() {
+    use compio_postgres::tls::MakeTlsConnect;
+    use std::sync::atomic::Ordering;
+
+    const VALUE: &str = "fragmented TLS record";
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let (release_peer, peer_released) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read fragmented-record SSLRequest");
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+                8,
+                "SSLRequest length"
+            );
+            assert_eq!(
+                u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+                80_877_103,
+                "SSLRequest code"
+            );
+            socket
+                .write_all(b"S")
+                .expect("accept fragmented-record TLS negotiation");
+            socket
+                .flush()
+                .expect("flush fragmented-record TLS negotiation response");
+
+            let mut tls = rustls::ServerConnection::new(server_config)
+                .expect("build fragmented-record TLS server session");
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            complete_startup(&mut stream, 909);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 'fragmented'\0");
+
+            let mut row = 1u16.to_be_bytes().to_vec();
+            row.extend_from_slice(&u32::try_from(VALUE.len()).unwrap().to_be_bytes());
+            row.extend_from_slice(VALUE.as_bytes());
+            let mut response = backend_frame(b'T', &row_description(&["value"]));
+            response.extend_from_slice(&backend_frame(b'D', &row));
+            response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write fragmented TLS query response");
+            stream.flush().expect("flush fragmented TLS query response");
+
+            peer_released
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("client did not release the still-open TLS peer");
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let config = dsn
+            .parse::<Config>()
+            .expect("parse fragmented-record TLS config");
+        let socket = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting the fragmented-record TLS socket hung")
+        .expect("connect the fragmented-record TLS socket");
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let nonempty_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let socket = OneByteTlsReads {
+            inner: socket,
+            armed: std::sync::Arc::clone(&armed),
+            nonempty_reads: std::sync::Arc::clone(&nonempty_reads),
+        };
+        let mut make = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build fragmented-record rustls connector");
+        let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+            OneByteTlsReads<compio::net::TcpStream>,
+        >>::make_tls_connect(&mut make, "localhost")
+        .expect("make fragmented-record rustls connection");
+        let (client, connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect_raw(socket, connector))
+                .await
+                .expect("fragmented-record TLS startup hung")
+                .expect("complete fragmented-record TLS startup");
+
+        // Startup is complete and no query has been sent, so every counted
+        // read below belongs to a steady-state TLS record.
+        armed.store(true, Ordering::SeqCst);
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let outcome = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.simple_query("SELECT 'fragmented'"),
+        )
+        .await;
+
+        let _ = release_peer.send(());
+        server.finish();
+        let messages = outcome
+            .expect("fragmented TLS query response hung")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "a one-byte ciphertext fragment was treated as EOF: {}",
+                    common::error_chain(&error)
+                )
+            });
+        let value = messages.iter().find_map(|message| match message {
+            compio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        });
+        assert_eq!(value, Some(VALUE), "the fragmented TLS row was changed");
+        assert!(
+            nonempty_reads.load(Ordering::SeqCst) >= 5,
+            "the fixture did not split one TLS record header across reads"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("fragmented-record connection task did not exit");
+    }))
+    .await
+    .expect("fragmented TLS record test exceeded its outer watchdog");
+}
+
+/// A serialized connection is selected when the socket beneath rustls refuses
+/// to split. That refusal must rebuild the identical TLS stream, including
+/// ciphertext the read path already took from the socket but has not yet fed
+/// to rustls.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_refused_tls_split_preserves_ciphertext_already_read_from_socket() {
+    use compio_postgres::tls::{MakeTlsConnect, TlsConnect};
+    use futures_util::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    const CHANNEL: &str = "split_buffer";
+    const PROCESS_ID: i32 = 912;
+
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut server_config = (*scripted_tls_server_config()).clone();
+        // Post-handshake tickets would add records before the two controlled
+        // application records and make the 4097-byte boundary ambiguous.
+        server_config.send_tls13_tickets = 0;
+        let server_config = std::sync::Arc::new(server_config);
+        let expected_payload = "x".repeat(8192);
+        let server_payload = expected_payload.clone();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut tls = rustls::ServerConnection::new(server_config)
+                .expect("build refused-split TLS server session");
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+
+            assert_eq!(
+                read_startup_protocol(&mut stream),
+                0x0003_0002,
+                "serialized TLS startup protocol"
+            );
+            stream
+                .write_all(&successful_startup_frames(
+                    PROCESS_ID,
+                    &1234i32.to_be_bytes(),
+                ))
+                .expect("write serialized TLS startup response");
+            stream.flush().expect("flush serialized TLS startup record");
+
+            stream
+                .write_all(&notification_frame(PROCESS_ID, CHANNEL, &server_payload))
+                .expect("write buffered TLS notification");
+            stream
+                .flush()
+                .expect("flush buffered TLS notification record");
+
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"SELECT 1\0",
+                "refused-split barrier query"
+            );
+            let mut response = backend_frame(b'C', b"SELECT 1\0");
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("answer refused-split barrier query");
+            stream.flush().expect("flush refused-split barrier query");
+        });
+
+        let socket = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting the refused-split TLS socket hung")
+        .expect("connect the refused-split TLS socket");
+        let coalesce_next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let split_attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let socket = RefusingBufferedTlsTransport {
+            socket,
+            coalesce_next: std::sync::Arc::clone(&coalesce_next),
+            split_attempted: std::sync::Arc::clone(&split_attempted),
+        };
+
+        let tls_config = "host=localhost sslmode=require"
+            .parse::<Config>()
+            .expect("parse direct refused-split TLS config");
+        let mut make = compio_postgres::MakeRustlsConnect::from_config(&tls_config)
+            .expect("build direct refused-split rustls connector");
+        let connector = <compio_postgres::MakeRustlsConnect as MakeTlsConnect<
+            RefusingBufferedTlsTransport,
+        >>::make_tls_connect(&mut make, "localhost")
+        .expect("make direct refused-split rustls connection");
+        let tls_stream = compio::time::timeout(OPERATION_WATCHDOG, connector.connect(socket))
+            .await
+            .expect("direct refused-split TLS handshake hung")
+            .expect("complete direct refused-split TLS handshake");
+
+        // The server flushes startup and the large notification as separate
+        // TLS records. One exact 4097-byte socket read crosses rustls' 4096-
+        // byte input window, leaving an unread ciphertext suffix at handoff.
+        coalesce_next.store(4097, Ordering::Release);
+        let startup_config = "user=scripted-user sslmode=disable"
+            .parse::<Config>()
+            .expect("parse serialized TLS startup config");
+        let (client, mut connection) = Box::pin(compio::time::timeout(
+            OPERATION_WATCHDOG,
+            startup_config.connect_raw(tls_stream, compio_postgres::NoTls),
+        ))
+        .await
+        .expect("serialized TLS startup hung")
+        .expect("complete serialized TLS startup");
+        let mut notifications = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let (query, notification) = compio::time::timeout(OPERATION_WATCHDOG, async {
+            futures_util::join!(client.simple_query("SELECT 1"), notifications.next())
+        })
+        .await
+        .expect("refused-split notification or barrier query hung");
+        assert!(
+            split_attempted.load(Ordering::Acquire),
+            "the fixture never exercised the refused TLS split"
+        );
+        let messages = query.unwrap_or_else(|error| {
+            panic!(
+                "refused TLS split corrupted the barrier query: {}",
+                common::error_chain(&error)
+            )
+        });
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [compio_postgres::SimpleQueryMessage::CommandComplete(1)]
+            ),
+            "refused-split barrier query returned {messages:?}"
+        );
+        match notification {
+            Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                assert_eq!(notification.process_id(), PROCESS_ID);
+                assert_eq!(notification.channel(), CHANNEL);
+                assert_eq!(notification.payload(), expected_payload);
+            }
+            other => panic!("the refused TLS split lost its buffered notification: {other:?}"),
+        }
+
+        drop(client);
+        server.finish();
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("refused-split connection task did not exit");
+    }))
+    .await
+    .expect("refused TLS split test exceeded its outer watchdog");
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn local_tls_teardown_is_clean_eof_even_with_a_late_server_frame() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let (armed_tx, armed_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read PostgreSQL SSLRequest");
+            socket.write_all(b"S").expect("accept TLS negotiation");
+            socket.flush().expect("flush TLS negotiation response");
+
+            let mut tls =
+                rustls::ServerConnection::new(server_config).expect("build TLS server session");
+            {
+                let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+                complete_startup(&mut stream, 906);
+            }
+
+            tls.writer()
+                .write_all(&notification_frame(906, "late_channel", "late_payload"))
+                .expect("queue the late PostgreSQL frame");
+            let mut late_ciphertext = Vec::new();
+            while tls.wants_write() {
+                tls.write_tls(&mut late_ciphertext)
+                    .expect("serialize the late TLS frame");
+            }
+            assert!(
+                !late_ciphertext.is_empty(),
+                "the late PostgreSQL frame produced no TLS ciphertext"
+            );
+            armed_tx.send(()).expect("report armed late TLS frame");
+            // Observe and process the client's alert before putting the
+            // withheld application record on the wire. Gating on `drop`
+            // alone would not order the two TCP directions.
+            expect_close_notify(&mut tls, &mut socket);
+
+            socket
+                .write_all(&late_ciphertext)
+                .expect("write a server frame after local close_notify");
+            socket.flush().expect("flush the late server frame");
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let config = dsn
+            .parse::<Config>()
+            .expect("parse local TLS teardown config");
+        let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build unverified rustls connector");
+        let (client, connection) = compio::time::timeout(OPERATION_WATCHDOG, config.connect(tls))
+            .await
+            .expect("TLS startup hung")
+            .expect("connect scripted TLS peer");
+        armed_rx
+            .recv_timeout(THREAD_WATCHDOG)
+            .expect("server did not arm its late TLS frame");
+
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        compio::time::sleep(Duration::from_millis(10)).await;
+        drop(client);
+
+        let driver_result = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("local TLS teardown left the reader wedged")
+            .expect("TLS connection task panicked");
+        driver_result.unwrap_or_else(|error| {
+            panic!(
+                "typed local close_notify was surfaced as a read error: {}",
+                common::error_chain(&error)
+            )
+        });
+        server.finish();
+    })
+    .await
+    .expect("local TLS EOF test exceeded its outer watchdog");
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_non_marker_tls_read_error_is_not_mapped_to_eof() {
+    use futures_util::StreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server_config = scripted_tls_server_config();
+        let (corrupt_tx, corrupt_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut socket = accept_bounded(&listener);
+            let mut ssl_request = [0u8; 8];
+            socket
+                .read_exact(&mut ssl_request)
+                .expect("read PostgreSQL SSLRequest");
+            socket.write_all(b"S").expect("accept TLS negotiation");
+            socket.flush().expect("flush TLS negotiation response");
+
+            let mut tls =
+                rustls::ServerConnection::new(server_config).expect("build TLS server session");
+            {
+                let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+                complete_startup(&mut stream, 907);
+                stream
+                    .write_all(&notification_frame(907, "tls_error_gate", "ready"))
+                    .expect("write the TLS error gate");
+                stream.flush().expect("flush the TLS error gate");
+            }
+
+            corrupt_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("client never observed the TLS error gate");
+            // A complete TLS application-data record with an impossible
+            // one-byte ciphertext body. This reaches rustls as InvalidData;
+            // it is not the driver's typed local-teardown marker.
+            socket
+                .write_all(&[0x17, 0x03, 0x03, 0x00, 0x01, 0x00])
+                .expect("write invalid TLS record");
+            socket.flush().expect("flush invalid TLS record");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+             connect_timeout=2",
+            server.addr.ip(),
+            server.addr.port()
+        );
+        let config = dsn.parse::<Config>().expect("parse TLS read-error config");
+        let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("build unverified rustls connector");
+        let (client, mut connection) =
+            compio::time::timeout(OPERATION_WATCHDOG, config.connect(tls))
+                .await
+                .expect("TLS startup hung")
+                .expect("connect scripted TLS peer");
+        let mut notifications = connection.notifications();
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        match compio::time::timeout(OPERATION_WATCHDOG, notifications.next())
+            .await
+            .expect("the TLS error gate was silently dropped")
+        {
+            Some(compio_postgres::AsyncMessage::Notification(notification)) => {
+                assert_eq!(notification.process_id(), 907);
+                assert_eq!(notification.channel(), "tls_error_gate");
+                assert_eq!(notification.payload(), "ready");
+            }
+            other => panic!("the TLS error gate reported the wrong event: {other:?}"),
+        }
+        corrupt_tx.send(()).expect("release the invalid TLS record");
+
+        let driver_result = compio::time::timeout(OPERATION_WATCHDOG, driver)
+            .await
+            .expect("a non-marker TLS read error hung the connection")
+            .expect("TLS connection task panicked");
+        let error = driver_result.expect_err("a non-marker TLS read error became clean EOF");
+        assert_eq!(
+            io_error_kind(&error),
+            Some(ErrorKind::InvalidData),
+            "the invalid TLS record surfaced as the wrong error: {}",
+            common::error_chain(&error)
+        );
+
+        drop(client);
+        server.finish();
+    })
+    .await
+    .expect("non-marker TLS error test exceeded its outer watchdog");
 }
 
 /// The CONNECTION half going away must also close the session cleanly.
@@ -1030,6 +4801,26 @@ fn expect_frontend_until_sync(stream: &mut TcpStream) {
             return;
         }
     }
+}
+
+fn expect_frontend_frame(stream: &mut TcpStream, expected_tag: u8) -> Vec<u8> {
+    let mut tag = [0u8; 1];
+    stream
+        .read_exact(&mut tag)
+        .expect("read expected frontend tag");
+    assert_eq!(tag[0], expected_tag, "unexpected frontend frame tag");
+
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read expected frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 4, "frontend frame length is below its header");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read expected frontend frame body");
+    body
 }
 
 /// Drive `prepare` against a peer that answers with `response`, and require the
@@ -1568,6 +5359,312 @@ async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
     .expect("wrong-direction COPY test exceeded its outer watchdog");
 }
 
+/// A conforming backend does not leave COPY IN merely because the caller
+/// requested the opposite direction. It waits until the frontend sends
+/// CopyFail (and, for extended query, Sync) before returning ErrorResponse and
+/// ReadyForQuery. The driver must therefore actively end the wrong-way mode.
+#[compio::test]
+async fn a_copy_in_response_to_copy_out_is_actively_ended() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 507);
+
+            expect_frontend_until_sync(&mut stream);
+            let mut prepared = backend_frame(b'1', b"");
+            prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepared.extend_from_slice(&backend_frame(b'n', b""));
+            prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&prepared)
+                .expect("write scripted prepare response");
+            stream.flush().expect("flush scripted prepare response");
+
+            expect_frontend_until_sync(&mut stream);
+            let mut copy_in = backend_frame(b'2', b"");
+            copy_in.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+            stream
+                .write_all(&copy_in)
+                .expect("write wrong-way CopyInResponse");
+            stream.flush().expect("flush wrong-way CopyInResponse");
+
+            let copy_fail = expect_frontend_frame(&mut stream, b'f');
+            assert_eq!(
+                copy_fail.last(),
+                Some(&0),
+                "CopyFail reason is not terminated"
+            );
+            assert!(
+                copy_fail.len() > 1,
+                "connection-owned CopyFail did not explain the refusal"
+            );
+            assert!(
+                expect_frontend_frame(&mut stream, b'S').is_empty(),
+                "Sync unexpectedly carried a body"
+            );
+
+            let mut error = Vec::from(&b"SERROR\0C0A000\0Mwrong-way COPY IN refused\0"[..]);
+            error.push(0);
+            let mut completion = backend_frame(b'E', &error);
+            completion.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&completion)
+                .expect("write COPY refusal completion");
+            stream.flush().expect("flush COPY refusal completion");
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = match compio::time::timeout(
+            Duration::from_millis(500),
+            client.copy_out("COPY t TO STDOUT"),
+        )
+        .await
+        {
+            Err(_) => panic!("copy_out hung instead of ending a wrong-way COPY IN response"),
+            Ok(Ok(_)) => panic!("the driver accepted a wrong-way COPY IN response"),
+            Ok(Err(error)) => error,
+        };
+        assert!(
+            common::error_chain(&error).contains("wrong-way COPY IN refused"),
+            "COPY refusal lost the server's diagnosis: {error}"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    })
+    .await
+    .expect("active wrong-direction COPY test exceeded its outer watchdog");
+}
+
+/// CopyInResponse enters COPY IN immediately. A later CopyOutResponse cannot
+/// replace that state: the frontend has already begun ending the wrong-way
+/// exchange with CopyFail.
+#[compio::test]
+async fn a_copy_in_response_cannot_transition_to_copy_out() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(505, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "a COPY IN to COPY OUT transition reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("COPY direction-transition test exceeded its outer watchdog");
+}
+
+/// Once CopyOutResponse has suppressed the connection-owned COPY IN fallback,
+/// a later CopyInResponse cannot be answered. The only legal bounded exit is
+/// to close the connection; sending the next ordinary request would itself be
+/// an illegal non-COPY message while the peer waits for frontend COPY input.
+#[compio::test]
+async fn a_copy_out_response_cannot_transition_to_copy_in() {
+    use futures_util::TryStreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 508);
+
+            expect_frontend_until_sync(&mut stream);
+            let mut prepared = backend_frame(b'1', b"");
+            prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepared.extend_from_slice(&backend_frame(b'n', b""));
+            prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&prepared)
+                .expect("write scripted prepare response");
+            stream.flush().expect("flush scripted prepare response");
+
+            expect_frontend_until_sync(&mut stream);
+            let mut copy_out = backend_frame(b'2', b"");
+            copy_out.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+            stream
+                .write_all(&copy_out)
+                .expect("write initial CopyOutResponse");
+            stream.flush().expect("flush initial CopyOutResponse");
+
+            continue_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("the client did not accept CopyOutResponse");
+            let mut changed_direction = backend_frame(b'd', b"row-one\n");
+            changed_direction.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+            stream
+                .write_all(&changed_direction)
+                .expect("write CopyOutResponse to CopyInResponse transition");
+            stream
+                .flush()
+                .expect("flush CopyOutResponse to CopyInResponse transition");
+
+            let mut tag = [0u8; 1];
+            let read = stream
+                .read(&mut tag)
+                .expect("read the driver's COPY transition exit");
+            assert_eq!(
+                read, 0,
+                "the driver sent frontend tag {} instead of closing after COPY OUT changed to \
+                 COPY IN",
+                tag[0]
+            );
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let stream = client
+            .copy_out("COPY t TO STDOUT")
+            .await
+            .expect("accept the initial CopyOutResponse");
+        continue_tx
+            .send(())
+            .expect("scripted peer stopped before the direction transition");
+        let mut stream = Box::pin(stream);
+        assert_eq!(
+            stream
+                .try_next()
+                .await
+                .expect("read the row before the transition"),
+            Some(bytes::Bytes::from_static(b"row-one\n"))
+        );
+        let error = stream
+            .try_next()
+            .await
+            .expect_err("the driver accepted COPY OUT changing to COPY IN");
+        assert!(
+            common::error_chain(&error).contains("unexpected message from server"),
+            "the COPY direction transition reported the wrong error: {error}"
+        );
+
+        let follow_up =
+            compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+        match follow_up {
+            Err(_) => panic!("the poisoned COPY transition stranded the next request"),
+            Ok(Ok(_)) => panic!("the driver reused a connection after its COPY direction changed"),
+            Ok(Err(_)) => {}
+        }
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    })
+    .await
+    .expect("COPY OUT to COPY IN transition test exceeded its outer watchdog");
+}
+
+/// Backend batches are an I/O optimisation, not a protocol reorder point. If
+/// CopyOutResponse precedes CopyInResponse in one read, COPY OUT owns the
+/// state before the illegal direction change arrives. The frontend therefore
+/// cannot send CopyFail; PostgreSQL allows only close or cancel to abort COPY
+/// OUT.
+#[compio::test]
+async fn copy_response_direction_changes_preserve_batch_wire_order() {
+    use futures_util::TryStreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 509);
+
+            expect_frontend_until_sync(&mut stream);
+            let mut prepared = backend_frame(b'1', b"");
+            prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepared.extend_from_slice(&backend_frame(b'n', b""));
+            prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&prepared)
+                .expect("write scripted prepare response");
+            stream.flush().expect("flush scripted prepare response");
+
+            expect_frontend_until_sync(&mut stream);
+            let mut changed_direction = backend_frame(b'2', b"");
+            changed_direction.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+            changed_direction.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+            stream
+                .write_all(&changed_direction)
+                .expect("write batched COPY direction transition");
+            stream
+                .flush()
+                .expect("flush batched COPY direction transition");
+
+            let mut tag = [0u8; 1];
+            let read = stream
+                .read(&mut tag)
+                .expect("read the driver's batched COPY transition exit");
+            assert_eq!(
+                read, 0,
+                "the driver sent frontend tag {} after reordering batched COPY responses",
+                tag[0]
+            );
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, async {
+            let stream = client.copy_out("COPY t TO STDOUT").await?;
+            let mut stream = Box::pin(stream);
+            stream.try_next().await.map(|_| ())
+        })
+        .await
+        .expect("batched COPY direction transition hung")
+        .expect_err("the driver accepted a batched COPY direction transition");
+        assert!(
+            common::error_chain(&error).contains("unexpected message from server"),
+            "the batched COPY direction transition reported the wrong error: {error}"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    })
+    .await
+    .expect("batched COPY direction-transition test exceeded its outer watchdog");
+}
+
+/// Ordinary extended COPY OUT completes Execute once. Replication has a
+/// separate two-CommandComplete contract, but that cannot leak into this
+/// state machine.
+#[compio::test]
+async fn a_duplicate_copy_out_command_complete_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(506, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "duplicate COPY OUT completion reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("duplicate-COPY-completion test exceeded its outer watchdog");
+}
+
 /// A COPY that is established correctly and then delivers a `DataRow` mid
 /// stream. This is the site at `copy_out.rs:88`, the one where resynchronising
 /// would hand the caller unparsed bytes as if they were copy data.
@@ -1615,6 +5712,92 @@ async fn a_copy_out_whose_copy_out_response_never_arrives_is_refused() {
     })
     .await
     .expect("missing-CopyOutResponse test exceeded its outer watchdog");
+}
+
+/// `CopyDone` closes the data phase. Bytes after it are protocol corruption,
+/// not another chunk for the caller.
+#[compio::test]
+async fn copy_data_after_copy_done_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'd', b"row-two\n"));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 2\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(521, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "post-CopyDone data reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("post-CopyDone data test exceeded its outer watchdog");
+}
+
+/// Ordinary COPY OUT has one data terminator. A second `CopyDone` must not be
+/// accepted as an idempotent delimiter.
+#[compio::test]
+async fn duplicate_copy_done_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 0\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(522, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "duplicate CopyDone reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("duplicate-CopyDone test exceeded its outer watchdog");
+}
+
+/// `CommandComplete` describes the COPY command and therefore cannot precede
+/// the `CopyDone` that ends its data phase.
+#[compio::test]
+async fn command_complete_before_copy_done_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 0\0"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(523, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "early CommandComplete reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("early-CommandComplete test exceeded its outer watchdog");
+}
+
+/// `ReadyForQuery` cannot turn `CopyDone` directly into success; the missing
+/// `CommandComplete` leaves the COPY command without a result.
+#[compio::test]
+async fn ready_for_query_before_command_complete_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(524, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "early ReadyForQuery reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("early-ReadyForQuery test exceeded its outer watchdog");
 }
 
 // ---------------------------------------------------------------------------
@@ -1850,6 +6033,34 @@ async fn copy_data_after_the_binary_copy_trailer_is_refused() {
     })
     .await
     .expect("cross-frame binary trailer test exceeded its outer watchdog");
+}
+
+/// An empty CopyData is still a CopyData message. After the binary trailer no
+/// further row frame is legal, regardless of whether its body has bytes.
+#[compio::test]
+async fn empty_copy_data_after_the_binary_copy_trailer_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let suffix = backend_frame(b'd', b"");
+        let response = binary_copy_out_frames_with_suffix(
+            vec![binary_copy_chunk(&[&binary_int4_tuple(7)])],
+            &(-1i16).to_be_bytes(),
+            &suffix,
+        );
+        let outcome = binary_copy_out_against(535, response).await;
+        let error = match outcome {
+            Ok(values) => panic!(
+                "the driver returned {values:?} after empty CopyData followed the binary trailer"
+            ),
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("0 bytes of CopyData after the binary COPY trailer"),
+            "empty CopyData after the binary trailer was not refused by name: {chain}"
+        );
+    })
+    .await
+    .expect("empty post-trailer CopyData test exceeded its outer watchdog");
 }
 
 /// Protocol `CopyDone` ends COPY OUT, but it is not the binary file trailer.

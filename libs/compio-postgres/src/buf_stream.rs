@@ -6,7 +6,7 @@
 //!
 //! Two hardening properties are load-bearing and must survive any rewrite:
 //! the length cap (which stops a malformed server from OOM-ing the driver;
-//! 64 MB by default, see `Config::max_message_size`) and the zero-copy `BytesMut::split` flush path.
+//! 64 MiB by default, see `Config::max_message_size`) and the zero-copy `BytesMut::split` flush path.
 
 use crate::Error;
 use bytes::BytesMut;
@@ -69,7 +69,7 @@ pub(crate) trait WriteFramer {
 const READ_BUF_CAPACITY: usize = 8192;
 
 /// Per-`fill()` syscall chunk size. We do not allocate `min_bytes`-sized
-/// buffers up front (a 64 MB frame arriving in 16 KB chunks would cause
+/// buffers up front (a 64 MiB frame arriving in 16 KB chunks would cause
 /// ~260 GB of heap churn). Instead, each read pulls at most this many
 /// bytes and the outer `while` loop issues as many reads as needed to
 /// satisfy `min_bytes`.
@@ -334,6 +334,71 @@ where
     }
 }
 
+async fn read_raw_from<R>(
+    reader: &mut R,
+    buf: Vec<u8>,
+    read_deadline: Option<&ReadDeadline>,
+) -> Result<(usize, Vec<u8>), Error>
+where
+    R: AsyncRead + Unpin,
+{
+    let BufResult(result, returned) = read_with_deadline(reader, buf, read_deadline).await?;
+    let n = result.map_err(Error::io)?;
+    Ok((n, returned))
+}
+
+async fn fill_read_buffer<R>(
+    reader: &mut R,
+    read_buf: &mut BytesMut,
+    read_scratch: &mut Vec<u8>,
+    read_deadline: Option<&ReadDeadline>,
+    max_message_size: usize,
+    min_bytes: usize,
+) -> Result<(), Error>
+where
+    R: AsyncRead + Unpin,
+{
+    if min_bytes > max_message_size {
+        return Err(Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("message too large: {min_bytes} bytes (max {max_message_size})"),
+        )));
+    }
+    while read_buf.len() < min_bytes {
+        if read_scratch.is_empty() {
+            *read_scratch = vec![0u8; READ_CHUNK];
+        }
+        let buf = std::mem::take(read_scratch);
+        let (n, buf) = read_raw_from(reader, buf, read_deadline).await?;
+        if n == 0 {
+            return Err(Error::io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed by server",
+            )));
+        }
+        read_buf.extend_from_slice(&buf[..n]);
+        *read_scratch = buf;
+    }
+    Ok(())
+}
+
+fn peek_u32_be_from(read_buf: &BytesMut, offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let slice = read_buf.get(offset..end)?;
+    Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn validate_length_against(length: u32, max_message_size: usize) -> Result<(), Error> {
+    let total = 1u64 + u64::from(length);
+    if total > max_message_size as u64 {
+        return Err(Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("message too large: {total} bytes (max {max_message_size})"),
+        )));
+    }
+    Ok(())
+}
+
 async fn flush_retry_interrupted<W>(writer: &mut W) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -344,6 +409,20 @@ where
             result => return result,
         }
     }
+}
+
+async fn flush_write_buffer<W>(writer: &mut W, write_buf: &mut BytesMut) -> Result<(), Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    if write_buf.is_empty() {
+        return Ok(());
+    }
+    let data = write_buf.split();
+    let BufResult(result, _) = writer.write_all(data).await;
+    result.map_err(Error::io)?;
+    flush_retry_interrupted(writer).await.map_err(Error::io)?;
+    Ok(())
 }
 
 /// Buffered read/write stream over any compio `AsyncRead + AsyncWrite`.
@@ -424,31 +503,15 @@ where
     /// malformed/malicious server from OOM-ing the process with a
     /// crafted 4-byte length field (e.g., 0xFFFFFFFF = 4 GB).
     pub async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
-        if min_bytes > self.max_message_size {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {min_bytes} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        while self.read_buf.len() < min_bytes {
-            if self.read_scratch.is_empty() {
-                self.read_scratch = vec![0u8; READ_CHUNK];
-            }
-            let buf = std::mem::take(&mut self.read_scratch);
-            let (n, buf) = self.read_raw(buf).await?;
-            if n == 0 {
-                return Err(Error::io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed by server",
-                )));
-            }
-            self.read_buf.extend_from_slice(&buf[..n]);
-            self.read_scratch = buf;
-        }
-        Ok(())
+        fill_read_buffer(
+            &mut self.inner,
+            &mut self.read_buf,
+            &mut self.read_scratch,
+            self.read_deadline.as_ref(),
+            self.max_message_size,
+            min_bytes,
+        )
+        .await
     }
 
     /// Access the read buffer for `Message::parse()` to consume from.
@@ -459,28 +522,16 @@ where
     /// Peek a big-endian `u32` at `offset` in the read buffer without consuming.
     /// Returns `None` if fewer than 4 bytes are available starting at `offset`.
     pub fn peek_u32_be(&self, offset: usize) -> Option<u32> {
-        let end = offset.checked_add(4)?;
-        let slice = self.read_buf.get(offset..end)?;
-        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        peek_u32_be_from(&self.read_buf, offset)
     }
 
     /// Reject a framed message whose declared length (from the 4-byte length
     /// field, which itself counts its own 4 bytes but not the 1-byte tag)
     /// would exceed `DEFAULT_MAX_MESSAGE_SIZE`. O(1) - called before we buffer the
     /// payload, so a malicious server can't coerce us to allocate up to
-    /// 64 MB per connection.
+    /// 64 MiB per connection.
     pub fn validate_length(&self, length: u32) -> Result<(), Error> {
-        let total = 1u64 + u64::from(length);
-        if total > self.max_message_size as u64 {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {total} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        Ok(())
+        validate_length_against(length, self.max_message_size)
     }
 
     /// Append data to the write buffer (no I/O until flush).
@@ -498,30 +549,7 @@ where
 
     /// Flush the write buffer to the socket.
     pub async fn flush(&mut self) -> Result<(), Error> {
-        if self.write_buf.is_empty() {
-            return Ok(());
-        }
-        let data = self.write_buf.split();
-        self.write_all_raw(data).await?;
-        flush_retry_interrupted(&mut self.inner)
-            .await
-            .map_err(Error::io)?;
-        Ok(())
-    }
-
-    /// Low-level read into owned buffer, returning (bytes_read, buffer).
-    async fn read_raw(&mut self, buf: Vec<u8>) -> Result<(usize, Vec<u8>), Error> {
-        let BufResult(result, returned) =
-            read_with_deadline(&mut self.inner, buf, self.read_deadline.as_ref()).await?;
-        let n = result.map_err(Error::io)?;
-        Ok((n, returned))
-    }
-
-    /// Low-level write all bytes to the socket.
-    async fn write_all_raw(&mut self, data: BytesMut) -> Result<(), Error> {
-        let BufResult(result, _) = self.inner.write_all(data).await;
-        result.map_err(Error::io)?;
-        Ok(())
+        flush_write_buffer(&mut self.inner, &mut self.write_buf).await
     }
 }
 
@@ -609,48 +637,20 @@ pub(crate) struct BufReadHalf<R> {
     max_message_size: usize,
 }
 
-impl<R> BufReadHalf<R>
-where
-    R: AsyncRead + Unpin,
-{
-    async fn read_raw(&mut self, buf: Vec<u8>) -> Result<(usize, Vec<u8>), Error> {
-        let BufResult(result, returned) =
-            read_with_deadline(&mut self.inner, buf, self.read_deadline.as_ref()).await?;
-        let n = result.map_err(Error::io)?;
-        Ok((n, returned))
-    }
-}
-
 impl<R> ReadFramer for BufReadHalf<R>
 where
     R: AsyncRead + Unpin,
 {
     async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
-        if min_bytes > self.max_message_size {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {min_bytes} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        while self.read_buf.len() < min_bytes {
-            if self.read_scratch.is_empty() {
-                self.read_scratch = vec![0u8; READ_CHUNK];
-            }
-            let buf = std::mem::take(&mut self.read_scratch);
-            let (n, buf) = self.read_raw(buf).await?;
-            if n == 0 {
-                return Err(Error::io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed by server",
-                )));
-            }
-            self.read_buf.extend_from_slice(&buf[..n]);
-            self.read_scratch = buf;
-        }
-        Ok(())
+        fill_read_buffer(
+            &mut self.inner,
+            &mut self.read_buf,
+            &mut self.read_scratch,
+            self.read_deadline.as_ref(),
+            self.max_message_size,
+            min_bytes,
+        )
+        .await
     }
 
     fn buf(&mut self) -> &mut BytesMut {
@@ -658,23 +658,11 @@ where
     }
 
     fn peek_u32_be(&self, offset: usize) -> Option<u32> {
-        let end = offset.checked_add(4)?;
-        let slice = self.read_buf.get(offset..end)?;
-        Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        peek_u32_be_from(&self.read_buf, offset)
     }
 
     fn validate_length(&self, length: u32) -> Result<(), Error> {
-        let total = 1u64 + u64::from(length);
-        if total > self.max_message_size as u64 {
-            return Err(Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {total} bytes (max {})",
-                    self.max_message_size
-                ),
-            )));
-        }
-        Ok(())
+        validate_length_against(length, self.max_message_size)
     }
 }
 
@@ -694,16 +682,7 @@ where
 {
     /// Flush the write buffer to the socket. Mirrors [`BufStream::flush`].
     pub async fn flush(&mut self) -> Result<(), Error> {
-        if self.write_buf.is_empty() {
-            return Ok(());
-        }
-        let data = self.write_buf.split();
-        let BufResult(result, _) = self.inner.write_all(data).await;
-        result.map_err(Error::io)?;
-        flush_retry_interrupted(&mut self.inner)
-            .await
-            .map_err(Error::io)?;
-        Ok(())
+        flush_write_buffer(&mut self.inner, &mut self.write_buf).await
     }
 
     /// Best-effort socket shutdown (TCP FIN). Mirrors the shutdown call in
@@ -792,6 +771,7 @@ where
 mod tests {
     use super::*;
     use compio::buf::{BufResult, IoBuf};
+    use std::collections::VecDeque;
 
     struct ReadySplitIo;
 
@@ -826,6 +806,18 @@ mod tests {
 
     struct UnsplitIo;
 
+    struct OneByteReader {
+        bytes: VecDeque<u8>,
+        reads: usize,
+    }
+
+    struct ReadMustNotBePolled;
+
+    struct ScratchProbeReader {
+        reads: usize,
+        scratch_was_reused: bool,
+    }
+
     struct InterruptOnceReader {
         reads: usize,
     }
@@ -839,6 +831,75 @@ mod tests {
 
     struct InterruptOnceWriter {
         flushes: usize,
+    }
+
+    #[derive(Default)]
+    struct WriteProbe {
+        writes: usize,
+        flushes: usize,
+        shutdowns: usize,
+    }
+
+    fn test_read_half<R>(inner: R) -> BufReadHalf<R>
+    where
+        R: AsyncRead + Unpin,
+    {
+        BufReadHalf {
+            inner,
+            read_buf: BytesMut::with_capacity(READ_BUF_CAPACITY),
+            read_scratch: vec![0u8; READ_CHUNK],
+            read_deadline: None,
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+        }
+    }
+
+    impl AsyncRead for OneByteReader {
+        async fn read<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
+            self.reads += 1;
+            match self.bytes.pop_front() {
+                Some(byte) => {
+                    assert!(
+                        buf.buf_len() > 0,
+                        "the split reader received an empty scratch buffer"
+                    );
+                    buf.as_mut_slice()[0] = byte;
+                    BufResult(Ok(1), buf)
+                }
+                None => BufResult(Ok(0), buf),
+            }
+        }
+    }
+
+    impl AsyncRead for ReadMustNotBePolled {
+        async fn read<B: IoBufMut>(&mut self, _buf: B) -> BufResult<usize, B> {
+            panic!("the split reader was polled past its configured message-size limit")
+        }
+    }
+
+    impl AsyncRead for ScratchProbeReader {
+        async fn read<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
+            const MARKER: u8 = 0xa5;
+
+            assert_eq!(
+                buf.buf_len(),
+                READ_CHUNK,
+                "the split reader received the wrong scratch-buffer size"
+            );
+            let byte = match self.reads {
+                0 => {
+                    buf.as_mut_slice()[READ_CHUNK - 1] = MARKER;
+                    b'a'
+                }
+                1 => {
+                    self.scratch_was_reused = buf.as_init()[READ_CHUNK - 1] == MARKER;
+                    b'b'
+                }
+                _ => return BufResult(Ok(0), buf),
+            };
+            self.reads += 1;
+            buf.as_mut_slice()[0] = byte;
+            BufResult(Ok(1), buf)
+        }
     }
 
     impl AsyncRead for InterruptOnceReader {
@@ -902,6 +963,30 @@ mod tests {
         }
 
         async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncRead for WriteProbe {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for WriteProbe {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.writes += 1;
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.shutdowns += 1;
             Ok(())
         }
     }
@@ -1019,6 +1104,74 @@ mod tests {
         assert_eq!(write_half.inner.flushes, 2, "split flush was not retried");
     }
 
+    #[compio::test]
+    async fn empty_flush_skips_transport_on_serialized_and_split_paths() {
+        let mut stream = BufStream::new(WriteProbe::default());
+        stream.flush().await.expect("flush the serialized stream");
+        assert_eq!(stream.inner.writes, 0, "serialized empty flush wrote");
+        assert_eq!(stream.inner.flushes, 0, "serialized empty flush flushed");
+
+        let mut write_half = BufWriteHalf {
+            inner: WriteProbe::default(),
+            write_buf: BytesMut::new(),
+        };
+        write_half.flush().await.expect("flush the split stream");
+        assert_eq!(write_half.inner.writes, 0, "split empty flush wrote");
+        assert_eq!(write_half.inner.flushes, 0, "split empty flush flushed");
+    }
+
+    #[compio::test]
+    async fn successful_flush_drains_serialized_and_split_write_buffers() {
+        let mut stream = BufStream::new(WriteProbe::default());
+        stream.write(b"serialized request");
+        stream.flush().await.expect("flush the serialized stream");
+        assert!(
+            stream.write_buf.is_empty(),
+            "serialized buffer was retained"
+        );
+        assert_eq!(
+            stream.inner.writes, 1,
+            "serialized bytes were not written once"
+        );
+        assert_eq!(
+            stream.inner.flushes, 1,
+            "serialized transport was not flushed once"
+        );
+
+        let mut write_half = BufWriteHalf {
+            inner: WriteProbe::default(),
+            write_buf: BytesMut::from(&b"split request"[..]),
+        };
+        write_half.flush().await.expect("flush the split stream");
+        assert!(write_half.write_buf.is_empty(), "split buffer was retained");
+        assert_eq!(
+            write_half.inner.writes, 1,
+            "split bytes were not written once"
+        );
+        assert_eq!(
+            write_half.inner.flushes, 1,
+            "split transport was not flushed once"
+        );
+    }
+
+    #[compio::test]
+    async fn split_shutdown_delegates_to_transport() {
+        let mut write_half = BufWriteHalf {
+            inner: WriteProbe::default(),
+            write_buf: BytesMut::new(),
+        };
+
+        write_half
+            .shutdown()
+            .await
+            .expect("shut down the split stream");
+
+        assert_eq!(
+            write_half.inner.shutdowns, 1,
+            "split shutdown was not delegated"
+        );
+    }
+
     #[test]
     fn splitting_preserves_every_buffer_and_unsplittable_fallback_does_too() {
         let mut splittable = BufStream::new(ReadySplitIo);
@@ -1054,6 +1207,96 @@ mod tests {
         assert_eq!(&rebuilt.read_buf[..], b"fallback server bytes");
         assert_eq!(&rebuilt.write_buf[..], b"fallback client bytes");
         assert!(rebuilt.read_deadline.is_some());
+    }
+
+    #[compio::test]
+    async fn split_fill_accumulates_partial_reads() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let mut read = test_read_half(OneByteReader {
+                bytes: VecDeque::from([b'a', b'b', b'c']),
+                reads: 0,
+            });
+
+            read.fill(3)
+                .await
+                .expect("the split read half failed to fill from partial reads");
+
+            assert_eq!(read.inner.reads, 3, "fill returned after a partial read");
+            assert_eq!(&read.read_buf[..], b"abc");
+        })
+        .await
+        .expect("split partial-read fill test exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn split_fill_enforces_configured_max_message_size_before_reading() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let mut read = test_read_half(ReadMustNotBePolled);
+            read.max_message_size = 8;
+
+            let error = read
+                .fill(9)
+                .await
+                .expect_err("the split read half accepted a fill above its configured limit");
+            let source = error
+                .into_source()
+                .expect("the split fill limit error must preserve its I/O cause");
+            let io = source
+                .downcast_ref::<std::io::Error>()
+                .expect("the split fill limit must be an I/O error");
+            assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(io.to_string(), "message too large: 9 bytes (max 8)");
+        })
+        .await
+        .expect("split fill-limit test exceeded its watchdog");
+    }
+
+    #[test]
+    fn split_length_validation_enforces_configured_max_message_size() {
+        let mut read = test_read_half(ReadMustNotBePolled);
+        read.max_message_size = 8;
+
+        read.validate_length(7)
+            .expect("a split frame exactly at the configured limit was rejected");
+        let error = read
+            .validate_length(8)
+            .expect_err("a split frame above the configured limit was accepted");
+        let source = error
+            .into_source()
+            .expect("the split frame limit error must preserve its I/O cause");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("the split frame limit must be an I/O error");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(io.to_string(), "message too large: 9 bytes (max 8)");
+    }
+
+    #[compio::test]
+    async fn split_fill_reuses_its_read_scratch_allocation() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let mut read = test_read_half(ScratchProbeReader {
+                reads: 0,
+                scratch_was_reused: false,
+            });
+
+            read.fill(1)
+                .await
+                .expect("the first split scratch-probe read failed");
+            assert_eq!(&read.read_buf[..], b"a");
+            read.read_buf.clear();
+            read.fill(1)
+                .await
+                .expect("the second split scratch-probe read failed");
+
+            assert_eq!(&read.read_buf[..], b"b");
+            assert_eq!(read.inner.reads, 2);
+            assert!(
+                read.inner.scratch_was_reused,
+                "the split read half replaced its scratch allocation between fills"
+            );
+        })
+        .await
+        .expect("split scratch-reuse test exceeded its watchdog");
     }
 
     #[test]

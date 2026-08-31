@@ -4,7 +4,7 @@
 // methods), so the wrapper is a plain enum; no pin_project_lite needed.
 
 use crate::buf_stream::SplitStream;
-use crate::connect_tls::Encryption;
+use crate::encryption::Encryption;
 use crate::tls::{ChannelBinding, ClientCertStatus, TlsStream};
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
@@ -86,6 +86,20 @@ where
         }
     }
 
+    /// Forwarded, NOT defaulted. The trait's default answers `None`, which
+    /// `connect_tls` reads as "this backend cannot observe ALPN" and refuses in
+    /// `sslnegotiation=direct`. A wrapped session that DID negotiate
+    /// `postgresql` would report the opposite of the truth.
+    ///
+    /// Today `connect_tls` asks the inner stream before wrapping it, so the
+    /// omission was invisible; that ordering is not a property anyone declared.
+    fn negotiated_alpn_protocol(&self) -> Option<&[u8]> {
+        match self {
+            MaybeTlsStream::Raw(_) => None,
+            MaybeTlsStream::Tls(s) => s.negotiated_alpn_protocol(),
+        }
+    }
+
     fn client_cert_status(&self) -> ClientCertStatus {
         match self {
             MaybeTlsStream::Raw(_) => ClientCertStatus::NotApplicable,
@@ -122,6 +136,24 @@ pub enum MaybeTlsWriteHalf<S: SplitStream, T: SplitStream> {
     Raw(S::WriteHalf),
     /// Write half of the TLS transport.
     Tls(T::WriteHalf),
+}
+
+impl<S: SplitStream, T: SplitStream> std::fmt::Debug for MaybeTlsReadHalf<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw(_) => formatter.debug_tuple("Raw").finish_non_exhaustive(),
+            Self::Tls(_) => formatter.debug_tuple("Tls").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<S: SplitStream, T: SplitStream> std::fmt::Debug for MaybeTlsWriteHalf<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw(_) => formatter.debug_tuple("Raw").finish_non_exhaustive(),
+            Self::Tls(_) => formatter.debug_tuple("Tls").finish_non_exhaustive(),
+        }
+    }
 }
 
 impl<S, T> AsyncRead for MaybeTlsReadHalf<S, T>
@@ -190,5 +222,140 @@ where
                 Err(s) => Err(MaybeTlsStream::Tls(s)),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ProbeStream;
+
+    struct ProbeReadHalf;
+
+    #[derive(Default)]
+    struct ProbeWriteHalf {
+        flushes: usize,
+        shutdowns: usize,
+    }
+
+    impl AsyncRead for ProbeReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for ProbeWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let n = buf.buf_len();
+            BufResult(Ok(n), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            self.shutdowns += 1;
+            Ok(())
+        }
+    }
+
+    impl SplitStream for ProbeStream {
+        type ReadHalf = ProbeReadHalf;
+        type WriteHalf = ProbeWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((ProbeReadHalf, ProbeWriteHalf::default()))
+        }
+    }
+
+    #[compio::test]
+    async fn maybe_tls_write_half_delegates_tls_flush() {
+        let stream: MaybeTlsStream<ProbeStream, ProbeStream> = MaybeTlsStream::Tls(ProbeStream);
+        let Ok((_read, mut write)) = stream.try_into_split() else {
+            panic!("the TLS probe stream refused to split");
+        };
+
+        write.flush().await.expect("flush the TLS half");
+
+        let MaybeTlsWriteHalf::Tls(probe) = write else {
+            panic!("the TLS write half changed variants");
+        };
+        assert_eq!(probe.flushes, 1, "the TLS transport was not flushed");
+    }
+
+    #[compio::test]
+    async fn maybe_tls_write_half_delegates_tls_shutdown() {
+        let stream: MaybeTlsStream<ProbeStream, ProbeStream> = MaybeTlsStream::Tls(ProbeStream);
+        let Ok((_read, mut write)) = stream.try_into_split() else {
+            panic!("the TLS probe stream refused to split");
+        };
+
+        write.shutdown().await.expect("shut down the TLS half");
+
+        let MaybeTlsWriteHalf::Tls(probe) = write else {
+            panic!("the TLS write half changed variants");
+        };
+        assert_eq!(probe.shutdowns, 1, "the TLS transport was not shut down");
+    }
+
+    /// A session that negotiated ALPN, to prove the wrapper forwards rather
+    /// than answering from `TlsStream`'s default.
+    struct AlpnStream;
+
+    impl AsyncRead for AlpnStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for AlpnStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let n = buf.buf_len();
+            BufResult(Ok(n), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl crate::tls::TlsStream for AlpnStream {
+        fn channel_binding(&self) -> crate::tls::ChannelBinding {
+            crate::tls::ChannelBinding::none()
+        }
+
+        fn negotiated_alpn_protocol(&self) -> Option<&[u8]> {
+            Some(b"postgresql")
+        }
+    }
+
+    /// The default answer is `None`, which `connect_tls` reads as "this backend
+    /// cannot observe ALPN" and refuses under `sslnegotiation=direct`. Not
+    /// forwarding would therefore report the opposite of the truth for a
+    /// session that DID select `postgresql`.
+    #[test]
+    fn the_wrapper_forwards_the_negotiated_alpn_protocol() {
+        use crate::tls::TlsStream as _;
+
+        let tls: MaybeTlsStream<AlpnStream, AlpnStream> = MaybeTlsStream::Tls(AlpnStream);
+        assert_eq!(
+            tls.negotiated_alpn_protocol(),
+            Some(&b"postgresql"[..]),
+            "the wrapper answered from the trait default instead of the session"
+        );
+
+        let raw: MaybeTlsStream<AlpnStream, AlpnStream> = MaybeTlsStream::Raw(AlpnStream);
+        assert_eq!(
+            raw.negotiated_alpn_protocol(),
+            None,
+            "the Raw arm consulted the inner stream; only the Tls arm may"
+        );
     }
 }

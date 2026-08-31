@@ -16,6 +16,21 @@ mod private {
         Uncached(&'a str),
     }
 
+    impl std::fmt::Debug for ToStatementType<'_> {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Statement(statement) => {
+                    formatter.debug_tuple("Statement").field(statement).finish()
+                }
+                Self::Query(_) => formatter.debug_tuple("Query").field(&"<redacted>").finish(),
+                Self::Uncached(_) => formatter
+                    .debug_tuple("Uncached")
+                    .field(&"<redacted>")
+                    .finish(),
+            }
+        }
+    }
+
     pub(crate) struct StatementExecution<'a> {
         pub(crate) statement: Statement,
         pub(crate) cache_sql: Option<&'a str>,
@@ -31,11 +46,23 @@ mod private {
                 // Explicit Statements stay caller-owned. Repreparing one would
                 // silently replace its identity and result metadata underneath
                 // the caller instead of making them opt into a fresh prepare.
-                ToStatementType::Statement(statement) => Ok(StatementExecution {
-                    statement: statement.clone(),
-                    cache_sql: None,
-                    unnamed_sql: None,
-                }),
+                ToStatementType::Statement(statement) => {
+                    match statement.owner() {
+                        Some(owner) if Arc::ptr_eq(&owner, client) => {}
+                        Some(_) => return Err(Error::statement_owner_mismatch()),
+                        // Internal unnamed descriptors have no connection owner.
+                        // They are metadata for an unnamed Parse performed by the
+                        // same operation, not reusable prepared-statement handles.
+                        None if statement.name().is_empty() => {}
+                        None => return Err(Error::statement_owner_dropped()),
+                    }
+
+                    Ok(StatementExecution {
+                        statement: statement.clone(),
+                        cache_sql: None,
+                        unnamed_sql: None,
+                    })
+                }
                 ToStatementType::Query(sql) => {
                     let cached = prepare::prepare_cached_with_origin(client, sql).await?;
                     Ok(StatementExecution {

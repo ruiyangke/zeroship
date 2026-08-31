@@ -74,7 +74,11 @@ async fn start(
 ) -> Result<(Responses, CopyResponse, CopyModeGuard), ExecutionError> {
     let (mut responses, copy_mode) = client
         .send_copy_statement(
-            query::producerless_request(buf, statement.may_enter_copy_in()),
+            // A malformed or rewritten peer can answer this COPY OUT request
+            // with CopyInResponse. Arm the same connection-owned CopyFail used
+            // by producerless queries so that wrong-way COPY IN is actively
+            // terminated instead of waiting forever for frontend input.
+            query::producerless_request(buf, true),
             statement,
             CopyMode::Out,
         )
@@ -128,11 +132,20 @@ async fn start(
             .map_err(ExecutionError::after_bind_complete)?
         {
             Message::CopyOutResponse(body) => {
+                // `codec::read_backend` validates every COPY response body
+                // before dispatch. This conversion is defense in depth; a
+                // deterministic connection test cannot reach its error arm.
                 break CopyResponse::from_backend(body.format(), body.column_formats())
                     .map_err(ExecutionError::after_bind_complete)?;
             }
-            // The connection-owned producer is already sending CopyFail.
-            Message::CopyInResponse(_) => {}
+            // The connection-owned producer is already sending CopyFail. The
+            // server entered COPY IN when it sent this response, so no later
+            // response can turn the exchange into COPY OUT.
+            Message::CopyInResponse(_) => {
+                return Err(ExecutionError::after_bind_complete(
+                    drain_refusal(&mut responses, Error::unexpected_message()).await,
+                ));
+            }
             _ => {
                 return Err(ExecutionError::after_bind_complete(
                     drain_refusal(&mut responses, Error::unexpected_message()).await,
@@ -153,7 +166,9 @@ pin_project! {
         copy_done: bool,
         command_complete: bool,
         // Last so Drop disconnects the consumer, arming connection-owned
-        // draining, before ordinary requests may queue behind it.
+        // draining, before ordinary requests may queue behind it. Safe code
+        // has no hook between synchronous field drops, so after-Drop probes
+        // cannot deterministically observe the opposite ordering.
         copy_mode: Option<CopyModeGuard>,
     }
 }
@@ -176,6 +191,10 @@ impl Stream for CopyOutStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
+        if this.copy_mode.is_none() {
+            return Poll::Ready(None);
+        }
+
         loop {
             match ready!(this.responses.poll_next(cx)) {
                 Ok(Message::CopyData(body)) if !*this.copy_done => {
@@ -188,7 +207,7 @@ impl Stream for CopyOutStream {
                     // not report EOF until CommandComplete arrives.
                     *this.copy_done = true;
                 }
-                Ok(Message::CommandComplete(_)) if *this.copy_done => {
+                Ok(Message::CommandComplete(_)) if *this.copy_done && !*this.command_complete => {
                     // The following Sync closes the implicit transaction. A
                     // deferred constraint can still fail there, so command
                     // completion is not yet stream success.

@@ -36,6 +36,8 @@ mod cancel_token;
 pub(crate) mod client;
 #[path = "../src/codec.rs"]
 mod codec;
+#[path = "../src/command_tag.rs"]
+mod command_tag;
 #[path = "../src/config.rs"]
 pub mod config;
 #[path = "../src/connect.rs"]
@@ -54,6 +56,8 @@ mod copy_format;
 mod copy_in;
 #[path = "../src/copy_out.rs"]
 mod copy_out;
+#[path = "../src/encryption.rs"]
+mod encryption;
 #[path = "../src/error/mod.rs"]
 pub mod error;
 #[path = "../src/escape.rs"]

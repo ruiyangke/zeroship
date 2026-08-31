@@ -53,6 +53,8 @@ impl CopyResponse {
         let mut column_formats = Vec::with_capacity(capacity);
         while let Some(code) = formats.next()? {
             let column_format = decode_format(code)?;
+            // `codec::read_backend` calls `validate_wire` before backend-message
+            // callers can reach this helper, so this duplicate guard is defensive.
             if format == CopyFormat::Text && column_format != CopyFormat::Text {
                 return Err(invalid_data(
                     "binary column format in a textual COPY response",

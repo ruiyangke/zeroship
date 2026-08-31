@@ -3,6 +3,7 @@ members = ["crates/*", "libs/*"]
 resolver = "3"
 exclude = [
     "crates/zeroship-runtime/benches/ntex-bench",
+    "libs/compio-postgres/vendor/postgres-types",
     "refs",
 ]
 
@@ -142,7 +143,7 @@ libc = "0.2"
 seccompiler = "0.5"
 landlock = "0.4"
 itoa = "1"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 ada-url = "3.4.4"
 # CIDR parsing + containment for the `node:net` egress rule set
 # (`zeroship_core::net_policy::Destination::Range`). Parse and `contains`

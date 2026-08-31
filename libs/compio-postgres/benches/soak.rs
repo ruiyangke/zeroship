@@ -43,6 +43,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const QUERY_DELAY_SECONDS: f64 = 0.02;
 const CANCELLATION_DELAY_SECONDS: f64 = 1.0;
 
+// Compare adjacent final quartiles so an early allocator step followed by a
+// plateau is stable, while growth that continues with the workload reaches the
+// tail. 64 KiB is the smallest power-of-two band above the measured benign
+// 52 KiB allocator commit, without muting the sustained 100 KiB/sample leaks
+// this rule's vectors exercise.
+//
+// At the default 37 samples over 180 seconds, this detects a steady linear leak
+// above 256 KiB per run (about 1.42 KiB/s or 6.2 B/operation at 42,408 ops); it
+// cannot detect one at or below that rate, and a sufficiently late leak can be
+// diluted by the quartile mean.
+const RSS_GROWTH_NOISE_BAND_KIB: u64 = 64;
+const RSS_GROWTH_QUARTILE_DIVISOR: usize = 4;
+const RSS_GROWTH_MIN_SAMPLES: usize = RSS_GROWTH_QUARTILE_DIVISOR;
+
 const POOLED_QUERY_SQL: &str = "SELECT $1::int8 FROM pg_sleep(0.02) /* cpg_soak_pooled */";
 const LARGE_PAYLOAD_SQL: &str =
     "SELECT repeat('x', 65536) FROM pg_sleep(0.02) /* cpg_soak_pooled */";
@@ -228,6 +242,74 @@ struct Sample {
     server_active_queries: i64,
     driver_live_connections: usize,
     operations: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RssGrowthVerdict {
+    InsufficientSamples,
+    Stable,
+    Growing,
+}
+
+impl RssGrowthVerdict {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::InsufficientSamples => "insufficient_samples",
+            Self::Stable => "stable",
+            Self::Growing => "growing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RssGrowthDecision {
+    verdict: RssGrowthVerdict,
+    window_samples: usize,
+    preceding_sum_kib: u128,
+    tail_sum_kib: u128,
+    noise_sum_kib: u128,
+}
+
+fn decide_rss_growth(rss_kib: &[u64]) -> RssGrowthDecision {
+    if rss_kib.len() < RSS_GROWTH_MIN_SAMPLES {
+        // A quartile has no sample yet; report insufficiency so the caller
+        // fails closed instead of indexing or silently accepting the run.
+        return RssGrowthDecision {
+            verdict: RssGrowthVerdict::InsufficientSamples,
+            window_samples: 0,
+            preceding_sum_kib: 0,
+            tail_sum_kib: 0,
+            noise_sum_kib: 0,
+        };
+    }
+
+    let window_samples = rss_kib.len() / RSS_GROWTH_QUARTILE_DIVISOR;
+    let tail_start = rss_kib.len() - window_samples;
+    let preceding_start = tail_start - window_samples;
+    let preceding_sum_kib = rss_kib[preceding_start..tail_start]
+        .iter()
+        .map(|value| u128::from(*value))
+        .sum::<u128>();
+    let tail_sum_kib = rss_kib[tail_start..]
+        .iter()
+        .map(|value| u128::from(*value))
+        .sum::<u128>();
+    let window_samples_u64 = u64::try_from(window_samples).unwrap_or(u64::MAX);
+    let noise_sum_kib =
+        u128::from(RSS_GROWTH_NOISE_BAND_KIB).saturating_mul(u128::from(window_samples_u64));
+    let verdict = if tail_sum_kib > preceding_sum_kib.saturating_add(noise_sum_kib) {
+        RssGrowthVerdict::Growing
+    } else {
+        RssGrowthVerdict::Stable
+    };
+
+    RssGrowthDecision {
+        verdict,
+        window_samples,
+        preceding_sum_kib,
+        tail_sum_kib,
+        noise_sum_kib,
+    }
 }
 
 #[derive(Debug)]
@@ -953,38 +1035,56 @@ fn rule_measurements(counts: &Counts, floors: &Floors, samples: &[Sample]) -> Re
         ));
     }
 
-    let rss_series = samples
+    let rss_values = samples
         .iter()
-        .map(|sample| sample.rss_kib.to_string())
+        .map(|sample| sample.rss_kib)
+        .collect::<Vec<_>>();
+    let rss_series = rss_values
+        .iter()
+        .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     println!("rss_kib_series=[{rss_series}]");
-    let nondecreasing = samples
+    let nondecreasing = rss_values.windows(2).all(|window| window[1] >= window[0]);
+    let rises = rss_values
         .windows(2)
-        .all(|window| window[1].rss_kib >= window[0].rss_kib);
-    let rises = samples
-        .windows(2)
-        .filter(|window| window[1].rss_kib > window[0].rss_kib)
+        .filter(|window| window[1] > window[0])
         .count();
-    let falls = samples
+    let falls = rss_values
         .windows(2)
-        .filter(|window| window[1].rss_kib < window[0].rss_kib)
+        .filter(|window| window[1] < window[0])
         .count();
-    let rss_delta_kib = match (samples.first(), samples.last()) {
-        (Some(first), Some(last)) => i128::from(last.rss_kib) - i128::from(first.rss_kib),
+    let rss_delta_kib = match (rss_values.first(), rss_values.last()) {
+        (Some(first), Some(last)) => i128::from(*last) - i128::from(*first),
         _ => 0,
     };
+    let rss_growth = decide_rss_growth(&rss_values);
     println!(
-        "rss_rule samples={} rises={} falls={} nondecreasing={} delta_kib={rss_delta_kib}",
+        "rss_rule samples={} rises={} falls={} nondecreasing={} delta_kib={rss_delta_kib} \
+         window_samples={} preceding_sum_kib={} tail_sum_kib={} noise_band_kib={} \
+         noise_sum_kib={} verdict={}",
         samples.len(),
         rises,
         falls,
-        nondecreasing
+        nondecreasing,
+        rss_growth.window_samples,
+        rss_growth.preceding_sum_kib,
+        rss_growth.tail_sum_kib,
+        RSS_GROWTH_NOISE_BAND_KIB,
+        rss_growth.noise_sum_kib,
+        rss_growth.verdict.label()
     );
-    if nondecreasing && rises > 0 {
-        failures.push(format!(
-            "RSS climbed monotonically across the measured series: rises={rises}, falls={falls}, delta_kib={rss_delta_kib}"
-        ));
+    match rss_growth.verdict {
+        RssGrowthVerdict::Growing => failures.push(format!(
+            "RSS kept growing into the final quartile: window_samples={} preceding_sum_kib={} \
+             tail_sum_kib={} noise_band_kib={RSS_GROWTH_NOISE_BAND_KIB}",
+            rss_growth.window_samples, rss_growth.preceding_sum_kib, rss_growth.tail_sum_kib
+        )),
+        RssGrowthVerdict::InsufficientSamples => failures.push(format!(
+            "RSS growth rule needs at least {RSS_GROWTH_MIN_SAMPLES} samples, got {}",
+            samples.len()
+        )),
+        RssGrowthVerdict::Stable => {}
     }
 
     if failures.is_empty() {
@@ -1274,7 +1374,177 @@ async fn run(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+fn expect_rss_verdict(samples: &[u64], expected: RssGrowthVerdict) -> Result<(), String> {
+    let actual = decide_rss_growth(samples);
+    if actual.verdict == expected {
+        Ok(())
+    } else {
+        Err(format!("expected {expected:?}, got {actual:?}"))
+    }
+}
+
+fn rss_one_step_then_flat_is_stable() -> Result<(), String> {
+    let mut samples = vec![9_864];
+    samples.extend([9_916; 36]);
+    expect_rss_verdict(&samples, RssGrowthVerdict::Stable)
+}
+
+fn rss_four_steps_then_long_plateau_is_stable() -> Result<(), String> {
+    let mut samples = vec![12_288; 2];
+    samples.extend([12_352; 9]);
+    samples.push(12_388);
+    samples.extend([12_452; 16]);
+    samples.extend([12_512; 21]);
+    expect_rss_verdict(&samples, RssGrowthVerdict::Stable)
+}
+
+fn rss_sub_noise_drift_is_stable() -> Result<(), String> {
+    let mut samples = vec![12_520, 12_524];
+    samples.extend([12_528; 35]);
+    expect_rss_verdict(&samples, RssGrowthVerdict::Stable)
+}
+
+fn rss_bounded_oscillation_is_stable() -> Result<(), String> {
+    let mut samples = vec![12_160];
+    for _ in 0..10 {
+        samples.extend([12_348, 12_160]);
+    }
+    samples.extend([12_160; 13]);
+    samples.extend([12_224, 12_288, 12_348]);
+
+    let rises = samples
+        .windows(2)
+        .filter(|window| window[1] > window[0])
+        .count();
+    let falls = samples
+        .windows(2)
+        .filter(|window| window[1] < window[0])
+        .count();
+    if (rises, falls) != (13, 10) {
+        return Err(format!(
+            "oscillation vector has rises={rises} falls={falls}, expected 13 and 10"
+        ));
+    }
+    expect_rss_verdict(&samples, RssGrowthVerdict::Stable)
+}
+
+fn rss_constant_series_is_stable() -> Result<(), String> {
+    expect_rss_verdict(&[10_000; 40], RssGrowthVerdict::Stable)
+}
+
+fn rss_strict_increase_is_growth() -> Result<(), String> {
+    let samples = (0_u64..37)
+        .map(|index| 10_000 + index * 100)
+        .collect::<Vec<_>>();
+    expect_rss_verdict(&samples, RssGrowthVerdict::Growing)
+}
+
+fn rss_final_third_resumes_growth() -> Result<(), String> {
+    let mut samples = vec![10_000; 24];
+    samples.extend((10_100_u64..=11_300).step_by(100));
+    expect_rss_verdict(&samples, RssGrowthVerdict::Growing)
+}
+
+fn rss_staircase_reaches_last_sample() -> Result<(), String> {
+    let samples = (0_u64..37)
+        .map(|index| 10_000 + index / 3 * 100)
+        .collect::<Vec<_>>();
+    expect_rss_verdict(&samples, RssGrowthVerdict::Growing)
+}
+
+fn rss_short_series_is_insufficient() -> Result<(), String> {
+    expect_rss_verdict(
+        &[10_000, 10_100, 10_200],
+        RssGrowthVerdict::InsufficientSamples,
+    )
+}
+
+type RssRuleTest = (&'static str, fn() -> Result<(), String>);
+
+const RSS_RULE_TESTS: &[RssRuleTest] = &[
+    (
+        "rss_rule::one_step_then_flat_is_stable",
+        rss_one_step_then_flat_is_stable,
+    ),
+    (
+        "rss_rule::four_steps_then_long_plateau_is_stable",
+        rss_four_steps_then_long_plateau_is_stable,
+    ),
+    (
+        "rss_rule::sub_noise_drift_is_stable",
+        rss_sub_noise_drift_is_stable,
+    ),
+    (
+        "rss_rule::bounded_oscillation_is_stable",
+        rss_bounded_oscillation_is_stable,
+    ),
+    (
+        "rss_rule::constant_series_is_stable",
+        rss_constant_series_is_stable,
+    ),
+    (
+        "rss_rule::strict_increase_is_growth",
+        rss_strict_increase_is_growth,
+    ),
+    (
+        "rss_rule::final_third_resumes_growth",
+        rss_final_third_resumes_growth,
+    ),
+    (
+        "rss_rule::staircase_reaches_last_sample",
+        rss_staircase_reaches_last_sample,
+    ),
+    (
+        "rss_rule::short_series_is_insufficient",
+        rss_short_series_is_insufficient,
+    ),
+];
+
+fn rss_rule_tests_requested() -> bool {
+    let mut arguments = env::args().skip(1);
+    arguments.next().as_deref() == Some("--test-threads=1") && arguments.next().is_none()
+}
+
+fn run_rss_rule_tests() -> ExitCode {
+    let mut passed = 0_usize;
+    let mut failed = 0_usize;
+    println!("running {} tests", RSS_RULE_TESTS.len());
+
+    for (name, test) in RSS_RULE_TESTS {
+        match test() {
+            Ok(()) => {
+                passed += 1;
+                println!("test {name} ... ok");
+            }
+            Err(error) => {
+                failed += 1;
+                println!("test {name} ... FAILED: {error}");
+            }
+        }
+    }
+
+    println!();
+    if failed == 0 {
+        println!(
+            "test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        );
+        ExitCode::SUCCESS
+    } else {
+        println!(
+            "test result: FAILED. {passed} passed; {failed} failed; 0 ignored; 0 measured; 0 filtered out"
+        );
+        ExitCode::FAILURE
+    }
+}
+
 fn main() -> ExitCode {
+    // This bench has `harness = false`, so `cargo test --bench soak` executes
+    // this main. Reserve libtest's exact serial flag for the pure RSS vectors;
+    // that path returns before argument parsing or any database setup.
+    if rss_rule_tests_requested() {
+        return run_rss_rule_tests();
+    }
+
     let args = match Args::parse() {
         Ok(args) => args,
         Err(error) => {

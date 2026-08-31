@@ -26,19 +26,19 @@ use std::time::Duration;
 pub(crate) async fn connect_socket(
     addr: &Addr,
     port: u16,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] tcp_user_timeout: Option<
-        Duration,
-    >,
+    tcp_user_timeout: Option<Duration>,
     keepalive_config: Option<&KeepaliveConfig>,
     #[cfg_attr(not(unix), allow(unused_variables))] require_peer: Option<&str>,
 ) -> Result<Socket, Error> {
     match addr {
-        Addr::Tcp(ip) => {
-            // compio's TcpStream::connect takes any `ToSocketAddrsAsync` - a
-            // `(IpAddr, u16)` tuple is directly supported.
-            let stream = TcpStream::connect((*ip, port))
-                .await
-                .map_err(Error::connect)?;
+        Addr::Tcp { ip, scope_id } => {
+            // Rebuilt through `Addr::socket_addr` rather than `SocketAddr::new`
+            // so the IPv6 zone survives into the sockaddr the kernel sees; a
+            // link-local target with scope 0 is refused with EINVAL.
+            let target = Addr::socket_addr(*ip, port, *scope_id);
+            // TCP_USER_TIMEOUT is applied inside the dial, because it only does
+            // its job if it is already on the socket when the SYN goes out.
+            let stream = dial_tcp(target, tcp_user_timeout).await?;
 
             stream.set_nodelay(true).map_err(Error::connect)?;
 
@@ -46,13 +46,10 @@ pub(crate) async fn connect_socket(
             // so the TcpStream remains usable afterwards.
             let sock_ref = SockRef::from(&stream);
 
-            #[cfg(target_os = "linux")]
-            if let Some(tcp_user_timeout) = tcp_user_timeout {
-                sock_ref
-                    .set_tcp_user_timeout(Some(tcp_user_timeout))
-                    .map_err(Error::connect)?;
-            }
-
+            // The keepalive options, unlike TCP_USER_TIMEOUT, act only on an
+            // ESTABLISHED connection, so setting them after the dial is
+            // correct. libpq sets them earlier only because it happens to hold
+            // the socket earlier, not because the ordering matters for them.
             if let Some(keepalive_config) = keepalive_config {
                 keepalive_config
                     .check_expressible()
@@ -76,6 +73,90 @@ pub(crate) async fn connect_socket(
             Ok(Socket::new_unix(socket))
         }
     }
+}
+
+/// Dial a TCP address with `TCP_USER_TIMEOUT` applied BEFORE `connect(2)`.
+///
+/// The ordering is load-bearing, not cosmetic. Linux consults
+/// `icsk_user_timeout` while the socket is still in SYN_SENT, so the option
+/// bounds the handshake only if it is already set when the SYN goes out;
+/// applied afterwards it can bound nothing but an already-established
+/// connection. libpq depends on exactly that: `setTCPUserTimeout` runs at
+/// `fe-connect.c:3427`, inside the `addr_cur->family != AF_UNIX` block, and
+/// `connect()` is not reached until `fe-connect.c:3481`.
+///
+/// Measured on Linux 6.12.90 against a blackholed address, one variable apart:
+/// with the option set beforehand `connect` fails at 3.01s for a 3000ms
+/// setting; on the same socket with the option unset it was still retrying at
+/// 19.63s. Setting it afterwards, as this function's caller used to, left a
+/// configured `tcp_user_timeout` inert during the one phase it was asked to
+/// bound - and when the dial never completed, the option was never set at all.
+///
+/// `compio::net::TcpStream::connect` only hands back a socket that is already
+/// connected, and compio-net 0.11.1's `SocketOpts` (`src/opts.rs`) carries no
+/// `TCP_USER_TIMEOUT` field, so neither entry point can set it early enough.
+/// Submitting the connect here is what makes the fd reachable before the
+/// handshake starts; it mirrors what `compio_net::Socket::connect_async` does
+/// internally, which is not reachable from outside that crate (`mod socket` is
+/// private).
+#[cfg(target_os = "linux")]
+async fn dial_tcp(
+    target: std::net::SocketAddr,
+    tcp_user_timeout: Option<Duration>,
+) -> Result<TcpStream, Error> {
+    use compio::buf::{BufResult, IntoInner};
+    use compio::driver::{ToSharedFd, op::Connect};
+    use socket2::{Domain, Protocol, SockAddr, Type};
+
+    // Without the option there is nothing to order, so take compio's own path.
+    let Some(tcp_user_timeout) = tcp_user_timeout else {
+        return TcpStream::connect(target).await.map_err(Error::connect);
+    };
+
+    let socket = socket2::Socket::new(
+        Domain::for_address(target),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )
+    .map_err(Error::connect)?;
+    // compio creates its own sockets non-blocking under the poll driver and
+    // relies on it (`compio-driver` `src/sys/poll/op.rs`); io_uring is
+    // indifferent. Setting it keeps this socket correct under either.
+    socket.set_nonblocking(true).map_err(Error::connect)?;
+    SockRef::from(&socket)
+        .set_tcp_user_timeout(Some(tcp_user_timeout))
+        .map_err(Error::connect)?;
+
+    let attacher = compio::runtime::Attacher::new(socket).map_err(Error::connect)?;
+    let BufResult(result, op) = compio::runtime::submit(Connect::new(
+        attacher.to_shared_fd(),
+        SockAddr::from(target),
+    ))
+    .await;
+    // The submitted op holds its own clone of the shared fd, so it has to be
+    // dropped before the socket below can be reclaimed.
+    drop(op);
+    result.map_err(Error::connect)?;
+
+    let socket = attacher.into_inner().try_unwrap().map_err(|_| {
+        Error::connect(io::Error::other(
+            "the dialled socket was still shared after its connect completed",
+        ))
+    })?;
+    // Attaching a second time is a no-op on this path: `Proactor::attach`
+    // documents "io-uring & polling: it will do nothing but return Ok(())".
+    TcpStream::from_std(std::net::TcpStream::from(socket)).map_err(Error::connect)
+}
+
+/// libpq's `setTCPUserTimeout` is guarded by `#ifdef TCP_USER_TIMEOUT`, so on a
+/// platform without the option the dial is not bounded there either. Matching
+/// that is the point: the parameter is refused or honoured, never emulated.
+#[cfg(not(target_os = "linux"))]
+async fn dial_tcp(
+    target: std::net::SocketAddr,
+    _tcp_user_timeout: Option<Duration>,
+) -> Result<TcpStream, Error> {
+    TcpStream::connect(target).await.map_err(Error::connect)
 }
 
 /// Authenticate a Unix socket before any PostgreSQL bytes cross it.
@@ -142,8 +223,10 @@ async fn check_require_peer(_stream: &UnixStream, _required: &str) -> io::Result
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use compio::io::AsyncRead;
     use compio::net::TcpListener;
-    use std::net::{IpAddr, Ipv4Addr};
+    use socket2::{Domain, Protocol, SockAddr, Type};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     /// Dial a listener this test owns, so the assertions are about the socket
     /// options and nothing else. The listener is returned so the connection
@@ -157,7 +240,10 @@ mod tests {
             .expect("bind a loopback listener");
         let addr = listener.local_addr().expect("listener address");
         let socket = connect_socket(
-            &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            &Addr::Tcp {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                scope_id: 0,
+            },
             addr.port(),
             tcp_user_timeout,
             keepalive,
@@ -166,6 +252,249 @@ mod tests {
         .await
         .expect("connect to the loopback listener");
         (socket, listener)
+    }
+
+    fn io_cause(error: &Error) -> &io::Error {
+        std::error::Error::source(error)
+            .and_then(|cause| cause.downcast_ref::<io::Error>())
+            .expect("the connect error must retain its I/O cause")
+    }
+
+    /// Nagle's algorithm changes latency, not protocol correctness, so a
+    /// connection with `TCP_NODELAY` accidentally left off passes every startup
+    /// and query test. Read the option from the descriptor that will carry the
+    /// `PostgreSQL` session instead of inferring it from successful traffic.
+    #[compio::test]
+    async fn tcp_connections_enable_nodelay() {
+        let (socket, _listener) = dial(None, None).await;
+
+        let fd = socket.borrowed_fd();
+        assert!(
+            SockRef::from(&fd).tcp_nodelay().expect("read TCP_NODELAY"),
+            "connect_socket left Nagle's algorithm enabled"
+        );
+    }
+
+    /// The hand-built socket path is entered only when `TCP_USER_TIMEOUT` is
+    /// configured. Existing IPv6 coverage takes the ordinary compio path, so
+    /// forcing this branch to create an IPv4 socket remains invisible until an
+    /// IPv6 target and a user timeout are exercised together.
+    #[compio::test]
+    async fn tcp_user_timeout_dial_uses_the_target_address_family() {
+        let Some((ip, scope_id)) = first_link_local_address() else {
+            panic!(
+                "fixture unusable: /proc/net/if_inet6 lists no scope-link address, so the manual \
+                 IPv6 dial cannot be exercised"
+            );
+        };
+
+        let outcome = compio::time::timeout(
+            Duration::from_secs(2),
+            connect_socket(
+                &Addr::Tcp { ip, scope_id },
+                5432,
+                Some(Duration::from_secs(1)),
+                None,
+                None,
+            ),
+        )
+        .await;
+
+        if let Ok(Err(error)) = outcome {
+            let cause = io_cause(&error);
+            assert!(
+                !cause
+                    .to_string()
+                    .contains("Address family not supported by protocol"),
+                "the manual dial created an IPv4 socket for IPv6 target {ip}: {cause}"
+            );
+        }
+    }
+
+    /// `io_uring` accepts a blocking descriptor and loopback connects complete
+    /// immediately, masking the fact that compio's poll driver requires the
+    /// manually-created socket to carry `O_NONBLOCK`. Read back the flag on the
+    /// exact branch that creates the socket itself.
+    #[compio::test]
+    async fn tcp_user_timeout_dial_returns_a_nonblocking_socket() {
+        let (socket, _listener) = dial(None, Some(Duration::from_secs(7))).await;
+
+        let fd = socket.borrowed_fd();
+        assert!(
+            SockRef::from(&fd).nonblocking().expect("read O_NONBLOCK"),
+            "the manual TCP_USER_TIMEOUT dial returned a blocking socket"
+        );
+    }
+
+    /// An elapsed-time assertion cannot distinguish ETIMEDOUT from a fabricated
+    /// ECONNREFUSED, and no existing test sends the manual socket path to a
+    /// closed port. Exercise both outcomes through that same path so neither
+    /// error kind can be substituted for the other.
+    #[compio::test]
+    async fn manual_tcp_dial_distinguishes_refusal_from_timeout() {
+        const BLACKHOLE: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        const PORT: u16 = 5432;
+        const STILL_HANGING: Duration = Duration::from_secs(4);
+        const BOUND: Duration = Duration::from_secs(2);
+
+        // Keep a socket bound but not listening so the port cannot be reused
+        // between choosing it and dialing it. Linux answers a SYN to this port
+        // with RST, which is the refused control.
+        let closed_port = socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+            .expect("create a closed-port fixture socket");
+        closed_port
+            .bind(&SockAddr::from(SocketAddr::from(([127, 0, 0, 1], 0))))
+            .expect("reserve a closed loopback port");
+        let refused_addr = closed_port
+            .local_addr()
+            .expect("closed-port fixture address")
+            .as_socket()
+            .expect("closed-port fixture is an IP socket");
+        let refused = connect_socket(
+            &Addr::Tcp {
+                ip: refused_addr.ip(),
+                scope_id: 0,
+            },
+            refused_addr.port(),
+            Some(Duration::from_secs(2)),
+            None,
+            None,
+        )
+        .await
+        .expect_err("a port with no listener accepted a connection");
+        assert_eq!(
+            io_cause(&refused).kind(),
+            io::ErrorKind::ConnectionRefused,
+            "a closed loopback port must report connection refused"
+        );
+
+        let control = compio::time::timeout(
+            STILL_HANGING,
+            connect_socket(
+                &Addr::Tcp {
+                    ip: BLACKHOLE,
+                    scope_id: 0,
+                },
+                PORT,
+                None,
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            control.is_err(),
+            "fixture unusable: {BLACKHOLE} did not blackhole for {STILL_HANGING:?}"
+        );
+
+        let timed_out = compio::time::timeout(
+            STILL_HANGING * 2,
+            connect_socket(
+                &Addr::Tcp {
+                    ip: BLACKHOLE,
+                    scope_id: 0,
+                },
+                PORT,
+                Some(BOUND),
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("TCP_USER_TIMEOUT did not settle the blackholed dial")
+        .expect_err("a blackholed address reported a successful connection");
+        assert_eq!(
+            io_cause(&timed_out).kind(),
+            io::ErrorKind::TimedOut,
+            "a TCP_USER_TIMEOUT expiry must remain distinguishable from refusal"
+        );
+    }
+
+    /// `set_tcp_keepalive` applies `SO_KEEPALIVE`, idle, and interval before the
+    /// retry count. A retry count that becomes -1 at the Linux socket boundary
+    /// therefore fails only after the descriptor is partially configured. The
+    /// error must be returned and the unusable connection must be closed.
+    #[compio::test]
+    async fn a_late_keepalive_error_is_returned_and_closes_the_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener address");
+        let config = KeepaliveConfig {
+            idle: Duration::from_secs(11),
+            interval: Some(Duration::from_secs(3)),
+            retries: Some(u32::MAX),
+        };
+
+        let error = connect_socket(
+            &Addr::Tcp {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                scope_id: 0,
+            },
+            addr.port(),
+            None,
+            Some(&config),
+            None,
+        )
+        .await
+        .expect_err("a late keepalive setsockopt failure was swallowed");
+        assert_eq!(error.to_string(), "error connecting to server");
+        assert_eq!(
+            io_cause(&error).kind(),
+            io::ErrorKind::InvalidInput,
+            "Linux must expose the rejected TCP_KEEPCNT as EINVAL"
+        );
+
+        let (mut peer, _) = compio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("accepting the partially configured connection timed out")
+            .expect("accept the partially configured connection");
+        let compio::BufResult(result, _buffer) =
+            compio::time::timeout(Duration::from_secs(2), peer.read(vec![0u8; 1]))
+                .await
+                .expect("the failed client left its socket open");
+        assert_eq!(
+            result.expect("read from the partially configured connection"),
+            0,
+            "a socket whose keepalive configuration failed was not closed"
+        );
+    }
+
+    /// The existing requirepeer test proves that a wrong name is rejected and
+    /// names both users, but any I/O error kind satisfies those assertions.
+    /// `PermissionDenied` is the stable signal callers can distinguish from a
+    /// missing socket or an NSS lookup failure.
+    #[compio::test]
+    async fn requirepeer_mismatch_is_permission_denied() {
+        let directory = tempfile::tempdir().expect("create a Unix socket directory");
+        let port = 5432;
+        let path = directory.path().join(format!(".s.PGSQL.{port}"));
+        let _listener = compio::net::UnixListener::bind(path)
+            .await
+            .expect("bind a Unix listener");
+        let actual = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+            .expect("look up the current operating-system user")
+            .expect("the current user ID has no passwd-database entry")
+            .name;
+        let required = format!("{actual}-definitely-not-the-peer");
+
+        let error = connect_socket(
+            &Addr::Unix(directory.path().to_path_buf()),
+            port,
+            None,
+            None,
+            Some(&required),
+        )
+        .await
+        .expect_err("a wrong requirepeer name connected");
+        let cause = io_cause(&error);
+        assert_eq!(cause.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            cause.to_string(),
+            format!(
+                "requirepeer specifies \"{required}\", but actual peer user name is \"{actual}\""
+            )
+        );
     }
 
     /// The keepalive values a caller configures must reach the kernel, not just
@@ -189,17 +518,19 @@ mod tests {
             "a configured keepalive left SO_KEEPALIVE off"
         );
         assert_eq!(
-            sock_ref.keepalive_time().expect("read TCP_KEEPIDLE"),
+            sock_ref.tcp_keepalive_time().expect("read TCP_KEEPIDLE"),
             Duration::from_secs(11),
             "keepalive idle did not reach the kernel"
         );
         assert_eq!(
-            sock_ref.keepalive_interval().expect("read TCP_KEEPINTVL"),
+            sock_ref
+                .tcp_keepalive_interval()
+                .expect("read TCP_KEEPINTVL"),
             Duration::from_secs(3),
             "keepalive interval did not reach the kernel"
         );
         assert_eq!(
-            sock_ref.keepalive_retries().expect("read TCP_KEEPCNT"),
+            sock_ref.tcp_keepalive_retries().expect("read TCP_KEEPCNT"),
             5,
             "keepalive retry count did not reach the kernel"
         );
@@ -276,7 +607,10 @@ mod tests {
                 .expect("bind a loopback listener");
             let addr = listener.local_addr().expect("listener address");
             let socket = connect_socket(
-                &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                &Addr::Tcp {
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    scope_id: 0,
+                },
                 addr.port(),
                 None,
                 Some(&config),
@@ -297,20 +631,168 @@ mod tests {
             // "skip the zero" must not degrade into "skip the whole config".
             if zeroed != "idle" {
                 assert_eq!(
-                    sock_ref.keepalive_time().expect("read TCP_KEEPIDLE"),
+                    sock_ref.tcp_keepalive_time().expect("read TCP_KEEPIDLE"),
                     Duration::from_secs(11),
                     "a zero keepalives_{zeroed} discarded the idle value beside it"
                 );
             }
             if zeroed != "count" {
                 assert_eq!(
-                    sock_ref.keepalive_retries().expect("read TCP_KEEPCNT"),
+                    sock_ref.tcp_keepalive_retries().expect("read TCP_KEEPCNT"),
                     5,
                     "a zero keepalives_{zeroed} discarded the retry count beside it"
                 );
             }
             drop(listener);
         }
+    }
+
+    /// `tcp_user_timeout` has to bound the DIAL, not just an established
+    /// connection. Linux reads `icsk_user_timeout` while the socket is in
+    /// SYN_SENT, so the option only does that job if it is already set when the
+    /// SYN goes out; applied after `connect(2)` returns it cannot bound a
+    /// handshake that never finishes, and the tests above cannot see the
+    /// difference because they all dial a listener that answers immediately.
+    ///
+    /// THE CONTROL LEG IS WHAT MAKES THE ASSERTION MEAN ANYTHING. It dials the
+    /// same address with no `tcp_user_timeout` and requires that it is STILL
+    /// hanging, proving the address really does swallow SYNs here. Without it a
+    /// host that answers this address with a RST would let the bounded leg
+    /// return quickly for entirely the wrong reason, and the test would pass
+    /// against the very defect it exists to catch.
+    #[compio::test]
+    async fn tcp_user_timeout_bounds_a_dial_that_never_completes() {
+        // RFC 5737 reserves 192.0.2.0/24 for documentation, so no host answers
+        // and the SYN is dropped rather than refused.
+        const BLACKHOLE: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        const PORT: u16 = 5432;
+        // Comfortably under the kernel's own SYN budget, which is six retries
+        // by default (net.ipv4.tcp_syn_retries) and runs past two minutes.
+        const STILL_HANGING: Duration = Duration::from_secs(4);
+        const BOUND: Duration = Duration::from_secs(2);
+
+        let control = compio::time::timeout(
+            STILL_HANGING,
+            connect_socket(
+                &Addr::Tcp {
+                    ip: BLACKHOLE,
+                    scope_id: 0,
+                },
+                PORT,
+                None,
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            control.is_err(),
+            "fixture unusable: dialling {BLACKHOLE} settled within \
+             {STILL_HANGING:?}, so it does not blackhole on this host and the \
+             bounded leg below would prove nothing"
+        );
+
+        let started = std::time::Instant::now();
+        let bounded = compio::time::timeout(
+            STILL_HANGING * 2,
+            connect_socket(
+                &Addr::Tcp {
+                    ip: BLACKHOLE,
+                    scope_id: 0,
+                },
+                PORT,
+                Some(BOUND),
+                None,
+                None,
+            ),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        bounded
+            .expect("tcp_user_timeout did not bound the dial at all")
+            .expect_err("a blackholed address reported a successful connection");
+        assert!(
+            elapsed < STILL_HANGING,
+            "tcp_user_timeout={BOUND:?} took {elapsed:?}, past the \
+             {STILL_HANGING:?} that the SAME dial survives with no timeout set, \
+             so the option is not reaching the socket before the SYN"
+        );
+    }
+
+    /// The IPv6 zone must reach the KERNEL, not just the `Addr`.
+    ///
+    /// `resolution_keeps_the_ipv6_zone` (connect.rs) proves the zone survives
+    /// resolution; this proves the dial still carries it. They are separate
+    /// failures: `SocketAddr::new(ip, port)` builds a `SocketAddrV6` with
+    /// scope 0, so the zone can be preserved perfectly right up to the dial
+    /// and still be discarded there.
+    ///
+    /// The oracle is EINVAL specifically, not success. Measured here against a
+    /// listener bound to a real link-local address, one variable apart: scope 0
+    /// fails instantly with `Invalid argument` before any packet leaves, while
+    /// the correct scope is accepted by the kernel and the connection is
+    /// attempted (it then goes unanswered, which is why "did not connect" is
+    /// not the assertion).
+    #[compio::test]
+    async fn a_link_local_dial_carries_its_zone_to_the_kernel() {
+        let Some((ip, scope_id)) = first_link_local_address() else {
+            panic!(
+                "fixture unusable: /proc/net/if_inet6 lists no scope-link (scope 20) \
+                 address on this host, so there is nothing to dial and this test \
+                 would prove nothing"
+            );
+        };
+
+        // Nothing needs to listen: the defect fires in the kernel's address
+        // check, before a SYN is built.
+        let outcome = compio::time::timeout(
+            Duration::from_secs(2),
+            connect_socket(&Addr::Tcp { ip, scope_id }, 5432, None, None, None),
+        )
+        .await;
+
+        if let Ok(Err(error)) = &outcome {
+            let text = {
+                let mut text = error.to_string();
+                let mut source = std::error::Error::source(error);
+                while let Some(cause) = source {
+                    text.push_str(&format!(": {cause}"));
+                    source = std::error::Error::source(cause);
+                }
+                text
+            };
+            assert!(
+                !text.contains("Invalid argument"),
+                "dialling {ip} (zone {scope_id}) was refused with EINVAL ({text}), \
+                 which is what the kernel answers when a link-local destination \
+                 carries scope 0 - the zone did not reach the sockaddr"
+            );
+        }
+    }
+
+    /// The first scope-link address in `/proc/net/if_inet6`, with its ifindex.
+    ///
+    /// Read from procfs rather than hardcoded because the address is
+    /// machine-specific. Format is `<32 hex nibbles> <ifindex hex> <prefixlen
+    /// hex> <scope hex> <flags hex> <device>`, and scope `20` is
+    /// `IPV6_ADDR_LINKLOCAL`.
+    fn first_link_local_address() -> Option<(IpAddr, u32)> {
+        let table = std::fs::read_to_string("/proc/net/if_inet6").ok()?;
+        table.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let packed = fields.next()?;
+            let ifindex = u32::from_str_radix(fields.next()?, 16).ok()?;
+            let _prefixlen = fields.next()?;
+            if fields.next()? != "20" {
+                return None;
+            }
+            let mut segments = [0u16; 8];
+            for (segment, chunk) in segments.iter_mut().zip(packed.as_bytes().chunks(4)) {
+                *segment = u16::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+            }
+            Some((IpAddr::V6(segments.into()), ifindex))
+        })
     }
 
     /// A DSN's values must reach the kernel IN LIBPQ'S UNITS.
@@ -343,17 +825,19 @@ mod tests {
         let fd = socket.borrowed_fd();
         let sock_ref = SockRef::from(&fd);
         assert_eq!(
-            sock_ref.keepalive_time().expect("read TCP_KEEPIDLE"),
+            sock_ref.tcp_keepalive_time().expect("read TCP_KEEPIDLE"),
             Duration::from_secs(11),
             "keepalives_idle is documented in seconds"
         );
         assert_eq!(
-            sock_ref.keepalive_interval().expect("read TCP_KEEPINTVL"),
+            sock_ref
+                .tcp_keepalive_interval()
+                .expect("read TCP_KEEPINTVL"),
             Duration::from_secs(3),
             "keepalives_interval is documented in seconds"
         );
         assert_eq!(
-            sock_ref.keepalive_retries().expect("read TCP_KEEPCNT"),
+            sock_ref.tcp_keepalive_retries().expect("read TCP_KEEPCNT"),
             5,
             "keepalives_count is a plain count"
         );
@@ -366,16 +850,20 @@ mod tests {
         );
     }
 
-    /// A sub-second keepalive is not expressible: `TCP_KEEPIDLE` and
-    /// `TCP_KEEPINTVL` take whole seconds, and socket2 converts a `Duration`
-    /// with `as_secs()`, which TRUNCATES (socket2 0.5.10,
-    /// `src/sys/unix.rs:1324`). So 500ms reaches the kernel as 0, which Linux
-    /// refuses with EINVAL - surfacing as an opaque failed connection rather
-    /// than a statement about the value the caller chose. `Duration::ZERO` is
-    /// the "leave it unset" sentinel and is handled separately; the gap was
-    /// every non-zero value below one second.
+    /// A keepalive that is not a whole number of seconds is not expressible:
+    /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` take whole seconds, and socket2
+    /// converts a `Duration` with `as_secs()`, which TRUNCATES (socket2 0.6.3,
+    /// `src/sys/unix.rs:1294`).
+    ///
+    /// That truncation fails in two ways, and both are covered below. Under one
+    /// second it reaches the kernel as 0, which Linux refuses with EINVAL,
+    /// surfacing as an opaque failed connection rather than a statement about
+    /// the value the caller chose. At or above one second it is ACCEPTED at the
+    /// truncated value, which is worse: 1500ms becomes 1s and 59_999ms becomes
+    /// 59s with nothing reported, so the caller cannot find out. `Duration::ZERO`
+    /// is the "leave it unset" sentinel and is handled separately.
     #[compio::test]
-    async fn a_sub_second_keepalive_is_refused_by_name() {
+    async fn a_keepalive_that_is_not_whole_seconds_is_refused_by_name() {
         for (label, config) in [
             (
                 "keepalives_idle",
@@ -393,20 +881,45 @@ mod tests {
                     retries: None,
                 },
             ),
+            // A FRACTIONAL value above one second is the same defect: 1500ms
+            // truncates to 1s and 59_999ms to 59s, so the caller silently gets
+            // a different keepalive from the one they asked for. Keying the
+            // guard to `as_secs() == 0` catches only the values that reach the
+            // kernel as 0; the quantity the rule is about is the sub-second
+            // remainder.
+            (
+                "keepalives_idle",
+                KeepaliveConfig {
+                    idle: Duration::from_millis(1500),
+                    interval: None,
+                    retries: None,
+                },
+            ),
+            (
+                "keepalives_interval",
+                KeepaliveConfig {
+                    idle: Duration::from_secs(10),
+                    interval: Some(Duration::from_millis(59_999)),
+                    retries: None,
+                },
+            ),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind a loopback listener");
             let addr = listener.local_addr().expect("listener address");
             let error = connect_socket(
-                &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                &Addr::Tcp {
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    scope_id: 0,
+                },
                 addr.port(),
                 None,
                 Some(&config),
                 None,
             )
             .await
-            .expect_err("a sub-second keepalive was accepted");
+            .expect_err("a keepalive that is not whole seconds was accepted");
             let chain = {
                 let mut text = error.to_string();
                 let mut source = std::error::Error::source(&error);

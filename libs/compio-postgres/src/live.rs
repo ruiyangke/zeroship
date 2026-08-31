@@ -13,10 +13,12 @@
 //! early return without clearing the scheduler. The cycle that leaves -
 //! inner -> scheduler -> task -> `Submit` -> inner - is never collected, so the
 //! `Proactor` is never dropped either. Measured 2026-08-20 over 24 cycles by
-//! reading `/proc/self/fd` targets: one connection per runtime leaks exactly
-//! three descriptors, and they are `anon_inode:[io_uring]`,
-//! `anon_inode:[eventfd]` and the socket. Two connections leak four. The law is
-//! `connections + 2` and it is guarded in
+//! reading `/proc/self/fd` targets: over plaintext, one connection per runtime
+//! leaks exactly three descriptors, and they are `anon_inode:[io_uring]`,
+//! `anon_inode:[eventfd]` and the socket. Two connections leak four. Measured
+//! 2026-08-27 over the 20 cycles in the guard below, TLS's exact one-connection
+//! shape is the eventfd plus socket, with no retained ring; its two-connection
+//! cost is still four. These exact transport-specific shapes are guarded in
 //! `tests/integration.rs::a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection`.
 //!
 //! None of that is specific to postgres: a bare `compio::net::TcpStream` read

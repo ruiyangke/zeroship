@@ -104,6 +104,10 @@ impl Statement {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    pub(crate) fn owner(&self) -> Option<Arc<InnerClient>> {
+        self.0.client.upgrade()
+    }
+
     pub(crate) fn may_enter_copy_in(&self) -> bool {
         self.0.may_enter_copy_in
     }

@@ -501,6 +501,7 @@ async fn read_timeout_during_command_recovery_keeps_command_classification() {
 async fn command_timeout_recovers_without_a_read_timeout() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
         let url = live_url();
+        let transport = common::test_transport(&url, common::suite_tls()).await;
         let mut connection_config: Config = url.parse().expect("parse PG_TEST_URL");
         connection_config
             .connect_timeout(CONNECT_TIMEOUT)
@@ -516,7 +517,7 @@ async fn command_timeout_recovers_without_a_read_timeout() {
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
         let mut client = pool.get().await.expect("check out live PostgreSQL session");
-        let backend_pid = client.process_id();
+        let announced_pid = client.process_id();
 
         let error = compio::time::timeout(
             LIVE_OPERATION_WATCHDOG,
@@ -539,11 +540,7 @@ async fn command_timeout_recovers_without_a_read_timeout() {
         .await
         .expect("same-client follow-up exceeded its watchdog")
         .expect("command timeout did not recover the held client");
-        assert_eq!(
-            row.get::<_, i32>(0),
-            backend_pid,
-            "follow-up query ran on a replacement physical session"
-        );
+        transport.assert_backend_pid(announced_pid, row.get(0), "command/read-timeout recovery");
         assert_eq!(row.get::<_, i32>(1), 42);
         assert!(!client.is_closed());
 

@@ -211,6 +211,72 @@ async fn copy_in_works_on_the_serialized_loop() {
         .await;
 }
 
+/// PostgreSQL can fail after CopyInResponse but before it reads the first
+/// frontend COPY frame. The opening extended-query Sync then completes error
+/// recovery, while the driver's already-queued CopyDone + Sync earns one more
+/// ReadyForQuery. That protocol-required second reply belongs to the same COPY
+/// exchange and must not be mistaken for the next request's response.
+#[compio::test]
+async fn a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query() {
+    let (client, split_refused) = serialized_client_with_probe().await;
+    let table = common::test_object_name("cpg post copy response error");
+    let function = common::test_object_name("cpg post copy response error function");
+    let trigger = common::test_object_name("cpg post copy response error trigger");
+
+    client
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table} (n int);
+             CREATE FUNCTION pg_temp.{function}() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 PERFORM pg_sleep(1);
+                 RAISE EXCEPTION USING
+                     ERRCODE = 'P0001',
+                     MESSAGE = 'post-G failure';
+             END
+             $$;
+             CREATE TRIGGER {trigger}
+             BEFORE INSERT ON {table}
+             FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.{function}();"
+        ))
+        .await
+        .expect("create delayed COPY IN failure fixture");
+
+    let sink = client
+        .copy_in::<_, bytes::Bytes>(&format!("COPY {table} FROM STDIN"))
+        .await
+        .expect("PostgreSQL must enter COPY IN before the trigger fails");
+    let mut sink = std::pin::pin!(sink);
+    let error = compio::time::timeout(std::time::Duration::from_secs(5), sink.as_mut().finish())
+        .await
+        .expect("COPY IN failure did not finish")
+        .expect_err("the delayed trigger unexpectedly accepted COPY IN");
+    assert_eq!(
+        error.code().map(compio_postgres::error::SqlState::code),
+        Some("P0001"),
+        "COPY IN lost the post-G server error: {}",
+        common::error_chain(&error)
+    );
+    assert!(
+        split_refused.get(),
+        "this test is not on the serialized loop"
+    );
+
+    let follow_up = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.query_one("SELECT 7::int4", &[]),
+    )
+    .await
+    .expect("the post-G COPY error stranded the serialized session");
+    let row = follow_up.unwrap_or_else(|error| {
+        panic!(
+            "a post-G COPY error left a second ReadyForQuery: {}",
+            common::error_chain(&error)
+        )
+    });
+    assert_eq!(row.get::<_, i32>(0), 7);
+}
+
 /// Portal paging on this loop.
 #[compio::test]
 async fn portal_paging_works_on_the_serialized_loop() {

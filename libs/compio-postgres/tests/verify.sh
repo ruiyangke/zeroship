@@ -125,6 +125,42 @@ else
     failures=$((failures + 1))
 fi
 
+# The RSS growth vectors decide whether a soak run is a leak or a plateau. They
+# live in a `harness = false` bench, so NO `cargo test -p compio-postgres` run
+# reaches them - measured 2026-08-28: that command emits 7 `test result:` lines
+# per server and none of them is this one. `run_mode` cannot host them either,
+# because its inventory step passes `-- --list`, which this bench answers with a
+# usage error rather than a listing. Left to a runbook they would simply rot, so
+# the matrix invokes them under the one argv that reaches them.
+rss_log=$(mktemp)
+PG_TEST_URL="$pg_url" cargo test -p compio-postgres --bench soak \
+    -- --test-threads=1 > "$rss_log" 2>&1
+rss_rc=$?
+read -r rss_passed rss_failed <<<"$(awk '
+    /^test result:/ { passed += $4; failed += $6 }
+    END { printf "%d %d\n", passed, failed }' "$rss_log")"
+
+# Floor, not an equality: adding a vector must not turn this red, removing one
+# must. A run that matches nothing prints the same "ok" as a run that passed.
+rss_floor=9
+if [ "$rss_failed" -ne 0 ]; then
+    printf '%-26s ruled_on=%s FAILED (%s)\n' "rss-growth-rule" "$rss_passed" "$rss_failed"
+    printf '  log: %s\n' "$rss_log"
+    failures=$((failures + 1))
+elif [ "$rss_passed" -lt "$rss_floor" ]; then
+    printf '%-26s ruled_on=%s BELOW FLOOR of %s - vectors went missing\n' \
+        "rss-growth-rule" "$rss_passed" "$rss_floor"
+    printf '  log: %s\n' "$rss_log"
+    failures=$((failures + 1))
+elif [ "$rss_rc" -ne 0 ]; then
+    printf '%-26s ruled_on=%s FAILED (exit %s with no failing vector)\n' \
+        "rss-growth-rule" "$rss_passed" "$rss_rc"
+    printf '  log: %s\n' "$rss_log"
+    failures=$((failures + 1))
+else
+    printf '%-26s ruled_on=%s ok\n' "rss-growth-rule" "$rss_passed"
+fi
+
 echo
 if [ "$failures" -eq 0 ]; then
     echo "VERIFY: all modes green"

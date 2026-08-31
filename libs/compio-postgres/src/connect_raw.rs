@@ -21,13 +21,15 @@ use crate::buf_stream::BufStream;
 use crate::cancel_token::CancelKey;
 use crate::client::{Client, StatementCacheSettings};
 use crate::codec::{
-    BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
+    BackendMessage, BackendMessages, FrontendMessage, read_backend_detached_async_frames,
+    write_frontend,
 };
 use crate::config::{
     self, AuthMethod, Config, ProtocolVersion, ReplicationMode, TargetSessionAttrs,
 };
-use crate::connect_tls::{Encryption, negotiate_tls};
+use crate::connect_tls::negotiate_tls;
 use crate::connection::Connection;
+use crate::encryption::Encryption;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{ServerVerification, TlsConnect, TlsStream};
 use bytes::{Bytes, BytesMut};
@@ -239,10 +241,15 @@ where
     async fn next(&mut self) -> Result<Option<Message>, Error> {
         loop {
             if let Some(body) = self.pending.take_raw_frame(b'v').map_err(Error::parse)? {
-                if self.phase != HandshakePhase::AwaitingAuthentication {
-                    return Err(protocol_error(
-                        "PostgreSQL sent NegotiateProtocolVersion after authentication began",
-                    ));
+                match self.phase {
+                    HandshakePhase::AwaitingAuthentication
+                    | HandshakePhase::Authenticating
+                    | HandshakePhase::ReadingStartupInfo => {}
+                    HandshakePhase::Complete => {
+                        return Err(protocol_error(
+                            "PostgreSQL sent NegotiateProtocolVersion after startup completed",
+                        ));
+                    }
                 }
                 match self.negotiate_protocol(body) {
                     Ok(()) => continue,
@@ -277,7 +284,14 @@ where
                 return Ok(Some(m));
             }
 
-            let batch = read_backend(&mut self.stream).await?;
+            // DETACHED, not shared. A delayed async frame outlives this batch:
+            // it is queued in `self.delayed` and replayed to the connection
+            // task after the handshake. Parsing it straight out of the read
+            // buffer leaves it sharing that allocation, so a 13-byte notice
+            // keeps a grown read buffer alive in full - measured at 13 bytes
+            // pinning 1 MiB. `MAX_DELAYED_HANDSHAKE_BYTES` charges the frame,
+            // so what is charged and what is held must be the same bytes.
+            let batch = read_backend_detached_async_frames(&mut self.stream).await?;
             match batch {
                 BackendMessage::Async {
                     message: msg,
@@ -413,6 +427,9 @@ where
                 "PostgreSQL reported unrequested protocol option `{option}`"
             )));
         }
+        if let Some((_, secret_key)) = &self.backend_key {
+            Self::validate_cancel_key(protocol, secret_key)?;
+        }
 
         self.negotiation_seen = true;
         self.protocol = protocol;
@@ -433,14 +450,20 @@ where
 
         let process_id = i32::from_be_bytes(body[..4].try_into().unwrap());
         let secret_key = CancelKey::new(body.slice(4..)).map_err(Error::parse)?;
-        if self.protocol == ProtocolVersion::V3_0 && secret_key.as_bytes().len() != 4 {
+        Self::validate_cancel_key(self.protocol, &secret_key)?;
+
+        self.backend_key = Some((process_id, secret_key));
+        Ok(())
+    }
+
+    fn validate_cancel_key(protocol: ProtocolVersion, secret_key: &CancelKey) -> Result<(), Error> {
+        if protocol == ProtocolVersion::V3_0 && secret_key.as_bytes().len() != 4 {
             return Err(protocol_error(format!(
                 "PostgreSQL sent a {}-byte cancel key for protocol 3.0; expected 4 bytes",
                 secret_key.as_bytes().len()
             )));
         }
 
-        self.backend_key = Some((process_id, secret_key));
         Ok(())
     }
 
@@ -957,14 +980,15 @@ fn target_session_attrs_mismatch(message: &'static str) -> Error {
 /// (`CopyBothResponse` is not in postgres-protocol's tag list).
 ///
 /// This is exported `pub(crate)` so the replication module can reuse
-/// the handshake state machine without duplicating ~250 LOC of
-/// auth/SASL code.
+/// the handshake state machine without duplicating ~250 LOC of auth/SASL
+/// code. The returned [`BufStream`] is the SAME one that decoded startup:
+/// bytes following `ReadyForQuery` may already be in its read buffer.
 pub(crate) async fn handshake_for_replication<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
 ) -> Result<
     (
-        MaybeTlsStream<S, T>,
+        BufStream<MaybeTlsStream<S, T>>,
         i32,
         Option<CancelKey>,
         std::collections::HashMap<String, String>,
@@ -989,12 +1013,7 @@ where
     handshake.prefer_available_server_error(ssl_cert_check)?;
     let (process_id, secret_key, parameters) = read_info(&mut handshake).await?;
 
-    Ok((
-        handshake.stream.into_inner(),
-        process_id,
-        secret_key,
-        parameters,
-    ))
+    Ok((handshake.stream, process_id, secret_key, parameters))
 }
 
 /// Enforce `sslcertmode=require` only after PostgreSQL authentication succeeds.
@@ -1241,11 +1260,7 @@ where
         }
     }
 
-    // Channel binding hook: the source introspects the TlsStream via
-    // `get_ref()` on the Framed wrapper. Our BufStream exposes
-    // `get_mut()` which yields &mut MaybeTlsStream<_, T>. MaybeTlsStream
-    // implements TlsStream (forwarding to the inner T), so we can query
-    // channel_binding() directly.
+    let negotiated_encryption = handshake.stream.get_mut().negotiated_encryption();
     let tls_server_end_point = handshake
         .stream
         .get_mut()
@@ -1254,17 +1269,15 @@ where
 
     let channel_binding_cfg = config.get_channel_binding();
 
-    // Enforce `ChannelBinding::Require` *before* the mechanism is picked
-    // so we reject both downgrade shapes with a precise error instead of
-    // relying on the post-hoc `can_skip_channel_binding` check:
-    //
-    //   1. Server advertises SCRAM-SHA-256-PLUS but the TLS backend
-    //      cannot export the server endpoint (no tls-server-end-point
-    //      channel binding). Silently falling back to plain
-    //      SCRAM-SHA-256 under `prefer` would be a downgrade surface.
-    //   2. Server does not advertise SCRAM-SHA-256-PLUS at all.
-    //
-    // Both are fatal when the user asked for `require`.
+    // A plaintext PLUS offer can signal that a proxy stripped TLS. Refuse it
+    // even when channel binding was explicitly disabled, as libpq does.
+    if has_scram_plus && negotiated_encryption == Encryption::Plaintext {
+        return handshake.prefer_available_server_error(Err(Error::authentication(
+            "server offered SCRAM-SHA-256-PLUS authentication over a non-TLS connection".into(),
+        )));
+    }
+
+    // Give `require` precise errors before the general selector below.
     if channel_binding_cfg == config::ChannelBinding::Require {
         if !has_scram_plus {
             return handshake.prefer_available_server_error(Err(Error::authentication(
@@ -1278,38 +1291,36 @@ where
         }
     }
 
-    // Under `prefer`, log an operator-visible warning when the server
-    // offered -PLUS but the backend can't bind, so the silent fallback
-    // to plain SCRAM-SHA-256 is still traceable.
-    if has_scram_plus
-        && tls_server_end_point.is_none()
-        && channel_binding_cfg == config::ChannelBinding::Prefer
-    {
-        log::warn!(
-            "server offered SCRAM-SHA-256-PLUS but TLS backend did not expose \
-             tls-server-end-point channel binding; falling back to plain SCRAM-SHA-256"
-        );
-    }
-
     let channel_binding = tls_server_end_point
         .filter(|_| channel_binding_cfg != config::ChannelBinding::Disable)
         .map(sasl::ChannelBinding::tls_server_end_point);
 
-    let (channel_binding, mechanism) = if has_scram_plus {
-        match channel_binding {
-            Some(channel_binding) => (channel_binding, sasl::SCRAM_SHA_256_PLUS),
-            None => (sasl::ChannelBinding::unsupported(), sasl::SCRAM_SHA_256),
-        }
-    } else if has_scram {
-        match channel_binding {
-            Some(_) => (sasl::ChannelBinding::unrequested(), sasl::SCRAM_SHA_256),
-            None => (sasl::ChannelBinding::unsupported(), sasl::SCRAM_SHA_256),
-        }
-    } else {
-        return handshake.prefer_available_server_error(Err(Error::authentication(
-            "unsupported SASL mechanism".into(),
-        )));
-    };
+    let (channel_binding, mechanism) =
+        if has_scram_plus && channel_binding_cfg != config::ChannelBinding::Disable {
+            match channel_binding {
+                Some(channel_binding) => (channel_binding, sasl::SCRAM_SHA_256_PLUS),
+                None => {
+                    return handshake.prefer_available_server_error(Err(Error::tls(
+                        "tls-server-end-point channel binding is unavailable for SCRAM-SHA-256-PLUS"
+                            .into(),
+                    )));
+                }
+            }
+        } else if has_scram {
+            let channel_binding = if negotiated_encryption == Encryption::Tls
+                && channel_binding_cfg != config::ChannelBinding::Disable
+            {
+                // `y` lets a capable server detect a stripped PLUS advertisement.
+                sasl::ChannelBinding::unrequested()
+            } else {
+                sasl::ChannelBinding::unsupported()
+            };
+            (channel_binding, sasl::SCRAM_SHA_256)
+        } else {
+            return handshake.prefer_available_server_error(Err(Error::authentication(
+                "unsupported SASL mechanism".into(),
+            )));
+        };
 
     if mechanism != sasl::SCRAM_SHA_256_PLUS {
         handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
@@ -1504,6 +1515,7 @@ mod tests {
     struct HandshakeWriteSuccess {
         input: Vec<u8>,
         offset: usize,
+        output: Vec<u8>,
     }
 
     impl AsyncRead for HandshakeWriteSuccess {
@@ -1518,6 +1530,7 @@ mod tests {
 
     impl AsyncWrite for HandshakeWriteSuccess {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.output.extend_from_slice(buf.as_init());
             BufResult(Ok(buf.buf_len()), buf)
         }
 
@@ -1530,12 +1543,57 @@ mod tests {
         }
     }
 
+    impl TlsStream for HandshakeWriteSuccess {
+        fn channel_binding(&self) -> crate::tls::ChannelBinding {
+            crate::tls::ChannelBinding::none()
+        }
+    }
+
     fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
         frame.push(tag);
         frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
         frame.extend_from_slice(body);
         frame
+    }
+
+    const SCRAM: &[u8] = b"SCRAM-SHA-256\0\0";
+    const SCRAM_PLUS: &[u8] = b"SCRAM-SHA-256-PLUS\0\0";
+    const SCRAM_BOTH: &[u8] = b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0";
+
+    #[allow(clippy::future_not_send)] // compio test futures are thread-local.
+    async fn sasl_attempt(
+        config: &Config,
+        encryption: Encryption,
+        mechanisms: &[u8],
+    ) -> (String, String) {
+        let mut body = 10i32.to_be_bytes().to_vec();
+        body.extend_from_slice(mechanisms);
+
+        let stream = HandshakeWriteSuccess {
+            input: frame(b'R', &body),
+            offset: 0,
+            output: vec![],
+        };
+        let mut handshake = Handshake::new(
+            match encryption {
+                Encryption::Plaintext => MaybeTlsStream::Raw(stream),
+                Encryption::Tls => MaybeTlsStream::Tls(stream),
+            },
+            config,
+        );
+        let error = authenticate(&mut handshake, config, "scripted-user")
+            .await
+            .expect_err("the scripted peer never completes SCRAM");
+        let output = match handshake.stream.get_mut() {
+            MaybeTlsStream::Raw(stream) | MaybeTlsStream::Tls(stream) => {
+                std::mem::take(&mut stream.output)
+            }
+        };
+        (
+            authentication_error_chain(error),
+            String::from_utf8_lossy(&output).into_owned(),
+        )
     }
 
     fn notice(message: &str) -> Vec<u8> {
@@ -1794,6 +1852,53 @@ mod tests {
         );
     }
 
+    /// An idle PostgreSQL backend can send a FATAL ErrorResponse immediately
+    /// after ReadyForQuery, for example when `pg_terminate_backend` reaches it.
+    /// One socket read can therefore over-read the start of that frame while
+    /// decoding startup. The replication handoff must carry those bytes into
+    /// its data-phase framer; the ordinary handoff already keeps its BufStream.
+    #[compio::test]
+    async fn replication_handshake_preserves_coalesced_post_ready_bytes() {
+        let post_ready = error_response("57P01", "terminating connection after startup");
+        let mut script = successful_handshake(std::iter::empty());
+        script.extend_from_slice(&post_ready);
+
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+            output: vec![],
+        });
+        let (stream, _, _, _) = handshake_for_replication(stream, &config)
+            .await
+            .expect("scripted replication startup must succeed");
+        let mut stream = stream;
+
+        assert_eq!(
+            stream.buf().len(),
+            post_ready.len(),
+            "replication handshake discarded coalesced post-ReadyForQuery bytes"
+        );
+
+        let BackendMessage::Normal { mut messages, .. } =
+            read_backend_detached_async_frames(&mut stream)
+                .await
+                .expect("decode the preserved post-ReadyForQuery frame")
+        else {
+            panic!("a FATAL ErrorResponse is not an asynchronous frame");
+        };
+        let Some(Message::ErrorResponse(error)) =
+            messages.next().expect("parse the preserved ErrorResponse")
+        else {
+            panic!("the preserved frame was not the scripted ErrorResponse");
+        };
+        let error = Error::db(error);
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01")
+        );
+    }
+
     #[compio::test]
     async fn target_probe_write_failure_preserves_an_error_buffered_after_ready() {
         let mut script = frame(b'Z', b"I");
@@ -1831,6 +1936,7 @@ mod tests {
         let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
             input: script,
             offset: 0,
+            output: vec![],
         });
         let mut handshake = Handshake::new(stream, &config);
         handshake.phase = HandshakePhase::Complete;
@@ -2080,11 +2186,12 @@ mod tests {
         );
     }
 
-    /// Negotiation is the first server response to the startup packet. Once
-    /// authentication has begun, a later negotiation cannot change the
-    /// protocol governing already-consumed messages.
+    /// `AuthenticationOk` does not end startup. The wire contract explicitly
+    /// allows the server to decline the requested minor version afterward, so
+    /// a valid downgrade before version-shaped `BackendKeyData` must continue on
+    /// the same connection.
     #[compio::test]
-    async fn negotiation_after_authentication_is_rejected() {
+    async fn post_authentication_negotiation_continues_before_backend_key_data() {
         let mut negotiation = Vec::new();
         negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
         negotiation.extend_from_slice(&0u32.to_be_bytes());
@@ -2098,14 +2205,107 @@ mod tests {
         let config: Config = "user=scripted-user sslmode=disable"
             .parse()
             .expect("parse scripted config");
-        let error = match config.connect_raw(stream, NoTls).await {
-            Ok(_) => panic!("NegotiateProtocolVersion after authentication was accepted"),
-            Err(error) => error,
+        let (client, connection) = config
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("post-authentication protocol negotiation did not continue startup");
+
+        assert_eq!(
+            client.protocol_version(),
+            ProtocolVersion::V3_0,
+            "the post-authentication downgrade was not retained"
+        );
+        drop((client, connection));
+    }
+
+    /// Protocol negotiation remains legal between authentication exchanges.
+    /// The downgrade must be transparent to the password response and the
+    /// following `AuthenticationOk`.
+    #[compio::test]
+    async fn negotiation_during_password_authentication_continues() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &3u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'R', &0u32.to_be_bytes()));
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let mut config = plaintext_config();
+        config.password("scripted-password");
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+            output: Vec::new(),
+        });
+        let mut handshake = Handshake::new(stream, &config);
+
+        authenticate(&mut handshake, &config, "scripted-user")
+            .await
+            .expect("protocol negotiation interrupted password authentication");
+        read_info(&mut handshake)
+            .await
+            .expect("startup did not continue after the authentication downgrade");
+        assert_eq!(handshake.protocol, ProtocolVersion::V3_0);
+    }
+
+    /// A four-byte cancel key is valid under both 3.2 and 3.0, so a later
+    /// downgrade can retain it unchanged.
+    #[compio::test]
+    async fn negotiation_after_four_byte_backend_key_data_continues() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let (client, connection) = config
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("a valid four-byte cancel key prevented protocol downgrade");
+
+        assert_eq!(client.protocol_version(), ProtocolVersion::V3_0);
+        drop((client, connection));
+    }
+
+    /// `BackendKeyData` is shaped by the protocol version: 3.0 fixes the key at
+    /// four bytes while 3.2 permits a variable length. A peer cannot first have
+    /// a variable key accepted under requested 3.2 and then change the version
+    /// governing that already-consumed key.
+    #[compio::test]
+    async fn downgrade_after_variable_backend_key_data_is_rejected() {
+        let mut key_data = 1234i32.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&[0x5a; 32]);
+
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'K', &key_data));
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let Err(error) = config.connect_raw(stream, NoTls).await else {
+            panic!("protocol downgrade retained a variable-length cancel key");
         };
         let chain = authentication_error_chain(error);
         assert!(
-            chain.contains("NegotiateProtocolVersion") && chain.contains("after authentication"),
-            "the out-of-phase negotiation was not identified: {chain}"
+            chain.contains("32-byte cancel key") && chain.contains("protocol 3.0"),
+            "the cancel key was not revalidated against the negotiated version: {chain}"
         );
     }
 
@@ -3387,6 +3587,51 @@ mod tests {
         );
     }
 
+    /// A delayed async frame must not keep the handshake read buffer's whole
+    /// allocation alive after that buffer grows. `bytes 1.11.1` implements
+    /// `BytesMut::split_to` by sharing the allocation, so parsing a tiny frame
+    /// directly from an over-allocated read buffer can pin all of it.
+    #[compio::test]
+    async fn delayed_message_does_not_pin_handshake_read_allocation() {
+        const NOTIFICATION_FRAME_LEN: usize = 13;
+
+        let mut script = frame(b'A', &[0, 0, 0, 1, b'c', 0, b'p', 0]);
+        assert_eq!(script.len(), NOTIFICATION_FRAME_LEN);
+        script.extend_from_slice(&frame(b'R', &0u32.to_be_bytes()));
+
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+            output: vec![],
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.stream.buf().reserve(1024 * 1024);
+        let allocation_capacity = handshake.stream.buf().capacity();
+        let allocation_base = handshake.stream.buf().as_ptr();
+
+        assert!(matches!(
+            handshake.next().await.expect("read scripted handshake"),
+            Some(Message::AuthenticationOk)
+        ));
+        assert_eq!(handshake.delayed.len(), 1);
+        assert_eq!(handshake.delayed_bytes, NOTIFICATION_FRAME_LEN);
+
+        // The exhausted normal batch is another shared view of the read
+        // allocation. Remove it so only the delayed message can prevent the
+        // stream from reclaiming its consumed prefix.
+        handshake.pending = BackendMessages::empty();
+        assert_eq!(handshake.stream.buf().len(), 0);
+        handshake.stream.buf().reserve(allocation_capacity);
+
+        assert_eq!(
+            handshake.stream.buf().as_ptr(),
+            allocation_base,
+            "a {NOTIFICATION_FRAME_LEN}-byte delayed message pinned the handshake's \
+             {allocation_capacity}-byte read allocation"
+        );
+    }
+
     #[compio::test]
     async fn handshake_replays_a_few_delayed_notices() {
         const NOTICE_TEXTS: [&str; 3] = ["first warning", "second warning", "third warning"];
@@ -3596,6 +3841,55 @@ mod tests {
         validate_tls_connector_parameters::<crate::Socket, _>(&connector, Encryption::Tls, &strong)
             .expect_err("a connector built for sslmode=require must not serve verify-full");
     }
+
+    #[compio::test]
+    async fn scram_plus_advertised_over_plaintext_is_refused() {
+        let mut config = scram_config();
+        config.channel_binding(crate::config::ChannelBinding::Disable);
+        let (error, output) = sasl_attempt(&config, Encryption::Plaintext, SCRAM_BOTH).await;
+        assert!(
+            output.is_empty() && error.contains("non-TLS"),
+            "{error}: {output:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn scram_plus_without_tls_endpoint_does_not_fallback() {
+        let config = scram_config();
+        let (error, output) = sasl_attempt(&config, Encryption::Tls, SCRAM_BOTH).await;
+        assert!(
+            output.is_empty() && error.contains("tls-server-end-point"),
+            "{error}: {output:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn tls_without_endpoint_uses_y_for_bare_scram() {
+        let config = scram_config();
+        let (_, output) = sasl_attempt(&config, Encryption::Tls, SCRAM).await;
+        assert!(
+            output.contains("SCRAM-SHA-256") && output.contains("y,,n="),
+            "TLS without endpoint material suppressed the y downgrade sentinel: {output:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn scram_plus_only_never_selects_unadvertised_bare_mechanism() {
+        let mut config = scram_config();
+        config.channel_binding(crate::config::ChannelBinding::Disable);
+        let (error, output) = sasl_attempt(&config, Encryption::Tls, SCRAM_PLUS).await;
+        assert!(
+            output.is_empty() && error.contains("unsupported SASL mechanism"),
+            "{error}: {output:?}"
+        );
+
+        let (_, output) = sasl_attempt(&config, Encryption::Tls, SCRAM_BOTH).await;
+        assert!(
+            output.contains("SCRAM-SHA-256") && output.contains("n,,n="),
+            "disable did not select the advertised bare mechanism with n: {output:?}"
+        );
+    }
+
     /// `channel_binding=require` refuses a server that never offers
     /// SCRAM-SHA-256-PLUS, and says SO.
     ///

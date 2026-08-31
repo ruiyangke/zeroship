@@ -63,16 +63,23 @@
 //! its ordered ciphertext queue are therefore shared through `SharedSession`.
 //! `ConnectionRelease::drop` leases that live state without holding its state
 //! mutex, serializes the alert, sends it nonblocking on the owned dup, and only
-//! then calls `shutdown(Both)`. It skips the alert if an earlier TLS write is
-//! still in flight, because overtaking that record would make the alert
-//! invalid. Every step remains best effort because `Drop` has no caller to
-//! report an error to and the physical session is ending regardless.
+//! then calls `shutdown(Both)`. It skips the alert if another TLS operation
+//! holds the session lease, because waiting in `Drop` can deadlock while
+//! overtaking that operation would make the alert invalid. Every step remains
+//! best effort because `Drop` has no caller to report an error to and the
+//! physical session is ending regardless.
 
 use std::{
     fmt,
     net::Shutdown,
     sync::{Arc, Weak},
 };
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TLS_BEFORE_SHUTDOWN_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Shuts down the connection's socket when dropped.
 ///
@@ -88,6 +95,22 @@ pub(crate) struct ConnectionRelease {
     /// socket. Present only when this physical connection negotiated TLS.
     #[cfg(feature = "tls")]
     tls_session: Option<crate::tls_sansio::SharedSession>,
+    /// Serializes "serialize the alert, send it, THEN shut the socket down"
+    /// against the connection-side guard, which runs the identical sequence on
+    /// the SAME socket.
+    ///
+    /// Losing the shutdown race is harmless; losing it MID-SEQUENCE is not.
+    /// `take_close_notify` sets `close_notify_sent`, so serializing the alert
+    /// CONSUMES it: if the other guard shuts the socket between our serialize
+    /// and our send, the alert is destroyed and cannot be regenerated, and the
+    /// session ends with the reset this machinery exists to avoid.
+    ///
+    /// A blocking mutex is safe here even though one holder is a `Drop`: the
+    /// critical section is a serialize, one non-blocking send and a
+    /// `shutdown(2)`, and it never waits on the rustls session, which is taken
+    /// with `try_with`.
+    #[cfg(feature = "tls")]
+    alert_then_shutdown: Arc<parking_lot::Mutex<()>>,
 }
 
 impl fmt::Debug for ConnectionRelease {
@@ -104,6 +127,9 @@ impl fmt::Debug for ConnectionRelease {
 #[derive(Clone)]
 pub(crate) struct ConnectionDropRelease {
     socket: Weak<socket2::Socket>,
+    /// Shared with the client-side guard; see its field for why.
+    #[cfg(feature = "tls")]
+    alert_then_shutdown: Arc<parking_lot::Mutex<()>>,
     /// The same live rustls state the client-side release carries. This guard
     /// needs it for the same reason: every exit it covers ends the physical
     /// session, and ending a TLS session without an alert makes the server log
@@ -147,13 +173,24 @@ fn send_close_notify_on(
 
     // Keep the exclusive lease through the synchronous sends so no
     // connection-task write can change the record sequence between
-    // serialization and delivery. `with` does not keep its state mutex locked
-    // while rustls invokes caller-supplied crypto or logging callbacks. A
-    // callback panic poisons the rustls state; catch it here because this
-    // best-effort Drop path must still reach the socket shutdown.
+    // serialization and delivery. Never wait for that lease: its holder can
+    // be in a caller-supplied rustls callback waiting for this Drop. A callback
+    // panic poisons the rustls state; catch it here because this best-effort
+    // Drop path must still reach the socket shutdown.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session.with(|session| {
-            let ciphertext = session.take_close_notify()?;
+        session.try_with(|tls| {
+            let ciphertext = tls.take_close_notify()?;
+
+            // TERMINAL FROM HERE, and set WHILE THIS LEASE IS STILL HELD.
+            // The lease is released when this closure ends, but the socket
+            // shutdown happens outside it, and in that window a concurrent
+            // writer could otherwise acquire the session and put a record
+            // BEHIND the alert - which the peer must never see. Setting it
+            // after `try_with` returns would leave exactly that gap; setting
+            // it before would make `try_with` refuse its own lease and send
+            // no alert at all.
+            session.mark_close_notify_sent();
+
             let mut remaining = ciphertext.as_slice();
             while !remaining.is_empty() {
                 #[cfg(target_os = "linux")]
@@ -172,6 +209,12 @@ fn send_close_notify_on(
             Ok(())
         })
     }));
+    #[cfg(test)]
+    TLS_BEFORE_SHUTDOWN_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().take() {
+            probe();
+        }
+    });
 }
 
 /// Duplicates the descriptor behind `handle` and takes ownership of the copy.
@@ -217,7 +260,7 @@ impl ConnectionRelease {
     /// one of them could go red. Now each arm carries a bound, an accessor and
     /// a `map`, so the next field cannot diverge between them.
     ///
-    /// One `Into` bound covers both because socket2 0.5.10 - the resolved
+    /// One `Into` bound covers both because socket2 0.6.3 - the resolved
     /// version - implements `From<OwnedFd>` and `From<OwnedSocket>` for
     /// `Socket` in `sys/unix.rs` and `sys/windows.rs` respectively.
     fn from_owned(owned: impl Into<socket2::Socket>) -> Self {
@@ -225,6 +268,8 @@ impl ConnectionRelease {
             socket: Arc::new(owned.into()),
             #[cfg(feature = "tls")]
             tls_session: None,
+            #[cfg(feature = "tls")]
+            alert_then_shutdown: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 }
@@ -264,6 +309,10 @@ impl ConnectionRelease {
             // session, so it gets the same handle rather than nothing.
             #[cfg(feature = "tls")]
             tls_session: self.tls_session.clone(),
+            // The SAME lock, not a second one: it exists to order this guard
+            // against the client-side one.
+            #[cfg(feature = "tls")]
+            alert_then_shutdown: Arc::clone(&self.alert_then_shutdown),
         }
     }
 
@@ -285,6 +334,21 @@ impl ConnectionRelease {
         // With it in `Drop` only, every one of those ended a TLS session with
         // no alert, and the later `Drop` could not make up for it - by then
         // this socket is already down and the send fails.
+        // NON-BLOCKING, and the whole pair is inside it. The other guard runs
+        // this same alert-then-shutdown pair on this same socket, and a
+        // shutdown landing between our serialize and our send destroys an
+        // alert that cannot be rebuilt.
+        //
+        // On contention we do NOTHING rather than wait: the holder is already
+        // committed to both steps, so it delivers the alert AND the shutdown.
+        // Waiting here instead would be a blocking wait inside a `Drop`, which
+        // is the very thing `try_with` exists to avoid - and it deadlocks
+        // outright when the holder is parked mid-sequence.
+        #[cfg(feature = "tls")]
+        let Some(_ordered) = self.alert_then_shutdown.try_lock() else {
+            return;
+        };
+
         #[cfg(feature = "tls")]
         self.send_close_notify();
 
@@ -312,6 +376,14 @@ impl ConnectionDropRelease {
     /// main connection task to finish its teardown.
     pub(crate) fn shutdown(&self) {
         if let Some(socket) = self.socket.upgrade() {
+            // Same lock, same non-blocking rule, same reason as the client
+            // half: the pair must not interleave with the other guard's pair,
+            // and the loser defers to a holder already committed to both steps.
+            #[cfg(feature = "tls")]
+            let Some(_ordered) = self.alert_then_shutdown.try_lock() else {
+                return;
+            };
+
             // The alert first, then the shutdown, in that order and for the
             // same reason as the client half: once the socket is down for
             // reading there is nothing left to write the alert through.

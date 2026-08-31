@@ -4,16 +4,19 @@
 
 #![allow(clippy::doc_overindented_list_items)]
 
-use crate::Socket;
-use crate::connect::{connect, with_connect_timeout};
-use crate::connect_raw::connect_raw;
-use crate::connect_tls::Encryption;
+// This module is a LEAF: configuration data and DSN parsing, nothing else.
+//
+// `Config::connect` and `Config::connect_raw` used to live here, which put the
+// crate's most depended-upon module (17 dependents) inside a 16-module
+// dependency cycle for the sake of about 55 lines. Rust allows an inherent
+// `impl` in any module of the defining crate, so those two methods now live in
+// `connect.rs` beside the code they call. The public API is unchanged.
+//
+// Keep it that way: if a new method here needs `connect`, `Client`,
+// `Connection` or a TLS type, it belongs in `connect.rs` instead.
+use crate::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::keepalive::KeepaliveConfig;
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
-use crate::{Client, Connection, Error};
-use compio::io::{AsyncRead, AsyncWrite};
 use std::borrow::Cow;
 #[cfg(unix)]
 use std::ffi::OsStr;
@@ -620,8 +623,9 @@ pub enum Host {
 ///     libpq, the setting is ignored on TCP connections.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
 ///     path to the directory containing Unix domain sockets. On Linux, `@` selects the abstract Unix-socket namespace.
-///     Otherwise, it is treated as a hostname. Multiple hosts can be specified, separated by commas. Each host will be
-///     tried in turn when connecting. Required if connecting with the `connect` method.
+///     Otherwise, it is treated as a hostname. Multiple hosts can be specified, separated by commas. By default they
+///     are tried in order; `load_balance_hosts=random` randomizes them. Either `host` or `hostaddr` is required by
+///     this driver's `connect` method.
 /// * `sslnegotiation` - TLS negotiation method. If set to `direct`, the client
 ///     will perform direct TLS handshake, this only works for PostgreSQL 17 and
 ///     newer.
@@ -637,17 +641,18 @@ pub enum Host {
 ///     If this parameter is not specified, the value of `host` will be looked up to find the corresponding IP address,
 ///     or if host specifies an IP address, that value will be used directly.
 ///     Using `hostaddr` allows the application to avoid a host name look-up, which might be important in applications
-///     with time constraints. However, a host name is required for TLS certificate verification.
+///     with time constraints. However, a host name is required for
+///     `verify-full` TLS certificate verification.
 ///     Specifically:
 ///         * If `hostaddr` is specified without `host`, the value for `hostaddr` gives the server network address.
-///             The connection attempt will fail if the authentication method requires a host name;
+///             The connection attempt will fail with `sslmode=verify-full`;
 ///         * If `host` is specified without `hostaddr`, a host name lookup occurs;
 ///         * If both `host` and `hostaddr` are specified, the value for `hostaddr` gives the server network address.
-///             The value for `host` is ignored unless the authentication method requires it,
-///             in which case it will be used as the host name.
+///             The value for `host` remains the TLS/SNI identity and the host
+///             used for password-file matching.
 /// * `port` - The port to connect to. Multiple ports can be specified, separated by commas. The number of ports must be
-///     either 1, in which case it will be used for all hosts, or the same as the number of hosts. Defaults to 5432 if
-///     omitted or the empty string.
+///     either 1, in which case it will be used for all configured endpoints, or the same as the number of `host` or
+///     `hostaddr` entries. Defaults to 5432 if omitted or the empty string.
 /// * `connect_timeout` - The time limit in seconds applied to each address tried, covering TLS negotiation, startup,
 ///     and authentication, and applied once more to each host entry's name resolution. Hostnames can resolve to
 ///     multiple IP addresses, and the limit restarts for each, as libpq's does. Defaults to no timeout.
@@ -713,7 +718,7 @@ pub enum Host {
 /// where this driver connects, and as whom, comes from the `Config` or the connection string.
 ///
 /// That is not only a preference here, it is a workspace rule with a gate behind it: a published
-/// library takes resolved options from its caller, and `crates/core/tests/config_env_access_gate.rs`
+/// library takes resolved options from its caller, and `crates/zeroship-core/tests/config_env_access_gate.rs`
 /// rejects a raw environment read anywhere in this crate's sources, against an exemption list that
 /// is deliberately empty.
 ///
@@ -972,15 +977,17 @@ impl Config {
         self.ssl_key_log_file.as_deref()
     }
 
-    /// Sets the largest single backend message this connection will accept.
+    /// Sets the largest single backend message accepted for application
+    /// traffic after connection setup.
     ///
-    /// Defaults to 64 MB. The cap exists because a message's length field is
-    /// read BEFORE its body, so a server claiming a multi-GB message would
-    /// otherwise have the driver allocate for it; rejecting on the header
-    /// bounds that for nothing.
+    /// Startup, authentication, and target-session probing always use the
+    /// default ceiling. The data phase defaults to 64 MiB. The cap exists
+    /// because a message's length field is read BEFORE its body, so a server
+    /// claiming a multi-GB message would otherwise have the driver allocate
+    /// for it; rejecting on the header bounds that for nothing.
     ///
     /// Raise it when the rows are genuinely large - PostgreSQL will send a
-    /// single value of up to 1 GB, and at the default such a value cannot be
+    /// single value of up to 1 GiB, and at the default such a value cannot be
     /// read at all. Raising it trades that ceiling for the memory a hostile or
     /// broken server could make one connection reserve, so raise it to what
     /// the data needs rather than to the maximum.
@@ -990,7 +997,7 @@ impl Config {
     }
 
     /// Gets the configured maximum message size, if one was set. `None` means
-    /// the 64 MB default applies.
+    /// the 64 MiB default applies.
     pub fn get_max_message_size(&self) -> Option<usize> {
         self.max_message_size
     }
@@ -1367,8 +1374,8 @@ impl Config {
 
     /// Sets the oldest PostgreSQL wire protocol the connection may use.
     ///
-    /// Defaults to [`ProtocolVersion::V3_0`], allowing a server that does not
-    /// support the requested maximum to negotiate the connection down to 3.0.
+    /// Defaults to [`ProtocolVersion::V3_0`], allowing a server with protocol
+    /// negotiation support to negotiate the connection down to 3.0.
     pub fn min_protocol_version(&mut self, version: ProtocolVersion) -> &mut Config {
         self.min_protocol_version = version;
         self
@@ -1390,8 +1397,10 @@ impl Config {
     /// Requesting 3.2 by default is worth the divergence because 3.2 is what
     /// carries the longer cancel key; 3.0's is a fixed 32 bits, which is
     /// brute-forceable, and that is why upstream lengthened it. Nothing is lost
-    /// against an older server: the server answers `NegotiateProtocolVersion`
-    /// and the session continues on 3.0.
+    /// when a peer answers `NegotiateProtocolVersion`: the session continues on
+    /// 3.0. `PostgreSQL` versions before 9.3.21 reject the newer minor, and other
+    /// peers without negotiation support may do the same; use
+    /// `max_protocol_version=3.0` for those peers.
     ///
     /// The fallback was measured in every shape this driver is deployed in,
     /// because a default that breaks a pooler is not a default: direct to
@@ -1470,10 +1479,13 @@ impl Config {
 
     /// Adds a host to the configuration.
     ///
-    /// Multiple hosts can be specified by calling this method multiple times, and each will be tried in order. On Unix
-    /// systems, a host starting with a `/` is interpreted as a path to a directory containing Unix domain sockets.
-    /// On Linux, a host starting with `@` selects the abstract Unix-socket namespace.
-    /// There must be either no hosts, or the same number of hosts as hostaddrs.
+    /// Multiple hosts can be specified by calling this method multiple times.
+    /// They are tried in insertion order unless
+    /// [`LoadBalanceHosts::Random`] is selected. On Unix systems, a host
+    /// starting with a `/` is interpreted as a path to a directory containing
+    /// Unix domain sockets. On Linux, a host starting with `@` selects the
+    /// abstract Unix-socket namespace. When both hosts and hostaddrs are
+    /// present, they must have the same length.
     pub fn host(&mut self, host: impl Into<String>) -> &mut Config {
         let host = host.into();
 
@@ -1529,8 +1541,10 @@ impl Config {
 
     /// Adds a hostaddr to the configuration.
     ///
-    /// Multiple hostaddrs can be specified by calling this method multiple times, and each will be tried in order.
-    /// There must be either no hostaddrs, or the same number of hostaddrs as hosts.
+    /// Multiple hostaddrs can be specified by calling this method multiple
+    /// times. They are tried in insertion order unless
+    /// [`LoadBalanceHosts::Random`] is selected. When both hostaddrs and hosts
+    /// are present, they must have the same length.
     pub fn hostaddr(&mut self, hostaddr: IpAddr) -> &mut Config {
         self.hostaddr.push(Some(hostaddr));
         self
@@ -1538,9 +1552,10 @@ impl Config {
 
     /// Adds a port to the configuration.
     ///
-    /// Multiple ports can be specified by calling this method multiple times. There must either be no ports, in which
-    /// case the default of 5432 is used, a single port, in which it is used for all hosts, or the same number of ports
-    /// as hosts.
+    /// Multiple ports can be specified by calling this method multiple times.
+    /// There must either be no ports, in which case the default of 5432 is
+    /// used, a single port, in which case it is used for every endpoint, or the
+    /// same number of ports as configured host or hostaddr entries.
     pub fn port(&mut self, port: u16) -> &mut Config {
         self.port.push(port);
         self
@@ -1614,8 +1629,8 @@ impl Config {
         self
     }
 
-    /// Gets the TCP user timeout, if one has been set with the
-    /// `user_timeout` method.
+    /// Gets the TCP user timeout, if one has been set with
+    /// [`Config::tcp_user_timeout`].
     pub fn get_tcp_user_timeout(&self) -> Option<&Duration> {
         self.tcp_user_timeout.as_ref()
     }
@@ -1794,11 +1809,6 @@ impl Config {
             // Empty selects the compiled default. Clearing is observable when
             // it overrides an earlier occurrence in the same string.
             self.port.clear();
-            return Ok(());
-        }
-
-        const EMPTY_MEANS_UNSET: &[&str] = &["statement_cache_capacity", "max_message_size"];
-        if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
             return Ok(());
         }
 
@@ -2425,68 +2435,6 @@ impl Config {
 
         Ok(())
     }
-
-    /// Opens a connection to a PostgreSQL database.
-    pub async fn connect<T>(&self, tls: T) -> Result<(Client, Connection<Socket, T::Stream>), Error>
-    where
-        T: MakeTlsConnect<Socket>,
-    {
-        connect(tls, self).await
-    }
-
-    /// Connects to a PostgreSQL database over an arbitrary stream.
-    ///
-    /// Uses the startup, authentication, timeout, statement-cache, TLS mode,
-    /// `sslsni`, and `sslcertmode` settings. A configured `requirepeer` is
-    /// refused because an arbitrary stream exposes neither its address family
-    /// nor peer credentials. Transport-address settings such as `host`,
-    /// `hostaddr`, `port`, keepalives, and `tcp_user_timeout` are ignored. The
-    /// connect timeout starts with TLS negotiation, covers startup and
-    /// authentication, and cannot cover the caller's work to open that stream.
-    /// The read timeout is installed only after startup succeeds.
-    ///
-    /// The caller owns the stream, so this entry point cannot open a second
-    /// one. `allow` and `prefer` are therefore reduced to the transport they
-    /// attempt *first* - plaintext and TLS respectively - with no reconnect if
-    /// it fails. Use [`Config::connect`] to get the fallback.
-    pub async fn connect_raw<S, T>(
-        &self,
-        stream: S,
-        tls: T,
-    ) -> Result<(Client, Connection<S, T::Stream>), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
-    {
-        if self.require_peer.is_some() {
-            // A generic stream does not expose an address family or peer
-            // credentials. Pretending this is a Unix socket would be unsafe,
-            // while ignoring the requested identity check would turn it into
-            // false assurance.
-            return Err(Error::config(
-                "requirepeer cannot be checked by Config::connect_raw; use Config::connect \
-                 with a Unix-domain host"
-                    .into(),
-            ));
-        }
-        self.validate_connection_settings()?;
-        // No release handle: the stream is the caller's, `S` is unconstrained,
-        // and a stream that is not a socket has no descriptor to shut down.
-        // Such a connection keeps the pre-existing behaviour - it is released
-        // when its connection task is next polled.
-        with_connect_timeout(
-            self.get_connect_timeout().copied(),
-            connect_raw(
-                stream,
-                tls,
-                Encryption::first_for(self.ssl_mode),
-                true,
-                self,
-                None,
-            ),
-        )
-        .await
-    }
 }
 
 impl FromStr for Config {
@@ -3068,6 +3016,39 @@ impl<'a> UrlParser<'a> {
         mem::take(&mut self.s)
     }
 
+    /// Take the URI authority without treating delimiters inside a leading
+    /// bracketed host as structural. libpq does not validate the bracketed
+    /// text as IPv6 here; it scans opaquely through the first `]`.
+    fn take_uri_authority(&mut self) -> &'a str {
+        let bytes = self.s.as_bytes();
+        let mut i = 0;
+        let mut item_start = true;
+
+        while i < bytes.len() {
+            if item_start && bytes[i] == b'[' {
+                let Some(close) = self.s[i + 1..].find(']') else {
+                    return self.take_all();
+                };
+                i += close + 2;
+                item_start = false;
+                continue;
+            }
+
+            match bytes[i] {
+                b'/' | b'?' => {
+                    let (authority, tail) = self.s.split_at(i);
+                    self.s = tail;
+                    return authority;
+                }
+                b',' => item_start = true,
+                _ => item_start = false,
+            }
+            i += 1;
+        }
+
+        self.take_all()
+    }
+
     fn eat_byte(&mut self) {
         self.s = &self.s[1..];
     }
@@ -3107,11 +3088,13 @@ impl<'a> UrlParser<'a> {
         };
         self.eat_byte();
 
-        // Empty means UNSET here too -- `postgres://:pw@h/db` names no user and
-        // `postgres://u:@h/db` no password. See the `"user"` arm of `param`.
+        // A syntactically absent value stays unset. A raw nonempty value that
+        // decodes to empty is still EXPLICIT, however: libpq stores that empty
+        // option and therefore does not let a service replace it.
         let mut it = creds.splitn(2, ':');
-        let user = self.decode(it.next().unwrap())?;
+        let user = it.next().unwrap();
         if !user.is_empty() {
+            let user = Self::decode(user)?;
             self.config.user(user);
             self.explicit.push("user".to_owned());
         }
@@ -3126,10 +3109,7 @@ impl<'a> UrlParser<'a> {
     }
 
     fn parse_host(&mut self) -> Result<(), Error> {
-        let host = match self.take_until(&['/', '?']) {
-            Some(host) => host,
-            None => self.take_all(),
-        };
+        let host = self.take_uri_authority();
 
         if host.is_empty() {
             return Ok(());
@@ -3137,7 +3117,21 @@ impl<'a> UrlParser<'a> {
         let mut hosts = Vec::new();
         let mut ports = Vec::new();
 
-        for chunk in host.split(',') {
+        let mut remaining = host;
+        loop {
+            let comma = if remaining.starts_with('[') {
+                remaining.find(']').and_then(|close| {
+                    remaining[close + 1..]
+                        .find(',')
+                        .map(|comma| close + 1 + comma)
+                })
+            } else {
+                remaining.find(',')
+            };
+            let (chunk, tail) = comma.map_or((remaining, None), |comma| {
+                (&remaining[..comma], Some(&remaining[comma + 1..]))
+            });
+
             let (host, port) = if chunk.starts_with('[') {
                 let idx = match chunk.find(']') {
                     Some(idx) => idx,
@@ -3145,6 +3139,9 @@ impl<'a> UrlParser<'a> {
                 };
 
                 let host = &chunk[1..idx];
+                if host.is_empty() {
+                    return Err(Error::config_parse(InvalidValue("host").into()));
+                }
                 let remaining = &chunk[idx + 1..];
                 let port = if let Some(port) = remaining.strip_prefix(':') {
                     Some(port)
@@ -3166,7 +3163,12 @@ impl<'a> UrlParser<'a> {
             // can replace even an authority value that would be invalid if it
             // survived. The joined value preserves one port per authority
             // host; applying each one separately would make only the last win.
-            ports.push(self.decode(port.unwrap_or(""))?.into_owned());
+            ports.push(port.unwrap_or(""));
+
+            let Some(tail) = tail else {
+                break;
+            };
+            remaining = tail;
         }
 
         // libpq stores an authority option only when its assembled buffer is
@@ -3175,16 +3177,16 @@ impl<'a> UrlParser<'a> {
         // so a service may supply the missing value. In a multi-host authority
         // the comma itself makes the buffer nonempty, preserving positional
         // empty slots such as `host=a,b port=,`.
-        if !hosts.join(",").is_empty() {
-            for host in hosts {
-                self.host_param(host)?;
-            }
+        let hosts = hosts.join(",");
+        if !hosts.is_empty() {
+            self.host_params(&hosts)?;
             self.explicit.push("host".to_owned());
         }
 
         let ports = ports.join(",");
         if !ports.is_empty() {
-            self.parameters.insert("port", ports);
+            self.parameters
+                .insert("port", Self::decode(&ports)?.into_owned());
             self.explicit.push("port".to_owned());
         }
 
@@ -3203,7 +3205,7 @@ impl<'a> UrlParser<'a> {
         };
 
         if !dbname.is_empty() {
-            self.config.dbname(self.decode(dbname)?);
+            self.config.dbname(Self::decode(dbname)?);
             self.explicit.push("dbname".to_owned());
         }
 
@@ -3218,7 +3220,7 @@ impl<'a> UrlParser<'a> {
 
         while !self.s.is_empty() {
             let key = match self.take_until(&['=']) {
-                Some(key) => self.decode(key)?,
+                Some(key) => Self::decode(key)?,
                 None => return Err(Error::config_parse("unterminated parameter".into())),
             };
             self.eat_byte();
@@ -3231,7 +3233,11 @@ impl<'a> UrlParser<'a> {
                 None => self.take_all(),
             };
 
-            self.explicit.push(key.to_string());
+            if value.contains('=') {
+                return Err(Error::config_parse(
+                    format!("extra key/value separator `=` in URI query parameter: `{key}`").into(),
+                ));
+            }
 
             if key == "host" {
                 // A query-string `host=` REPLACES the authority's hosts, as
@@ -3240,43 +3246,55 @@ impl<'a> UrlParser<'a> {
                 // fails to resolve the query host and never falls back to the
                 // authority, which it could only do by having discarded it.
                 //
-                // This one key is routed through `host_param` rather than
+                // This one key is routed through `host_params` rather than
                 // `param` so a `/`-prefixed value is still recognised as a
-                // socket directory, and `host_param` appends because the
+                // socket directory, and `host_params` appends because the
                 // AUTHORITY needs it to -- so the clear belongs here, once,
                 // before the comma-separated value is applied.
                 self.config.host.clear();
-                for host in value.split(',') {
-                    self.host_param(host)?;
-                }
+                self.host_params(value)?;
+                self.explicit.push("host".to_owned());
             } else {
-                let value = self.decode(value)?.into_owned();
-                self.parameters.insert(key.into_owned(), value);
+                let value = Self::decode(value)?.into_owned();
+                if key == "ssl" && value == "true" {
+                    self.parameters.insert("sslmode", "require");
+                    self.explicit.push("sslmode".to_owned());
+                } else {
+                    self.explicit.push(key.to_string());
+                    self.parameters.insert(key.into_owned(), value);
+                }
             }
         }
 
         Ok(())
     }
 
-    /// One host from a URL authority, APPENDED to the list.
+    /// Decode and append a URL's complete `host` option.
     ///
-    /// ONE function, with only the Unix-socket branch behind a `cfg`. It was
-    /// two, and they drifted: the non-Unix one went through
-    /// `param("host", ..)`, which clears so a repeated keyword can override.
-    /// This loop runs once per host in the authority, so on Windows
-    /// `postgres://a,b/db` kept only `b` -- the same defect the port arm had,
-    /// on the one platform the tests here cannot execute.
+    /// libpq percent-decodes the whole option before its comma-list splitter
+    /// runs. Consequently `%2C` is a host separator, not a literal comma in a
+    /// host name. Decoding each authority item separately reversed that order
+    /// and tried to resolve one comma-containing name instead of two hosts.
     ///
-    /// Collapsing them puts the append on a line every platform compiles and
-    /// the Linux tests exercise, so the property cannot hold on one target and
-    /// not the other. Only the `/`-prefixed socket path is genuinely
-    /// Unix-only.
-    fn host_param(&mut self, s: &str) -> Result<(), Error> {
+    /// A wholly empty decoded option means no host list. A comma still creates
+    /// positional empty slots, just as the keyword parser does.
+    fn host_params(&mut self, s: &str) -> Result<(), Error> {
         let decoded = Self::validated_percent_decode(s)?;
+        if decoded.is_empty() {
+            return Ok(());
+        }
 
+        for host in decoded.split(|byte| *byte == b',') {
+            self.decoded_host_param(host)?;
+        }
+        Ok(())
+    }
+
+    /// Append one already-decoded host without clearing earlier list items.
+    fn decoded_host_param(&mut self, decoded: &[u8]) -> Result<(), Error> {
         #[cfg(unix)]
         if decoded.first() == Some(&b'/') {
-            self.config.host_path(OsStr::from_bytes(&decoded));
+            self.config.host_path(OsStr::from_bytes(decoded));
             return Ok(());
         }
 
@@ -3286,9 +3304,36 @@ impl<'a> UrlParser<'a> {
             return Ok(());
         }
 
-        let decoded = str::from_utf8(&decoded).map_err(|e| Error::config_parse(Box::new(e)))?;
+        let decoded = str::from_utf8(decoded).map_err(|e| Error::config_parse(Box::new(e)))?;
         self.config.host(decoded);
         Ok(())
+    }
+
+    /// Trim raw ASCII spaces at a component's boundaries and refuse one in its
+    /// interior, as libpq's `conninfo_uri_decode` does.
+    ///
+    /// `PostgreSQL` deliberately accepts boundary padding even though a strict
+    /// RFC URI would not. An interior raw space still commonly means the two
+    /// DSN syntaxes were mixed, as in
+    /// `postgres://host/zeroship read_timeout=5`. libpq rejects that outright;
+    /// this crate used to fold the whole tail into the DATABASE NAME and fail
+    /// later against the server with `database "zeroship read_timeout=5" does
+    /// not exist`, which names the symptom and not the cause. Measured against
+    /// the review container's libpq on 2026-08-26: it refuses an interior raw
+    /// space in the user, host, database and a query value alike, and accepts
+    /// `%20` in each.
+    fn trim_raw_boundary_spaces(s: &str) -> Result<&str, Error> {
+        let trimmed = s.trim_matches(' ');
+        if trimmed.contains(' ') {
+            return Err(Error::config_parse(
+                format!(
+                    "unexpected spaces found in \"{s}\", use percent-encoded \
+                     spaces (%20) instead"
+                )
+                .into(),
+            ));
+        }
+        Ok(trimmed)
     }
 
     /// Refuse a malformed percent escape, as libpq does
@@ -3301,33 +3346,6 @@ impl<'a> UrlParser<'a> {
     /// without encoding the `%` -- became a host name containing a percent
     /// sign. Silently using a different credential than the one written is the
     /// failure worth refusing.
-    /// Refuse a RAW space in a URL component, as libpq does
-    /// (`unexpected spaces found in "a b", use percent-encoded spaces (%20)
-    /// instead`).
-    ///
-    /// A space cannot appear unencoded in a URL, and accepting one turns a
-    /// mistake into a different connection rather than an error. The mistake
-    /// this catches is mixing the two DSN syntaxes - appending a keyword
-    /// setting to a URL, as in
-    /// `postgres://host/zeroship read_timeout=5`. libpq rejects that outright;
-    /// this crate used to fold the whole tail into the DATABASE NAME and fail
-    /// later against the server with `database "zeroship read_timeout=5" does
-    /// not exist`, which names the symptom and not the cause. Measured against
-    /// the review container's libpq on 2026-08-26: it refuses a raw space in the user, the
-    /// host, the database and a query value alike, and accepts `%20` in each.
-    fn validate_no_raw_spaces(s: &str) -> Result<(), Error> {
-        if s.contains(' ') {
-            return Err(Error::config_parse(
-                format!(
-                    "unexpected spaces found in \"{s}\", use percent-encoded \
-                     spaces (%20) instead"
-                )
-                .into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn validate_percent_escapes(s: &str) -> Result<(), Error> {
         let bytes = s.as_bytes();
         let mut i = 0;
@@ -3358,12 +3376,19 @@ impl<'a> UrlParser<'a> {
     /// three by hand - miss one and that component silently accepts what the
     /// others refuse.
     fn validated_percent_decode(s: &str) -> Result<Cow<'_, [u8]>, Error> {
-        Self::validate_no_raw_spaces(s)?;
+        let encoded = s;
+        let s = Self::trim_raw_boundary_spaces(s)?;
         Self::validate_percent_escapes(s)?;
-        Ok(Cow::from(percent_encoding::percent_decode(s.as_bytes())))
+        let decoded = Cow::from(percent_encoding::percent_decode(s.as_bytes()));
+        if decoded.contains(&0) {
+            return Err(Error::config_parse(
+                format!("forbidden value %00 in percent-encoded value: \"{encoded}\"").into(),
+            ));
+        }
+        Ok(decoded)
     }
 
-    fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {
+    fn decode(s: &str) -> Result<Cow<'_, str>, Error> {
         match Self::validated_percent_decode(s)? {
             Cow::Borrowed(bytes) => std::str::from_utf8(bytes)
                 .map(Cow::Borrowed)
@@ -3489,8 +3514,13 @@ mod tests {
                 "keepalives_interval",
                 "keepalives_count",
             ] {
-                if format!("host=h {key}=' 1 '").parse::<Config>().is_err() {
-                    whitespace_refused.push(key);
+                for whitespace in [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'] {
+                    if format!("host=h {key}='{whitespace}1{whitespace}'")
+                        .parse::<Config>()
+                        .is_err()
+                    {
+                        whitespace_refused.push(format!("{key} with U+{:04X}", whitespace as u32));
+                    }
                 }
                 for value in ["2147483648", "-2147483649"] {
                     if format!("host=h {key}={value}").parse::<Config>().is_ok() {
@@ -3566,9 +3596,9 @@ mod tests {
     ///
     /// Measured against the review container's libpq with the `.invalid` host read-out
     /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md` describes the
-    /// technique). The rule is per-TYPE, not uniform: every numeric option
-    /// takes empty as "not given" and uses its default, every enum option
-    /// REFUSES it, and string options keep the empty string.
+    /// technique). The rule is per-option, not uniform: `port=` selects its
+    /// compiled default, other numeric options refuse an empty value, enum
+    /// options refuse it, and string options generally keep the empty string.
     /// GSSAPI is not implemented, but that is not a reason to refuse a request
     /// to TURN IT OFF.
     ///
@@ -3584,8 +3614,8 @@ mod tests {
     /// distinction is the whole point - accepting them would be the
     /// "accepted and silently ignored" failure `libpq_parameter_parity.rs`
     /// exists to prevent.
-    /// A raw space in a URL is a MISTAKE, and the commonest one is mixing the
-    /// two DSN syntaxes: appending a keyword setting to a URL.
+    /// An interior raw space in a URL is a MISTAKE, and the commonest one is
+    /// mixing the two DSN syntaxes: appending a keyword setting to a URL.
     ///
     /// This crate used to accept it and fold the tail into the database name,
     /// so `postgres://h/zeroship read_timeout=5` connected to a database
@@ -3618,7 +3648,7 @@ mod tests {
         /// four until 2026-08-26 and would have passed with the password
         /// unchecked.
         #[test]
-        fn a_raw_space_is_refused_in_every_component() {
+        fn an_interior_raw_space_is_refused_in_every_component() {
             for dsn in [
                 "postgres://postgres@127.0.0.1:5432/zeroship read_timeout=5",
                 "postgres://post gres@127.0.0.1:5432/zeroship",
@@ -3805,6 +3835,47 @@ mod tests {
         }
 
         #[test]
+        fn a_quoted_value_containing_only_whitespace_is_preserved() {
+            let whitespace = " \t\n\u{000b}\u{000c}\r";
+            let dsn = format!("host=x.invalid application_name='{whitespace}'");
+            let config = dsn
+                .parse::<Config>()
+                .expect("quoted whitespace is ordinary value data");
+
+            assert_eq!(config.get_application_name(), Some(whitespace));
+        }
+
+        #[test]
+        fn an_unquoted_whitespace_only_value_is_empty() {
+            let whitespace = " \t\n\u{000b}\u{000c}\r";
+            let dsn = format!("host=x.invalid application_name={whitespace}");
+            let config = dsn
+                .parse::<Config>()
+                .expect("unquoted trailing whitespace is skipped");
+
+            assert_eq!(config.get_application_name(), Some(""));
+        }
+
+        #[test]
+        fn every_c_whitespace_character_is_ignored_around_equals() {
+            for whitespace in [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'] {
+                for dsn in [
+                    format!("host{whitespace}=x.invalid"),
+                    format!("host={whitespace}x.invalid"),
+                ] {
+                    let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                        panic!("C whitespace around `=` was refused in {dsn:?}: {error}")
+                    });
+                    assert_eq!(
+                        config.get_hosts(),
+                        [super::super::Host::Tcp("x.invalid".to_owned())],
+                        "C whitespace around `=` changed the host in {dsn:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn empty_identity_values_restore_their_defaults() {
             let parsed = "user=alice user='' password=secret password='' dbname=app dbname=''"
                 .parse::<Config>()
@@ -3887,6 +3958,43 @@ mod tests {
             assert!(
                 unnamed.is_empty(),
                 "empty integer values were refused without naming: {}",
+                unnamed.join(", ")
+            );
+        }
+
+        #[test]
+        fn empty_driver_numeric_values_are_rejected_by_name() {
+            let mut accepted = Vec::new();
+            let mut unnamed = Vec::new();
+            for key in ["statement_cache_capacity", "max_message_size"] {
+                for dsn in [
+                    format!("host=x.invalid {key}="),
+                    format!("postgresql://x.invalid/db?{key}="),
+                ] {
+                    match dsn.parse::<Config>() {
+                        Ok(_) => accepted.push(dsn),
+                        Err(error) => {
+                            let names_key =
+                                std::iter::successors(std::error::Error::source(&error), |cause| {
+                                    std::error::Error::source(*cause)
+                                })
+                                .any(|cause| cause.to_string().contains(key));
+                            if !names_key {
+                                unnamed.push(dsn);
+                            }
+                        }
+                    }
+                }
+            }
+
+            assert!(
+                accepted.is_empty(),
+                "empty driver numeric values were silently accepted: {}",
+                accepted.join(", ")
+            );
+            assert!(
+                unnamed.is_empty(),
+                "empty driver numeric values were refused without naming their key: {}",
                 unnamed.join(", ")
             );
         }
@@ -4967,6 +5075,15 @@ mod tests {
 mod dsn_parse_tests {
     use super::*;
 
+    fn error_chain(error: &Error) -> String {
+        std::iter::successors(std::error::Error::source(error), |cause| {
+            std::error::Error::source(*cause)
+        })
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ")
+    }
+
     fn service_file_with_host_and_port() -> tempfile::NamedTempFile {
         use std::io::Write as _;
 
@@ -4975,6 +5092,213 @@ mod dsn_parse_tests {
             .expect("write service file");
         file.flush().expect("flush service file");
         file
+    }
+
+    fn service_file_with_user() -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("create service file");
+        writeln!(file, "[uri-user]\nuser=service-user").expect("write service file");
+        file.flush().expect("flush service file");
+        file
+    }
+
+    #[test]
+    fn uri_percent_decoded_nul_is_forbidden() {
+        for dsn in [
+            "postgresql://user:a%00b@host/db",
+            "postgresql://host/d%00b",
+            "postgresql://host/db?application_name=a%00b",
+        ] {
+            let Err(error) = dsn.parse::<Config>() else {
+                panic!("percent-decoded NUL parsed in {dsn:?}");
+            };
+            let chain = error_chain(&error);
+            assert!(
+                chain.contains("forbidden value %00"),
+                "the NUL refusal did not identify the bad encoding in {dsn:?}: {chain}"
+            );
+        }
+    }
+
+    #[test]
+    fn uri_boundary_spaces_are_trimmed_before_percent_decoding() {
+        let config = "postgresql:// user : secret @ host : 5432 / db ? application_name = app "
+            .parse::<Config>()
+            .expect("libpq trims raw spaces at component boundaries");
+
+        assert_eq!(config.get_user(), Some("user"));
+        assert_eq!(config.get_password(), Some(b"secret".as_slice()));
+        assert_eq!(config.get_hosts(), [Host::Tcp("host".to_owned())]);
+        assert_eq!(config.get_ports(), [5432]);
+        assert_eq!(config.get_dbname(), Some("db"));
+        assert_eq!(config.get_application_name(), Some("app"));
+
+        let encoded = "postgresql://host/db?application_name=%20app%20"
+            .parse::<Config>()
+            .expect("percent-encoded boundary spaces are data, not padding");
+        assert_eq!(encoded.get_application_name(), Some(" app "));
+    }
+
+    #[test]
+    fn an_explicitly_blank_raw_uri_user_blocks_a_service_user() {
+        let service_file = service_file_with_user();
+        let query = format!(
+            "servicefile={}&service=uri-user",
+            service_file.path().display()
+        );
+
+        let absent = format!("postgresql://@host/db?{query}")
+            .parse::<Config>()
+            .expect("the service supplies an absent URI user");
+        assert_eq!(absent.get_user(), Some("service-user"));
+
+        let blank = format!("postgresql:// @host/db?{query}")
+            .parse::<Config>()
+            .expect("libpq accepts a raw-space URI user as explicitly blank");
+        assert_eq!(
+            blank.get_user(),
+            None,
+            "an explicitly blank URI user must not inherit the service user"
+        );
+    }
+
+    #[test]
+    fn bracketed_uri_hosts_scan_delimiters_after_the_closing_bracket() {
+        for (dsn, expected_hosts) in [
+            ("postgresql://[a,b]/db", &["a", "b"][..]),
+            ("postgresql://[a?b]/db", &["a?b"][..]),
+            ("postgresql://[a/b]/db", &["a/b"][..]),
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("libpq accepts {dsn:?}: {error}"));
+            let hosts = config
+                .get_hosts()
+                .iter()
+                .map(|host| match host {
+                    Host::Tcp(host) => host.as_str(),
+                    #[cfg(unix)]
+                    Host::Unix(path) => panic!("{dsn:?} became a Unix host: {path:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(hosts, expected_hosts, "{dsn}");
+            assert_eq!(config.get_dbname(), Some("db"), "{dsn}");
+        }
+    }
+
+    #[test]
+    fn uri_authority_port_list_is_decoded_before_parsing_items() {
+        "postgresql://first: 5432 ,second: 5433 /db"
+            .parse::<Config>()
+            .expect_err("libpq rejects spaces internal to the assembled port option");
+
+        let one = "postgresql://first: 5432 /db"
+            .parse::<Config>()
+            .expect("boundary spaces around one authority port are valid");
+        assert_eq!(one.get_ports(), [5432]);
+    }
+
+    #[test]
+    fn uri_query_rejects_a_second_raw_equals() {
+        "postgresql://host/db?application_name=a=b"
+            .parse::<Config>()
+            .expect_err("libpq rejects an extra raw key/value separator");
+
+        let encoded = "postgresql://host/db?application_name=a%3Db"
+            .parse::<Config>()
+            .expect("an encoded equals sign is ordinary value data");
+        assert_eq!(encoded.get_application_name(), Some("a=b"));
+    }
+
+    #[test]
+    fn empty_bracketed_uri_host_is_rejected() {
+        "postgresql://[]/db"
+            .parse::<Config>()
+            .expect_err("libpq rejects an empty bracketed IPv6 host");
+
+        let valid = "postgresql://[::1]/db"
+            .parse::<Config>()
+            .expect("a nonempty bracketed IPv6 host is valid");
+        assert_eq!(valid.get_hosts(), [Host::Tcp("::1".to_owned())]);
+    }
+
+    #[test]
+    fn uri_ssl_true_maps_to_sslmode_require() {
+        let config = "postgresql://host/db?ssl=true"
+            .parse::<Config>()
+            .expect("libpq supports the JDBC ssl=true URI spelling");
+        assert_eq!(config.get_ssl_mode(), SslMode::Require);
+
+        for (dsn, expected) in [
+            (
+                "postgresql://host/db?ssl=true&sslmode=disable",
+                SslMode::Disable,
+            ),
+            (
+                "postgresql://host/db?sslmode=disable&ssl=true",
+                SslMode::Require,
+            ),
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .expect("ssl=true and sslmode share one last-value-wins slot");
+            assert_eq!(config.get_ssl_mode(), expected, "{dsn}");
+        }
+
+        "postgresql://host/db?ssl=false"
+            .parse::<Config>()
+            .expect_err("only the documented ssl=true spelling is special");
+    }
+
+    #[test]
+    fn uri_percent_decoded_host_commas_split_the_host_list() {
+        for dsn in [
+            "postgresql://first%2Csecond/db",
+            "postgresql:///db?host=first%2Csecond",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("{dsn:?} did not parse: {error}"));
+            assert_eq!(
+                config.get_hosts(),
+                [
+                    Host::Tcp("first".to_owned()),
+                    Host::Tcp("second".to_owned()),
+                ],
+                "libpq decodes the host option before splitting it: {dsn:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_uri_socket_host_stays_a_unix_path() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let config = "postgresql:///db?host=%2Ftmp%2Fpostgres-%FF"
+            .parse::<Config>()
+            .expect("a percent-decoded Unix socket host need not be UTF-8");
+
+        match config.get_hosts() {
+            [Host::Unix(path)] => {
+                assert_eq!(path.as_os_str().as_bytes(), b"/tmp/postgres-\xff");
+            }
+            hosts => panic!("the URI socket host was not one Unix path: {hosts:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_uri_query_host_is_an_unset_host_list() {
+        let config = "postgresql://authority/db?host=&hostaddr=127.0.0.1,127.0.0.2"
+            .parse::<Config>()
+            .expect("an empty query host clears the authority host");
+
+        assert!(
+            config.get_hosts().is_empty(),
+            "host= must be absent, not a one-element empty host list"
+        );
+        assert_eq!(config.get_hostaddrs().len(), 2);
     }
 
     #[test]

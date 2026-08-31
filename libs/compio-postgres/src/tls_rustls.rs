@@ -618,6 +618,7 @@ fn der_tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(contents.len() + 8);
     encoded.push(tag);
     if contents.len() < 128 {
+        // Below 128, so the value is in `0..=127` and this cast is exact.
         encoded.push(contents.len() as u8);
     } else {
         let width = (usize::BITS - contents.len().leading_zeros()).div_ceil(8) as usize;
@@ -1262,6 +1263,19 @@ pub struct RustlsConnect {
     server_verification: ServerVerification,
 }
 
+impl std::fmt::Debug for RustlsConnect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RustlsConnect")
+            .field("config", &"<redacted>")
+            .field("policy_identity", &self.policy_identity)
+            .field("domain", &self.domain)
+            .field("ssl_cert_mode", &self.ssl_cert_mode)
+            .field("server_verification", &self.server_verification)
+            .finish()
+    }
+}
+
 impl<S> TlsConnect<S> for RustlsConnect
 where
     S: AsyncRead + AsyncWrite + Unpin + crate::buf_stream::SplitStream + 'static,
@@ -1339,6 +1353,19 @@ pub struct RustlsStream<S> {
     negotiated_alpn_protocol: Option<Vec<u8>>,
 }
 
+impl<S> std::fmt::Debug for RustlsStream<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tls_server_end_point = self.tls_server_end_point.as_ref().map(|_| "<redacted>");
+
+        formatter
+            .debug_struct("RustlsStream")
+            .field("tls_server_end_point", &tls_server_end_point)
+            .field("client_cert_status", &self.client_cert_status)
+            .field("negotiated_alpn_protocol", &self.negotiated_alpn_protocol)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S: AsyncRead + AsyncWrite + Unpin + 'static> AsyncRead for RustlsStream<S> {
     async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
         self.inner.read(buf).await
@@ -1381,15 +1408,11 @@ where
             client_cert_status,
             negotiated_alpn_protocol,
         } = self;
-        let (socket, session) = inner.into_parts();
-        match socket.try_into_split() {
-            Ok((read, write)) => Ok((
-                TlsReadHalf::new(read, session.clone()),
-                TlsWriteHalf::new(write, session),
-            )),
+        match inner.try_into_split() {
+            Ok((read, write)) => Ok((read, write)),
             // The socket refused, so rebuild the stream exactly as it was.
-            Err(socket) => Err(RustlsStream {
-                inner: TlsStreamCore::new(socket, session),
+            Err(inner) => Err(RustlsStream {
+                inner,
                 tls_server_end_point,
                 client_cert_status,
                 negotiated_alpn_protocol,
@@ -1530,17 +1553,232 @@ fn tls_server_end_point(cert: &CertificateDer<'_>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buf_stream::SplitStream;
+    use crate::maybe_tls_stream::MaybeTlsStream;
+    use crate::tls_sansio::handshaken_pair;
+    use compio::buf::{BufResult, IoBuf, IoBufMut};
     use compio::net::{TcpListener, TcpStream};
     use futures_channel::oneshot;
     use rustls::server::{ClientHello, ResolvesServerCert};
     use sha2::Digest;
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::io::Write as _;
     use std::sync::Mutex;
 
     /// The CA that signed [`SERVER_LOCALHOST`], and nothing else.
     const CA: &str = include_str!("../tests/data/verifier_ca.pem");
     /// A server certificate whose only subject-alternative name is `localhost`.
     const SERVER_LOCALHOST: &str = include_str!("../tests/data/verifier_server_localhost.pem");
+
+    struct ScriptedTlsSocket {
+        reads: VecDeque<Vec<u8>>,
+    }
+
+    struct DiscardTlsWriteHalf;
+
+    async fn read_scripted<B: IoBufMut>(
+        reads: &mut VecDeque<Vec<u8>>,
+        buf: B,
+    ) -> BufResult<usize, B> {
+        let Some(chunk) = reads.pop_front() else {
+            let mut empty: &[u8] = &[];
+            return AsyncRead::read(&mut empty, buf).await;
+        };
+        let mut source: &[u8] = &chunk;
+        let result = AsyncRead::read(&mut source, buf).await;
+        let consumed = chunk.len() - source.len();
+        if consumed < chunk.len() {
+            reads.push_front(chunk[consumed..].to_vec());
+        }
+        result
+    }
+
+    impl AsyncRead for ScriptedTlsSocket {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.reads, buf).await
+        }
+    }
+
+    impl AsyncWrite for ScriptedTlsSocket {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for DiscardTlsWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SplitStream for ScriptedTlsSocket {
+        type ReadHalf = Self;
+        type WriteHalf = DiscardTlsWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((self, DiscardTlsWriteHalf))
+        }
+    }
+
+    fn scripted_tls_stream(
+        client: rustls::ClientConnection,
+        reads: VecDeque<Vec<u8>>,
+    ) -> MaybeTlsStream<ScriptedTlsSocket, RustlsStream<ScriptedTlsSocket>> {
+        MaybeTlsStream::Tls(RustlsStream {
+            inner: TlsStreamCore::new(ScriptedTlsSocket { reads }, share(client)),
+            tls_server_end_point: None,
+            client_cert_status: ClientCertStatus::NotApplicable,
+            negotiated_alpn_protocol: None,
+        })
+    }
+
+    #[compio::test]
+    async fn tls_split_reassembles_a_record_across_socket_reads() {
+        const PAYLOAD: &[u8] = b"one record in two reads";
+        let (client, mut server) = handshaken_pair();
+
+        server
+            .writer()
+            .write_all(PAYLOAD)
+            .expect("queue the TLS record");
+        let mut first = Vec::new();
+        while server.wants_write() {
+            server
+                .write_tls(&mut first)
+                .expect("serialize the TLS record");
+        }
+        assert!(
+            first.len() > 3,
+            "the TLS record must extend beyond its scripted first read"
+        );
+        let second = first.split_off(3);
+
+        let stream = scripted_tls_stream(client, VecDeque::from([first, second]));
+        let Ok((mut read, _write)) = stream.try_into_split() else {
+            panic!("the scripted TLS stream refused to split");
+        };
+        let BufResult(result, buf) = read.read(vec![0u8; PAYLOAD.len()]).await;
+        let n = result.expect("decrypt the TLS record split across two socket reads");
+        assert_eq!(n, PAYLOAD.len());
+        assert_eq!(&buf[..n], PAYLOAD);
+    }
+
+    #[compio::test]
+    async fn tls_split_reports_close_notify_and_socket_eof_as_eof() {
+        let (close_client, mut close_server) = handshaken_pair();
+        close_server.send_close_notify();
+        let mut close_wire = Vec::new();
+        while close_server.wants_write() {
+            close_server
+                .write_tls(&mut close_wire)
+                .expect("serialize close_notify");
+        }
+        assert!(
+            !close_wire.is_empty(),
+            "the close_notify fixture produced no ciphertext"
+        );
+
+        let close_stream = scripted_tls_stream(close_client, VecDeque::from([close_wire]));
+        let Ok((mut close_read, _write)) = close_stream.try_into_split() else {
+            panic!("the close_notify TLS stream refused to split");
+        };
+        let BufResult(close_result, _) = close_read.read(vec![0u8; 1]).await;
+        assert_eq!(
+            close_result.expect("read the peer's close_notify"),
+            0,
+            "close_notify must end the split TLS reader"
+        );
+
+        let (eof_client, _eof_server) = handshaken_pair();
+        let eof_stream = scripted_tls_stream(eof_client, VecDeque::new());
+        let Ok((mut eof_read, _write)) = eof_stream.try_into_split() else {
+            panic!("the socket-EOF TLS stream refused to split");
+        };
+        let BufResult(eof_result, _) = eof_read.read(vec![0u8; 1]).await;
+        assert_eq!(
+            eof_result.expect("read the closed socket"),
+            0,
+            "socket EOF must end the split TLS reader"
+        );
+    }
+
+    #[compio::test]
+    async fn tls_split_preserves_ciphertext_already_read_from_socket() {
+        const BEFORE: &[u8] = b"before split";
+        let trailing = vec![b'x'; 4096];
+        let (client, mut server) = handshaken_pair();
+
+        server
+            .writer()
+            .write_all(BEFORE)
+            .expect("queue the first TLS record");
+        let mut wire = Vec::new();
+        while server.wants_write() {
+            server
+                .write_tls(&mut wire)
+                .expect("serialize the first TLS record");
+        }
+        server
+            .writer()
+            .write_all(&trailing)
+            .expect("queue the trailing TLS record");
+        while server.wants_write() {
+            server
+                .write_tls(&mut wire)
+                .expect("serialize the trailing TLS record");
+        }
+        assert!(
+            wire.len() > 4096 && wire.len() < 16 * 1024,
+            "the fixture must cross rustls' 4096-byte input window in one socket read"
+        );
+
+        let socket = ScriptedTlsSocket {
+            reads: VecDeque::from([wire]),
+        };
+        let rustls = RustlsStream {
+            inner: TlsStreamCore::new(socket, share(client)),
+            tls_server_end_point: None,
+            client_cert_status: ClientCertStatus::NotApplicable,
+            negotiated_alpn_protocol: None,
+        };
+        let mut stream: MaybeTlsStream<ScriptedTlsSocket, _> = MaybeTlsStream::Tls(rustls);
+
+        let BufResult(first, first_buf) = stream.read(vec![0u8; BEFORE.len()]).await;
+        let first = first.expect("decrypt the first TLS record");
+        assert_eq!(&first_buf[..first], BEFORE, "the split fixture is invalid");
+
+        let (mut read, _write) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the scripted TLS stream refused to split"),
+        };
+        let BufResult(second, second_buf) = read.read(vec![0u8; trailing.len()]).await;
+        let second = second.expect("decrypt the trailing TLS record after the split");
+        assert_eq!(
+            second,
+            trailing.len(),
+            "the TLS split discarded ciphertext already read from the socket"
+        );
+        assert_eq!(&second_buf[..second], trailing);
+    }
 
     thread_local! {
         static KEY_LOG_PROBE: RefCell<Option<Arc<KeyLogToFile>>> = const { RefCell::new(None) };

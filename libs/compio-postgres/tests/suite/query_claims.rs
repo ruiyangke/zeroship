@@ -33,13 +33,14 @@ async fn copy_in_close_commits_input_and_keeps_the_client_usable() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
         let process_id = client.process_id();
+        let table = common::test_object_name("query_claims_copy_close");
         client
-            .batch_execute("CREATE TEMP TABLE query_claims_copy_close (n int4 NOT NULL)")
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (n int4 NOT NULL)"))
             .await
             .expect("create COPY close fixture");
 
         let sink = client
-            .copy_in::<_, Bytes>("COPY query_claims_copy_close (n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
             .await
             .expect("start COPY input");
         let mut sink = Box::pin(sink);
@@ -51,8 +52,7 @@ async fn copy_in_close_commits_input_and_keeps_the_client_usable() {
 
         let row = client
             .query_one(
-                "SELECT pg_backend_pid(), count(*)::int8, sum(n)::int8 \
-                 FROM query_claims_copy_close",
+                &format!("SELECT pg_backend_pid(), count(*)::int8, sum(n)::int8 FROM {table}"),
                 &[],
             )
             .await
@@ -69,19 +69,19 @@ async fn copy_in_close_commits_input_and_keeps_the_client_usable() {
 async fn query_text_params_coerces_by_position_and_decodes_binary_results() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("query_claims_text_query");
         client
-            .batch_execute(
-                "CREATE TEMP TABLE query_claims_text_query (\
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (\
                      n int4 NOT NULL, enabled bool NOT NULL\
-                 )",
-            )
+                 )"
+            ))
             .await
             .expect("create query_text_params fixture");
 
         let rows = client
             .query_text_params(
-                "INSERT INTO query_claims_text_query (n, enabled) \
-                 VALUES ($1, $2) RETURNING n, enabled",
+                &format!("INSERT INTO {table} (n, enabled) VALUES ($1, $2) RETURNING n, enabled"),
                 &["42", "true"],
             )
             .await
@@ -98,18 +98,19 @@ async fn query_text_params_coerces_by_position_and_decodes_binary_results() {
 async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("query_claims_text_execute");
         client
-            .batch_execute(
-                "CREATE TEMP TABLE query_claims_text_execute (\
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (\
                      n int4 NOT NULL, optional_n int4\
-                 )",
-            )
+                 )"
+            ))
             .await
             .expect("create execute_text_params fixture");
 
         let affected = client
             .execute_text_params(
-                "INSERT INTO query_claims_text_execute (n, optional_n) VALUES ($1, $2)",
+                &format!("INSERT INTO {table} (n, optional_n) VALUES ($1, $2)"),
                 &[Some("42".to_string()), None],
             )
             .await
@@ -117,7 +118,7 @@ async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
         assert_eq!(affected, 1);
 
         let row = client
-            .query_one("SELECT n, optional_n FROM query_claims_text_execute", &[])
+            .query_one(&format!("SELECT n, optional_n FROM {table}"), &[])
             .await
             .expect("read execute_text_params result");
         assert_eq!(row.get::<_, i32>("n"), 42);
@@ -131,17 +132,18 @@ async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
 async fn row_stream_reports_affected_rows_only_after_exhaustion() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("query_claims_rows_affected");
         client
-            .batch_execute(
-                "CREATE TEMP TABLE query_claims_rows_affected (n int4 NOT NULL); \
-                 INSERT INTO query_claims_rows_affected VALUES (1), (2), (3)",
-            )
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (n int4 NOT NULL); \
+                 INSERT INTO {table} VALUES (1), (2), (3)"
+            ))
             .await
             .expect("create rows_affected fixture");
 
         let stream = client
             .query_raw(
-                "UPDATE query_claims_rows_affected SET n = n + 10 RETURNING n",
+                &format!("UPDATE {table} SET n = n + 10 RETURNING n"),
                 std::iter::empty::<&i32>(),
             )
             .await
@@ -386,12 +388,13 @@ async fn binary_copy_write_refuses_a_short_value_list() {
     use compio_postgres::types::Type;
 
     let client = connect().await;
+    let table = common::test_object_name("query_claims_binary_arity");
     client
-        .batch_execute("CREATE TEMP TABLE query_claims_binary_arity (a int4, b text)")
+        .batch_execute(&format!("CREATE TEMP TABLE {table} (a int4, b text)"))
         .await
         .expect("create the binary COPY fixture");
     let sink = client
-        .copy_in("COPY query_claims_binary_arity FROM STDIN BINARY")
+        .copy_in(&format!("COPY {table} FROM STDIN BINARY"))
         .await
         .expect("enter binary COPY");
     let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::INT4, Type::TEXT]));
@@ -432,13 +435,14 @@ async fn a_refused_binary_copy_row_leaves_nothing_behind() {
 
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("query_claims_binary_rollback");
         client
-            .batch_execute("CREATE TEMP TABLE query_claims_binary_rollback (v text)")
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (v text)"))
             .await
             .expect("create the binary COPY fixture");
 
         let sink = client
-            .copy_in("COPY query_claims_binary_rollback FROM STDIN BINARY")
+            .copy_in(&format!("COPY {table} FROM STDIN BINARY"))
             .await
             .expect("enter binary COPY");
         let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::TEXT]));
@@ -470,7 +474,7 @@ async fn a_refused_binary_copy_row_leaves_nothing_behind() {
             .expect("finish the binary COPY");
 
         let rows: Vec<String> = client
-            .query("SELECT v FROM query_claims_binary_rollback ORDER BY v", &[])
+            .query(&format!("SELECT v FROM {table} ORDER BY v"), &[])
             .await
             .expect("read back the copied rows")
             .iter()
@@ -506,13 +510,14 @@ async fn an_accepted_binary_copy_row_between_two_others_is_kept() {
 
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("query_claims_binary_control");
         client
-            .batch_execute("CREATE TEMP TABLE query_claims_binary_control (v text)")
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (v text)"))
             .await
             .expect("create the binary COPY control fixture");
 
         let sink = client
-            .copy_in("COPY query_claims_binary_control FROM STDIN BINARY")
+            .copy_in(&format!("COPY {table} FROM STDIN BINARY"))
             .await
             .expect("enter binary COPY");
         let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::TEXT]));
@@ -529,7 +534,7 @@ async fn an_accepted_binary_copy_row_between_two_others_is_kept() {
             .expect("finish the binary COPY");
 
         let rows: Vec<String> = client
-            .query("SELECT v FROM query_claims_binary_control ORDER BY v", &[])
+            .query(&format!("SELECT v FROM {table} ORDER BY v"), &[])
             .await
             .expect("read back the copied rows")
             .iter()
@@ -591,13 +596,14 @@ async fn a_binary_copy_row_refused_after_writing_bytes_leaves_no_garbage() {
 
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
+        let table = common::test_object_name("query_claims_binary_partial");
         client
-            .batch_execute("CREATE TEMP TABLE query_claims_binary_partial (v text)")
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (v text)"))
             .await
             .expect("create the partial-encode fixture");
 
         let sink = client
-            .copy_in("COPY query_claims_binary_partial FROM STDIN BINARY")
+            .copy_in(&format!("COPY {table} FROM STDIN BINARY"))
             .await
             .expect("enter binary COPY");
         let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::TEXT]));
@@ -625,7 +631,7 @@ async fn a_binary_copy_row_refused_after_writing_bytes_leaves_no_garbage() {
             .expect("a COPY carrying only accepted rows must be accepted");
 
         let rows: Vec<String> = client
-            .query("SELECT v FROM query_claims_binary_partial ORDER BY v", &[])
+            .query(&format!("SELECT v FROM {table} ORDER BY v"), &[])
             .await
             .expect("read back the copied rows")
             .iter()

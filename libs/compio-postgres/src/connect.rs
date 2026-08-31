@@ -19,13 +19,14 @@
 
 use crate::client::{Addr, Client, SocketConfig};
 use crate::config::{Host, LoadBalanceHosts, SslMode, TargetSessionAttrs};
-use crate::connect_raw::connect_raw_with_target_session_attrs;
+use crate::connect_raw::{connect_raw, connect_raw_with_target_session_attrs};
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::Encryption;
 use crate::connection::Connection;
+use crate::encryption::Encryption;
 use crate::passfile;
-use crate::tls::MakeTlsConnect;
+use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Config, Error, Socket};
+use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
 use std::borrow::Cow;
@@ -123,9 +124,13 @@ impl Endpoint {
                     )));
                 }
 
-                Ok(addrs.into_iter().map(|addr| Addr::Tcp(addr.ip())).collect())
+                Ok(addrs.into_iter().map(Addr::tcp).collect())
             }
-            EndpointTarget::Ip(ip) => Ok(vec![Addr::Tcp(*ip)]),
+            EndpointTarget::Ip(ip) => Ok(vec![Addr::Tcp {
+                ip: *ip,
+                // `hostaddr` parses as an `IpAddr`, which cannot carry a zone.
+                scope_id: 0,
+            }]),
             #[cfg(unix)]
             EndpointTarget::Unix(path) => Ok(vec![Addr::Unix(path.clone())]),
         }
@@ -514,7 +519,7 @@ where
 /// sockets use the mode's normal ordering and may be retried by their caller.
 pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryption {
     match addr {
-        Addr::Tcp(_) => Encryption::first_for(mode),
+        Addr::Tcp { .. } => Encryption::first_for(mode),
         #[cfg(unix)]
         Addr::Unix(_) => Encryption::Plaintext,
     }
@@ -525,7 +530,9 @@ pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryptio
 /// separate policy bit so `verify-full` can still require an actual `host`.
 pub(crate) fn tls_server_name(addr: &Addr, hostname: Option<&str>) -> String {
     hostname.map(str::to_owned).unwrap_or_else(|| match addr {
-        Addr::Tcp(ip) => ip.to_string(),
+        // Deliberately WITHOUT the zone: this string is the TLS server
+        // name, and a `%scope` suffix would break certificate matching.
+        Addr::Tcp { ip, .. } => ip.to_string(),
         #[cfg(unix)]
         Addr::Unix(_) => String::new(),
     })
@@ -740,7 +747,7 @@ where
         // `ServerVerification::select` REFUSES `sslmode=disable` outright
         // ("does not use TLS, so no verification policy applies") - so asking
         // it unconditionally turns every `disable` connection into a TLS error.
-        server_verification: if negotiated == crate::connect_tls::Encryption::Plaintext {
+        server_verification: if negotiated == crate::encryption::Encryption::Plaintext {
             crate::tls::ServerVerification::None
         } else {
             crate::tls::ServerVerification::demanded_by(
@@ -758,11 +765,81 @@ where
     Ok((client, connection))
 }
 
+/// The public entry points, implemented beside the code they call.
+///
+/// These are inherent methods on [`Config`], which Rust permits from any
+/// module of the defining crate. They live here rather than in `config.rs` so
+/// that configuration stays a leaf: see the note at the top of that file.
+impl Config {
+    /// Opens a connection to a PostgreSQL database.
+    pub async fn connect<T>(&self, tls: T) -> Result<(Client, Connection<Socket, T::Stream>), Error>
+    where
+        T: MakeTlsConnect<Socket>,
+    {
+        connect(tls, self).await
+    }
+
+    /// Connects to a PostgreSQL database over an arbitrary stream.
+    ///
+    /// Uses the startup, authentication, timeout, statement-cache, TLS mode,
+    /// `sslsni`, and `sslcertmode` settings. A configured `requirepeer` is
+    /// refused because an arbitrary stream exposes neither its address family
+    /// nor peer credentials. Transport-address settings such as `host`,
+    /// `hostaddr`, `port`, keepalives, and `tcp_user_timeout` are ignored. The
+    /// connect timeout starts with TLS negotiation, covers startup and
+    /// authentication, and cannot cover the caller's work to open that stream.
+    /// The read timeout is installed only after startup succeeds.
+    ///
+    /// The caller owns the stream, so this entry point cannot open a second
+    /// one. `allow` and `prefer` are therefore reduced to the transport they
+    /// attempt *first* - plaintext and TLS respectively - with no reconnect if
+    /// it fails. Use [`Config::connect`] to get the fallback.
+    pub async fn connect_raw<S, T>(
+        &self,
+        stream: S,
+        tls: T,
+    ) -> Result<(Client, Connection<S, T::Stream>), Error>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        T: TlsConnect<S>,
+    {
+        if self.require_peer.is_some() {
+            // A generic stream does not expose an address family or peer
+            // credentials. Pretending this is a Unix socket would be unsafe,
+            // while ignoring the requested identity check would turn it into
+            // false assurance.
+            return Err(Error::config(
+                "requirepeer cannot be checked by Config::connect_raw; use Config::connect \
+                 with a Unix-domain host"
+                    .into(),
+            ));
+        }
+        self.validate_connection_settings()?;
+        // No release handle: the stream is the caller's, `S` is unconstrained,
+        // and a stream that is not a socket has no descriptor to shut down.
+        // Such a connection keeps the pre-existing behaviour - it is released
+        // when its connection task is next polled.
+        with_connect_timeout(
+            self.get_connect_timeout().copied(),
+            connect_raw(
+                stream,
+                tls,
+                Encryption::first_for(self.ssl_mode),
+                true,
+                self,
+                None,
+            ),
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::NoTls;
     use crate::config::SslMode;
+    use crate::test_utils::paired_loopback_port;
     use crate::tls::{MakeTlsConnect, NoTlsStream, TlsConnect};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::TcpListener;
@@ -972,6 +1049,63 @@ mod tests {
         );
     }
 
+    fn endpoint_error(config: &Config) -> String {
+        let error = match endpoints(config) {
+            Ok(_) => panic!("the invalid endpoint lists were accepted"),
+            Err(error) => error,
+        };
+        let mut text = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            text.push_str(" | ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        text
+    }
+
+    #[test]
+    fn multiple_ports_must_match_the_host_count() {
+        for dsn in [
+            "host=first.example,second.example,third.example port=5432,5433",
+            "host=first.example,second.example port=5432,5433,5434",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .expect("host and port lists parse before endpoint validation");
+            let error = endpoint_error(&config);
+
+            assert!(
+                error.contains("invalid number of ports"),
+                "the mismatched port refusal was unclear for {dsn:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_and_hostaddr_lists_must_have_equal_counts() {
+        for (dsn, counts) in [
+            (
+                "host=first.example,second.example hostaddr=127.0.0.1",
+                "number of hosts (2) is different from number of hostaddrs (1)",
+            ),
+            (
+                "host=first.example hostaddr=127.0.0.1,127.0.0.2",
+                "number of hosts (1) is different from number of hostaddrs (2)",
+            ),
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .expect("host and hostaddr lists parse before endpoint validation");
+            let error = endpoint_error(&config);
+
+            assert!(
+                error.contains(counts),
+                "the mismatched hostaddr refusal was unclear for {dsn:?}: {error}"
+            );
+        }
+    }
+
     fn refused_handshake() -> Vec<u8> {
         frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
     }
@@ -1019,7 +1153,14 @@ mod tests {
     }
 
     async fn scripted_probe_server(reply: ProbeReply) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        scripted_probe_server_bound("127.0.0.1:0".parse().unwrap(), reply).await
+    }
+
+    async fn scripted_probe_server_bound(
+        bind: SocketAddr,
+        reply: ProbeReply,
+    ) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (query_seen, query_observed) = oneshot::channel();
 
@@ -1188,7 +1329,7 @@ mod tests {
     ///
     /// The per-address deadline test needs TWO stalled endpoints sharing ONE
     /// port, because `Endpoint::addresses` discards the resolved port
-    /// (`Addr::Tcp(addr.ip())`) and `connect_once` dials `endpoint.port()`.
+    /// (`Addr::tcp(addr)`) and `connect_once` dials `endpoint.port()`.
     /// Two loopback IPs on the same port is the only shape that expresses it.
     async fn scripted_server_bound(
         bind: SocketAddr,
@@ -1654,9 +1795,13 @@ mod tests {
     #[compio::test]
     async fn probe_sql_error_skips_transport_and_address_before_next_host() {
         let (tls_seen, mut tls_observed) = oneshot::channel();
-        let (first, first_query_observed) =
-            scripted_probe_server(ProbeReply::ErrorThenTls(tls_seen)).await;
-        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_query_observed) = scripted_probe_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            ProbeReply::ErrorThenTls(tls_seen),
+        )
+        .await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (sibling, mut sibling_startup_observed) =
             scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
         let (second, second_query_observed) =
@@ -1717,9 +1862,13 @@ mod tests {
     #[compio::test]
     async fn probe_transport_failure_stops_every_retry_path() {
         let (tls_seen, mut tls_observed) = oneshot::channel();
-        let (first, query_observed) =
-            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
-        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, query_observed) = scripted_probe_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            ProbeReply::CloseThenTls(tls_seen),
+        )
+        .await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (sibling, mut sibling_startup_observed) =
             scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
         let (second, mut second_query_observed) =
@@ -1980,9 +2129,13 @@ mod tests {
 
     #[compio::test]
     async fn target_mismatch_skips_other_addresses_for_the_same_host() {
-        let (first, first_query_observed) =
-            scripted_probe_server(ProbeReply::Recovery(false)).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_query_observed) = scripted_probe_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            ProbeReply::Recovery(false),
+        )
+        .await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, mut second_startup_observed) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
         let mut config = hostname_config_for(first, Duration::from_secs(2));
@@ -2058,6 +2211,54 @@ mod tests {
         }
     }
 
+    /// A resolved IPv6 zone must survive resolution.
+    ///
+    /// `getaddrinfo` returns `sin6_scope_id` for a link-local host, and it is
+    /// not decoration: Linux `tcp_v6_connect` refuses an `IPV6_ADDR_LINKLOCAL`
+    /// destination when the socket is not bound to an interface, which this
+    /// crate never does. Measured here against a listener on
+    /// `fe80::7eed:8dff:fec3:8315%eth0`, one variable apart: scope 0 fails
+    /// instantly with EINVAL before a packet leaves, the real scope is
+    /// accepted. Narrowing to `IpAddr` at this line is therefore the point at
+    /// which a link-local endpoint becomes permanently undialable.
+    ///
+    /// The port is deliberately different from the endpoint's, because
+    /// `addresses` keeps only the address and `connect_once` supplies the port
+    /// separately; this test is about the ZONE, not the port.
+    #[compio::test]
+    async fn resolution_keeps_the_ipv6_zone() {
+        const ZONE: u32 = 7;
+        let mut config = Config::new();
+        config.host("link-local.example").ssl_mode(SslMode::Disable);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+
+        let mut resolver = ListResolver(vec![SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().expect("a literal link-local address"),
+            5432,
+            0,
+            ZONE,
+        ))]);
+        let resolved = endpoint
+            .addresses(&mut resolver, LoadBalanceHosts::Disable)
+            .await
+            .expect("the resolver returned one address");
+
+        match resolved.as_slice() {
+            [Addr::Tcp { ip, scope_id }] => {
+                assert_eq!(ip.to_string(), "fe80::1", "the address itself changed");
+                assert_eq!(
+                    *scope_id, ZONE,
+                    "the resolved IPv6 zone was dropped, so this link-local \
+                     address would be dialled with scope 0 and refused with EINVAL"
+                );
+            }
+            other => panic!("expected one resolved TCP address, got {}", other.len()),
+        }
+    }
+
     /// Four entries have 24 possible permutations. If the shuffle is correct
     /// and uniform, the chance that all 64 trials produce the same ordering is
     /// 24^-63, approximately 1.11e-87.
@@ -2087,7 +2288,7 @@ mod tests {
                 .expect("the resolver returned four addresses")
                 .into_iter()
                 .map(|addr| match addr {
-                    Addr::Tcp(ip) => ip,
+                    Addr::Tcp { ip, .. } => ip,
                     #[cfg(unix)]
                     Addr::Unix(path) => {
                         panic!(
@@ -2150,9 +2351,10 @@ mod tests {
     /// proves the test traversed TLS legs rather than plaintext sockets.
     #[compio::test]
     async fn tls_failure_advances_to_second_resolved_address() {
+        let port = paired_loopback_port();
         let (first, first_opening) =
-            tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+            tls_handshake_server_bound(SocketAddr::from(([127, 0, 0, 1], port))).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_opening) = tls_handshake_server_bound(second_bind).await;
 
         let mut config = Config::new();
@@ -2191,8 +2393,10 @@ mod tests {
     /// win the walk.
     #[compio::test]
     async fn connect_succeeds_via_second_resolved_address() {
-        let (first, first_seen) = scripted_server_after_startup(Some(Vec::new())).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_seen) =
+            scripted_server_bound(SocketAddr::from(([127, 0, 0, 1], port)), Some(Vec::new())).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
         let config = hostname_config_for(first, Duration::from_secs(5));
@@ -2222,7 +2426,7 @@ mod tests {
             .socket_config
             .expect("a connected client records its socket address");
         assert!(
-            matches!(socket_config.addr, Addr::Tcp(ip) if ip == second.ip()),
+            matches!(socket_config.addr, Addr::Tcp { ip, .. } if ip == second.ip()),
             "the returned client must record the healthy second address"
         );
         drop((client, connection));
@@ -2230,8 +2434,13 @@ mod tests {
 
     #[compio::test]
     async fn cannot_connect_now_skips_other_addresses_for_the_same_host() {
-        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let port = paired_loopback_port();
+        let (first, first_seen) = scripted_server_bound(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            Some(refused_handshake()),
+        )
+        .await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (_second, mut second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
         let mut config = hostname_config_for(first, Duration::from_secs(5));
@@ -2315,9 +2524,11 @@ mod tests {
     /// noise.
     #[compio::test]
     async fn connect_timeout_restarts_for_each_resolved_address() {
-        let (first, first_seen) = scripted_server_after_startup(None).await;
+        let port = paired_loopback_port();
+        let (first, first_seen) =
+            scripted_server_bound(SocketAddr::from(([127, 0, 0, 1], port)), None).await;
         // Same port, second loopback IP: see `scripted_server_bound`.
-        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], port));
         let (second, second_seen) = scripted_server_bound(second_bind, None).await;
 
         let config = hostname_config_for(first, Duration::from_millis(150));

@@ -7,6 +7,7 @@
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
+use crate::command_tag::extract_row_affected;
 use crate::connection::RequestMessages;
 use crate::copy_in::CopyInReceiver;
 use crate::prepare::get_type;
@@ -18,7 +19,7 @@ use fallible_iterator::FallibleIterator;
 use futures_util::Stream;
 use log::{Level, debug, log_enabled};
 use pin_project_lite::pin_project;
-use postgres_protocol::message::backend::{CommandCompleteBody, Message};
+use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use postgres_types::Type;
 use std::fmt;
@@ -94,6 +95,11 @@ where
     let responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
+            // A pre-BindComplete ErrorResponse has already crossed the
+            // connection dispatcher, which invalidates this same statement
+            // before waking the response consumer. This idempotent call is a
+            // defensive second check; local send/read errors are not stale
+            // statement errors and therefore cannot make it observable alone.
             statement.invalidate_cache_on_error(&error);
             return Err(error);
         }
@@ -448,36 +454,25 @@ pub async fn query_portal(
     portal: &Portal,
     max_rows: i32,
 ) -> Result<RowStream, Error> {
-    let buf = client.with_buf(|buf| {
-        frontend::execute(portal.name(), max_rows, buf).map_err(Error::encode)?;
-        frontend::sync(buf);
-        Ok(buf.split().freeze())
-    })?;
+    portal.with_live_on(client, || {
+        let buf = client.with_buf(|buf| {
+            frontend::execute(portal.name(), max_rows, buf).map_err(Error::encode)?;
+            frontend::sync(buf);
+            Ok(buf.split().freeze())
+        })?;
 
-    let responses = client.send_statement(
-        producerless_request(buf, portal.statement().may_enter_copy_in()),
-        portal.statement(),
-    )?;
+        let responses = client.send_statement(
+            producerless_request(buf, portal.statement().may_enter_copy_in()),
+            portal.statement(),
+        )?;
 
-    Ok(RowStream {
-        statement: portal.statement().clone(),
-        responses,
-        rows_affected: None,
-        copy_out_refused: false,
+        Ok(RowStream {
+            statement: portal.statement().clone(),
+            responses,
+            rows_affected: None,
+            copy_out_refused: false,
+        })
     })
-}
-
-/// Extract the number of rows affected from [`CommandCompleteBody`].
-pub fn extract_row_affected(body: &CommandCompleteBody) -> Result<u64, Error> {
-    let rows = body
-        .tag()
-        .map_err(Error::parse)?
-        .rsplit(' ')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap_or(0);
-    Ok(rows)
 }
 
 pub async fn execute<P, I>(
@@ -904,5 +899,160 @@ pub async fn sync(client: &InnerClient) -> Result<(), Error> {
     match responses.next().await? {
         Message::ReadyForQuery(_) => Ok(()),
         _ => Err(Error::unexpected_message()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_bind, query_text_params};
+    use crate::Statement;
+    use crate::client::Client;
+    use crate::codec::FrontendMessage;
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::RequestMessages;
+    use crate::types::{IsNull, ToSql, Type, to_sql_checked};
+    use bytes::BytesMut;
+    use futures_channel::mpsc;
+    use futures_util::task::noop_waker;
+    use std::error::Error as _;
+    use std::future::Future;
+    use std::task::{Context, Poll};
+
+    fn test_client() -> (Client, mpsc::UnboundedReceiver<crate::connection::Request>) {
+        let (sender, receiver) = mpsc::unbounded();
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        (client, receiver)
+    }
+
+    fn frontend_frames(mut batch: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while !batch.is_empty() {
+            assert!(batch.len() >= 5, "frontend frame is missing its header");
+            let body_len = u32::from_be_bytes(batch[1..5].try_into().unwrap()) as usize;
+            assert!(
+                body_len >= 4,
+                "frontend frame length excludes its own header"
+            );
+            let frame_len = body_len + 1;
+            assert!(
+                frame_len <= batch.len(),
+                "frontend frame length exceeds the captured batch"
+            );
+            frames.push((batch[0], batch[5..frame_len].to_vec()));
+            batch = &batch[frame_len..];
+        }
+        frames
+    }
+
+    #[test]
+    fn encode_bind_rejects_too_many_parameters_before_writing_bind() {
+        let statement = Statement::unnamed(vec![Type::INT4], vec![]);
+        let mut buf = BytesMut::from(&b"sentinel"[..]);
+
+        let error = encode_bind(&statement, [1_i32, 2_i32], "", &mut buf).unwrap_err();
+
+        assert_eq!(error.to_string(), "expected 1 parameters but got 2");
+        assert_eq!(&buf[..], b"sentinel");
+    }
+
+    #[test]
+    fn encode_bind_rejects_too_few_parameters_before_writing_bind() {
+        let statement = Statement::unnamed(vec![Type::INT4], vec![]);
+        let mut buf = BytesMut::from(&b"sentinel"[..]);
+
+        let error = encode_bind(&statement, std::iter::empty::<i32>(), "", &mut buf).unwrap_err();
+
+        assert_eq!(error.to_string(), "expected 1 parameters but got 0");
+        assert_eq!(&buf[..], b"sentinel");
+    }
+
+    #[test]
+    fn text_query_batches_parse_bind_portal_describe_unlimited_execute_and_sync() {
+        let (client, mut requests) = test_client();
+        let params = ["42"];
+        let mut query = Box::pin(query_text_params(
+            client.inner(),
+            "SELECT $1::int4",
+            &params,
+        ));
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(query.as_mut().poll(&mut context), Poll::Pending));
+        let request = requests
+            .try_recv()
+            .expect("text query did not enqueue its frontend batch");
+        let RequestMessages::Single(FrontendMessage::Raw(bytes)) = request.messages else {
+            panic!("text query was not encoded as one raw frontend batch");
+        };
+
+        let frames = frontend_frames(&bytes);
+        assert_eq!(
+            frames.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            b"PBDES"
+        );
+        assert_eq!(frames[2].1, b"P\0", "Describe must target the portal");
+        assert_eq!(
+            frames[3].1, b"\0\0\0\0\0",
+            "Execute must name the unnamed portal and request unlimited rows"
+        );
+    }
+
+    #[derive(Debug)]
+    struct RefusesConversion;
+
+    impl ToSql for RefusesConversion {
+        fn to_sql(
+            &self,
+            _: &Type,
+            _: &mut BytesMut,
+        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+            Err(std::io::Error::other("sentinel conversion").into())
+        }
+
+        fn accepts(_: &Type) -> bool {
+            true
+        }
+
+        to_sql_checked!();
+    }
+
+    #[test]
+    fn bind_conversion_names_the_failing_parameter_and_preserves_its_source() {
+        let statement = Statement::unnamed(vec![Type::INT4, Type::TEXT], vec![]);
+        let first = 1_i32;
+        let second = RefusesConversion;
+        let params: [&(dyn ToSql + Sync); 2] = [&first, &second];
+        let mut buf = BytesMut::new();
+
+        let error = encode_bind(&statement, params, "", &mut buf).unwrap_err();
+
+        assert_eq!(error.to_string(), "error serializing parameter 1");
+        assert_eq!(
+            error
+                .source()
+                .expect("conversion error lost its source")
+                .to_string(),
+            "sentinel conversion"
+        );
+    }
+
+    #[test]
+    fn bind_protocol_serialization_is_an_encode_error() {
+        const TOO_MANY: usize = u16::MAX as usize + 1;
+        let statement = Statement::unnamed(vec![Type::INT4; TOO_MANY], vec![]);
+        let params = vec![None::<i32>; TOO_MANY];
+        let mut buf = BytesMut::new();
+
+        let error = encode_bind(&statement, params, "", &mut buf).unwrap_err();
+
+        assert_eq!(error.to_string(), "error encoding message to server");
     }
 }

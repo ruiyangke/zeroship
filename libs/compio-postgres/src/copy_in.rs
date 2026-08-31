@@ -11,14 +11,14 @@ use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::copy_format::CopyResponse;
-use crate::query::{ExecutionError, extract_row_affected};
+use crate::query::ExecutionError;
 use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::{Buf, BufMut, BytesMut};
 use futures_channel::mpsc;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use log::debug;
 use pin_project_lite::pin_project;
-use postgres_protocol::message::backend::Message;
+use postgres_protocol::message::backend::{CommandCompleteBody, Message};
 use postgres_protocol::message::frontend;
 use postgres_protocol::message::frontend::CopyData;
 use std::future;
@@ -46,6 +46,20 @@ enum CopyInMessage {
     Abort,
 }
 
+#[derive(Clone, Copy)]
+enum CopyInState {
+    /// Caller-fed extended-protocol COPY input is still streaming.
+    Streaming,
+    /// A producerless extended query must terminate with `CopyFail + Sync`.
+    ExtendedFailing { reason: &'static str },
+    /// A producerless simple query must terminate with `CopyFail` alone.
+    SimpleFailing { reason: &'static str },
+    /// The extended-protocol stream has emitted or suppressed its terminal.
+    ExtendedFinished,
+    /// The simple-protocol stream has emitted its terminal without `Sync`.
+    SimpleFinished,
+}
+
 /// Stream of frontend messages fed to the connection task for a `COPY FROM
 /// STDIN` request. The connection's request-handler branch polls `next()`
 /// until the stream terminates. Extended protocol uses `CopyDone+Sync` or
@@ -53,18 +67,14 @@ enum CopyInMessage {
 /// that protocol emits `ReadyForQuery` without a Sync barrier.
 pub struct CopyInReceiver {
     receiver: mpsc::Receiver<CopyInMessage>,
-    done: bool,
-    abort_reason: Option<&'static str>,
-    sync_after_terminal: bool,
+    state: CopyInState,
 }
 
 impl CopyInReceiver {
     fn new(receiver: mpsc::Receiver<CopyInMessage>) -> CopyInReceiver {
         CopyInReceiver {
             receiver,
-            done: false,
-            abort_reason: None,
-            sync_after_terminal: true,
+            state: CopyInState::Streaming,
         }
     }
 
@@ -78,7 +88,10 @@ impl CopyInReceiver {
     /// terminal frame. Reusing the real COPY state machine is what makes both
     /// paths cost exactly one response slot.
     pub(crate) fn aborting(initial: FrontendMessage, reason: &'static str) -> Self {
-        Self::aborting_with_terminal(initial, reason, true)
+        Self {
+            receiver: Self::producerless_receiver(initial),
+            state: CopyInState::ExtendedFailing { reason },
+        }
     }
 
     /// Build the same producerless COPY for a simple-protocol `Query`.
@@ -88,33 +101,40 @@ impl CopyInReceiver {
     /// backend after the first, so the driver must neither send that redundant
     /// barrier nor account for a response to it.
     pub(crate) fn aborting_simple(initial: FrontendMessage, reason: &'static str) -> Self {
-        Self::aborting_with_terminal(initial, reason, false)
+        Self {
+            receiver: Self::producerless_receiver(initial),
+            state: CopyInState::SimpleFailing { reason },
+        }
     }
 
-    fn aborting_with_terminal(
-        initial: FrontendMessage,
-        reason: &'static str,
-        sync_after_terminal: bool,
-    ) -> Self {
+    fn producerless_receiver(initial: FrontendMessage) -> mpsc::Receiver<CopyInMessage> {
         let (mut sender, receiver) = mpsc::channel(1);
         sender
             .try_send(CopyInMessage::Message(initial))
             .expect("a new producerless COPY channel accepts its initial frame");
         drop(sender);
-        Self {
-            receiver,
-            done: false,
-            abort_reason: Some(reason),
-            sync_after_terminal,
-        }
+        receiver
     }
 
-    /// True after this stream emitted its terminal CopyDone/CopyFail frame,
-    /// including the extended-protocol Sync when one is required. The
-    /// connection uses this to start the final server-response read clock only
-    /// after that frame finishes flushing.
+    /// True after this stream emitted or suppressed its terminal
+    /// CopyDone/CopyFail frame, including the extended-protocol Sync when one
+    /// is required. The connection uses this to start the final server-response
+    /// read clock only after that frame finishes flushing.
     pub(crate) fn is_done(&self) -> bool {
-        self.done
+        matches!(
+            self.state,
+            CopyInState::ExtendedFinished | CopyInState::SimpleFinished
+        )
+    }
+
+    /// Whether this producer's terminal COPY frame includes an extended-query
+    /// Sync. PostgreSQL can answer both the opening Sync and this terminal Sync
+    /// after an error that occurs immediately after CopyInResponse.
+    pub(crate) fn terminal_includes_sync(&self) -> bool {
+        !matches!(
+            self.state,
+            CopyInState::SimpleFailing { .. } | CopyInState::SimpleFinished
+        )
     }
 }
 
@@ -122,28 +142,40 @@ impl Stream for CopyInReceiver {
     type Item = FrontendMessage;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
-        if self.done {
+        if self.is_done() {
             return Poll::Ready(None);
         }
 
         match ready!(self.receiver.poll_next_unpin(cx)) {
             Some(CopyInMessage::Message(message)) => Poll::Ready(Some(message)),
             Some(CopyInMessage::Abort) => {
-                self.done = true;
+                self.state = CopyInState::ExtendedFinished;
                 Poll::Ready(None)
             }
             Some(CopyInMessage::Done) => {
-                self.done = true;
+                self.state = CopyInState::ExtendedFinished;
                 let mut buf = BytesMut::new();
                 frontend::copy_done(&mut buf);
                 frontend::sync(&mut buf);
                 Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
             }
             None => {
-                self.done = true;
+                let (reason, include_sync, finished) = match self.state {
+                    CopyInState::Streaming => ("", true, CopyInState::ExtendedFinished),
+                    CopyInState::ExtendedFailing { reason } => {
+                        (reason, true, CopyInState::ExtendedFinished)
+                    }
+                    CopyInState::SimpleFailing { reason } => {
+                        (reason, false, CopyInState::SimpleFinished)
+                    }
+                    CopyInState::ExtendedFinished | CopyInState::SimpleFinished => {
+                        unreachable!("finished COPY streams return before polling their channel")
+                    }
+                };
+                self.state = finished;
                 let mut buf = BytesMut::new();
-                frontend::copy_fail(self.abort_reason.unwrap_or(""), &mut buf).unwrap();
-                if self.sync_after_terminal {
+                frontend::copy_fail(reason, &mut buf).unwrap();
+                if include_sync {
                     frontend::sync(&mut buf);
                 }
                 Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
@@ -157,7 +189,17 @@ enum SinkState {
     Active,
     Closing,
     Reading,
+    ReadingAfterClose,
     Finished(u64),
+}
+
+fn copy_row_count(body: &CommandCompleteBody) -> Result<u64, Error> {
+    let tag = body.tag().map_err(Error::parse)?;
+    let rows = tag
+        .strip_prefix("COPY ")
+        .filter(|rows| !rows.is_empty() && rows.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(Error::unexpected_message)?;
+    rows.parse().map_err(|_| Error::unexpected_message())
 }
 
 struct BufferedCopyAppend<'a> {
@@ -242,7 +284,10 @@ where
         loop {
             match self.as_mut().project().responses.poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Err(error)) => {
+                    self.as_mut().clear_copy_mode();
+                    return Poll::Ready(Err(error));
+                }
                 Poll::Ready(Ok(_)) => {}
             }
         }
@@ -314,14 +359,14 @@ where
                     match sender_closed {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {
-                            *self.as_mut().project().state = SinkState::Reading;
+                            *self.as_mut().project().state = SinkState::ReadingAfterClose;
                         }
                         Poll::Ready(Err(_)) => {
                             *self.as_mut().project().state = SinkState::Reading;
                         }
                     }
                 }
-                SinkState::Reading => {
+                SinkState::Reading | SinkState::ReadingAfterClose => {
                     let response = {
                         let this = self.as_mut().project();
                         this.responses.poll_next(cx)
@@ -333,7 +378,7 @@ where
                             if this.completion.is_some() {
                                 *this.completion = Some(Err(Error::unexpected_message()));
                             } else {
-                                *this.completion = Some(extract_row_affected(&body));
+                                *this.completion = Some(copy_row_count(&body));
                             }
                         }
                         Poll::Ready(Ok(Message::ReadyForQuery(_))) => {
@@ -354,7 +399,7 @@ where
                         }
                         Poll::Ready(Ok(_)) => {
                             let this = self.as_mut().project();
-                            if this.completion.is_none() {
+                            if !matches!(this.completion.as_ref(), Some(Err(_))) {
                                 *this.completion = Some(Err(Error::unexpected_message()));
                             }
                         }
@@ -440,6 +485,7 @@ where
         if matches!(self.state, SinkState::Finished(_)) {
             return Poll::Ready(Ok(()));
         }
+        let closed_by_sink = matches!(self.state, SinkState::ReadingAfterClose);
         let buffered = !self.as_mut().project().buf.is_empty();
         if buffered {
             let ready = self.as_mut().project().sender.as_mut().poll_ready(cx);
@@ -471,7 +517,9 @@ where
         match flushed {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
-            Poll::Ready(Ok(())) if disconnected => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) if disconnected && !closed_by_sink => {
+                self.poll_disconnected_diagnosis(cx)
+            }
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
         }
     }
@@ -641,18 +689,21 @@ async fn send_initial_copy_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{CopyInReceiver, send_initial_copy_message};
-    use crate::Statement;
-    use crate::client::{Client, CopyMode};
+    use super::{CopyInReceiver, CopyInSink, SinkState, send_initial_copy_message};
+    use crate::client::{Client, CopyMode, ResponseMessages};
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
     use crate::connection::RequestMessages;
+    use crate::copy_format::CopyResponse;
     use crate::error::{DbError, SqlState};
+    use crate::{Error, Statement};
     use bytes::Bytes;
     use bytes::{BufMut, BytesMut};
     use futures_channel::mpsc;
     use futures_util::StreamExt;
     use postgres_protocol::message::backend::Message;
+    use std::collections::VecDeque;
+    use std::marker::PhantomData;
 
     fn admin_shutdown() -> DbError {
         let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
@@ -753,5 +804,319 @@ mod tests {
         assert_eq!(bytes[0], b'f');
         let copy_fail_len = 1 + u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
         assert_eq!(&bytes[copy_fail_len..], &[b'S', 0, 0, 0, 4]);
+    }
+
+    #[compio::test]
+    async fn non_numeric_copy_command_tag_cannot_confirm_a_row_count() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let mut response_sender = requests
+            .try_recv()
+            .expect("receive the scripted COPY request")
+            .sender;
+
+        let mut command_frame = BytesMut::new();
+        command_frame.put_u8(b'C');
+        command_frame.put_u32(14);
+        command_frame.extend_from_slice(b"COPY nope\0");
+        let command = Message::parse(&mut command_frame)
+            .expect("parse malformed-count CommandComplete")
+            .expect("malformed-count CommandComplete is complete");
+
+        let mut ready_frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+        let ready = Message::parse(&mut ready_frame)
+            .expect("parse ReadyForQuery")
+            .expect("ReadyForQuery is complete");
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command),
+                Ok(ready),
+            ])))
+            .expect("deliver scripted COPY completion");
+
+        let sink = CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state: SinkState::Reading,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        };
+        let mut sink = Box::pin(sink);
+        match sink.as_mut().finish().await {
+            Ok(rows) => {
+                panic!("COPY IN invented row count {rows} from malformed command tag")
+            }
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "unexpected message from server",
+                "malformed COPY count reported the wrong protocol failure"
+            ),
+        }
+    }
+
+    #[compio::test]
+    async fn poll_ready_error_clears_copy_mode_guard() {
+        use futures_util::Sink;
+
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let request = requests
+            .try_recv()
+            .expect("receive the scripted COPY request");
+        let crate::connection::Request {
+            messages,
+            sender: mut response_sender,
+            ..
+        } = request;
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                Error::from_db_error(admin_shutdown()),
+            )])))
+            .expect("deliver terminal COPY error");
+        drop(messages);
+
+        let sink = CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state: SinkState::Active,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        };
+        let mut sink = Box::pin(sink);
+        let error = std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx))
+            .await
+            .expect_err("the disconnected COPY producer hid its server error");
+        assert_eq!(error.code(), Some(&SqlState::ADMIN_SHUTDOWN));
+
+        client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                Bytes::from_static(b"next request"),
+            )))
+            .unwrap_or_else(|error| panic!("the recovered COPY kept rejecting commands: {error}"));
+    }
+
+    #[compio::test]
+    async fn a_message_after_copy_confirmation_refuses_success() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let mut response_sender = requests
+            .try_recv()
+            .expect("receive the scripted COPY request")
+            .sender;
+
+        let mut command_frame = BytesMut::new();
+        command_frame.put_u8(b'C');
+        command_frame.put_u32(11);
+        command_frame.extend_from_slice(b"COPY 1\0");
+        let command = Message::parse(&mut command_frame)
+            .expect("parse COPY CommandComplete")
+            .expect("COPY CommandComplete is complete");
+
+        let mut done_frame = BytesMut::from(&b"c\0\0\0\x04"[..]);
+        let done = Message::parse(&mut done_frame)
+            .expect("parse backend CopyDone")
+            .expect("backend CopyDone is complete");
+        let mut ready_frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+        let ready = Message::parse(&mut ready_frame)
+            .expect("parse ReadyForQuery")
+            .expect("ReadyForQuery is complete");
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command),
+                Ok(done),
+                Ok(ready),
+            ])))
+            .expect("deliver scripted COPY completion");
+
+        let sink = CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state: SinkState::Reading,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        };
+        let mut sink = Box::pin(sink);
+        match sink.as_mut().finish().await {
+            Ok(rows) => {
+                panic!("COPY IN reported {rows} rows after an illegal post-confirmation message")
+            }
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "unexpected message from server",
+                "post-confirmation message reported the wrong protocol failure"
+            ),
+        }
+    }
+
+    #[compio::test]
+    async fn flush_after_cancelled_close_preserves_copy_completion() {
+        let rows = compio::time::timeout(std::time::Duration::from_secs(1), async {
+            let (request_sender, mut requests) = mpsc::unbounded();
+            let client = Client::new(
+                request_sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                0,
+                Some(0.into()),
+                None,
+            );
+            let (sender, receiver) = mpsc::channel(1);
+            let statement = Statement::unnamed(Vec::new(), Vec::new());
+            let (responses, copy_mode) = client
+                .inner()
+                .send_copy_statement(
+                    RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                    &statement,
+                    CopyMode::In,
+                )
+                .expect("enqueue the scripted COPY request");
+            let request = requests
+                .try_recv()
+                .expect("receive the scripted COPY request");
+            let crate::connection::Request {
+                messages,
+                sender: mut response_sender,
+                ..
+            } = request;
+            let mut receiver = match messages {
+                RequestMessages::CopyIn(receiver) => receiver,
+                RequestMessages::Single(_) => panic!("scripted COPY request was not streaming"),
+            };
+
+            let sink = CopyInSink::<Bytes> {
+                sender,
+                responses,
+                response: CopyResponse::default(),
+                buf: BytesMut::new(),
+                state: SinkState::Active,
+                completion: None,
+                _p2: PhantomData,
+                copy_mode: Some(copy_mode),
+            };
+            let mut sink = Box::pin(sink);
+
+            let close_poll = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(futures_util::Sink::poll_close(sink.as_mut(), cx))
+            })
+            .await;
+            assert!(
+                matches!(close_poll, std::task::Poll::Pending),
+                "the first close poll unexpectedly completed: {close_poll:?}"
+            );
+            assert!(
+                !matches!(
+                    sink.as_ref().get_ref().state,
+                    SinkState::Active | SinkState::Closing | SinkState::Finished(_)
+                ),
+                "the pending close poll did not reach response reading"
+            );
+            assert!(
+                sink.as_ref().get_ref().sender.is_closed(),
+                "the pending close poll did not close its own sender"
+            );
+
+            match receiver
+                .next()
+                .await
+                .expect("the cancelled close omitted CopyDone + Sync")
+            {
+                FrontendMessage::Raw(bytes) => {
+                    assert_eq!(&bytes[..], &[b'c', 0, 0, 0, 4, b'S', 0, 0, 0, 4]);
+                }
+                FrontendMessage::CopyData(_) => panic!("the COPY terminal was encoded as data"),
+            }
+
+            let mut command_frame = BytesMut::new();
+            command_frame.put_u8(b'C');
+            command_frame.put_u32(11);
+            command_frame.extend_from_slice(b"COPY 0\0");
+            let command = Message::parse(&mut command_frame)
+                .expect("parse COPY CommandComplete")
+                .expect("COPY CommandComplete is complete");
+            let mut ready_frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+            let ready = Message::parse(&mut ready_frame)
+                .expect("parse ReadyForQuery")
+                .expect("ReadyForQuery is complete");
+            response_sender
+                .try_send(ResponseMessages::Observed(VecDeque::from([
+                    Ok(command),
+                    Ok(ready),
+                ])))
+                .expect("deliver scripted COPY completion");
+            drop(response_sender);
+
+            std::future::poll_fn(|cx| futures_util::Sink::poll_flush(sink.as_mut(), cx))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("flush swallowed the completed COPY response: {error}")
+                });
+            sink.as_mut().finish().await
+        })
+        .await
+        .expect("cancelled-close regression timed out")
+        .expect("the completed COPY failed after the cancelled close");
+
+        assert_eq!(rows, 0);
     }
 }

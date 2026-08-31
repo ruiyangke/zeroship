@@ -11,9 +11,9 @@
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
+use crate::command_tag::extract_row_affected;
 use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInReceiver;
-use crate::query::extract_row_affected;
 use crate::{Error, SimpleQueryMessage, SimpleQueryRow};
 use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
@@ -22,24 +22,67 @@ use log::debug;
 use pin_project_lite::pin_project;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
+
+/// The wire format of a value returned by the simple query protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SimpleQueryFormat {
+    /// PostgreSQL's text representation.
+    Text,
+    /// PostgreSQL's type-specific binary representation.
+    Binary,
+}
+
+impl SimpleQueryFormat {
+    fn from_code(code: i16) -> Result<Self, Error> {
+        match code {
+            0 => Ok(Self::Text),
+            1 => Ok(Self::Binary),
+            _ => Err(Error::parse(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("RowDescription carries invalid format code {code}"),
+            ))),
+        }
+    }
+}
 
 /// Information about a column of a single query row.
 #[derive(Debug)]
 pub struct SimpleColumn {
     name: String,
+    type_oid: u32,
+    format: SimpleQueryFormat,
 }
 
 impl SimpleColumn {
-    pub(crate) fn new(name: String) -> SimpleColumn {
-        SimpleColumn { name }
+    pub(crate) fn new(name: String, type_oid: u32, format: SimpleQueryFormat) -> SimpleColumn {
+        SimpleColumn {
+            name,
+            type_oid,
+            format,
+        }
     }
 
     /// Returns the name of the column.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the PostgreSQL type OID of the column.
+    ///
+    /// This identifies the type-specific representation used by a
+    /// [`SimpleQueryFormat::Binary`] value.
+    pub fn type_oid(&self) -> u32 {
+        self.type_oid
+    }
+
+    /// Returns the wire format of the column's values.
+    pub fn format(&self) -> SimpleQueryFormat {
+        self.format
     }
 }
 
@@ -274,7 +317,7 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
 
     while index < bytes.len() {
         match bytes[index] {
-            byte if byte.is_ascii_whitespace() => index += 1,
+            byte if byte.is_ascii_whitespace() || byte == b'\x0b' => index += 1,
             b'-' if bytes.get(index + 1) == Some(&b'-') => {
                 index += 2;
                 while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
@@ -397,7 +440,10 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                     copy = word.eq_ignore_ascii_case(b"copy");
                     copy_from = false;
                 } else if copy && paren_depth == 0 {
-                    if copy_from && word.eq_ignore_ascii_case(b"stdin") {
+                    if copy_from
+                        && (word.eq_ignore_ascii_case(b"stdin")
+                            || word.eq_ignore_ascii_case(b"stdout"))
+                    {
                         return true;
                     }
                     copy_from = word.eq_ignore_ascii_case(b"from");
@@ -467,7 +513,11 @@ impl Stream for SimpleQueryStream {
                     let mut collected: Vec<SimpleColumn> =
                         Vec::with_capacity(fields.size_hint().0.min(MAX_TARGET_LIST_ENTRIES));
                     while let Some(field) = fields.next().map_err(Error::parse)? {
-                        collected.push(SimpleColumn::new(field.name().to_string()));
+                        collected.push(SimpleColumn::new(
+                            field.name().to_string(),
+                            field.type_oid(),
+                            SimpleQueryFormat::from_code(field.format())?,
+                        ));
                     }
                     let columns: Arc<[SimpleColumn]> = collected.into();
 
@@ -507,9 +557,10 @@ mod tests {
     use super::may_enter_copy_in;
 
     #[test]
-    fn copy_in_classifier_finds_statement_level_from_stdin() {
+    fn copy_in_classifier_finds_frontend_copy_sources() {
         for query in [
             "COPY t FROM STDIN",
+            "COPY t FROM STDOUT",
             "SELECT 1; COPY t (a) FrOm /* nested /* comment */ ok */ StDiN",
             "; -- lead\n COPY BINARY t FROM STDIN WITH (FORMAT binary)",
             r"SELECT 'a\'; COPY t FROM STDIN",
@@ -518,6 +569,10 @@ mod tests {
         ] {
             assert!(may_enter_copy_in(query), "missed COPY-IN query: {query}");
         }
+        assert!(
+            may_enter_copy_in("COPY t FROM\x0bSTDIN"),
+            "missed COPY-IN query with PostgreSQL vertical-tab whitespace"
+        );
     }
 
     #[test]

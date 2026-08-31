@@ -25,14 +25,14 @@ use crate::cancel_token::CancelKey;
 use crate::client::SocketConfig;
 use crate::config::{SslCertMode, SslMode, SslNegotiation};
 use crate::connect::{tls_server_name, with_connect_timeout};
-use crate::connect_tls;
+use crate::encryption::Encryption;
 use crate::tls::{MakeTlsConnect, TlsConnect, TlsPolicyIdentity};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
 
 pub(crate) fn validate_cancel_tls_policy<S, T>(
     tls: &T,
-    encryption: connect_tls::Encryption,
+    encryption: Encryption,
     ssl_sni: bool,
     ssl_cert_mode: SslCertMode,
     server_verification: crate::tls::ServerVerification,
@@ -41,7 +41,7 @@ pub(crate) fn validate_cancel_tls_policy<S, T>(
 where
     T: TlsConnect<S>,
 {
-    if encryption == connect_tls::Encryption::Plaintext {
+    if encryption == Encryption::Plaintext {
         return Ok(());
     }
 
@@ -132,6 +132,11 @@ where
         }
     };
 
+    // `with_connect_timeout` fabricates its own error after dropping the timed
+    // future, so keep delivery state outside it and attach that state to
+    // whichever error emerges.
+    let delivery = cancel_query_raw::CancelDeliveryTracker::default();
+    let attempt_delivery = delivery.clone();
     with_connect_timeout(config.connect_timeout, async move {
         let encryption = config.encryption;
         let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
@@ -163,10 +168,12 @@ where
             has_hostname,
             process_id,
             secret_key,
+            &attempt_delivery,
         )
         .await
     })
     .await
+    .map_err(|error| error.with_cancel_delivery(delivery.delivery()))
 }
 
 /// Send `CancelRequest` and wait for the postmaster to consume its connection.
@@ -284,14 +291,14 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Plaintext,
+            encryption: Encryption::Plaintext,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -621,7 +628,7 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -630,7 +637,7 @@ mod tests {
             require_peer: None,
             // The only value `require` can record: `connect.rs` never offers
             // it a plaintext leg, and a server refusal is fatal there.
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -746,14 +753,14 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -969,14 +976,14 @@ mod tests {
         let addr = listener.local_addr().expect("scripted server address");
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             // What `sslmode=verify-full` plus a root cert demands.
@@ -1023,14 +1030,14 @@ mod tests {
             .expect("bind scripted server");
         let addr = listener.local_addr().expect("scripted server address");
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni,
             ssl_cert_mode,
             server_verification: crate::tls::ServerVerification::None,
@@ -1091,14 +1098,14 @@ mod tests {
             .expect("bind scripted server");
         let addr = listener.local_addr().expect("scripted server address");
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
@@ -1151,14 +1158,14 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
-            encryption: crate::connect_tls::Encryption::Tls,
+            encryption: Encryption::Tls,
             ssl_sni: true,
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,

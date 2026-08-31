@@ -6,6 +6,7 @@
 
 use crate::Socket;
 use crate::copy_out::CopyOutStream;
+use crate::portal::PortalScope;
 use crate::query::RowStream;
 use crate::tls::MakeTlsConnect;
 use crate::tls::TlsConnect;
@@ -26,7 +27,26 @@ use futures_util::TryStreamExt;
 pub struct Transaction<'a> {
     client: &'a mut Client,
     savepoint: Option<Savepoint>,
+    portal_scope: PortalScope,
+    parent_portal_scope: Option<PortalScope>,
     done: bool,
+}
+
+impl std::fmt::Debug for Transaction<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Transaction")
+            .field(
+                "savepoint_name",
+                &self.savepoint.as_ref().map(|savepoint| &savepoint.name),
+            )
+            .field(
+                "savepoint_depth",
+                &self.savepoint.as_ref().map(|savepoint| savepoint.depth),
+            )
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A representation of a PostgreSQL database savepoint.
@@ -60,27 +80,6 @@ const ROLLBACK_TAG: &str = "ROLLBACK";
 
 use crate::escape::quote_identifier;
 
-/// The SQL that ends a savepoint's scope: undo its work, then take the name
-/// back off the server's savepoint stack.
-///
-/// `ROLLBACK TO SAVEPOINT` deliberately LEAVES the savepoint defined - that is
-/// what makes "roll back to it again later" possible, and it is the documented
-/// behaviour, not a quirk. But a `Transaction` whose `rollback` has been
-/// called is finished: its Rust value is consumed and no later call can name
-/// it. Leaving the name defined lets it outlive the scope that owned it, and
-/// PostgreSQL resolves a savepoint name to the MOST RECENTLY established one,
-/// so a leftover shadows an enclosing savepoint of the same name and sends the
-/// enclosing rollback to the wrong scope. It also leaves a subtransaction open
-/// per rolled-back savepoint, which a retry loop accumulates.
-///
-/// The order matters and is not interchangeable: after a failed statement the
-/// subtransaction is in an aborted state, where `RELEASE` is refused and
-/// `ROLLBACK TO` is the statement that recovers it.
-pub(crate) fn rollback_savepoint(name: &str) -> String {
-    let name = quote_identifier(name);
-    format!("ROLLBACK TO {name}; RELEASE {name}")
-}
-
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.done {
@@ -91,12 +90,17 @@ impl Drop for Transaction<'_> {
         // inspects this flag at checkout time and drains any pending
         // ROLLBACK via a barrier (`simple_query("")`) so the next caller
         // never inherits a broken-tx state. `__private_api_rollback` also
-        // sets the flag - we set it here too so the invariant holds even
-        // if the encode step fails silently.
+        // sets the flag synchronously before it encodes or sends anything.
+        // That makes this caller-side ordering redundant by construction:
+        // moving this mark below the call cannot become observable while the
+        // callee owns the same pre-send mark. Keep it here because this acting
+        // destructor owns the contract; adding a seam merely to distinguish
+        // the duplicate marks would test the seam, not the invariant.
         self.client.inner().set_dirty();
 
         let name = self.savepoint.as_ref().map(|sp| sp.name.as_str());
         self.client.__private_api_rollback(name);
+        self.portal_scope.invalidate();
     }
 }
 
@@ -105,6 +109,8 @@ impl<'a> Transaction<'a> {
         Transaction {
             client,
             savepoint: None,
+            portal_scope: PortalScope::new(),
+            parent_portal_scope: None,
             done: false,
         }
     }
@@ -145,14 +151,16 @@ impl<'a> Transaction<'a> {
         if self.savepoint.is_some() && self.client.transaction_status().is_none() {
             self.client.simple_query("").await?;
         }
+        let nested_failed = self.savepoint.is_some()
+            && self.client.transaction_status() == Some(crate::TransactionStatus::Failed);
         let responses = if let Some(sp) = self.savepoint.as_ref() {
             let name = quote_identifier(&sp.name);
             let query = format!("RELEASE {name}");
-            if self.client.transaction_status() == Some(crate::TransactionStatus::Failed) {
+            if nested_failed {
                 crate::simple_query::start_batch_execute_with_error_cleanup(
                     self.client.inner(),
                     &query,
-                    &rollback_savepoint(&sp.name),
+                    &crate::escape::rollback_savepoint(&sp.name),
                 )?
             } else {
                 crate::simple_query::start_batch_execute(self.client.inner(), &query)?
@@ -166,6 +174,15 @@ impl<'a> Transaction<'a> {
         // still being built leaves the transaction open on the server with
         // nothing left to undo it.
         self.done = true;
+        if let Some(parent) = self.parent_portal_scope.take() {
+            if nested_failed {
+                self.portal_scope.invalidate();
+            } else {
+                self.portal_scope.reparent(parent);
+            }
+        } else {
+            self.portal_scope.invalidate();
+        }
         let tag = crate::simple_query::finish_batch_execute_reporting_tag(responses).await?;
         // batch_execute awaited the command to completion - the
         // connection is in a known-clean state. Clear any dirty flag
@@ -195,12 +212,13 @@ impl<'a> Transaction<'a> {
     /// provides any error encountered to the caller.
     pub async fn rollback(mut self) -> Result<(), Error> {
         let query = if let Some(sp) = self.savepoint.as_ref() {
-            rollback_savepoint(&sp.name)
+            crate::escape::rollback_savepoint(&sp.name)
         } else {
             "ROLLBACK".to_string()
         };
         let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
         self.done = true;
+        self.portal_scope.invalidate();
         let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {
             // Explicit rollback awaited to completion - the connection is
@@ -401,6 +419,7 @@ impl<'a> Transaction<'a> {
             execution.statement,
             params,
             execution.unnamed_sql,
+            self.portal_scope.clone(),
         )
         .await
     }
@@ -522,6 +541,8 @@ impl<'a> Transaction<'a> {
         Ok(Transaction {
             client: self.client,
             savepoint: Some(Savepoint { name, depth }),
+            portal_scope: PortalScope::new(),
+            parent_portal_scope: Some(self.portal_scope.clone()),
             done: false,
         })
     }
@@ -529,5 +550,141 @@ impl<'a> Transaction<'a> {
     /// Returns a reference to the underlying `Client`.
     pub fn client(&self) -> &Client {
         self.client
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Savepoint, Transaction};
+    use crate::Statement;
+    use crate::client::{Client, ResponseMessages};
+    use crate::codec::{BackendMessages, FrontendMessage};
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::{Request, RequestDisposition, RequestMessages, TransactionEffect};
+    use crate::portal::{Portal, PortalScope};
+    use bytes::BytesMut;
+    use futures_channel::mpsc;
+    use futures_util::StreamExt;
+
+    fn test_client() -> (Client, mpsc::UnboundedReceiver<Request>) {
+        let (sender, receiver) = mpsc::unbounded();
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        (client, receiver)
+    }
+
+    fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    fn portal_is_live(portal: &Portal, client: &Client) -> bool {
+        portal.with_live_on(client.inner(), || Ok(())).is_ok()
+    }
+
+    /// `PostgreSQL`'s rollback destroys the server portal even if the local
+    /// scope stays active, so every live-server test still gets an error. Keep
+    /// the request queued but remove the server: the stale Rust handle itself
+    /// must be rejected before it can enqueue any use of that missing portal.
+    #[test]
+    fn drop_invalidates_portals_before_server_cleanup_can_mask_them() {
+        let (mut client, mut requests) = test_client();
+        let transaction = Transaction::new(&mut client);
+        let portal = Portal::new(
+            transaction.client.inner(),
+            "p_drop_scope".to_string(),
+            Statement::unnamed(vec![], vec![]),
+            transaction.portal_scope.clone(),
+        );
+        assert!(portal_is_live(&portal, transaction.client()));
+
+        drop(transaction);
+
+        let request = requests
+            .try_recv()
+            .expect("transaction drop did not enqueue its rollback");
+        assert_eq!(request.disposition, RequestDisposition::Housekeeping);
+        assert_eq!(request.transaction_effect, TransactionEffect::MayChange);
+        let RequestMessages::Single(FrontendMessage::Raw(bytes)) = request.messages else {
+            panic!("transaction drop did not encode one rollback batch");
+        };
+        assert_eq!(&bytes[5..], b"ROLLBACK\0");
+        assert!(
+            !portal_is_live(&portal, &client),
+            "transaction drop left its portal scope locally active"
+        );
+    }
+
+    /// A child scope starts active, so checking only that its portal survives
+    /// the nested commit cannot detect a missing reparent. Check the other
+    /// direction too: invalidating the saved parent must immediately make the
+    /// child portal invalid without asking `PostgreSQL` to find its old name.
+    #[compio::test]
+    async fn nested_commit_reparents_portals_to_the_parent_scope() {
+        let (mut client, mut requests) = test_client();
+        let parent_scope = PortalScope::new();
+        let child_scope = PortalScope::new();
+        let transaction = Transaction {
+            client: &mut client,
+            savepoint: Some(Savepoint {
+                name: "child_scope".to_string(),
+                depth: 1,
+            }),
+            portal_scope: child_scope.clone(),
+            parent_portal_scope: Some(parent_scope.clone()),
+            done: false,
+        };
+        let portal = Portal::new(
+            transaction.client.inner(),
+            "p_child_scope".to_string(),
+            Statement::unnamed(vec![], vec![]),
+            child_scope,
+        );
+
+        let commit = transaction.commit();
+        let respond = async {
+            let mut request = requests
+                .next()
+                .await
+                .expect("nested commit did not enqueue RELEASE");
+            assert_eq!(request.disposition, RequestDisposition::Awaited);
+            assert_eq!(request.transaction_effect, TransactionEffect::MayChange);
+            let RequestMessages::Single(FrontendMessage::Raw(bytes)) = &request.messages else {
+                panic!("nested commit did not encode one RELEASE batch");
+            };
+            assert_eq!(&bytes[5..], b"RELEASE \"child_scope\"\0");
+
+            let mut bytes = BytesMut::new();
+            bytes.extend_from_slice(&backend_frame(b'C', b"RELEASE\0"));
+            bytes.extend_from_slice(&backend_frame(b'Z', b"T"));
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    bytes,
+                )))
+                .expect("deliver the scripted RELEASE response");
+        };
+
+        let (result, ()) = futures_util::join!(commit, respond);
+        result.expect("scripted nested commit failed");
+        assert!(
+            portal_is_live(&portal, &client),
+            "nested commit invalidated its child portal instead of preserving it"
+        );
+
+        parent_scope.invalidate();
+        assert!(
+            !portal_is_live(&portal, &client),
+            "nested commit left the child scope active instead of parenting it"
+        );
     }
 }
