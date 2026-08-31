@@ -178,6 +178,40 @@ over. Enumerating a route table by grepping literal path strings in one file mis
 If `api.` is wanted for creators later, the honest move is renaming the GATEWAY's host and freeing the
 name - a token-identity change deserving its own task, never a line item inside a database refactor.
 
+**16. THE MIGRATION SERVICE IS REACHABLE FROM OUTSIDE.** "the migrate-server is accessable to outers."
+This confirms decisions 11 and 14 against the objection raised on 2026-08-30 and settles it.
+
+**THE OBJECTION, RECORDED BECAUSE IT WAS SERIOUS.** The deleted forward's own header
+(`crates/zeroship-control/src/migrations_api.rs`) states the opposite topology outright: "`migrated`
+binds loopback in every deployment we ship (`ports: 127.0.0.1:9091:9091`) because it holds the
+SUPERUSER provisioning DSN - it is the one service that may `CREATE SCHEMA` and `CREATE ROLE`", and
+quotes the compose comment: "nothing outside the compose network should reach it. Creators drive it
+through control." The brief that ordered the deletion asserted the reverse - that the service was
+exposed nowhere as an oversight to fix - and was written without reading that header. The isolation
+was deliberate.
+
+The decision overrides it knowingly. The service authorizes every request against the caller's own
+bearer with its own `PolicySet` and `BearerVerifier`, so reachability was never what protected it.
+
+**THREE PROTECTIONS DIE WITH THE HOP AND MUST BE REPLACED, NOT NOTED.** They were found by the agent
+that performed the deletion, arguing against its own change:
+
+- **A per-IP rate limit on the one endpoint that runs `CREATE SCHEMA` and `CREATE ROLE` as superuser.**
+  `migrations_api.rs:90` called `admin_rate_limit`, which is `http_util::rate_limit` over the `admin`
+  bucket at 30 requests per minute (`crates/zeroship-control/src/main.rs:999`,
+  `Quota::per_minute(30, 60)`), Postgres-backed and proxy-aware. Direct applies are otherwise
+  unthrottled. The limiter is portable - it takes a request, a PG handle, a bucket name, a quota and a
+  trust-proxy flag, and the migration service already holds its own `control_pg` client.
+- **Source-IP propagation.** The migration service sets `request_ip: None`, losing IP-policy input and
+  audit context. Behind the edge it sees Caddy, so `trust_proxy` must be got right or the platform
+  rate-limits itself as one client, or trusts a spoofable header. This is the risky part, not the
+  limiter.
+- **First-seen platform CLI grant materialization.** Direct UUID applies can stay on the default grant
+  fallback until some other control request materializes rows.
+
+Exposure without those replacements is a downgrade, not a refactor. The rate limit in particular
+guards a superuser DDL path that is now publicly routable.
+
 ## 2026-08-29
 
 ### Three more operator decisions, two of which fix defects no review round found
