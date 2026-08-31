@@ -862,6 +862,19 @@ it keep decoding its own stream while only the privileged and destructive parts 
 
   *This was the security review's S3 claim, which that review explicitly flagged as resting on
   "PostgreSQL's documented role-attribute model, not a live probe". It holds.*
+
+  **A second probe closes #60's open question, in the dangerous direction.** #60 asked whether a
+  widened reaper query would fail SILENT - whether other databases' slot rows are even visible to a
+  non-superuser - because that would be a gentler failure than over-reaping. They are visible: a slot
+  created in database `slotvis_a` is returned to a `REPLICATION`-only role connected to database
+  `postgres`, with its `database` column reading `slotvis_a`, while the `current_database()` filter
+  returns 0 for it.
+
+  So the two capabilities compose: **any `REPLICATION` role can SEE every slot on the cluster and
+  DROP any of them.** The reaper's `database = current_database()` predicate
+  (`slot_reaper.rs:213`, `:251`) is the entire blast-radius fence, and it is application SQL, not a
+  boundary PostgreSQL enforces. That is the sharpest available argument for Full: the database
+  declines to draw the line, so the only place it can be drawn is which process holds the attribute.
 - **Full** - the whole WAL side moves and the worker loses REPLICATION outright, satisfying the
   invariant rather than approximating it.
 
