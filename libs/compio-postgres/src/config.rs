@@ -1791,11 +1791,6 @@ impl Config {
             return Ok(());
         }
 
-        const EMPTY_MEANS_UNSET: &[&str] = &["statement_cache_capacity", "max_message_size"];
-        if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
-            return Ok(());
-        }
-
         match key {
             // An EMPTY credential means UNSET, not "a user whose name is the
             // empty string". libpq resolves `?user=` by falling back to the
@@ -3580,9 +3575,9 @@ mod tests {
     ///
     /// Measured against the review container's libpq with the `.invalid` host read-out
     /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md` describes the
-    /// technique). The rule is per-TYPE, not uniform: every numeric option
-    /// takes empty as "not given" and uses its default, every enum option
-    /// REFUSES it, and string options keep the empty string.
+    /// technique). The rule is per-option, not uniform: `port=` selects its
+    /// compiled default, other numeric options refuse an empty value, enum
+    /// options refuse it, and string options generally keep the empty string.
     /// GSSAPI is not implemented, but that is not a reason to refuse a request
     /// to TURN IT OFF.
     ///
@@ -3819,6 +3814,47 @@ mod tests {
         }
 
         #[test]
+        fn a_quoted_value_containing_only_whitespace_is_preserved() {
+            let whitespace = " \t\n\u{000b}\u{000c}\r";
+            let dsn = format!("host=x.invalid application_name='{whitespace}'");
+            let config = dsn
+                .parse::<Config>()
+                .expect("quoted whitespace is ordinary value data");
+
+            assert_eq!(config.get_application_name(), Some(whitespace));
+        }
+
+        #[test]
+        fn an_unquoted_whitespace_only_value_is_empty() {
+            let whitespace = " \t\n\u{000b}\u{000c}\r";
+            let dsn = format!("host=x.invalid application_name={whitespace}");
+            let config = dsn
+                .parse::<Config>()
+                .expect("unquoted trailing whitespace is skipped");
+
+            assert_eq!(config.get_application_name(), Some(""));
+        }
+
+        #[test]
+        fn every_c_whitespace_character_is_ignored_around_equals() {
+            for whitespace in [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'] {
+                for dsn in [
+                    format!("host{whitespace}=x.invalid"),
+                    format!("host={whitespace}x.invalid"),
+                ] {
+                    let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                        panic!("C whitespace around `=` was refused in {dsn:?}: {error}")
+                    });
+                    assert_eq!(
+                        config.get_hosts(),
+                        [super::super::Host::Tcp("x.invalid".to_owned())],
+                        "C whitespace around `=` changed the host in {dsn:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn empty_identity_values_restore_their_defaults() {
             let parsed = "user=alice user='' password=secret password='' dbname=app dbname=''"
                 .parse::<Config>()
@@ -3901,6 +3937,43 @@ mod tests {
             assert!(
                 unnamed.is_empty(),
                 "empty integer values were refused without naming: {}",
+                unnamed.join(", ")
+            );
+        }
+
+        #[test]
+        fn empty_driver_numeric_values_are_rejected_by_name() {
+            let mut accepted = Vec::new();
+            let mut unnamed = Vec::new();
+            for key in ["statement_cache_capacity", "max_message_size"] {
+                for dsn in [
+                    format!("host=x.invalid {key}="),
+                    format!("postgresql://x.invalid/db?{key}="),
+                ] {
+                    match dsn.parse::<Config>() {
+                        Ok(_) => accepted.push(dsn),
+                        Err(error) => {
+                            let names_key =
+                                std::iter::successors(std::error::Error::source(&error), |cause| {
+                                    std::error::Error::source(*cause)
+                                })
+                                .any(|cause| cause.to_string().contains(key));
+                            if !names_key {
+                                unnamed.push(dsn);
+                            }
+                        }
+                    }
+                }
+            }
+
+            assert!(
+                accepted.is_empty(),
+                "empty driver numeric values were silently accepted: {}",
+                accepted.join(", ")
+            );
+            assert!(
+                unnamed.is_empty(),
+                "empty driver numeric values were refused without naming their key: {}",
                 unnamed.join(", ")
             );
         }
@@ -5174,6 +5247,23 @@ mod dsn_parse_tests {
                 ],
                 "libpq decodes the host option before splitting it: {dsn:?}"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_uri_socket_host_stays_a_unix_path() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let config = "postgresql:///db?host=%2Ftmp%2Fpostgres-%FF"
+            .parse::<Config>()
+            .expect("a percent-decoded Unix socket host need not be UTF-8");
+
+        match config.get_hosts() {
+            [Host::Unix(path)] => {
+                assert_eq!(path.as_os_str().as_bytes(), b"/tmp/postgres-\xff");
+            }
+            hosts => panic!("the URI socket host was not one Unix path: {hosts:?}"),
         }
     }
 
