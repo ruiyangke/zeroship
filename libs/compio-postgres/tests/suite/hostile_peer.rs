@@ -4619,6 +4619,65 @@ async fn dropping_a_tls_client_sends_close_notify() {
         .expect("connection task did not exit after client release");
 }
 
+/// `connect_replication` attaches the socket release handle to the TLS session
+/// with its OWN copy of that call, and nothing exercised it: the whole
+/// 1439-test suite passed with `configure_release` removed from the
+/// replication path, while removing the `connect_raw` copy fails four tests
+/// including this one's sibling. Without the handle a dropped replication
+/// session never emits `close_notify`, so the walsender sees an abrupt
+/// transport close rather than an orderly TLS shutdown.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn dropping_a_tls_replication_connection_sends_close_notify() {
+    let server_config = scripted_tls_server_config();
+
+    let server = StubServer::spawn(move |listener| {
+        let mut socket = accept_bounded(&listener);
+
+        let mut ssl_request = [0u8; 8];
+        socket
+            .read_exact(&mut ssl_request)
+            .expect("read PostgreSQL SSLRequest");
+        assert_eq!(
+            u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+            80_877_103,
+            "SSLRequest code"
+        );
+        socket.write_all(b"S").expect("accept TLS negotiation");
+        socket.flush().expect("flush TLS negotiation response");
+
+        let mut tls =
+            rustls::ServerConnection::new(server_config).expect("build TLS server session");
+        {
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            complete_startup(&mut stream, 215);
+        }
+
+        expect_close_notify(&mut tls, &mut socket);
+    });
+
+    let dsn = format!(
+        "host=localhost hostaddr={} port={} user=scripted-user sslmode=require \
+         replication=database connect_timeout=2",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let config = dsn.parse::<Config>().expect("parse TLS replication config");
+    let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("build unverified rustls connector");
+    let replication = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        compio_postgres::replication::connect_replication(tls, &config),
+    )
+    .await
+    .expect("replication connect over TLS exceeded its watchdog")
+    .expect("connect to scripted TLS replication peer");
+
+    drop(replication);
+
+    server.finish();
+}
+
 #[compio::test]
 async fn a_data_row_with_fewer_fields_than_its_description_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
