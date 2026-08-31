@@ -1609,15 +1609,16 @@ impl Pool {
         }
     }
 
-    /// Home an alive, un-owned [`PoolEntry`] that needs a new holder: hand it
-    /// directly to the front live waiter, or push it to `idle` if none is
-    /// waiting. Does NOT touch `active` or `total` - the connection is alive
-    /// and already counted. `active` is bumped only after the next checkout's
-    /// validation succeeds.
+    /// Handle an un-owned [`PoolEntry`] reclaimed by `Waiter::drop` after a
+    /// handoff was deposited into its slot but cancelled before being polled
+    /// out. An eligible entry goes directly to the front live waiter, or to
+    /// `idle` if none is waiting; it remains counted in `total`, and `active`
+    /// is bumped only after the next checkout's validation succeeds. An
+    /// ineligible entry releases its `total` slot and records an eviction here.
     ///
-    /// Shared by `return_client` (normal release of a live connection) and
-    /// `Waiter::drop` (reclaim of an entry deposited into a slot that was then
-    /// cancelled before polling it out).
+    /// This is only the waiter-reclaim path. `return_client` does NOT come
+    /// through here; it calls the sibling `deposit_freed_entry` under an armed
+    /// `ReturnPermitGuard`.
     fn redeposit_freed_entry(&self, entry: PoolEntry) {
         if self.closed.get() {
             self.discard_unowned_entry(entry);
