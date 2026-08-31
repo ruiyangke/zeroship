@@ -1,3 +1,11 @@
+// This test target is its own crate ROOT and overflows rustc's layout query
+// computing the layout of `support::grant_all_runtime_table_columns()`.
+// `recursion_limit` is per crate root, so the crate's lib and its sibling test
+// targets do not cover this one. Caught by `tests/clippy_gate.sh`, which lints
+// `--all-targets`; a bare `cargo test -p zeroship-plugin-db --lib` never builds
+// this file, which is why it compiled clean until the gate ran.
+#![recursion_limit = "256"]
+
 //! End-to-end tests for the native `Db.transaction(fn)`
 //! orchestrator against real Postgres.
 //!

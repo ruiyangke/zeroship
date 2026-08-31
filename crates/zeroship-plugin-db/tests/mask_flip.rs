@@ -1,3 +1,10 @@
+// This test target is its own crate ROOT and overflows rustc's layout query.
+// `recursion_limit` is per crate root, so the crate's lib and its sibling test
+// targets do not cover this one. Caught by `tests/clippy_gate.sh`, which lints
+// `--all-targets`; a bare `cargo test -p zeroship-plugin-db --lib` never builds
+// this file, which is why it compiled clean until the gate ran.
+#![recursion_limit = "256"]
+
 //! The masking storage flip: the filter oracle, and the three silent
 //! consequences of closing it.
 //!
