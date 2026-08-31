@@ -101,8 +101,8 @@ fn the_length_fence_is_inclusive_at_63() {
     println!("ruled on 2 lengths");
 }
 
-/// TABLE half of the pair. The two shared platform prefixes are checked before
-/// the role-specific `pg_`, `__zs_`, and `sqlite_` reservations.
+/// TABLE half of the pair. The shared platform prefixes and the runtime copy of
+/// each shipping backend's catalog prefix are both checked before rendering.
 #[test]
 fn the_table_fence_holds() {
     let refused = [
@@ -113,7 +113,6 @@ fn the_table_fence_holds() {
         "__ZERO_MIGRATE_x",
         "__zeroship_migrations",
         "__ZEROSHIP_x",
-        "__zs_internal",
         "sqlite_master",
         "sqlite_sequence",
     ];
@@ -128,7 +127,7 @@ fn the_table_fence_holds() {
     }
     // The control: a name that merely resembles a reserved one must pass, or
     // the fence is a blanket refusal wearing a table's clothes.
-    for name in ["page_views", "zeroship_apps", "sqlited", "pgx"] {
+    for name in ["page_views", "zeroship_apps", "__zs_internal", "sqlited", "pgx"] {
         assert!(
             Ident::parse_as(name, IdentRole::Collection).is_ok(),
             "the table fence over-matched {name:?}"
@@ -150,6 +149,7 @@ fn the_column_fence_holds() {
         "_",
         "__zs_x",
         "__zeroship_migrations",
+        "pg_attribute",
         "sqlite_master",
         "ssn_masked",
         "email_masked",
@@ -176,7 +176,7 @@ fn the_column_fence_holds() {
         );
         ruled_on += 1;
     }
-    assert_eq!(ruled_on, 17);
+    assert_eq!(ruled_on, 18);
     assert!(ruled_on >= 15, "ruled on {ruled_on} column names");
     println!("ruled on {ruled_on} column names");
 }
