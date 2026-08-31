@@ -31,13 +31,13 @@
 //! compiled and RE-EXECUTED in 70 separate binaries; 1779 - 895 is exactly
 //! 69 x 13. A test that was `foo.rs::bar` is now reported as `foo::bar`.
 //!
-//! Four targets stay separate, each for a reason that would break if folded:
+//! Five targets stay separate, each for a reason that would break if folded:
 //!   - `tls_live`, `unix_socket_live` - declared with `required-features`, so
 //!     they must be able to not build at all
 //!   - `serialized_loop` - already an explicit target
-//!   - `socket_release` - installs a process-global `log::set_logger`, and so
-//!     does `transaction_claims` in here. Only the first call in a process
-//!     succeeds, so one of the two has to own its own process.
+//!   - `socket_release`, `query_debug_logging` - each installs a process-global
+//!     `log::set_logger`, and so does `transaction_claims` in here. Only the
+//!     first call in a process succeeds, so each has to own its own process.
 //!
 //! Helper names collide freely across these modules (`connected`, `client`,
 //! `fixture` are each defined many times) because each file is its own module

@@ -244,3 +244,9 @@ name = "serialized_loop"
 # in a process succeeds; separate binaries are what keep both able to run.
 [[test]]
 name = "socket_release"
+
+# Its own binary because it installs a process-global logger whose Debug level
+# makes the query encoder take its parameter-logging branch. Sharing a process
+# with another logger would silently select the non-Debug branch instead.
+[[test]]
+name = "query_debug_logging"
