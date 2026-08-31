@@ -267,7 +267,9 @@ where
                             "before authentication completed"
                         }
                         HandshakePhase::Complete => "after startup completed",
-                        HandshakePhase::ReadingStartupInfo => unreachable!(),
+                        HandshakePhase::ReadingStartupInfo => {
+                            unreachable!("the phase guard excludes ReadingStartupInfo")
+                        }
                     };
                     return Err(protocol_error(format!(
                         "PostgreSQL sent BackendKeyData {timing}"
@@ -358,8 +360,16 @@ where
             ));
         }
 
-        let version = u32::from_be_bytes(body[..4].try_into().unwrap());
-        let option_count = i32::from_be_bytes(body[4..8].try_into().unwrap());
+        let version = u32::from_be_bytes(
+            body[..4]
+                .try_into()
+                .expect("the eight-byte body minimum guarantees a complete protocol version"),
+        );
+        let option_count = i32::from_be_bytes(
+            body[4..8]
+                .try_into()
+                .expect("the eight-byte body minimum guarantees a complete option count"),
+        );
         let Some(protocol) = ProtocolVersion::from_wire(version) else {
             return Err(protocol_error(format!(
                 "PostgreSQL negotiated unsupported protocol version {}.{}",
@@ -452,7 +462,11 @@ where
             ));
         }
 
-        let process_id = i32::from_be_bytes(body[..4].try_into().unwrap());
+        let process_id = i32::from_be_bytes(
+            body[..4]
+                .try_into()
+                .expect("the four-byte body minimum guarantees a complete process ID"),
+        );
         let secret_key = CancelKey::new(body.slice(4..)).map_err(Error::parse)?;
         Self::validate_cancel_key(self.protocol, &secret_key)?;
 
