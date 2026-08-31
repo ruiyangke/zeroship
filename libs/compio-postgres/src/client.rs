@@ -3361,7 +3361,7 @@ impl Client {
             // the server in the same state the explicit call would, or which
             // exit a caller took would decide whether a savepoint outlives it.
             let sql = match name {
-                Some(name) => crate::transaction::rollback_savepoint(name),
+                Some(name) => crate::escape::rollback_savepoint(name),
                 None => "ROLLBACK".to_string(),
             };
             // H6: Don't panic on NUL in savepoint names. `frontend::query`
