@@ -432,7 +432,7 @@ shape: Database creation edits the Datastore's existing shared publication.
 The routing table in `docs/proposals/2026-08-26-runtime-db-binding-00-index.md:25`
 called this "one cluster publication" until 2026-08-30 and now reads "one shared
 publication per Datastore". A publication is DATASTORE-scoped
-(`pg_publication.relisshared = f`), so the old wording was not a summary of this
+(`pg_class.relisshared` is `f` for the publication catalogs), so the old wording was not a summary of this
 design but a contradiction of it - and the summary line is what a reader meets
 first.
 
