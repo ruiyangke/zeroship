@@ -847,6 +847,21 @@ it keep decoding its own stream while only the privileged and destructive parts 
 - **Partial** - only `slot_reaper` moves. The worker keeps REPLICATION and keeps decoding. It then
   still holds a privilege PostgreSQL cannot distinguish from "drop anyone's slot", so the only fence
   is WHICH PROCESS ISSUES THE DROP - defence in depth, not capability removal.
+
+  **MEASURED 2026-08-31, on live PostgreSQL 18.6, rather than inferred from the documentation.** Two
+  non-superuser roles, both carrying only the `REPLICATION` attribute. `probe_owner` created a
+  logical slot; `probe_intruder` - a DIFFERENT role - then ran
+  `pg_drop_replication_slot('probe_slot')`. It succeeded silently, and the slot count went 1 to 0.
+  **PostgreSQL enforces NO per-slot ownership check.**
+
+  So this is now a fact, not a reading of the role-attribute model: a worker holding `REPLICATION`
+  can drop ANY slot on the cluster, including slots belonging to other tenants' workers and to the
+  relay itself. Relocating the reaper's CODE changes nothing about that. The capability is the role
+  attribute, and the only way to remove it is `NOREPLICATION` - which is what "Full" means and
+  "Partial" does not.
+
+  *This was the security review's S3 claim, which that review explicitly flagged as resting on
+  "PostgreSQL's documented role-attribute model, not a live probe". It holds.*
 - **Full** - the whole WAL side moves and the worker loses REPLICATION outright, satisfying the
   invariant rather than approximating it.
 
