@@ -1,33 +1,32 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use compio_postgres::{Client, NoTls};
-use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use ntex::http::StatusCode;
-use ntex::web::{self, test, HttpResponse};
-use serde_json::{json, Value};
+use ntex::web::{self, HttpResponse, test};
+use serde_json::{Value, json};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
 use zeroship_migrate::{
-    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend,
-    ProjectLockAcquisition,
+    ExecutorConfig, MigrationBackend, ProjectLockAcquisition, effective_policy_from_charter_toml,
 };
 use zeroship_migrate_postgres::PostgresBackend;
-use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
+use zeroship_migrate_server::MigrationServiceState;
+use zeroship_migrate_server::apply::{ApplyMigrationsRequest, apply_ir_documents};
 use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
-use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
+use zeroship_migrate_server::policy::{MIGRATE_POLICY_FILENAME, ManagedPolicyConfig};
 use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::session::CompioPgSession;
-use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
@@ -42,10 +41,8 @@ fn dsn() -> String {
 }
 
 fn tmpdir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "zs-migrated-{label}-{}",
-        Uuid::new_v4().simple()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("zs-migrated-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
 }
@@ -210,8 +207,8 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     // holds, so the leak makes a production-shaped check slower on every run and
     // muddies any measurement of it (the `runtime_dependents_sql` docstring's
     // "540 of 540" was taken over a population this suite had been growing).
-    let runtime_role = zeroship_core::database_role::per_app_role_name(&schema)
-        .expect("test app role name");
+    let runtime_role =
+        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
     for r in [role, runtime_role] {
         let _ = conn
             .batch_execute(&format!(
@@ -232,7 +229,10 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
         )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[app_id])
+        .execute(
+            "DELETE FROM zeroship.app_members WHERE app_id = $1",
+            &[app_id],
+        )
         .await;
     let _ = conn
         .execute("DELETE FROM zeroship.apps WHERE id = $1", &[app_id])
@@ -247,13 +247,22 @@ async fn cleanup_user(conn: &Client, user_id: &Uuid) {
         )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.permission_tokens WHERE owner_id = $1", &[user_id])
+        .execute(
+            "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
+            &[user_id],
+        )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[user_id])
+        .execute(
+            "DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1",
+            &[user_id],
+        )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.app_members WHERE user_id = $1", &[user_id])
+        .execute(
+            "DELETE FROM zeroship.app_members WHERE user_id = $1",
+            &[user_id],
+        )
         .await;
     let _ = conn
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[user_id])
@@ -474,12 +483,43 @@ fn create_notes_request() -> Value {
     })
 }
 
-fn two_file_lock_span_request() -> Value {
-    json!({
-        "kind": "ir",
-        "descriptor_sha256": TEST_DESCRIPTOR_SHA256_NEXT,
-        "documents": [
-            {
+/// The complete migration history for the rollback-coverage regression.
+///
+/// The first document is byte-for-byte the history returned by
+/// [`create_notes_request`]. The second advances that history, so submitting
+/// `create_notes_request()` afterwards is a real 1..K request against a journal
+/// at 1..N rather than a different spelling of the same set.
+fn complete_notes_history_request() -> Value {
+    let mut request = create_notes_request();
+    request["descriptor_sha256"] = json!(TEST_DESCRIPTOR_SHA256_NEXT);
+    request["documents"]
+        .as_array_mut()
+        .expect("create-notes fixture documents")
+        .push(json!({
+            "filename": "0002_extend_notes.ir.json",
+            "body": {
+                "ir_version": 1,
+                "name": "extend_notes",
+                "ops": [{
+                    "op": "addColumn",
+                    "table": "notes",
+                    "column": "summary",
+                    "type": "text",
+                    "nullable": true
+                }]
+            }
+        }));
+    request
+}
+
+fn lock_span_request() -> Value {
+    let mut request = create_notes_request();
+    request["descriptor_sha256"] = json!(TEST_DESCRIPTOR_SHA256_NEXT);
+    request["documents"]
+        .as_array_mut()
+        .expect("create-notes fixture documents")
+        .extend([
+            json!({
                 "filename": "0002_create_lock_span_marker.ir.json",
                 "body": {
                     "ir_version": 1,
@@ -492,8 +532,8 @@ fn two_file_lock_span_request() -> Value {
                         ]
                     }]
                 }
-            },
-            {
+            }),
+            json!({
                 "filename": "0003_extend_notes.ir.json",
                 "body": {
                     "ir_version": 1,
@@ -507,9 +547,9 @@ fn two_file_lock_span_request() -> Value {
                         "nullable": true
                     }]
                 }
-            }
-        ]
-    })
+            }),
+        ]);
+    request
 }
 
 fn denied_vendor_request() -> Value {
@@ -531,10 +571,12 @@ fn denied_vendor_request() -> Value {
 }
 
 fn drop_notes_request() -> Value {
-    json!({
-        "kind": "ir",
-        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
-        "documents": [{
+    let mut request = create_notes_request();
+    request["descriptor_sha256"] = json!(TEST_DESCRIPTOR_SHA256_NEXT);
+    request["documents"]
+        .as_array_mut()
+        .expect("create-notes fixture documents")
+        .push(json!({
             "filename": "0002_drop_notes.ir.json",
             "body": {
                 "ir_version": 1,
@@ -544,8 +586,8 @@ fn drop_notes_request() -> Value {
                     "table": "notes"
                 }]
             }
-        }]
-    })
+        }));
+    request
 }
 
 /// A creator migration that CREATES a table named exactly like the platform's
@@ -583,10 +625,12 @@ fn create_platform_journal_table_request() -> Value {
 
 /// The same name, as a `dropTable`.
 fn drop_platform_journal_request() -> Value {
-    json!({
-        "kind": "ir",
-        "descriptor_sha256": TEST_DESCRIPTOR_SHA256,
-        "documents": [{
+    let mut request = create_notes_request();
+    request["descriptor_sha256"] = json!(TEST_DESCRIPTOR_SHA256_NEXT);
+    request["documents"]
+        .as_array_mut()
+        .expect("create-notes fixture documents")
+        .push(json!({
             "filename": "0003_drop_journal.ir.json",
             "body": {
                 "ir_version": 1,
@@ -596,8 +640,8 @@ fn drop_platform_journal_request() -> Value {
                     "table": "__zeroship_schema_migrations"
                 }]
             }
-        }]
-    })
+        }));
+    request
 }
 
 fn with_policy(mut request: Value, body: &str) -> Value {
@@ -848,7 +892,10 @@ async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
     );
     let lit = q.replace('\'', "''");
     let present = conn
-        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .query(
+            &format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"),
+            &[],
+        )
         .await
         .expect("regclass probe");
     if !present[0].get::<_, bool>("p") {
@@ -868,7 +915,10 @@ async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
 async fn relation_exists(conn: &Client, qualified: &str) -> bool {
     let lit = qualified.replace('\'', "''");
     let rows = conn
-        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
+        .query(
+            &format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"),
+            &[],
+        )
         .await
         .expect("regclass probe");
     rows[0].get("p")
@@ -918,8 +968,7 @@ async fn as_app_runtime_identity(
 ) -> Result<(), compio_postgres::Error> {
     let worker = quote_ident(zeroship_migrate_server::apply::WORKER_ROLE);
     let runtime = quote_ident(
-        &zeroship_core::database_role::per_app_role_name(app_schema)
-            .expect("test app role name"),
+        &zeroship_core::database_role::per_app_role_name(app_schema).expect("test app role name"),
     );
     conn.batch_execute(&format!(
         "SET SESSION AUTHORIZATION {worker}; SET ROLE {runtime};"
@@ -931,7 +980,9 @@ async fn as_app_runtime_identity(
          comes from the test DSN, the second from provision_runtime_app_role",
     );
     let out = conn.batch_execute(sql).await;
-    let restored = conn.batch_execute("RESET ROLE; RESET SESSION AUTHORIZATION;").await;
+    let restored = conn
+        .batch_execute("RESET ROLE; RESET SESSION AUTHORIZATION;")
+        .await;
     assert!(
         restored.is_ok(),
         "the admin identity must come back on this connection or every later \
@@ -1144,8 +1195,8 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     let schema = app_id.to_string();
     let table = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
     let audit = format!("{}.{}", quote_ident(&schema), quote_ident(table));
-    let runtime_role = zeroship_core::database_role::per_app_role_name(&schema)
-        .expect("test app role name");
+    let runtime_role =
+        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
 
     // DELETION, not reordering: say which one before touching any privilege.
     assert!(
@@ -1218,7 +1269,6 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     cleanup_user(&conn, &owner_id).await;
 }
 
-
 #[ntex::test]
 async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     let conn = admin_conn().await;
@@ -1271,8 +1321,11 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     // `schema_migrations` would have it silently adopted as the journal. This
     // asserts nothing occupies that name.
     assert!(
-        !relation_exists(&conn, &format!("\"{app_id}_migrations\".__zeroship_schema_migrations"))
-            .await,
+        !relation_exists(
+            &conn,
+            &format!("\"{app_id}_migrations\".__zeroship_schema_migrations")
+        )
+        .await,
         "the separate <app>_migrations meta schema must be gone"
     );
     assert!(
@@ -1386,27 +1439,30 @@ scope = "all"
     );
 }
 
-/// A bundle owns one project advisory lock, not one lock per IR file.
+/// A bundle owns one project advisory lock through its terminal ledger write.
 ///
-/// The blocker holds `ACCESS SHARE` on the table file 2 alters. That permits
-/// preflight and file 1 to finish, then parks file 2 at its `AccessExclusiveLock`
-/// request. A second session probes the project advisory key at that exact point.
+/// The first blocker holds `ACCESS SHARE` on the table the final file alters.
+/// That permits preparation, attestation, the submitted ledger insert, and the
+/// earlier files to finish, then parks the final file at its
+/// `AccessExclusiveLock` request. While it is parked, a second connection locks
+/// that request's submitted ledger row. Once the final file is released, the
+/// apply reaches `mark_applied` and waits on the row.
+/// Probing the project advisory key at both waits proves one lock spans every
+/// file and the terminal timestamp that decides which descriptor is newest.
 #[compio::test]
-async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
+async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
     let conn = admin_conn().await;
+    let ledger_conn = admin_conn().await;
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
     let tmp = tmpdir("project-lock-span");
-    let policy_config = ManagedPolicyConfig::default_confined(
-        TEST_POLICY_SEAL_KEY.to_vec(),
-        1,
-    )
-    .expect("test policy config");
+    let policy_config = ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+        .expect("test policy config");
     let schema_apply_store = SchemaApplyStore::new(dsn());
-    let initial: ApplyMigrationsRequest = serde_json::from_value(create_notes_request())
-        .expect("deserialize initial apply request");
+    let initial: ApplyMigrationsRequest =
+        serde_json::from_value(create_notes_request()).expect("deserialize initial apply request");
     apply_ir_documents(
         &dsn(),
         &tmp,
@@ -1417,25 +1473,24 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
         owner_id,
     )
     .await
-    .expect("create the table file 2 will alter");
+    .expect("create the table the final file will alter");
 
-    let notes = format!("{}.{}", quote_ident(&app_id.to_string()), quote_ident("notes"));
-    conn.batch_execute(&format!(
-        "BEGIN; LOCK TABLE {notes} IN ACCESS SHARE MODE;"
-    ))
-    .await
-    .expect("hold the file-2 table lock");
+    let notes = format!(
+        "{}.{}",
+        quote_ident(&app_id.to_string()),
+        quote_ident("notes")
+    );
+    conn.batch_execute(&format!("BEGIN; LOCK TABLE {notes} IN ACCESS SHARE MODE;"))
+        .await
+        .expect("hold the final-file table lock");
 
     let apply_dsn = dsn();
     let apply_tmp = tmp.clone();
-    let request: ApplyMigrationsRequest = serde_json::from_value(two_file_lock_span_request())
-        .expect("deserialize two-file apply request");
+    let request: ApplyMigrationsRequest =
+        serde_json::from_value(lock_span_request()).expect("deserialize lock-span apply request");
     let apply_task = compio::runtime::spawn(async move {
-        let policy_config = ManagedPolicyConfig::default_confined(
-            TEST_POLICY_SEAL_KEY.to_vec(),
-            1,
-        )
-        .expect("test policy config");
+        let policy_config = ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
+            .expect("test policy config");
         let schema_apply_store = SchemaApplyStore::new(apply_dsn.clone());
         apply_ir_documents(
             &apply_dsn,
@@ -1449,9 +1504,9 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
         .await
     });
 
-    let mut reached_file_two = false;
+    let mut reached_final_file = false;
     for _ in 0..500 {
-        reached_file_two = conn
+        reached_final_file = conn
             .query_one(
                 "SELECT EXISTS ( \
                      SELECT 1 FROM pg_locks \
@@ -1462,15 +1517,15 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
                 &[&notes],
             )
             .await
-            .expect("observe file 2 waiting on its table lock")
+            .expect("observe the final file waiting on its table lock")
             .get(0);
-        if reached_file_two {
+        if reached_final_file {
             break;
         }
         compio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    let contender_acquired = if reached_file_two {
+    let final_file_contender_acquired = if reached_final_file {
         conn.query_one(
             "SELECT pg_try_advisory_lock( \
                     (h >> 32)::int4, ((h << 32) >> 32)::int4 \
@@ -1483,7 +1538,7 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
     } else {
         false
     };
-    if contender_acquired {
+    if final_file_contender_acquired {
         conn.execute(
             "SELECT pg_advisory_unlock( \
                     (h >> 32)::int4, ((h << 32) >> 32)::int4 \
@@ -1494,12 +1549,95 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
         .expect("release unexpectedly acquired project lock");
     }
 
+    let (ledger_backend_pid, held_submitted_row) = if reached_final_file {
+        ledger_conn
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin the terminal-ledger blocker");
+        let rows = ledger_conn
+            .query(
+                "SELECT migration_id FROM zeroship.app_schema_applies \
+                  WHERE app_id = $1 AND status = 'submitted' \
+                  ORDER BY submitted_at DESC, migration_id DESC \
+                  FOR UPDATE",
+                &[&app_id],
+            )
+            .await
+            .expect("lock the in-flight apply's submitted ledger row");
+        let pid = ledger_conn
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("read the terminal-ledger blocker's backend pid")
+            .get::<_, i32>(0);
+        (Some(pid), rows.len() == 1)
+    } else {
+        (None, false)
+    };
+
     conn.batch_execute("ROLLBACK")
         .await
-        .expect("release the file-2 table lock");
-    let apply_result = apply_task.await.expect("join the two-file apply");
+        .expect("release the final-file table lock");
 
-    let file_two_column_applied = conn
+    let mut reached_terminal_write = false;
+    if held_submitted_row {
+        let blocker_pid = ledger_backend_pid.expect("a held row has a blocker backend");
+        for _ in 0..500 {
+            reached_terminal_write = conn
+                .query_one(
+                    "SELECT EXISTS ( \
+                         SELECT 1 FROM pg_stat_activity AS activity \
+                          WHERE $1::int = ANY(pg_blocking_pids(activity.pid)) \
+                            AND activity.wait_event_type = 'Lock' \
+                            AND strpos( \
+                                  activity.query, \
+                                  'UPDATE zeroship.app_schema_applies' \
+                                ) > 0 \
+                     )",
+                    &[&blocker_pid],
+                )
+                .await
+                .expect("observe mark_applied waiting on the submitted row")
+                .get(0);
+            if reached_terminal_write {
+                break;
+            }
+            compio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    let terminal_contender_acquired = if reached_terminal_write {
+        conn.query_one(
+            "SELECT pg_try_advisory_lock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+               ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
+            &[&app_id.to_string()],
+        )
+        .await
+        .expect("probe the project lock while mark_applied is blocked")
+        .get::<_, bool>(0)
+    } else {
+        false
+    };
+    if terminal_contender_acquired {
+        conn.execute(
+            "SELECT pg_advisory_unlock( \
+                    (h >> 32)::int4, ((h << 32) >> 32)::int4 \
+               ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
+            &[&app_id.to_string()],
+        )
+        .await
+        .expect("release unexpectedly acquired terminal project lock");
+    }
+    if ledger_backend_pid.is_some() {
+        ledger_conn
+            .batch_execute("ROLLBACK")
+            .await
+            .expect("release the terminal-ledger row");
+    }
+
+    let apply_result = apply_task.await.expect("join the lock-span apply");
+
+    let final_file_column_applied = conn
         .query_one(
             "SELECT EXISTS ( \
                  SELECT 1 FROM information_schema.columns \
@@ -1510,7 +1648,7 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
             &[&app_id.to_string()],
         )
         .await
-        .expect("observe file 2's completed schema effect")
+        .expect("observe the final file's completed schema effect")
         .get::<_, bool>(0);
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1518,17 +1656,29 @@ async fn project_lock_spans_every_file_in_a_two_file_apply_pg() {
     cleanup_user(&conn, &owner_id).await;
 
     assert!(
-        reached_file_two,
-        "the apply never reached the blocked DDL in file 2: {apply_result:?}"
+        reached_final_file,
+        "the apply never reached the blocked DDL in its final file: {apply_result:?}"
     );
     assert!(
-        !contender_acquired,
-        "the project advisory lock was free while file 2 was executing"
+        !final_file_contender_acquired,
+        "the project advisory lock was free while the final file was executing"
     );
-    let outcome = apply_result.expect("two-file apply succeeds after the blocker releases");
     assert!(
-        file_two_column_applied,
-        "file 2 did not apply its column after the blocker released: {outcome:?}"
+        held_submitted_row,
+        "the blocked apply did not expose exactly one submitted ledger row"
+    );
+    assert!(
+        reached_terminal_write,
+        "mark_applied never waited on the submitted ledger row: {apply_result:?}"
+    );
+    assert!(
+        !terminal_contender_acquired,
+        "the project advisory lock was free while mark_applied was waiting"
+    );
+    let outcome = apply_result.expect("lock-span apply succeeds after the blocker releases");
+    assert!(
+        final_file_column_applied,
+        "the final file did not apply its column after the blocker released: {outcome:?}"
     );
 }
 
@@ -1650,7 +1800,10 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     let resp = test::call_service(&svc, post(create_notes_request())).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let journaled_before = journaled_count(&conn, &app_id).await;
-    assert!(journaled_before >= 1, "the journal must exist to be attacked");
+    assert!(
+        journaled_before >= 1,
+        "the journal must exist to be attacked"
+    );
 
     // THE FIXTURE HAS ALREADY FAILED TWICE HERE, both times passing the case while
     // measuring itself: once with `"table":` on a `createTable` (refused as a
@@ -1687,11 +1840,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
              comment above is now wrong: {body}"
         );
         assert!(
-            relation_exists(
-                &conn,
-                &format!("\"{app_id}\".__zeroship_schema_migrations")
-            )
-            .await,
+            relation_exists(&conn, &format!("\"{app_id}\".__zeroship_schema_migrations")).await,
             "the journal must still exist after a refused {label}"
         );
     }
@@ -1716,7 +1865,11 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     )
     .await;
     assert!(
-        !relation_exists(&conn, &format!("\"{fresh_id}\".__zeroship_schema_migrations")).await,
+        !relation_exists(
+            &conn,
+            &format!("\"{fresh_id}\".__zeroship_schema_migrations")
+        )
+        .await,
         "this arm only means anything against an app with NO journal yet"
     );
     let resp = test::call_service(
@@ -1796,9 +1949,8 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
-    let publication =
-        zeroship_core::replication_names::publication_name(&app_id.to_string())
-            .expect("app id is a valid publication seed");
+    let publication = zeroship_core::replication_names::publication_name(&app_id.to_string())
+        .expect("app id is a valid publication seed");
     conn.batch_execute(&format!(
         "CREATE PUBLICATION {} FOR ALL TABLES",
         quote_ident(&publication)
@@ -1879,6 +2031,99 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
             .as_deref()
             .is_some_and(|error| error.contains("publication")),
         "the terminal row must retain the post-DDL failure: {ledger:?}"
+    );
+}
+
+/// A creator must not move the deploy ledger head behind the database journal.
+///
+/// The first request supplies and applies 1..N. The second request is the old
+/// 1..K artifact: every migration it carries is already journaled, so the engine
+/// applies nothing. Before the server attested full-set journal coverage, that
+/// empty apply returned 200 and stamped the truncated descriptor as the newest
+/// applied row, which made the deploy guard admit old code over the newer schema.
+#[ntex::test]
+async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrate_server::configure),
+    )
+    .await;
+    let post = |body: Value| {
+        test::TestRequest::post()
+            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .header("authorization", "Bearer good-token")
+            .set_json(&body)
+            .to_request()
+    };
+
+    let first_resp = test::call_service(&svc, post(complete_notes_history_request())).await;
+    assert_eq!(first_resp.status(), StatusCode::OK);
+    let first: Value =
+        serde_json::from_slice(&test::read_body(first_resp).await).expect("first JSON body");
+    assert!(
+        first["applied"]
+            .as_array()
+            .is_some_and(|versions| !versions.is_empty()),
+        "the complete history must advance the real journal: {first}"
+    );
+    let missing_version = first["applied"]
+        .as_array()
+        .and_then(|versions| versions.last())
+        .and_then(Value::as_str)
+        .expect("the final applied version belongs to the 0002 document")
+        .to_string();
+
+    let rollback_resp = test::call_service(&svc, post(create_notes_request())).await;
+    let rollback_status = rollback_resp.status();
+    let rollback_body: Value =
+        serde_json::from_slice(&test::read_body(rollback_resp).await).expect("rollback JSON body");
+    let ledger: Vec<(String, Option<String>, Value)> = conn
+        .query(
+            "SELECT status, descriptor_sha256, applied_versions \
+               FROM zeroship.app_schema_applies \
+              WHERE app_id = $1 \
+              ORDER BY submitted_at ASC, migration_id ASC",
+            &[&app_id],
+        )
+        .await
+        .expect("read every ledger row for the rollback attempt")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
+
+    assert_eq!(
+        rollback_status,
+        StatusCode::CONFLICT,
+        "a truncated history must be refused; response={rollback_body}, ledger={ledger:?}"
+    );
+    assert_eq!(rollback_body["error"], "migration_history_incomplete");
+    assert!(
+        rollback_body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains(&missing_version)),
+        "the refusal must name the omitted journaled version {missing_version}: {rollback_body}"
+    );
+    assert_eq!(
+        ledger,
+        vec![(
+            "applied".to_string(),
+            Some(TEST_DESCRIPTOR_SHA256_NEXT.to_string()),
+            first["applied"].clone(),
+        )],
+        "the refusal must happen before any row for the truncated descriptor is written"
     );
 }
 
@@ -1975,8 +2220,6 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
     cleanup_user(&conn, &owner_id).await;
 }
 
-
-
 #[ntex::test]
 async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     let app_id = Uuid::now_v7();
@@ -2046,7 +2289,12 @@ async fn apply_api_rejects_bearer_for_different_app() {
     let other_app = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("wrong-app-token", owner_id, [Scope::AppsDeploy], [other_app]);
+    auth.insert(
+        "wrong-app-token",
+        owner_id,
+        [Scope::AppsDeploy],
+        [other_app],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2100,7 +2348,10 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     );
 
     let role_rows = conn
-        .query("SELECT 1 FROM pg_roles WHERE rolname = 'zs_migrated_forbidden'", &[])
+        .query(
+            "SELECT 1 FROM pg_roles WHERE rolname = 'zs_migrated_forbidden'",
+            &[],
+        )
         .await
         .expect("query pg_roles");
     assert!(role_rows.is_empty(), "guard-denied createRole must not run");
@@ -2206,10 +2457,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
         .header("authorization", "Bearer good-token")
-        .set_json(&with_policy(
-            create_notes_request(),
-            escalating_policy(),
-        ))
+        .set_json(&with_policy(create_notes_request(), escalating_policy()))
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2241,10 +2489,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
         .header("authorization", "Bearer good-token")
-        .set_json(&with_policy(
-            create_notes_request(),
-            malformed_policy(),
-        ))
+        .set_json(&with_policy(create_notes_request(), malformed_policy()))
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2345,7 +2590,12 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let err = authenticator
-        .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(
+            "not-a-jwt",
+            Uuid::now_v7(),
+            Scope::AppsDeploy,
+            "test-request-id",
+        )
         .await
         .expect_err("malformed bearer must be denied");
     assert!(

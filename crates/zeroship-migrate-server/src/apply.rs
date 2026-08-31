@@ -4,22 +4,23 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
+use zeroship_core::database_role::{PerAppRoleNameError, per_app_role_name};
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
-    resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine,
-    MigrationIr, SealError, SealedPolicy,
+    Approval, ApprovalScope, DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig,
+    IrAuthor, LiveSchema, LockMode, LoweredArtifact, MigrationBackend, MigrationEngine,
+    MigrationIr, PlanStatusManifest, SealError, SealedPolicy, StatusError,
+    resolve_create_table_policy,
 };
 // PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
 // them off the facade, so this PostgreSQL host names PostgreSQL rather than
 // reaching for a re-export that deliberately no longer exists.
-use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
-use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zeroship_migrate_postgres::role::migrator_role_name;
-use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
-use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use crate::session::CompioPgSession;
+use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::role::migrator_role_name;
+use zeroship_migrate_postgres::{DIALECT as POSTGRES, PostgresBackend};
 
 /// The backends this host hands to every engine entry point.
 ///
@@ -30,20 +31,19 @@ use crate::session::CompioPgSession;
 /// at each call site, NOT by narrowing the set: the engine resolves a backend by
 /// `DialectId` out of whatever it was given, so a narrowed set would only change
 /// which errors are reachable, not which backend runs.
-const VENDORS: zeroship_migrate_backend::registry::VendorSet =
-    zeroship_migrate::shipping_vendors();
+const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
 use crate::policy::{
-    confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
-    ManagedPolicyError, SealVerifier,
-};
-use crate::publication::{reconcile_app_publication, PublicationError};
-use crate::schema_apply_store::{
-    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
+    CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError, SealVerifier,
+    confined_guard_policy_for_schema,
 };
 use crate::provisioning::{
-    exec_retry, provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
-    AUDIT_UNMASK_TABLE,
+    AUDIT_UNMASK_TABLE, ProvisionRoleError, exec_retry, provision_audit_unmask_table,
+    provision_migrator,
+};
+use crate::publication::{PublicationError, reconcile_app_publication};
+use crate::schema_apply_store::{
+    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -122,13 +122,6 @@ pub enum IrApplyError {
     /// Introspecting the live schema failed.
     #[error("read Postgres catalog for live facts: {0}")]
     Snapshot(#[source] zeroship_migrate::DriftError),
-    /// Acquiring or releasing the bundle-wide project lock failed.
-    #[error("{action} project advisory lock: {source}")]
-    ProjectLock {
-        action: &'static str,
-        #[source]
-        source: zeroship_migrate::ApplyError,
-    },
     /// A `.ir.json` failed the fail-closed LOAD GATE or guarded lower.
     #[error("IR load/guarded-lower ({file}): {source}")]
     Ir {
@@ -220,6 +213,19 @@ pub enum ApplyRequestError {
     ProvisionAuditUnmask(compio_postgres::Error),
     #[error("app publication provision: {0}")]
     ProvisionPublication(#[from] PublicationError),
+    #[error("{action} migration project advisory lock: {source}")]
+    ProjectLock {
+        action: &'static str,
+        #[source]
+        source: zeroship_migrate::ApplyError,
+    },
+    #[error("migration history attestation: {0}")]
+    HistoryAttestation(#[from] StatusError),
+    #[error(
+        "submitted migration set is incomplete: missing journaled versions: {missing}",
+        missing = .missing_versions.join(", ")
+    )]
+    IncompleteHistory { missing_versions: Vec<String> },
     #[error("migration preflight: {0}")]
     Preflight(#[from] IrApplyError),
     #[error("sealed migration apply: {0}")]
@@ -249,12 +255,13 @@ pub enum ProvisionRuntimeRoleError {
 /// creator runs under is what bounds them, and the engine still refuses a
 /// destructive step it was not handed an [`Approval`] for.
 ///
-/// The row in `zeroship.app_schema_applies` is opened BEFORE the engine runs. A
-/// surviving request with a reachable control store closes it through exactly one
-/// terminal transition: `mark_applied` on success or `mark_failed` on error. A
-/// process death or terminal store failure can leave it `submitted`: the ledger
-/// and app schema may live on different DSNs, so no transaction spans them. No
-/// serving path reads an open row; the deploy gate reads only `applied` rows.
+/// The row in `zeroship.app_schema_applies` opens only after guarded preparation
+/// and complete-history attestation, but before creator DDL. A surviving request
+/// with a reachable control store then closes it through exactly one terminal
+/// transition: `mark_applied` on success or `mark_failed` on error. A process
+/// death or terminal store failure can leave it `submitted`: the ledger and app
+/// schema may live on different DSNs, so no transaction spans them. No serving
+/// path reads an open row; the deploy gate reads only `applied` rows.
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
@@ -295,8 +302,8 @@ pub async fn apply_ir_documents(
         ))
         .await
         .map_err(ApplyRequestError::ProvisionSchema)?;
-    let role = migrator_role_name(&schema)
-        .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
+    let role =
+        migrator_role_name(&schema).map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
     // The executor re-vets rendered SQL at apply time from its own policy, so it must
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
@@ -334,82 +341,123 @@ pub async fn apply_ir_documents(
     provision_audit_unmask_table(session.client(), &schema)
         .await
         .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
-    // PREFLIGHT runs before any row is written and before any DDL: it lowers every
-    // document under the guard and refuses a denied plan, so a bundle the engine
-    // would reject leaves neither a ledger row nor a half-built schema.
-    preflight_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy).await?;
+    let backend = PostgresBackend::new_generic(&session);
+    backend
+        .acquire_project_lock(&exec_cfg)
+        .await
+        .map_err(|source| ApplyRequestError::ProjectLock {
+            action: "acquire",
+            source,
+        })?;
 
-    schema_apply_store
-        .record_submitted(SchemaApplyInput {
-            app_id: *app_id,
-            migration_id,
+    // The one project-lock bracket binds all four facts the deploy ledger relies
+    // on: the catalog snapshot used to lower, the complete supplied manifest set,
+    // the journal coverage verdict, and the terminal ledger timestamp. Releasing
+    // before `mark_applied` would let an older concurrent request stamp a newer
+    // `applied_at` after a later schema had already completed.
+    let result = async {
+        // PREPARATION runs before any ledger row or creator DDL. It lowers every
+        // document under the guard, refuses a denied plan, and retains those exact
+        // artifacts for apply so attestation and execution cannot disagree.
+        let prepared =
+            prepare_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy).await?;
+        attest_complete_history(&backend, &exec_cfg, &prepared).await?;
+
+        // Coverage refusal happens above this line. A truncated request therefore
+        // leaves no submitted, failed, or applied row that could become the deploy
+        // guard's newest ledger fact.
+        schema_apply_store
+            .record_submitted(SchemaApplyInput {
+                app_id: *app_id,
+                migration_id,
+                principal_id,
+                request_body,
+                effective_profile: &policy.managed,
+                ceiling_id: &policy.ceiling_id,
+                ceiling_version: policy.ceiling_version,
+                descriptor_sha256: &request.descriptor_sha256,
+            })
+            .await?;
+
+        let apply_result = run_apply(
+            &session,
+            &backend,
+            policy_config,
+            &policy,
+            &schema,
+            &prepared,
+            &exec_cfg,
+            &role,
             principal_id,
-            request_body,
-            effective_profile: &policy.managed,
-            ceiling_id: &policy.ceiling_id,
-            ceiling_version: policy.ceiling_version,
-            descriptor_sha256: &request.descriptor_sha256,
-        })
-        .await?;
+        )
+        .await;
 
-    let result = run_apply(
-        &session,
-        policy_config,
-        &policy,
-        &schema,
-        dir.path(),
-        &exec_cfg,
-        &role,
-        principal_id,
-    )
-    .await;
-
-    match result {
-        Ok(outcome) => {
-            // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
-            // nothing is what an app whose descriptor bytes moved without a schema
-            // change (an engine upgrade, a codegen fix) uses to become deployable
-            // again, because the control plane compares against the NEWEST applied
-            // row. Skipping the write for an empty set would brick every such app.
-            match schema_apply_store
-                .mark_applied(*app_id, migration_id, &outcome.applied)
-                .await
-            {
-                Ok(transition) => {
-                    if transition == TerminalTransition::Lost {
-                        // The DDL is committed and cannot be taken back, but a
-                        // concurrent path failed this migration while the engine was
-                        // applying it, so the row reads `failed`. The record now
-                        // contradicts the database it describes and only an operator
-                        // can reconcile them. Erroring here would report a failure
-                        // over changes that did land, so the request continues and
-                        // the divergence is raised instead.
-                        tracing::error!(
-                            app_id = %app_id,
-                            migration_id = %migration_id,
-                            "migrate-server: apply lost the terminal transition to a concurrent \
-                             failure - schema changes are committed but the row reads failed"
-                        );
+        match apply_result {
+            Ok(outcome) => {
+                // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
+                // nothing is what an app whose descriptor bytes moved without a
+                // schema change (an engine upgrade, a codegen fix) uses to become
+                // deployable again. Coverage, not emptiness, decides whether the row
+                // is safe to write.
+                match schema_apply_store
+                    .mark_applied(*app_id, migration_id, &outcome.applied)
+                    .await
+                {
+                    Ok(transition) => {
+                        if transition == TerminalTransition::Lost {
+                            // The DDL is committed and cannot be taken back, but a
+                            // concurrent path failed this migration while the engine
+                            // was applying it, so the row reads `failed`. The record
+                            // now contradicts the database it describes and only an
+                            // operator can reconcile them.
+                            tracing::error!(
+                                app_id = %app_id,
+                                migration_id = %migration_id,
+                                "migrate-server: apply lost the terminal transition to a \
+                                 concurrent failure - schema changes are committed but the row \
+                                 reads failed"
+                            );
+                        }
+                        Ok(ApplyMigrationsResponse {
+                            migration_id,
+                            applied: outcome.applied,
+                            skipped: outcome.skipped,
+                            pending_contract: outcome.pending_contract,
+                        })
                     }
-                    Ok(ApplyMigrationsResponse {
-                        migration_id,
-                        applied: outcome.applied,
-                        skipped: outcome.skipped,
-                        pending_contract: outcome.pending_contract,
-                    })
+                    Err(err) => Err(ApplyRequestError::SchemaApplyStore(err)),
                 }
-                Err(err) => Err(ApplyRequestError::SchemaApplyStore(err)),
+            }
+            Err(err) => {
+                mark_apply_failed(schema_apply_store, *app_id, migration_id, &err.to_string())
+                    .await;
+                Err(err)
             }
         }
-        Err(err) => {
-            mark_apply_failed(schema_apply_store, *app_id, migration_id, &err.to_string()).await;
-            Err(err)
+    }
+    .await;
+
+    let release = backend.release_project_lock(&exec_cfg).await;
+    match (result, release) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Ok(_), Err(source)) => Err(ApplyRequestError::ProjectLock {
+            action: "release",
+            source,
+        }),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                project = %exec_cfg.project_id,
+                "migrate-server: failed to release project lock after request failure"
+            );
+            Err(error)
         }
     }
 }
 
 /// Run every fallible schema/apply operation after the ledger row opens and before
-/// its terminal transition.
+/// its terminal transition, while the caller holds the project lock.
 ///
 /// The caller awaits this future without `?`, then routes its one result through
 /// the terminal ledger transition. Adding another post-submit operation here
@@ -417,10 +465,11 @@ pub async fn apply_ir_documents(
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 async fn run_apply(
     session: &CompioPgSession,
+    backend: &PostgresBackend<'_, CompioPgSession>,
     policy_config: &ManagedPolicyConfig,
     apply_policy: &EffectivePolicy,
     schema: &str,
-    ir_dir: &Path,
+    prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
     role: &str,
     principal_id: Uuid,
@@ -441,14 +490,11 @@ async fn run_apply(
     provision_runtime_app_role(session.client(), schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
-    let backend = PostgresBackend::new_generic(session);
     let outcome = apply_sealed(
-        session,
-        &backend,
+        backend,
         sealed_policy.sealed,
         &sealed_policy.verifier,
-        schema,
-        ir_dir,
+        prepared,
         exec_cfg,
         &apply_policy.policy,
         Approval::None,
@@ -471,45 +517,26 @@ struct SealedApplyOutcome {
     pending_contract: Vec<String>,
 }
 
-/// Apply a `.ir.json` bundle to Postgres through a sealed shared-infra policy, over
-/// the [`CompioPgSession`] seam.
+/// Apply prepared `.ir.json` documents through a sealed shared-infra policy.
 ///
-/// Verifies the in-process MAC + binding (tamper/staleness fail-closed), then drives
-/// the published engine's guarded lower + `apply_plan` per file. Table-shape injection
-/// is resolved through the composed engine [`EffectivePolicy`](PdpPolicy) that the
-/// seal covers. The rendered-DDL guard uses the separately authored, schema-bound
-/// no-inject confined charter so it can vet the managed CREATE TABLE emitted by lower.
-/// This is the service-owned reimplementation of the in-tree `apply_sealed` +
-/// `apply_bundle_ir_postgres`, since the published engine exports neither.
+/// Verifies the in-process MAC + binding (tamper/staleness fail-closed), then
+/// applies the exact guarded-lower artifacts whose manifests passed journal
+/// coverage attestation. The caller owns the project lock for the whole call.
 #[allow(clippy::too_many_arguments)]
 async fn apply_sealed(
-    session: &CompioPgSession,
     backend: &PostgresBackend<'_, CompioPgSession>,
     sealed: SealedPolicy,
     verifier: &SealVerifier,
-    owner_app: &str,
-    migrations_dir: &Path,
+    prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
     policy: &PdpPolicy,
     approval: Approval,
     applied_by: &str,
 ) -> Result<SealedApplyOutcome, SealedApplyError> {
     verifier.verify(&sealed, policy)?;
-    let guard_cfg = guard_config_for_managed(&exec_cfg.project_schema);
-    apply_bundle_ir_postgres(
-        session,
-        backend,
-        &exec_cfg.project_schema,
-        owner_app,
-        migrations_dir,
-        exec_cfg,
-        &guard_cfg,
-        policy,
-        approval,
-        applied_by,
-    )
-    .await
-    .map_err(SealedApplyError::Apply)
+    apply_prepared_ir_documents(backend, prepared, exec_cfg, approval, applied_by)
+        .await
+        .map_err(SealedApplyError::Apply)
 }
 
 /// Discover `*.ir.json` files in a directory, deterministically ordered by path
@@ -654,182 +681,55 @@ async fn postgres_ir_apply_state(
     })
 }
 
-/// Apply all `*.ir.json` files in a directory to Postgres over the seam,
-/// acquiring the project advisory lock once on the host's pinned session,
-/// passing `LockMode::AlreadyHeld` to every file, and releasing once after the
-/// whole set. The service-owned reimplementation of the engine's removed
-/// `apply_bundle_ir_postgres`.
-#[allow(clippy::too_many_arguments)]
-async fn apply_bundle_ir_postgres(
-    session: &CompioPgSession,
-    backend: &PostgresBackend<'_, CompioPgSession>,
-    project_schema: &str,
-    owner_app: &str,
-    migrations_dir: &Path,
-    exec_cfg: &ExecutorConfig,
-    guard_cfg: &GuardConfig,
-    policy: &PdpPolicy,
-    approval: Approval,
-    applied_by: &str,
-) -> Result<SealedApplyOutcome, IrApplyError> {
-    let ir_files = discover_ir_files(migrations_dir)?;
-    if ir_files.is_empty() {
-        return Ok(SealedApplyOutcome::default());
-    }
-
-    // `backend` is bound to this host's pinned `session`, so the advisory lock
-    // and every file apply run on the same raw PostgreSQL session.
-    backend
-        .acquire_project_lock(exec_cfg)
-        .await
-        .map_err(|source| IrApplyError::ProjectLock {
-            action: "acquire",
-            source,
-        })?;
-
-    let body = async {
-        let mut state = postgres_ir_apply_state(session, exec_cfg, owner_app)
-            .await
-            .map_err(IrApplyError::Snapshot)?;
-        let mut outcome = SealedApplyOutcome::default();
-        for path in &ir_files {
-            // The host owns the one outer lock bracket. Every engine plan must
-            // leave that lock alone, including the first file.
-            let file_outcome = apply_one_ir_file_postgres(
-                backend,
-                project_schema,
-                owner_app,
-                path,
-                &mut state,
-                exec_cfg,
-                guard_cfg,
-                policy,
-                approval,
-                applied_by,
-                LockMode::AlreadyHeld,
-            )
-            .await?;
-            outcome.applied.extend(file_outcome.applied);
-            outcome.skipped.extend(file_outcome.skipped);
-            outcome.pending_contract.extend(file_outcome.pending_contract);
-        }
-        Ok::<SealedApplyOutcome, IrApplyError>(outcome)
-    }
-    .await;
-
-    let unlock = backend
-        .release_project_lock(exec_cfg)
-        .await
-        .map_err(|source| IrApplyError::ProjectLock {
-            action: "release",
-            source,
-        });
-    match (body, unlock) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), unlock_result) => {
-            if let Err(unlock_error) = unlock_result {
-                tracing::warn!(
-                    error = %unlock_error,
-                    project = %exec_cfg.project_id,
-                    "migrate-server: failed to release project lock after PG IR apply"
-                );
-            }
-            Err(error)
-        }
-    }
+/// One guarded-lower artifact retained from the locked preparation pass.
+struct PreparedIrDocument {
+    file: String,
+    artifact: LoweredArtifact,
 }
 
-/// Apply one PG `.ir.json` file: read → fail-closed load + guarded lower
-/// (`IrAuthor::load_and_lower_guarded`, Postgres dialect) → engine
-/// `apply_plan_with_touched_and_depends_scoped`. Advances `state` with the
-/// created tables so a later file in the set sees them.
-#[allow(clippy::too_many_arguments)]
-async fn apply_one_ir_file_postgres(
+/// Apply the exact prepared documents whose complete manifest set was attested.
+///
+/// The caller owns the project lock. Every engine call therefore uses
+/// [`LockMode::AlreadyHeld`], including the first document.
+async fn apply_prepared_ir_documents(
     backend: &PostgresBackend<'_, CompioPgSession>,
-    project_schema: &str,
-    owner_app: &str,
-    path: &Path,
-    state: &mut PostgresIrApplyState,
+    prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
-    guard_cfg: &GuardConfig,
-    policy: &PdpPolicy,
     approval: Approval,
     applied_by: &str,
-    lock_mode: LockMode,
 ) -> Result<SealedApplyOutcome, IrApplyError> {
-    let file = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("<unknown>")
-        .to_string();
-    let raw_bytes = std::fs::read_to_string(path).map_err(|e| IrApplyError::Read {
-        file: file.clone(),
-        message: e.to_string(),
-    })?;
-    // Fold the effective table-shape profile into every `createTable` op (system
-    // columns/indexes + resolved primary key) BEFORE the fail-closed load gate,
-    // which — under a `forbid` `author_primary_key` profile — REFUSES an
-    // unresolved createTable. This is the managed-service analogue of the creator
-    // build tool's shape fold, and the same normalisation the Phase-F smoke test
-    // proves green. Non-`createTable` ops pass through untouched.
-    let bytes = resolve_shape_bytes(&raw_bytes, policy, project_schema, &file)?;
-
-    let mut author = IrAuthor::new(VENDORS, project_schema, owner_app, &POSTGRES, policy);
-    if let Some(scope) = guard_cfg.schema_scope() {
-        author = author.with_schema_scope(scope);
+    let mut aggregate = SealedApplyOutcome::default();
+    for document in prepared {
+        let artifact = &document.artifact;
+        let recovery_scope: Option<&DeployRecoveryScope<'_>> = None;
+        let outcome = MigrationEngine::new(VENDORS)
+            .apply_plan_with_touched_and_depends_scoped(
+                &artifact.plan.steps,
+                &artifact.touched_tables,
+                &artifact.depends_on,
+                approval,
+                &ApprovalScope::All,
+                backend,
+                exec_cfg,
+                applied_by,
+                LockMode::AlreadyHeld,
+                recovery_scope,
+            )
+            .await
+            .map_err(|source| IrApplyError::Apply {
+                file: document.file.clone(),
+                source,
+            })?;
+        aggregate.applied.extend(outcome.applied.applied);
+        aggregate.skipped.extend(outcome.applied.skipped);
+        aggregate.pending_contract.extend(
+            outcome
+                .pending_contract
+                .iter()
+                .map(|migration| migration.version.as_str().to_string()),
+        );
     }
-    let lowered = author
-        .load_and_lower_guarded(
-            &bytes,
-            owner_app,
-            &state.registry,
-            &state.live_schema,
-            guard_cfg,
-        )
-        .map_err(|source| IrApplyError::Ir {
-            file: file.clone(),
-            source,
-        })?;
-
-    let created_tables = lowered.created_tables.clone();
-    let recovery_scope: Option<&DeployRecoveryScope<'_>> = None;
-    let outcome = MigrationEngine::new(VENDORS)
-        .apply_plan_with_touched_and_depends_scoped(
-            &lowered.plan.steps,
-            &lowered.touched_tables,
-            &lowered.depends_on,
-            approval,
-            &ApprovalScope::All,
-            backend,
-            exec_cfg,
-            applied_by,
-            lock_mode,
-            recovery_scope,
-        )
-        .await
-        .map_err(|source| IrApplyError::Apply {
-            file: file.clone(),
-            source,
-        })?;
-
-    for t in created_tables {
-        state
-            .registry
-            .entry(t.clone())
-            .or_insert_with(|| owner_app.to_string());
-        state.live_schema.tables.insert(t);
-    }
-
-    Ok(SealedApplyOutcome {
-        applied: outcome.applied.applied,
-        skipped: outcome.applied.skipped,
-        pending_contract: outcome
-            .pending_contract
-            .iter()
-            .map(|m| m.version.as_str().to_string())
-            .collect(),
-    })
+    Ok(aggregate)
 }
 
 /// The policy this apply runs under: the ceiling, narrowed by the draft the
@@ -863,32 +763,32 @@ fn resolve_apply_policy(
     Ok(policy_config.compose_effective_for_app(app_id, None, Some(&parsed))?)
 }
 
-/// Lower every document under the guard and refuse a denied plan, WITHOUT writing
-/// anything.
+/// Lower every document under the guard, refuse a denied plan, and retain the
+/// exact artifacts for journal attestation and apply.
 ///
 /// It used to also classify which versions needed operator approval; that
 /// classification had exactly one consumer, an approval state machine no caller
-/// could drive, and both are gone. What remains is the reason to run a second
-/// lower at all: the real apply lowers per file and executes as it goes, so a
-/// bundle whose LAST document is denied would otherwise have already committed the
-/// DDL of the ones before it. Preflight walks the whole set first.
+/// could drive, and both are gone. A bundle whose LAST document is denied must be
+/// refused before the DDL of the earlier documents commits, so preparation walks
+/// the whole set first.
 ///
-/// Because it lowers the same artifact the apply will (the same shape fold, the
-/// same guard, the same registry threading), a set that passes here and is denied
-/// there is a bug rather than a policy decision.
-async fn preflight_ir_documents(
+/// This function runs while the caller holds the project lock. Keeping the owned
+/// artifacts means status and apply consume one lowering result, not two catalog
+/// snapshots that merely ought to agree.
+async fn prepare_ir_documents(
     session: &CompioPgSession,
     exec_cfg: &ExecutorConfig,
     schema: &str,
     migrations_dir: &Path,
     policy: &EffectivePolicy,
-) -> Result<(), ApplyRequestError> {
+) -> Result<Vec<PreparedIrDocument>, ApplyRequestError> {
     let files = discover_ir_files(migrations_dir)?;
     let guard_cfg = guard_config_for_managed(schema);
     let mut state = postgres_ir_apply_state(session, exec_cfg, schema)
         .await
         .map_err(IrApplyError::Snapshot)?;
     let engine = MigrationEngine::new(VENDORS);
+    let mut prepared = Vec::with_capacity(files.len());
 
     for path in files {
         let file = path
@@ -900,9 +800,8 @@ async fn preflight_ir_documents(
             file: file.clone(),
             message: err.to_string(),
         })?;
-        // Fold the effective table-shape profile the same way the apply path does,
-        // so preflight lowers the SAME resolved artifact it will apply (identical
-        // version-ids + destructive classification).
+        // Fold the effective table-shape profile before guarded lower so the
+        // retained artifact has the managed system shape the executor will apply.
         let bytes = resolve_shape_bytes(&raw_bytes, &policy.policy, schema, &file)?;
         let mut author = IrAuthor::new(VENDORS, schema, schema, &POSTGRES, &policy.policy);
         if let Some(scope) = guard_cfg.schema_scope() {
@@ -929,16 +828,64 @@ async fn preflight_ir_documents(
             }
             .into());
         }
-        for table in lowered.created_tables {
+        for table in &lowered.created_tables {
             state
                 .registry
                 .entry(table.clone())
                 .or_insert_with(|| schema.to_string());
-            state.live_schema.tables.insert(table);
+            state.live_schema.tables.insert(table.clone());
         }
+        prepared.push(PreparedIrDocument {
+            file,
+            artifact: lowered,
+        });
     }
 
-    Ok(())
+    Ok(prepared)
+}
+
+/// Require the supplied complete manifest set to cover every unaccounted-for
+/// net journal identity.
+///
+/// The ordinary executor deliberately cannot make this decision because its
+/// per-plan input is not the host's complete set. Here the server has every
+/// prepared document and holds the same project lock the subsequent apply uses.
+async fn attest_complete_history(
+    backend: &PostgresBackend<'_, CompioPgSession>,
+    exec_cfg: &ExecutorConfig,
+    prepared: &[PreparedIrDocument],
+) -> Result<(), ApplyRequestError> {
+    // Bootstrap after preparation so a malformed creator bundle still fails before
+    // journal DDL, but before status so an interrupted partial bootstrap is repaired
+    // rather than mistaken for an empty history. The outer advisory lock serializes
+    // the first bootstrap.
+    backend
+        .ensure_journal(exec_cfg)
+        .await
+        .map_err(StatusError::Journal)?;
+    let mut manifests = Vec::with_capacity(prepared.len());
+    for document in prepared {
+        manifests.push(PlanStatusManifest::from_applied_plan(
+            &document.artifact.plan,
+            &document.artifact.depends_on,
+        )?);
+    }
+    let status = zeroship_migrate::ops::status::status_plans_via_backend_locked(
+        backend, exec_cfg, &manifests,
+    )
+    .await?;
+    let mut missing_versions: Vec<String> = status
+        .unexpected_journal
+        .into_iter()
+        .map(|entry| entry.version)
+        .collect();
+    missing_versions.sort();
+    missing_versions.dedup();
+    if missing_versions.is_empty() {
+        Ok(())
+    } else {
+        Err(ApplyRequestError::IncompleteHistory { missing_versions })
+    }
 }
 
 /// Build the rendered-DDL guard from the authored no-inject confined charter, bound
@@ -951,7 +898,6 @@ fn guard_policy_for_managed(schema: &str) -> PdpPolicy {
     confined_guard_policy_for_schema(schema)
         .expect("embedded no-inject confined guard charter must bind and compose")
 }
-
 
 // `ApplyRequestError` is ~152 bytes wide because it wraps `IrApplyError` /
 // `SealedApplyError` (themselves wide - see the allows on `discover_ir_files`
@@ -971,12 +917,11 @@ fn write_ir_documents(
 
     for doc in &request.documents {
         let path = dir.path().join(&doc.filename);
-        let bytes = serde_json::to_vec_pretty(&doc.body).map_err(|source| {
-            ApplyRequestError::Write {
+        let bytes =
+            serde_json::to_vec_pretty(&doc.body).map_err(|source| ApplyRequestError::Write {
                 path: path.clone(),
                 source: std::io::Error::other(source.to_string()),
-            }
-        })?;
+            })?;
         std::fs::write(&path, bytes).map_err(|source| ApplyRequestError::Write {
             path: path.clone(),
             source,
@@ -1012,7 +957,6 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
     }
     Ok(())
 }
-
 
 /// Close the request's ledger row as `failed`, best effort.
 ///
@@ -1099,6 +1043,16 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_policy_invalid",
         ),
+        ApplyRequestError::IncompleteHistory { .. } => (
+            ntex::http::StatusCode::CONFLICT,
+            "migration_history_incomplete",
+        ),
+        ApplyRequestError::HistoryAttestation(
+            StatusError::Ordering(_) | StatusError::PlanManifest(_),
+        ) => (
+            ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "migration_invalid",
+        ),
         ApplyRequestError::Preflight(source) => ir_apply_error_kind(source),
         ApplyRequestError::Apply(source) => sealed_apply_error_kind(source),
         ApplyRequestError::TempDir(_)
@@ -1111,7 +1065,9 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::ProvisionRole(_)
         | ApplyRequestError::ProvisionRuntimeRole(_)
         | ApplyRequestError::ProvisionAuditUnmask(_)
-        | ApplyRequestError::ProvisionPublication(_) => (
+        | ApplyRequestError::ProvisionPublication(_)
+        | ApplyRequestError::ProjectLock { .. }
+        | ApplyRequestError::HistoryAttestation(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
         ),
@@ -1140,9 +1096,7 @@ fn ir_apply_error_kind(err: &IrApplyError) -> (ntex::http::StatusCode, &'static 
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_invalid",
         ),
-        IrApplyError::Read { .. }
-        | IrApplyError::Snapshot(_)
-        | IrApplyError::ProjectLock { .. } => (
+        IrApplyError::Read { .. } | IrApplyError::Snapshot(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
         ),
@@ -1578,6 +1532,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn incomplete_history_is_a_classified_creator_conflict() {
+        let err = ApplyRequestError::IncompleteHistory {
+            missing_versions: vec!["mig_missing_a".to_string(), "mig_missing_b".to_string()],
+        };
+        assert_eq!(
+            apply_error_kind(&err),
+            (
+                ntex::http::StatusCode::CONFLICT,
+                "migration_history_incomplete",
+            )
+        );
+        let detail = err.to_string();
+        assert!(
+            detail.contains("mig_missing_a"),
+            "first missing version: {detail}"
+        );
+        assert!(
+            detail.contains("mig_missing_b"),
+            "second missing version: {detail}"
+        );
+    }
+
+    #[test]
+    fn history_status_failure_stays_infrastructure() {
+        let err = ApplyRequestError::HistoryAttestation(StatusError::Journal(
+            zeroship_migrate::JournalError::Backend("fixture read failure".to_string()),
+        ));
+        assert_eq!(
+            apply_error_kind(&err),
+            (
+                ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+                "migration_infrastructure",
+            )
+        );
+    }
+
+    #[test]
+    fn invalid_history_manifest_stays_a_creator_fault() {
+        let err = ApplyRequestError::HistoryAttestation(StatusError::PlanManifest(
+            "invalid dependency fixture".to_string(),
+        ));
+        assert_eq!(
+            apply_error_kind(&err),
+            (
+                ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "migration_invalid",
+            )
+        );
+    }
+
     /// A syntactically valid descriptor hash for the shape tests, which are
     /// about everything EXCEPT the hash.
     const TEST_DESCRIPTOR_SHA256: &str =
@@ -1754,8 +1759,12 @@ mod live_audit_unmask_provisioning {
                 continue;
             }
             let q = quote_ident(&role);
-            let _ = admin.batch_execute(&format!("DROP OWNED BY {q} CASCADE")).await;
-            let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {q}")).await;
+            let _ = admin
+                .batch_execute(&format!("DROP OWNED BY {q} CASCADE"))
+                .await;
+            let _ = admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {q}"))
+                .await;
         }
     }
 
@@ -2242,8 +2251,12 @@ mod live_worker_role_fence {
         }
         for role in [&fx.worker, &fx.app_role] {
             let q = quote_ident(role);
-            let _ = admin.batch_execute(&format!("DROP OWNED BY {q} CASCADE")).await;
-            let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {q}")).await;
+            let _ = admin
+                .batch_execute(&format!("DROP OWNED BY {q} CASCADE"))
+                .await;
+            let _ = admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {q}"))
+                .await;
         }
     }
 
@@ -2281,10 +2294,7 @@ mod live_worker_role_fence {
     /// `(roleid, member, GRANTOR)` and a second grantor's inheriting row would
     /// re-open the fence for the pair - a query shaped `LIMIT 1` would report a
     /// fence that a sibling row has already opened.
-    async fn inherit_options(
-        admin: &compio_postgres::Client,
-        fx: &Fixture,
-    ) -> Vec<bool> {
+    async fn inherit_options(admin: &compio_postgres::Client, fx: &Fixture) -> Vec<bool> {
         admin
             .query(
                 "SELECT membership.inherit_option \
@@ -2512,10 +2522,7 @@ mod live_worker_role_fence {
 
         // ARM B - the role attribute, which is the intuitive fix and is inert.
         admin
-            .batch_execute(&format!(
-                "ALTER ROLE {} NOINHERIT",
-                quote_ident(&fx.worker)
-            ))
+            .batch_execute(&format!("ALTER ROLE {} NOINHERIT", quote_ident(&fx.worker)))
             .await
             .expect("alter the role attribute");
         let rolinherit: bool = admin
