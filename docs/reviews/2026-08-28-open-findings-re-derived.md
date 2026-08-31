@@ -7,6 +7,31 @@ fixed, two rested on a false premise, and one cited code that no longer exists.
 This document exists so the list is not re-derived a fourth time. Each verdict
 below names the evidence, not an opinion.
 
+## The whole list, answered (settled 2026-08-30 at `54981c225`)
+
+Read this table first. It is keyed to SYMBOLS, never line numbers - every
+citation in the original list rotted, and two of them pointed at code that had
+moved. Detail and evidence for each row are in the sections below.
+
+| # | carried claim | verdict | what settles it |
+| - | ------------- | ------- | --------------- |
+| 1 | `connect_raw` drops `deferred_error`; `take_deferred_error` uncalled | TRUE but BENIGN; "uncalled" is FALSE | all 5 assignments guard on `saw_error_response`, whose only producer is `ERROR_RESPONSE_TAG`; the batch holding that ErrorResponse is kept in `pending` and `take_available_server_error_if` prefers it |
+| 2 | `MAX_DELAYED_HANDSHAKE_BYTES` pins the whole allocation | ALREADY FIXED | `delayed_message_does_not_pin_handshake_read_allocation` |
+| 3 | `handshake.stream.into_inner()` drops buffered bytes | FALSE, and no such call exists | 3 scripted handoff tests, mutation-proved by clearing the stream buffer |
+| 4 | `binary_copy` cancellation discards already-Ok rows | FALSE, and INVERTED | `cancelling_a_backpressured_flush_keeps_completed_rows` goes RED when `split_off` is moved after the await |
+| 5 | `copy_in` reads its OWN close as a lost connection | FALSE - premise true, conclusion wrong | `poll_close` DOES close the sender; `!closed_by_sink` excludes it; `flush_after_cancelled_close_preserves_copy_completion` |
+| 6 | TLS split discards unconsumed ciphertext | FALSE at all three layers | `tls_split_preserves_ciphertext_already_read_from_socket`, `tls_split_preserves_the_plain_scratch_buffer` |
+
+Two carried entries were confirmed rather than dismissed, and both were found by
+following a call ONE level deeper than the finding's own citation: row 1, and
+the post-write cancel defect that became `CancelDeliveryTracker`. That is the
+pattern worth keeping - the citation is where the claim stops, not where the
+code stops.
+
+**Row 5 is the one to re-read if you only read one.** Its verdict was right in
+the first pass for a reason that was WRONG, and the wrong reason would have
+licensed deleting the `!closed_by_sink` term that does the actual work.
+
 ## 1. `connect_raw.rs:302` discards `deferred_error`; `take_deferred_error()` is uncalled
 
 **FALSE.** `take_deferred_error()` has two callers: `connection.rs:811` and
