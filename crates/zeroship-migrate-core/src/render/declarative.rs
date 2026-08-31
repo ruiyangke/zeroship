@@ -1,7 +1,7 @@
 //! Declarative schema-as-code: desired-schema -> generated migrations.
 //!
 //! The authoring layer holds a creator's **declared schema** - the
-//! per-collection descriptor JSON the db SDK emits via `registerModel`
+//! per-collection descriptor JSON the db SDK emits for the runtime descriptor
 //! (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). This
 //! module turns that declared schema into a deterministic [`SchemaSnapshot`]
 //! ([`desired_snapshot_for_dialect`]) and then **diffs** it against the live snapshot to
@@ -57,13 +57,15 @@ use zeroship_migrate_ir::dialect::DialectId;
 // The column-clause spellings moved with it, for the same reason: all three impls
 // call every one of them, so a shared helper cannot stay above the vendors.
 use zeroship_migrate_backend::ddl::{
-    constraint_supports_fk_columns, fk_target_table, index_supports_fk_columns, is_pk_index,
-    CreateTableRequest, DdlEmitter,
+    CreateTableRequest, DdlEmitter, constraint_supports_fk_columns, fk_target_table,
+    index_supports_fk_columns, is_pk_index,
 };
 use zeroship_migrate_backend::schema::{
     ColumnRenameStrategy, ExistingColumnChangeStrategy, SchemaRenderer,
 };
-use zeroship_migrate_backend::table_rebuild::{InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy};
+use zeroship_migrate_backend::table_rebuild::{
+    InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy,
+};
 
 impl InjectedPrimaryKey for ResolvedInject {
     fn primary_key(&self) -> Option<&[String]> {
@@ -86,7 +88,7 @@ impl InjectedPrimaryKey for ResolvedInject {
 // header states the rule and `constraint_definition_is_comparison_text` enforces it
 // now that `pub(crate)` cannot.
 pub(crate) use zeroship_migrate_backend::constraint_definition::{
-    constraintdef_cols, quote_ident_if_needed, NOT_VALID_DEFINITION_SUFFIX,
+    NOT_VALID_DEFINITION_SUFFIX, constraintdef_cols, quote_ident_if_needed,
 };
 
 // `default_clause` and `generated_clause` MOVED to
@@ -152,7 +154,7 @@ pub(crate) fn single_stmt(mig: Migration) -> LoweredUnit {
 // Input contract - the per-collection declared-schema descriptor.
 // ---------------------------------------------------------------------------
 
-/// One field of a collection, as the `registerModel` descriptor declares it
+/// One field of a collection, as the runtime descriptor declares it
 /// (`{ type, required, unique, default, ref }`).
 ///
 /// Untrusted: `name` and `ty` are validated at the author boundary before any
@@ -351,7 +353,7 @@ pub struct IndexDescriptor {
 
 /// A per-collection declared-schema descriptor (one table).
 ///
-/// Mirrors the `registerModel` JSON the SDK emits, parsed into a typed shape:
+/// Mirrors the runtime descriptor JSON the SDK emits, parsed into a typed shape:
 /// `{ _meta, _indexes:[...], <field>:{...} }`. The `_meta` slot is opaque metadata
 /// the migrate crate does not consume (it carries soft-delete / versioning flags
 /// the SDK already expanded into concrete fields before this point).
@@ -2228,7 +2230,7 @@ fn build_table_snapshot_impl(
         // turn into a `COMMENT ON COLUMN` statement. Built by the SHARED codec
         // (`crate::schema::query::mask_sentinel_for_field` ->
         // `build_mask_sentinel`) so it is byte-identical to the one
-        // `registerModel` writes. `snapshot_schema` never introspects COMMENTs,
+        // schema application writes. `snapshot_schema` never introspects COMMENTs,
         // so the sentinel is not a snapshot drift attribute (excluded from
         // `ColumnSnapshot` equality).
         if mask_raw_column_for_field(f).is_some() {
@@ -2381,11 +2383,7 @@ fn build_table_snapshot_impl(
                 }
             })
             .collect();
-        indexes.push(IndexSnapshot::btree(
-            idx.name.clone(),
-            idx.unique,
-            columns,
-        ));
+        indexes.push(IndexSnapshot::btree(idx.name.clone(), idx.unique, columns));
     }
 
     // The declarative desired-snapshot path remains name-sorted to match
@@ -3176,7 +3174,10 @@ pub enum MaskTransitionStep {
 impl MaskTransitionStep {
     fn migration(&self) -> &Migration {
         match self {
-            Self::Ddl(migration) | Self::Backfill { marker: migration, .. } => migration,
+            Self::Ddl(migration)
+            | Self::Backfill {
+                marker: migration, ..
+            } => migration,
         }
     }
 
@@ -3193,7 +3194,10 @@ impl MaskTransitionStep {
 
     fn migration_mut(&mut self) -> &mut Migration {
         match self {
-            Self::Ddl(migration) | Self::Backfill { marker: migration, .. } => migration,
+            Self::Ddl(migration)
+            | Self::Backfill {
+                marker: migration, ..
+            } => migration,
         }
     }
 }
@@ -3297,17 +3301,17 @@ fn constraint_owns_index(constraint: &ConstraintSnapshot) -> bool {
         .any(|kind| constraint.kind.eq_ignore_ascii_case(kind))
 }
 
-fn foreign_key_targets_column(
-    constraint: &ConstraintSnapshot,
-    table: &str,
-    column: &str,
-) -> bool {
+fn foreign_key_targets_column(constraint: &ConstraintSnapshot, table: &str, column: &str) -> bool {
     if !constraint.kind.eq_ignore_ascii_case("FOREIGN KEY")
         || fk_target_table(&constraint.definition).as_deref() != Some(table)
     {
         return false;
     }
-    let Some(references_at) = constraint.definition.to_ascii_uppercase().find("REFERENCES") else {
+    let Some(references_at) = constraint
+        .definition
+        .to_ascii_uppercase()
+        .find("REFERENCES")
+    else {
         return false;
     };
     let target = &constraint.definition[references_at..];
@@ -3726,10 +3730,13 @@ impl DeclarativeAuthor {
         column: &str,
         raw_column: &str,
         live: &TableSnapshot,
-    ) -> Result<(
-        Vec<String>,
-        zeroship_migrate_backend::backfill::CursorContract,
-    ), DeclarativeError> {
+    ) -> Result<
+        (
+            Vec<String>,
+            zeroship_migrate_backend::backfill::CursorContract,
+        ),
+        DeclarativeError,
+    > {
         let mut candidates = Vec::new();
         for kind in ["PRIMARY KEY", "UNIQUE"] {
             for constraint in live
@@ -3847,10 +3854,13 @@ impl DeclarativeAuthor {
 
         let has_encryption = |snapshot: &ColumnSnapshot| {
             snapshot.encryption_sentinel.is_some()
-                || snapshot.comment_sentinel.as_deref().is_some_and(|sentinel| {
-                    zeroship_migrate_backend::mask_codec::parse_encryption_sentinel(sentinel)
-                        .is_ok()
-                })
+                || snapshot
+                    .comment_sentinel
+                    .as_deref()
+                    .is_some_and(|sentinel| {
+                        zeroship_migrate_backend::mask_codec::parse_encryption_sentinel(sentinel)
+                            .is_ok()
+                    })
         };
         if has_encryption(live_column) || has_encryption(desired_raw) {
             return Err(DeclarativeError::EncryptedMaskBackfillRefused {
@@ -3877,9 +3887,11 @@ impl DeclarativeAuthor {
         }
 
         for (other_table, snapshot) in &live_schema.tables {
-            if snapshot.constraints.iter().any(|constraint| {
-                foreign_key_targets_column(constraint, table, column)
-            }) {
+            if snapshot
+                .constraints
+                .iter()
+                .any(|constraint| foreign_key_targets_column(constraint, table, column))
+            {
                 return Err(DeclarativeError::UnsupportedInV1(format!(
                     "mask transition for {table}.{column}: foreign key from table {other_table} targets the value identity being moved to {raw_column}"
                 )));
@@ -3993,8 +4005,12 @@ impl DeclarativeAuthor {
                 self.render_alter_column_nullability(table, column, true),
             ));
         }
-        if self.schema_renderer().canonical_type(&live_column.data_type)
-            != self.schema_renderer().canonical_type(&desired_mask.data_type)
+        if self
+            .schema_renderer()
+            .canonical_type(&live_column.data_type)
+            != self
+                .schema_renderer()
+                .canonical_type(&desired_mask.data_type)
             || live_column.case_sensitive != desired_mask.case_sensitive
         {
             steps.push(MaskTransitionStep::Ddl(
@@ -4024,9 +4040,11 @@ impl DeclarativeAuthor {
         });
 
         if let Some(default) = desired_raw.default.as_deref() {
-            steps.push(MaskTransitionStep::Ddl(
-                self.render_set_column_default(table, &raw_column, default),
-            ));
+            steps.push(MaskTransitionStep::Ddl(self.render_set_column_default(
+                table,
+                &raw_column,
+                default,
+            )));
         }
         if !desired_raw.nullable {
             steps.push(MaskTransitionStep::Ddl(
@@ -4043,13 +4061,8 @@ impl DeclarativeAuthor {
                 .iter()
                 .any(|kind| constraint.kind.eq_ignore_ascii_case(kind))
             {
-                self.lower_add_constraint(
-                    table,
-                    &constraint.name,
-                    &constraint.definition,
-                    true,
-                )
-                .0
+                self.lower_add_constraint(table, &constraint.name, &constraint.definition, true)
+                    .0
             } else {
                 return Err(DeclarativeError::UnsupportedInV1(format!(
                     "mask transition for {table}.{column}: desired constraint {} of kind {} cannot be installed on {raw_column}",
@@ -4065,8 +4078,7 @@ impl DeclarativeAuthor {
             .map(|constraint| constraint.name.as_str())
             .collect();
         for index in &desired.indexes {
-            if index_references_column(index, column)
-                || index_references_column(index, &raw_column)
+            if index_references_column(index, column) || index_references_column(index, &raw_column)
             {
                 if index.unique && index_references_column(index, column) {
                     return Err(DeclarativeError::UnsupportedInV1(format!(
@@ -4503,8 +4515,7 @@ impl DeclarativeAuthor {
                         .cloned(),
                 );
                 transitioned_live.indexes.retain(|index| {
-                    !index_references_column(index, field)
-                        && !index_references_column(index, &raw)
+                    !index_references_column(index, field) && !index_references_column(index, &raw)
                 });
                 transitioned_live.indexes.extend(
                     dt.indexes
@@ -7285,10 +7296,10 @@ mod snapshot_builder_refactor_safety_tests {
         ResolvedInject::for_table(&effective, schema, table).expect("empty inject shape")
     }
     use super::{
+        CollectionDescriptor, ColumnSnapshot, CreateTableRequest, DeclarativeAuthor,
+        FieldDescriptor, IndexDescriptor, ResolvedInject, TableRuntimeOptions, TableSnapshot,
         build_resolved_table_snapshot, build_table_snapshot, check_constraint_name,
-        enum_check_names, injected_index_names, CollectionDescriptor, ColumnSnapshot,
-        CreateTableRequest, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, ResolvedInject,
-        TableRuntimeOptions, TableSnapshot,
+        enum_check_names, injected_index_names,
     };
     use crate::test_fixtures::{POSTGRES, SQLITE};
 
@@ -7938,12 +7949,13 @@ mod advisory_seam_tests {
             .iter()
             .find(|a| a.rule == rule::DESTRUCTIVE_DROP)
             .unwrap();
-        assert!(a
-            .suggestion
-            .as_deref()
-            .unwrap()
-            .to_lowercase()
-            .contains("expand-contract"));
+        assert!(
+            a.suggestion
+                .as_deref()
+                .unwrap()
+                .to_lowercase()
+                .contains("expand-contract")
+        );
     }
 
     #[test]
@@ -8182,7 +8194,7 @@ mod mysql_storage_agreement_tests {
     //! COUNTERFACTUAL - a shape the engine refuses rather than one it ships - and
     //! the refusal it depends on is pinned by
     //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
-    use super::{column_snapshot_for_field, FieldDescriptor};
+    use super::{FieldDescriptor, column_snapshot_for_field};
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use zeroship_migrate_backend::schema::KeyStorageEvidence;
 
@@ -8429,7 +8441,7 @@ mod inline_check_rename_tests {
     //! make text surgery admissible here at all - literal vs identifier, exact vs
     //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE
     //! rather than CORRUPT. Every one of them is a way a plain substring swap is wrong.
-    use super::{rename_quoted_column_in_sql, SchemaRenderer};
+    use super::{SchemaRenderer, rename_quoted_column_in_sql};
     use crate::test_fixtures::{MYSQL, SQLITE};
     use zeroship_migrate_ir::dialect::DialectId;
 
@@ -8563,8 +8575,8 @@ mod derived_index_alias_tests {
     //! need pgvector and PostGIS. These pin the other two derived sites, the regime
     //! the whole alias rests on, and the ambiguity report.
     use super::{
-        build_table_snapshot, derived_index_aliases_for, non_unique_index_name, pair_indexes,
-        CollectionDescriptor, FieldDescriptor, IndexSnapshot,
+        CollectionDescriptor, FieldDescriptor, IndexSnapshot, build_table_snapshot,
+        derived_index_aliases_for, non_unique_index_name, pair_indexes,
     };
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use std::collections::BTreeMap;

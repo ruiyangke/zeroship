@@ -120,9 +120,7 @@ pub async fn run_drift_check_for_column(
     if !sample_pct.is_finite() || sample_pct <= 0.0 || sample_pct > 100.0 {
         return Err(DbError::ValidationFailed {
             code: "invalid_sample_pct",
-            message: format!(
-                "drift check: sample_pct must be in (0, 100], got {sample_pct}"
-            ),
+            message: format!("drift check: sample_pct must be in (0, 100], got {sample_pct}"),
             hint: None,
         });
     }
@@ -138,6 +136,10 @@ pub async fn run_drift_check_for_column(
     let Some(col_meta) = lookup_drift_column_meta(&schema, column)? else {
         return Ok(DriftReport::default());
     };
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    if let Some(sqlite) = backend.as_sqlite() {
+        sqlite.attach_app_file(app_id).await?;
+    }
 
     // The two columns, in their post-flip roles: the REAL VALUE is in
     // `__zs_raw__<col>` and the STORED MASK is in the field's own column. The
@@ -168,7 +170,11 @@ pub async fn run_drift_check_for_column(
     };
 
     for row in rows {
-        let SampledRow { row_pk, parent, stored } = row;
+        let SampledRow {
+            row_pk,
+            parent,
+            stored,
+        } = row;
         // Sibling NULL with non-NULL parent IS a drift case (the
         // dual-write contract guarantees both populated together), but
         // we don't have an "expected" string to put in the audit row
@@ -201,15 +207,9 @@ pub async fn run_drift_check_for_column(
             }
         };
 
-        let expected = compute_expected_masked(
-            app_id,
-            collection,
-            column,
-            &col_meta,
-            &row_pk,
-            &parent,
-        )
-        .await?;
+        let expected =
+            compute_expected_masked(app_id, collection, column, &col_meta, &row_pk, &parent)
+                .await?;
 
         if expected != stored_text {
             let sample = DriftSample {
@@ -302,7 +302,11 @@ fn lookup_drift_column_meta(
             Some("bytes") => "bytes",
             _ => "string",
         };
-        Some(EncMeta { mode, key_id, wraps })
+        Some(EncMeta {
+            mode,
+            key_id,
+            wraps,
+        })
     } else {
         None
     };
@@ -460,8 +464,8 @@ async fn sample_rows_sqlite(
     sibling: &str,
     sample_pct: f64,
 ) -> Result<Vec<SampledRow>, DbError> {
-    use crate::backend::sqlite::session::TypedCell;
     use crate::backend::DialectBuilder as _;
+    use crate::backend::sqlite::session::TypedCell;
 
     let q_app = sq.quote_ident(app_id);
     let q_coll = sq.quote_ident(collection);
@@ -517,7 +521,11 @@ async fn sample_rows_sqlite(
                 )));
             }
         };
-        out.push(SampledRow { row_pk, parent: parent_val, stored });
+        out.push(SampledRow {
+            row_pk,
+            parent: parent_val,
+            stored,
+        });
     }
     Ok(out)
 }
@@ -571,7 +579,8 @@ async fn compute_expected_masked(
 
     // Encrypted column path — decrypt + decode-per-wraps + mask.
     let enc = meta.enc.as_ref().expect("checked just above");
-    let plaintext_bytes = decrypt_parent_value(app_id, collection, column, enc, row_pk, parent).await?;
+    let plaintext_bytes =
+        decrypt_parent_value(app_id, collection, column, enc, row_pk, parent).await?;
     let plaintext_string = decode_plaintext_per_wraps(&plaintext_bytes, enc.wraps)?;
     Ok(apply_mask_kind(meta.kind, &plaintext_string))
 }
@@ -1031,7 +1040,10 @@ mod tests {
         let meta = lookup_drift_column_meta(&schema, "ssn").unwrap().unwrap();
         assert!(matches!(meta.kind, MaskKind::Last4));
         let enc = meta.enc.expect("encryption metadata");
-        assert!(matches!(enc.mode, crate::backend::EncryptionMode::Randomised));
+        assert!(matches!(
+            enc.mode,
+            crate::backend::EncryptionMode::Randomised
+        ));
         assert_eq!(enc.key_id, "k1");
         assert_eq!(enc.wraps, "string");
     }
@@ -1132,9 +1144,15 @@ mod tests {
 
     #[test]
     fn hex_to_bytes_round_trip() {
-        assert_eq!(hex_to_bytes("\\xdeadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            hex_to_bytes("\\xdeadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
         assert_eq!(hex_to_bytes("\\x").unwrap(), Vec::<u8>::new());
-        assert_eq!(hex_to_bytes("deadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            hex_to_bytes("deadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
     }
 
     #[test]
@@ -1195,11 +1213,7 @@ mod tests {
         // Descriptor entry installed but `ssn` carries no `mask` declaration.
         let app = "drift_unit_no_mask_app";
         let collection = "users";
-        crate::cache_schema_for_tests(
-            app,
-            collection,
-            json!({ "ssn": { "type": "string" } }),
-        );
+        crate::cache_schema_for_tests(app, collection, json!({ "ssn": { "type": "string" } }));
         let runtime = compio::runtime::Runtime::new().unwrap();
         let report = runtime
             .block_on(run_drift_check_for_column(app, collection, "ssn", 1.0))

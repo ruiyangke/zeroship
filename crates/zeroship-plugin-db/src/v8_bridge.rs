@@ -2,7 +2,7 @@
 //!
 //! This module is the seam between V8 and the rest of the plugin —
 //! nothing here knows about SQL or schema. Callers above
-//! (`crud`, `register_model`, `transaction`, `drop_namespace`,
+//! (`crud`, `transaction`, `drop_namespace`,
 //! `replication_ops`) parse args via these helpers, mint promises, and
 //! hand the work to the async layer.
 //!
@@ -182,18 +182,30 @@ pub(crate) struct DecodeBudget {
 
 impl DecodeBudget {
     fn new() -> Self {
-        Self { nodes: MAX_DECODE_NODES, bytes: MAX_DECODE_BYTES }
+        Self {
+            nodes: MAX_DECODE_NODES,
+            bytes: MAX_DECODE_BYTES,
+        }
     }
     fn take_node(&mut self) -> Result<(), DecodeError> {
-        self.nodes = self.nodes.checked_sub(1).ok_or(DecodeError::Budget("node count"))?;
+        self.nodes = self
+            .nodes
+            .checked_sub(1)
+            .ok_or(DecodeError::Budget("node count"))?;
         Ok(())
     }
     fn take_nodes(&mut self, n: usize) -> Result<(), DecodeError> {
-        self.nodes = self.nodes.checked_sub(n).ok_or(DecodeError::Budget("node count"))?;
+        self.nodes = self
+            .nodes
+            .checked_sub(n)
+            .ok_or(DecodeError::Budget("node count"))?;
         Ok(())
     }
     fn take_bytes(&mut self, n: usize) -> Result<(), DecodeError> {
-        self.bytes = self.bytes.checked_sub(n).ok_or(DecodeError::Budget("decoded bytes"))?;
+        self.bytes = self
+            .bytes
+            .checked_sub(n)
+            .ok_or(DecodeError::Budget("decoded bytes"))?;
         Ok(())
     }
 }
@@ -257,9 +269,13 @@ fn v8_value_to_serde_json_depth(
             // `get` runs JS: a replaced `toISOString` may throw. A throw here
             // leaves a pending exception, which we propagate rather than
             // falling through to the numeric branch with a live exception set.
-            let fn_v = obj.get(scope, to_iso_key.into()).ok_or(DecodeError::PendingException)?;
+            let fn_v = obj
+                .get(scope, to_iso_key.into())
+                .ok_or(DecodeError::PendingException)?;
             if let Ok(to_iso) = v8::Local::<v8::Function>::try_from(fn_v) {
-                let result = to_iso.call(scope, v, &[]).ok_or(DecodeError::PendingException)?;
+                let result = to_iso
+                    .call(scope, v, &[])
+                    .ok_or(DecodeError::PendingException)?;
                 if result.is_string() {
                     let s = result.to_rust_string_lossy(scope);
                     budget.take_bytes(s.len())?;
@@ -280,7 +296,9 @@ fn v8_value_to_serde_json_depth(
         return Err(DecodeError::Unsupported("date with no representable value"));
     }
     if v.is_array() {
-        let arr: v8::Local<v8::Array> = v.try_into().map_err(|_| DecodeError::Unsupported("array"))?;
+        let arr: v8::Local<v8::Array> = v
+            .try_into()
+            .map_err(|_| DecodeError::Unsupported("array"))?;
         let n = arr.length() as usize;
         // Charge the whole breadth BEFORE reserving. `new Array(4294967295)` is
         // cheap and sparse in V8 but would otherwise ask Rust to reserve
@@ -290,21 +308,31 @@ fn v8_value_to_serde_json_depth(
         for i in 0..arr.length() {
             // An element that cannot be read is NOT `null`. Defaulting it would
             // silently alter the value the caller passed.
-            let elem = arr.get_index(scope, i).ok_or(DecodeError::PendingException)?;
-            out.push(v8_value_to_serde_json_depth(scope, elem, depth + 1, budget)?);
+            let elem = arr
+                .get_index(scope, i)
+                .ok_or(DecodeError::PendingException)?;
+            out.push(v8_value_to_serde_json_depth(
+                scope,
+                elem,
+                depth + 1,
+                budget,
+            )?);
         }
         return Ok(Value::Array(out));
     }
     if v.is_object() {
-        let obj: v8::Local<v8::Object> =
-            v.try_into().map_err(|_| DecodeError::Unsupported("object"))?;
+        let obj: v8::Local<v8::Object> = v
+            .try_into()
+            .map_err(|_| DecodeError::Unsupported("object"))?;
         let names = obj
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
             .ok_or(DecodeError::PendingException)?;
         budget.take_nodes(names.length() as usize)?;
         let mut map = serde_json::Map::new();
         for i in 0..names.length() {
-            let key_v = names.get_index(scope, i).ok_or(DecodeError::PendingException)?;
+            let key_v = names
+                .get_index(scope, i)
+                .ok_or(DecodeError::PendingException)?;
             let key = key_v.to_rust_string_lossy(scope);
             budget.take_bytes(key.len())?;
             // THE DEFECT THIS REPLACES: `obj.get` runs JS (accessor property,
@@ -313,7 +341,10 @@ fn v8_value_to_serde_json_depth(
             // decoded to one clause and the mutation ran against a strict
             // subset of the declared predicate. Read exactly once, and refuse.
             let val_v = obj.get(scope, key_v).ok_or(DecodeError::PendingException)?;
-            map.insert(key, v8_value_to_serde_json_depth(scope, val_v, depth + 1, budget)?);
+            map.insert(
+                key,
+                v8_value_to_serde_json_depth(scope, val_v, depth + 1, budget)?,
+            );
         }
         return Ok(Value::Object(map));
     }
@@ -470,9 +501,9 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
     match oid {
         // BYTEA = 17 — canonical wire shape is base64 text.
         17 => match row.raw_value(idx) {
-            Ok(Some(bytes)) => Value::String(
-                base64::engine::general_purpose::STANDARD.encode(bytes),
-            ),
+            Ok(Some(bytes)) => {
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
             Ok(None) | Err(_) => Value::Null,
         },
         // BOOL = 16
@@ -497,14 +528,12 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
         },
         // FLOAT4 = 700
         700 => match row.try_get::<_, f32>(idx) {
-            Ok(v) => serde_json::Number::from_f64(f64::from(v))
-                .map_or(Value::Null, Value::Number),
+            Ok(v) => serde_json::Number::from_f64(f64::from(v)).map_or(Value::Null, Value::Number),
             Err(_) => Value::Null,
         },
         // FLOAT8 = 701
         701 => match row.try_get::<_, f64>(idx) {
-            Ok(v) => serde_json::Number::from_f64(v)
-                .map_or(Value::Null, Value::Number),
+            Ok(v) => serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number),
             Err(_) => Value::Null,
         },
         // UUID = 2950
@@ -589,8 +618,7 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
                 if let Ok(i) = s.parse::<i64>() {
                     Value::Number(serde_json::Number::from(i))
                 } else if let Ok(f) = s.parse::<f64>() {
-                    serde_json::Number::from_f64(f)
-                        .map_or(Value::String(s), Value::Number)
+                    serde_json::Number::from_f64(f).map_or(Value::String(s), Value::Number)
                 } else {
                     Value::String(s)
                 }
@@ -610,12 +638,11 @@ fn typed_cell_to_json(cell: &TypedCell) -> Value {
     match cell {
         TypedCell::Null => Value::Null,
         TypedCell::Integer(n) => Value::Number(serde_json::Number::from(*n)),
-        TypedCell::Real(f) => serde_json::Number::from_f64(*f)
-            .map_or(Value::Null, Value::Number),
+        TypedCell::Real(f) => serde_json::Number::from_f64(*f).map_or(Value::Null, Value::Number),
         TypedCell::Text(s) => Value::String(s.clone()),
-        TypedCell::Blob(bytes) => Value::String(
-            base64::engine::general_purpose::STANDARD.encode(bytes),
-        ),
+        TypedCell::Blob(bytes) => {
+            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+        }
     }
 }
 
@@ -710,8 +737,14 @@ mod tests {
             decode!("1.5"),
             Ok(Value::Number(serde_json::Number::from_f64(1.5).unwrap()))
         );
-        assert_eq!(decode!("0"), Ok(Value::Number(serde_json::Number::from(0i64))));
-        assert_eq!(decode!("-42"), Ok(Value::Number(serde_json::Number::from(-42i64))));
+        assert_eq!(
+            decode!("0"),
+            Ok(Value::Number(serde_json::Number::from(0i64)))
+        );
+        assert_eq!(
+            decode!("-42"),
+            Ok(Value::Number(serde_json::Number::from(-42i64)))
+        );
         assert!(
             matches!(decode!("Number.MAX_VALUE"), Ok(Value::Number(_))),
             "the largest finite double must decode as a number, not Null"

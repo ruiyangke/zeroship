@@ -64,7 +64,9 @@ impl InProcessLockRegistry {
     /// leave it true (returning `false`).
     pub(crate) fn try_acquire(&self, key: (String, String)) -> bool {
         let mut slots = self.slots.borrow_mut();
-        let slot = slots.entry(key).or_insert_with(|| Rc::new(Cell::new(false)));
+        let slot = slots
+            .entry(key)
+            .or_insert_with(|| Rc::new(Cell::new(false)));
         if slot.get() {
             // Already held by another acquirer.
             false
@@ -119,9 +121,8 @@ impl InProcessLockRegistry {
 ///
 /// Unlike the PG lock guards, release is synchronous: the lock lives in
 /// an in-memory registry, so `Drop` can free it immediately without any
-/// async unlock SQL. This is the right shape for `register_model` on the
-/// SQLite arm, where the critical failure mode was "acquire succeeded,
-/// then an early return / panic / cancellation leaked the slot forever".
+/// async unlock SQL. The critical failure mode is "acquire succeeded, then an
+/// early return / panic / cancellation leaked the slot forever".
 #[cfg(test)]
 #[must_use = "SqliteLockGuard releases the registry slot on Drop"]
 pub(crate) struct SqliteLockGuard {
@@ -159,7 +160,7 @@ mod tests {
     fn try_acquire_returns_true_on_first() {
         let reg = InProcessLockRegistry::new();
         assert!(
-            reg.try_acquire(key("app_demo:register_model", "register_model")),
+            reg.try_acquire(key("app_demo:snapshot_restore", "snapshot_restore")),
             "first acquire on an empty registry must return true"
         );
     }
@@ -167,7 +168,7 @@ mod tests {
     #[test]
     fn try_acquire_returns_false_when_held() {
         let reg = InProcessLockRegistry::new();
-        let k = key("app_demo:register_model", "register_model");
+        let k = key("app_demo:snapshot_restore", "snapshot_restore");
         assert!(reg.try_acquire(k.clone()));
         assert!(
             !reg.try_acquire(k),
@@ -178,7 +179,7 @@ mod tests {
     #[test]
     fn release_unblocks() {
         let reg = InProcessLockRegistry::new();
-        let k = key("app_demo:register_model", "register_model");
+        let k = key("app_demo:snapshot_restore", "snapshot_restore");
         assert!(reg.try_acquire(k.clone()));
         reg.release(k.clone());
         assert!(
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn release_drops_unshared_slot_from_registry() {
         let reg = InProcessLockRegistry::new();
-        let k = key("app_demo:register_model", "register_model");
+        let k = key("app_demo:snapshot_restore", "snapshot_restore");
         assert!(reg.try_acquire(k.clone()));
         assert_eq!(reg.slots.borrow().len(), 1, "slot must exist after acquire");
         reg.release(k);
@@ -207,7 +208,7 @@ mod tests {
         reg.release(key("app_demo:never_acquired", "never_acquired"));
 
         // Release on a known but currently-unheld slot — no-op (warns).
-        let k = key("app_demo:register_model", "register_model");
+        let k = key("app_demo:snapshot_restore", "snapshot_restore");
         assert!(reg.try_acquire(k.clone()));
         reg.release(k.clone());
         // Second release on the same key — slot is registered but
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn sqlite_lock_guard_drop_releases_slot() {
         let reg = Rc::new(InProcessLockRegistry::new());
-        let k = key("app_demo:register_model", "register_model");
+        let k = key("app_demo:snapshot_restore", "snapshot_restore");
         assert!(reg.try_acquire(k.clone()), "precondition: slot acquired");
 
         let guard = SqliteLockGuard {
@@ -256,7 +257,7 @@ mod tests {
     #[test]
     fn sqlite_lock_guard_releases_slot_on_panic_unwind() {
         let reg = Rc::new(InProcessLockRegistry::new());
-        let k = key("app_demo:register_model", "register_model");
+        let k = key("app_demo:snapshot_restore", "snapshot_restore");
         assert!(reg.try_acquire(k.clone()), "precondition: slot acquired");
 
         let prev_hook = std::panic::take_hook();

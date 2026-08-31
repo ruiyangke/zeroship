@@ -1,7 +1,7 @@
 //! Per-worker-thread DB context — single typed home for every plug-in
 //! thread-local. The plug-in previously carried several separate
-//! `thread_local!` declarations (`DB_POOL`, `DB_URL`, `REGISTERED_MODELS`,
-//! `TX_CONN`, `PENDING_EMITS` in `lib.rs`; `RUNNING_CONSUMERS` in
+//! `thread_local!` declarations (`DB_POOL`, `DB_URL`, `TX_CONN`,
+//! `PENDING_EMITS` in `lib.rs`; `RUNNING_CONSUMERS` in
 //! `replication_ops.rs`). Each had its own borrow/take/replace ritual;
 //! lifecycle invariants were enforced by convention only.
 //!
@@ -39,8 +39,8 @@ use compio_postgres::{OwnedPooledClient, Pool};
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
 use crate::binding::DbBinding;
-use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::broker::ChangeEvent;
+use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::error::DbError;
 use crate::service::DbResourceKey;
 
@@ -186,14 +186,6 @@ pub struct ThreadDbContext {
     /// isolates must stamp the same value while different containers stamp
     /// different values.
     cdc_worker_id: Option<String>,
-
-    /// Registered models — keyed by "app_id:collection". Prevents repeated
-    /// registration on this worker thread.
-    ///
-    /// This key does not yet distinguish deploys. It cannot be changed alone:
-    /// the declared [`Self::schemas`] cache and all of its consumers are keyed
-    /// at the same granularity.
-    registered_models: HashSet<String>,
 
     /// Active transaction clients, **keyed by owning `app_id`**.
     ///
@@ -361,9 +353,8 @@ pub struct ThreadDbContext {
     ///
     /// One entry per `(app_id, deploy_token, collection)`. The value is the
     /// descriptor's own field map for that collection - `{ <column>: FieldDef }`
-    /// including the v2 `storage` block - carried verbatim from
-    /// `manifest.runtime_descriptor` through `globalThis.__zsRuntimeDescriptor`
-    /// and `installSchema`'s `registerModel` chain.
+    /// including the v2 `storage` block - carried verbatim from the validated
+    /// `manifest.runtime_descriptor` by `DbPlugin::bind_runtime_descriptor`.
     ///
     /// **There is no second source.** The live-catalog introspection cache that
     /// used to sit beside this map is deleted: it re-derived a strict SUBSET of
@@ -476,7 +467,6 @@ impl ThreadDbContext {
             pool: None,
             db_url: None,
             cdc_worker_id: None,
-            registered_models: HashSet::new(),
             tx_conns: HashMap::new(),
             tx_claims: HashSet::new(),
             tx_waiters: HashMap::new(),
@@ -679,30 +669,6 @@ impl ThreadDbContext {
         self.cdc_worker_id = Some(worker_id.to_string());
     }
 
-    // ----- REGISTERED_MODELS -----------------------------------------
-
-    /// Check whether the model has been registered on this worker thread.
-    pub(crate) fn is_model_registered(&self, app_id: &str, collection: &str) -> bool {
-        let key = format!("{app_id}:{collection}");
-        self.registered_models.contains(&key)
-    }
-
-    /// Mark the model as registered (idempotent).
-    pub(crate) fn mark_model_registered(&mut self, app_id: &str, collection: &str) {
-        let key = format!("{app_id}:{collection}");
-        self.registered_models.insert(key);
-    }
-
-    /// Clear the registered mark for one model — forces the next `registerModel`
-    /// to re-run the cold path instead of the warm short-circuit. Used by tests
-    /// that re-register the same `(app, collection)` with a CHANGED schema (a real
-    /// dev re-deploy presents a fresh binding; the test reuses one context).
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn clear_model_registered(&mut self, app_id: &str, collection: &str) {
-        let key = format!("{app_id}:{collection}");
-        self.registered_models.remove(&key);
-    }
-
     /// The descriptor-store key for one collection under one binding.
     fn schema_key(binding: &DbBinding, collection: &str) -> String {
         format!(
@@ -714,11 +680,9 @@ impl ThreadDbContext {
     }
 
     /// Install one collection's descriptor entry for this binding.
-    ///
-    /// The only production caller is `register_model_dispatch`, which is driven
-    /// by `installSchema` off `globalThis.__zsRuntimeDescriptor`. Idempotent:
-    /// a re-register overwrites, which is what a dev re-deploy of the same
-    /// deploy token means.
+    /// Test fixtures use this narrow helper; production boot replaces the
+    /// binding's complete descriptor through [`Self::replace_schemas`].
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn cache_schema(
         &mut self,
         binding: &DbBinding,
@@ -729,15 +693,24 @@ impl ThreadDbContext {
             .insert(Self::schema_key(binding, collection), Arc::new(schema));
     }
 
-    /// Drop every cached declared schema for `app_id`. Test-only seam used to
-    /// simulate a FRESH worker-thread context booting against a WARM app file
-    /// (the sibling cache starts empty even though the file already holds tables) —
-    /// the exact condition the warm-multi-collection drop-suppression fix
-    /// must survive.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn clear_schemas_for_app(&mut self, app_id: &str) {
-        let prefix = format!("{app_id}:");
-        self.schemas.retain(|k, _| !k.starts_with(&prefix));
+    /// Replace the complete descriptor for one app-at-deploy binding.
+    ///
+    /// Callers fully validate and collect every entry before borrowing the
+    /// context mutably. The retain-and-insert sequence is therefore one
+    /// synchronous publication point: no callback can observe a partial
+    /// descriptor, removed collections do not survive a dev isolate restart,
+    /// and an empty input leaves a schema-less binding empty.
+    pub(crate) fn replace_schemas(
+        &mut self,
+        binding: &DbBinding,
+        schemas: Vec<(String, serde_json::Value)>,
+    ) {
+        let prefix = format!("{}:{}:", binding.app_id(), binding.deploy_token());
+        self.schemas.retain(|key, _| !key.starts_with(&prefix));
+        for (collection, schema) in schemas {
+            self.schemas
+                .insert(Self::schema_key(binding, &collection), Arc::new(schema));
+        }
     }
 
     /// The descriptor entry for one collection under one binding.
@@ -751,7 +724,9 @@ impl ThreadDbContext {
         binding: &DbBinding,
         collection: &str,
     ) -> Option<Arc<serde_json::Value>> {
-        self.schemas.get(&Self::schema_key(binding, collection)).cloned()
+        self.schemas
+            .get(&Self::schema_key(binding, collection))
+            .cloned()
     }
 
     /// Enumerate every `(collection, schema)` pair the descriptor store holds
@@ -860,7 +835,10 @@ impl ThreadDbContext {
 
     /// Park a waker on `app_id`'s claim.
     pub(crate) fn push_tx_waiter(&mut self, app_id: &str, waker: std::task::Waker) {
-        self.tx_waiters.entry(app_id.to_string()).or_default().push(waker);
+        self.tx_waiters
+            .entry(app_id.to_string())
+            .or_default()
+            .push(waker);
     }
 
     /// Park a connection in `app_id`'s transaction slot. Returns the
@@ -1100,10 +1078,7 @@ impl ThreadDbContext {
 
     /// Record the queued-event watermark for a frame that just opened.
     pub(crate) fn push_frame_emit_mark(&mut self, app_id: &str) {
-        let mark = self
-            .pending_emits
-            .get(app_id)
-            .map_or(0, std::vec::Vec::len);
+        let mark = self.pending_emits.get(app_id).map_or(0, std::vec::Vec::len);
         self.savepoint_emit_marks
             .entry(app_id.to_string())
             .or_default()
@@ -1173,7 +1148,6 @@ impl ThreadDbContext {
     pub(crate) fn clear_pending_emits_for(&mut self, app_id: &str) {
         self.pending_emits.remove(app_id);
     }
-
 }
 
 impl Default for ThreadDbContext {
@@ -1257,8 +1231,8 @@ mod tests {
 
     use super::*;
 
-    use crate::broker::{ChangeEvent, ChangeOp};
     use crate::BackendUrl;
+    use crate::broker::{ChangeEvent, ChangeOp};
     use std::collections::HashMap;
 
     fn dummy_event(collection: &str) -> ChangeEvent {
@@ -1288,8 +1262,6 @@ mod tests {
         // pending_emits starts empty (each app's queue is allocated
         // lazily on first push).
         assert!(ctx.pending_emits.is_empty());
-        // Model registry empty.
-        assert!(!ctx.is_model_registered("a", "c"));
     }
 
     #[test]
@@ -1351,7 +1323,10 @@ mod tests {
         assert!(ctx.db_url().is_none() && ctx.backend_selection().is_none());
 
         install(&mut ctx, "postgres://a");
-        assert!(matches!(ctx.backend_selection(), Some(BackendUrl::Postgres)));
+        assert!(matches!(
+            ctx.backend_selection(),
+            Some(BackendUrl::Postgres)
+        ));
 
         install(&mut ctx, "sqlite:/tmp/ctx-install.sqlite");
         assert!(matches!(
@@ -1429,30 +1404,6 @@ mod tests {
         ctx.finish_backend_init();
     }
 
-    // ----- REGISTERED_MODELS ---------------------------------------------
-
-    #[test]
-    fn registered_models_round_trip() {
-        let mut ctx = ThreadDbContext::new();
-        assert!(!ctx.is_model_registered("app_a", "messages"));
-        ctx.mark_model_registered("app_a", "messages");
-        assert!(ctx.is_model_registered("app_a", "messages"));
-        // App / collection both contribute to the key.
-        assert!(!ctx.is_model_registered("app_b", "messages"));
-        assert!(!ctx.is_model_registered("app_a", "other"));
-    }
-
-    #[test]
-    fn mark_model_registered_is_idempotent() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.mark_model_registered("app_a", "msgs");
-        ctx.mark_model_registered("app_a", "msgs");
-        assert!(ctx.is_model_registered("app_a", "msgs"));
-        // HashSet dedupes — the second call shouldn't grow the registry
-        // (verified via the set's `len` semantics).
-        assert_eq!(ctx.registered_models.len(), 1);
-    }
-
     // ----- TX token monotonic counter ------------------------------------
 
     #[test]
@@ -1485,7 +1436,10 @@ mod tests {
         ctx.discard_frame_effects("app_t");
         let kept = ctx.pending_emits.get("app_t").expect("queue");
         assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
-        assert_eq!(kept[0].collection, "c1", "the enclosing frame's event survives");
+        assert_eq!(
+            kept[0].collection, "c1",
+            "the enclosing frame's event survives"
+        );
 
         // `discard_frame_effects` does NOT pop: a rolled-back frame is not
         // closed until its RELEASE lands, and that is the call that pops.
@@ -1632,10 +1586,9 @@ mod tests {
     /// exercise the slot state machine only.
     async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
         use crate::backend::SqlExecutor as _;
-        let backend = crate::backend::sqlite::SqliteBackend::new(
-            std::path::PathBuf::from(dir.path()),
-        )
-        .expect("open sqlite backend");
+        let backend =
+            crate::backend::sqlite::SqliteBackend::new(std::path::PathBuf::from(dir.path()))
+                .expect("open sqlite backend");
         let client = backend
             .acquire_dedicated_client("slot_state_probe")
             .await

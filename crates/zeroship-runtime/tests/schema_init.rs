@@ -8,13 +8,14 @@
 //!     `DATABASE_URL` still boot.
 //!   - When the runtime ships an `installSchema`-shaped module, an `env.db`
 //!     namespace, and a descriptor, the init script calls
-//!     `installSchema(descriptorFields, env)` with the live `env.db` handle.
+//!     `installSchema(descriptorFields, env, { descriptor })` with the live
+//!     `env.db` handle.
 //!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
 use crate::common;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, init_v8};
 use zeroship_runtime::{NativePlugin, NativeRegistrar};
 
 struct DummyDbPlugin;
@@ -38,6 +39,40 @@ impl NativePlugin for DummyDbPlugin {
     }
 }
 
+struct DescriptorProbePlugin;
+
+impl NativePlugin for DescriptorProbePlugin {
+    fn namespace(&self) -> &str {
+        "descriptor_probe"
+    }
+
+    fn name(&self) -> &str {
+        "descriptor-probe"
+    }
+
+    fn register(&self, _r: &mut NativeRegistrar) {}
+
+    fn bind_runtime_descriptor(
+        &self,
+        scope: &mut v8::PinScope,
+        _app_id: &str,
+        descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        let observed = descriptor
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| "none".to_string());
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "__zsDescriptorHookObserved")
+            .ok_or_else(|| "failed to allocate probe key".to_string())?;
+        let value = v8::String::new(scope, &observed)
+            .ok_or_else(|| "failed to allocate probe value".to_string())?;
+        global.set(scope, key.into(), value.into());
+        Ok(())
+    }
+}
+
 /// No-op native op for [`DummyDbPlugin`]. Free function so it coerces to
 /// `v8::FunctionCallback` without a capturing closure.
 fn dummy_db_noop(
@@ -46,6 +81,54 @@ fn dummy_db_noop(
     mut rv: v8::ReturnValue,
 ) {
     rv.set_undefined();
+}
+
+fn descriptor_hook_observed(runtime_descriptor: Option<String>) -> String {
+    init_v8();
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: r#"
+const observedAtModuleEvaluation = globalThis.__zsDescriptorHookObserved ?? "missing";
+export default {
+    fetch() { return new Response(observedAtModuleEvaluation); },
+};
+"#
+        .into(),
+    }];
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .plugin(DescriptorProbePlugin)
+        .runtime_descriptor(runtime_descriptor)
+        .build();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://localhost/",
+        &[],
+        "",
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    match outcome {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "descriptor probe must boot");
+            String::from_utf8(body).expect("probe response is UTF-8")
+        }
+        _ => panic!("expected synchronous descriptor probe response"),
+    }
+}
+
+#[test]
+fn native_descriptor_hook_receives_validated_descriptor_before_module_evaluation() {
+    let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[]}}}"#;
+    let observed = descriptor_hook_observed(Some(descriptor.to_string()));
+    let expected: serde_json::Value = serde_json::from_str(descriptor).unwrap();
+    let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn native_descriptor_hook_receives_none_before_schema_less_module_evaluation() {
+    assert_eq!(descriptor_hook_observed(None), "none");
 }
 
 /// Build a Runtime around the given user-entry source + procedure
@@ -57,11 +140,7 @@ fn dummy_db_noop(
 /// Using function-shape here keeps the test surface narrow: the
 /// runtime's `__zsDispatch` is exercised by `rpc_dispatch.rs`; here we
 /// just need a working dispatch path that surfaces the probe result.
-fn dispatch_probe(
-    user_src: &str,
-    procs_block: &str,
-    method: &str,
-) -> Result<String, String> {
+fn dispatch_probe(user_src: &str, procs_block: &str, method: &str) -> Result<String, String> {
     init_v8();
 
     // Synthetic entry shim — function-shape dispatcher (the advanced /
@@ -193,9 +272,10 @@ export default {
     // No schema key — discovery should short-circuit.
 };
 "#;
-    let modules = vec![
-        ModuleEntry { specifier: "index.js".into(), source: user_src.into() },
-    ];
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: user_src.into(),
+    }];
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
@@ -213,7 +293,10 @@ export default {
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
             let body = String::from_utf8_lossy(&body).into_owned();
-            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            assert!(
+                (200..300).contains(&status),
+                "non-2xx: status={status} body={body}"
+            );
             body
         }
         _ => panic!("expected sync Response"),
@@ -221,7 +304,10 @@ export default {
     // The init script must not have called `installSchema` — no
     // `__zsCapturedSchema` exists because the user has no schema. The
     // probe returns `null` (JSON-encoded).
-    assert!(body.contains(r#""json":null"#), "expected null, got: {body}");
+    assert!(
+        body.contains(r#""json":null"#),
+        "expected null, got: {body}"
+    );
 }
 
 #[test]
@@ -270,7 +356,7 @@ export function installSchema(schema, _env) {
     globalThis.__zsCapturedSchema = JSON.stringify({
         keys: Object.keys(schema),
     });
-    return { collections: {}, ready: Promise.resolve() };
+    return { collections: {} };
 }
 "#;
 
@@ -291,9 +377,18 @@ import "@zeroship/db/internal";
 
     let user_with_preinit = format!("{pre_init}\n{user_src}");
     let modules = vec![
-        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
-        ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
-        ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
+        ModuleEntry {
+            specifier: "index.js".into(),
+            source: user_with_preinit,
+        },
+        ModuleEntry {
+            specifier: "@zeroship/bootstrap/install-schema".into(),
+            source: stub_bootstrap.into(),
+        },
+        ModuleEntry {
+            specifier: "@zeroship/db/internal".into(),
+            source: stub_db_internal.into(),
+        },
     ];
 
     let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
@@ -316,13 +411,18 @@ import "@zeroship/db/internal";
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
             let body = String::from_utf8_lossy(&body).into_owned();
-            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            assert!(
+                (200..300).contains(&status),
+                "non-2xx: status={status} body={body}"
+            );
             body
         }
         _ => panic!("expected sync Response"),
     };
-    assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
-        "expected captured descriptor schema with 'posts' key, got: {body}");
+    assert!(
+        body.contains(r#"\"keys\":[\"posts\"]"#),
+        "expected captured descriptor schema with 'posts' key, got: {body}"
+    );
 }
 
 #[test]
@@ -380,7 +480,7 @@ export function installSchema(schema, _env, _options) {
         optionKeys: _options ? Object.keys(_options) : [],
         hasDeclaredSchemas: !!(_options && Object.prototype.hasOwnProperty.call(_options, "declaredSchemas")),
     });
-    return { collections: {}, ready: Promise.resolve() };
+    return { collections: {} };
 }
 "#;
     let stub_db_internal = r#"
@@ -393,9 +493,18 @@ import "@zeroship/db/internal";
 
     let user_with_preinit = format!("{pre_init}\n{user_src}");
     let modules = vec![
-        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
-        ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
-        ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
+        ModuleEntry {
+            specifier: "index.js".into(),
+            source: user_with_preinit,
+        },
+        ModuleEntry {
+            specifier: "@zeroship/bootstrap/install-schema".into(),
+            source: stub_bootstrap.into(),
+        },
+        ModuleEntry {
+            specifier: "@zeroship/db/internal".into(),
+            source: stub_db_internal.into(),
+        },
     ];
 
     // The bundled descriptor: a DIFFERENT collection (`posts`) than the
@@ -420,19 +529,28 @@ import "@zeroship/db/internal";
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
             let body = String::from_utf8_lossy(&body).into_owned();
-            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            assert!(
+                (200..300).contains(&status),
+                "non-2xx: status={status} body={body}"
+            );
             body
         }
         _ => panic!("expected sync Response"),
     };
     // The FIELD SOURCE (installSchema's first arg) is the descriptor's
     // collections (`posts`), NOT the declared `todos`.
-    assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
-        "expected installSchema sourced from the descriptor (posts), got: {body}");
-    assert!(body.contains(r#"\"optionKeys\":[\"platform\",\"descriptor\"]"#),
-        "expected runtime-entry to pass only platform+descriptor options, got: {body}");
-    assert!(body.contains(r#"\"hasDeclaredSchemas\":false"#),
-        "declaredSchemas must not be passed to installSchema, got: {body}");
+    assert!(
+        body.contains(r#"\"keys\":[\"posts\"]"#),
+        "expected installSchema sourced from the descriptor (posts), got: {body}"
+    );
+    assert!(
+        body.contains(r#"\"optionKeys\":[\"descriptor\"]"#),
+        "expected runtime-entry to pass only descriptor options, got: {body}"
+    );
+    assert!(
+        body.contains(r#"\"hasDeclaredSchemas\":false"#),
+        "declaredSchemas must not be passed to installSchema, got: {body}"
+    );
 }
 
 #[test]
@@ -470,9 +588,10 @@ export default {
     schema: { todos: { id: { type: "id" } } },
 };
 "#;
-    let modules = vec![
-        ModuleEntry { specifier: "index.js".into(), source: user_src.into() },
-    ];
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: user_src.into(),
+    }];
 
     // No descriptor on the builder — the global stays unset and the stale
     // default.schema must be ignored.
@@ -494,13 +613,18 @@ export default {
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
             let body = String::from_utf8_lossy(&body).into_owned();
-            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            assert!(
+                (200..300).contains(&status),
+                "non-2xx: status={status} body={body}"
+            );
             body
         }
         _ => panic!("expected sync Response"),
     };
-    assert!(body.contains(r#""json":null"#),
-        "without a descriptor, runtime-entry must install nothing and ignore default.schema: {body}");
+    assert!(
+        body.contains(r#""json":null"#),
+        "without a descriptor, runtime-entry must install nothing and ignore default.schema: {body}"
+    );
 }
 
 #[test]
@@ -554,11 +678,10 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
 #[test]
 fn bootstrap_module_lacks_legacy_schema_init_symbols() {
     // Stage 4 cleanup: the synthetic SSR entry no longer publishes
-    // `__zsSchemaInit`. The runtime bootstrap doesn't either — its
-    // discovery is a top-level await against the `ready` promise
-    // returned by `installSchema`. Verify the legacy global stays
-    // undefined throughout the bootstrap's evaluation. If a regression
-    // re-introduces an IIFE that publishes it, this test will catch it.
+    // `__zsSchemaInit`. The runtime bootstrap does not either: native plugins
+    // receive the descriptor before module evaluation and the JavaScript
+    // installer plants wrappers directly. Verify the legacy global stays
+    // undefined throughout bootstrap evaluation.
     let body = dispatch_probe(
         r#"
         export function readInit() {

@@ -196,10 +196,8 @@ pub trait SqlExecutor: 'static {
 ///   visible cluster-wide. A future SQLite backend would map it to
 ///   either `BEGIN EXCLUSIVE` (when the lock duration aligns with a
 ///   transaction) or a sentinel-row in a `__zs_locks` table (for
-///   session-scoped duration). The two existing call sites are both in
-///   this category: the register-model orchestrator's per-app
-///   serialiser (`name = "register_model"`) and the per-migration
-///   progress lock (`name = format!("mig:{spec.name}")`).
+///   session-scoped duration). Snapshot and restore use this category so two
+///   worker processes cannot replace one app's database concurrently.
 ///
 /// - [`LockScope::LocalApp`] — **single-process visibility**. The lock
 ///   coordinates work inside one worker's Rust runtime — backed by an
@@ -217,13 +215,8 @@ pub trait SqlExecutor: 'static {
 /// directly as keys into a per-process HashMap (`GlobalApp` and
 /// `LocalApp` both, since SQLite is in-process by definition;
 /// §8.5). The variant classifies *visibility*, not key shape.
-/// Name of the per-app register-model advisory lock.
-///
-/// MOVED HERE from `register_model::bootstrap` when that module was deleted. It
-/// is not a leftover: two live [`LockScope::GlobalApp`] sites in the PostgreSQL
-/// backend name this same lock, so the string outlived the module that used to
-/// define it and belongs beside the scope type it parameterises.
-pub const REGISTER_MODEL_LOCK_TAG: &str = "register_model";
+/// Name of the per-app lock shared by snapshot and restore.
+pub const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LockScope {
@@ -234,7 +227,7 @@ pub enum LockScope {
     GlobalApp {
         /// App identifier — first half of the key namespace.
         app_id: String,
-        /// Scope name tag — e.g. `"register_model"`,
+        /// Scope name tag, e.g. `"snapshot_restore"`,
         /// `"mig:add_archived_flag"`. Both halves of the underlying
         /// `(key1, key2)` advisory-lock pair derive from this field
         /// (see [`Self::to_keys`]).
@@ -244,7 +237,10 @@ pub enum LockScope {
     /// one worker's Rust runtime — backed by an in-memory HashMap
     /// registry, NOT by SQL. No production caller yet; the variant
     /// exists so future call sites can classify their intent.
-    #[allow(dead_code, reason = "LocalApp remains part of the lock model for test-helper coverage even though the release build only constructs GlobalApp.")]
+    #[allow(
+        dead_code,
+        reason = "LocalApp remains part of the lock model for test-helper coverage even though the release build only constructs GlobalApp."
+    )]
     LocalApp {
         /// App identifier — first half of the key namespace.
         app_id: String,
@@ -287,7 +283,6 @@ impl LockScope {
             Self::GlobalApp { name, .. } | Self::LocalApp { name, .. } => name.as_str(),
         }
     }
-
 }
 
 /// Advisory-lock capability — session-scoped `(key1, key2)` locks held
@@ -338,9 +333,8 @@ pub trait LockManager: SqlExecutor {
     /// **Security**: the previous version called
     /// `acquire_advisory_lock`, which on PG issues `pg_advisory_lock`
     /// — a server-side wait that has no timeout. A malicious app
-    /// holding its own register-model lock indefinitely could stall
-    /// every subsequent `register_model` / migration call for that
-    /// same app until the holding session terminated. The retry loop
+    /// holding its own session lock indefinitely could stall every subsequent
+    /// operation using that scope until the holding session terminated. The retry loop
     /// caps the wait at ~1.75s and surfaces
     /// `DbError::LockContention` (wire code `lock_not_available`)
     /// on exhaustion so the caller decides how to react.
@@ -375,7 +369,7 @@ pub trait LockManager: SqlExecutor {
     /// client-side lock state survives a dropped future.
     ///
     /// **Why this schedule**: the contended window is operator-set
-    /// (a held migration / register-model lock) so we want a hard
+    /// (for example, a held migration or snapshot lock) so we want a hard
     /// upper bound, not exponential growth. The schedule trades 5
     /// PG round-trips against the longest legitimate hold time we
     /// observe (~1s for a slow `CREATE INDEX CONCURRENTLY`
@@ -392,13 +386,7 @@ pub trait LockManager: SqlExecutor {
         // Tuple shape `(attempt_idx, pre_wait_ms)` is read off in the
         // loop body so a future contributor sees the cumulative
         // budget without re-deriving it: 0+50+200+500+1000 = 1750ms.
-        const SCHEDULE: &[(u32, u64)] = &[
-            (1, 0),
-            (2, 50),
-            (3, 200),
-            (4, 500),
-            (5, 1000),
-        ];
+        const SCHEDULE: &[(u32, u64)] = &[(1, 0), (2, 50), (3, 200), (4, 500), (5, 1000)];
         let (k1, k2) = scope.to_keys();
         for (attempt, pre_wait_ms) in SCHEDULE.iter().copied() {
             if pre_wait_ms > 0 {
@@ -408,8 +396,8 @@ pub trait LockManager: SqlExecutor {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     // Lock currently held by another acquirer. Trace
-                    // each retry so operators correlating "register_model
-                    // slow" reports against `pg_locks` can see the
+                    // each retry so operators correlating slow-operation
+                    // reports against `pg_locks` can see the
                     // wait-pattern client-side.
                     tracing::warn!(
                         scope_app_id = %scope.app_id(),
@@ -443,7 +431,7 @@ pub trait LockManager: SqlExecutor {
             message: format!(
                 "advisory lock held by another acquirer (scope={}/{}); \
                  bounded retry of 5 attempts at 0/50/200/500/1000ms exhausted. \
-                 Hint: retry or check for a stuck migration / register_model holder.",
+                 Hint: retry or check for a stuck holder of this operation scope.",
                 scope.app_id(),
                 scope.name(),
             ),
@@ -456,11 +444,7 @@ pub trait LockManager: SqlExecutor {
     ///
     /// Takes `&LockScope` — see [`Self::acquire`].
     #[allow(async_fn_in_trait)]
-    async fn try_acquire(
-        &self,
-        client: &Self::Client,
-        scope: &LockScope,
-    ) -> Result<bool, DbError> {
+    async fn try_acquire(&self, client: &Self::Client, scope: &LockScope) -> Result<bool, DbError> {
         let (k1, k2) = scope.to_keys();
         self.try_acquire_advisory_lock(client, &k1, &k2).await
     }
@@ -493,9 +477,8 @@ pub trait LockManager: SqlExecutor {
     /// `BEGIN EXCLUSIVE` or a sentinel table).
     ///
     /// **Security**: the indefinite-wait shape is a within-app DoS
-    /// vector — a malicious app holding its own session-scoped
-    /// advisory lock stalls every subsequent `register_model` /
-    /// migration call for that same app. The typed [`Self::acquire`]
+    /// vector: a malicious app holding its own session-scoped advisory lock
+    /// stalls every subsequent operation using that scope. The typed [`Self::acquire`]
     /// surface no longer dispatches through this method; it routes
     /// via [`Self::try_acquire_with_backoff`] instead. This method is
     /// retained as the trait primitive only because (a) some future
@@ -510,7 +493,10 @@ pub trait LockManager: SqlExecutor {
     /// at every call site.
     #[doc(hidden)]
     #[allow(async_fn_in_trait)]
-    #[allow(dead_code, reason = "The blocking advisory-lock primitive is retained for lock-manager tests; production code routes through try_acquire/backoff.")]
+    #[allow(
+        dead_code,
+        reason = "The blocking advisory-lock primitive is retained for lock-manager tests; production code routes through try_acquire/backoff."
+    )]
     async fn acquire_advisory_lock(
         &self,
         client: &Self::Client,
@@ -551,7 +537,6 @@ pub trait LockManager: SqlExecutor {
     ) -> Result<(), DbError>;
 }
 
-
 /// Live-schema introspection capability — "read the catalog and return
 /// a typed snapshot the diff engine can consume".
 ///
@@ -559,10 +544,8 @@ pub trait LockManager: SqlExecutor {
 /// `docs/archive/p0-implementation-plan.md` and
 /// `docs/archive/db-system-design.md` §7). The trait owns the
 /// `LiveSchema` associated type that used to live on `Backend` —
-/// pinning it here means consumer bounds like
-/// `<B: SchemaIntrospect<LiveSchema = LiveSchema>>` in
-/// `register_model::plan` go through a narrow capability trait instead
-/// of the omnibus super-trait. `Backend` re-anchors the same
+/// pinning it here means test helpers and conformance assertions use a narrow
+/// capability trait instead of the omnibus super-trait. `Backend` re-anchors the same
 /// associated type via the `SchemaIntrospect<LiveSchema = LiveSchema>`
 /// super-bound below so the constraint is unchanged for existing
 /// callers.
@@ -723,13 +706,19 @@ pub trait DialectBuilder: 'static {
     /// `"timestamp"`, …) to the engine's column-type vocabulary.
     /// `opts` is the per-field option object the SDK passes alongside
     /// the type (e.g. `{ length: 256 }`).
-    #[allow(dead_code, reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions.")]
+    #[allow(
+        dead_code,
+        reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions."
+    )]
     fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String;
 
     /// SQL fragment that evaluates to "now" on the server. PG: `NOW()`;
     /// SQLite: `CURRENT_TIMESTAMP`. Returned as a `&'static str` so
     /// callers can splice it into a query string without an alloc.
-    #[allow(dead_code, reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions.")]
+    #[allow(
+        dead_code,
+        reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions."
+    )]
     fn now_fn(&self) -> &'static str;
 
     /// Engine-side SQL that returns the last-inserted rowid for a
@@ -737,7 +726,10 @@ pub trait DialectBuilder: 'static {
     /// PG returns `None` (it routes through `RETURNING` instead).
     /// SQLite returns `Some("SELECT last_insert_rowid()")`. Default
     /// `None` so the PG impl doesn't need to override.
-    #[allow(dead_code, reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions.")]
+    #[allow(
+        dead_code,
+        reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions."
+    )]
     fn last_insert_rowid_sql(&self) -> Option<&'static str> {
         None
     }
@@ -770,8 +762,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient
 }
 
 /// Postgres-specific extension trait carrying the
-/// `acquire_pooled_client_for_lock` primitive — the register-model
-/// bootstrap's pool checkout, whose lease
+/// `acquire_pooled_client_for_lock` primitive - a pool checkout whose lease
 /// [`crate::backend::lock_guard::LockGuard`] holds for the life of the
 /// advisory lock.
 ///
@@ -904,9 +895,8 @@ pub trait ChangeStream: 'static {
 ///
 /// The matching `subscribe()` rejection branch lives on the
 /// [`SchemaPendingGuard`] (the louder rail); backfill is silent on the
-/// `subscribe` path by design (a backfill window is internally driven
-/// — `migrations.run` or `register_model` Pass 1 — and SDK callers
-/// have no way to observe it directly).
+/// `subscribe` path by design (a backfill window is internally driven and SDK
+/// callers have no way to observe it directly).
 ///
 /// The `#[must_use]` annotation prevents accidental inline drop at
 /// the call site — the pause/resume contract is the *duration* of the
@@ -1090,9 +1080,8 @@ pub use zeroship_schema::descriptors::GeoPoint;
 //
 // Two capability traits defined per
 // `docs/archive/p5-encryption-backup-implementation-plan.md` §2 + §9.
-// Neither joins the `Backend` super-trait composition or the
-// [`RegisterBackend`] marker — they're admin-surface accessors routed
-// via dedicated `BackendHandle::as_encrypted_column_*` /
+// Neither joins the `Backend` super-trait composition. They are admin-surface
+// accessors routed via dedicated `BackendHandle::as_encrypted_column_*` /
 // `as_backup_*` accessors (mirror of the `as_change_stream_*` shape
 // the [`ChangeStream`] capability adopted).
 //
@@ -1146,11 +1135,7 @@ pub trait EncryptedColumn: 'static {
     /// through `crate::encryption::keys::KeyStore::resolve` which
     /// does the HKDF expansion.
     #[allow(async_fn_in_trait)]
-    async fn resolve_key(
-        &self,
-        app_id: &str,
-        key_id: &str,
-    ) -> Result<Self::KeyHandle, DbError>;
+    async fn resolve_key(&self, app_id: &str, key_id: &str) -> Result<Self::KeyHandle, DbError>;
 
     /// Encrypt `plaintext` under `key` and `aad`, returning the
     /// packed wire blob produced by `crate::encryption::wire::pack`.
@@ -1230,11 +1215,7 @@ pub trait Backup: 'static {
     /// downloads + `pg_restore` + atomic schema swap. SQLite:
     /// downloads + atomic rename + isolate evict.
     #[allow(async_fn_in_trait)]
-    async fn restore(
-        &self,
-        app_id: &str,
-        snapshot: &SnapshotHandle,
-    ) -> Result<(), DbError>;
+    async fn restore(&self, app_id: &str, snapshot: &SnapshotHandle) -> Result<(), DbError>;
 
     /// Replay WAL up to `target`. PG: writes the target to a
     /// `__zeroship_admin.pitr_targets` table NOTHING NOW CREATES, so
@@ -1243,11 +1224,7 @@ pub trait Backup: 'static {
     /// SQLite: returns `Configuration { code: "pitr_pg_only" }`
     /// — SQLite has no WAL-archive PITR story.
     #[allow(async_fn_in_trait)]
-    async fn pitr_replay(
-        &self,
-        app_id: &str,
-        target: PitrTarget,
-    ) -> Result<(), DbError>;
+    async fn pitr_replay(&self, app_id: &str, target: PitrTarget) -> Result<(), DbError>;
 }
 
 /// Options for [`Backup::snapshot`].
@@ -1372,50 +1349,6 @@ impl Drop for SchemaPendingGuard {
     }
 }
 
-/// Marker super-trait composing every capability the register-model
-/// pipeline needs from a backend, so the `bootstrap` / `run_pipeline`
-/// signatures can write `B: RegisterBackend` instead of restating the
-/// 6-trait compound bound at each function.
-///
-/// For ergonomics, the bound is exactly
-/// [`PgSqlExecutor`] (transitively [`SqlExecutor`]) +
-/// [`LockManager`] + [`SchemaIntrospect`] with
-/// `LiveSchema = crate::diff::LiveSchema` + [`PgLockManager`]. The blanket `impl<T> RegisterBackend for T`
-/// auto-impls the marker for any type that already satisfies the
-/// six sub-bounds (today, [`PostgresBackend`]; tomorrow, any other
-/// concrete impl that wires up the same set).
-///
-/// See the "Ergonomics" step in
-/// `docs/archive/p0-implementation-plan.md` and
-/// `docs/archive/db-system-design.md` §7.
-// The `EncryptedColumn` super-bound is required for
-// the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
-// (the backfill decrypts encrypted columns before applying the mask
-// transform). Both backends impl `EncryptedColumn` unconditionally.
-#[cfg(any(test, feature = "test-helpers"))]
-pub trait RegisterBackend:
-    PgSqlExecutor
-    + LockManager<Client = compio_postgres::OwnedPooledClient>
-    + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-    + PgLockManager
-    + VectorIndex
-    + SpatialIndex
-    + EncryptedColumn
-{
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-impl<T> RegisterBackend for T where
-    T: PgSqlExecutor
-        + LockManager<Client = compio_postgres::OwnedPooledClient>
-        + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-            + PgLockManager
-        + VectorIndex
-        + SpatialIndex
-        + EncryptedColumn
-{
-}
-
 /// The data-store boundary. One impl per storage backend; today only
 /// Postgres ([`PostgresBackend`]).
 ///
@@ -1499,11 +1432,8 @@ impl<T> RegisterBackend for T where
 /// cargo doc --no-deps --workspace --all-features  -> 0
 /// ```
 ///
-/// That single link was `cross_app_fk.rs` citing
-/// `register_model::bootstrap::build_ctx`, whose module is
-/// `#[cfg(any(test, feature = "test-helpers"))]`. It was ALSO factually wrong -
-/// `build_ctx` never called that validator. It is a span now, naming the
-/// function that does (`bootstrap`), and both arms of the gate stand at zero.
+/// The unresolved link that motivated this gate was removed with its dead
+/// schema-apply module; both arms of the gate stand at zero.
 ///
 /// It is a conformance marker, not the production abstraction: nothing takes
 /// `dyn Backend` (see the note above `BackendHandle`), dispatch goes through
@@ -1511,10 +1441,7 @@ impl<T> RegisterBackend for T where
 /// implement the whole sub-trait set.
 #[cfg(any(test, feature = "test-helpers"))]
 pub trait Backend:
-    SqlExecutor
-    + LockManager
-    + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-    + 'static
+    SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema> + 'static
 {
 }
 
@@ -1593,8 +1520,8 @@ impl BackendHandle {
     /// caller's body is sync, but it cannot `.await` across the
     /// closure boundary without lifetime gymnastics (the closure's
     /// inner future would have to outlive the closure scope). The
-    /// async paths in `migrations.rs` / `register_model/mod.rs` /
-    /// every `v8_classes::migration*` call site instead `.await` on
+    /// async paths in `migrations.rs` and every `v8_classes::migration*` call
+    /// site instead `.await` on
     /// the returned `&PostgresBackend` directly:
     ///
     /// ```ignore
@@ -1643,10 +1570,8 @@ impl BackendHandle {
     /// Returns `Some(&SqliteBackend)` on the SQLite arm; `None` on
     /// the PG arm.
     ///
-    /// Present so `as_sqlite()?` consumer
-    /// migration has a stable accessor to migrate onto. Has no
-    /// production caller yet — the orchestrator / migrations / register-model
-    /// paths continue to use `as_postgres()?` against the PG arm only.
+    /// Used by runtime dispatchers that branch between the PostgreSQL and
+    /// SQLite implementations without exposing the concrete enum arm.
     pub fn as_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
             Self::Postgres(_) => None,
@@ -1699,7 +1624,9 @@ impl BackendHandle {
     ) -> Option<crate::backend::sqlite::cdc::SqliteChangeStream> {
         match self {
             Self::Postgres(_) => None,
-            Self::Sqlite(b) => Some(crate::backend::sqlite::cdc::SqliteChangeStream::new(b.clone())),
+            Self::Sqlite(b) => Some(crate::backend::sqlite::cdc::SqliteChangeStream::new(
+                b.clone(),
+            )),
         }
     }
 
@@ -1805,11 +1732,9 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
-
     /// Compile-time: [`PostgresBackend`] satisfies
     /// [`SchemaIntrospect`] with the associated type pinned to
-    /// [`crate::diff::LiveSchema`]. This is the constraint
-    /// `register_model::plan` now uses (`<B: SchemaIntrospect<LiveSchema = LiveSchema>>`).
+    /// [`crate::diff::LiveSchema`].
     fn assert_postgres_backend_impls_schema_introspect() {
         fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
         assert_impl::<PostgresBackend>();
@@ -1825,26 +1750,12 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the PG-only
-    /// [`PgLockManager`] extension trait. This is the
-    /// escape-hatch closer for the `backend.pool().get()` call site at
-    /// `register_model/bootstrap.rs:103`: the returned
-    /// `PooledClient<'p>` keeps the `'p` lifetime threaded through
+    /// [`PgLockManager`] extension trait. The returned `PooledClient<'p>` keeps
+    /// the `'p` lifetime threaded through
     /// [`LockGuard`] without needing a GAT on
     /// [`LockManager`] (Open Q5 resolution).
     fn assert_postgres_backend_impls_pg_lock_manager() {
         fn assert_impl<T: PgLockManager>() {}
-        assert_impl::<PostgresBackend>();
-    }
-
-    /// Compile-time: [`PostgresBackend`] satisfies the
-    /// [`RegisterBackend`] marker super-trait. The
-    /// blanket `impl<T> RegisterBackend for T where T: …` auto-impls
-    /// the marker for any type with the six sub-bounds; if a future
-    /// refactor pulls one bound off (or detaches a sub-impl block),
-    /// this stops compiling here rather than at the `bootstrap` /
-    /// `run_pipeline` call sites.
-    fn assert_postgres_backend_impls_register_backend() {
-        fn assert_impl<T: RegisterBackend>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -2049,13 +1960,13 @@ mod tests {
     fn lock_scope_keys_global_app_canonical_shape() {
         let scope = LockScope::GlobalApp {
             app_id: "app_42".to_string(),
-            name: "register_model".to_string(),
+            name: "snapshot_restore".to_string(),
         };
         let (k1, k2) = scope.to_keys();
-        assert_eq!(k1, "app_42:register_model");
-        assert_eq!(k2, "register_model");
+        assert_eq!(k1, "app_42:snapshot_restore");
+        assert_eq!(k2, "snapshot_restore");
         assert_eq!(scope.app_id(), "app_42");
-        assert_eq!(scope.name(), "register_model");
+        assert_eq!(scope.name(), "snapshot_restore");
     }
 
     #[test]
@@ -2092,7 +2003,7 @@ mod tests {
         // GlobalApp arm — exercises acquire / try_acquire / release.
         let global = LockScope::GlobalApp {
             app_id: "app_t".into(),
-            name: "register_model".into(),
+            name: "snapshot_restore".into(),
         };
         let _ = backend.try_acquire(client, &global).await?;
         backend.acquire(client, &global).await?;
@@ -2153,11 +2064,7 @@ mod tests {
                 unreachable!("not exercised by try_acquire_with_backoff")
             }
 
-            async fn pool_exec(
-                &self,
-                _sql: &str,
-                _params: &[&str],
-            ) -> Result<u64, DbError> {
+            async fn pool_exec(&self, _sql: &str, _params: &[&str]) -> Result<u64, DbError> {
                 unreachable!("not exercised by try_acquire_with_backoff")
             }
 
@@ -2213,7 +2120,7 @@ mod tests {
         let client = MockClient;
         let scope = LockScope::GlobalApp {
             app_id: "app_contention_test".into(),
-            name: "register_model".into(),
+            name: "snapshot_restore".into(),
         };
 
         // Drive the future on a fresh compio runtime — the test must
@@ -2243,7 +2150,7 @@ mod tests {
                     "message must name the scope app_id, got: {message}"
                 );
                 assert!(
-                    message.contains("register_model"),
+                    message.contains("snapshot_restore"),
                     "message must name the scope name, got: {message}"
                 );
                 assert!(
@@ -2281,7 +2188,6 @@ mod tests {
         let _ = assert_postgres_backend_impls_schema_introspect as fn();
         let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
         let _ = assert_postgres_backend_impls_pg_lock_manager as fn();
-        let _ = assert_postgres_backend_impls_register_backend as fn();
         let _ = assert_pg_change_stream_impls_change_stream as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();

@@ -783,7 +783,7 @@ The platform targets PostgreSQL first; the core surface **is** PG-shaped and is 
 
 ### 5.1 The declarative differ: desired snapshot → diff → generated migrations
 
-The platform's authoring layer holds a creator's **declared schema** — the per-collection descriptor JSON the `@zeroship/db` SDK emits via `registerModel` (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). `render/declarative.rs` turns that into migrations in two passes (`declarative.rs:1-11`, re-exported at `lib.rs:137-141`):
+The declarative authoring layer accepts a creator's **declared schema** as per-collection descriptor JSON (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). `render/declarative.rs` turns that into migrations in two passes (`declarative.rs:1-11`, re-exported at `lib.rs:137-141`):
 
 1. **`desired_snapshot(...)`** reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
 2. **`DeclarativeAuthor::diff(...)`** introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
@@ -824,12 +824,15 @@ the committed migration modules into IR envelopes, and `zeroship-migrate-node`'s
 generated `schema.runtime.json` and stages it as the manifest's
 content-addressed `runtime_descriptor` blob
 (`sdks/vite-plugin/src/zship.ts:203-216`); deploy-time application runs through
-the standalone migration service. At runtime boot, `@zeroship/bootstrap`'s
-`installSchema(schema, env.db, { descriptor })` walks the descriptor, runs
-`registerModel` in topological order, and plants typed `Collection` wrappers on
-the native `env.db`. So both directions meet at one wire type — the v2
+the standalone migration service. At runtime boot, Rust validates the
+descriptor and plugin-db publishes its collection field maps natively before
+creator modules evaluate. `@zeroship/bootstrap`'s
+`installSchema(schema, env.db, { descriptor })` walks the same descriptor to
+plant typed `Collection` wrappers on the native `env.db`. So both directions
+meet at one wire type - the v2
 `RuntimeSchemaDescriptor`: gen-types *emits* it, the `.zship` packer *carries*
-it, `installSchema` *installs* it. See
+it, native boot *binds* it, and `installSchema` projects its typed JavaScript
+wrappers. See
 [§11.6–§11.7](#11-platform-self-hosting--build-integration).
 
 ---

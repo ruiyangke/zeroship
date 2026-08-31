@@ -95,7 +95,6 @@ function makeNativeWithBulkUnmask(
     opts?: { actor?: unknown; reason?: string };
   } = {};
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async bulkUnmask(
@@ -115,7 +114,6 @@ function makeNativeWithBulkUnmask(
 /** Native double whose Collection lacks `bulkUnmask` (legacy runtime). */
 function makeNativeMissingBulkUnmask() {
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {};
     },

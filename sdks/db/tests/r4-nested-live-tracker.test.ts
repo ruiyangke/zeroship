@@ -62,7 +62,6 @@ function makeMockNative() {
   const rowsByTable: Record<string, AnyRec[]> = {};
   const subs: Record<string, FakeSub[]> = {};
   const native = {
-    registerModel: async () => undefined,
     collection(name: string) {
       return {
         async find(_f: AnyRec, _o: AnyRec) {

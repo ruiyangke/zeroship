@@ -20,7 +20,6 @@ import type { NativeDb } from "../src/native.js";
 
 function makeNative(): NativeDb {
   return {
-    registerModel: () => Promise.resolve(),
     collection: () => ({
       async find() { return []; },
       async findOne() { return null; },

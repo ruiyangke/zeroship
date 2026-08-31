@@ -38,7 +38,6 @@ function makeNativeRecording() {
     findOpts?: AnyRec;
   } = {};
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async find(_filter: AnyRec, opts?: AnyRec) {
@@ -84,7 +83,6 @@ function makeNativeRecording() {
  *  entirely so the SDK's typed `*_not_available` errors fire. */
 function makeNativeMissingPurge() {
   const native = {
-    registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
         async insert(doc: AnyRec) {

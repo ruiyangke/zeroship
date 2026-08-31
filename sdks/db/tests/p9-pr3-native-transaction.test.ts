@@ -38,7 +38,6 @@ function makeNativeTxMock(rowsByTable: Record<string, AnyRec[]> = {}) {
   const settles: string[] = [];
   let depth = 0;
   const native = {
-    registerModel: () => Promise.resolve(),
     async transaction(cb: (raw: unknown) => unknown, _opts?: { isolationLevel?: string }) {
       depth += 1;
       const level = depth;

@@ -28,7 +28,7 @@ function migrationCreating(table: string, column: string): string {
     ``,
     `export default {`,
     `  name: "create_${table}",`,
-    `  up() {`,
+    `  schema() {`,
     `    table("${table}").create({`,
     `      columns: {`,
     `        ${column}: t.text().notNull(),`,
@@ -224,6 +224,7 @@ describe("devServerPlugin", () => {
       const second = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(second.status, 200);
       assert.deepEqual(await second.json(), { changed: [] });
+      assert.equal(await harness.runtimeSpawnCount(), 1, "ordinary HMR keeps the runtime alive");
     } finally {
       await harness.close();
     }
@@ -289,33 +290,98 @@ describe("devServerPlugin", () => {
     }
   });
 
-  test("migration hot-update regenerates and re-injects the runtime descriptor (in-process)", async () => {
+  test("migration hot-update regenerates the descriptor and starts a fresh runtime", async () => {
     const harness = await startHarness({
       devServerPort: 3905,
       migrations: { migrationSource: migrationCreating("todos", "title") },
     });
     try {
+      const firstRuntime = await harness.runtimeLog();
+      assert.equal(firstRuntime.spawnCount, 1);
+
       // A NEW migration (a second version) adds a `notes` collection. The
-      // in-process regen must re-fold and re-inject the updated descriptor.
+      // in-process regen must re-fold the descriptor and replace the child so
+      // native boot binds it before the new isolate evaluates app modules.
       const migrationFile = resolve(harness.root, "migrations/20240617123100_notes.ts");
       await fs.writeFile(migrationFile, migrationCreating("notes", "body"));
       await harness.queueHmrChange(migrationFile);
 
-      const resp = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
-      assert.equal(resp.status, 200);
-      const payload = await resp.json() as {
-        changed?: string[];
-        runtimeDescriptorJson?: string | null;
-      };
-      assert.ok(
-        payload.changed?.includes(migrationFile),
-        `expected HMR payload to include ${migrationFile}`,
-      );
-      const descriptor = JSON.parse(payload.runtimeDescriptorJson ?? "null");
-      assert.equal(descriptor?.version, 2, "re-injected a valid v2 descriptor");
+      await waitFor(async () => {
+        const runtime = await harness.runtimeLog();
+        assert.equal(runtime.spawnCount, 2);
+      });
+
+      const runtime = await harness.runtimeLog();
+      assert.notEqual(runtime.pid, firstRuntime.pid, "descriptor change replaces the child");
+      const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
+      assert.equal(descriptor?.version, 2, "fresh child receives a valid v2 descriptor");
       assert.ok(descriptor.collections.todos, "original todos collection retained");
       assert.ok(descriptor.collections.notes, "new notes collection folded in");
       assert.equal(descriptor.collections.notes.fields.body.type, "string", "new author field folded");
+
+      const resp = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
+      assert.equal(resp.status, 200);
+      const payload = await resp.json() as Record<string, unknown>;
+      assert.ok(Array.isArray(payload.changed));
+      assert.equal(
+        Object.hasOwn(payload, "runtimeDescriptorJson"),
+        false,
+        "descriptor no longer travels over HMR",
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("does not lose a descriptor update racing the initial runtime spawn", async () => {
+    const harness = await startHarness({
+      devServerPort: 3907,
+      migrations: {
+        migrationSource: migrationCreating("todos", "title"),
+        updateAtListen: migrationCreating("notes", "body"),
+      },
+    });
+    try {
+      await waitFor(async () => {
+        const runtime = await harness.runtimeLog();
+        const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
+        assert.ok(descriptor?.collections.todos, "boot collection retained");
+        assert.ok(descriptor?.collections.notes, "racing descriptor update reached a child");
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("descriptor correction recovers a supervisor that exhausted the old descriptor", async () => {
+    const harness = await startHarness({
+      devServerPort: 3906,
+      migrations: { migrationSource: migrationCreating("todos", "title") },
+      rapidExitSpawns: 4,
+      serveRuntime: true,
+    });
+    try {
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), 4);
+        const response = await fetch(`${harness.origin}/api/probe`);
+        const body = await response.json() as {
+          retryable?: boolean;
+          details?: { state?: string };
+        };
+        assert.equal(body.details?.state, "fatal");
+        assert.equal(body.retryable, false);
+      }, 15_000);
+
+      const migrationFile = resolve(harness.root, "migrations/20240617123100_notes.ts");
+      await fs.writeFile(migrationFile, migrationCreating("notes", "body"));
+      await harness.queueHmrChange(migrationFile);
+
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), 5);
+        const response = await fetch(`${harness.origin}/api/probe`);
+        assert.equal(response.status, 200);
+        assert.equal(await response.text(), "runtime-ok");
+      });
     } finally {
       await harness.close();
     }
@@ -368,7 +434,10 @@ async function startHarness(options: {
   devServerPort?: number;
   migrations?: {
     migrationSource: string;
+    updateAtListen?: string;
   };
+  rapidExitSpawns?: number;
+  serveRuntime?: boolean;
 } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
   const serverEntry = resolve(root, "src/server.ts");
@@ -437,6 +506,8 @@ async function startHarness(options: {
       "    ZEROSHIP_DIE_WITH_PARENT: process.env.ZEROSHIP_DIE_WITH_PARENT,",
       "  },",
       "}, null, 2));",
+      `const rapidExitSpawns = ${options.rapidExitSpawns ?? 0};`,
+      `const serveRuntime = ${options.serveRuntime === true};`,
       "const stop = () => {",
       "  writeFileSync(stopPath, 'stopped');",
       "  process.exit(0);",
@@ -444,7 +515,16 @@ async function startHarness(options: {
       "process.on('SIGTERM', stop);",
       "process.on('SIGINT', stop);",
       "process.on('SIGUSR2', () => process.exit(1));",
-      "setInterval(() => {}, 1000);",
+      "if (spawnCount <= rapidExitSpawns) {",
+      "  setTimeout(() => process.exit(1), 20);",
+      "} else if (serveRuntime) {",
+      "  const { createServer } = require('node:http');",
+      "  const portArg = process.argv.find((arg) => arg.startsWith('--port='));",
+      "  const port = Number(portArg.slice('--port='.length));",
+      "  createServer((_req, res) => { res.end('runtime-ok'); }).listen(port);",
+      "} else {",
+      "  setInterval(() => {}, 1000);",
+      "}",
       "",
     ].join("\n"),
     { mode: 0o755 },
@@ -485,7 +565,19 @@ async function startHarness(options: {
         strictPort: false,
       },
     });
+    let updateAtListen: Promise<void> | undefined;
+    if (options.migrations?.updateAtListen !== undefined) {
+      const migrationFile = resolve(root, "migrations/20240617123100_notes.ts");
+      updateAtListen = new Promise<void>((resolveUpdate, rejectUpdate) => {
+        server!.httpServer?.once("listening", () => {
+          fs.writeFile(migrationFile, options.migrations!.updateAtListen!)
+            .then(() => devServerPluginImpl.hotUpdate!({ file: migrationFile } as any))
+            .then(resolveUpdate, rejectUpdate);
+        });
+      });
+    }
     await server.listen();
+    await updateAtListen;
 
     const addr = server.httpServer?.address();
     assert.ok(addr && typeof addr === "object", "expected Vite HTTP server to listen on a socket");
@@ -514,6 +606,11 @@ async function startHarness(options: {
       },
       close: async (closeOptions = {}) => {
         const { expectRuntimeStop = true, cleanup = true } = closeOptions;
+        const runtimeAtClose = expectRuntimeStop
+          ? await fs.readFile(runtimeLogPath, "utf8")
+              .then((json) => JSON.parse(json) as RuntimeLog)
+              .catch(() => null)
+          : null;
         if (server) {
           await server.close();
           server = null;
@@ -522,6 +619,9 @@ async function startHarness(options: {
           await waitFor(async () => {
             await fs.access(runtimeStopPath);
           });
+          if (runtimeAtClose) {
+            await waitForProcessExit(runtimeAtClose.pid);
+          }
         }
         if (cleanup) {
           await cleanupRoot(root, previousDatabaseUrl);

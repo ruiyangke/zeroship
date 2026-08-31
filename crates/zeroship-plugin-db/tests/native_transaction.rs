@@ -26,15 +26,9 @@
 //! compiled default; see `crates/core/src/config/test_overlay.rs`.
 //! Run: `cargo test -p zeroship-plugin-db --test native_transaction -- --test-threads=1`
 //!
-//! NOTE (baseline): every test here runs `registerModel("notes", ...)`
-//! in `setup`. On a Postgres that enforces the
-//! single-command-per-extended-query rule, that DDL apply
-//! fails with `cannot insert multiple commands into a prepared statement`
-//! (the collection's `CREATE TABLE` + implicit `CREATE INDEX` payload is
-//! issued via `pool_exec`'s extended protocol — a pre-existing DDL-layer
-//! issue, NOT specific to transactions). On such an instance these tests
-//! fail at `setup`. The orchestrator logic itself is covered without a
-//! DB by the Rust unit tests + tx-view shape
+//! Each runtime receives the same descriptor shape that a deploy carries; the
+//! tables are applied ahead of boot by the fixture. The orchestrator logic is
+//! also covered without a DB by the Rust unit tests + tx-view shape
 //! tests in `crates/plugin-db/src/{orchestrator,v8_classes}/transaction.rs`,
 //! the `db_v8_class.rs` surface tests, the SQLite SAVEPOINT SQL tests in
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
@@ -50,7 +44,7 @@ use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 fn pg_url() -> String {
     zeroship_core::config::test_database_url()
@@ -130,22 +124,15 @@ fn require_pg() -> String {
     url
 }
 
-/// plugin-db's registerModel uses env_vars.APP_ID for the schema name
-/// (defaults to "default" when unset). Tests run with the empty
-/// EnvSnapshot so we target "default".
+/// Tests run with the empty EnvSnapshot, so the runtime targets `default`.
 const APP_SCHEMA: &str = "default";
 
 /// Drop the app schema, then PROVISION the `notes` table the way the engine /
 /// deploy-apply does.
 ///
-/// `registerModel` on the PG dialect issues NO runtime
-/// DDL — `zeroship-migrate` is the sole PG schema authority and creates the
-/// schema at deploy time, before the app serves. So the table must already
-/// exist when the handlers run. We stand in for the deploy-time engine apply by
-/// building the schema via `exec_register_model_with_pool` (the same DDL +
-/// sentinel emission the relocated engine produces), then the handlers'
-/// `registerModel` call is a faithful no-op — exactly the production order
-/// (engine-at-deploy, runtime-reads-only).
+/// `zeroship-migrate` is the sole PostgreSQL schema authority and creates the
+/// schema at deploy time, before the app serves. The table must already exist
+/// when the handlers run, so this fixture stands in for deploy-time apply.
 /// Release this runtime's connections before it falls out of scope.
 ///
 /// Every helper here builds its own runtime and drops it when the block ends.
@@ -172,14 +159,17 @@ fn reset_schema(url: &str) {
         })
         .detach();
         client
-            .execute(&format!("DROP SCHEMA IF EXISTS \"{APP_SCHEMA}\" CASCADE"), &[])
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS \"{APP_SCHEMA}\" CASCADE"),
+                &[],
+            )
             .await
             .unwrap();
         drop(client);
 
         // Deploy stand-in, as RAW SQL. `zeroship-migrate` is the PG schema
-        // authority; registerModel applies no DDL, so a test that needs the
-        // `notes` table creates it. The per-isolate context still needs the URL
+        // authority, so a test that needs the `notes` table creates it. The
+        // per-thread context still needs the URL
         // for the transaction orchestrator under test.
         zeroship_plugin_db::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
@@ -248,10 +238,9 @@ fn count_notes(url: &str) -> i64 {
 /// It used to end with `COMMENT ON COLUMN ... 'zsenc:randomised:<key>:string'`.
 /// That sentinel is gone with the catalog read that recovered it: the encryption
 /// metadata the CRUD passes act on now comes from the RUNTIME DESCRIPTOR, which
-/// in these tests is installed by the REAL `registerModel` the fixture's
-/// `setup` action runs. `key_id` is still a parameter because the JS schema and
-/// the test's supplied root key have to agree on it; nothing in the SQL below
-/// reads it any more.
+/// in these tests is installed from the RuntimeBuilder descriptor. `key_id` is
+/// still a parameter because the descriptor and supplied root key have to
+/// agree on it; nothing in the SQL below reads it any more.
 fn create_encrypted_users_table(url: &str, key_id: &str) {
     let url = url.to_string();
     let _ = key_id;
@@ -357,11 +346,61 @@ async function _zsFetch(request) {
 export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
-fn dispatch_zs_for_app(
+fn notes_runtime_descriptor() -> String {
+    serde_json::json!({
+        "version": 2,
+        "collections": {
+            "notes": {
+                "fields": {
+                    "title": {"type": "string", "required": true},
+                },
+                "options": {
+                    "softDelete": false,
+                    "versioning": false,
+                    "strictness": "strict",
+                },
+                "indexes": [],
+            },
+        },
+    })
+    .to_string()
+}
+
+fn users_runtime_descriptor(key_id: &str) -> String {
+    serde_json::json!({
+        "version": 2,
+        "collections": {
+            "users": {
+                "fields": {
+                    "email": {"type": "string", "required": true, "unique": true},
+                    "name": {"type": "string", "required": true},
+                    "ssn": {
+                        "type": "string",
+                        "encrypted": {
+                            "mode": "randomised",
+                            "keyId": key_id,
+                            "wraps": "string",
+                        },
+                    },
+                },
+                "options": {
+                    "softDelete": false,
+                    "versioning": false,
+                    "strictness": "strict",
+                },
+                "indexes": [],
+            },
+        },
+    })
+    .to_string()
+}
+
+fn dispatch_zs_for_app_with_descriptor(
     url: &str,
     source: &str,
     name: &str,
     app_id: Option<&str>,
+    descriptor: String,
 ) -> (u16, serde_json::Value) {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -385,17 +424,8 @@ fn dispatch_zs_for_app(
         .modules(modules)
         .env_vars(env_vars)
         .plugins(plugins)
+        .runtime_descriptor(Some(descriptor))
         .build();
-    if app_id.is_some() {
-        // Production schema bootstrap initializes this backend handle without
-        // applying app migrations. Transactions read the handle directly.
-        zeroship_plugin_db::set_db_url_for_tests(url);
-        block_on(async {
-            zeroship_plugin_db::init_pool_async()
-                .await
-                .expect("initialize the production Postgres backend");
-        });
-    }
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let url_ep = format!("http://localhost/__zeroship/v1/{name}");
@@ -427,38 +457,36 @@ fn dispatch_zs_for_app(
             }
             (status, body)
         }),
-        FetchOutcome::Pending { rx, cancel: _ } => {
-            block_on(async {
-                runtime.start_pump();
-                let settled = compio::time::timeout(Duration::from_secs(15), rx.recv())
-                    .await
-                    .expect("pending timeout")
-                    .expect("settled error");
-                match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
-                    SettledFetch::Stream {
-                        status,
-                        body_reader,
-                        ..
-                    } => {
-                        let mut body = Vec::new();
-                        loop {
-                            while let Some(chunk) = body_reader.pop() {
-                                body.extend_from_slice(&chunk);
-                            }
-                            if body_reader.is_done() {
-                                break;
-                            }
-                            body_reader.wait_for_data().await;
+        FetchOutcome::Pending { rx, cancel: _ } => block_on(async {
+            runtime.start_pump();
+            let settled = compio::time::timeout(Duration::from_secs(15), rx.recv())
+                .await
+                .expect("pending timeout")
+                .expect("settled error");
+            match settled {
+                SettledFetch::Response { status, body, .. } => (status, body),
+                SettledFetch::Stream {
+                    status,
+                    body_reader,
+                    ..
+                } => {
+                    let mut body = Vec::new();
+                    loop {
+                        while let Some(chunk) = body_reader.pop() {
+                            body.extend_from_slice(&chunk);
                         }
-                        (status, body)
+                        if body_reader.is_done() {
+                            break;
+                        }
+                        body_reader.wait_for_data().await;
                     }
-                    SettledFetch::WebSocketUpgrade { .. } => {
-                        panic!("unexpected WebSocketUpgrade variant")
-                    }
+                    (status, body)
                 }
-            })
-        }
+                SettledFetch::WebSocketUpgrade { .. } => {
+                    panic!("unexpected WebSocketUpgrade variant")
+                }
+            }
+        }),
         FetchOutcome::WebSocketUpgrade { .. } => panic!("unexpected WebSocketUpgrade variant"),
     };
     let body = String::from_utf8_lossy(&body).into_owned();
@@ -467,62 +495,43 @@ fn dispatch_zs_for_app(
     (status, json)
 }
 
+fn dispatch_zs_for_app(
+    url: &str,
+    source: &str,
+    name: &str,
+    app_id: Option<&str>,
+) -> (u16, serde_json::Value) {
+    dispatch_zs_for_app_with_descriptor(url, source, name, app_id, notes_runtime_descriptor())
+}
+
 fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) {
     dispatch_zs_for_app(url, source, name, None)
 }
 
-/// `_procedures` declaring `setup` (registerModel) plus the per-test
-/// handlers `body`.
-///
-/// `registerModel` lives off `env.db`, on the `__platform`
-/// capability handle (reached via `globalThis.__zsDbPlatform`, which the
-/// production runtime-entry DELETES before request handlers run). This
-/// test module's top-level evaluates BEFORE that deletion (ESM import
-/// hoisting puts `__user__.js` ahead of the spliced runtime-entry), so we
-/// capture the resolver into a module-local const here and register
-/// through it — mirroring how `@zeroship/bootstrap`'s dev-entry captures
-/// the handle at module init.
+fn dispatch_zs_with_descriptor(
+    url: &str,
+    source: &str,
+    name: &str,
+    descriptor: String,
+) -> (u16, serde_json::Value) {
+    dispatch_zs_for_app_with_descriptor(url, source, name, None, descriptor)
+}
+
+/// Build a module around the per-test handlers in `body`.
 fn build_src(body: &str) -> String {
     format!(
         r#"
 import {{ env }} from "zeroship";
-
-const __plat = (typeof globalThis.__zsDbPlatform === "function")
-    ? globalThis.__zsDbPlatform(env.db)
-    : undefined;
-
-function setup(_input, _ctx) {{
-    return __plat.registerModel("notes", {{
-        title: {{ type: "string", required: true }},
-    }});
-}}
-setup.config = {{ kind: "action" }};
 
 {body}
 "#
     ) + SHIM
 }
 
-fn build_encrypted_users_src(key_id: &str, body: &str) -> String {
+fn build_encrypted_users_src(body: &str) -> String {
     format!(
         r#"
 import {{ env }} from "zeroship";
-
-const __plat = (typeof globalThis.__zsDbPlatform === "function")
-    ? globalThis.__zsDbPlatform(env.db)
-    : undefined;
-
-function setup(_input, _ctx) {{
-    return __plat.registerModel("users", {{
-        email: {{ type: "string", required: true, unique: true }},
-        name: {{ type: "string", required: true }},
-        ssn: {{
-            type: "string",
-            encrypted: {{ mode: "randomised", keyId: "{key_id}", wraps: "string" }}
-        }}
-    }});
-}}
-setup.config = {{ kind: "action" }};
 
 {body}
 "#,
@@ -533,31 +542,10 @@ setup.config = {{ kind: "action" }};
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Install the descriptor entry for the collection an "unmigrated app" test
-/// reads, so the read gets PAST the schema authority and reaches the database
-/// that was never migrated.
-///
-/// That is the shape being modelled: a deploy whose descriptor declares `notes`
-/// and whose per-app Postgres schema and role do not exist yet. Without the
-/// entry the read is refused by `collection_not_declared` first and the test
-/// stops measuring the provisioning remediation it exists for — which is
-/// exactly what happened when the descriptor became the sole authority.
-///
-/// The binding is the cold-start one because `dispatch_zs_for_app` injects no
-/// `ZEROSHIP_DEPLOY_ID`, so `mint_db` falls back to the same token.
-fn declare_notes_for_unmigrated_app(app_id: &str) {
-    zeroship_plugin_db::cache_schema_for_tests(
-        app_id,
-        "notes",
-        serde_json::json!({ "title": { "type": "string" } }),
-    );
-}
-
 #[test]
 fn unmigrated_app_autocommit_response_names_migrate() {
     let url = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    declare_notes_for_unmigrated_app(&app_id);
     let src = build_src(
         r#"
 function autocommitBeforeMigrate(_input, _ctx) {
@@ -568,13 +556,11 @@ const _procedures = { autocommitBeforeMigrate };
 "#,
     );
 
-    let (status, body) = dispatch_zs_for_app(
-        &url,
-        &src,
-        "autocommitBeforeMigrate",
-        Some(&app_id),
+    let (status, body) = dispatch_zs_for_app(&url, &src, "autocommitBeforeMigrate", Some(&app_id));
+    assert_eq!(
+        status, 500,
+        "missing role must be a 500 response; body={body}"
     );
-    assert_eq!(status, 500, "missing role must be a 500 response; body={body}");
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
         Some("schema_not_provisioned"),
@@ -602,13 +588,11 @@ const _procedures = { transactionBeforeMigrate };
 "#,
     );
 
-    let (status, body) = dispatch_zs_for_app(
-        &url,
-        &src,
-        "transactionBeforeMigrate",
-        Some(&app_id),
+    let (status, body) = dispatch_zs_for_app(&url, &src, "transactionBeforeMigrate", Some(&app_id));
+    assert_eq!(
+        status, 500,
+        "missing role must be a 500 response; body={body}"
     );
-    assert_eq!(status, 500, "missing role must be a 500 response; body={body}");
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
         Some("schema_not_provisioned"),
@@ -771,10 +755,15 @@ const _procedures = {
         drain_open_connections().await;
     });
 
-    assert_eq!(status, 200, "the handler catches the setup denial; body={body}");
+    assert_eq!(
+        status, 200,
+        "the handler catches the setup denial; body={body}"
+    );
     let result = body.get("json").expect("caught error result");
     assert_eq!(
-        result.get("callbackReached").and_then(serde_json::Value::as_bool),
+        result
+            .get("callbackReached")
+            .and_then(serde_json::Value::as_bool),
         Some(false),
         "session setup must fail before creator callback execution; body={body}"
     );
@@ -788,7 +777,9 @@ const _procedures = {
         "an uncaught grant denial must carry its terminal HTTP remedy; body={uncaught_body}"
     );
     assert_eq!(
-        uncaught_body.get("code").and_then(serde_json::Value::as_str),
+        uncaught_body
+            .get("code")
+            .and_then(serde_json::Value::as_str),
         Some("GRANT_REVOKED"),
         "the 403 response must retain the classified denial code; body={uncaught_body}"
     );
@@ -798,7 +789,6 @@ const _procedures = {
 fn unmigrated_app_streaming_response_names_migrate() {
     let url = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    declare_notes_for_unmigrated_app(&app_id);
     let src = [
         r#"import { env } from "zeroship";"#,
         include_str!("../../../sdks/bootstrap/dist/fetch-handler.js"),
@@ -821,13 +811,14 @@ export default { fetch: _fetch, rpc: _procedures };
     ]
     .join("\n");
 
-    let (status, body) =
-        dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(&app_id));
-    assert_eq!(status, 200, "SSE errors stay inside a 200 stream; body={body}");
+    let (status, body) = dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(&app_id));
+    assert_eq!(
+        status, 200,
+        "SSE errors stay inside a 200 stream; body={body}"
+    );
     let text = body.as_str().expect("SSE body must be text");
     assert!(
-        text.contains("schema_not_provisioned")
-            || text.contains("SCHEMA_NOT_PROVISIONED"),
+        text.contains("schema_not_provisioned") || text.contains("SCHEMA_NOT_PROVISIONED"),
         "streaming response must preserve the provisioning code; body={text}"
     );
     assert!(
@@ -857,12 +848,9 @@ async function commitOne(_input, _ctx) {
     return { txResult: r };
 }
 commitOne.config = { kind: "action" };
-const _procedures = { setup, commitOne };
+const _procedures = { commitOne };
 "#,
     );
-
-    let (status, body) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200, "setup failed: {body}");
 
     let (status, body) = dispatch_zs(&url, &src, "commitOne");
     assert_eq!(status, 200, "commitOne failed: {body}");
@@ -896,12 +884,9 @@ async function insertThenThrow(_input, _ctx) {
     }
 }
 insertThenThrow.config = { kind: "action" };
-const _procedures = { setup, insertThenThrow };
+const _procedures = { insertThenThrow };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "insertThenThrow");
     assert_eq!(status, 200, "harness should succeed: {body}");
@@ -941,12 +926,9 @@ async function syncThrow(_input, _ctx) {
     }
 }
 syncThrow.config = { kind: "action" };
-const _procedures = { setup, syncThrow };
+const _procedures = { syncThrow };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "syncThrow");
     assert_eq!(status, 200, "harness should succeed: {body}");
@@ -990,12 +972,9 @@ async function nestedPartialFailure(_input, _ctx) {
     return { txResult: r };
 }
 nestedPartialFailure.config = { kind: "action" };
-const _procedures = { setup, nestedPartialFailure };
+const _procedures = { nestedPartialFailure };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "nestedPartialFailure");
     assert_eq!(status, 200, "nested handler should succeed: {body}");
@@ -1057,12 +1036,9 @@ async function savepointEmitLeak(_input, _ctx) {
     return { txResult: r };
 }
 savepointEmitLeak.config = { kind: "action" };
-const _procedures = { setup, savepointEmitLeak };
+const _procedures = { savepointEmitLeak };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "savepointEmitLeak");
     assert_eq!(status, 200, "handler should succeed: {body}");
@@ -1112,12 +1088,9 @@ async function nestedBothCommit(_input, _ctx) {
     return { txResult: r };
 }
 nestedBothCommit.config = { kind: "action" };
-const _procedures = { setup, nestedBothCommit };
+const _procedures = { nestedBothCommit };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "nestedBothCommit");
     assert_eq!(status, 200, "nested handler should succeed: {body}");
@@ -1163,18 +1136,18 @@ async function deepNest(_input, _ctx) {
     }
 }
 deepNest.config = { kind: "action" };
-const _procedures = { setup, deepNest };
+const _procedures = { deepNest };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "deepNest");
     // The deepest reject propagates up through every level (each inner
     // rejection rolls its savepoint back and re-rejects), so the
     // outermost transaction(fn) rejects — the handler catches it.
-    assert_eq!(status, 200, "handler should catch the depth-cap error: {body}");
+    assert_eq!(
+        status, 200,
+        "handler should catch the depth-cap error: {body}"
+    );
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
         inner.get("tripped").and_then(|v| v.as_bool()),
@@ -1208,12 +1181,9 @@ async function probeTxView(_input, _ctx) {
     });
 }
 probeTxView.config = { kind: "action" };
-const _procedures = { setup, probeTxView };
+const _procedures = { probeTxView };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "probeTxView");
     assert_eq!(status, 200, "probe should succeed: {body}");
@@ -1253,12 +1223,9 @@ function probeBegin(_input, _ctx) {
     return { beginType: typeof env.db.beginTransaction };
 }
 probeBegin.config = { kind: "action" };
-const _procedures = { setup, probeBegin };
+const _procedures = { probeBegin };
 "#,
     );
-
-    let (status, _b) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200);
 
     let (status, body) = dispatch_zs(&url, &src, "probeBegin");
     assert_eq!(status, 200, "probe should succeed: {body}");
@@ -1279,7 +1246,6 @@ fn update_many_randomised_failure_is_atomic_postgres() {
     let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
 
     let src = build_encrypted_users_src(
-        key_id,
         r#"
 async function seed(_input, _ctx) {
     const coll = env.db.collection("users");
@@ -1325,25 +1291,32 @@ async function failBulk(_input, _ctx) {
 }
 failBulk.config = { kind: "action" };
 
-const _procedures = { setup, seed, failBulk };
+const _procedures = { seed, failBulk };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200, "setup failed: {body}");
-    let (status, body) = dispatch_zs(&url, &src, "seed");
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &src, "seed", users_runtime_descriptor(key_id));
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
     zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
-    let (status, body) = dispatch_zs(&url, &src, "failBulk");
-    assert_eq!(status, 200, "caught updateMany failure must remain inspectable: {body}");
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &src, "failBulk", users_runtime_descriptor(key_id));
+    assert_eq!(
+        status, 200,
+        "caught updateMany failure must remain inspectable: {body}"
+    );
     let result = &body["json"];
     assert_eq!(result["failure"]["code"], "unique_violation", "body={body}");
     let after = result["after"]
         .as_array()
         .expect("caller-visible post-failure rows must be an array");
-    assert_eq!(after.len(), 2, "the exercised target set must be non-empty: {body}");
+    assert_eq!(
+        after.len(),
+        2,
+        "the exercised target set must be non-empty: {body}"
+    );
     let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
     assert_eq!(
         counters.target_row_resolution_calls, 1,
@@ -1438,12 +1411,9 @@ async function poisonThenCommit(_input, _ctx) {
     return { txResult: r };
 }
 poisonThenCommit.config = { kind: "action" };
-const _procedures = { setup, poisonThenCommit };
+const _procedures = { poisonThenCommit };
 "#,
     );
-
-    let (status, body) = dispatch_zs(&url, &src, "setup");
-    assert_eq!(status, 200, "setup failed: {body}");
 
     let (status, body) = dispatch_zs(&url, &src, "poisonThenCommit");
     let rows = count_notes(&url);
@@ -1459,7 +1429,10 @@ const _procedures = { setup, poisonThenCommit };
              A rolled-back commit must not be reported as committed."
         );
     } else {
-        assert_eq!(rows, 0, "a failed commit must leave nothing behind; body={body}");
+        assert_eq!(
+            rows, 0,
+            "a failed commit must leave nothing behind; body={body}"
+        );
     }
 }
 
@@ -1614,7 +1587,10 @@ mod sc1_live {
                 .expect("temp table");
 
             // 1. Establish the OUTER savepoint under a depth-derived name.
-            client.batch_execute("SAVEPOINT zs_sp_1").await.expect("outer");
+            client
+                .batch_execute("SAVEPOINT zs_sp_1")
+                .await
+                .expect("outer");
             client
                 .batch_execute("INSERT INTO sc1_live_probe VALUES ('outer')")
                 .await
@@ -1639,7 +1615,10 @@ mod sc1_live {
             // 3. Reuse the name at the same depth - what a depth-derived
             //    scheme does after the depth decrements. There are now TWO
             //    savepoints called zs_sp_1.
-            client.batch_execute("SAVEPOINT zs_sp_1").await.expect("inner");
+            client
+                .batch_execute("SAVEPOINT zs_sp_1")
+                .await
+                .expect("inner");
             client
                 .batch_execute("INSERT INTO sc1_live_probe VALUES ('inner')")
                 .await
@@ -1976,7 +1955,9 @@ mod sc1_driver {
                 (1, 0, 1),
                 "a released session returns to the pool as idle"
             );
-            probe::begin(APP, None).await.expect("a second BEGIN reuses it");
+            probe::begin(APP, None)
+                .await
+                .expect("a second BEGIN reuses it");
             assert_eq!(
                 probe::session_backend_pid(APP),
                 Some(pid_before),

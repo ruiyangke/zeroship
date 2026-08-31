@@ -101,8 +101,7 @@
 # BOTH CEILINGS ARE 0, AND THE ASYMMETRY IS GONE
 # ----------------------------------------------
 # Default was allowed 1 until 2026-08-20. That 1 was a named residue:
-# crates/plugin-db/src/cross_app_fk.rs cited
-# `register_model::bootstrap::build_ctx`, whose module is
+# crates/plugin-db/src/cross_app_fk.rs cited a bootstrap helper whose module was
 # `#[cfg(any(test, feature = "test-helpers"))]`, so the link resolved under
 # --all-features and not under default. The header here said it "cannot be
 # edited into correctness" because link-vs-span depended on an open decision

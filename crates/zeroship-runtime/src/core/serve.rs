@@ -35,8 +35,7 @@ use crate::{EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use futures::{pin_mut, FutureExt};
-
+use futures::{FutureExt, pin_mut};
 
 // ===========================================================================
 // Public API
@@ -224,7 +223,11 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             exit_bind_error(options.port, &e);
         }
     } else {
-        tracing::info!(workers = num_workers, port = options.port, "runtime spawning workers");
+        tracing::info!(
+            workers = num_workers,
+            port = options.port,
+            "runtime spawning workers"
+        );
         let mut handles = Vec::new();
         for i in 0..num_workers {
             let worker_modules = modules.clone();
@@ -507,7 +510,10 @@ async fn handle_connection(
             let chunked_body_buf: Vec<u8>;
             let (body_bytes, total_input_consumed): (&[u8], usize) = if is_chunked {
                 match decode_chunked_body(&data[consumed + header_len..], MAX_BODY_BYTES) {
-                    ChunkedDecode::Complete { body_bytes, consumed_input } => {
+                    ChunkedDecode::Complete {
+                        body_bytes,
+                        consumed_input,
+                    } => {
                         chunked_body_buf = body_bytes;
                         (chunked_body_buf.as_slice(), header_len + consumed_input)
                     }
@@ -526,7 +532,10 @@ async fn handle_connection(
                 if data.len() - consumed < total_len {
                     break;
                 }
-                (&data[consumed + header_len..consumed + total_len], total_len)
+                (
+                    &data[consumed + header_len..consumed + total_len],
+                    total_len,
+                )
             };
 
             let total_len = total_input_consumed;
@@ -542,9 +551,12 @@ async fn handle_connection(
             // is user-space.
             if method == "GET" && is_kernel_health_path(path) {
                 let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
-                if write_result.is_err() { return; }
+                if write_result.is_err() {
+                    return;
+                }
             } else {
-                let host = headers.iter()
+                let host = headers
+                    .iter()
                     .find(|h| h.name.eq_ignore_ascii_case("host"))
                     .and_then(|h| std::str::from_utf8(h.value).ok())
                     .unwrap_or("localhost");
@@ -553,21 +565,23 @@ async fn handle_connection(
                 // Materialize request headers as `(name, value)` pairs once —
                 // reused both for the fetch handler (as its request headers)
                 // and for the WebSocket handshake if this turns into an upgrade.
-                let request_headers: Vec<(String, String)> = headers.iter()
+                let request_headers: Vec<(String, String)> = headers
+                    .iter()
                     .filter(|h| !h.name.is_empty())
-                    .map(|h| (
-                        h.name.to_string(),
-                        std::str::from_utf8(h.value).unwrap_or("").to_string(),
-                    ))
+                    .map(|h| {
+                        (
+                            h.name.to_string(),
+                            std::str::from_utf8(h.value).unwrap_or("").to_string(),
+                        )
+                    })
                     .collect();
 
                 // Check for WebSocket upgrade BEFORE dispatch — after a
                 // successful upgrade the stream is no longer HTTP, so we
                 // must not loop back to parse another request out of it.
-                let is_upgrade = request_headers.iter().any(|(name, value)|
-                    name.eq_ignore_ascii_case("upgrade") &&
-                    value.eq_ignore_ascii_case("websocket")
-                );
+                let is_upgrade = request_headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket")
+                });
 
                 // THE LEFTOVER, and why an upgrade is the only path that needs
                 // it. This loop reads by BUFFER, not by request: one read can
@@ -602,9 +616,14 @@ async fn handle_connection(
                     &runtime,
                     &app_env,
                     &dev_auth,
-                ).await;
-                if !wrote_ok { return; }
-                if is_upgrade { return; }
+                )
+                .await;
+                if !wrote_ok {
+                    return;
+                }
+                if is_upgrade {
+                    return;
+                }
             }
 
             consumed += total_len;
@@ -688,7 +707,10 @@ enum ChunkedDecode {
     /// Body decoded successfully. `body_bytes` holds the concatenated
     /// chunk payloads, `consumed_input` tells the caller how many input
     /// bytes were consumed (including framing, so it can slice past them).
-    Complete { body_bytes: Vec<u8>, consumed_input: usize },
+    Complete {
+        body_bytes: Vec<u8>,
+        consumed_input: usize,
+    },
     /// Not enough input to finish a chunk or the terminator. Caller should
     /// read more bytes and retry — no state mutated.
     Incomplete,
@@ -811,10 +833,7 @@ async fn wait_for_data_or_idle(
     }
 }
 
-async fn stream_chunked_body(
-    stream: &mut TcpStream,
-    reader: crate::channel::StreamReader,
-) -> bool {
+async fn stream_chunked_body(stream: &mut TcpStream, reader: crate::channel::StreamReader) -> bool {
     stream_chunked_body_with_idle(stream, reader, STREAM_IDLE_TIMEOUT).await
 }
 
@@ -863,7 +882,10 @@ async fn stream_chunked_body_with_idle(
 
 fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> Vec<u8> {
     let status_text = match status {
-        200 => "OK", 404 => "Not Found", 500 => "Internal Server Error", _ => "OK",
+        200 => "OK",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
     };
     let mut buf = Vec::with_capacity(256);
     buf.extend_from_slice(b"HTTP/1.1 ");
@@ -874,7 +896,9 @@ fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> V
     buf.extend_from_slice(b"\r\n");
 
     for (name, value) in headers {
-        if name.eq_ignore_ascii_case("content-length") { continue; }
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
         buf.extend_from_slice(name.as_bytes());
         buf.extend_from_slice(b": ");
         buf.extend_from_slice(value.as_bytes());
@@ -927,7 +951,13 @@ async fn handle_request(
     app_env: &EnvSnapshot,
     dev_auth: &crate::dev_auth::DevAuthSettings,
 ) -> bool {
-    let IncomingRequest { method, url, request_headers, body, ws_pending } = request;
+    let IncomingRequest {
+        method,
+        url,
+        request_headers,
+        body,
+        ws_pending,
+    } = request;
 
     // The app-facing env. In the standalone server there's no control plane
     // supplying per-app secrets/vars, so this is seeded from process-env
@@ -950,43 +980,90 @@ async fn handle_request(
     // condition is re-read per request.
     let user_json = crate::dev_auth::resolve_dev_user_json(request_headers, dev_auth);
 
-    let outcome =
-        runtime.call_fetch_handler_with_user(method, url, request_headers, body, &env, ctx, user_json);
+    let outcome = runtime.call_fetch_handler_with_user(
+        method,
+        url,
+        request_headers,
+        body,
+        &env,
+        ctx,
+        user_json,
+    );
 
     match outcome {
-        FetchOutcome::Response { status, headers, body, logs: _ } => {
+        FetchOutcome::Response {
+            status,
+            headers,
+            body,
+            logs: _,
+        } => {
             let resp = build_http_response(status, &headers, &body);
             let BufResult(r, _) = stream.write_all(resp).await;
             r.is_ok()
         }
-        FetchOutcome::Stream { status, headers, body_reader, logs: _ } => {
+        FetchOutcome::Stream {
+            status,
+            headers,
+            body_reader,
+            logs: _,
+        } => {
             // Notify the pump — a streaming handler may have queued timers
             // or fetches in its `start()` callback that won't run until
             // the pump loop picks them up.
             runtime.notify_pump();
             let header_bytes = build_stream_response_headers(status, &headers);
             let BufResult(r, _) = stream.write_all(header_bytes).await;
-            if r.is_err() { return false; }
+            if r.is_err() {
+                return false;
+            }
             stream_chunked_body(stream, body_reader).await
         }
         FetchOutcome::WebSocketUpgrade { ws_id, headers } => {
-            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime, ws_pending).await
+            handle_websocket_upgrade(
+                stream,
+                ws_id,
+                &headers,
+                request_headers,
+                runtime,
+                ws_pending,
+            )
+            .await
         }
         FetchOutcome::Pending { rx, cancel: cf } => {
             match recv_with_timeout(&rx, runtime.wall_timeout(), &cf, runtime).await {
-                Some(Ok(SettledFetch::Response { status, headers, body, .. })) => {
+                Some(Ok(SettledFetch::Response {
+                    status,
+                    headers,
+                    body,
+                    ..
+                })) => {
                     let resp = build_http_response(status, &headers, &body);
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
-                Some(Ok(SettledFetch::Stream { status, headers, body_reader, .. })) => {
+                Some(Ok(SettledFetch::Stream {
+                    status,
+                    headers,
+                    body_reader,
+                    ..
+                })) => {
                     let header_bytes = build_stream_response_headers(status, &headers);
                     let BufResult(r, _) = stream.write_all(header_bytes).await;
-                    if r.is_err() { return false; }
+                    if r.is_err() {
+                        return false;
+                    }
                     stream_chunked_body(stream, body_reader).await
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade { ws_id, headers, .. })) => {
-                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime, ws_pending).await
+                    handle_websocket_upgrade(
+                        stream,
+                        ws_id,
+                        &headers,
+                        request_headers,
+                        runtime,
+                        ws_pending,
+                    )
+                    .await
                 }
                 Some(Err(e)) => {
                     let body = format!(
@@ -999,7 +1076,8 @@ async fn handle_request(
                 }
                 None => {
                     let resp = build_http_response(
-                        504, &[],
+                        504,
+                        &[],
                         br#"{"message":"request timed out","name":"Error"}"#,
                     );
                     let BufResult(r, _) = stream.write_all(resp).await;
@@ -1020,7 +1098,10 @@ fn compute_ws_accept_key(key: &str) -> String {
     let mut hasher = sha1::Sha1::new();
     hasher.update(key.trim().as_bytes());
     hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hasher.finalize())
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        hasher.finalize(),
+    )
 }
 
 /// Write the HTTP 101 Switching Protocols response to complete the WebSocket handshake.
@@ -1058,7 +1139,10 @@ async fn write_ws_handshake(
 /// Returns (opcode, payload) or None on error/EOF.
 ///
 /// Client-to-server frames are always masked (RFC 6455 section 5.1).
-async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R, pending: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
+async fn read_ws_frame<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    pending: &mut Vec<u8>,
+) -> Option<(u8, Vec<u8>)> {
     // Read header (2 bytes), payload-len extension, mask, and payload
     // bytes via `read_exact` so partial reads don't corrupt the
     // framing. Compio returns fewer bytes than requested when:
@@ -1100,7 +1184,8 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R, pending: &mut Vec<u
     // handle a 0x8 frame by echoing a Close with the carried code and
     // tearing the connection down — so the peer sees a clean 1009 close
     // and we never touch the oversized length again.
-    const MAX_WS_FRAME_PAYLOAD: u64 = crate::web::websocket::constants::DEFAULT_MAX_FRAME_SIZE as u64;
+    const MAX_WS_FRAME_PAYLOAD: u64 =
+        crate::web::websocket::constants::DEFAULT_MAX_FRAME_SIZE as u64;
     if payload_len > MAX_WS_FRAME_PAYLOAD {
         return Some((0x8, 1009u16.to_be_bytes().to_vec()));
     }
@@ -1171,7 +1256,11 @@ async fn read_exact<R: AsyncRead + Unpin>(
 }
 
 /// Write a WebSocket frame to the stream (server-to-client: unmasked).
-async fn write_ws_frame<W: compio::io::AsyncWrite + Unpin>(stream: &mut W, opcode: u8, payload: &[u8]) -> bool {
+async fn write_ws_frame<W: compio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    opcode: u8,
+    payload: &[u8],
+) -> bool {
     let len = payload.len();
     let mut frame = Vec::with_capacity(10 + len);
 
@@ -1222,7 +1311,6 @@ async fn handle_websocket_upgrade(
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
 
-
     if ws_key.is_empty() {
         let response = build_http_response(400, &[], b"Missing Sec-WebSocket-Key");
         let BufResult(r, _) = stream.write_all(response).await;
@@ -1244,7 +1332,10 @@ async fn handle_websocket_upgrade(
     let server_ws_id = {
         let state = runtime.state();
         let s = state.borrow();
-        s.websockets.get(&ws_id).and_then(|ws| ws.peer_id).unwrap_or(0)
+        s.websockets
+            .get(&ws_id)
+            .and_then(|ws| ws.peer_id)
+            .unwrap_or(0)
     };
 
     #[cfg(not(feature = "runtime_native_websocket"))]
@@ -1257,8 +1348,8 @@ async fn handle_websocket_upgrade(
     // a `WsEvent::MessageText` / `WsEvent::MessageBinary` / Close.
     #[cfg(feature = "runtime_native_websocket")]
     let kernel_rx = {
-        use futures::channel::mpsc;
         use crate::websocket_native::network as nw;
+        use futures::channel::mpsc;
         let (tx, rx) = mpsc::unbounded::<nw::WsEvent>();
         let state = runtime.state();
         if let Some(ws) = nw::lookup_native_ws_state(&state, ws_id) {
@@ -1388,12 +1479,8 @@ async fn write_kernel_event<W: compio::io::AsyncWrite + Unpin>(
 ) -> bool {
     use crate::websocket_native::network as nw;
     match ev {
-        nw::WsEvent::MessageText(text) => {
-            write_ws_frame(stream, 0x1, text.as_bytes()).await
-        }
-        nw::WsEvent::MessageBinary(data) => {
-            write_ws_frame(stream, 0x2, &data).await
-        }
+        nw::WsEvent::MessageText(text) => write_ws_frame(stream, 0x1, text.as_bytes()).await,
+        nw::WsEvent::MessageBinary(data) => write_ws_frame(stream, 0x2, &data).await,
         nw::WsEvent::Close { code, reason, .. } => {
             let mut close_payload = Vec::with_capacity(2 + reason.len());
             close_payload.extend_from_slice(&code.to_be_bytes());
@@ -1438,13 +1525,15 @@ async fn write_kernel_event<W: compio::io::AsyncWrite + Unpin>(
 async fn native_ws_pump(
     stream: &mut TcpStream,
     server_ws_id: u32,
-    mut kernel_rx: futures::channel::mpsc::UnboundedReceiver<crate::websocket_native::network::WsEvent>,
+    mut kernel_rx: futures::channel::mpsc::UnboundedReceiver<
+        crate::websocket_native::network::WsEvent,
+    >,
     runtime: &Runtime,
     ws_pending: Vec<u8>,
 ) -> bool {
+    use futures::FutureExt;
     use futures::channel::mpsc;
     use futures::stream::StreamExt;
-    use futures::FutureExt;
 
     // Reader → writer channel for echoing the peer's Close.
     let (close_tx, mut close_rx) = mpsc::unbounded::<(u16, String)>();
@@ -1596,8 +1685,16 @@ struct WsPollBoth<F> {
 
 #[cfg(not(feature = "runtime_native_websocket"))]
 impl<F> WsPollBoth<F> {
-    fn new(read_fut: F, outgoing_ready: Rc<Cell<bool>>, pump_waker: Rc<RefCell<Option<Waker>>>) -> Self {
-        Self { read_fut, outgoing_ready, pump_waker }
+    fn new(
+        read_fut: F,
+        outgoing_ready: Rc<Cell<bool>>,
+        pump_waker: Rc<RefCell<Option<Waker>>>,
+    ) -> Self {
+        Self {
+            read_fut,
+            outgoing_ready,
+            pump_waker,
+        }
     }
 }
 
@@ -1605,7 +1702,10 @@ impl<F> WsPollBoth<F> {
 impl<F: std::future::Future<Output = Option<(u8, Vec<u8>)>>> std::future::Future for WsPollBoth<F> {
     type Output = WsEvent;
 
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<WsEvent> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<WsEvent> {
         // SAFETY: read_fut is structurally pinned — we never move self after pinning.
         let this = unsafe { self.get_unchecked_mut() };
 
@@ -1741,6 +1841,11 @@ fn run_single_worker(
     // process vars. Shared (read-only) across all connections this worker
     // accepts; an `Rc` clone is one refcount bump per connection.
     let app_env = Rc::new(app_env_from_prefixed_vars(&env_vars));
+    // Vite dev hands the generated descriptor to `zeroship serve` through
+    // process env. Feed it into the same RuntimeState slot used by deployed
+    // bundles so validation and native plugin binding happen before creator
+    // modules evaluate. Schema-less apps omit the variable entirely.
+    let runtime_descriptor = env_vars.get("ZEROSHIP_RUNTIME_DESCRIPTOR").cloned();
 
     // Resolve the two dev-auth conditions ONCE per worker, here where the
     // process starts, rather than per request inside the resolver. In prod
@@ -1771,6 +1876,7 @@ fn run_single_worker(
             let runtime = Runtime::builder()
                 .modules(modules)
                 .env_vars(env_vars)
+                .runtime_descriptor(runtime_descriptor)
                 .limits(RuntimeLimits {
                     cpu_limit,
                     wall_timeout,
@@ -1821,7 +1927,10 @@ mod serve_gaps_tests {
     fn app_env_selects_prefixed_vars_and_strips_prefix() {
         let mut vars = HashMap::new();
         vars.insert("ZS_VAR_API_KEY".to_string(), "xyz".to_string());
-        vars.insert("ZS_VAR_DATABASE_URL".to_string(), "postgres://x".to_string());
+        vars.insert(
+            "ZS_VAR_DATABASE_URL".to_string(),
+            "postgres://x".to_string(),
+        );
         // Non-prefixed host vars must not cross into the app env.
         vars.insert("HOME".to_string(), "/home/leak".to_string());
         vars.insert("PATH".to_string(), "/usr/bin".to_string());
@@ -1873,7 +1982,10 @@ mod serve_gaps_tests {
     fn bind_error_message_falls_back_for_other_errors() {
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let msg = bind_error_message(80, &denied);
-        assert!(msg.contains("failed to bind port 80"), "generic path: {msg}");
+        assert!(
+            msg.contains("failed to bind port 80"),
+            "generic path: {msg}"
+        );
     }
 
     // The reuseport listener constructor is now fallible (returns
@@ -1893,7 +2005,10 @@ mod chunked_decode_tests {
 
     fn assert_complete(result: ChunkedDecode, expected_body: &[u8]) {
         match result {
-            ChunkedDecode::Complete { body_bytes, consumed_input: _ } => {
+            ChunkedDecode::Complete {
+                body_bytes,
+                consumed_input: _,
+            } => {
                 assert_eq!(&body_bytes[..], expected_body);
             }
             other => panic!("expected Complete, got {:?}", discriminant(other)),
@@ -2027,7 +2142,11 @@ mod ws_frame_tests {
         let frame = block_on(read_ws_frame(&mut r, &mut Vec::new()));
         let (opcode, payload) = frame.expect("oversized frame should yield a Close, not EOF");
         assert_eq!(opcode, 0x8, "oversized frame must surface as a Close frame");
-        assert_eq!(payload.len(), 2, "Close payload must carry just the 2-byte status code");
+        assert_eq!(
+            payload.len(),
+            2,
+            "Close payload must carry just the 2-byte status code"
+        );
         let code = u16::from_be_bytes([payload[0], payload[1]]);
         assert_eq!(code, 1009, "must close with status 1009 (Message Too Big)");
     }
@@ -2160,7 +2279,10 @@ mod worker_count_clamp_tests {
         // `--workers=0` → available_parallelism() → N; SQLite still clamps to 1.
         let r = resolve_num_workers(0, 12, Some("file:./local.db"));
         assert_eq!(r.num_workers, 1);
-        assert_eq!(r.requested, 12, "the pre-clamp request is the available count");
+        assert_eq!(
+            r.requested, 12,
+            "the pre-clamp request is the available count"
+        );
         assert!(r.clamped_for_sqlite);
     }
 
@@ -2190,6 +2312,9 @@ mod worker_count_clamp_tests {
         // The Vite dev path already passes --workers=1: a no-op, not a clamp.
         let r = resolve_num_workers(1, 8, Some("sqlite:dev.sqlite"));
         assert_eq!(r.num_workers, 1);
-        assert!(!r.clamped_for_sqlite, "1→1 is not a clamp (no surprising log)");
+        assert!(
+            !r.clamped_for_sqlite,
+            "1-to-1 is not a clamp (no surprising log)"
+        );
     }
 }

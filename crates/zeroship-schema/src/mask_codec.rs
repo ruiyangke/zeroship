@@ -82,8 +82,8 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 /// wraps this same `zsenc:…` body in `/* */`) survives in `sqlite_master.sql`.
 ///
 /// The two emitters share the SAME `zsenc:<mode>:<keyId>:<wraps>` body, so the
-/// metadata a `generate`d migration carries is byte-identical to the one
-/// `registerModel` writes — the verify-bricking guard. The parser side is
+/// metadata generated for either dialect is byte-identical - the
+/// verify-bricking guard. The parser side is
 /// [`parse_encryption_sentinel`].
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
@@ -202,9 +202,7 @@ pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), MaskSe
         }
     }
     let kind_str = kind_str.ok_or_else(|| {
-        MaskSentinelError::new(format!(
-            "mask_sentinel_malformed: missing kind= in {s:?}"
-        ))
+        MaskSentinelError::new(format!("mask_sentinel_malformed: missing kind= in {s:?}"))
     })?;
     let class_str = class_str.ok_or_else(|| {
         MaskSentinelError::new(format!(
@@ -309,9 +307,17 @@ mod tests {
 
     #[test]
     fn build_encryption_sentinel_canonical_shape() {
-        let s = build_encryption_sentinel(&enc(EncryptionMode::Randomised, "default", WrappedType::String));
+        let s = build_encryption_sentinel(&enc(
+            EncryptionMode::Randomised,
+            "default",
+            WrappedType::String,
+        ));
         assert_eq!(s, "zsenc:randomised:default:string");
-        let d = build_encryption_sentinel(&enc(EncryptionMode::Deterministic, "k7", WrappedType::Number));
+        let d = build_encryption_sentinel(&enc(
+            EncryptionMode::Deterministic,
+            "k7",
+            WrappedType::Number,
+        ));
         assert_eq!(d, "zsenc:deterministic:k7:number");
     }
 
@@ -335,7 +341,10 @@ mod tests {
         let bare = parse_encryption_sentinel("zsenc:randomised:default:string").unwrap();
         let inline = parse_encryption_sentinel("/* zsenc:randomised:default:string */").unwrap();
         assert_eq!(bare, inline);
-        assert_eq!(bare, enc(EncryptionMode::Randomised, "default", WrappedType::String));
+        assert_eq!(
+            bare,
+            enc(EncryptionMode::Randomised, "default", WrappedType::String)
+        );
     }
 
     #[test]
@@ -346,41 +355,53 @@ mod tests {
 
     #[test]
     fn parse_encryption_sentinel_rejects_missing_prefix() {
-        assert!(parse_encryption_sentinel("randomised:default:string")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("randomised:default:string")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_wrong_arity() {
-        assert!(parse_encryption_sentinel("zsenc:randomised:default")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
-        assert!(parse_encryption_sentinel("zsenc:randomised:default:string:extra")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("zsenc:randomised:default")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
+        assert!(
+            parse_encryption_sentinel("zsenc:randomised:default:string:extra")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_unknown_mode_and_wraps() {
-        assert!(parse_encryption_sentinel("zsenc:rot13:default:string")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
-        assert!(parse_encryption_sentinel("zsenc:randomised:default:blob")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("zsenc:rot13:default:string")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
+        assert!(
+            parse_encryption_sentinel("zsenc:randomised:default:blob")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_empty_key_id() {
-        assert!(parse_encryption_sentinel("zsenc:randomised::string")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("zsenc:randomised::string")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 }

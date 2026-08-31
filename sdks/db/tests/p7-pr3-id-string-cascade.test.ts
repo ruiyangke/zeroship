@@ -63,7 +63,6 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
   function makeNative(rows: Record<string, AnyRec>) {
     const calls: { find: AnyRec[]; findOne: AnyRec[] } = { find: [], findOne: [] };
     const native = {
-      registerModel: () => Promise.resolve(),
       collection() {
         return {
           async findOne(filter: AnyRec) {
@@ -146,7 +145,6 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
     // The SDK passes the user doc through; the Rust side mints `id`
     // and the `RETURNING *` row carries it back.
     const native = {
-      registerModel: () => Promise.resolve(),
       collection() {
         return {
           async insert(doc: AnyRec) {
@@ -174,7 +172,6 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
   test("insert_without_id_lets_platform_mint", async () => {
     let receivedDoc: AnyRec | null = null;
     const native = {
-      registerModel: () => Promise.resolve(),
       collection() {
         return {
           async insert(doc: AnyRec) {

@@ -60,8 +60,7 @@ fn init_v8_platform(single_threaded: bool) {
         // work — npm packages bundled by deepagents (Anthropic SDK, etc.)
         // construct these at module top-level and crash with "Internal
         // error. Icu error." otherwise.
-        v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
-            .expect("failed to load ICU data");
+        v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA).expect("failed to load ICU data");
 
         if single_threaded {
             // `--single_threaded` keeps V8's GC/compiler work on the calling thread;
@@ -326,9 +325,7 @@ pub const ZS_PLATFORM_PRIVATE_NAME: &str = "zeroship::db::__platform#capability"
 /// and the `get_private` reader ([`zs_db_platform_callback`]) call this
 /// so they operate on byte-identical symbol identity. Cheap after the
 /// first call — `for_api` returns the interned symbol on repeat reads.
-pub fn zs_platform_private<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-) -> v8::Local<'s, v8::Private> {
+pub fn zs_platform_private<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
     let name = v8::String::new(scope, ZS_PLATFORM_PRIVATE_NAME).unwrap();
     v8::Private::for_api(scope, Some(name))
 }
@@ -388,9 +385,8 @@ fn zs_db_platform_callback(
 /// `cargo build -p zeroship-runtime`. The workspace's root `pnpm build`
 /// runs the bootstrap package in topological order via the
 /// @zeroship/db → @zeroship/bootstrap dependency edge.
-pub(crate) const DB_INIT_JS: &str = include_str!(
-    "../../../../sdks/bootstrap/dist/runtime-entry.js"
-);
+pub(crate) const DB_INIT_JS: &str =
+    include_str!("../../../../sdks/bootstrap/dist/runtime-entry.js");
 
 /// Internal capability bridge module source.
 ///
@@ -1615,24 +1611,18 @@ pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
 /// BEFORE the `default.fetch` / `default.rpc` resolution. Order matters:
 ///   1. The internal kind bridge evaluates before creator code and removes the
 ///      forgeable string-named kind callbacks from `globalThis`.
-///   2. [`DB_INIT_JS`] runs next — its top-level await on
-///      `import("@zeroship/bootstrap/install-schema")` resolves through
-///      V8's microtask checkpoint, `installSchema(schema, env.db)`
-///      plants typed Collection wrappers on env.db, and the returned
-///      `ready` promise is awaited so module evaluation gates on DDL
-///      settling.
+///   2. [`DB_INIT_JS`] runs next. Its top-level await imports the framework
+///      installer through V8's microtask checkpoint and plants typed Collection
+///      wrappers on `env.db`. Native plugins already received the validated
+///      descriptor before creator module evaluation.
 ///
 /// By the time the kernel reads `default.fetch` / `default.rpc` off the user
-/// namespace, the dispatcher bridge is captured privately and the schema is
-/// live on `env.db`.
+/// namespace, the dispatcher bridge is captured privately and the typed schema
+/// surface is live on `env.db`.
 pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
     let prefix = bootstrap_prefix_js();
-    let mut s = String::with_capacity(
-        prefix.len()
-            + DB_INIT_JS.len()
-            + BOOTSTRAP_MAIN_JS.len()
-            + 4,
-    );
+    let mut s =
+        String::with_capacity(prefix.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len() + 4);
     s.push_str(&prefix);
     s.push_str(DB_INIT_JS);
     s.push_str(BOOTSTRAP_MAIN_JS);
@@ -1998,21 +1988,18 @@ function _zsIsWsUpgrade(request) {
     return true;
 }
 
-// Schema-readiness gate (ISS-66 / C1). `DB_INIT_JS` (runtime-entry)
-// stashes the async DDL chain on `globalThis.__zsSchemaReady` but does
-// NOT await it (top-level await would leave module eval pending and
+// DB boot-policy readiness gate. `runtime-entry` stashes the asynchronous
+// mask-policy installation on `globalThis.__zsSchemaReady` but does NOT await
+// it (top-level await would leave module eval pending and
 // 404 every dispatch). The RPC dispatcher already awaits it before the
 // first procedure; the WinterCG fetch / fetchFast entries did NOT — so a
-// `default.fetch` handler doing `env.db.users.insert(...)` raced the
-// cold-boot SQLite migration ("no such table" / mid-rebuild read).
+// `default.fetch` handler could otherwise race that security setup.
 //
 // Gate fetch + fetchFast at REQUEST time (not module-eval time): await
 // the same promise the dispatcher awaits before invoking the user slot.
-// In production (Postgres) `registerModel` is a no-op and the schema is
-// applied at deploy, so `__zsSchemaReady` resolves ~immediately → the
-// await is near-free on the warm path (a settled promise). A REJECTED
-// chain (failed migration) surfaces as a thrown error from the gate, so
-// the fetch fails loud rather than hanging or reading a half-built DB.
+// The await is near-free on the warm path once the promise is settled. A
+// rejected policy chain surfaces as a thrown error from the gate, so the fetch
+// fails loud rather than running without its declared policy.
 async function __zsAwaitSchemaReady() {
     const ready = globalThis.__zsSchemaReady;
     if (ready && typeof ready.then === "function") {
@@ -2026,7 +2013,7 @@ async function __zsAwaitSchemaReady() {
 
 // Resolve the user's default.fetch once at module init. When present we
 // wrap it in a thin async shim that AWAITS `__zsSchemaReady` first, so
-// the user handler never runs against an un-migrated / mid-rebuild DB.
+// the user handler never runs before DB boot policy is ready.
 // The kernel already awaits a returned Promise and turns thrown
 // exceptions into `DispatchResult::ErrorValue` (honoring `err.status`),
 // so the shim adds one settled-promise await on the warm path and
@@ -2208,17 +2195,26 @@ export default {
 /// `default.fetch` without a reach-through global). `None` if module loading
 /// failed (error is already logged).
 ///
-/// The `plugins` slice is accepted but not currently invoked here — the
-/// `zeroship.*` facade was removed as part of the kernel-cut refactor
-/// (PR 1 Task D1). Plugins will be re-exposed via the bootstrap's `env.*`
-/// binding in PR 3; the parameter is kept so call sites don't have to
-/// change in this PR.
+/// The `plugins` slice receives the fully validated runtime descriptor before
+/// any creator module evaluates. Plugins that do not consume schema metadata
+/// keep the default no-op hook.
 pub fn load_polyfills_and_modules(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
-    _plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
+    plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
 ) -> Result<v8::Global<v8::Value>, String> {
-    setup_globals(scope)?;
+    let runtime_descriptor = setup_globals_with_descriptor(scope)?;
+    let app_id = crate::plugin::runtime_app_id(scope);
+    for plugin in plugins {
+        plugin
+            .bind_runtime_descriptor(scope, &app_id, runtime_descriptor.as_ref())
+            .map_err(|error| {
+                format!(
+                    "runtime: plugin '{}' rejected the runtime descriptor: {error}",
+                    plugin.name()
+                )
+            })?;
+    }
 
     // Order matters here:
     //
@@ -2598,11 +2594,9 @@ fn drain_next_ticks(scope: &mut v8::PinScope) -> bool {
         if processed >= 10_000 {
             let has_more = !state.borrow().next_tick_callbacks.is_empty();
             if has_more {
-                let message = v8::String::new(
-                    scope,
-                    "process.nextTick queue exceeded 10000 callbacks",
-                )
-                .unwrap();
+                let message =
+                    v8::String::new(scope, "process.nextTick queue exceeded 10000 callbacks")
+                        .unwrap();
                 let exception = v8::Exception::error(scope, message);
                 scope.throw_exception(exception);
             }
@@ -2645,11 +2639,8 @@ fn process_next_tick_callback(
     _rv: v8::ReturnValue,
 ) {
     let Ok(callback) = v8::Local::<v8::Function>::try_from(args.get(0)) else {
-        let message = v8::String::new(
-            scope,
-            "process.nextTick callback must be a function",
-        )
-        .unwrap();
+        let message =
+            v8::String::new(scope, "process.nextTick callback must be a function").unwrap();
         let exception = v8::Exception::type_error(scope, message);
         scope.throw_exception(exception);
         return;
@@ -2664,11 +2655,14 @@ fn process_next_tick_callback(
         .map(|index| v8::Global::new(scope, args.get(index)))
         .collect();
     let continuation_context = crate::core::invocation::capture_context(scope);
-    state.borrow_mut().next_tick_callbacks.push_back(NextTickCallback {
-        callback,
-        args: callback_args,
-        continuation_context,
-    });
+    state
+        .borrow_mut()
+        .next_tick_callbacks
+        .push_back(NextTickCallback {
+            callback,
+            args: callback_args,
+            continuation_context,
+        });
 }
 
 // ===========================================================================
@@ -2758,8 +2752,8 @@ fn zs_driver_next_command_callback(
     let resolver = match v8::PromiseResolver::new(scope) {
         Some(resolver) => resolver,
         None => {
-            let msg = v8::String::new(scope, "__zsNextCommand: PromiseResolver::new failed")
-                .unwrap();
+            let msg =
+                v8::String::new(scope, "__zsNextCommand: PromiseResolver::new failed").unwrap();
             scope.throw_exception(v8::Exception::error(scope, msg));
             return;
         }
@@ -2769,9 +2763,9 @@ fn zs_driver_next_command_callback(
     let command_or_error = {
         let mut s = state.borrow_mut();
         match s.js_driver.as_mut() {
-            Some(driver) if driver.next_command_resolver.is_some() => {
-                Some(Err("__zsNextCommand called while another waiter is parked".to_string()))
-            }
+            Some(driver) if driver.next_command_resolver.is_some() => Some(Err(
+                "__zsNextCommand called while another waiter is parked".to_string(),
+            )),
             Some(driver) => match driver.command_queue.pop_front() {
                 Some(command_json) => Some(Ok(command_json)),
                 None => {
@@ -2779,7 +2773,9 @@ fn zs_driver_next_command_callback(
                     None
                 }
             },
-            None => Some(Err("__zsNextCommand called without JS driver state".to_string())),
+            None => Some(Err(
+                "__zsNextCommand called without JS driver state".to_string()
+            )),
         }
     };
 
@@ -2790,8 +2786,8 @@ fn zs_driver_next_command_callback(
                     resolver.resolve(scope, value);
                 }
                 None => {
-                    let msg = v8::String::new(scope, "__zsNextCommand: invalid command JSON")
-                        .unwrap();
+                    let msg =
+                        v8::String::new(scope, "__zsNextCommand: invalid command JSON").unwrap();
                     resolver.reject(scope, v8::Exception::error(scope, msg));
                 }
             },
@@ -3047,8 +3043,8 @@ fn set_timeout_callback(
     let callback = match v8::Local::<v8::Function>::try_from(args.get(0)) {
         Ok(f) => f,
         Err(_) => {
-            let msg = v8::String::new(scope, "setTimeout: first argument must be a function")
-                .unwrap();
+            let msg =
+                v8::String::new(scope, "setTimeout: first argument must be a function").unwrap();
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -3068,8 +3064,12 @@ fn set_timeout_callback(
             drop(s);
             let msg = v8::String::new(
                 scope,
-                &format!("Too many pending timers (limit: {})", crate::state::MAX_PENDING_TIMERS),
-            ).unwrap();
+                &format!(
+                    "Too many pending timers (limit: {})",
+                    crate::state::MAX_PENDING_TIMERS
+                ),
+            )
+            .unwrap();
             let exc = v8::Exception::range_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -3098,7 +3098,11 @@ fn set_timeout_callback(
     if delay < Duration::from_millis(1) {
         s.ready_timers.push_back(id);
     } else {
-        s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
+        s.spawned_timers.push(crate::state::SpawnedTimer {
+            id,
+            delay,
+            interval: None,
+        });
     }
 
     rv.set(v8::Integer::new(scope, id as i32).into());
@@ -3140,8 +3144,8 @@ fn set_interval_callback(
     let callback = match v8::Local::<v8::Function>::try_from(args.get(0)) {
         Ok(f) => f,
         Err(_) => {
-            let msg = v8::String::new(scope, "setInterval: first argument must be a function")
-                .unwrap();
+            let msg =
+                v8::String::new(scope, "setInterval: first argument must be a function").unwrap();
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -3162,8 +3166,12 @@ fn set_interval_callback(
             drop(s);
             let msg = v8::String::new(
                 scope,
-                &format!("Too many pending timers (limit: {})", crate::state::MAX_PENDING_TIMERS),
-            ).unwrap();
+                &format!(
+                    "Too many pending timers (limit: {})",
+                    crate::state::MAX_PENDING_TIMERS
+                ),
+            )
+            .unwrap();
             let exc = v8::Exception::range_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -3187,7 +3195,11 @@ fn set_interval_callback(
     if let Some(req_id) = owner_request_id {
         s.timer_owner.insert(id, req_id);
     }
-    s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: Some(delay) });
+    s.spawned_timers.push(crate::state::SpawnedTimer {
+        id,
+        delay,
+        interval: Some(delay),
+    });
 
     rv.set(v8::Integer::new(scope, id as i32).into());
 }
@@ -3202,6 +3214,12 @@ fn set_interval_callback(
 /// alongside the helper it wraps; native classes come from
 /// `#[v8_class]` impl blocks via their per-class `install` fn.
 pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
+    setup_globals_with_descriptor(scope).map(|_| ())
+}
+
+fn setup_globals_with_descriptor(
+    scope: &mut v8::PinScope,
+) -> Result<Option<serde_json::Value>, String> {
     let global = scope.get_current_context().global(scope);
 
     // global = globalThis (Node.js compat — many npm packages reference `global`)
@@ -3338,11 +3356,8 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
     // codes like 1011 (server error). Only the bootstrap reaches
     // this; user app code keeps using `socket.close(code, reason)`.
     {
-        let f = v8::Function::new(
-            scope,
-            crate::websocket_native::ws_server_close_callback,
-        )
-        .unwrap();
+        let f =
+            v8::Function::new(scope, crate::websocket_native::ws_server_close_callback).unwrap();
         let key = v8::String::new(scope, "__wsServerClose").unwrap();
         global.set(scope, key.into(), f.into());
     }
@@ -3392,11 +3407,10 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
         }
     }
 
-    // __zsDbPlatform — the P9 §8 capability-handle resolver. Reads the
+    // __zsDbPlatform - the P9 section 8 capability-handle resolver. Reads the
     // `DbPlatform` instance stashed on `env.db` under the `ZS_PLATFORM`
-    // private symbol and returns it. `@zeroship/bootstrap`'s
-    // `runtime-entry` calls this once at boot, threads the handle into
-    // `installSchema`, then DELETES the global so no creator handler can
+    // private symbol and returns it. `@zeroship/bootstrap` resolves it once for
+    // the mask-policy flush, then deletes the global so no creator handler can
     // reach it. See `zs_db_platform_callback`.
     {
         let f = v8::Function::new(scope, zs_db_platform_callback).unwrap();
@@ -3412,7 +3426,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
     // migration fold. Absent (`None`) means schema-less app. A present but
     // corrupt/non-v2 descriptor is a hard boot error, never a schema-less
     // fallback.
-    {
+    let runtime_descriptor = {
         let descriptor_json = {
             let state: crate::state::SharedState = scope
                 .get_slot::<crate::state::SharedState>()
@@ -3421,7 +3435,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
             state.borrow().runtime_descriptor.clone()
         };
         if let Some(json) = descriptor_json {
-            validate_runtime_descriptor_json(&json)?;
+            let descriptor = validate_runtime_descriptor_json(&json)?;
             let parsed = v8::String::new(scope, &json)
                 .and_then(|s| v8::json::parse(scope, s))
                 .ok_or_else(|| {
@@ -3430,8 +3444,11 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
                 })?;
             let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
             global.set(scope, key.into(), parsed);
+            Some(descriptor)
+        } else {
+            None
         }
-    }
+    };
 
     // __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash
     // for the PR 2 bootstrap. `__zs_bind_request_ctx(ctx)` stashes the
@@ -3511,7 +3528,11 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
         // surface; we don't shadow them with a secret).
         let (app_vars, app_secrets, expose_keys) = {
             let s = state.borrow();
-            (s.env_app_vars.clone(), s.env_app_secrets.clone(), s.env_expose_keys.clone())
+            (
+                s.env_app_vars.clone(),
+                s.env_app_secrets.clone(),
+                s.env_expose_keys.clone(),
+            )
         };
         for name in &expose_keys {
             if let Some(value) = app_secrets.get(name) {
@@ -3543,11 +3564,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
         // "Cannot read properties of undefined (reading 'node')".
         {
             let versions = v8::Object::new(scope);
-            for (k, v) in [
-                ("node", "20.0.0"),
-                ("v8", "12.0.0"),
-                ("openssl", "3.0.0"),
-            ] {
+            for (k, v) in [("node", "20.0.0"), ("v8", "12.0.0"), ("openssl", "3.0.0")] {
                 let k = v8::String::new(scope, k).unwrap();
                 let v = v8::String::new(scope, v).unwrap();
                 versions.set(scope, k.into(), v.into());
@@ -3709,22 +3726,27 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
     // across chunk boundaries (the AI SDK / SSE bug). Native
     // implementations live in `text_encoding.rs` and are wired here
     // via the macro-emitted `register` fn (#198).
-    crate::register_native_classes!(scope, global, [
-        crate::text_encoding::TextEncoder,
-        crate::text_encoding::TextDecoder,
-    ]);
+    crate::register_native_classes!(
+        scope,
+        global,
+        [
+            crate::text_encoding::TextEncoder,
+            crate::text_encoding::TextDecoder,
+        ]
+    );
 
     // Native Headers per WHATWG Fetch §2.2 — wired in
     // `load_polyfills_and_modules` immediately after fetch.js runs.
     // The class itself lives in `crate::headers`; it replaces the JS
     // polyfill that used to ship in `embed/fetch.js`. WPT pass: 98/0/1.
-    Ok(())
+    Ok(runtime_descriptor)
 }
 
-fn validate_runtime_descriptor_json(json: &str) -> Result<(), String> {
+fn validate_runtime_descriptor_json(json: &str) -> Result<serde_json::Value, String> {
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| format!("runtime: manifest.runtime_descriptor is not valid JSON: {e}"))?;
-    validate_runtime_descriptor_value(&value)
+    validate_runtime_descriptor_value(&value)?;
+    Ok(value)
 }
 
 fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), String> {
@@ -3743,8 +3765,7 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
         .and_then(serde_json::Value::as_object)
     else {
         return Err(
-            "runtime: manifest.runtime_descriptor v2 requires object field `collections`"
-                .into(),
+            "runtime: manifest.runtime_descriptor v2 requires object field `collections`".into(),
         );
     };
 
@@ -3810,7 +3831,10 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
             }
         }
 
-        let Some(indexes) = collection.get("indexes").and_then(serde_json::Value::as_array) else {
+        let Some(indexes) = collection
+            .get("indexes")
+            .and_then(serde_json::Value::as_array)
+        else {
             return Err(format!(
                 "runtime: manifest.runtime_descriptor collection {name:?} requires array field `indexes`"
             ));
@@ -3930,10 +3954,14 @@ pub fn install_native_streams(scope: &mut v8::PinScope) {
 pub fn install_text_encoding_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     // #198 — bare template + globalThis bind for both classes.
-    crate::register_native_classes!(scope, global, [
-        crate::text_encoding::streams::TextEncoderStream,
-        crate::text_encoding::streams::TextDecoderStream,
-    ]);
+    crate::register_native_classes!(
+        scope,
+        global,
+        [
+            crate::text_encoding::streams::TextEncoderStream,
+            crate::text_encoding::streams::TextDecoderStream,
+        ]
+    );
 }
 
 /// Install native `CompressionStream` / `DecompressionStream` per the

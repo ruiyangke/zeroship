@@ -300,7 +300,6 @@ describe("C2 — validation dispatch on discriminator", () => {
 describe("C2 — partial update against a flat-expanded union", () => {
   function makeMockNative() {
     const native = {
-      registerModel: () => Promise.resolve(),
       collection(_name: string) {
         return {
           async update(_f: Record<string, unknown>, _u: Record<string, unknown>) {

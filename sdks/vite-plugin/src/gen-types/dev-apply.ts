@@ -2,8 +2,7 @@
  * Apply the committed migrations to the dev SQLite file AHEAD of the worker.
  *
  * This makes the dev tier match the platform: on Postgres the `migrated`
- * service applies the schema at deploy, before the app serves, and
- * `registerModel` is a pure no-op. On SQLite the worker used to create the
+ * service applies the schema at deploy, before the app serves. On SQLite the worker used to create the
  * schema itself, lazily, one collection at a time, in registration order —
  * which is backwards, and is the root of the "SCHEMA-INIT" class of dev-only
  * bugs. See

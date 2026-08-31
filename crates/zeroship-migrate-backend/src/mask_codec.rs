@@ -111,7 +111,7 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 ///
 /// The two emitters share the SAME `zero-migrate:enc:<mode>:<keyId>:<wraps>` body, so the
 /// metadata a `generate`d migration carries is byte-identical to the one
-/// `registerModel` writes - the verify-bricking guard. The parser side is
+/// schema application writes - the verify-bricking guard. The parser side is
 /// [`parse_encryption_sentinel`].
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
@@ -460,10 +460,12 @@ mod tests {
 
     #[test]
     fn parse_encryption_sentinel_rejects_missing_prefix() {
-        assert!(parse_encryption_sentinel("randomised:default:string")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("randomised:default:string")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 
     #[test]

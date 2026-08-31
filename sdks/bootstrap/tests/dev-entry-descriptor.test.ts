@@ -17,7 +17,6 @@ function makeDevEntry() {
       },
     }),
     getEnvDb: () => ({
-      registerModel: () => Promise.resolve(),
       transaction: (cb: (raw: unknown) => unknown) => cb(undefined),
       collection: () => ({ find: async () => [] }),
     }),

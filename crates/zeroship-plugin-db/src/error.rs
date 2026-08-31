@@ -29,8 +29,7 @@
 //!    at the V8 boundary (these are TypeError-class, never need `.code`).
 //!
 //! 4. **Cold-init**: `lib.rs::init_pool_async` returns `Result<_, String>`;
-//!    the call sites at `register_model/mod.rs` and `exec.rs::ensure_pool`
-//!    synthesise `DbError::Configuration` with
+//!    `exec.rs::ensure_pool` synthesises `DbError::Configuration` with
 //!    code `lazy_init_failed` (the same code at
 //!    every cold-init call site).
 //!
@@ -77,10 +76,8 @@ use crate::transaction::reducer::identity::DenyReason;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum DbError {
-    /// DDL deploy refused before any rows changed — typically a
-    /// `validation_refused` envelope from
-    /// `register_model`. The full JSON envelope is in
-    /// `envelope_json`; the variant exists so callers know the wire
+    /// A backend constraint refusal represented as a JSON envelope. The full
+    /// envelope is in `envelope_json`; the variant exists so callers know the wire
     /// payload is *already* a JSON object the SDK consumes verbatim.
     SchemaRefused {
         code: &'static str,
@@ -100,44 +97,30 @@ pub enum DbError {
 
     /// Postgres 23505 — unique constraint violation. `collection` is
     /// best-effort (parsed from the error detail when available).
-    UniqueViolation {
-        message: String,
-    },
+    UniqueViolation { message: String },
 
     /// Postgres 23503 — foreign key constraint violation.
-    FkViolation {
-        message: String,
-    },
+    FkViolation { message: String },
 
     /// Postgres 23502 — NOT NULL violation.
-    NotNullViolation {
-        message: String,
-    },
+    NotNullViolation { message: String },
 
     /// Postgres 23514 — CHECK constraint violation.
-    CheckViolation {
-        message: String,
-    },
+    CheckViolation { message: String },
 
     /// Postgres 40001 / 40P01 — serialization failure or deadlock.
     /// SDK callers can retry these via the standard exponential
     /// backoff loop.
-    Serialization {
-        message: String,
-    },
+    Serialization { message: String },
 
     /// Postgres 55P03 / 55006 — lock not available / object in use.
-    LockContention {
-        message: String,
-    },
+    LockContention { message: String },
 
     /// Postgres class 08 (connection_exception) and other transient
     /// failures (53*, 57*). Distinct from `Serialization` because the
     /// retry semantics differ: serialization retries the *transaction*;
     /// transient retries the connection.
-    Transient {
-        message: String,
-    },
+    Transient { message: String },
 
     /// Plugin mis-configured at runtime (`DB_URL` missing, advisory
     /// lock unavailable, `wal_level != logical`, etc.). Not a user
@@ -177,17 +160,13 @@ pub enum DbError {
     /// platform internal and is denied with a `tracing::error!`. The
     /// `code` is `'static` because the closed set of access-denied
     /// reasons is known at compile time.
-    AccessDenied {
-        code: &'static str,
-    },
+    AccessDenied { code: &'static str },
 
     /// Catch-all for everything that doesn't fit above. The message is
     /// preserved for the JS console; the code is always `internal` so
     /// the SDK has *something* to branch on (even if it's "this should
     /// never happen, file a bug").
-    Internal {
-        message: String,
-    },
+    Internal { message: String },
 }
 
 /// How a per-app session-setup failure must drive transaction startup.
@@ -272,14 +251,12 @@ pub const GRANT_REVOKED_MESSAGE: &str =
 /// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
 /// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
 /// creator reading the HTTP response only ever sees the message.
-pub const MISSING_ROLE_MESSAGE: &str =
-    "this app's database is not provisioned: its per-app Postgres role does not \
+pub const MISSING_ROLE_MESSAGE: &str = "this app's database is not provisioned: its per-app Postgres role does not \
      exist. Run `zeroship migrate` for this app, then retry.";
 
 /// Operator/`env.db`-caller hint for [`SCHEMA_NOT_PROVISIONED`]. Reaches app
 /// JS as `err.hint` on a direct native throw; does NOT reach the HTTP wire.
-pub const MISSING_ROLE_HINT: &str =
-    "`zeroship migrate` creates the app's schema and per-app role. A deploy \
+pub const MISSING_ROLE_HINT: &str = "`zeroship migrate` creates the app's schema and per-app role. A deploy \
      alone does not: the first `env.db` call is what discovers the role is \
      missing.";
 
@@ -324,9 +301,9 @@ impl DbError {
         e: &compio_postgres::Error,
         app_id: &str,
     ) -> SessionSetupError {
-        if e.as_db_error().is_some_and(|db| {
-            is_missing_per_app_session_role(db.code(), db.message(), app_id)
-        }) {
+        if e.as_db_error()
+            .is_some_and(|db| is_missing_per_app_session_role(db.code(), db.message(), app_id))
+        {
             let msg = walk_pg_chain(e);
             tracing::warn!(
                 error = %msg,
@@ -387,20 +364,26 @@ impl DbError {
         };
 
         if code == &SqlState::UNIQUE_VIOLATION {
-            DbError::UniqueViolation { message: scrub_constraint_detail(msg) }
+            DbError::UniqueViolation {
+                message: scrub_constraint_detail(msg),
+            }
         } else if code == &SqlState::FOREIGN_KEY_VIOLATION {
-            DbError::FkViolation { message: scrub_constraint_detail(msg) }
+            DbError::FkViolation {
+                message: scrub_constraint_detail(msg),
+            }
         } else if code == &SqlState::NOT_NULL_VIOLATION {
-            DbError::NotNullViolation { message: scrub_constraint_detail(msg) }
+            DbError::NotNullViolation {
+                message: scrub_constraint_detail(msg),
+            }
         } else if code == &SqlState::CHECK_VIOLATION {
-            DbError::CheckViolation { message: scrub_constraint_detail(msg) }
+            DbError::CheckViolation {
+                message: scrub_constraint_detail(msg),
+            }
         } else if code == &SqlState::T_R_SERIALIZATION_FAILURE
             || code == &SqlState::T_R_DEADLOCK_DETECTED
         {
             DbError::Serialization { message: msg }
-        } else if code == &SqlState::LOCK_NOT_AVAILABLE
-            || code == &SqlState::OBJECT_IN_USE
-        {
+        } else if code == &SqlState::LOCK_NOT_AVAILABLE || code == &SqlState::OBJECT_IN_USE {
             DbError::LockContention { message: msg }
         } else if code == &SqlState::DISK_FULL
             || code == &SqlState::OUT_OF_MEMORY
@@ -424,19 +407,24 @@ impl DbError {
     /// directly.
     pub fn to_op_error(self) -> OpError {
         match self {
-            DbError::SchemaRefused { code, envelope_json } => {
+            DbError::SchemaRefused {
+                code,
+                envelope_json,
+            } => {
                 // SchemaRefused carries a JSON envelope the SDK parses
                 // verbatim. We stamp the static `code` so SDK callers
                 // can branch on `e.code === "validation_refused"` without
                 // resorting to JSON.parse(e.message). The envelope JSON
                 // stays the message body so existing callers that
                 // serde_json::from_str(&err.to_string()) continue to
-                // parse the envelope correctly. See `register_model_dispatch`.
+                // parse the envelope correctly.
                 OpError::coded(code, envelope_json, None::<String>)
             }
-            DbError::ValidationFailed { code, message, hint } => {
-                OpError::coded(code, message, hint)
-            }
+            DbError::ValidationFailed {
+                code,
+                message,
+                hint,
+            } => OpError::coded(code, message, hint),
             DbError::UniqueViolation { message } => {
                 OpError::coded("unique_violation", message, None::<String>)
             }
@@ -452,42 +440,48 @@ impl DbError {
             DbError::Serialization { message } => OpError::coded(
                 "serialization_failure",
                 message,
-                Some("retry the transaction; Postgres SSI / deadlock detector aborted it".to_string()),
+                Some(
+                    "retry the transaction; Postgres SSI / deadlock detector aborted it"
+                        .to_string(),
+                ),
             ),
             DbError::LockContention { message } => OpError::coded(
                 "lock_not_available",
                 message,
-                Some("Retry after a short backoff; another worker holds the lock briefly.".to_string()),
+                Some(
+                    "Retry after a short backoff; another worker holds the lock briefly."
+                        .to_string(),
+                ),
             ),
             DbError::Transient { message } => OpError::coded(
                 "transient",
                 message,
                 Some("transient backend failure; retry after a short backoff".to_string()),
             ),
-            DbError::Configuration { code, message, hint } => {
-                OpError::coded(code, message, hint)
-            }
+            DbError::Configuration {
+                code,
+                message,
+                hint,
+            } => OpError::coded(code, message, hint),
             DbError::PermissionDenied { code, message } => {
                 OpError::coded_with_status(code, message, None::<String>, 403)
             }
-            DbError::Coded { code, message, hint } => OpError::coded(code, message, hint),
+            DbError::Coded {
+                code,
+                message,
+                hint,
+            } => OpError::coded(code, message, hint),
             DbError::AccessDenied { code } => OpError::coded(
                 code,
                 "platform-internal capability is not reachable from app code",
                 None::<String>,
             ),
-            DbError::Internal { message } => {
-                OpError::coded("internal", message, None::<String>)
-            }
+            DbError::Internal { message } => OpError::coded("internal", message, None::<String>),
         }
     }
 
-    /// Render a flat string for callers that still flow through the
-    /// `Result<_, String>` -> `OpResult::Failed { error: String }` path
-    /// (notably `register_model_dispatch`, where the SDK already
-    /// `JSON.parse`'s the message as an envelope). Used as a bridge
-    /// while the conversion sweep proceeds; new code should prefer
-    /// `to_op_error()`.
+    /// Render a flat string for remaining non-V8 and test callers. New V8
+    /// boundary code should prefer `to_op_error()` so the typed code survives.
     pub fn into_string(self) -> String {
         match self {
             DbError::SchemaRefused { envelope_json, .. } => envelope_json,
@@ -602,14 +596,8 @@ impl DbError {
     /// Q-SF-E (§10) settled on retryable semantics — caller is
     /// expected to re-read the row, observe the bumped `version`,
     /// and retry with the new value.
-    pub fn version_mismatch(
-        collection: &str,
-        row_id: Option<&str>,
-        expected_version: i64,
-    ) -> Self {
-        let id_part = row_id
-            .map(|id| format!(" {id}"))
-            .unwrap_or_default();
+    pub fn version_mismatch(collection: &str, row_id: Option<&str>, expected_version: i64) -> Self {
+        let id_part = row_id.map(|id| format!(" {id}")).unwrap_or_default();
         DbError::ValidationFailed {
             code: "version_mismatch",
             message: format!(
@@ -669,19 +657,17 @@ impl DbError {
     /// i.e. the active backend isn't the Postgres arm. Every call site
     /// (`as_postgres().ok_or_else(...)?` / `Some/None` match) routes
     /// through this helper so the wire `.code` (`backend_unsupported`)
-    /// AND the operator-facing `hint` stay identical across the
-    /// `migrations` / `migration` / `register_model` / `transaction`
-    /// paths.
+    /// AND the operator-facing `hint` stay identical across backend-specific
+    /// operation paths.
     ///
     /// Prior hand-rolled `DbError::Configuration { code:
     /// "backend_unsupported", ... }` literals at four call sites had
-    /// drifted into three distinct `hint` shapes (two `None`, one
-    /// PG-only sentence, one bare `"register_model"`); centralising
+    /// drifted into three distinct `hint` shapes; centralising
     /// here keeps the SDK-visible hint stable as the backend-arm
     /// dispatcher evolves.
     ///
     /// `op` names the operation surface for the message body
-    /// (e.g. `"transaction"`, `"register_model"`, `"migration RPC"`)
+    /// (e.g. `"transaction"`, `"migration RPC"`)
     /// so the operator-facing text stays specific without forcing each
     /// call site to re-spell the static `code` / `hint`.
     pub(crate) fn backend_unsupported(op: &str) -> Self {
@@ -940,9 +926,18 @@ mod tests {
                    DETAIL: Key (email)=(alice@example.com) already exists."
             .to_string();
         let scrubbed = scrub_constraint_detail(raw);
-        assert!(!scrubbed.contains("alice@example.com"), "value must be scrubbed: {scrubbed}");
-        assert!(!scrubbed.contains("DETAIL"), "DETAIL line must be gone: {scrubbed}");
-        assert!(scrubbed.contains("unique constraint"), "primary message kept: {scrubbed}");
+        assert!(
+            !scrubbed.contains("alice@example.com"),
+            "value must be scrubbed: {scrubbed}"
+        );
+        assert!(
+            !scrubbed.contains("DETAIL"),
+            "DETAIL line must be gone: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("unique constraint"),
+            "primary message kept: {scrubbed}"
+        );
         // A message without a DETAIL line is unchanged.
         let plain = "db: some other error".to_string();
         assert_eq!(scrub_constraint_detail(plain.clone()), plain);
@@ -1106,8 +1101,16 @@ mod tests {
         );
         // Platform-authored and fixed: no server text, no role name, no
         // app id, and nothing interpolated at all.
-        assert!(!op.message.contains("_role"), "no role name: {}", op.message);
-        assert!(!op.message.contains("ERROR:"), "no server text: {}", op.message);
+        assert!(
+            !op.message.contains("_role"),
+            "no role name: {}",
+            op.message
+        );
+        assert!(
+            !op.message.contains("ERROR:"),
+            "no server text: {}",
+            op.message
+        );
         assert!(op.message.is_ascii(), "ASCII only: {}", op.message);
     }
 
@@ -1242,10 +1245,7 @@ mod tests {
                 DbError::UniqueViolation { message: "".into() },
                 "unique_violation",
             ),
-            (
-                DbError::FkViolation { message: "".into() },
-                "fk_violation",
-            ),
+            (DbError::FkViolation { message: "".into() }, "fk_violation"),
             (
                 DbError::NotNullViolation { message: "".into() },
                 "not_null_violation",
@@ -1262,14 +1262,8 @@ mod tests {
                 DbError::LockContention { message: "".into() },
                 "lock_not_available",
             ),
-            (
-                DbError::Transient { message: "".into() },
-                "transient",
-            ),
-            (
-                DbError::Internal { message: "".into() },
-                "internal",
-            ),
+            (DbError::Transient { message: "".into() }, "transient"),
+            (DbError::Internal { message: "".into() }, "internal"),
         ];
         for (variant, expected_code) in cases {
             let got = op_code(variant);
@@ -1289,14 +1283,44 @@ mod tests {
                 other => panic!("expected CodedError, got {other:?}"),
             }
         }
-        assert!(op_hint(DbError::Serialization { message: "x".into() }).is_some());
-        assert!(op_hint(DbError::Transient { message: "x".into() }).is_some());
+        assert!(
+            op_hint(DbError::Serialization {
+                message: "x".into()
+            })
+            .is_some()
+        );
+        assert!(
+            op_hint(DbError::Transient {
+                message: "x".into()
+            })
+            .is_some()
+        );
         // LockContention is retriable — must also carry a hint.
-        assert!(op_hint(DbError::LockContention { message: "x".into() }).is_some());
+        assert!(
+            op_hint(DbError::LockContention {
+                message: "x".into()
+            })
+            .is_some()
+        );
         // Non-retryable violations must not advise a retry.
-        assert!(op_hint(DbError::UniqueViolation { message: "x".into() }).is_none());
-        assert!(op_hint(DbError::FkViolation { message: "x".into() }).is_none());
-        assert!(op_hint(DbError::Internal { message: "x".into() }).is_none());
+        assert!(
+            op_hint(DbError::UniqueViolation {
+                message: "x".into()
+            })
+            .is_none()
+        );
+        assert!(
+            op_hint(DbError::FkViolation {
+                message: "x".into()
+            })
+            .is_none()
+        );
+        assert!(
+            op_hint(DbError::Internal {
+                message: "x".into()
+            })
+            .is_none()
+        );
     }
 
     /// `From<compio_postgres::Error>` must route through
@@ -1332,8 +1356,8 @@ mod tests {
     #[test]
     fn first_row_or_internal_returns_internal_err_on_empty() {
         let rows: Vec<i64> = vec![];
-        let err = first_row_or_internal(&rows, "audit: INSERT")
-            .expect_err("empty slice must error");
+        let err =
+            first_row_or_internal(&rows, "audit: INSERT").expect_err("empty slice must error");
         match err {
             DbError::Internal { message } => {
                 assert!(
@@ -1359,35 +1383,51 @@ mod tests {
     fn prefix_message_preserves_variant_and_code() {
         let cases = [
             (
-                DbError::UniqueViolation { message: "boom".into() },
+                DbError::UniqueViolation {
+                    message: "boom".into(),
+                },
                 "unique_violation",
             ),
             (
-                DbError::FkViolation { message: "boom".into() },
+                DbError::FkViolation {
+                    message: "boom".into(),
+                },
                 "fk_violation",
             ),
             (
-                DbError::NotNullViolation { message: "boom".into() },
+                DbError::NotNullViolation {
+                    message: "boom".into(),
+                },
                 "not_null_violation",
             ),
             (
-                DbError::CheckViolation { message: "boom".into() },
+                DbError::CheckViolation {
+                    message: "boom".into(),
+                },
                 "check_violation",
             ),
             (
-                DbError::Serialization { message: "boom".into() },
+                DbError::Serialization {
+                    message: "boom".into(),
+                },
                 "serialization_failure",
             ),
             (
-                DbError::LockContention { message: "boom".into() },
+                DbError::LockContention {
+                    message: "boom".into(),
+                },
                 "lock_not_available",
             ),
             (
-                DbError::Transient { message: "boom".into() },
+                DbError::Transient {
+                    message: "boom".into(),
+                },
                 "transient",
             ),
             (
-                DbError::Internal { message: "boom".into() },
+                DbError::Internal {
+                    message: "boom".into(),
+                },
                 "internal",
             ),
         ];
@@ -1526,9 +1566,8 @@ mod tests {
     /// the seven system fields.
     #[test]
     fn from_query_error_reserved_system_field_carries_hint() {
-        let qe = crate::query::QueryError::ReservedSystemFieldName(
-            "Field name 'id' is reserved".into(),
-        );
+        let qe =
+            crate::query::QueryError::ReservedSystemFieldName("Field name 'id' is reserved".into());
         let db = DbError::from(qe);
         match db {
             DbError::ValidationFailed { code, hint, .. } => {

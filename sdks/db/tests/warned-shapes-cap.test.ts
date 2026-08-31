@@ -60,7 +60,6 @@ describe("Gap P — _warnedShapes is bounded at MAX_WARNED_SHAPES", () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const native = {
-      registerModel: () => Promise.resolve(),
       collection() {
         return {
           async find() {
@@ -122,7 +121,6 @@ describe("Gap P — _warnedShapes is bounded at MAX_WARNED_SHAPES", () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const native = {
-      registerModel: () => Promise.resolve(),
       collection() {
         return {
           async find() {

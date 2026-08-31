@@ -18,11 +18,9 @@ lockstep.
 ## What lives here
 
 - `install-schema.ts` — `installSchema(schema, env, { descriptor }) →
-  { collections, ready }`, the framework-internal installer for the
-  generated `RuntimeSchemaDescriptor`. Walks the descriptor-derived schema
-  map, calls `registerModel` in topo order, and plants typed Collection
-  wrappers on `env.db`. Helpers: `model()`, `validateRefTargets()`,
-  `topoSortByRefs()`, `normalizeSchema()`.
+  { collections }`, the framework-internal installer for the generated
+  `RuntimeSchemaDescriptor`. It plants typed Collection wrappers on
+  `env.db`. Helpers: `model()`, `validateRefTargets()`, `normalizeSchema()`.
 - `dispatcher.ts` — `__zsDispatch(rpcDict, name, input, ctx)`. Owns
   input parse / capability frame / stream framing / dev-only
   output validation. Same logic for dev and prod.
@@ -33,7 +31,7 @@ lockstep.
   user's own `default.fetch`.
 - `runtime-entry.ts` — TLA orchestrator the runtime crate
   `include_str!`s. Reads the injected `RuntimeSchemaDescriptor`, calls
-  `installSchema`, and exposes readiness for the dispatcher.
+  `installSchema`, and exposes mask-policy readiness for the dispatcher.
 - `dev-entry.ts` — dev-mode equivalent that wires the dispatcher /
   fetch handler / schema install around a user-supplied module loader
   (e.g. Vite's ModuleRunner).

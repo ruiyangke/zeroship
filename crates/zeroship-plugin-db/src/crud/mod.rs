@@ -77,10 +77,9 @@ pub mod mask_policy;
 pub(crate) use mask_policy::dispatch_set_mask_policy_field;
 pub(crate) use unmask::{dispatch_bulk_unmask_field, dispatch_unmask_field};
 
-// Mask backfill / rewrite / removal jobs driven by the
-// register-model apply pipeline. Same visibility pattern: `pub` under
-// `test-helpers` so the integration tests can drive the helpers
-// directly without standing up the full orchestrator.
+// Mask backfill / rewrite / removal jobs driven by the migration service.
+// Same visibility pattern: `pub` under `test-helpers` so integration tests
+// can drive the helpers directly without standing up the full orchestrator.
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod mask_backfill;
 
@@ -108,7 +107,7 @@ mod write_pipeline;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(unused_imports)]
 pub use write_pipeline::{
-    reset_write_path_counters_for_tests, write_path_counters_for_tests, WritePathCounters,
+    WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,7 +182,11 @@ fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
 fn current_sql_dialect() -> query::SqlDialect {
     match crate::context::with(|c| c.backend()) {
         Some(crate::backend::BackendHandle::Sqlite(_)) => query::SqlDialect::Sqlite,
-        _ => query::SqlDialect::Postgres,
+        Some(crate::backend::BackendHandle::Postgres(_)) => query::SqlDialect::Postgres,
+        None => match crate::context::with(|c| c.backend_selection()) {
+            Some(crate::BackendUrl::Sqlite { .. }) => query::SqlDialect::Sqlite,
+            _ => query::SqlDialect::Postgres,
+        },
     }
 }
 
@@ -338,11 +341,7 @@ fn lower_boolean_scalar(value: &mut Value) {
 }
 
 fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
-    schema
-        .as_object()?
-        .get(field)?
-        .get("type")?
-        .as_str()
+    schema.as_object()?.get(field)?.get("type")?.as_str()
 }
 
 fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
@@ -359,7 +358,11 @@ fn sqlite_blob_param(bytes: &[u8]) -> String {
     )
 }
 
-fn encode_sqlite_binary_scalar(field: &str, field_def: &Value, value: &mut Value) -> Result<(), DbError> {
+fn encode_sqlite_binary_scalar(
+    field: &str,
+    field_def: &Value,
+    value: &mut Value,
+) -> Result<(), DbError> {
     if value.is_null() {
         return Ok(());
     }
@@ -454,7 +457,10 @@ fn encode_sqlite_binary_doc_with_schema(schema: &Value, doc: &mut Value) -> Resu
     Ok(())
 }
 
-fn encode_sqlite_binary_update_with_schema(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
+fn encode_sqlite_binary_update_with_schema(
+    schema: &Value,
+    patch: &mut Value,
+) -> Result<(), DbError> {
     let Some(obj) = patch.as_object_mut() else {
         return Ok(());
     };
@@ -806,7 +812,8 @@ pub(crate) fn dispatch_insert<'s>(
             Err(e) => return reject_op(resolver, request_id, e),
         };
         maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-        let built = query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect());
+        let built =
+            query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
@@ -868,13 +875,9 @@ pub(crate) fn dispatch_insert_many<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut docs = docs;
-        if let Err(e) = prepare_insert_many_docs_for_binding(
-            &mut docs,
-            &binding,
-            &coll,
-            actor_id.as_deref(),
-        )
-        .await
+        if let Err(e) =
+            prepare_insert_many_docs_for_binding(&mut docs, &binding, &coll, actor_id.as_deref())
+                .await
         {
             return reject_op(resolver, request_id, e);
         }
@@ -884,8 +887,13 @@ pub(crate) fn dispatch_insert_many<'s>(
         };
         maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
 
-        let built =
-            query::build_insert_many_with_dialect(&app, &coll, &schema, &docs, current_sql_dialect());
+        let built = query::build_insert_many_with_dialect(
+            &app,
+            &coll,
+            &schema,
+            &docs,
+            current_sql_dialect(),
+        );
         let result = match built {
             Ok(bq) => {
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
@@ -1007,18 +1015,13 @@ pub(crate) fn dispatch_update_one<'s>(
         let per_row_encrypted_update =
             write_pipeline::update_requires_per_row_encryption(&schema, &update);
         let target_row = if per_row_encrypted_update {
-            let target_rows = match write_pipeline::resolve_target_row_ids(
-                &route,
-                &coll,
-                &filter,
-                1,
-                &schema,
-            )
-            .await
-            {
-                Ok(rows) => rows,
-                Err(e) => return reject_op(resolver, request_id, e),
-            };
+            let target_rows =
+                match write_pipeline::resolve_target_row_ids(&route, &coll, &filter, 1, &schema)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(e) => return reject_op(resolver, request_id, e),
+                };
             let Some(target_row) = target_rows.first().cloned() else {
                 if let Some(expected_version) = cas_version {
                     let row_id = filter
@@ -1286,11 +1289,7 @@ pub(crate) fn dispatch_update_many<'s>(
                             .as_object()
                             .and_then(|o| o.get("id"))
                             .and_then(|v| v.as_str());
-                        return Err(DbError::version_mismatch(
-                            &coll,
-                            row_id,
-                            expected_version,
-                        ));
+                        return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                     }
                     return Ok(0);
                 }
@@ -1305,9 +1304,7 @@ pub(crate) fn dispatch_update_many<'s>(
                         &binding,
                         &coll,
                         &mut row_update,
-                        write_pipeline::ApplyMode::Update {
-                            row_pk: &row_pk,
-                        },
+                        write_pipeline::ApplyMode::Update { row_pk: &row_pk },
                     )
                     .await?;
                     maybe_lower_sqlite_boolean_update(&schema, &mut row_update);
@@ -1352,11 +1349,7 @@ pub(crate) fn dispatch_update_many<'s>(
                             .as_object()
                             .and_then(|o| o.get("id"))
                             .and_then(|v| v.as_str());
-                        return Err(DbError::version_mismatch(
-                            &coll,
-                            row_id,
-                            expected_version,
-                        ));
+                        return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                     }
                 }
                 Ok(affected)
@@ -1502,9 +1495,14 @@ pub(crate) fn dispatch_delete_one<'s>(
             // setting `deleted_at`. Subscribers wanting to react
             // to soft-deletes inspect `new_tuple.deleted_at`.
             let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update)
-                    .await?;
-            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default()).await
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            read_pipeline::apply(
+                &binding,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
         |result: read_pipeline::ApplyResult| {
             first_row_or_null_masked(result.rows, result.has_masked)
@@ -1580,8 +1578,14 @@ pub(crate) fn dispatch_purge_one<'s>(
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_delete_one_with_dialect(app_id, collection, &schema, &filter, current_sql_dialect())
-            .map_err(DbError::from)
+        query::build_delete_one_with_dialect(
+            app_id,
+            collection,
+            &schema,
+            &filter,
+            current_sql_dialect(),
+        )
+        .map_err(DbError::from)
     });
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -1593,8 +1597,7 @@ pub(crate) fn dispatch_purge_one<'s>(
         built,
         move |bq| async move {
             let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete)
-                    .await?;
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete).await?;
             read_pipeline::apply(
                 &binding,
                 &coll,
@@ -2043,11 +2046,11 @@ pub(crate) fn dispatch_upsert<'s>(
         );
         let result = match built {
             Ok(bq) => {
-            // Upsert can be either INSERT (new row) or UPDATE (existing).
-            // We tag as Update because the subscriber's reaction is the
-            // same -- re-fetch. Finer-grained read-set narrowing could
-            // distinguish INSERT from UPDATE; this coarser tagging
-            // doesn't need to.
+                // Upsert can be either INSERT (new row) or UPDATE (existing).
+                // We tag as Update because the subscriber's reaction is the
+                // same -- re-fetch. Finer-grained read-set narrowing could
+                // distinguish INSERT from UPDATE; this coarser tagging
+                // doesn't need to.
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
             }
             Err(e) => Err(DbError::from(e)),
@@ -2151,8 +2154,7 @@ pub(crate) fn dispatch_search<'s>(
                 } else {
                     let err = DbError::Configuration {
                         code: "invalid_vector_arg",
-                        message: "search: every element of `vector` must be a number"
-                            .to_string(),
+                        message: "search: every element of `vector` must be a number".to_string(),
                         hint: None,
                     };
                     let op_err: OpError = err.to_op_error();
@@ -2235,11 +2237,8 @@ pub(crate) fn dispatch_search<'s>(
         // dispatch helper isn't generic over the backend; runtime
         // wiring stashes a `BackendHandle` per isolate that we route
         // through the existing `as_postgres()` accessor.
-        let backend = crate::context::with(|c| c.backend());
         let result: Result<Vec<Value>, DbError> = async {
-            let backend = backend.ok_or_else(|| {
-                DbError::config("not_configured", "db: backend not initialized".to_string())
-            })?;
+            let backend = crate::exec::ensure_backend_for_shared_sql().await?;
             let pg_path = || async {
                 let pg = backend
                     .as_postgres()
@@ -2255,6 +2254,7 @@ pub(crate) fn dispatch_search<'s>(
             // based on which arm the runtime is bound to, not on
             // Cargo-feature ordering.
             if let Some(sq) = backend.as_sqlite() {
+                sq.attach_app_file(binding.app_id()).await?;
                 use crate::backend::VectorIndex as _;
                 return sq
                     .vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
@@ -2408,17 +2408,15 @@ pub(crate) fn dispatch_near<'s>(
     let point = crate::backend::GeoPoint { lat, lng };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let backend = crate::context::with(|c| c.backend());
         let result: Result<Vec<Value>, DbError> = async {
-            let backend = backend.ok_or_else(|| {
-                DbError::config("not_configured", "db: backend not initialized".to_string())
-            })?;
+            let backend = crate::exec::ensure_backend_for_shared_sql().await?;
             // SQLite arm routes through the pure-Rust haversine
             // flat-scan `SpatialIndex` impl on `SqliteBackend`.
             // Short-circuit BEFORE the PG path so a build with both
             // arms compiled in dispatches based on which arm the
             // runtime is bound to.
             if let Some(sq) = backend.as_sqlite() {
+                sq.attach_app_file(binding.app_id()).await?;
                 use crate::backend::SpatialIndex as _;
                 return sq
                     .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
@@ -2598,17 +2596,28 @@ async fn encryption_pass_dispatch(
     doc: &mut Value,
     sidechannel: &mut mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
     if let Some(pg) = backend.as_encrypted_column_pg() {
         return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-            pg, app_id, collection, schema, row_pk, doc, sidechannel,
+            pg,
+            app_id,
+            collection,
+            schema,
+            row_pk,
+            doc,
+            sidechannel,
         )
         .await;
     }
     if let Some(sq) = backend.as_encrypted_column_sqlite() {
         return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-            sq, app_id, collection, schema, row_pk, doc, sidechannel,
+            sq,
+            app_id,
+            collection,
+            schema,
+            row_pk,
+            doc,
+            sidechannel,
         )
         .await;
     }
@@ -2673,6 +2682,15 @@ mod tests {
     use base64::Engine as _;
 
     #[test]
+    fn configured_sqlite_dialect_does_not_require_an_open_backend() {
+        crate::reset_context_for_tests();
+        crate::set_db_url_for_tests("sqlite::memory:");
+        assert!(crate::context::with(|context| context.backend()).is_none());
+        assert_eq!(current_sql_dialect(), query::SqlDialect::Sqlite);
+        crate::reset_context_for_tests();
+    }
+
+    #[test]
     fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
         let schema = serde_json::json!({
             "active": { "type": "boolean" },
@@ -2687,7 +2705,10 @@ mod tests {
 
         lower_boolean_filter_with_schema(&schema, &mut filter);
 
-        assert_eq!(filter["$and"][0]["active"]["$in"], serde_json::json!([1, 0]));
+        assert_eq!(
+            filter["$and"][0]["active"]["$in"],
+            serde_json::json!([1, 0])
+        );
         assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
     }
 

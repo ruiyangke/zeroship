@@ -57,7 +57,6 @@ export interface CrudCollectionInternals<
   _knownFields: Set<string>;
   _idLoader: IdLoader<Row<S>> | null;
   _txDepth: number;
-  ensureReady(): Promise<void>;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _toResultError(e: unknown): Error;
   _loadById(id: string, txDepthAtCall: number): Promise<Row<S> | null>;
@@ -314,7 +313,6 @@ export async function loadByIdCollection<
   id: string,
   txDepthAtCall: number,
 ): Promise<Row<S> | null> {
-  await self.ensureReady();
   if (self._idLoader === null) {
     self._idLoader = new IdLoader<Row<S>>(
       async (ids) => {
@@ -393,10 +391,7 @@ export function findCollection<
   const q = new Query<S, Row<S>, AllSchemas>(
     self._name,
     mapped,
-    async (_col, f, fopts) => {
-      await self.ensureReady();
-      return self._nativeCollection().find(f, fopts);
-    },
+    async (_col, f, fopts) => self._nativeCollection().find(f, fopts),
     self._toField,
     self._toColumn,
     (rows, spec) => self._loadRelations(rows, spec),

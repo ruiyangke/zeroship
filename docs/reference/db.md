@@ -461,13 +461,10 @@ plausible-looking answers are wrong.
 **It is not `crates/zeroship-plugin-db/src/cross_app_fk.rs`.** That file holds a
 `reject_cross_app_fk` validator that scans `refTarget` for an `<other_app>.`
 prefix and returns `cross_app_fk_forbidden`, and it is the mechanism this page
-used to cite. As of 2026-08-20 it has **no production call site**: one caller
-lives in a `#[cfg(any(test, feature = "test-helpers"))]` module, the other in a
-function whose every caller is a `#[cfg(test)]` test. Production
-`registerModel` issues no DDL on either backend, so it never runs. Nor is it
-`crates/zeroship-schema`, whose FK builders are reached only from that same
-cfg-gated pipeline; the migration engine carries its own copy of that renderer
-and does not depend on the crate.
+used to cite. It has **no production call site**; integration tests call it
+directly to pin the policy-level refusal. Nor is it `crates/zeroship-schema`;
+the migration engine carries its own copy of that renderer and does not depend
+on the crate.
 
 **Schema is applied by the migration engine at deploy**, and that is where the
 answer lives. Four things hold there, in order:
@@ -1159,8 +1156,7 @@ Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
 
 **Platform-internal — NOT on `env.db` (P9 §8 `__platform` capability gate):**
 
-`registerModel`, `setMaskPolicy`, and the
-`migrations` / `replication` namespaces are **not** properties of
+`setMaskPolicy` and the `replication` namespace are **not** properties of
 `env.db`. They live on a `DbPlatform` capability handle the runtime sets
 on `env.db` under a **V8 private symbol** and hands only to
 `@zeroship/bootstrap`'s runtime-entry. They are unreachable from app
@@ -1170,9 +1166,10 @@ code:
 - The handle is invisible to `Object.keys` / `getOwnPropertyNames` /
   `getOwnPropertySymbols` / `Reflect.ownKeys` / `for..in` / JSON — a
   `v8::Private` slot is not a JS property and cannot be keyed from JS.
-- Schema registration happens automatically at app boot: the platform
-  installer reads the generated runtime descriptor and registers each
-  collection via the platform handle. You never call `registerModel` yourself.
+- Runtime boot validates the generated descriptor and asks plugin-db to publish
+  its complete collection field-map set natively before creator modules run.
+  `installSchema` reads the same descriptor only to plant typed JavaScript
+  `Collection` wrappers.
 
 Public type contracts live in `sdks/types/db.d.ts` (which no longer
 declares the platform-internal classes — those moved to

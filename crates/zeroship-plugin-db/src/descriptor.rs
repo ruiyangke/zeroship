@@ -34,19 +34,16 @@
 //! # Where the descriptor comes from
 //!
 //! `manifest.runtime_descriptor` -> the worker resolves the blob
-//! (`crates/zeroship-worker/src/sync.rs:40-70`) -> `RuntimeState.runtime_descriptor`
-//! -> `setup_globals` validates and exposes it as
-//! `globalThis.__zsRuntimeDescriptor`
-//! (`crates/zeroship-runtime/src/core/init.rs:3415-3434`) -> `installSchema`
-//! walks it and calls `registerModel` per collection
-//! (`sdks/bootstrap/src/install-schema.ts:1314-1350`) -> `register_model_dispatch`
-//! installs each entry into the per-isolate store. The `storage` block survives
-//! that whole chain untouched: `normalizeSchema`'s wire-`FieldDef` branch is a
-//! shallow spread (`install-schema.ts:369-372`) and `read_json_arg` converts the
-//! whole V8 value without filtering keys.
+//! (`crates/zeroship-worker/src/sync.rs`) -> `RuntimeState.runtime_descriptor`
+//! -> runtime boot validates the complete value, injects
+//! `globalThis.__zsRuntimeDescriptor` for the JavaScript SDK, and invokes
+//! `DbPlugin::bind_runtime_descriptor` before creator modules evaluate. The DB
+//! plugin publishes every collection's `fields` map to the thread-local store in
+//! one synchronous replacement. The `storage` block therefore survives
+//! unchanged, without a Rust -> JavaScript -> Rust registration round trip.
 //!
-//! The dev tier takes the same last three steps off the global that
-//! `sdks/vite-plugin/src/dev-bootstrap/index.ts` sets.
+//! The dev tier passes the generated descriptor to `zeroship serve`, which puts
+//! it on `RuntimeState` and takes this same native boot path.
 
 use std::sync::Arc;
 
@@ -116,14 +113,22 @@ mod tests {
         let pinned = DbBinding::new("app_two_deploys", "deploy_pinned");
         let current = DbBinding::new("app_two_deploys", "deploy_current");
         crate::context::with_mut(|c| {
-            c.cache_schema(&pinned, "secrets", json!({ "marker": { "type": "string" } }));
+            c.cache_schema(
+                &pinned,
+                "secrets",
+                json!({ "marker": { "type": "string" } }),
+            );
         });
         assert!(
             collection_schema(&current, "secrets").is_err(),
             "the current deploy must not read the pinned deploy's descriptor entry",
         );
         crate::context::with_mut(|c| {
-            c.cache_schema(&current, "secrets", json!({ "other": { "type": "string" } }));
+            c.cache_schema(
+                &current,
+                "secrets",
+                json!({ "other": { "type": "string" } }),
+            );
         });
         assert_eq!(
             collection_schema(&pinned, "secrets").unwrap().as_ref(),

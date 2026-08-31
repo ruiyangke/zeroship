@@ -131,7 +131,7 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #       reason "default gate runs the sqlite leg only", which named THIS script
 #       and was wrong about it: nothing here passes `--ignored`, so the one job
 #       that could run it never did, and it sat broken from the 2026-08-10
-#       registerModel cutover until someone read it. Removing the attribute is
+#       per-collection schema boot cutover until someone read it. Removing the attribute is
 #       what puts it in this count.
 #   +1  bytes_column_stores_raw_bytes_on_postgres. A genuinely new test in
 #       `integration`, and the only one of the two written for the t.bytes()

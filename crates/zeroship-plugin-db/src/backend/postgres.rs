@@ -1,8 +1,8 @@
 //! `PostgresBackend` — the single concrete impl of [`super::Backend`].
 //!
 //! Wraps the `compio_postgres::Pool` and the configured URL. Every PG-
-//! flavoured call moves here so consumer files (`register_model/*`,
-//! `transaction/*`) can stay free of `compio_postgres::Client` direct
+//! flavoured call moves here so consumer files such as `transaction/*` can stay
+//! free of `compio_postgres::Client` direct
 //! references and go through the trait instead.
 //!
 //! The methods are intentionally thin — they forward to the existing
@@ -24,12 +24,12 @@ use std::rc::Rc;
 use crate::diff::LiveSchema;
 use crate::error::DbError;
 
-use super::{
-    DialectBuilder, GeoPoint, LockManager, PgSqlExecutor,
-    SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
-};
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
+use super::{
+    DialectBuilder, GeoPoint, LockManager, PgSqlExecutor, SpatialIndex, SqlExecutor, VectorIndex,
+    VectorMetric,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 use super::{PgLockManager, SchemaIntrospect};
 
@@ -308,8 +308,7 @@ impl LockManager for PostgresBackend {
         key1: &str,
         key2: &str,
     ) -> Result<bool, DbError> {
-        let sql =
-            "SELECT pg_try_advisory_lock(hashtext($1)::int4, hashtext($2)::int4) AS got";
+        let sql = "SELECT pg_try_advisory_lock(hashtext($1)::int4, hashtext($2)::int4) AS got";
         let rows = client
             .query_text_params(sql, &[key1, key2])
             .await
@@ -467,9 +466,13 @@ impl VectorIndex for PostgresBackend {
         .map_err(DbError::from)?;
 
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows =
-            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
-                .await?;
+        let rows = crate::exec::query_postgres_pool_with_autocommit_role(
+            &self.pool,
+            app_id,
+            &bq.sql,
+            &param_refs,
+        )
+        .await?;
         Ok(crate::v8_bridge::rows_to_json_value(&rows))
     }
 }
@@ -513,10 +516,7 @@ impl PostgresBackend {
         let empty: Vec<&str> = Vec::new();
         let rows = self
             .pool
-            .query_text_params(
-                "SELECT 1 FROM pg_extension WHERE extname='postgis'",
-                &empty,
-            )
+            .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &empty)
             .await
             .map_err(|e| DbError::from_pg(&e))?;
         let present = !rows.is_empty();
@@ -562,9 +562,13 @@ impl SpatialIndex for PostgresBackend {
         )
         .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows =
-            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
-                .await?;
+        let rows = crate::exec::query_postgres_pool_with_autocommit_role(
+            &self.pool,
+            app_id,
+            &bq.sql,
+            &param_refs,
+        )
+        .await?;
         Ok(crate::v8_bridge::rows_to_json_value(&rows))
     }
 }
@@ -574,9 +578,8 @@ impl PgLockManager for PostgresBackend {
     async fn acquire_pooled_client_for_lock(
         &self,
     ) -> Result<compio_postgres::OwnedPooledClient, DbError> {
-        // Mirror the pre-PR-3 inline call site at
-        // `register_model/bootstrap.rs:103`: a pool checkout with the same
-        // operator-facing error message so log lines stay grep-able.
+        // Keep one typed pool-checkout error so operator log lines stay
+        // grep-able across test-helper callers.
         self.pool.get_owned().await.map_err(|e| DbError::Transient {
             message: format!("db: failed to acquire orchestrator client: {e}"),
         })
@@ -715,11 +718,7 @@ impl Backend for PostgresBackend {}
 impl crate::backend::EncryptedColumn for PostgresBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
-    async fn resolve_key(
-        &self,
-        app_id: &str,
-        key_id: &str,
-    ) -> Result<Self::KeyHandle, DbError> {
+    async fn resolve_key(&self, app_id: &str, key_id: &str) -> Result<Self::KeyHandle, DbError> {
         self.key_store.resolve(app_id, key_id).await
     }
 
@@ -828,11 +827,11 @@ mod backup_pg {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::PostgresBackend;
+    use crate::backend::SNAPSHOT_RESTORE_LOCK_TAG;
     use crate::backend::{
         BusyPolicy, LockGuard, LockScope, PgLockManager, PitrTarget, SnapshotHandle, SnapshotOpts,
     };
     use crate::error::DbError;
-    use crate::backend::REGISTER_MODEL_LOCK_TAG;
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
     /// path. Returns a typed `Configuration` error for unsupported
@@ -907,11 +906,7 @@ mod backup_pg {
     /// shapes the SDK needs to branch on get a coded variant; the rest
     /// pass through as `Internal` with the raw stderr in the message
     /// so the operator can read it from the log.
-    fn classify_pg_tool_failure(
-        op: &'static str,
-        stderr: &str,
-        if_busy: BusyPolicy,
-    ) -> DbError {
+    fn classify_pg_tool_failure(op: &'static str, stderr: &str, if_busy: BusyPolicy) -> DbError {
         // `pg_dump: error: connection to server ... failed: …` —
         // transient infra issue. When the caller asked for Retry we
         // mark it retryable; otherwise propagate the same code so the
@@ -937,9 +932,7 @@ mod backup_pg {
         }
         // `pg_dump: error: relation "<app>.<table>" does not exist` /
         // schema not found.
-        if stderr.contains("does not exist")
-            || stderr.contains("no matching schemas were found")
-        {
+        if stderr.contains("does not exist") || stderr.contains("no matching schemas were found") {
             return DbError::Configuration {
                 code: "snapshot_app_unknown",
                 message: format!(
@@ -947,8 +940,7 @@ mod backup_pg {
                     stderr.trim().lines().next().unwrap_or(stderr.trim())
                 ),
                 hint: Some(
-                    "verify the app_id matches a schema that exists on this database"
-                        .to_string(),
+                    "verify the app_id matches a schema that exists on this database".to_string(),
                 ),
             };
         }
@@ -987,15 +979,15 @@ mod backup_pg {
         dest_uri: &str,
         opts: SnapshotOpts,
     ) -> Result<SnapshotHandle, DbError> {
-        // Pre-flight: hold the per-app `register_model` lock for the
-        // duration of pg_dump so no concurrent deploy mutates the
-        // schema while we capture it. Contention surfaces as
+        // Pre-flight: hold the per-app snapshot/restore lock for the duration
+        // of pg_dump so another backup operation cannot replace the database
+        // while we capture it. Contention surfaces as
         // `migration_in_progress` regardless of `opts.if_busy` — the
         // SDK branches on `.code` and the caller chooses to retry.
         let lock_client = backend.acquire_pooled_client_for_lock().await?;
         let scope = LockScope::GlobalApp {
             app_id: app_id.to_string(),
-            name: REGISTER_MODEL_LOCK_TAG.to_string(),
+            name: SNAPSHOT_RESTORE_LOCK_TAG.to_string(),
         };
         let guard = match LockGuard::acquire(backend, lock_client, &scope).await {
             Ok(g) => g,
@@ -1007,8 +999,7 @@ mod backup_pg {
                          {message}"
                     ),
                     hint: Some(
-                        "retry the snapshot once the in-flight register_model / migration \
-                         completes"
+                        "retry the snapshot once the in-flight snapshot / restore completes"
                             .to_string(),
                     ),
                 });
@@ -1021,9 +1012,7 @@ mod backup_pg {
         if let Some(parent) = dest_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| DbError::Internal {
-                    message: format!(
-                        "snapshot: create parent dir {parent:?} failed: {e}"
-                    ),
+                    message: format!("snapshot: create parent dir {parent:?} failed: {e}"),
                 })?;
             }
         }
@@ -1077,9 +1066,7 @@ mod backup_pg {
                 let _ = guard.release().await;
                 let _ = std::fs::remove_file(&dest_path);
                 return Err(DbError::Internal {
-                    message: format!(
-                        "snapshot: SHA-256 of {dest_path_str:?} failed: {e}"
-                    ),
+                    message: format!("snapshot: SHA-256 of {dest_path_str:?} failed: {e}"),
                 });
             }
         };
@@ -1102,15 +1089,13 @@ mod backup_pg {
         app_id: &str,
         snapshot: &SnapshotHandle,
     ) -> Result<(), DbError> {
-        // Hold the per-app register_model lock for the whole restore.
-        // This prevents concurrent deploys from racing the
-        // drop-and-recreate sequence — without it, a register_model
-        // running mid-restore would see an empty schema and CREATE
-        // its own tables on top of whatever pg_restore is rebuilding.
+        // Hold the per-app snapshot/restore lock for the whole restore so
+        // another backup operation cannot observe the drop-and-recreate
+        // sequence.
         let lock_client = backend.acquire_pooled_client_for_lock().await?;
         let scope = LockScope::GlobalApp {
             app_id: app_id.to_string(),
-            name: REGISTER_MODEL_LOCK_TAG.to_string(),
+            name: SNAPSHOT_RESTORE_LOCK_TAG.to_string(),
         };
         let guard = match LockGuard::acquire(backend, lock_client, &scope).await {
             Ok(g) => g,
@@ -1122,8 +1107,7 @@ mod backup_pg {
                          {message}"
                     ),
                     hint: Some(
-                        "retry the restore once the in-flight register_model / migration \
-                         completes"
+                        "retry the restore once the in-flight snapshot / restore completes"
                             .to_string(),
                     ),
                 });
@@ -1165,9 +1149,7 @@ mod backup_pg {
             Err(e) => {
                 let _ = guard.release().await;
                 return Err(DbError::Internal {
-                    message: format!(
-                        "restore: SHA-256 of {src_path:?} failed: {e}"
-                    ),
+                    message: format!("restore: SHA-256 of {src_path:?} failed: {e}"),
                 });
             }
         }
@@ -1194,11 +1176,7 @@ mod backup_pg {
         // entity prefixes), not user input.
         let drop_sql = format!(r#"DROP SCHEMA IF EXISTS "{app_id}" CASCADE"#);
         let empty: Vec<&str> = Vec::new();
-        if let Err(e) = backend
-            .pool()
-            .query_text_params(&drop_sql, &empty)
-            .await
-        {
+        if let Err(e) = backend.pool().query_text_params(&drop_sql, &empty).await {
             let _ = guard.release().await;
             return Err(DbError::Internal {
                 message: format!("restore: DROP SCHEMA failed: {}", DbError::from_pg(&e)),
@@ -1239,19 +1217,14 @@ mod backup_pg {
             let _ = guard.release().await;
             // The schema is empty at this point — the operator needs
             // to know that the partial restore left no data.
-            let base = classify_pg_tool_failure(
-                "pg_restore",
-                &stderr,
-                BusyPolicy::Abort,
-            );
+            let base = classify_pg_tool_failure("pg_restore", &stderr, BusyPolicy::Abort);
             return Err(match base {
                 DbError::Internal { message } => DbError::Coded {
                     code: "restore_failed".to_string(),
                     message: format!(
                         "{message}\n\
                          NOTE: schema {app_id:?} is EMPTY after partial restore — \
-                         operator must re-restore or re-run register_model to \
-                         reconstruct state"
+                         operator must re-run restore to reconstruct state"
                     ),
                     hint: Some(
                         "P6a hardening lands the swap_schema_atomic SECURITY DEFINER \
@@ -1341,8 +1314,8 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        Backend, DialectBuilder, LockManager, PgLockManager, PgSqlExecutor, RegisterBackend,
-        SchemaIntrospect, SqlExecutor,
+        Backend, DialectBuilder, LockManager, PgLockManager, PgSqlExecutor, SchemaIntrospect,
+        SqlExecutor,
     };
 
     /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
@@ -1365,13 +1338,11 @@ mod tests {
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
-        fn impls_register_backend<T: RegisterBackend>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
         impls_schema_introspect::<PostgresBackend>();
         impls_pg_sql_executor::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();
-        impls_register_backend::<PostgresBackend>();
 
         // `DialectBuilder` impl lands directly on the backend
         // (not on the `Backend` super-trait -- the trait composition
