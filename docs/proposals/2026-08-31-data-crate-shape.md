@@ -176,8 +176,29 @@ may be deleted. Reads carry no such entanglement.
 modules to extract. `broker.rs` is a process-wide in-memory router that merges TWO sources - its own
 header: "local mutations within any isolate in this process, and pgoutput WAL frames decoded by the
 streaming consumer". `crates/zeroship-plugin-db/src/backend/sqlite/cdc.rs:646` calls
-`crate::broker::publish(&event)` directly. Moving it would turn every local `db.insert(...)` into a
-network round trip to observe your own write.
+`crate::broker::publish(&event)` directly.
+
+**The broker stays, but the reason given here was WRONG - corrected 2026-08-31 by review, verified
+against `exec.rs`.** This paragraph used to end "Moving it would turn every local `db.insert(...)`
+into a network round trip to observe your own write." That is not what the code does. `emit_for_rows`
+(`crates/zeroship-plugin-db/src/exec.rs:470`) returns BEFORE emitting locally in both production
+configurations:
+
+- `:478` - on SQLite, because the writer actor's commit hook already publishes; the SDK-local emit
+  "races the CDC publisher and produces duplicate identical live snapshots" (`:481-482`).
+- `:485` - on PostgreSQL whenever the WAL consumer is running for that app, because, in its own
+  words, "the WAL consumer is running for this app, [so] it owns the publish path for events this
+  isolate writes. The corresponding `emit_local` call would be a no-op" (`:448-451`).
+
+So the SDK-local emit at `:490` onwards is reached only on what `:480` names "the Postgres/no-WAL-
+consumer path". **A PostgreSQL subscriber already observes its own write via WAL today.** There is no
+in-process short circuit to protect.
+
+**The correct reason the broker stays is registry locality, not write latency.** It is the
+subscriber registry that V8 objects hold handles into: `v8_classes/subscription.rs:3` - "The wrapper
+owns the `broker::Subscription` directly in its V8 [slot]" - with `:316` minting it through
+`broker::try_subscribe`. A registry whose handles live in V8 slots cannot leave the process that
+runs V8. That argument holds regardless of which side publishes.
 
 So the seam is one module lower:
 
@@ -216,10 +237,13 @@ it keep decoding its own stream while only the privileged and destructive parts 
 - **Full** - the whole WAL side moves and the worker loses REPLICATION outright, satisfying the
   invariant rather than approximating it.
 
-**Full is cheaper than an earlier draft of this document claimed.** That draft said full extraction
-"adds a hop to every subscription". It does not: the broker stays, so LOCAL writes still short-
-circuit in-process with no network at all. The hop lands only on changes originating in OTHER
-processes - which already travel through WAL today. And the worker needs no new client machinery,
+**Full is cheaper than an earlier draft of this document claimed - and the reason is now the
+measured one.** That draft said full extraction "adds a hop to every subscription". A second draft
+answered that "the broker stays, so LOCAL writes still short-circuit in-process with no network at
+all", which is false: `exec.rs:485` suppresses the local emit for exactly the apps whose WAL consumer
+is running. The correct answer is stronger than either. **On PostgreSQL a subscriber's own write is
+ALREADY WAL-bound today**, so extraction cannot add a round trip to a path that never had one - it
+adds one process hop to a path already going through WAL. The worker needs no new client machinery,
 because the relay would feed `broker::publish` over a transport exactly where `wal_consumer` feeds it
 in-process now. The broker is already the merge point and does not care which side an event came
 from.
