@@ -75,6 +75,8 @@ below was re-run by the pilot against the FULL seven-target gate
 | 37 Frame-offset guard | 2 | was UNBOUND, now BOUND each | `{first_matching_tag,error_response_before}_advances_past_the_entire_leading_frame` |
 | 38 Deferred codec error | 4 (+1 uncounted guard arm) | covered, NOT independently bound - and correctly so, see below | one specific test per copy + a deliberate aggregate |
 | 39 TLS release attachment | 2 | connect_raw covered by 4; **replication copy was UNBOUND** | `dropping_a_tls_replication_connection_sends_close_notify` (new) |
+| 40 Request COPY flags | 2 | UNRULED - the mutation HANGS rather than fails, see note | - |
+| 41 COPY state reset | 2 | 1 covered (26 COPY-specific failures); **1 UNBOUND** | the `CopyFrame(None)` reset at the multiplexed arm is uncovered |
 | 42 Weak pool callbacks | 6 | BOUND | agent table |
 | 43 Weak pool metrics | 2 | BOTH were UNBOUND | `housekeeping_after_connect_{failure,ineligibility}_records_an_eviction` |
 | 45 Streaming COPY refusal | 2 | BOUND each | agent table |
@@ -142,6 +144,23 @@ targets, not seven.
 Worth copying: the two tests use distinct parameter sentinels (`[1101101]` and
 `[2202202]`), so a mutation's failure message names which copy was hit rather
 than only that something failed.
+
+### A mutation that HANGS is not a verdict either
+
+Group 40's `ReadObligation::new(deadline, is_copy)` takes an `is_copy` flag.
+Setting it to `false` does not make tests fail - it makes
+`copy_in_works_on_the_serialized_loop` DEADLOCK, because the COPY read
+obligation never arms and the loop waits for a read that is never scheduled.
+The probe ran 35 minutes with no result.
+
+That tells you the flag is load-bearing and nothing else. Worse, a hung run
+defeats the restore: the script sits in `wait`, so its EXIT trap cannot fire
+until the child is killed, and the mutated file stays in the tree meanwhile.
+
+For a flag whose removal deadlocks, pick a mutation that keeps the loop
+progressing - flip a downstream consumer of the flag rather than the flag
+itself - or bound the run with `timeout` so a hang reports as a hang instead of
+stalling the sweep.
 
 ### A mutation that breaks 216 tests has not isolated anything
 
