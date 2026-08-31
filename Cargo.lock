@@ -7877,6 +7877,7 @@ dependencies = [
  "tracing",
  "zeroship-core",
  "zeroship-data-plan",
+ "zeroship-migrate",
  "zeroship-migrate-core",
 ]
 

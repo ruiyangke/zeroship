@@ -326,7 +326,7 @@ pub(super) const CASES: &[Stream] = &[
         // Postgres regardless of target.
         name: "c_dialectal_leg_selection",
         ops: r#"[
-  {"op":"dialectal","legs":{"postgres":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"pg_only","type":"text"}],"primaryKey":["id"],"runtimeOptions":{"softDelete":true,"versioning":false},"indexes":[{"name":"docs_pg_idx","columns":[{"kind":"column","name":"pg_only"}]}]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"sqlite_only","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_only","type":"text"}],"primaryKey":["id"]}]}}
+  {"op":"dialectal","legs":{"postgres":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"postgres_leg","type":"text"}],"primaryKey":["id"],"runtimeOptions":{"softDelete":true,"versioning":false},"indexes":[{"name":"docs_pg_idx","columns":[{"kind":"column","name":"postgres_leg"}]}]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"embedded_leg","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_leg","type":"text"}],"primaryKey":["id"]}]}}
 ]"#,
     },
     Stream {
@@ -1320,9 +1320,9 @@ const ROWS: &[Row] = &[
     // plain index reach the runtime-metadata answer (row 7,
     // docs/review-log.md:18536-18539) -- which is what the `indexes(docs)` row
     // shows on Postgres and does not show on the other two.
-    Row { key: "c_dialectal_leg_selection|Postgres|columns(docs)", verdict: "AGREED {id,pg_only}", status: Status::Consistent },
-    Row { key: "c_dialectal_leg_selection|Sqlite|columns(docs)", verdict: "AGREED {id,sqlite_only}", status: Status::Consistent },
-    Row { key: "c_dialectal_leg_selection|Mysql|columns(docs)", verdict: "AGREED {id,mysql_only}", status: Status::Consistent },
+    Row { key: "c_dialectal_leg_selection|Postgres|columns(docs)", verdict: "AGREED {id,postgres_leg}", status: Status::Consistent },
+    Row { key: "c_dialectal_leg_selection|Sqlite|columns(docs)", verdict: "AGREED {embedded_leg,id}", status: Status::Consistent },
+    Row { key: "c_dialectal_leg_selection|Mysql|columns(docs)", verdict: "AGREED {id,mysql_leg}", status: Status::Consistent },
     Row { key: "c_dialectal_leg_selection|Postgres|runtime_options(docs)", verdict: "AGREED TableRuntimeOptions { soft_delete: true, versioning: false, strictness: Strict }", status: Status::Consistent },
     Row { key: "c_dialectal_leg_selection|Sqlite|runtime_options(docs)", verdict: "AGREED TableRuntimeOptions { soft_delete: false, versioning: false, strictness: Strict }", status: Status::Consistent },
     Row { key: "c_dialectal_leg_selection|Mysql|runtime_options(docs)", verdict: "AGREED TableRuntimeOptions { soft_delete: false, versioning: false, strictness: Strict }", status: Status::Consistent },

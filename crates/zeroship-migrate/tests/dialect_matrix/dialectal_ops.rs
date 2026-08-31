@@ -228,7 +228,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
         r#"{"ir_version":1,"name":"sqlite_skip_postgres_leg","ops":[
           {"op":"createTable","name":"docs","columns":[{"name":"title","type":"text"}]},
           {"op":"dialectal","legs":{"postgres":[
-            {"op":"addColumn","table":"docs","column":"pg_only","type":"text"}
+            {"op":"addColumn","table":"docs","column":"postgres_only","type":"text"}
           ],"sqlite":[]}}
         ]}"#,
     );
@@ -270,7 +270,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
 
     let rows = be
         .actor()
-        .query("SELECT name FROM pragma_table_info('docs') WHERE name='pg_only'")
+        .query("SELECT name FROM pragma_table_info('docs') WHERE name='postgres_only'")
         .await
         .expect("pragma_table_info probe");
     assert!(

@@ -52,7 +52,7 @@
 //! The fences genuinely differ, and SC-3 is emphatic that they are **a pair,
 //! not a single guardian**: a *table* name is fenced by `validate_collection`'s
 //! prefix list, a *column* name by a second list in `RESERVED_NAMES` (`_`,
-//! `__zs_`, `__zeroship_`, `sqlite_`, the `_masked` sibling suffix, and the six
+//! `__zs_`, `__zeroship_`, the `_masked` sibling suffix, and the six
 //! classification names).
 //!
 //! **`validate_collection` is FORKED.** The data plane and migration engine
@@ -66,11 +66,9 @@
 //! Code paths that do not load migration IR must still invoke their own copy;
 //! matching slices do nothing by themselves.
 //!
-//! Three role-specific decisions are deliberate departures from the shapes in
+//! Two role-specific decisions are deliberate departures from the shapes in
 //! `query.rs`, and each is called out on the table that carries it:
 //!
-//! * [`IdentRole::Collection`] fences `sqlite_`, which `validate_collection`
-//!   does **not**. See [`COLLECTION_RESERVATIONS`].
 //! * [`IdentRole::Alias`] permits a single leading `_`, which
 //!   `validate_field_name` does not. See [`ALIAS_RESERVATIONS`].
 //! * No role fences the seven platform system-field names. That reservation
@@ -124,7 +122,7 @@ impl IdentRole {
     const fn reservations(self) -> &'static [Reservation] {
         match self {
             Self::Namespace => NAMESPACE_RESERVATIONS,
-            Self::Collection => COLLECTION_RESERVATIONS,
+            Self::Collection => &[],
             Self::Column => COLUMN_RESERVATIONS,
             Self::Alias => ALIAS_RESERVATIONS,
             Self::Constraint | Self::Index => DERIVED_NAME_RESERVATIONS,
@@ -158,7 +156,7 @@ enum Reservation {
     Exact(&'static str),
     /// Refuse any name starting with this, case-insensitively.
     Prefix(&'static str),
-    /// Refuse any name ending with this.
+    /// Refuse any name ending with this, case-sensitively.
     Suffix(&'static str),
 }
 
@@ -173,7 +171,7 @@ impl Reservation {
             Self::Prefix(p) => {
                 name.len() >= p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
             }
-            Self::Suffix(s) => name.len() >= s.len() && name.as_bytes()[name.len() - s.len()..].eq_ignore_ascii_case(s.as_bytes()),
+            Self::Suffix(s) => name.ends_with(s),
         }
     }
 
@@ -201,17 +199,16 @@ const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Additional table-name fences beyond the shared platform prefix slice.
+/// Catalog prefixes owned by the backends the runtime can address.
 ///
-/// `sqlite_` is **added**, and its absence from `validate_collection` looks
-/// like a straightforward inversion rather than a decision: `SQLite` reserves the
-/// `sqlite_` prefix for *table* names specifically, yet in `query.rs` it is
-/// fenced only on columns (`RESERVED_NAMES`) - the one place `SQLite` does not
-/// reserve it. The dev tier is `SQLite`, so the fence belongs on both roles
-/// here.
-const COLLECTION_RESERVATIONS: &[Reservation] = &[
+/// These are separate from the neutral platform tables. SQLite refuses
+/// `sqlite_*` table names outright, while PostgreSQL does not reliably refuse
+/// every `pg_*` object. Both prefixes apply to columns because the migration
+/// engine fences the union from every registered backend against later
+/// retargeting. The behavioral parity suite derives the real shipping set and
+/// fails when this zero-dependency runtime copy drifts.
+const BACKEND_CATALOG_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
-    Reservation::Prefix("__zs_"),
     Reservation::Prefix("sqlite_"),
 ];
 
@@ -228,7 +225,6 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("_"),
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship_"),
-    Reservation::Prefix("sqlite_"),
     // Masked-column sibling suffix (the Path B sibling-column strategy).
     Reservation::Suffix("_masked"),
     // The six default classifications, reserved at column level so a creator
@@ -370,6 +366,15 @@ impl Ident {
             });
         }
         if role == IdentRole::Collection {
+            for reservation in BACKEND_CATALOG_RESERVATIONS {
+                if reservation.matches(raw) {
+                    return Err(IdentError::Reserved {
+                        role,
+                        name: raw.to_string(),
+                        reservation: reservation.describe(),
+                    });
+                }
+            }
             for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
                 let reservation = Reservation::Prefix(prefix);
                 if reservation.matches(raw) {
@@ -388,6 +393,17 @@ impl Ident {
                     name: raw.to_string(),
                     reservation: reservation.describe(),
                 });
+            }
+        }
+        if role == IdentRole::Column {
+            for reservation in BACKEND_CATALOG_RESERVATIONS {
+                if reservation.matches(raw) {
+                    return Err(IdentError::Reserved {
+                        role,
+                        name: raw.to_string(),
+                        reservation: reservation.describe(),
+                    });
+                }
             }
         }
         Ok(Self(raw.to_string()))
@@ -472,27 +488,31 @@ mod tests {
         assert!(!Reservation::Suffix("_masked").matches("s"));
     }
 
-    /// Every role must actually consult a table, or a role added later gets a
-    /// silent free pass. `Constraint`/`Index` share the deliberately empty one.
+    /// Every role must have deliberate reservation behavior. Collection and
+    /// column consult the backend catalog table in addition to their neutral
+    /// role-specific fences; `Constraint`/`Index` intentionally accept the
+    /// witnesses because they name only platform-derived identifiers.
     #[test]
-    fn every_role_resolves_a_reservation_table() {
-        let roles = [
-            IdentRole::Namespace,
-            IdentRole::Collection,
-            IdentRole::Column,
-            IdentRole::Alias,
-            IdentRole::Constraint,
-            IdentRole::Index,
+    fn every_role_has_deliberate_reservation_behavior() {
+        let cases = [
+            (IdentRole::Namespace, "__zeroship_admin", false),
+            (IdentRole::Collection, "pg_class", false),
+            (IdentRole::Column, "pg_attribute", false),
+            (IdentRole::Alias, "__zeroship_internal", false),
+            (IdentRole::Constraint, "pg_constraint", true),
+            (IdentRole::Index, "pg_index", true),
         ];
-        let with_fences = roles
-            .iter()
-            .filter(|r| !r.reservations().is_empty())
-            .count();
+        for (role, witness, expected_acceptance) in cases {
+            assert_eq!(
+                Ident::parse_as(witness, role).is_ok(),
+                expected_acceptance,
+                "unexpected reservation verdict for {role} witness {witness:?}"
+            );
+        }
         assert_eq!(
-            with_fences, 4,
-            "four of the six roles carry a creator-facing fence; \
-             Constraint and Index name only platform-derived identifiers"
+            cases.len(),
+            6,
+            "a new role must be given reservation behavior deliberately"
         );
-        assert_eq!(roles.len(), 6, "a new role must be given a fence table deliberately");
     }
 }
