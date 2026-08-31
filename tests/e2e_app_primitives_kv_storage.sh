@@ -221,7 +221,7 @@ echo "=== Stage 3: mint admin platform bearer (offline) ==="
 # The scope string is the deleted permission_tokens policy's action list,
 # one-for-one: it becomes the token policy control intersects with the
 # owner's own authority (TOKEN and USER).
-SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
+SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
 
 OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
 

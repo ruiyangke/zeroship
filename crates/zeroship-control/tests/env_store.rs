@@ -90,7 +90,7 @@ async fn var_crud_roundtrip() {
     assert!(!store.delete_var(app, "FOO").await.unwrap());
 
     // Cleanup.
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     // Teardown: `store` and `registry` each cycle their own connections per
     // call, and the last one opened has no later await in this test to let
@@ -135,7 +135,7 @@ async fn secret_roundtrip_encrypted() {
     );
 
     // Cleanup.
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -156,7 +156,7 @@ async fn merged_env_secret_overrides_var() {
     let merged = store.merged_env(app).await.unwrap();
     assert_eq!(merged.get("API_KEY").and_then(|v| v.as_str()), Some("secret-value"));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -179,7 +179,7 @@ async fn invalid_key_rejected_client_side() {
             "expected BadKey for '{bad}', got {err:?}");
     }
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -206,8 +206,8 @@ async fn per_app_isolation() {
     assert_eq!(env_a.len(), 1);
     assert_eq!(env_b.len(), 1);
 
-    registry.delete_app(&app_a).await.ok();
-    registry.delete_app(&app_b).await.ok();
+    registry.archive_app(&app_a).await.ok();
+    registry.archive_app(&app_b).await.ok();
 
     drop(store);
     drop(registry);
@@ -233,7 +233,7 @@ async fn wrong_master_key_fails_decrypt() {
     let err = reader.merged_env(app).await.unwrap_err();
     assert!(matches!(err, zeroship_control::env_store::EnvError::SecretDecrypt { .. }));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(writer);
     drop(reader);
@@ -290,8 +290,8 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
         "cross-key ciphertext transplant must fail, got {err:?}"
     );
 
-    registry.delete_app(&app_a).await.ok();
-    registry.delete_app(&app_b).await.ok();
+    registry.archive_app(&app_a).await.ok();
+    registry.archive_app(&app_b).await.ok();
 
     drop(client);
     drop(store);
@@ -300,7 +300,7 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 }
 
 #[compio::test]
-async fn delete_cascades_from_app() {
+async fn archive_preserves_app_environment() {
     let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k").expect("store");
@@ -309,10 +309,13 @@ async fn delete_cascades_from_app() {
     store.set_var(app, "V1", "x").await.unwrap();
     store.set_secret(app, "S1", "y").await.unwrap();
 
-    // Drop the app — FK ON DELETE CASCADE removes rows.
-    registry.delete_app(&app).await.unwrap();
-    assert!(store.list_vars(app).await.unwrap().is_empty());
-    assert!(store.list_secret_names(app).await.unwrap().is_empty());
+    // Archive retains environment state so restore is lossless.
+    registry.archive_app(&app).await.unwrap();
+    assert_eq!(
+        store.list_vars(app).await.unwrap(),
+        vec![("V1".to_string(), "x".to_string())]
+    );
+    assert_eq!(store.list_secret_names(app).await.unwrap(), vec!["S1"]);
 
     drop(store);
     drop(registry);
@@ -353,7 +356,7 @@ async fn env_version_bumps_on_every_mutation() {
     let v5 = registry.get_versions().await.unwrap();
     assert_eq!(v5.get(&app).unwrap().env_version, 4);
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -413,7 +416,7 @@ async fn delete_secret_and_set_expose_bump_exactly_once() {
         "set_expose commits its bump with the exposure set, so exactly one"
     );
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -459,7 +462,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     assert_eq!(merged.get("STRIPE_KEY").and_then(|v| v.as_str()), Some("sk_live_old"));
     assert_eq!(merged.get("OPENAI_KEY").and_then(|v| v.as_str()), Some("sk-new"));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store_v1);
     drop(store_v2);
@@ -510,7 +513,7 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[0].actor_user_id, Some(second_actor));
     assert_eq!(rows[1].actor_user_id, Some(first_actor));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(registry);
     common::drain_pg().await;
@@ -553,7 +556,7 @@ async fn app_audit_is_append_only() {
         "expected append-only/permission rejection, got: {message}"
     );
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(conn);
     drop(registry);
@@ -601,7 +604,7 @@ async fn set_value_over_cap_rejected() {
     let err = store.set_secret(app, "FOO", &too_big).await.unwrap_err();
     assert!(matches!(err, zeroship_control::env_store::EnvError::TooLarge(_)));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -663,7 +666,7 @@ async fn merged_env_for_worker_emits_split_shape() {
     let err = store.set_expose(app, &["lowercase".to_string()]).await.unwrap_err();
     assert!(matches!(err, zeroship_control::env_store::EnvError::BadKey(_)));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -683,7 +686,7 @@ async fn long_value_roundtrip() {
     let merged = store.merged_env(app).await.unwrap();
     assert_eq!(merged.get("BIG_TOKEN").and_then(|v| v.as_str()), Some(big.as_str()));
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(store);
     drop(registry);
@@ -736,7 +739,7 @@ async fn undecryptable_secret_names_the_key_in_the_error() {
         "the error must not carry the plaintext; got: {msg}"
     );
 
-    registry.delete_app(&app).await.ok();
+    registry.archive_app(&app).await.ok();
 
     drop(conn);
     drop(store);

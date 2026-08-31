@@ -261,8 +261,12 @@ macro_rules! init_control {
                 )
                 .service(
                     web::resource("/api/apps/{id}")
-                        .route(web::get().to(api::get_app))
-                        .route(web::delete().to(api::delete_app)),
+                        .route(web::get().to(api::get_app)),
+                )
+                .service(
+                    web::resource("/api/apps/{id}/archive")
+                        .route(web::put().to(api::archive_app))
+                        .route(web::delete().to(api::unarchive_app)),
                 )
                 .service(
                     web::resource("/api/apps/{id}/deploy")
@@ -1434,8 +1438,8 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::OK);
 
-    let req = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{app_id}"))
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/apps/{app_id}/archive"))
         .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1577,7 +1581,13 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
 
     assert_eq!(
         stored_grants(&fx.state, user_id).await,
-        vec!["apps:deploy", "apps:read", "apps:write", "secrets:read"],
+        vec![
+            "apps:archive",
+            "apps:deploy",
+            "apps:read",
+            "apps:write",
+            "secrets:read",
+        ],
         "the default CLI grants were not materialized, so an operator has no row to delete"
     );
     assert_eq!(
@@ -1657,7 +1667,7 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
 }
 
 #[compio::test]
-async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
+async fn viewer_role_cannot_use_granted_apps_archive_scope() {
     let user_id = Uuid::new_v4();
     let Some(mut fx) = fixture_with_platform("user-subset", user_id).await else {
         return;
@@ -1668,17 +1678,16 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let owner_id = Uuid::new_v4();
     let app_id = create_app_owned_by(&mut fx, "user-subset", owner_id).await;
     grant_app_member(&fx.state, app_id, user_id, "viewer").await;
-    // The principal is entitled to `apps:delete` and the token carries it, so
-    // the 403 below is the ROLE check refusing a viewer. Without this the
-    // request would also 403, but for the uninteresting reason that
-    // `apps:delete` is outside the default CLI grant set and control's
-    // entitlement intersection had already stripped it from the policy.
-    seed_grants(&fx.state, user_id, &["apps:delete"]).await;
+    // The principal is entitled to `apps:archive` and the token carries it, so
+    // the 403 below is the ROLE check refusing a viewer. Seed the grant
+    // explicitly so the assertion does not depend on just-in-time default CLI
+    // grant materialization elsewhere in the request path.
+    seed_grants(&fx.state, user_id, &["apps:archive"]).await;
     let app = init_control!(fx);
 
-    let req = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{app_id}"))
-        .header("authorization", bearer_for_scope(user_id, "apps:delete"))
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/apps/{app_id}/archive"))
+        .header("authorization", bearer_for_scope(user_id, "apps:archive"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::FORBIDDEN);

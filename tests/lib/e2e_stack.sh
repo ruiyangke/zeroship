@@ -338,7 +338,7 @@ stack_up() {
 # The scope list is one scope string per Cedar action. Billing is NOT in it; a
 # harness that needs `billing:*` passes its own list as the first argument.
 mint_creator_bearer() {
-  local scope="${1:-apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write}"
+  local scope="${1:-apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write}"
   local owner pg_database
   pg_database="${E2E_PG_DATABASE:-zeroship}"
   owner="$(node -e 'console.log(require("crypto").randomUUID())')"

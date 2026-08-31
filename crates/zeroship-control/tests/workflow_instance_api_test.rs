@@ -333,6 +333,79 @@ async fn workflow_routes_reject_missing_auth() {
 }
 
 #[compio::test]
+async fn archived_app_rejects_new_runs_until_restore() {
+    let Some(db_url) = db_url() else {
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
+        return;
+    };
+    let fx = build_fixture(&db_url, "archived-admission").await;
+    let (app_id, _) = seed_app(&fx, "archived-admission", &["Checkout"]).await;
+    fx.state
+        .registry
+        .archive_app(&app_id)
+        .await
+        .expect("archive workflow app")
+        .expect("workflow app exists");
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+
+    let status = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri("/internal/workflows/Checkout/runs")
+                .set_json(&json!({ "input": { "orderId": 1 } })),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let run_count: i64 = fx
+        .pg
+        .query_one(
+            &wf_sql(
+                app_id,
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE app_id = $1",
+            ),
+            &[&app_id],
+        )
+        .await
+        .expect("count archived app runs")
+        .get("n");
+    assert_eq!(run_count, 0, "archive must reject before journal mutation");
+
+    fx.state
+        .registry
+        .unarchive_app(&app_id)
+        .await
+        .expect("restore workflow app")
+        .expect("workflow app exists");
+    let status = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri("/internal/workflows/Checkout/runs")
+                .set_json(&json!({ "input": { "orderId": 2 } })),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::CREATED);
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+#[compio::test]
 async fn create_conflicts_status_and_cross_app_isolation() {
     let Some(db_url) = db_url() else {
         zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");

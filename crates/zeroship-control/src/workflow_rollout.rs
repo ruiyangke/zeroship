@@ -17,11 +17,23 @@ pub async fn workflows_enabled_for_app<C>(
 where
     C: GenericClient + Sync,
 {
+    // Archive takes the exclusive form of this transaction-scoped lock. Calls
+    // made inside a workflow mutation transaction therefore either commit
+    // before archive returns or observe the archived marker afterwards.
+    conn.query_one(
+        "SELECT pg_advisory_xact_lock_shared( \
+             hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
+         )",
+        &[app_id],
+    )
+    .await
+    .map_err(RegistryError::from)?;
     let rows = conn
         .query(
             "SELECT a.workflows_enabled \
                     AND COALESCE(p.workflows_allowed, false) \
-                    AND NOT COALESCE(p.archived, true) AS enabled \
+                    AND NOT COALESCE(p.archived, true) \
+                    AND a.archived_at IS NULL AS enabled \
                FROM zeroship.apps a \
                LEFT JOIN zeroship.plans p ON p.id = a.plan_id \
               WHERE a.id = $1",

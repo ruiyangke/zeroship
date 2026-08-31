@@ -1,4 +1,9 @@
 //! Durable-workflow schedule reconciliation and sweep.
+//!
+//! App archive preserves schedule rows and their due frontier. Both the batch
+//! claim and the claimed-row reload require an active app, so an archive that
+//! lands between those two transactions still prevents a new run. Unarchive
+//! resumes from the retained frontier under the schedule's catch-up policy.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
@@ -354,12 +359,13 @@ async fn claim_due_schedules(
                 WHERE s.enabled \
                   AND s.next_fire_at <= now() \
                   AND (s.claimed_by IS NULL OR s.lease_expires IS NULL OR s.lease_expires <= now()) \
+                  AND app.archived_at IS NULL \
                   AND app.workflows_enabled \
                   AND plan.workflows_allowed \
                   AND NOT plan.archived \
                 ORDER BY s.next_fire_at, s.id \
                 LIMIT $1 \
-                FOR UPDATE SKIP LOCKED \
+                FOR UPDATE OF s SKIP LOCKED \
              ) \
              UPDATE zeroship.workflow_schedules s \
                 SET claimed_by = $2, \
@@ -397,6 +403,20 @@ async fn fire_claimed_schedule(
         .map_err(RegistryError::from)?
         .get::<_, bool>("locked");
     if !locked {
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(0);
+    }
+
+    // Take lifecycle before any row lock. Deploy updates the app row before it
+    // reconciles this schedule row, while archive takes lifecycle before the
+    // app row. Reading app_id without a row lock, then taking lifecycle here,
+    // prevents schedule -> lifecycle -> app -> schedule from becoming a
+    // three-transaction deadlock cycle.
+    let Some(app_id) = claimed_schedule_app_id(&tx, &claim.id, &config.owner_id).await? else {
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(0);
+    };
+    if !crate::workflow_rollout::workflows_enabled_for_app(&tx, &app_id).await? {
         tx.commit().await.map_err(RegistryError::from)?;
         return Ok(0);
     }
@@ -462,6 +482,27 @@ async fn fire_claimed_schedule(
     Ok(fired)
 }
 
+/// Read the lifecycle-lock key without taking a row lock. Ownership and app
+/// state are rechecked by [`load_claimed_schedule`] after lifecycle is held.
+async fn claimed_schedule_app_id<C>(
+    conn: &C,
+    schedule_id: &str,
+    owner_id: &str,
+) -> Result<Option<Uuid>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT app_id FROM zeroship.workflow_schedules \
+              WHERE id = $1 AND claimed_by = $2",
+            &[&schedule_id, &owner_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(rows.first().map(|row| row.get("app_id")))
+}
+
 /// Re-read a schedule this sweeper claimed, gated on OWNERSHIP - not on lease
 /// freshness.
 ///
@@ -483,6 +524,17 @@ async fn fire_claimed_schedule(
 /// sweeper took to get here. `lease_expires` keeps its real job in
 /// `claim_due_schedules`: letting a LATER sweep re-claim a schedule whose
 /// sweeper died mid-fire.
+///
+/// App activity is the other load-time gate. Archive may commit after the
+/// batch claim but before this transaction begins, so checking only in
+/// `claim_due_schedules` would still start a run after archive. The caller has
+/// already taken the shared lifecycle lock from an unlocked app-id read; these
+/// predicates recheck the joined state under the schedule row lock.
+///
+/// Lock only `s`. The caller already owns shared app-lifecycle before this
+/// read, while archive owns exclusive lifecycle before updating
+/// `zeroship.apps`. `start_scheduled_workflow_run` re-enters the same shared
+/// transaction lock harmlessly.
 async fn load_claimed_schedule<C>(
     conn: &C,
     schedule_id: &str,
@@ -504,10 +556,11 @@ where
                 AND s.enabled \
                 AND s.next_fire_at <= now() \
                 AND s.claimed_by = $2 \
+                AND app.archived_at IS NULL \
                 AND app.workflows_enabled \
                 AND plan.workflows_allowed \
                 AND NOT plan.archived \
-              FOR UPDATE",
+              FOR UPDATE OF s",
             &[&schedule_id, &owner_id],
         )
         .await

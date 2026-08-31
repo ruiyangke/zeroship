@@ -66,7 +66,8 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// asks for a refresh token) but confers no resource authority, and folding it
 /// in here would let it through that intersection as though
 /// it did.
-pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 5] = [
+    "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
@@ -82,7 +83,8 @@ pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
 /// REGISTRATION, so a scope missing here is refused with `invalid_scope`
 /// before anything else happens. `offline_access` therefore has to be listed
 /// even though it grants no authority.
-pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 5] = [
+pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 6] = [
+    "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",

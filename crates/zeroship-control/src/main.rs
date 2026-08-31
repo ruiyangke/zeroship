@@ -649,8 +649,8 @@ fn main() -> std::io::Result<()> {
     // `.zship` deploys land in `{prefix}/blobs/` + `{prefix}/manifests/`;
     // control writes through the SAME store gateway + worker read (local disk
     // for dev, S3 for production). The legacy per-app `BundleStore`/VFS is
-    // gone — app purge now deletes the app's manifest keyspace via
-    // `BlobStore::delete_app_manifests`.
+    // gone. App archive retains the manifest keyspace so restore can publish
+    // the same artifact without rebuilding or rewriting history.
     // The S3 inputs are read HERE, not inside `zeroship-bundle`, so the read is
     // recorded against this binary. Resolved only for a remote store: on local
     // disk the credentials are legitimately absent.
@@ -1071,8 +1071,12 @@ fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/api/apps/{id}")
-                    .route(web::get().to(api::get_app))
-                    .route(web::delete().to(api::delete_app)),
+                    .route(web::get().to(api::get_app)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/archive")
+                    .route(web::put().to(api::archive_app))
+                    .route(web::delete().to(api::unarchive_app)),
             )
             .service(
                 // 256MB cap matches `MAX_COMPRESSED_BYTES` in deploy.rs.

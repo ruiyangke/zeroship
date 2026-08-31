@@ -1,11 +1,11 @@
-//! §17.7 drop-namespace sequencing — the PG teardown order for deleting
-//! an app.
+//! Section 17.7 drop-namespace sequencing - the privileged PostgreSQL teardown
+//! order for retiring a database namespace.
 //!
-//! Called by the control plane under a control-plane-held lock (§17.7).
-//! plugin-db owns the *ordering* of the PG-side steps; the control plane
-//! owns the cross-worker fan-out (signalling every worker to deprovision
-//! its consumer) and the lock. This module is the single place the
-//! ordering lives so it can't drift.
+//! App archive does not call this module. Control has no provisioning DSN and
+//! must never issue privileged DDL. A future database teardown coordinator
+//! belongs behind zeroship-migrate-server and must first re-home this app-keyed
+//! shape onto the database binding lifecycle. This module remains the single
+//! place the low-level PG step order is recorded so it cannot drift.
 //!
 //! ## Ordering
 //!
@@ -41,17 +41,12 @@
 //! detaching) is surfaced so the caller retries from step 3. Every other
 //! step is a no-op when its precondition is already met.
 //!
-//! ## Dead-code posture (control-plane wiring pending)
+//! ## Dead-code posture (migration-service redesign pending)
 //!
-//! [`drop_namespace`] is the control-plane entry point for app deletion
-//! — there is no V8 / creator-facing dispatch for it (deletion is a
-//! control-plane operation under a control-plane-held lock, §17.7). Until
-//! the control plane wires the call (cross-worker fan-out + lock), the
-//! orchestrator surface is unused in a default build; it is fully
-//! exercised by the `tests/integration.rs` PG suite (reachable via
-//! `test-helpers`). Same posture as `auth/*` — built + tested, zero
-//! production callers until the wire-up.
-//! Remove the allow in the PR that wires the control-plane call.
+//! [`drop_namespace`] has no production caller and is not a creator-facing or
+//! control-plane app lifecycle entry point. It is fully exercised by the
+//! `tests/integration.rs` PG suite (reachable via `test-helpers`). Remove the
+//! allow only when a database-keyed migrate-server coordinator owns the call.
 #![allow(dead_code)]
 
 use compio_postgres::Pool;
@@ -67,8 +62,7 @@ pub struct DropNamespaceOpts {
     /// `subscription_app_dropped` and the drop proceeds.
     pub force: bool,
     /// Count of active subscriptions on the app, as seen by the CALLER.
-    /// The control plane aggregates this across workers via the
-    /// `/internal/subscriptions/:app_id` admin endpoint; the
+    /// A future privileged coordinator must aggregate this across workers; the
     /// single-worker / dev path can pass
     /// [`crate::broker::app_subscription_count`]. The orchestrator does
     /// NOT read the in-process broker itself for the gate, because the

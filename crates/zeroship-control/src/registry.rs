@@ -280,7 +280,7 @@ impl Registry {
                 "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
                  VALUES ($1, $2, $3, $4) \
                  RETURNING id, name, plan_id, deploy_hash, api_key, \
-                           created_at::text, updated_at::text",
+                           archived_at::text, created_at::text, updated_at::text",
                 &[&name, &plan_id, &api_key, &key_hash],
             )
             .await?;
@@ -306,7 +306,8 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
+                "SELECT id, name, plan_id, deploy_hash, api_key, archived_at::text, \
+                        created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE id = $1",
                 &[id],
             )
@@ -319,7 +320,8 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
+                "SELECT id, name, plan_id, deploy_hash, api_key, archived_at::text, \
+                        created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE name = $1",
                 &[&name],
             )
@@ -341,7 +343,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.deploy_hash, a.api_key, \
-                        a.created_at::text, a.updated_at::text \
+                        a.archived_at::text, a.created_at::text, a.updated_at::text \
                  FROM zeroship.apps a \
                  JOIN zeroship.app_members m ON m.app_id = a.id \
                  WHERE m.user_id = $1 \
@@ -352,73 +354,146 @@ impl Registry {
         Ok(rows.iter().map(row_to_record).collect())
     }
 
-    /// Delete an app by id. Returns true if the app row was deleted.
+    /// Archive an app without deleting any app-attributed state.
     ///
-    /// ATOMIC: deletes the `zeroship.apps` row AND the per-app
-    /// `zeroship.oauth_clients` row (`client_id = client_id_for_app(id)`) in ONE
-    /// transaction, so the real FK chain cascades every dependent row in the
-    /// single `zeroship` schema in one shot:
-    /// - apps: {gateway_sessions, app_members, app_session_anchors
-    ///   (by app_id), app_oauth_clients, app_usage,
-    ///   app_vars, app_secrets, …}
-    /// - oauth_clients: {oauth_grants, app_user_identities,
-    ///   app_session_anchors (by client_id)}
-    ///
-    /// Deleting the per-app oauth_clients row is what closes the relay arm:
-    /// `app_user_identities.app_client_id` FKs into `oauth_clients(client_id)`
-    /// ON DELETE CASCADE, so this single txn replaces the former best-effort
-    /// alias-revoke companion UPDATE (no orphaned live aliases possible).
-    ///
-    /// Runs on a DEDICATED owned connection (`conn()` → fresh mutable `Client`)
-    /// so the RAII `transaction()` guard owns it; an aborted txn never poisons a
-    /// shared handle.
-    pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
-        let client_id = crate::app_oauth_client::client_id_for_app(id);
+    /// The first transition records its timestamp; retries return the same
+    /// record without moving that timestamp or `updated_at`. Route publication
+    /// and workflow admission enforce this marker. A deploy may replace the
+    /// retained artifact while archived, but cannot make it routable or
+    /// schedulable. Database schema and role lifecycle is intentionally absent
+    /// here: control has no provisioning DSN and privileged teardown belongs to
+    /// migrate-server.
+    pub async fn archive_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
         let mut conn = self.conn().await?;
-
-        // Schema MAJOR-1(i): a billed app is NOT hard-deletable. `invoice_lines.app_id
-        // → apps ON DELETE RESTRICT` (0042) would otherwise abort the DELETE with an
-        // opaque DB error for any ever-invoiced app. Pre-check + return a TYPED
-        // Conflict so the caller gets a clear 409 — consistent with the
-        // anonymize-don't-delete financial-history posture (the account reaper retains
-        // and anonymizes such apps' owners rather than erasing the billing trail).
-        let billed = conn
-            .query(
-                "SELECT EXISTS (SELECT 1 FROM zeroship.invoice_lines WHERE app_id = $1) AS billed",
-                &[id],
-            )
-            .await?
-            .first()
-            .is_some_and(|r| r.get::<_, bool>("billed"));
-        if billed {
-            return Err(RegistryError::Conflict(format!(
-                "app {id} has billing history (invoiced line items) and cannot be hard-deleted; \
-                 it must be anonymized instead"
-            )));
-        }
-
         let tx = conn.transaction().await?;
-        let n = tx
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
-            .await?;
-        // Delete the per-app oauth_clients row in the SAME txn. Its FK children
-        // (oauth_grants, app_user_identities, app_session_anchors-by-client_id)
-        // cascade. Keyed on the deterministic `client_id_for_app(id)` — the same
-        // value `provision_app_oauth_client` wrote — so no extension-table read
-        // is needed (and the app_oauth_clients row is already cascade-gone with
-        // the apps row above; this targets the shared oauth_clients row).
-        tx.execute(
-            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
+        // Workflow admissions and the worker's final claim take the shared
+        // form of this lock. Once archive returns, no claim can have crossed
+        // the marker; work admitted before it may still finish.
+        tx.query_one(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
+             )",
+            &[id],
         )
         .await?;
+        let rows = tx
+            .query(
+                "UPDATE zeroship.apps \
+                    SET archived_at = COALESCE(archived_at, NOW()), \
+                        updated_at = CASE WHEN archived_at IS NULL THEN NOW() ELSE updated_at END \
+                  WHERE id = $1 \
+                  RETURNING id, name, plan_id, deploy_hash, api_key, \
+                            archived_at::text, created_at::text, updated_at::text",
+                &[id],
+            )
+            .await?;
         tx.commit().await?;
-        Ok(n > 0)
+        Ok(rows.first().map(row_to_record))
+    }
+
+    /// Restore an archived app. Retained name, manifests, billing evidence, and
+    /// workflow records become active through their normal polling paths. The
+    /// retained deploy is checked against the latest applied schema descriptor
+    /// while the app row is locked; restore must not bypass the deploy gate.
+    pub async fn unarchive_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.query_one(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
+             )",
+            &[id],
+        )
+        .await?;
+        let state = tx
+            .query(
+                "SELECT archived_at IS NOT NULL AS archived, manifest_json \
+                   FROM zeroship.apps \
+                  WHERE id = $1 \
+                  FOR UPDATE",
+                &[id],
+            )
+            .await?;
+        let Some(state) = state.first() else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        if state.get::<_, bool>("archived") {
+            let apply_in_progress: bool = tx
+                .query_one(
+                    "SELECT EXISTS ( \
+                         SELECT 1 FROM zeroship.app_schema_applies \
+                          WHERE app_id = $1 AND status = 'submitted' \
+                     ) AS applying",
+                    &[id],
+                )
+                .await?
+                .get("applying");
+            if apply_in_progress {
+                return Err(RegistryError::Conflict(format!(
+                    "app {id} has a schema apply in progress; retry restore after it finishes"
+                )));
+            }
+            let manifest_json: Option<String> = state.get("manifest_json");
+            let descriptor_sha256 = match manifest_json {
+                Some(json) => {
+                    let manifest = serde_json::from_str::<zeroship_bundle::Manifest>(&json)
+                        .map_err(|error| {
+                            RegistryError::Conflict(format!(
+                                "archived app {id} has an invalid retained manifest: {error}"
+                            ))
+                        })?;
+                    manifest.validate().map_err(|error| {
+                        RegistryError::Conflict(format!(
+                            "archived app {id} has an invalid retained manifest: {error}"
+                        ))
+                    })?;
+                    manifest.runtime_descriptor.map(|entry| entry.hash)
+                }
+                None => None,
+            };
+            let applied_sha256 = tx
+                .query(
+                    "SELECT m.descriptor_sha256 \
+                       FROM zeroship.app_schema_applies m \
+                      WHERE m.app_id = $1 AND m.status = 'applied' \
+                      ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
+                               m.migration_id DESC \
+                      LIMIT 1",
+                    &[id],
+                )
+                .await?
+                .first()
+                .map(|row| row.get::<_, String>("descriptor_sha256"));
+            if descriptor_sha256 != applied_sha256 {
+                return Err(RegistryError::SchemaNotApplied {
+                    descriptor_sha256,
+                    applied_sha256,
+                });
+            }
+        }
+
+        let rows = tx
+            .query(
+                "UPDATE zeroship.apps \
+                    SET archived_at = NULL, \
+                        updated_at = CASE WHEN archived_at IS NOT NULL THEN NOW() ELSE updated_at END \
+                  WHERE id = $1 \
+                  RETURNING id, name, plan_id, deploy_hash, api_key, \
+                            archived_at::text, created_at::text, updated_at::text",
+                &[id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.first().map(row_to_record))
     }
 
     /// Atomic deploy commit. Sets `deploy_hash` and `manifest_json` in
     /// the same UPDATE so the gateway never observes a half-applied
-    /// deploy. Used by the .zship ingest path.
+    /// deploy. Used by the .zship ingest path. Archived apps accept this as a
+    /// staged deploy: active-route and workflow projections continue to omit
+    /// the app until restore.
     ///
     /// THIS STATEMENT IS WHAT "LIVE" MEANS. The gateway reads exactly these two
     /// columns ([`Self::get_gateway_snapshot`]) and polls them; the
@@ -488,10 +563,10 @@ impl Registry {
             // Zero rows is ambiguous: no such app, or the schema predicate
             // refused. Disambiguate for the MESSAGE only — the decision was
             // already taken atomically above, so this read cannot re-open it.
-            let app_exists = tx
+            let app_rows = tx
                 .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
                 .await?;
-            if app_exists.is_empty() {
+            if app_rows.is_empty() {
                 tx.commit().await?;
                 return Ok(false);
             }
@@ -607,6 +682,11 @@ impl Registry {
     /// rows whose JSON fails to parse both surface as `manifest: None`;
     /// the worker treats that as "no V8 isolate to load" and skips the
     /// app on its reconcile pass.
+    ///
+    /// Archived apps intentionally remain in this projection. Disappearance
+    /// means database deprovisioning to the worker version poller, including
+    /// CDC teardown. Archive is an app lifecycle transition, not database
+    /// teardown; gateway routes and workflow selectors are the execution gates.
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
         // LEFT JOIN the plan catalog so each app's runtime limits come from its
@@ -776,7 +856,8 @@ impl Registry {
                                   WHEN 'active'    THEN 2 \
                                   ELSE 3 END, \
                               m.user_id \
-                 ) acct ON TRUE",
+                 ) acct ON TRUE \
+                 WHERE a.archived_at IS NULL",
                 &[],
             )
             .await?;
@@ -988,13 +1069,15 @@ fn net_policy_limits_from_catalog(
 /// Convert a query row into an `AppRecord`.
 ///
 /// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
-///          api_key (TEXT), created_at (BIGINT), updated_at (BIGINT).
+///          api_key (TEXT), archived_at (TEXT | NULL), created_at (TEXT),
+///          updated_at (TEXT).
 fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
     AppRecord {
         id: row.get("id"),
         name: row.get("name"),
         plan_id: row.get("plan_id"),
         deploy_hash: row.get("deploy_hash"),
+        archived_at: row.get("archived_at"),
         api_key: row.get("api_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),

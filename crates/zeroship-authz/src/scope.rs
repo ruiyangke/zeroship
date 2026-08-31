@@ -7,7 +7,7 @@ pub enum Scope {
     AppsRead,
     AppsWrite,
     AppsDeploy,
-    AppsDelete,
+    AppsArchive,
     EnvRead,
     EnvWrite,
     SecretsRead,
@@ -27,7 +27,7 @@ impl Scope {
         Self::AppsRead,
         Self::AppsWrite,
         Self::AppsDeploy,
-        Self::AppsDelete,
+        Self::AppsArchive,
         Self::EnvRead,
         Self::EnvWrite,
         Self::SecretsRead,
@@ -49,7 +49,7 @@ impl Scope {
             Self::AppsRead => Action::AppsRead,
             Self::AppsWrite => Action::AppsWrite,
             Self::AppsDeploy => Action::AppsDeploy,
-            Self::AppsDelete => Action::AppsDelete,
+            Self::AppsArchive => Action::AppsArchive,
             Self::EnvRead => Action::EnvRead,
             Self::EnvWrite => Action::EnvWrite,
             Self::SecretsRead => Action::SecretsRead,
@@ -71,7 +71,7 @@ impl Scope {
             Self::AppsRead => "apps:read",
             Self::AppsWrite => "apps:write",
             Self::AppsDeploy => "apps:deploy",
-            Self::AppsDelete => "apps:delete",
+            Self::AppsArchive => "apps:archive",
             Self::EnvRead => "env:read",
             Self::EnvWrite => "env:write",
             Self::SecretsRead => "secrets:read",
@@ -104,7 +104,7 @@ impl Scope {
             Self::AppsRead => "View your apps",
             Self::AppsWrite => "Create and modify your apps",
             Self::AppsDeploy => "Deploy code to your apps",
-            Self::AppsDelete => "Delete your apps",
+            Self::AppsArchive => "Archive and restore your apps",
             Self::EnvRead => "Read environment variables and allowed network hosts",
             Self::EnvWrite => "Modify environment variables and allowed network hosts",
             Self::SecretsRead => "Read secrets (names only)",
@@ -131,7 +131,7 @@ impl Scope {
             "apps:read" => Self::AppsRead,
             "apps:write" => Self::AppsWrite,
             "apps:deploy" => Self::AppsDeploy,
-            "apps:delete" => Self::AppsDelete,
+            "apps:archive" => Self::AppsArchive,
             "env:read" => Self::EnvRead,
             "env:write" => Self::EnvWrite,
             "secrets:read" => Self::SecretsRead,
@@ -220,6 +220,10 @@ mod tests {
     fn human_labels_are_consent_copy() {
         assert_eq!(Scope::AppsDeploy.human_label(), "Deploy code to your apps");
         assert_eq!(
+            Scope::AppsArchive.human_label(),
+            "Archive and restore your apps"
+        );
+        assert_eq!(
             Scope::SecretsRead.human_label(),
             "Read secrets (names only)"
         );
@@ -248,6 +252,10 @@ mod tests {
     #[test]
     fn unknown_scope_rejects() {
         assert!(parse_scope_string("apps:read bogus:scope").is_err());
+        assert!(
+            Scope::parse("apps:delete").is_err(),
+            "the removed delete authority must not survive as an alias"
+        );
     }
 
     #[test]

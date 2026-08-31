@@ -193,7 +193,7 @@ pub enum Action {
     AppsRead,           // "apps:read"
     AppsWrite,          // "apps:write"
     AppsDeploy,         // "apps:deploy"
-    AppsDelete,         // "apps:delete"
+    AppsArchive,        // "apps:archive"
 
     // Environment
     EnvRead,            // "env:read"
@@ -564,7 +564,7 @@ Three credential types reach `AuthzGuard`. Each has a distinct lifecycle.
 - **Mint:** Authorization Code + PKCE through hydra (§12.1). The token is a hydra-issued RFC 9068 JWT (1 h access, 90 d refresh), signed by hydra's keys, audience-bound to `https://api.zeroship.ai`.
 - **Format:** hydra-issued JWT. Verified by `crates/zeroship-control/src/api.rs` using hydra's JWKS (already cached by the OIDC RP layer).
 - **No PAT-style policy attached.** OAuth access tokens carry **scopes**, which translate to `Action` sets at the extractor. Scope vocabulary (P9):
-  - `apps:read` `apps:write` `apps:deploy` `apps:delete`
+  - `apps:read` `apps:write` `apps:deploy` `apps:archive`
   - `env:read` `env:write` `secrets:read` `secrets:write`
   - `billing:read` `billing:write`
   - `team:read` `team:write`

@@ -861,9 +861,10 @@ mod tests {
         // Every member of the closed vocabulary must be rejected — pins the
         // disjointness invariant against the full set, not just one example.
         for id in [
-            "apps:read", "apps:deploy", "env:read", "env:write", "secrets:read",
-            "secrets:write", "billing:read", "billing:write", "team:read", "team:write",
-            "account:read", "account:write", "deployments:read", "deployments:rollback",
+            "apps:read", "apps:write", "apps:deploy", "apps:archive", "env:read", "env:write",
+            "secrets:read", "secrets:write", "billing:read", "billing:write", "team:read",
+            "team:write", "account:read", "account:write", "deployments:read",
+            "deployments:rollback",
         ] {
             let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
             assert!(

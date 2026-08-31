@@ -250,7 +250,8 @@ SELECT
        AND NOT attribute.attisdropped
        AND has_column_privilege(current_user, relation.oid, attribute.attnum, 'SELECT')
        AND NOT (
-         (relation.relname = 'apps' AND attribute.attname IN ('id', 'plan_id', 'workflows_enabled'))
+         (relation.relname = 'apps' AND attribute.attname IN
+             ('id', 'plan_id', 'workflows_enabled', 'archived_at'))
          OR (relation.relname = 'plans' AND attribute.attname IN
              ('id', 'name', 'runtime_limits_json', 'workflows_allowed', 'archived'))
          OR (relation.relname = 'app_deploys' AND attribute.attname IN
@@ -260,6 +261,7 @@ SELECT
   has_column_privilege(current_user, 'zeroship.apps', 'id', 'SELECT')
     AND has_column_privilege(current_user, 'zeroship.apps', 'plan_id', 'SELECT')
     AND has_column_privilege(current_user, 'zeroship.apps', 'workflows_enabled', 'SELECT')
+    AND has_column_privilege(current_user, 'zeroship.apps', 'archived_at', 'SELECT')
     AND has_column_privilege(current_user, 'zeroship.plans', 'id', 'SELECT')
     AND has_column_privilege(current_user, 'zeroship.plans', 'name', 'SELECT')
     AND has_column_privilege(current_user, 'zeroship.plans', 'runtime_limits_json', 'SELECT')

@@ -721,7 +721,7 @@ mod tests {
         // missing entry here is a `zeroship deploy` that 403s on one verb.
         assert_eq!(
             requested_scope(),
-            "apps:deploy apps:read apps:write secrets:read offline_access"
+            "apps:archive apps:deploy apps:read apps:write secrets:read offline_access"
         );
     }
 

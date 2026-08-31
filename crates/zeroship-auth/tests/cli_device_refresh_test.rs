@@ -36,7 +36,8 @@ const CONTROL_AUDIENCE: &str = "control.zeroship.ai";
 const CLI_SCOPE: &str = "offline_access apps:deploy apps:read";
 /// Spelled out rather than read from the constant the code reads, so this
 /// assertion measures the registration instead of restating it.
-const EXPECTED_REGISTERED_SCOPES: [&str; 5] = [
+const EXPECTED_REGISTERED_SCOPES: [&str; 6] = [
+    "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
@@ -45,8 +46,13 @@ const EXPECTED_REGISTERED_SCOPES: [&str; 5] = [
 ];
 /// The scopes the CLI's token may carry AUTHORITY for. `offline_access` is
 /// deliberately absent: it manages the grant, it does not widen it.
-const EXPECTED_ISSUABLE_SCOPES: [&str; 4] =
-    ["apps:deploy", "apps:read", "apps:write", "secrets:read"];
+const EXPECTED_ISSUABLE_SCOPES: [&str; 5] = [
+    "apps:archive",
+    "apps:deploy",
+    "apps:read",
+    "apps:write",
+    "secrets:read",
+];
 
 // ─── Lifetime ceilings, as LITERALS ──────────────────────────────────────────
 //
