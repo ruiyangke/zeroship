@@ -57,6 +57,7 @@ below was re-run by the pilot against the FULL seven-target gate
 | 9 Optional-row cardinality | 2 | BOUND | typed and untyped `query_opt` early-return tests |
 | 10 Buffered ErrorResponse scanner | 2 | SPLIT: replication live and covered by 4; **connection copy is DEAD** | see below |
 | 14 Close plus Sync | 2 | BOUND | `dropping_armed_portal_cleanup_enqueues_close` |
+| 13 Startup/auth handshake | 2 | BOUND: 555 and 30 failures; the replication copy now has its own test | `replication_handshake_uses_the_configured_user_in_an_md5_response` |
 | 17 Cancel confirmation | **3**, not 2 | 2 pre-bound, 1 was UNBOUND | `raw_cancel_success_keeps_pool_lease_reusable` (new) |
 | 15 Scalar row arity | 3 | BOUND | `query_scalar` / `query_one_scalar` / `query_opt_scalar` arity tests |
 | 18 Statement-cache LRU updates | **4**, not 3 | BOUND, including the uncounted candidate-LRU copy | LRU eviction tests |
@@ -211,6 +212,27 @@ For a flag whose removal deadlocks, pick a mutation that keeps the loop
 progressing - flip a downstream consumer of the flag rather than the flag
 itself - or bound the run with `timeout` so a hang reports as a hang instead of
 stalling the sweep.
+
+### A probe log can go BINARY, and then plain grep reports nothing
+
+Group 13's two probes wrote logs containing NUL bytes, because the mutation made
+auth fail and a failing test printed a raw PostgreSQL password message -
+`"PostgreSQL specifies: p\0(md55d57ce..."`. `grep` treats such a file as binary
+and matches nothing, so the harness reported
+
+    line 602 applied=2 gitM=[M] targets=0 passed= failed=
+
+which looks like a compile failure. With `grep -a` the same log says **9 targets,
+900 passed, 555 failed**.
+
+Any probe that makes an auth, startup or framing test fail can do this. The
+danger is not the noise: an empty `failed=` renders as zero failures, and zero
+failures is how a copy gets classified UNBOUND. A blinded parse can invent a gap
+in code that 555 tests already cover.
+
+All 73 probe logs from this session were audited; only those two contained NULs,
+so no other verdict is affected. Every probe script now parses with `grep -a`,
+and `targets=0` is treated as instrument failure rather than as a result.
 
 ### A mutation that breaks 216 tests has not isolated anything
 
