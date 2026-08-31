@@ -766,6 +766,89 @@ mod tests {
         );
     }
 
+    async fn assert_pre_bind_mismatch_suppresses_copy_terminal(
+        unnamed_sql: Option<&str>,
+        unexpected: Message,
+    ) {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+
+        let copy = copy_in_inner::<Bytes>(
+            client.inner(),
+            Statement::unnamed(Vec::new(), Vec::new()),
+            unnamed_sql,
+        );
+        let connection = async move {
+            let request = requests
+                .next()
+                .await
+                .expect("receive the scripted COPY request");
+            let crate::connection::Request {
+                messages,
+                sender: mut response_sender,
+                ..
+            } = request;
+            let mut receiver = match messages {
+                RequestMessages::CopyIn(receiver) => receiver,
+                RequestMessages::Single(_) => {
+                    panic!("COPY IN did not enqueue a streaming request")
+                }
+            };
+
+            response_sender
+                .try_send(ResponseMessages::Observed(VecDeque::from([Ok(unexpected)])))
+                .expect("deliver the unexpected pre-Bind response");
+
+            match receiver
+                .next()
+                .await
+                .expect("COPY IN omitted its initial frontend batch")
+            {
+                FrontendMessage::Raw(_) => {}
+                FrontendMessage::CopyData(_) => {
+                    panic!("COPY IN encoded its initial frontend batch as CopyData")
+                }
+            }
+            assert!(
+                receiver.next().await.is_none(),
+                "a pre-Bind protocol mismatch emitted a COPY terminal frame"
+            );
+        };
+
+        let (result, ()) = futures_util::future::join(copy, connection).await;
+        let failure = match result {
+            Ok(_) => panic!("the unexpected pre-Bind response started COPY IN"),
+            Err(failure) => failure,
+        };
+        let (error, before_bind_complete) = failure.into_parts();
+        assert!(
+            before_bind_complete,
+            "the pre-Bind mismatch was classified after BindComplete"
+        );
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }
+
+    #[compio::test]
+    async fn unexpected_parse_slot_message_suppresses_copy_terminal() {
+        assert_pre_bind_mismatch_suppresses_copy_terminal(
+            Some("COPY scripted FROM STDIN"),
+            Message::BindComplete,
+        )
+        .await;
+    }
+
+    #[compio::test]
+    async fn unexpected_bind_slot_message_suppresses_copy_terminal() {
+        assert_pre_bind_mismatch_suppresses_copy_terminal(None, Message::ParseComplete).await;
+    }
+
     #[compio::test]
     async fn initial_producer_failure_preserves_terminal_server_diagnosis() {
         let (request_sender, mut requests) = mpsc::unbounded();
