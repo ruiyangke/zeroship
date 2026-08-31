@@ -714,9 +714,29 @@ constructor validates" rather than "a `&str` that a validator was called on some
 
 Sequence: reads first (the search family, whose shape #12 already established), then writes.
 
-**A3 (writes) is gated on #45.** The `RETURNING` projection is exactly where column grants and the
-unmask primitive meet. Porting writes before #45 is decided means building against a contract that
-may be deleted. Reads carry no such entanglement.
+**A3 (writes) WAS gated on #45. IT IS NOT ANY MORE - #45 was settled by the operator on 2026-08-31.**
+The gate said: the `RETURNING` projection is exactly where column grants and the unmask primitive
+meet, so porting writes first meant building against a contract that might be deleted.
+
+The contract is now fixed, and in the direction that removes the entanglement entirely: **`unmask()`
+stays worker-side and creator-controlled, and database-enforced column grants are NOT built.** The
+reasoning is a reframing rather than a concession - masking is a HYGIENE feature, not a containment
+boundary. The rows are the creator's own data in the creator's own schema, `defineMaskPolicy()`
+exists so the creator sets the rule, and per-column withholding would have been the platform
+overriding the creator's stated policy about the creator's own data.
+
+So Track A can be ported reads-then-writes with no external dependency. Two things carry forward into
+the write port:
+
+- **`sanitize_app_actor` remains load-bearing**, and its justification is now sharper: a forged
+  `actor: {kind:"auto"}` (DB-3) defeats THE CREATOR'S OWN policy, and creator control is the whole
+  basis of the decision. The typed IR must not offer a path around it.
+- **The unbounded-write bound is still worth having**, but for the reason the security review
+  established rather than the one this document first gave: the residual is that every affected row
+  materialises into a worker isolate SHARED ACROSS TENANTS, so it is a bounded availability concern,
+  not tenant isolation. And `{}`-means-all-rows is a DOCUMENTED capability
+  (`sdks/db/src/utils.ts:82`), so a mandatory `RowLimit` is a contract break to `@zeroship/db` that
+  needs a replacement idiom, not free hardening.
 
 ## Track B - CDC out of the worker
 
