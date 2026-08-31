@@ -144,9 +144,12 @@ impl BackendMessages {
 
     /// Return the tag of the first frame without consuming it.
     ///
-    /// The prepare path uses this at the connection boundary to decide
-    /// whether a cancelled `Parse` created its named statement. The response
-    /// still has to be delivered intact when its caller is alive.
+    /// Two connection-boundary consumers inspect this without parsing the
+    /// batch. Prepare cleanup uses the first tag to decide whether a cancelled
+    /// `Parse` created its named statement, then must deliver the batch intact
+    /// when its caller is alive. COPY-IN error recovery uses a bare leading
+    /// `ReadyForQuery` to recognize the duplicate completion and must consume
+    /// and drop that batch before it reaches the next response slot.
     pub(crate) fn first_tag(&self) -> Option<u8> {
         self.0.first().copied()
     }
