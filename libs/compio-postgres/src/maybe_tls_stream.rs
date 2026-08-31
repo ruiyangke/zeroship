@@ -124,6 +124,24 @@ pub enum MaybeTlsWriteHalf<S: SplitStream, T: SplitStream> {
     Tls(T::WriteHalf),
 }
 
+impl<S: SplitStream, T: SplitStream> std::fmt::Debug for MaybeTlsReadHalf<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw(_) => formatter.debug_tuple("Raw").finish_non_exhaustive(),
+            Self::Tls(_) => formatter.debug_tuple("Tls").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<S: SplitStream, T: SplitStream> std::fmt::Debug for MaybeTlsWriteHalf<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw(_) => formatter.debug_tuple("Raw").finish_non_exhaustive(),
+            Self::Tls(_) => formatter.debug_tuple("Tls").finish_non_exhaustive(),
+        }
+    }
+}
+
 impl<S, T> AsyncRead for MaybeTlsReadHalf<S, T>
 where
     S: SplitStream,

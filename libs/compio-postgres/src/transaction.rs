@@ -32,6 +32,23 @@ pub struct Transaction<'a> {
     done: bool,
 }
 
+impl std::fmt::Debug for Transaction<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Transaction")
+            .field(
+                "savepoint_name",
+                &self.savepoint.as_ref().map(|savepoint| &savepoint.name),
+            )
+            .field(
+                "savepoint_depth",
+                &self.savepoint.as_ref().map(|savepoint| savepoint.depth),
+            )
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A representation of a PostgreSQL database savepoint.
 struct Savepoint {
     name: String,

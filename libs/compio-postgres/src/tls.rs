@@ -20,10 +20,12 @@ use std::sync::Arc;
 pub(crate) const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
 
 pub(crate) mod private {
+    #[derive(Debug)]
     pub struct ForcePrivateApi;
 
     // Read only by the TLS connectors, so the field is genuinely dead when the
     // `tls` feature is off. Targeted rather than a crate-wide allow.
+    #[derive(Debug)]
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub struct ReleaseConfig<'a>(&'a mut crate::release::ConnectionRelease);
 
@@ -121,6 +123,17 @@ impl ServerVerification {
 /// Channel binding information returned from a TLS handshake.
 pub struct ChannelBinding {
     pub(crate) tls_server_end_point: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for ChannelBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tls_server_end_point = self.tls_server_end_point.as_ref().map(|_| "<redacted>");
+
+        formatter
+            .debug_struct("ChannelBinding")
+            .field("tls_server_end_point", &tls_server_end_point)
+            .finish()
+    }
 }
 
 /// What a completed TLS handshake observed about client-certificate use.
@@ -341,6 +354,7 @@ impl<S> TlsConnect<S> for NoTls {
 }
 
 /// The future returned by `NoTls`.
+#[derive(Debug)]
 pub struct NoTlsFuture(());
 
 impl Future for NoTlsFuture {
@@ -357,6 +371,7 @@ impl Future for NoTlsFuture {
 /// The TLS "stream" type produced by the `NoTls` connector.
 ///
 /// Since `NoTls` doesn't support TLS, this type is uninhabited.
+#[derive(Debug)]
 pub enum NoTlsStream {}
 
 /// Uninhabited, so this is unreachable. It exists to satisfy the
@@ -411,6 +426,22 @@ impl error::Error for NoTlsError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_binding_debug_redacts_tls_server_end_point() {
+        let secret = b"channel-binding-material".to_vec();
+        let exposed = format!("{secret:?}");
+        let debug = format!("{:?}", ChannelBinding::tls_server_end_point(secret));
+
+        assert!(
+            debug.contains("<redacted>"),
+            "channel binding debug did not mark the redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&exposed),
+            "channel binding debug leaked TLS binding material: {debug}"
+        );
+    }
 
     /// The mode-to-policy table, asserted arm by arm.
     ///

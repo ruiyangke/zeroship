@@ -575,8 +575,7 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
                 ..Default::default()
             })
             .await
-            .err()
-            .expect("an option the proto_version cannot carry must be refused");
+            .expect_err("an option the proto_version cannot carry must be refused");
 
         assert!(
             error.as_db_error().is_none(),
@@ -617,8 +616,7 @@ async fn protocol_above_four_is_refused_locally() {
             ..Default::default()
         })
         .await
-        .err()
-        .expect("proto_version 5 must be refused before START_REPLICATION");
+        .expect_err("proto_version 5 must be refused before START_REPLICATION");
     let chain = common::error_chain(&error);
 
     assert!(
@@ -650,8 +648,7 @@ async fn protocol_below_one_is_refused_locally() {
             ..Default::default()
         })
         .await
-        .err()
-        .expect("proto_version 0 must be refused before START_REPLICATION");
+        .expect_err("proto_version 0 must be refused before START_REPLICATION");
     let chain = common::error_chain(&error);
 
     assert!(

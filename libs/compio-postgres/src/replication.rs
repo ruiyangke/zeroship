@@ -411,6 +411,18 @@ pub struct ReplicationConnection<S, T> {
     cancel_token: CancelToken,
 }
 
+impl<S, T> std::fmt::Debug for ReplicationConnection<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplicationConnection")
+            .field("parameter_count", &self.parameters.len())
+            .field("in_flight", &self.in_flight)
+            .field("has_release", &self.release.is_some())
+            .field("cancel_token", &self.cancel_token)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Records that an I/O call owns the stream, so that a call which never
 /// returned can be told from one that did.
 ///
@@ -987,6 +999,19 @@ pub struct ReplicationStream<S, T> {
     in_flight: InFlight,
     release: Option<ConnectionRelease>,
     cancel_token: CancelToken,
+}
+
+impl<S, T> std::fmt::Debug for ReplicationStream<S, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplicationStream")
+            .field("lsn", &self.lsn)
+            .field("copy_response", &self.copy_response)
+            .field("in_flight", &self.in_flight)
+            .field("has_release", &self.release.is_some())
+            .field("cancel_token", &self.cancel_token)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Tracks the two distinct LSN positions a logical-replication client

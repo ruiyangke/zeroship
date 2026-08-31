@@ -85,6 +85,16 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct Portal(Arc<Inner>);
 
+impl std::fmt::Debug for Portal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Portal")
+            .field("name", &self.0.name)
+            .field("statement_name", &self.0.statement.name())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Portal {
     pub(crate) fn new(
         client: &Arc<InnerClient>,

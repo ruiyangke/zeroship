@@ -448,8 +448,7 @@ async fn replication_connect_reports_the_error_when_no_host_answers() {
 
     let err = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
         .await
-        .err()
-        .expect("no host was listening, so this cannot succeed");
+        .expect_err("no host was listening, so this cannot succeed");
     assert!(
         !common::server_answered(&err),
         "nothing answered, so this must be a connect failure: {}",
@@ -683,8 +682,7 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
         &config_with(compio_postgres::config::SslMode::Prefer),
     )
     .await
-    .err()
-    .expect("a weak sslmode with sslrootcert=system is a contradiction");
+    .expect_err("a weak sslmode with sslrootcert=system is a contradiction");
     let refused_chain = common::error_chain(&refused);
     assert!(
         refused_chain.contains("sslrootcert=system"),
@@ -696,8 +694,7 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
         &config_with(compio_postgres::config::SslMode::VerifyFull),
     )
     .await
-    .err()
-    .expect("nothing is listening on that port, so this cannot succeed");
+    .expect_err("nothing is listening on that port, so this cannot succeed");
     let dialled_chain = common::error_chain(&dialled);
     assert!(
         !dialled_chain.contains("sslrootcert=system"),
@@ -1401,8 +1398,7 @@ async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
                 ..Default::default()
             })
             .await
-            .err()
-            .expect("an LSN this driver cannot represent must not start a stream");
+            .expect_err("an LSN this driver cannot represent must not start a stream");
 
         let rendered = format!("{error}");
         let chain = std::iter::successors(std::error::Error::source(&error), |error| {

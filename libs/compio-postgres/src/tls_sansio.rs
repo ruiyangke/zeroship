@@ -1023,6 +1023,14 @@ pub struct TlsReadHalf<R> {
     reader: TlsReader<R>,
 }
 
+impl<R> std::fmt::Debug for TlsReadHalf<R> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsReadHalf")
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R> AsyncRead for TlsReadHalf<R>
 where
     R: AsyncRead + Unpin,
@@ -1036,6 +1044,14 @@ where
 pub struct TlsWriteHalf<W> {
     socket: W,
     session: SharedSession,
+}
+
+impl<W> std::fmt::Debug for TlsWriteHalf<W> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsWriteHalf")
+            .finish_non_exhaustive()
+    }
 }
 
 impl<W> TlsWriteHalf<W> {
