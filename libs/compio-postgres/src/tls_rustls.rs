@@ -2504,6 +2504,30 @@ mod tests {
         assert!(tls_server_end_point(&cert).is_none());
     }
 
+    /// A name that is entirely whitespace canonicalises to nothing, and must do so
+    /// by the early return rather than by panicking. `rposition` below that
+    /// return carries an `expect` reading "the first non-space byte proved one
+    /// exists" - true only because the early return already handled the case
+    /// where there is no such byte.
+    ///
+    /// This matters because the input is a CRL ISSUER NAME: it comes from
+    /// whoever wrote the CRL, not from us. Removing the early return leaves the
+    /// whole suite green, so nothing was checking that an all-space name is
+    /// answered rather than fatal.
+    #[test]
+    fn crl_issuer_all_whitespace_name_canonicalises_to_empty() {
+        for spaces in [&b" "[..], &b"\t\n\r"[..], &[b' ', 0x0b, 0x0c, b'\t'][..]] {
+            let value = Any::from_tag_and_data(Tag::PrintableString, spaces);
+            let canonical = openssl_canonical_string(&value)
+                .expect("an all-space name is well formed, just empty")
+                .expect("PrintableString is an OpenSSL-canonical string type");
+            assert!(
+                canonical.is_empty(),
+                "an all-space issuer name must canonicalise to nothing, got {canonical:?}"
+            );
+        }
+    }
+
     #[test]
     fn crl_issuer_bmp_string_decodes_big_endian_two_byte_units() {
         // BMPString stores each Unicode scalar as one two-byte, big-endian unit.
