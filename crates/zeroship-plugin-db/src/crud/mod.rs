@@ -650,104 +650,79 @@ pub(crate) fn dispatch_find<'s>(
     let route = crate::tx_scope::capture_route(scope, app_id);
     let coll = collection.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        if let Err(e) = validate_unmask_projection(select.as_ref(), &unmask_columns) {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            };
-        }
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move {
+            validate_unmask_projection(select.as_ref(), &unmask_columns)?;
 
-        // Upfront auth fence for the unmask hint.
-        if !unmask_columns.is_empty() {
-            if let Err(e) = crate::crud::unmask::authorize_query_hint(
-                &binding,
-                &coll,
-                &unmask_columns,
-                &unmask_actor,
-                &unmask_reason,
-            )
-            .await
-            {
-                return reject_op(resolver, request_id, e);
-            }
-        }
-
-        // Resolve the descriptor entry BEFORE building SQL. It is the
-        // projection allowlist: the SELECT clause expands to `"id"` plus one
-        // term per declared field, with a masked column read through its
-        // sibling (`"<col>_masked" AS "<col>"`) so the ciphertext column never
-        // leaves the database on a default read. A collection this deploy does
-        // not declare is refused here.
-        let schema_hint = match crate::descriptor::collection_schema(&binding, &coll) {
-            Ok(schema) => schema,
-            Err(e) => return reject_op(resolver, request_id, e),
-        };
-        // Soft-delete auto-filter gate.
-        let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
-        let mut sql_filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema_hint, &mut sql_filter);
-        let built = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-            &app,
-            &coll,
-            &sql_filter,
-            limit,
-            offset,
-            order_by.as_ref(),
-            select.as_ref(),
-            &schema_hint,
-            &unmask_columns,
-            filter_soft_deleted,
-            current_sql_dialect(),
-        );
-        let bq = match built {
-            Ok(bq) => bq,
-            Err(e) => return reject_op(resolver, request_id, DbError::from(e)),
-        };
-        match exec_query(&route, bq).await {
-            Ok(rows) => {
-                let result = match read_pipeline::apply(
+            // Upfront auth fence for the unmask hint.
+            if !unmask_columns.is_empty() {
+                crate::crud::unmask::authorize_query_hint(
                     &binding,
                     &coll,
-                    rows,
-                    read_pipeline::ApplyOptions {
-                        unmask_columns: &unmask_columns,
-                        schema_field_scope: read_pipeline::SchemaFieldScope::All,
-                        ..read_pipeline::ApplyOptions::default()
-                    },
+                    &unmask_columns,
+                    &unmask_actor,
+                    &unmask_reason,
                 )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => return reject_op(resolver, request_id, e),
-                };
-                if !unmask_columns.is_empty() {
-                    if let Err(e) = crate::crud::unmask::audit_query_hint_granted(
-                        &binding,
-                        &coll,
-                        &unmask_columns,
-                        &unmask_actor,
-                        &unmask_reason,
-                    )
-                    .await
-                    {
-                        return reject_op(resolver, request_id, e);
-                    }
-                }
-                OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
-                    request_id,
-                }
+                .await?;
             }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+
+            // Resolve the descriptor entry BEFORE building SQL. It is the
+            // projection allowlist: the SELECT clause expands to `"id"` plus one
+            // term per declared field, with a masked column read through its
+            // sibling (`"<col>_masked" AS "<col>"`) so the ciphertext column never
+            // leaves the database on a default read. A collection this deploy does
+            // not declare is refused here.
+            let schema_hint = crate::descriptor::collection_schema(&binding, &coll)?;
+            // Soft-delete auto-filter gate.
+            let filter_soft_deleted =
+                system_fields_pass::should_filter_soft_deleted(include_deleted);
+            let mut sql_filter = filter;
+            maybe_lower_sqlite_boolean_filter(&schema_hint, &mut sql_filter);
+            let bq = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+                &app,
+                &coll,
+                &sql_filter,
+                limit,
+                offset,
+                order_by.as_ref(),
+                select.as_ref(),
+                &schema_hint,
+                &unmask_columns,
+                filter_soft_deleted,
+                current_sql_dialect(),
+            )
+            .map_err(DbError::from)?;
+            let rows = exec_query(&route, bq).await?;
+            let result = read_pipeline::apply(
+                &binding,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions {
+                    unmask_columns: &unmask_columns,
+                    schema_field_scope: read_pipeline::SchemaFieldScope::All,
+                    ..read_pipeline::ApplyOptions::default()
+                },
+            )
+            .await?;
+            // The audit runs AFTER the rows are in hand and BEFORE they are
+            // lowered: a failure here must refuse the read, not log it and
+            // return the plaintext anyway.
+            if !unmask_columns.is_empty() {
+                crate::crud::unmask::audit_query_hint_granted(
+                    &binding,
+                    &coll,
+                    &unmask_columns,
+                    &unmask_actor,
+                    &unmask_reason,
+                )
+                .await?;
+            }
+            Ok(result)
+        },
+        |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
+    )));
 
     promise
 }
