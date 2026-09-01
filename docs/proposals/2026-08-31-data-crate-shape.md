@@ -197,7 +197,40 @@ found it: Phase 0.1 in the execution order.
 | module | lines | why it does not place |
 | --- | --- | --- |
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
-| `error.rs` | 1,703 | **must be split TWO ways, and neither is first.** (1) `to_op_error` belongs in the adapter but cannot go until the dispatch surface does - 43 of its 49 production callers are engine-tier. (2) **It names `compio_postgres` in six signatures** (`from_pg` `:355`, `coded_sql` `:731`, four more), so `data-core` is not vendor-neutral and `data-sqlite` would link the Postgres driver through it. Reason (2) was missed by every review round. See Phase 0.1. |
+| `error.rs` | 1,703 | **cannot be split cleanly at all, and one of the three reasons is a language rule rather than a placement choice.** (1) `to_op_error` belongs in the adapter but cannot go until the dispatch surface does - 44 of its 51 production callers are engine-tier. (2) It names `compio_postgres` in **eight** signatures (`from_pg` `:355`, `coded_sql` `:731`, `walk_pg_chain` `:907`, five more). (3) **The orphan rule pins five `From` impls here permanently** - see below. |
+
+**`DbError`'s five `From` impls fix `data-core`'s dependency floor by coherence, and the document has
+been costing this as if relocation were an option.** Found in round 5 by the reviewer assigned impl
+position - the one place no other instrument looked.
+
+```
+error.rs:797  impl From<compio_postgres::Error>                    for DbError
+error.rs:803  impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError
+error.rs:814  impl From<crate::query::QueryError>                   for DbError   <- Track A DELETES this module
+error.rs:870  impl From<zeroship_schema::error::SchemaError>        for DbError
+error.rs:884  impl From<zeroship_schema::error::MaskSentinelError>  for DbError
+```
+
+`impl From<A> for B` is legal only in the crate that owns `A` or `B`. For `:797`, **both sides are
+foreign to `data-postgres`** - so unlike `from_pg` and `coded_sql`, that impl **cannot follow the
+vendor code down**. It stays wherever `DbError` lives. There are exactly three exits, and all are
+design decisions rather than cleanup:
+
+1. **`data-core` keeps the `compio-postgres` dependency.** Then the vendor-neutral contract crate is
+   not vendor-neutral, and `data-sqlite` links the Postgres driver - the finding above, made permanent.
+2. **Delete the `From`.** Cheap and compiler-guided: `error.rs:794-796` says it exists so callers "gain
+   the ergonomic `?` operator", and reliance is small - one `e.into()` at `:732` against 17 explicit
+   `from_pg`/`coded_sql` sites. Every `?` that breaks is named by `rustc`.
+3. **Newtype the pg error inside `data-postgres`** and impl `From<Newtype> for DbError` there. Legal,
+   and it rewrites every conversion chain.
+
+**The same rule pins the other four**, so `data-core`'s true dependency floor is
+`{zeroship-schema, zeroship-core, compio-postgres-or-a-redesign}` - while the target block declares
+`data-core -> data-query-builder` **and nothing else**. The declared crate graph is wrong about the
+contract crate's dependencies, which is the one row four review rounds were most confident about.
+
+And `:814` is a scheduling trap: `From<crate::query::QueryError>` welds `DbError` to the string
+builder **Track A deletes**. That `From` must die *with* Track A, and no Track A step lists it.
 | ~~`context.rs`~~ | 1,688 | **RESOLVED by the `BackendHandle` finding.** It holds `Option<BackendHandle>` (`:422`) and constructs both variants (`:561`, `:587`), so it follows the enum UP into `data-engine`. |
 | `auth/` | 1,459 | **it is THREE things wearing one name - see below.** |
 | `service.rs` | 606 | **it straddles, and its own header proves it.** |
