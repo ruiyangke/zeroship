@@ -876,6 +876,22 @@ defect, and it is worth naming the pattern: **every design so far has been
 written against the single-row path and broken on a sibling path that shares the
 builder.**
 
+**MEASURED, and the live test fixture cannot see it.** The same statement against
+both DDL shapes, on the pg18 container:
+
+| DDL shape | Result |
+| --- | --- |
+| the live fixture - `created_at TIMESTAMPTZ DEFAULT NOW()` | **succeeds**, storing `created_at = NULL` for the second row |
+| production - `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` (`query.rs:212`) | `ERROR: null value in column "created_at" violates not-null constraint` |
+
+`crates/zeroship-plugin-db/tests/integration.rs`'s `notes` fixture declares both
+timestamps **nullable**, while production emits `NOT NULL`. The fixture's own
+comment claims it "makes the fixture look like what production reads" - it
+matched the columns and not the constraints. So a regression test for this defect
+written on that fixture would pass while production raises `23502`, and would
+silently store NULL, which is the failure mode hardest to notice. **The fixture
+must be corrected before any TDD on edit 2b** (task #135).
+
 ### The lifecycle fence is also incomplete for upsert
 
 Even with 4a and 4b, `upsert` runs the **INSERT** pass (`write_pipeline.rs:159`),
