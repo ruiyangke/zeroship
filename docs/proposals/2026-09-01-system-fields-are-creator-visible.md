@@ -204,7 +204,43 @@ RENDERING of the assignment rule, not a second declaration of it.
 `typedId` has no SQL rendering, so it yields no DDL default - the absence falls
 out instead of needing a rule.
 
-## THE TWO DIRECTIVES CONFLICT, AND ONLY THE OPERATOR CAN RESOLVE IT
+## RESOLVED, 2026-09-01: `assign` is not overridable, `default` is
+
+Operator decision. The conflict recorded below is settled, and the override
+policy needs no new property - it is the choice of SLOT:
+
+- **`assign`** - the platform computes the value. A creator-supplied value is
+  NOT accepted.
+- **`default`** - a fallback used when the creator supplies nothing. A
+  creator-supplied value WINS.
+
+Every system field carries an `assign`, so all seven are platform-owned on
+write. Ordinary creator columns keep `default` and stay overridable, which is
+what `t.string().default("x")` already means.
+
+**What this settles, stated plainly because two of them reverse earlier
+positions in this document:**
+
+| | outcome |
+| --- | --- |
+| `created_by` forgery | **closed.** A supplied value is not accepted, so the audit column means something. |
+| #126 - `insert({id})` round-trip | **closed as won't-fix.** `id` is assigned, so a supplied id is not accepted. The silent DISCARD still gets fixed - it becomes a refusal - but the value never lands. |
+| acceptance criterion 3 - supplied `updated_at` wins | **inverted.** It must now be refused. |
+| acceptance criterion 6 - supplied `id` round-trips | **inverted.** Same reason. |
+| history / external-id import | **moves to migration DML.** Edit 3b's fence must therefore refuse only `created_by`/`updated_by`, never `id` or `created_at`, or import has no path at all. |
+
+**One implementation constraint this creates, and it is easy to get wrong.**
+"Not accepted" must mean the value is REMOVED before the builder sees it, not
+merely ignored. The raw `zeroship.db.*` path does not pass through `validateDoc`
+(`system_fields_pass.rs:29-32` names it first-class), so a supplied `version`
+can still arrive. If the auto-bump is made unconditional while the key still
+reaches `build_upsert`, the generic loop emits `"version" = EXCLUDED."version"`
+(`query.rs:6295-6304`) AND the bump emits a second assignment to the same column
+(`:6313-6333`) - two assignments to one column in one `DO UPDATE SET`, which
+PostgreSQL refuses. Strip at the pass, then make the bump unconditional; the two
+edits are one change.
+
+## The conflict this resolved (recorded for the reasoning, not as an open question)
 
 Round 5 surfaced a tension between two things the operator asked for, and no
 design can satisfy both:
