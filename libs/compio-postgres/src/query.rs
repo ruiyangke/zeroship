@@ -203,7 +203,11 @@ pub async fn query_text_params(
 
     loop {
         match responses.next().await? {
-            Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
+            // Same portal rule as `execute_text_params`: this sends
+            // `describe(b'P', ...)`, and a portal Describe answers with
+            // RowDescription or NoData. ParameterDescription belongs to a
+            // STATEMENT Describe, which only the `b'S'` paths below issue.
+            Message::ParseComplete | Message::BindComplete => {}
             Message::NoData => {
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], vec![]),
