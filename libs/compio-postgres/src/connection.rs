@@ -8275,6 +8275,28 @@ mod tests {
         vec![b'G', 0, 0, 0, 7, 0, 0, 0]
     }
 
+    #[compio::test]
+    async fn serialized_main_loop_preserves_stashed_batch_order() {
+        let (connection, mut response, copy_request) =
+            connection_with_stashed_batch(vec![completed_response_batch(b'I')]);
+        drop(copy_request);
+
+        compio::time::timeout(Duration::from_secs(1), connection.run_serialized())
+            .await
+            .expect("serialized main loop exceeded its watchdog")
+            .expect("serialized main loop failed");
+
+        let mut tags = Vec::new();
+        while let Ok(mut batch) = response.try_recv() {
+            tags.extend(batch_tags(&mut batch));
+        }
+        assert_eq!(
+            tags,
+            ["STASHED", "SELECT 1"],
+            "the next backend batch overtook the serialized-loop stash"
+        );
+    }
+
     /// THE CASE. While `handle_request` reads through COPY startup, a batch
     /// belonging to the EARLIER request `P` arrives. `P`'s consumer has caught
     /// up, so `try_send` succeeds - and unless the stash is drained first, that
