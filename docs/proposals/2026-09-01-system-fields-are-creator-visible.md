@@ -204,6 +204,75 @@ RENDERING of the assignment rule, not a second declaration of it.
 `typedId` has no SQL rendering, so it yields no DDL default - the absence falls
 out instead of needing a rule.
 
+## THE TWO DIRECTIVES CONFLICT, AND ONLY THE OPERATOR CAN RESOLVE IT
+
+Round 5 surfaced a tension between two things the operator asked for, and no
+design can satisfy both:
+
+- *"expose these fields to creator, less restrictions"* - the original directive.
+- *"a creator value in an assigned column is not a concept"* - the consequence of
+  the `assign` model.
+
+**The second is MORE restrictive than what ships today, and more restrictive than
+the Salesforce behaviour the directive cited.** Today's runtime honours a
+creator-supplied value for all seven on INSERT
+(`system_fields_pass.rs:257`, `:267`, `:270`), and the module doc at `:21-27`
+explicitly sanctions it for "migration code that pre-seeds historical timestamps
+or a specific version". Salesforce's own "Set Audit Fields" permits create-time
+audit setting, which is the model the directive named.
+
+Three fields want three different override answers, and `{by, on}` expresses
+none of them:
+
+| field | what the proposal's own acceptance criteria require |
+| --- | --- |
+| `id` | a supplied value **wins** (criterion 6, and the whole of #126) |
+| `created_by` | a supplied value is **removed** (criterion 7) |
+| `updated_at` | a supplied value **wins** (criterion 3) |
+
+All three merely "have an assign". So either `assign` gains an override axis -
+a third property, which is the accumulation already rejected once - or the
+uniform-strictness reading stands and **criteria 3 and 6 flip to must-fail**,
+deleting the affordance this same document calls "the strongest practical
+argument for the change".
+
+**The concrete use case this kills: external-id / history import.** Migrating
+rows from an existing system while keeping stable ids and original timestamps.
+If uniform strictness stands, that has to move to migration DML - which is the
+same path edit 3b proposes to fence, so the fence must not extend past the actor
+columns.
+
+**This is a decision, not a defect.** Recorded here unresolved rather than
+settled by inference.
+
+### The one binding the charter cannot attest: typedId's prefix
+
+The inject rule is `scope = "all"`, `mandatory = true` - one identical line for
+every table of every app (`confined-system-shape.inject.toml:60-64`). So
+`assign = { by = "typedId" }` is the same everywhere, but the PREFIX is
+per-collection creator data.
+
+`prefix_for_collection` (`system_fields_pass.rs:128-135`) reads the descriptor's
+`idPrefix` with **no validation**. `RESERVED_ID_PREFIXES` exists
+(`zeroship-schema/src/query.rs:922`) and the *derived*-prefix path guards `usr`
+(`system_fields_pass.rs:60`, `:97-111`) - but the descriptor-declared path
+bypasses both. A hand-edited descriptor claiming `idPrefix: "usr"` mints
+platform-user-shaped ids from the worker.
+
+After the charter moves into the worker and the descriptor "becomes a mirror it
+can verify", this is **the one binding input that stays creator-controlled and
+unverifiable** - the charter can attest that `id` is typedId-assigned, but not
+what prefix it uses. The fix is one call at the pass boundary, and it belongs to
+this design, because this design is what claims the worker stops trusting
+descriptor bindings.
+
+**Also to correct before anyone implements from it:** the field table in this
+section lists SIX rows. `updated_by` is missing. It fits as
+`{ by = "actor", on = "write" }`, but that forces an undecided question - on an
+anonymous update the builder omits the SET clause today
+(`query.rs:4228-4232`), leaving `updated_by` naming an actor who did not make
+the last write.
+
 ## ROUND 5 KILLED THE DERIVATION, IN TWO PLACES, ONE OF THEM PLAINTEXT
 
 **1. Deriving the DDL default from `by` makes every row born soft-deleted.**
