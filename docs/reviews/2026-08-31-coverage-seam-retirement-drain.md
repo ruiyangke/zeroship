@@ -139,6 +139,53 @@ pre-existing tests fail on it, and that mismatch is what prompted the recheck.
 all the same shape: auth refusals, the 2PC decoders, and this. The aggregate
 form has been right every time it was actually run.
 
+### So the reading was automated: `tests/lib/dead_functions.py`
+
+Three misreads of the same shape is a broken instrument, not three lapses of
+attention. The manual step that failed every time - "which `fn` is this line
+run inside?" - is now the tool's job. It brace-matches each production `fn`
+span, skips every `#[cfg(...test...)]` span (the same predicate-matching the
+panic-message sweep needed, so `#[cfg(all(test, unix))]` is not a phantom), and
+reports a function only when EVERY counted region inside it is zero.
+
+Validated against both directions on the same JSON before being used:
+
+    drain_available_retirement_read_channel   absent   (covered since 5905f885e)
+    Pool::query_text_params                   present  (15 regions, all zero)
+    Pool::batch_execute                       present  (14 regions, all zero)
+
+That is agreement with the hand-aggregation, which is all a re-derivation can
+show - it does not make either reading true. **The `batch_execute` row is in
+fact stale**: `4eaabb40e` covered it after this JSON was produced. Treat the
+list as a claim about the commit the JSON came from, never about the tree.
+
+Ranked by what the crate actually depends on rather than by region count:
+
+    pool.rs         Pool::cancel_query        PUBLIC, and called from outside
+    pool.rs         transport::cancel_query   the TLS-policy branch it delegates to
+    pool.rs         Pool::query_text_params   0 test references
+    transaction.rs  Transaction::query_text_params   0 test references
+
+`Pool::cancel_query` is the one that matters. It is not merely untested inside
+this crate: `crates/zeroship-plugin-db/src/transaction/cancel.rs:146` calls it
+to cancel a running transaction, so the platform's cancellation path runs
+through a wrapper no test in the owning crate executes.
+
+### Four of the dead functions should not be tested, they should be deleted
+
+`Client::cancel_query`, `Client::cancel_query_raw`, `Transaction::cancel_query`
+and `Transaction::cancel_query_raw` are all `#[deprecated(since = "0.6.0")]`
+forwarders to `cancel_token()`, and they are the crate's only four deprecated
+items. The caller set is closed: the two `Client` forms are called only by the
+two `Transaction` forms, and the `Transaction` forms are called by nothing.
+Every other `cancel_query` in the tree resolves to `CancelToken::cancel_query`
+or `Pool::cancel_query`, both of which stay.
+
+Under the project's no-back-compat rule the answer is deletion, not coverage.
+Worth stating because a dead-code list invites the reflex to cover everything
+on it: **the first question for each entry is whether the function should
+exist**, and for these four it should not.
+
 ## A per-line lookup into the coverage segments is NOT "did this line run"
 
 Recorded because it nearly cost a dispatch. Reading segment counts line by line,
