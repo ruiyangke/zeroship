@@ -23,12 +23,20 @@
 #                 crates/zeroship-migrate-server/tests/author_and_apply_pg.rs
 #                 crates/zeroship-migrate/tests/column_shapes/injected_column_collation.rs
 #                 crates/zeroship-plugin-db/tests/distributed_live.rs
-#   TypeScript  policies/codegen.mjs emits the fragment as a const into
-#               sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts,
-#               which the emit ceiling and the dev-apply charter import. That
-#               file is COMMITTED, not built, so tsc/tsx/the editor keep working
-#               with no build-order knowledge - and so it is the one thing here
-#               that can still go stale. Arm 3 regenerates and diffs it.
+#   TypeScript  policies/codegen.mjs emits TWO views, because the two consumers
+#               ask different questions of the same bytes:
+#                 sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts
+#                     the fragment verbatim as a const, which the emit ceiling
+#                     and the dev-apply charter concatenate grants onto and load
+#                     as a policy document.
+#                 sdks/db/src/generated/confined-system-shape.generated.ts
+#                     the rule PROJECTED into data - column name, nullability,
+#                     assign - because @zeroship/db asks "does the platform
+#                     compute this field?" per insert, and shipping it the TOML
+#                     would mean shipping a TOML parser into the data plane.
+#               Both are COMMITTED, not built, so tsc/tsx/the editor keep working
+#               with no build-order knowledge - and so they are the two things
+#               here that can still go stale. Arm 3 regenerates and diffs both.
 #
 # WHAT THAT CHANGES ABOUT THIS GATE. Comparing copies is no longer a question
 # anyone can answer wrongly; the compiler answers it. What is left is the part a
@@ -139,17 +147,26 @@ NOT_MIRRORED=(
 # Discovery finds this file's own declarations otherwise.
 SELF="tests/inject_policy_mirror_gate.sh"
 
-# MEASURED 2026-08-31: one authored fragment, one generated view, 19 inert
-# fixtures, and seven consumers. Every number is ASSERTED, not merely reported: a gate
+# MEASURED 2026-09-01: one authored fragment, two generated views, 19 inert
+# fixtures, and eight consumers. Every number is ASSERTED, not merely reported: a gate
 # that adapts to whatever it finds cannot tell "nothing was added" from
 # "something was added and I adjusted".
 #
-# The five Rust consumers are the deployed ceiling, two adapter PG tests, the
-# production-charter collation integration test, and plugin-db's distributed
-# live test. The last two are tests, but consuming the shared fragment is the
-# point: neither is an inert copy of the platform shape.
+# The six Rust consumers are the deployed ceiling, two adapter PG tests, the
+# production-charter collation integration test, plugin-db's distributed live
+# test, and plugin-db's own compiled-in charter. Three of those are tests, but
+# consuming the shared fragment is the point: none is an inert copy of the
+# platform shape.
+#
+# THIS SAID FIVE UNTIL 2026-09-01, and had been wrong since 27f4d5f45 ("feat(db):
+# compile the operator charter into the worker") added
+# crates/zeroship-plugin-db/src/system_shape_charter.rs as the sixth. That is the
+# failure mode the asserted counts exist to produce - a new consumer is supposed
+# to fail this gate until someone states it - so the red was the gate working.
+# What it also shows is that the count and the prose above it rot together: the
+# sentence naming the five was not re-read when the sixth landed.
 EXPECTED_INERT=19
-EXPECTED_RUST_CONSUMERS=5
+EXPECTED_RUST_CONSUMERS=6
 EXPECTED_TS_CONSUMERS=2
 
 # ---------------------------------------------------------------------------
@@ -296,16 +313,29 @@ trap 'rm -f "$codegen_log"' EXIT
 node "$ROOT/$CODEGEN" --check >"$codegen_log" 2>&1
 codegen_rc=$?
 
-# One generated target is ruled on. The floor is 1 because there is exactly one,
-# and the arm's real anti-vacuity guard is that the codegen itself refuses (exit
-# 2) when the fragment carries no rule to generate from.
-gate_arm codegen 1 1 || true
+# TWO generated targets are ruled on, and the floor is 2 because a run that
+# byte-compared only one of them would print exactly what a clean tree prints.
+# The two are different VIEWS of the same fragment, not copies of each other:
+#
+#   sdks/vite-plugin/.../confined-system-shape.generated.ts   the TOML verbatim,
+#       because its consumer concatenates grants onto it and loads a policy
+#       document.
+#   sdks/db/src/generated/confined-system-shape.generated.ts  the rule PROJECTED
+#       into data (column name, nullability, assign), because its consumer asks
+#       "does the platform compute this field?" per insert and must not carry a
+#       TOML parser into the data plane.
+#
+# Neither can be derived from the other by this gate, so both are regenerated in
+# memory and diffed. The arm's other anti-vacuity guard is that the codegen
+# itself refuses (exit 2) when the fragment carries no rule, no columns, or no
+# column bearing an `assign`.
+gate_arm codegen 2 2 || true
 
 if [ "$codegen_rc" -ne 0 ]; then
-    echo "  FAIL: the generated TypeScript view drifted from the fragment."
+    echo "  FAIL: a generated TypeScript view drifted from the fragment."
     sed 's/^/        /' "$codegen_log"
     echo "        Run \`node $CODEGEN\` and commit the result. Do NOT hand-edit"
-    echo "        $GENERATED - it is overwritten."
+    echo "        the file the line above marks DRIFT - both views are overwritten."
     gate_arms_finish || true
     # exit 2 when the codegen refused outright (no rule to generate from, an
     # unembeddable character); exit 1 when it simply found drift.

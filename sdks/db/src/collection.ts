@@ -31,6 +31,7 @@ import type {
   WithSpec,
 } from "./types";
 import { err, naming, ok } from "./types";
+import { CONFINED_SYSTEM_SHAPE_COLUMN_NAMES } from "./generated/confined-system-shape.generated";
 import {
   aggregateCollection,
   countCollection,
@@ -205,16 +206,15 @@ export class Collection<
       fieldToCol[field] = col;
       colToField[col] = field;
     }
-    const autoFields = [
-      "id",
-      "created_at",
-      "updated_at",
-      "created_by",
-      "updated_by",
-      "version",
-      "deleted_at",
-    ];
-    for (const field of autoFields) {
+    // The platform columns, from the operator charter rather than restated
+    // here. Adding an eighth is a charter line, not an edit to this loop.
+    //
+    // NOTE this loop OVERWRITES rather than collides: a creator field whose
+    // strategy-mapped column equals one of these silently loses its
+    // `colToField` entry to the platform name, because the platform pass runs
+    // second. That is a real hazard and it is not introduced here - see the
+    // `deletedAt` note in installSchema's model().
+    for (const field of CONFINED_SYSTEM_SHAPE_COLUMN_NAMES) {
       const col = strategy.toColumn(field);
       fieldToCol[field] = col;
       colToField[col] = field;

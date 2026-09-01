@@ -505,6 +505,29 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
       (def.type === "string" && def.required && value === "");
 
     if (missing) {
+      // PLATFORM-ASSIGNED fields are neither required of the caller nor
+      // materialised for them. Both facts are ONE fact - the field carries an
+      // `assign`, so the platform computes the value - and neither is stored
+      // separately anywhere; see `FieldDef.assign`.
+      //
+      // The order matters: this arm sits ABOVE the `default` arm on purpose. A
+      // charter column may carry both (`version` is `increment(1)` with a DDL
+      // `DEFAULT 1`), and letting the default arm win would materialise the
+      // seed into the row and hand the SQL builder a value the runtime is
+      // supposed to compute. `assign` is the stronger claim, so it is read
+      // first.
+      //
+      // `delete` here is on `result`, this function's OWN object, never on
+      // `doc`. The caller's document is not touched: a validator that edits its
+      // input makes the caller's object depend on whether it was validated. The
+      // key is dropped rather than left undefined because `deleted_at` and
+      // friends would otherwise reach the native op as an explicit NULL and
+      // drive a NOT NULL violation on a column whose value the platform was
+      // about to supply.
+      if (def.assign !== undefined) {
+        delete result[key];
+        continue;
+      }
       if (def.default !== undefined) {
         result[key] =
           typeof def.default === "function" ? def.default() : def.default;
