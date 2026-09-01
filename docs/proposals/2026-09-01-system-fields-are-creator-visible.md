@@ -32,21 +32,42 @@ schema declaring one of `SYSTEM_FIELD_NAMES` (`:249`), with a single sanctioned
 exception for `id: t.id("prefix")`. And `:1072` strips all seven out of the
 descriptor-derived field list before it reaches `model()`.
 
-**The strip is an intentional visibility policy, and the refusal is a separate
-mechanism.** An earlier draft of this proposal claimed the strip was merely a
-workaround - that without it the platform's own descriptor would throw
-`RESERVED_SYSTEM_FIELD_NAME` on boot, because `model()` (`:555`) feeds
-`normalizeSchema()` (`:579`) where the refusal lives. **That was false, and a
-reviewer refuted it from the code.** `normalizeSchema` copies any raw `FieldDef`
-and `continue`s at `:297-300`, *before* the refusal at `:308`, and the comment
-at `:288-292` says exactly why: descriptor fields "legitimately carry system
-fields ... so they bypass the creator-facing system-field fence below". Remove
-the strip and nothing throws.
+**The strip is an INSERT-VALIDATION GUARD.** This took three answers to get
+right, and the first two were mine.
 
-The correction makes the work **simpler**, not harder: the strip and the refusal
-are independent edits, not one coupled mechanism. Removing the strip exposes the
-fields; narrowing the refusal lets creators declare them. Both are still needed
-for the acceptance criteria, but neither forces the other.
+*Answer 1 (wrong).* The first draft said the strip was a workaround for the
+declaration refusal - that without it the platform's own descriptor would throw
+`RESERVED_SYSTEM_FIELD_NAME` on boot. **Refuted from the code.**
+`normalizeSchema` copies any raw `FieldDef` and `continue`s at `:297-300`,
+*before* the refusal at `:308`, and the comment at `:288-292` says exactly why.
+Nothing throws at boot.
+
+*Answer 2 (incomplete).* "Then it must be an intentional visibility policy."
+Also wrong, because there is nothing left to make visible: the read path and the
+row types already expose all seven (see the costs section below).
+
+*Answer 3, and it is the strip's actual job.* **It stops `validateDoc`
+rejecting every insert.** The committed descriptors mark `id`, `created_at` and
+`updated_at` as `"required": true` **with no `default`**
+(`examples/db-hitcounter/generated/zeroship/schema.runtime.json:9,20,31`; only
+`version` carries `default: 1` at `:62-65`). `validateDoc` errors on exactly
+that shape - `else if (def.required)` at `sdks/db/src/validate.ts:511-512`. Put
+the seven back in `_schema` and `insert({ path: "/x" })` throws
+`ValidationError: id is required, created_at is required, updated_at is
+required`.
+
+The strip's own introducing commit says so. `363b0edcb` added it alongside a
+test named **"does not require runtime descriptor system fields in insert
+input"** (`sdks/bootstrap/tests/install-schema.test.ts:223`), and never touched
+`normalizeSchema`. The guard is about insert *requiredness*, not visibility and
+not the refusal.
+
+**Consequence: the two-edit design in this proposal does not work.** Deleting
+`:192` and `:1072` red-bars every insert in the tree, including this proposal's
+own acceptance criterion 6. The change additionally requires either the fold to
+emit system fields as non-required, or `validateDoc` to understand that
+platform-populated fields are never required *on input*. That is the real centre
+of this work, and neither reviewer round found it until the second.
 
 ## Three defects found while establishing the above
 
@@ -71,10 +92,30 @@ and through `normalizeSchema`:
 The framing in the first draft was too generous to the current code. It is not
 that the fence is "too strict for one spelling and blind to another": **both
 spellings resolve to the same column**, so both collide identically, and the
-fence catches exactly one of them - the one a camelCase-authoring creator is
-least likely to write. A creator on `snakeCase` who writes `createdAt`, which is
-the spelling the naming strategy exists to support, silently acquires the
-platform's audit column.
+fence catches exactly one of them.
+
+**But no creator can reach this today, and the draft that said one could was
+overstating it.** A reviewer traced reachability: both installers pass only
+`{ descriptor }` (`runtime-entry.ts:152-156`, `dev-entry.ts:279-286`), the
+default is `asIs` (`install-schema.ts:1008`, `collection.ts:200`), and
+`installSchema` is framework-internal, so creators cannot pass `naming` at all.
+**No production path activates `snakeCase`.** The only routes to the collision
+are direct `model()` / `normalizeSchema` callers - i.e. tests.
+
+Nor is the SDK the authoritative fence. Creator schemas are *migrations*, and
+the engine refuses a colliding declaration twice
+(`crates/zeroship-migrate-core/src/model/table_shape.rs:361-376`
+`SystemColumnCollision`, and `.../schema/query.rs:511-531`). `createdAt` passes
+both and becomes its own physical column `"createdAt"`, coexisting with
+`created_at`. Two columns, no collision.
+
+So defect 1 is a **latent footgun in an unreachable configuration**, not a live
+hole. It stays in scope because the fix is cheap and the configuration is
+supported-in-name; it drops out of the security argument entirely. If it is ever
+wired, the failure is nastier than the draft said: writes land in the system
+column, an UPDATE is refused with an error naming a field the creator never
+typed, and reads never populate the creator's field, because the `autoFields`
+loop overwrites the mapping (`collection.ts:203-221`, last write wins).
 
 **2. Two system fields are already exposed, under different spellings.**
 `model()` injects `deletedAt` at `:583` when soft-delete is on and `version` at
@@ -180,7 +221,18 @@ named in one place and enforced on both sides of the V8 boundary:
 | --- | --- | --- |
 | `writeOnce` | `id`, `created_at`, `created_by` | read, filter, sort, and **set on INSERT**; never on UPDATE |
 | `defaulted` | `updated_at`, `updated_by`, `version` | the above, and supply a value on UPDATE, which wins over the auto-bump |
-| `managed` | `deleted_at` | the above, but the lifecycle runs through `delete()` / `restore()` |
+| ~~`managed`~~ | `deleted_at` | **this row was fiction - see below** |
+
+**The `managed` tier does not exist in Rust, and a reviewer caught it.**
+`check_keys_for_immutable_and_overrides` refuses the three immutables and hints
+the three defaulted, then lets `deleted_at` fall through `_ => {}`
+(`system_fields_pass.rs:438`) as an ordinary SET column. No fence exists in
+`crud/mod.rs` either. So an UPDATE patch naming `deleted_at` soft-deletes or
+resurrects a row today, bypassing `delete()` / `restore()` entirely. The claim
+below that this table is "exactly the split the runtime already enforces" is
+therefore false for one field of seven: `deleted_at` is `defaulted`-like and
+unfenced. Either the `managed` tier needs Rust work this proposal must name, or
+the table must describe what ships.
 
 This is exactly the split the runtime already enforces. The proposal does not
 invent a policy; it makes the SDK stop contradicting the one that ships.
@@ -328,9 +380,18 @@ mechanism is not a passing test.
 
 ## Acceptance
 
+0. **NEW, and it gates everything else.** `insert({ path: "/x" })` on a
+   descriptor-installed collection still succeeds after the strip is removed.
+   It does **not** today: `id` / `created_at` / `updated_at` are
+   `"required": true` with no default, so `validateDoc:511` raises
+   `ValidationError`. This is the criterion that proves the design's central
+   edit is survivable, and the two-edit version of this proposal fails it.
 1. A creator schema declaring `created_at: t.timestamp()` is accepted, and
    reads return the platform's value. (`t.date` does not exist - the date-ish
-   builders are `t.timestamp()` and `t.calendarDate()`.)
+   builders are `t.timestamp()` and `t.calendarDate()`.) **Passable only as an
+   SDK unit test as written**: a real creator declares schema in a *migration*,
+   and the engine refuses the name at `table_shape.rs:361-376`. Making this true
+   for an actual creator requires engine changes this proposal does not specify.
 2. An UPDATE patch naming `created_at` is refused by the runtime, with the
    error surfacing through the SDK. **REGRESSION GUARD ONLY - it cannot fail.**
    `checkPartial` skips unknown keys (`validate.ts:613-614`, `if (!def)
