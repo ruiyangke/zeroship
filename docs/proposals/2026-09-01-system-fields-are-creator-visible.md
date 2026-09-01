@@ -92,6 +92,24 @@ this proposal says it belongs.
 Found by a reviewer, not by me, and it is the most valuable finding in the
 round.
 
+**MEASURED, not inferred.** Two pairs through `normalizeSchema`, each differing
+in exactly one variable - builder versus plain object literal, same field name,
+same declared type:
+
+| Declaration | Result |
+| --- | --- |
+| `{ version: t.number() }` | throws `RESERVED_SYSTEM_FIELD_NAME` |
+| `{ version: { type: "number" } }` | **accepted**, `{"version":{"type":"number"}}` |
+| `{ created_at: t.number() }` | throws `RESERVED_SYSTEM_FIELD_NAME` |
+| `{ created_at: { type: "number" } }` | **accepted**, `{"created_at":{"type":"number"}}` |
+
+The first probe was asymmetric - it asserted rather than printed - and reported
+a failing control with no way to say why. The cause was that `t.date()` does not
+exist (the builders are `string, number, boolean, timestamp, json, array, ref,
+object, vector, geoPoint, calendarDate, bytes, encrypted, literal, id, actor,
+union`), so the control was testing a `TypeError`, not the fence. Printing both
+arms instead of asserting one is what surfaced it.
+
 ## The design
 
 **Expose all seven on the Collection.** Delete `stripRuntimeSystemFields`
@@ -168,8 +186,9 @@ traced end to end.
 
 ## Acceptance
 
-1. A creator schema declaring `created_at: t.date()` is accepted, and reads
-   return the platform's value.
+1. A creator schema declaring `created_at: t.timestamp()` is accepted, and
+   reads return the platform's value. (`t.date` does not exist - the date-ish
+   builders are `t.timestamp()` and `t.calendarDate()`.)
 2. An UPDATE patch naming `created_at` is refused by the runtime, with the
    error surfacing through the SDK.
 3. An UPDATE patch naming `updated_at` is accepted and the supplied value wins
