@@ -114,7 +114,43 @@ required:
 This keeps a working creator capability, keeps the security property uniform, and
 costs one generator whose whole meaning is "not me". Refusing integer identity
 instead would delete a feature to make the charter tidier, which is the platform
-serving itself. The prefix stays per-collection input, resolved at
+serving itself.
+
+### An `assign` may not outlive the thing its generator depends on
+
+The resolution above is only sound if `by = "identity"` stays true. It does not,
+today, and the gap is general rather than specific to identity: **charter
+resolution runs on `CreateTable` only** (`table_shape.rs:310`), so no later
+operation is re-resolved against the charter.
+
+The concrete instance: `AlterPrimaryKey` accepts `dropIdentityFrom: ["id"]`
+(`validate.rs:11789`), and the fold removes `column.identity` while leaving
+`assign.by = "identity"` untouched (`single_fold.rs:714`). After that migration
+the descriptor claims the database generates `id` and the database does not.
+Step 5's pass would omit the column from the INSERT and every insert would fail.
+
+**Production is protected only by accident, which is the reason to fix it rather
+than note it.** Destructive primary-key changes require approval and
+migrate-server supplies `Approval::None` (`apply.rs:495`) - so the operation is
+refused for a reason that has nothing to do with assignment policy. Local dev
+supplies `approved: true` (`dev-apply.ts:172`), so the stale binding is reachable
+there now. A protection that holds for an unrelated reason is not a protection;
+it is a coincidence with good PR.
+
+**Decided: refuse the operation, and state the rule generally.** An operation
+that would invalidate a column's `assign.by` is refused at the policy-aware IR
+boundary, for every backend. For `by = "identity"` that is `dropIdentityFrom`;
+the same guard catches any future operation that removes a DDL feature an
+`assign` depends on.
+
+The narrower alternatives are all incoherent, which is what makes this the
+answer rather than a preference. Clearing the `assign` hands the column to
+caller-supplied values, which the policy refuses - so the column becomes
+unwritable by anyone. Reverting `by` to `typedId` cannot produce an integer.
+Changing the column's type is a new destructive design. **Dropping identity from
+an assigned `id` does not produce a working table under any reading**, so
+refusing it removes no capability; a creator's own integer column carries no
+`assign` and may still drop its identity freely. The prefix stays per-collection input, resolved at
 generation time and validated at the pass boundary against
 `RESERVED_ID_PREFIXES`, which is the gap documented below. That division is not a
 concession: it is the same one the charter already makes, and the reason the
