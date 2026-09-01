@@ -52,13 +52,6 @@ pub(crate) const IMMUTABLE_SYSTEM_FIELDS: &[&str] = &["id", "created_at", "creat
 /// "<prefix>_<22 base62 chars>" shape compact).
 const MAX_AUTO_PREFIX_LEN: usize = 4;
 
-/// Typed-id prefixes the auto-derivation must never produce, because
-/// they collide with platform-reserved prefixes (`usr` is the platform
-/// user-id prefix — `crates/core/src/typed_id.rs`). Mirrors
-/// [`crate::query::RESERVED_ID_PREFIXES`]; realistically only a
-/// collection literally named `usrs` (→ `usr`) trips this.
-const RESERVED_AUTO_PREFIXES: &[&str] = &["usr"];
-
 /// Derive a typed_id prefix from a collection name when the schema
 /// does not declare one explicitly.
 ///
@@ -72,8 +65,9 @@ const RESERVED_AUTO_PREFIXES: &[&str] = &["usr"];
 ///    alphanumeric — matches the validator in
 ///    `crates/core/src/typed_id.rs`).
 ///
-/// Empty / non-ASCII / pathological collection names fall back to
-/// `"row"` so the prefix is always a valid typed_id segment.
+/// Empty / non-ASCII collection names fall back to `"row"`. The candidate is
+/// validated together with descriptor-declared prefixes by
+/// [`prefix_for_collection`].
 ///
 /// The `t.id(prefix)` schema declaration (carried on the
 /// field as `idPrefix`) is read from the orchestrator-cached
@@ -94,21 +88,6 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
     if truncated.is_empty() {
         return "row".to_string();
     }
-    if RESERVED_AUTO_PREFIXES.contains(&truncated.as_str()) {
-        // The stripped-stem form landed on a reserved prefix (e.g.
-        // `usrs` → `usr`). Fall back to the un-stripped, capped form
-        // (`usrs` → `usrs`); if THAT is also reserved, the inert `row`.
-        let unstripped: String = collection
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .take(MAX_AUTO_PREFIX_LEN)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        if unstripped.is_empty() || RESERVED_AUTO_PREFIXES.contains(&unstripped.as_str()) {
-            return "row".to_string();
-        }
-        return unstripped;
-    }
     truncated
 }
 
@@ -118,6 +97,7 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
 ///    descriptor entry the caller resolved.
 /// 2. Fall back to [`derive_prefix_from_collection_name`] when the descriptor
 ///    declares no explicit prefix.
+/// 3. Validate either source through [`crate::query::validate_id_prefix`].
 ///
 /// `schema` is passed in rather than looked up. The write pipeline resolves the
 /// collection's entry once through [`crate::descriptor::collection_schema`] and
@@ -125,13 +105,23 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
 /// id is minted — a lookup here could only re-derive the same answer, or
 /// silently fall back to the derived prefix for a collection the write was
 /// about to be refused for anyway.
-pub(crate) fn prefix_for_collection(schema: &Value, collection: &str) -> String {
-    schema
+///
+/// # Errors
+///
+/// Returns a validation error when either the descriptor-declared or derived
+/// prefix is malformed or reserved for platform ids.
+pub(crate) fn prefix_for_collection(
+    schema: &Value,
+    collection: &str,
+) -> Result<String, DbError> {
+    let prefix = schema
         .get("id")
         .and_then(|id_def| id_def.get("idPrefix"))
         .and_then(|p| p.as_str())
         .map(str::to_string)
-        .unwrap_or_else(|| derive_prefix_from_collection_name(collection))
+        .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
+    crate::query::validate_id_prefix(&prefix)?;
+    Ok(prefix)
 }
 
 /// Look up the current request's authenticated actor id (typed_id
@@ -173,14 +163,19 @@ pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
 /// Visibility: `pub(crate)` in release builds; `pub` under
 /// `test-helpers` so the integration tests can drive the helper
 /// directly without standing up V8.
+///
+/// # Errors
+///
+/// Returns a validation error before minting when the resolved typed-id prefix
+/// is malformed or reserved for platform ids.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) fn apply_system_fields_on_insert(
     doc: &mut Value,
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
-    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id);
+) -> Result<(), DbError> {
+    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id)
 }
 
 #[cfg(feature = "test-helpers")]
@@ -189,8 +184,8 @@ pub fn apply_system_fields_on_insert(
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
-    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id);
+) -> Result<(), DbError> {
+    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id)
 }
 
 fn apply_system_fields_on_insert_impl(
@@ -198,11 +193,11 @@ fn apply_system_fields_on_insert_impl(
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
+) -> Result<(), DbError> {
     let Some(obj) = doc.as_object_mut() else {
-        return;
+        return Ok(());
     };
-    inject_into_object(obj, schema, collection, actor_id);
+    inject_into_object(obj, schema, collection, actor_id)
 }
 
 /// Run the auto-population pass over every doc in an `insertMany`
@@ -211,14 +206,19 @@ fn apply_system_fields_on_insert_impl(
 /// one request context).
 ///
 /// Same visibility rationale as [`apply_system_fields_on_insert`].
+///
+/// # Errors
+///
+/// Returns a validation error before minting when the resolved typed-id prefix
+/// is malformed or reserved for platform ids.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) fn apply_system_fields_on_insert_many(
     docs: &mut Value,
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
-    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id);
+) -> Result<(), DbError> {
+    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id)
 }
 
 #[cfg(feature = "test-helpers")]
@@ -227,8 +227,8 @@ pub fn apply_system_fields_on_insert_many(
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
-    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id);
+) -> Result<(), DbError> {
+    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id)
 }
 
 fn apply_system_fields_on_insert_many_impl(
@@ -236,15 +236,16 @@ fn apply_system_fields_on_insert_many_impl(
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
+) -> Result<(), DbError> {
     let Some(arr) = docs.as_array_mut() else {
-        return;
+        return Ok(());
     };
     for doc in arr.iter_mut() {
         if let Some(obj) = doc.as_object_mut() {
-            inject_into_object(obj, schema, collection, actor_id);
+            inject_into_object(obj, schema, collection, actor_id)?;
         }
     }
+    Ok(())
 }
 
 fn inject_into_object(
@@ -252,10 +253,10 @@ fn inject_into_object(
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
-) {
+) -> Result<(), DbError> {
     // `id` — auto-mint when absent.
     if !obj.contains_key("id") {
-        let prefix = prefix_for_collection(schema, collection);
+        let prefix = prefix_for_collection(schema, collection)?;
         let minted = zeroship_core::typed_id::generate(&prefix);
         obj.insert("id".to_string(), Value::String(minted));
     }
@@ -287,6 +288,7 @@ fn inject_into_object(
             .all(|n| SYSTEM_FIELD_NAMES.contains(n)),
         "apply_system_fields_on_insert touched a name not in SYSTEM_FIELD_NAMES",
     );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -592,13 +594,24 @@ mod tests {
     }
 
     #[test]
-    fn derive_prefix_never_yields_reserved_usr() {
-        // A collection literally named `usrs` would strip-s to
-        // the reserved `usr` prefix (platform user-id). The guard must
-        // fall back to the un-stripped capped form (`usrs`) instead.
-        let derived = derive_prefix_from_collection_name("usrs");
-        assert_ne!(derived, "usr", "must not produce the reserved usr prefix");
-        assert_eq!(derived, "usrs");
+    fn insert_refuses_reserved_derived_prefix() {
+        // The same validator that fences creator-declared prefixes also
+        // fences a collection name whose derived prefix is reserved.
+        let mut doc = json!({ "title": "hi" });
+        let result = apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "usrs",
+            None,
+        );
+
+        match result {
+            Err(DbError::ValidationFailed { code, .. }) => {
+                assert_eq!(code, "reserved_system_field_name");
+            }
+            other => panic!("expected reserved-prefix refusal, got {other:?}"),
+        }
+        assert!(doc.get("id").is_none(), "refusal must happen before minting");
     }
 
     // ---- declared idPrefix wins over derivation --------------------
@@ -626,7 +639,8 @@ mod tests {
         // `prefix_for_collection` returns the declared prefix instead of
         // deriving from the collection name.
         assert_eq!(
-            prefix_for_collection(&schema_with_blog_id_prefix(), "posts"),
+            prefix_for_collection(&schema_with_blog_id_prefix(), "posts")
+                .expect("ordinary declared prefix must be accepted"),
             "blog"
         );
     }
@@ -637,7 +651,8 @@ mod tests {
         // from the descriptor entry: a `posts` collection declaring
         // `id: t.id("blog")` mints `blog_...` ids, not `post_...`.
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_with_blog_id_prefix(), "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_with_blog_id_prefix(), "posts", None)
+            .expect("ordinary declared prefix must be accepted");
         let id = doc
             .get("id")
             .and_then(|v| v.as_str())
@@ -654,7 +669,8 @@ mod tests {
     #[test]
     fn insert_auto_mints_id_when_absent() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
         let id = doc
             .get("id")
             .and_then(|v| v.as_str())
@@ -670,7 +686,8 @@ mod tests {
     #[test]
     fn insert_respects_creator_supplied_id() {
         let mut doc = json!({ "id": "post_abc123", "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
         assert_eq!(
             doc.get("id").and_then(|v| v.as_str()),
             Some("post_abc123"),
@@ -681,18 +698,26 @@ mod tests {
     #[test]
     fn insert_minted_id_has_correct_prefix_for_collection_name() {
         let mut doc = json!({});
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "users", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "users", None)
+            .expect("derived prefix must be accepted");
         assert!(doc.get("id").unwrap().as_str().unwrap().starts_with("user_"));
 
         let mut doc2 = json!({});
-        apply_system_fields_on_insert(&mut doc2, &schema_without_id_prefix(), "tasks", None);
+        apply_system_fields_on_insert(&mut doc2, &schema_without_id_prefix(), "tasks", None)
+            .expect("derived prefix must be accepted");
         assert!(doc2.get("id").unwrap().as_str().unwrap().starts_with("task_"));
     }
 
     #[test]
     fn insert_populates_created_by_from_actor() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_actor1"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_actor1"),
+        )
+        .expect("derived prefix must be accepted");
         assert_eq!(
             doc.get("created_by").and_then(|v| v.as_str()),
             Some("usr_actor1")
@@ -707,7 +732,8 @@ mod tests {
     #[test]
     fn insert_leaves_created_by_absent_when_no_actor() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
         assert!(
             !doc.as_object().unwrap().contains_key("created_by"),
             "no actor → no created_by injection (DB default NULL fires)"
@@ -724,7 +750,13 @@ mod tests {
             "title": "hi",
             "created_by": "usr_override",
         });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_session_actor"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_session_actor"),
+        )
+        .expect("derived prefix must be accepted");
         // Creator's explicit value wins over the session actor — same
         // pattern as `id` above (Q-SF-B).
         assert_eq!(
@@ -736,7 +768,13 @@ mod tests {
     #[test]
     fn insert_does_not_inject_created_at_or_updated_at_or_version() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
         let obj = doc.as_object().unwrap();
         assert!(!obj.contains_key("created_at"), "DB default must fire");
         assert!(!obj.contains_key("updated_at"), "DB default must fire");
@@ -751,7 +789,8 @@ mod tests {
             "version": 5,
             "created_at": 1700000000000_i64,
         });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
         // Creator-supplied overrides for the DB-defaulted columns flow
         // through untouched — migration code uses this to pre-seed
         // historical timestamps + version pointers.
@@ -765,9 +804,21 @@ mod tests {
     #[test]
     fn insert_pass_is_idempotent() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
         let id_after_first = doc.get("id").unwrap().as_str().unwrap().to_string();
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_y"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_y"),
+        )
+        .expect("derived prefix must be accepted");
         // Second pass must NOT re-mint id and must NOT overwrite
         // created_by — pass is "inject when absent".
         assert_eq!(
@@ -783,7 +834,13 @@ mod tests {
     #[test]
     fn insert_pass_non_object_doc_is_no_op() {
         let mut doc = json!("not an object");
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
         // Non-object docs pass through unchanged — the downstream
         // build_insert will reject them with a typed error.
         assert_eq!(doc, json!("not an object"));
@@ -797,7 +854,13 @@ mod tests {
             { "title": "a" },
             { "title": "b" },
         ]);
-        apply_system_fields_on_insert_many(&mut docs, &schema_without_id_prefix(), "posts", Some("usr_x"));
+        apply_system_fields_on_insert_many(
+            &mut docs,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
         let arr = docs.as_array().unwrap();
         let id_a = arr[0].get("id").and_then(|v| v.as_str()).unwrap();
         let id_b = arr[1].get("id").and_then(|v| v.as_str()).unwrap();
@@ -821,7 +884,13 @@ mod tests {
             { "id": "post_keepme", "title": "a" },
             { "title": "b" },
         ]);
-        apply_system_fields_on_insert_many(&mut docs, &schema_without_id_prefix(), "posts", None);
+        apply_system_fields_on_insert_many(
+            &mut docs,
+            &schema_without_id_prefix(),
+            "posts",
+            None,
+        )
+        .expect("derived prefix must be accepted");
         let arr = docs.as_array().unwrap();
         assert_eq!(
             arr[0].get("id").and_then(|v| v.as_str()),
@@ -842,7 +911,13 @@ mod tests {
     #[test]
     fn insert_pass_emits_three_extra_columns_when_actor_present() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
         let obj = doc.as_object().unwrap();
         // The 4 columns reaching INSERT: user-declared title + the 3
         // auto-injected system fields (id + created_by + updated_by).
@@ -862,7 +937,8 @@ mod tests {
     #[test]
     fn insert_pass_omits_actor_columns_when_no_actor() {
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
         let obj = doc.as_object().unwrap();
         // Only id is injected (auto-mint always runs).
         assert_eq!(obj.len(), 2, "doc keys: {:?}", obj.keys().collect::<Vec<_>>());
@@ -884,7 +960,13 @@ mod tests {
     fn insert_pass_followed_by_build_insert_returns_every_system_field() {
         use crate::query::{build_insert, SYSTEM_FIELD_NAMES};
         let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", Some("usr_x"));
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
         let built = build_insert("app1", "posts", &schema_without_id_prefix(), &doc)
             .expect("build_insert");
         let returning = built

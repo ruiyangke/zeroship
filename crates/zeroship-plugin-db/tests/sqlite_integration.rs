@@ -8748,7 +8748,8 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
             &serde_json::json!({ "title": { "type": "string", "required": true } }),
             "posts",
             Some("usr_actor_e2e"),
-        );
+        )
+        .expect("derived prefix must be accepted");
 
         // The minted id must carry the `post_` prefix (collection-name
         // derived since the schema didn't declare an `idPrefix`).
@@ -8895,7 +8896,8 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             }),
             "posts",
             None,
-        );
+        )
+        .expect("derived prefix must be accepted");
         let built =
             build_insert_with_dialect("app_demo", "posts", &schema, &post_doc, SqlDialect::Sqlite)
                 .expect("build posts insert");
