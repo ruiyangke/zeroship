@@ -538,6 +538,63 @@ job, and it is far smaller than the crate-wide framing implies - but note WHY it
 search family was ported to the IR under #12, and unmask was explicitly deferred then to avoid a
 collision. This is that deferral coming due.
 
+### Is `data-engine` portable across vendors? No, and the measurement says exactly why
+
+Asked directly by the operator on 2026-09-01, because an earlier phrasing here - "the part of the
+data plane that doesn't know what a backend is" - invites the answer "so it is portable". It is not,
+and the distinction matters for decisions 4 and 5.
+
+**What IS vendor-agnostic, measured.** 37 production backend-dispatch sites in ~25,094 engine lines
+(48 total, minus the 11 in the test-only `crud/mask_drift.rs`). About 10,400 of those lines have
+ZERO dispatch sites:
+
+| module | lines | dispatch |
+| --- | --- | --- |
+| `crud/mask_pass.rs` | 1,285 | 0 |
+| `crud/system_fields_pass.rs` | 1,132 | 0 |
+| `crud/write_pipeline.rs` | 1,023 | 0 |
+| `crud/encryption_pass.rs` | 840 | 0 |
+| `crud/mask_backfill.rs` | 549 | 0 |
+| `crud/bytes_pass.rs` | 338 | 0 |
+| `transaction/reducer/` (production) | 3,149 | 0 |
+| `broker.rs` | 2,069 | 0 |
+
+Those would survive a new vendor untouched. That is the argument against folding the engine into the
+backends, and it holds.
+
+**What is NOT portable, and it is three separate things.**
+
+1. **The engine hand-writes dialect SQL.** `crud/unmask.rs:540` builds
+   `SELECT "col" FROM "app"."coll" WHERE id = $1` and `:610` builds
+   `SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1` - same function, two dialects, engine tier.
+   Decision 4 is what closes this.
+2. **`BackendHandle` is a closed two-arm enum**, not an open trait: `backend/mod.rs:1612-1615`
+   matches `Self::Postgres(b)` / `Self::Sqlite(_)`. A third vendor edits the core type and every
+   match arm.
+3. **The engine downcasts to CONCRETE vendor types, not capability traits.**
+   `backend/mod.rs:1551` is `as_postgres(&self) -> Option<&PostgresBackend>`; `:1587`, `:1662` and
+   `:1681` are the same shape. `crud/mod.rs:2010` then calls `pg.vector_search(...)` under
+   `use crate::backend::VectorIndex as _;` - a TRAIT method on a CONCRETE receiver obtained by
+   downcast. Tracked as #119.
+
+**And the typed IR that would deliver portability is not wired at all.**
+`grep -c zeroship_data_plan` across `crates/zeroship-plugin-db/src/` returns **0**. So
+`data-core -> data-query-builder` is not an edge that exists and is not one relocation away; it
+appears only after Track A retypes the executor. That is measured confirmation of the family
+correction already recorded above.
+
+**Consequence for the split, and it is a sequencing fact rather than an opinion.** Point 3 is why
+`backend/mod.rs` has no tier at all and sits among the unjudged files: `BackendHandle` names both
+vendors, so any single tier makes it name both, which the signature census forbids. It is therefore
+the hidden third leg of the `ENGINE <-> SQLITE` cycle - `ENGINE -> SQLITE -> backend/mod.rs ->
+ENGINE` - that opus reached independently from the other direction. Inverting the downcasts to
+`as_vector_index() -> Option<&dyn VectorIndex>` is what unblocks tiering that file.
+
+**Both #119 and #122 are blocked on #112**, and this is the part that turns a cleanup into a
+prerequisite: `Backend` itself and four of the thirteen capability traits are `cfg`-gated
+(`backend/mod.rs:567`, `:626`, `:800`, `:1216`, `:1457`). **You cannot dispatch through traits a
+release build does not compile.**
+
 ### Three earlier choices, taken by the operator on 2026-08-31:
 
 1. **Finish `data-plan`.** One query builder. Wire the typed IR into the data plane and delete the
