@@ -5073,6 +5073,33 @@ mod tests {
     }
 
     #[compio::test]
+    async fn idle_timeout_eviction_drops_entry_after_releasing_idle_borrow() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            idle_timeout: Duration::from_secs(1),
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(457);
+        let events = park_query_events_on_housekeeping_wake(&client, HousekeepingPoolWake::Close);
+        let mut timed_out = PoolEntry::new(client, config.max_lifetime);
+        timed_out.last_used = Instant::now() - Duration::from_secs(2);
+        let pool = Rc::new(test_pool(config, vec![timed_out], 0, 1));
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(Rc::clone(&pool));
+
+        assert!(!Pool::housekeep(&weak).await);
+        assert!(
+            pool.closed.get(),
+            "idle eviction cleanup did not close the pool"
+        );
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+        drop(events);
+    }
+
+    #[compio::test]
     async fn idle_timeout_eviction_preserves_min_idle() {
         let config = PoolConfig {
             max_size: 2,
