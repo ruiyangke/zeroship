@@ -332,10 +332,9 @@ pub(crate) struct TargetRowId {
 /// while the update ran in a transaction would resolve pre-transaction
 /// ids.
 ///
-/// `schema` is the caller's already-resolved descriptor entry. The probe's own
-/// PROJECTION is `query::empty_read_schema()` (it selects `id` alone, a
-/// platform system field); this entry is only what the caller's FILTER is
-/// lowered against for SQLite booleans.
+/// `schema` is the caller's already-resolved descriptor entry. The probe still
+/// selects only `id`; the declared fields are carried solely so its filter can
+/// lower SQLite booleans and numeric timestamp binds by field type.
 pub(crate) async fn resolve_target_row_ids(
     route: &TxRoute,
     collection: &str,
@@ -350,6 +349,7 @@ pub(crate) async fn resolve_target_row_ids(
     let built = query::build_write_target_probe(
         app_id,
         collection,
+        schema,
         &sql_filter,
         limit,
         super::current_sql_dialect(),
@@ -509,6 +509,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     let built = query::build_conflict_probe_with_dialect(
         app_id,
         collection,
+        schema,
         &filter,
         super::current_sql_dialect(),
     )

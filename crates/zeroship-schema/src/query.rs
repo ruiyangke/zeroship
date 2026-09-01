@@ -3039,10 +3039,52 @@ fn def_to_constraints_for_dialect(
 /// **L24** — this is what "no fields" looks like now, and it is FAIL-CLOSED: a
 /// read against it projects the seven platform system columns and nothing else,
 /// and every non-system identifier in `select` / `orderBy` is refused. It is not
-/// a stand-in for an unresolved schema; the only production caller is
-/// [`build_write_target_probe`], which selects `id` alone.
+/// a stand-in for an unresolved schema; callers use it only when the declared
+/// creator shape is genuinely empty.
 pub fn empty_read_schema() -> Value {
     Value::Object(serde_json::Map::new())
+}
+
+/// Whether a creator-declared field stores an instant and therefore accepts
+/// the Unix-millisecond numbers emitted by the read pipeline.
+///
+/// This is deliberately both schema- and value-driven. JavaScript `Date`
+/// values reach this layer as ISO strings and are already accepted by the
+/// database; only numeric values need lowering at the SQL boundary. Platform
+/// timestamps are assigned by the system-field pass and are not declared in
+/// this schema, so they cannot enter this arm.
+fn is_creator_timestamp_number(schema_hint: &Value, field: &str, value: &Value) -> bool {
+    value.is_number()
+        && schema_hint
+            .get(field)
+            .and_then(|def| def.get("type"))
+            .and_then(Value::as_str)
+            == Some("date")
+}
+
+/// Bind a creator value and return its dialect-specific SQL expression.
+///
+/// PostgreSQL and SQLite cannot consume the Unix-millisecond number returned
+/// by reads as a timestamp value directly. Convert the *placeholder* in SQL so
+/// the parameter protocol stays unchanged and the indexed column remains bare
+/// in comparisons. MySQL is render-only and keeps its existing bare bind.
+fn push_creator_value_bind(
+    params: &mut Vec<String>,
+    value: &Value,
+    field: &str,
+    schema_hint: &Value,
+    dialect: SqlDialect,
+) -> String {
+    params.push(value_to_param(value));
+    let n = params.len();
+    if !is_creator_timestamp_number(schema_hint, field, value) {
+        return format!("${n}");
+    }
+    match dialect {
+        SqlDialect::Postgres => format!("to_timestamp(${n}/1000.0)"),
+        SqlDialect::Sqlite => format!("strftime('%Y-%m-%dT%H:%M:%fZ', ${n}/1000.0, 'unixepoch')"),
+        SqlDialect::Mysql => format!("${n}"),
+    }
 }
 
 /// Build the bounded id probe used before a write fans out per matching row.
@@ -3054,15 +3096,12 @@ pub fn empty_read_schema() -> Value {
 pub fn build_write_target_probe(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     limit: i64,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     let select = serde_json::json!(["id"]);
-    // `id` is a platform system field, so the EMPTY read schema is the correct
-    // and complete one for this probe: it declares no creator field, and this
-    // query projects none.
-    let probe_schema = empty_read_schema();
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
             app_id,
@@ -3072,7 +3111,7 @@ pub fn build_write_target_probe(
             None,
             None,
             Some(&select),
-            &probe_schema,
+            schema_hint,
             &[],
             false,
             dialect,
@@ -3087,6 +3126,7 @@ pub fn build_write_target_probe(
 pub fn build_conflict_probe_with_dialect(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
@@ -3125,12 +3165,15 @@ pub fn build_conflict_probe_with_dialect(
         } else {
             raw
         };
-        params.push(param_value);
-        let n = params.len();
         if binary_bind {
+            params.push(param_value);
+            let n = params.len();
             conditions.push(format!("{col} = {}", dialect.binary_bind_placeholder(n)));
         } else {
-            conditions.push(format!("{col} = ${n}"));
+            conditions.push(format!(
+                "{col} = {}",
+                push_creator_value_bind(&mut params, value, field, schema_hint, dialect)
+            ));
         }
     }
 
@@ -3319,7 +3362,7 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where_with_dialect(filter, &mut params, dialect)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     if let Some(lim) = limit {
         validate_limit_bound("find.limit", lim, limit_ceiling)?;
     }
@@ -3778,9 +3821,17 @@ fn push_group_by_field(
 pub fn build_count(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_count_with_soft_delete(app_id, collection, filter, false)
+    build_count_with_soft_delete(
+        app_id,
+        collection,
+        schema_hint,
+        filter,
+        false,
+        SqlDialect::Postgres,
+    )
 }
 
 /// COUNT(*) with the soft-delete auto-filter. The CRUD
@@ -3790,8 +3841,10 @@ pub fn build_count(
 pub fn build_count_with_soft_delete(
     app_id: &str,
     collection: &str,
+    schema_hint: &Value,
     filter: &Value,
     filter_soft_deleted: bool,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -3800,7 +3853,7 @@ pub fn build_count_with_soft_delete(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("SELECT COUNT(*) AS count FROM {schema}.{table}");
     let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
@@ -3885,18 +3938,17 @@ pub fn build_insert_with_dialect(
             placeholders.push("NULL".to_string());
         } else {
             let is_binary_bind = binary_bind_cols.contains(key.as_str());
-            let raw = value_to_param(value);
-            let param_value = if is_binary_bind {
-                dialect.wrap_binary_bind_param(raw)
-            } else {
-                raw
-            };
-            params.push(param_value);
-            let n = params.len();
             if is_binary_bind {
-                placeholders.push(dialect.binary_bind_placeholder(n));
+                params.push(dialect.wrap_binary_bind_param(value_to_param(value)));
+                placeholders.push(dialect.binary_bind_placeholder(params.len()));
             } else {
-                placeholders.push(format!("${n}"));
+                placeholders.push(push_creator_value_bind(
+                    &mut params,
+                    value,
+                    key,
+                    schema_hint,
+                    dialect,
+                ));
             }
         }
     }
@@ -3956,8 +4008,9 @@ pub fn collect_binary_bind_cols(
 pub fn build_set_clauses(
     update: &Value,
     params: &mut Vec<String>,
+    schema_hint: &Value,
 ) -> Result<Vec<String>, QueryError> {
-    build_set_clauses_with_dialect(update, params, SqlDialect::Postgres)
+    build_set_clauses_with_dialect(update, params, schema_hint, SqlDialect::Postgres)
 }
 
 /// Knobs the SET-clause builder needs to compose the
@@ -4020,11 +4073,18 @@ pub struct SystemFieldAutoBump<'a> {
 pub fn build_set_clauses_with_dialect(
     update: &Value,
     params: &mut Vec<String>,
+    schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<Vec<String>, QueryError> {
     // The default auto-bump is empty (no version bump, no updated_by) —
     // preserves the contract for callers that don't need auto-bump.
-    build_set_clauses_with_system_fields(update, params, dialect, &SystemFieldAutoBump::default())
+    build_set_clauses_with_system_fields(
+        update,
+        params,
+        schema_hint,
+        dialect,
+        &SystemFieldAutoBump::default(),
+    )
 }
 
 /// SET-clause builder + system-field auto-bump pass.
@@ -4052,6 +4112,7 @@ pub fn build_set_clauses_with_dialect(
 pub fn build_set_clauses_with_system_fields(
     update: &Value,
     params: &mut Vec<String>,
+    schema_hint: &Value,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<Vec<String>, QueryError> {
@@ -4113,18 +4174,14 @@ pub fn build_set_clauses_with_system_fields(
                 let clause = match op {
                     "$set" => {
                         let is_binary_bind = binary_bind_cols.contains(key.as_str());
-                        let raw = value_to_param(op_val);
-                        let param_value = if is_binary_bind {
-                            dialect.wrap_binary_bind_param(raw)
-                        } else {
-                            raw
-                        };
-                        params.push(param_value);
-                        let n = params.len();
                         if is_binary_bind {
-                            format!("{col} = {}", dialect.binary_bind_placeholder(n))
+                            params.push(dialect.wrap_binary_bind_param(value_to_param(op_val)));
+                            format!("{col} = {}", dialect.binary_bind_placeholder(params.len()))
                         } else {
-                            format!("{col} = ${n}")
+                            format!(
+                                "{col} = {}",
+                                push_creator_value_bind(params, op_val, key, schema_hint, dialect,)
+                            )
                         }
                     }
                     "$inc" => {
@@ -4172,18 +4229,17 @@ pub fn build_set_clauses_with_system_fields(
 
         // Plain field: value — treat as $set
         let is_binary_bind = binary_bind_cols.contains(key.as_str());
-        let raw = value_to_param(value);
-        let param_value = if is_binary_bind {
-            dialect.wrap_binary_bind_param(raw)
-        } else {
-            raw
-        };
-        params.push(param_value);
-        let n = params.len();
         if is_binary_bind {
-            set_clauses.push(format!("{col} = {}", dialect.binary_bind_placeholder(n)));
+            params.push(dialect.wrap_binary_bind_param(value_to_param(value)));
+            set_clauses.push(format!(
+                "{col} = {}",
+                dialect.binary_bind_placeholder(params.len())
+            ));
         } else {
-            set_clauses.push(format!("{col} = ${n}"));
+            set_clauses.push(format!(
+                "{col} = {}",
+                push_creator_value_bind(params, value, key, schema_hint, dialect)
+            ));
         }
     }
 
@@ -4314,9 +4370,10 @@ pub fn build_update_one_with_system_fields(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let set_clauses = build_set_clauses_with_system_fields(update, &mut params, dialect, autobump)?;
+    let set_clauses =
+        build_set_clauses_with_system_fields(update, &mut params, schema_hint, dialect, autobump)?;
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let inner_where = if where_clause.is_empty() {
         String::new()
@@ -4461,18 +4518,17 @@ pub fn build_insert_many_with_dialect(
                 placeholders.push("NULL".to_string());
             } else {
                 let is_binary_bind = binary_bind_cols.contains(key.as_str());
-                let raw = value_to_param(val);
-                let param_value = if is_binary_bind {
-                    dialect.wrap_binary_bind_param(raw)
-                } else {
-                    raw
-                };
-                params.push(param_value);
-                let n = params.len();
                 if is_binary_bind {
-                    placeholders.push(dialect.binary_bind_placeholder(n));
+                    params.push(dialect.wrap_binary_bind_param(value_to_param(val)));
+                    placeholders.push(dialect.binary_bind_placeholder(params.len()));
                 } else {
-                    placeholders.push(format!("${n}"));
+                    placeholders.push(push_creator_value_bind(
+                        &mut params,
+                        val,
+                        key,
+                        schema_hint,
+                        dialect,
+                    ));
                 }
             }
         }
@@ -4553,9 +4609,10 @@ pub fn build_update_many_with_system_fields(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let set_clauses = build_set_clauses_with_system_fields(update, &mut params, dialect, autobump)?;
+    let set_clauses =
+        build_set_clauses_with_system_fields(update, &mut params, schema_hint, dialect, autobump)?;
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("UPDATE {schema}.{table} SET {}", set_clauses.join(", "));
     if !where_clause.is_empty() {
@@ -4575,6 +4632,7 @@ pub fn build_delete_many(
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -4584,7 +4642,7 @@ pub fn build_delete_many(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("DELETE FROM {schema}.{table}");
     if !where_clause.is_empty() {
@@ -4630,7 +4688,7 @@ pub fn build_delete_one_with_dialect(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let (target_col, lock_clause) = single_row_write_target(dialect);
     let sql = format!(
@@ -4787,7 +4845,7 @@ pub fn build_soft_delete_one_with_system_fields(
     let mut params: Vec<String> = Vec::new();
     let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     // The inner SELECT scopes the soft-delete to a single live row.
     // If the filter is empty the WHERE becomes just `deleted_at IS
     // NULL` (any single live row). The dispatch path doesn't call this
@@ -4834,7 +4892,7 @@ pub fn build_soft_delete_many_with_system_fields(
     let mut params: Vec<String> = Vec::new();
     let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     let where_sql = if where_clause.is_empty() {
         " WHERE \"deleted_at\" IS NULL".to_string()
     } else {
@@ -4873,7 +4931,7 @@ pub fn build_restore_one_with_system_fields(
     let mut params: Vec<String> = Vec::new();
     let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     let inner_where = if where_clause.is_empty() {
         " WHERE \"deleted_at\" IS NOT NULL".to_string()
     } else {
@@ -4908,7 +4966,7 @@ pub fn build_restore_many_with_system_fields(
     let mut params: Vec<String> = Vec::new();
     let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     let where_sql = if where_clause.is_empty() {
         " WHERE \"deleted_at\" IS NOT NULL".to_string()
     } else {
@@ -5040,7 +5098,7 @@ pub fn build_aggregate_with_result_columns(
         })?;
 
         if let Some(match_val) = obj.get("$match") {
-            where_clause = build_where(match_val, &mut params)?;
+            where_clause = build_where_with_dialect(match_val, &mut params, schema_hint, dialect)?;
         } else if let Some(group_val) = obj.get("$group") {
             let group_obj = group_val.as_object().ok_or_else(|| {
                 QueryError::InvalidFilter("aggregate: $group must be an object".to_string())
@@ -5168,7 +5226,8 @@ pub fn build_aggregate_with_result_columns(
                 result_cols.push(alias.clone());
             }
         } else if let Some(having_val) = obj.get("$having") {
-            having_clause = build_having(having_val, &mut params, &agg_exprs, schema_hint)?;
+            having_clause =
+                build_having(having_val, &mut params, &agg_exprs, schema_hint, dialect)?;
         } else if let Some(sort_val) = obj.get("$sort") {
             // Track sort columns/directions for $first threading
             last_sort.clear();
@@ -5297,7 +5356,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     let select_expr = col.clone();
 
     let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("SELECT DISTINCT {select_expr} FROM {schema}.{table}");
     let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
@@ -5391,7 +5450,7 @@ pub fn build_vector_search(
     params.push(vec_lit);
     params.push(k.to_string());
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where(filter, &mut params, schema_hint)?;
 
     let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
     let mut sql =
@@ -5457,7 +5516,7 @@ pub fn build_spatial_near(
     params.push(radius_m.to_string());
     params.push(limit.to_string());
 
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where(filter, &mut params, schema_hint)?;
 
     let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
     let mut sql = format!(
@@ -5486,9 +5545,10 @@ fn build_having(
     params: &mut Vec<String>,
     agg_exprs: &std::collections::HashMap<String, String>,
     schema_hint: &Value,
+    dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_clause_budget(filter, ClauseBudgetKind::Having)?;
-    build_having_inner(filter, params, agg_exprs, schema_hint)
+    build_having_inner(filter, params, agg_exprs, schema_hint, dialect)
 }
 
 fn build_having_inner(
@@ -5496,6 +5556,7 @@ fn build_having_inner(
     params: &mut Vec<String>,
     agg_exprs: &std::collections::HashMap<String, String>,
     schema_hint: &Value,
+    dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     match filter {
         Value::Null => Ok(String::new()),
@@ -5511,7 +5572,15 @@ fn build_having_inner(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_having_inner(v, params, agg_exprs, schema_hint))
+                                .map(|v| {
+                                    build_having_inner(
+                                        v,
+                                        params,
+                                        agg_exprs,
+                                        schema_hint,
+                                        dialect,
+                                    )
+                                })
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> = sub
@@ -5529,7 +5598,15 @@ fn build_having_inner(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_having_inner(v, params, agg_exprs, schema_hint))
+                                .map(|v| {
+                                    build_having_inner(
+                                        v,
+                                        params,
+                                        agg_exprs,
+                                        schema_hint,
+                                        dialect,
+                                    )
+                                })
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> = sub
@@ -5551,13 +5628,20 @@ fn build_having_inner(
                     // Resolve alias → aggregate expression, or fall back to
                     // the quoted column. SEC-4: a masked base column in
                     // HAVING reads its masked sibling, never plaintext.
-                    let col = if let Some(expr) = agg_exprs.get(key) {
-                        expr.clone()
+                    let (col, creator_field) = if let Some(expr) = agg_exprs.get(key) {
+                        (expr.clone(), None)
                     } else {
                         validate_read_identifier(key, schema_hint)?;
-                        quote_ident(key)
+                        (quote_ident(key), Some(key.as_str()))
                     };
-                    let cond = build_having_condition(&col, value, params)?;
+                    let cond = build_having_condition(
+                        &col,
+                        value,
+                        params,
+                        creator_field,
+                        schema_hint,
+                        dialect,
+                    )?;
                     conditions.push(cond);
                 }
             }
@@ -5569,55 +5653,62 @@ fn build_having_inner(
     }
 }
 
-/// Build a single HAVING condition. Like `build_field_condition_with_dialect` but takes
-/// a pre-resolved column expression (which may be an aggregate like `COUNT(*)`).
+/// Bind a HAVING operand. Base creator fields use the same typed timestamp
+/// conversion as WHERE; accumulator aliases stay untyped and retain a bare
+/// placeholder because no descriptor declares their result type.
+fn push_having_value_bind(
+    params: &mut Vec<String>,
+    value: &Value,
+    creator_field: Option<&str>,
+    schema_hint: &Value,
+    dialect: SqlDialect,
+) -> String {
+    if let Some(field) = creator_field {
+        push_creator_value_bind(params, value, field, schema_hint, dialect)
+    } else {
+        params.push(value_to_param(value));
+        format!("${}", params.len())
+    }
+}
+
+/// Build a single HAVING condition. Like `build_field_condition_with_dialect`
+/// but takes a pre-resolved column expression (which may be an aggregate like
+/// `COUNT(*)`).
 fn build_having_condition(
     col_expr: &str,
     value: &Value,
     params: &mut Vec<String>,
+    creator_field: Option<&str>,
+    schema_hint: &Value,
+    dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     match value {
         Value::Object(ops) if ops.keys().any(|k| k.starts_with('$')) => {
             let mut parts = Vec::new();
             for (op, val) in ops {
-                let cond = match op.as_str() {
-                    "$eq" => {
-                        params.push(value_to_param(val));
-                        format!("{col_expr} = ${}", params.len())
-                    }
-                    "$ne" => {
-                        params.push(value_to_param(val));
-                        format!("{col_expr} != ${}", params.len())
-                    }
-                    "$gt" => {
-                        params.push(value_to_param(val));
-                        format!("{col_expr} > ${}", params.len())
-                    }
-                    "$gte" => {
-                        params.push(value_to_param(val));
-                        format!("{col_expr} >= ${}", params.len())
-                    }
-                    "$lt" => {
-                        params.push(value_to_param(val));
-                        format!("{col_expr} < ${}", params.len())
-                    }
-                    "$lte" => {
-                        params.push(value_to_param(val));
-                        format!("{col_expr} <= ${}", params.len())
-                    }
+                let sql_op = match op.as_str() {
+                    "$eq" => "=",
+                    "$ne" => "!=",
+                    "$gt" => ">",
+                    "$gte" => ">=",
+                    "$lt" => "<",
+                    "$lte" => "<=",
                     other => {
                         return Err(QueryError::InvalidFilter(format!(
                             "unsupported HAVING operator: {other}"
                         )));
                     }
                 };
-                parts.push(cond);
+                let bind =
+                    push_having_value_bind(params, val, creator_field, schema_hint, dialect);
+                parts.push(format!("{col_expr} {sql_op} {bind}"));
             }
             Ok(parts.join(" AND "))
         }
         _ => {
-            params.push(value_to_param(value));
-            Ok(format!("{col_expr} = ${}", params.len()))
+            let bind =
+                push_having_value_bind(params, value, creator_field, schema_hint, dialect);
+            Ok(format!("{col_expr} = {bind}"))
         }
     }
 }
@@ -5629,26 +5720,31 @@ fn build_having_condition(
 /// Build a WHERE clause from a filter JSON value.
 /// Returns empty string if the filter is null/empty.
 ///
-/// Visibility lifted from `fn` to `pub` so SQLite backend helpers can
-/// compose a parametrised predicate fragment without rebuilding the filter
-/// machinery. The body itself is unchanged - every existing call site keeps
-/// its behaviour byte-for-byte.
-pub fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
-    build_where_with_dialect(filter, params, SqlDialect::Postgres)
+/// The schema is required because creator timestamp reads surface as Unix
+/// milliseconds, which must be lowered to the column's timestamp type at each
+/// bind expression. This wrapper emits PostgreSQL SQL.
+pub fn build_where(
+    filter: &Value,
+    params: &mut Vec<String>,
+    schema_hint: &Value,
+) -> Result<String, QueryError> {
+    build_where_with_dialect(filter, params, schema_hint, SqlDialect::Postgres)
 }
 
 pub fn build_where_with_dialect(
     filter: &Value,
     params: &mut Vec<String>,
+    schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_clause_budget(filter, ClauseBudgetKind::Filter)?;
-    build_where_with_dialect_inner(filter, params, dialect)
+    build_where_with_dialect_inner(filter, params, schema_hint, dialect)
 }
 
 fn build_where_with_dialect_inner(
     filter: &Value,
     params: &mut Vec<String>,
+    schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     match filter {
@@ -5666,7 +5762,9 @@ fn build_where_with_dialect_inner(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_where_with_dialect_inner(v, params, dialect))
+                                .map(|v| {
+                                    build_where_with_dialect_inner(v, params, schema_hint, dialect)
+                                })
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> = sub
@@ -5684,7 +5782,9 @@ fn build_where_with_dialect_inner(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_where_with_dialect_inner(v, params, dialect))
+                                .map(|v| {
+                                    build_where_with_dialect_inner(v, params, schema_hint, dialect)
+                                })
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> = sub
@@ -5697,7 +5797,12 @@ fn build_where_with_dialect_inner(
                             }
                         }
                         "$not" => {
-                            let sub = build_where_with_dialect_inner(value, params, dialect)?;
+                            let sub = build_where_with_dialect_inner(
+                                value,
+                                params,
+                                schema_hint,
+                                dialect,
+                            )?;
                             if !sub.is_empty() {
                                 conditions.push(format!("NOT ({sub})"));
                             }
@@ -5710,7 +5815,13 @@ fn build_where_with_dialect_inner(
                     }
                 } else {
                     // Field-level condition
-                    let cond = build_field_condition_with_dialect(key, value, params, dialect)?;
+                    let cond = build_field_condition_with_dialect(
+                        key,
+                        value,
+                        params,
+                        schema_hint,
+                        dialect,
+                    )?;
                     conditions.push(cond);
                 }
             }
@@ -5726,6 +5837,7 @@ fn build_field_condition_with_dialect(
     field: &str,
     value: &Value,
     params: &mut Vec<String>,
+    schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_field_name(field)?;
@@ -5741,33 +5853,39 @@ fn build_field_condition_with_dialect(
                         if val.is_null() {
                             format!("{col} IS NULL")
                         } else {
-                            params.push(value_to_param(val));
-                            format!("{col} = ${}", params.len())
+                            let bind =
+                                push_creator_value_bind(params, val, field, schema_hint, dialect);
+                            format!("{col} = {bind}")
                         }
                     }
                     "$ne" => {
                         if val.is_null() {
                             format!("{col} IS NOT NULL")
                         } else {
-                            params.push(value_to_param(val));
-                            format!("{col} != ${}", params.len())
+                            let bind =
+                                push_creator_value_bind(params, val, field, schema_hint, dialect);
+                            format!("{col} != {bind}")
                         }
                     }
                     "$gt" => {
-                        params.push(value_to_param(val));
-                        format!("{col} > ${}", params.len())
+                        let bind =
+                            push_creator_value_bind(params, val, field, schema_hint, dialect);
+                        format!("{col} > {bind}")
                     }
                     "$gte" => {
-                        params.push(value_to_param(val));
-                        format!("{col} >= ${}", params.len())
+                        let bind =
+                            push_creator_value_bind(params, val, field, schema_hint, dialect);
+                        format!("{col} >= {bind}")
                     }
                     "$lt" => {
-                        params.push(value_to_param(val));
-                        format!("{col} < ${}", params.len())
+                        let bind =
+                            push_creator_value_bind(params, val, field, schema_hint, dialect);
+                        format!("{col} < {bind}")
                     }
                     "$lte" => {
-                        params.push(value_to_param(val));
-                        format!("{col} <= ${}", params.len())
+                        let bind =
+                            push_creator_value_bind(params, val, field, schema_hint, dialect);
+                        format!("{col} <= {bind}")
                     }
                     "$in" => {
                         let arr = val.as_array().ok_or_else(|| {
@@ -5790,8 +5908,7 @@ fn build_field_condition_with_dialect(
                         let placeholders: Vec<String> = values
                             .iter()
                             .map(|v| {
-                                params.push(value_to_param(v));
-                                format!("${}", params.len())
+                                push_creator_value_bind(params, v, field, schema_hint, dialect)
                             })
                             .collect();
                         match (placeholders.is_empty(), nulls.is_empty()) {
@@ -5827,8 +5944,7 @@ fn build_field_condition_with_dialect(
                         let placeholders: Vec<String> = values
                             .iter()
                             .map(|v| {
-                                params.push(value_to_param(v));
-                                format!("${}", params.len())
+                                push_creator_value_bind(params, v, field, schema_hint, dialect)
                             })
                             .collect();
                         match (placeholders.is_empty(), nulls.is_empty()) {
@@ -5891,8 +6007,8 @@ fn build_field_condition_with_dialect(
             if value.is_null() {
                 Ok(format!("{col} IS NULL"))
             } else {
-                params.push(value_to_param(value));
-                Ok(format!("{col} = ${}", params.len()))
+                let bind = push_creator_value_bind(params, value, field, schema_hint, dialect);
+                Ok(format!("{col} = {bind}"))
             }
         }
     }
@@ -6288,18 +6404,17 @@ pub fn build_upsert_with_dialect(
             placeholders.push("NULL".to_string());
         } else {
             let is_binary_bind = binary_bind_cols.contains(key.as_str());
-            let raw = value_to_param(value);
-            let param_value = if is_binary_bind {
-                dialect.wrap_binary_bind_param(raw)
-            } else {
-                raw
-            };
-            params.push(param_value);
-            let n = params.len();
             if is_binary_bind {
-                placeholders.push(dialect.binary_bind_placeholder(n));
+                params.push(dialect.wrap_binary_bind_param(value_to_param(value)));
+                placeholders.push(dialect.binary_bind_placeholder(params.len()));
             } else {
-                placeholders.push(format!("${n}"));
+                placeholders.push(push_creator_value_bind(
+                    &mut params,
+                    value,
+                    key,
+                    schema_hint,
+                    dialect,
+                ));
             }
         }
 
@@ -6420,8 +6535,17 @@ pub fn build_find_or_create(
 
     for (key, value) in obj {
         columns.push(quote_ident(key));
-        params.push(value_to_param(value));
-        placeholders.push(format!("${}", params.len()));
+        if value.is_null() {
+            placeholders.push("NULL".to_string());
+        } else {
+            placeholders.push(push_creator_value_bind(
+                &mut params,
+                value,
+                key,
+                schema_hint,
+                SqlDialect::Postgres,
+            ));
+        }
     }
 
     let conflict_cols: Vec<String> = conflict_arr
@@ -6490,6 +6614,14 @@ mod tests {
             "tags":       { "type": "array" },
             "title":      { "type": "string" },
             "views":      { "type": "number" },
+        })
+    }
+
+    fn timestamp_test_schema() -> Value {
+        json!({
+            "date_only": { "type": "calendarDate" },
+            "occurred_at": { "type": "date" },
+            "optional": { "type": "string" },
         })
     }
 
@@ -6761,6 +6893,129 @@ mod tests {
     }
 
     #[test]
+    fn creator_timestamp_numeric_write_bind_is_lowered_per_dialect() {
+        let schema = timestamp_test_schema();
+        let doc = json!({"occurred_at": -1});
+
+        let pg =
+            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Postgres)
+                .unwrap();
+        assert!(
+            pg.sql.contains("VALUES (to_timestamp($1/1000.0))"),
+            "sql: {}",
+            pg.sql
+        );
+        assert_eq!(pg.params, vec!["-1"]);
+
+        let sqlite =
+            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Sqlite)
+                .unwrap();
+        assert!(
+            sqlite
+                .sql
+                .contains("VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', $1/1000.0, 'unixepoch'))"),
+            "sql: {}",
+            sqlite.sql
+        );
+        assert_eq!(sqlite.params, vec!["-1"]);
+    }
+
+    #[test]
+    fn creator_timestamp_numeric_filter_bind_is_lowered_per_dialect() {
+        let schema = timestamp_test_schema();
+        let filter = json!({
+            "occurred_at": {
+                "$gt": -1,
+                "$in": [-1, 0, null],
+            },
+        });
+
+        let mut pg_params = Vec::new();
+        let pg =
+            build_where_with_dialect(&filter, &mut pg_params, &schema, SqlDialect::Postgres)
+                .unwrap();
+        assert!(pg.contains(r#""occurred_at" > to_timestamp($1/1000.0)"#));
+        assert!(
+            pg.contains(r#""occurred_at" IN (to_timestamp($2/1000.0), to_timestamp($3/1000.0))"#)
+        );
+        assert!(pg.contains(r#"OR "occurred_at" IS NULL"#));
+        assert_eq!(pg_params, vec!["-1", "-1", "0"]);
+
+        let mut sqlite_params = Vec::new();
+        let sqlite =
+            build_where_with_dialect(&filter, &mut sqlite_params, &schema, SqlDialect::Sqlite)
+                .unwrap();
+        assert!(
+            sqlite.contains(
+                r#""occurred_at" > strftime('%Y-%m-%dT%H:%M:%fZ', $1/1000.0, 'unixepoch')"#
+            )
+        );
+        assert!(sqlite.contains(
+            r#""occurred_at" IN (strftime('%Y-%m-%dT%H:%M:%fZ', $2/1000.0, 'unixepoch'), strftime('%Y-%m-%dT%H:%M:%fZ', $3/1000.0, 'unixepoch'))"#
+        ));
+        assert!(sqlite.contains(r#"OR "occurred_at" IS NULL"#));
+        assert_eq!(sqlite_params, vec!["-1", "-1", "0"]);
+    }
+
+    #[test]
+    fn creator_timestamp_bind_lowering_is_type_and_value_driven() {
+        let schema = timestamp_test_schema();
+        let doc = json!({
+            "occurred_at": "1969-12-31T23:59:59.999Z",
+            "date_only": -1,
+            "optional": null,
+        });
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let q = build_insert_with_dialect("app1", "events", &schema, &doc, dialect).unwrap();
+            assert!(!q.sql.contains("to_timestamp"), "sql: {}", q.sql);
+            assert!(!q.sql.contains("strftime"), "sql: {}", q.sql);
+            assert!(q.sql.contains("NULL"), "sql: {}", q.sql);
+            assert_eq!(
+                q.params,
+                vec!["1969-12-31T23:59:59.999Z", "-1"],
+                "dialect: {dialect:?}"
+            );
+        }
+
+        let filter = json!({
+            "occurred_at": "1969-12-31T23:59:59.999Z",
+            "date_only": -1,
+            "optional": null,
+        });
+        let mut params = Vec::new();
+        let sql =
+            build_where_with_dialect(&filter, &mut params, &schema, SqlDialect::Sqlite).unwrap();
+        assert!(!sql.contains("strftime"), "sql: {sql}");
+        assert!(sql.contains(r#""optional" IS NULL"#), "sql: {sql}");
+        assert_eq!(params, vec!["1969-12-31T23:59:59.999Z", "-1"]);
+    }
+
+    #[test]
+    fn creator_timestamp_binary_bind_takes_precedence() {
+        let schema = timestamp_test_schema();
+        let doc = json!({
+            "occurred_at": -1,
+            "__zsbin__occurred_at": true,
+        });
+        let pg =
+            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Postgres)
+                .unwrap();
+        assert!(
+            pg.sql.contains("VALUES (decode($1, 'base64')::bytea)"),
+            "sql: {}",
+            pg.sql
+        );
+        assert!(!pg.sql.contains("to_timestamp"), "sql: {}", pg.sql);
+
+        let sqlite =
+            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Sqlite)
+                .unwrap();
+        assert!(sqlite.sql.contains("VALUES ($1)"), "sql: {}", sqlite.sql);
+        assert!(!sqlite.sql.contains("strftime"), "sql: {}", sqlite.sql);
+        assert!(sqlite.params[0].starts_with(SQLITE_BINARY_BIND_PREFIX));
+    }
+
+    #[test]
     fn test_invalid_collection() {
         let filter = json!({});
         let result = build_find("app1", "users; DROP TABLE", &filter, None, None, None, None);
@@ -6778,7 +7033,7 @@ mod tests {
     #[test]
     fn test_count() {
         let filter = json!({"active": true});
-        let q = build_count("app1", "users", &filter).unwrap();
+        let q = build_count("app1", "users", &tschema(), &filter).unwrap();
         assert!(q.sql.contains("SELECT COUNT(*)"));
         assert_eq!(q.params, vec!["true"]);
     }
@@ -7165,7 +7420,8 @@ mod tests {
     #[test]
     fn test_delete_many() {
         let filter = json!({"active": false});
-        let q = build_delete_many("app1", "users", &tschema(), &filter).unwrap();
+        let q =
+            build_delete_many("app1", "users", &tschema(), &filter, SqlDialect::Postgres).unwrap();
         assert!(
             q.sql.starts_with(r#"DELETE FROM "app1"."users""#),
             "sql: {}",
@@ -7179,7 +7435,8 @@ mod tests {
     #[test]
     fn test_delete_many_no_filter() {
         let filter = json!({});
-        let q = build_delete_many("app1", "users", &tschema(), &filter).unwrap();
+        let q =
+            build_delete_many("app1", "users", &tschema(), &filter, SqlDialect::Postgres).unwrap();
         assert!(!q.sql.contains("WHERE"), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert!(q.params.is_empty());
@@ -7315,6 +7572,53 @@ mod tests {
         assert!(q.sql.contains("HAVING COUNT(*) >= $1"), "sql: {}", q.sql);
         assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["10"]);
+    }
+
+    #[test]
+    fn aggregate_having_creator_timestamp_numeric_bind_is_lowered_per_dialect() {
+        let pipeline = json!([
+            {"$group": {"by": "occurred_at", "cnt": {"$count": true}}},
+            {"$having": {"$and": [
+                {"occurred_at": {"$gt": -1}},
+                {"cnt": {"$gte": 10}}
+            ]}}
+        ]);
+        let schema = timestamp_test_schema();
+
+        let pg = build_aggregate_with_soft_delete_with_dialect(
+            "app1",
+            "events",
+            &pipeline,
+            false,
+            &schema,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert!(
+            pg.sql
+                .contains(r#"HAVING ("occurred_at" > to_timestamp($1/1000.0) AND COUNT(*) >= $2)"#),
+            "sql: {}",
+            pg.sql
+        );
+        assert_eq!(pg.params, vec!["-1", "10"]);
+
+        let sqlite = build_aggregate_with_soft_delete_with_dialect(
+            "app1",
+            "events",
+            &pipeline,
+            false,
+            &schema,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert!(
+            sqlite.sql.contains(
+                r#"HAVING ("occurred_at" > strftime('%Y-%m-%dT%H:%M:%fZ', $1/1000.0, 'unixepoch') AND COUNT(*) >= $2)"#
+            ),
+            "sql: {}",
+            sqlite.sql
+        );
+        assert_eq!(sqlite.params, vec!["-1", "10"]);
     }
 
     #[test]
@@ -10858,7 +11162,7 @@ mod tests {
     fn build_where_rejects_reserved_masked_suffix_in_filter() {
         let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
         let mut params: Vec<String> = Vec::new();
-        let err = build_where(&filter, &mut params).unwrap_err();
+        let err = build_where(&filter, &mut params, &tschema()).unwrap_err();
         match err {
             QueryError::InvalidIdent(msg) => {
                 assert!(
@@ -10959,7 +11263,7 @@ mod tests {
             filter_obj.insert((*name).to_string(), serde_json::json!("any-value"));
             let filter = serde_json::Value::Object(filter_obj);
             let mut params: Vec<String> = Vec::new();
-            let clause = build_where(&filter, &mut params)
+            let clause = build_where(&filter, &mut params, &tschema())
                 .unwrap_or_else(|e| panic!("filter on {name:?} must build, got {e:?}"));
             assert!(
                 clause.contains(&format!("\"{name}\"")),
@@ -12988,7 +13292,7 @@ mod tests {
             filter.insert(format!("f{idx}"), serde_json::json!(idx));
         }
         let mut params = Vec::new();
-        let err = build_where(&Value::Object(filter), &mut params)
+        let err = build_where(&Value::Object(filter), &mut params, &tschema())
             .expect_err("too many clauses must be rejected");
         assert!(matches!(err, QueryError::InvalidFilter(_)));
         assert!(
@@ -13252,9 +13556,25 @@ mod tests {
     #[test]
     fn build_count_with_soft_delete_appends_filter() {
         let filter = serde_json::json!({});
-        let q = build_count_with_soft_delete("app1", "posts", &filter, true).unwrap();
+        let q = build_count_with_soft_delete(
+            "app1",
+            "posts",
+            &tschema(),
+            &filter,
+            true,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
         assert!(q.sql.contains("WHERE \"deleted_at\" IS NULL"));
-        let q2 = build_count_with_soft_delete("app1", "posts", &filter, false).unwrap();
+        let q2 = build_count_with_soft_delete(
+            "app1",
+            "posts",
+            &tschema(),
+            &filter,
+            false,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
         assert!(!q2.sql.contains("WHERE"));
     }
 
@@ -13285,8 +13605,16 @@ mod tests {
     #[test]
     fn legacy_build_count_is_byte_identical_to_soft_delete_off() {
         let filter = serde_json::json!({ "id": "x" });
-        let q_legacy = build_count("app1", "posts", &filter).unwrap();
-        let q_new = build_count_with_soft_delete("app1", "posts", &filter, false).unwrap();
+        let q_legacy = build_count("app1", "posts", &tschema(), &filter).unwrap();
+        let q_new = build_count_with_soft_delete(
+            "app1",
+            "posts",
+            &tschema(),
+            &filter,
+            false,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
         assert_eq!(q_legacy.sql, q_new.sql);
     }
 
@@ -13576,7 +13904,7 @@ mod tests {
             ),
             (
                 "deleteMany",
-                build_delete_many("app1", "users", schema, &filter).unwrap(),
+                build_delete_many("app1", "users", schema, &filter, d).unwrap(),
             ),
             (
                 "softDeleteOne",
