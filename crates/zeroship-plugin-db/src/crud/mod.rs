@@ -2029,6 +2029,15 @@ pub(crate) fn dispatch_search<'s>(
 
         match result {
             Ok(rows) => {
+                // Metering, success arm only. The search family is a read op on
+                // either backend and reaches the database WITHOUT passing
+                // through `exec::run_sql` - the PG arm goes to
+                // `PostgresBackend::query_roled_json`, the SQLite arm to its own
+                // scan - so until 2026-09-01 it was billed as nothing at all.
+                // Counted here at the op boundary rather than in either vendor:
+                // the vendor tier must not reach up into the engine for the
+                // meter handle, which is the cycle #110 just removed.
+                crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
                 let result = match read_pipeline::apply(
                     &binding,
                     &coll,
@@ -2210,6 +2219,15 @@ pub(crate) fn dispatch_near<'s>(
 
         match result {
             Ok(rows) => {
+                // Metering, success arm only. The search family is a read op on
+                // either backend and reaches the database WITHOUT passing
+                // through `exec::run_sql` - the PG arm goes to
+                // `PostgresBackend::query_roled_json`, the SQLite arm to its own
+                // scan - so until 2026-09-01 it was billed as nothing at all.
+                // Counted here at the op boundary rather than in either vendor:
+                // the vendor tier must not reach up into the engine for the
+                // meter handle, which is the cycle #110 just removed.
+                crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
                 let result = match read_pipeline::apply(
                     &binding,
                     &coll,

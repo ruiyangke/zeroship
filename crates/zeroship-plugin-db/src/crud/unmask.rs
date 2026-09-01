@@ -454,6 +454,9 @@ pub async fn dispatch_unmask(
         // so operators see every attempted access — including the
         // `canUnmask()` probe path the SDK uses.
         write_audit_unmask_row(app_id, &args, &mask_meta.classification, "denied").await?;
+        // The REFUSED unmask still wrote an audit row, and that row cost a
+        // statement. Metering counts work performed, not permission granted.
+        meter_audit_write(app_id);
         return Err(DbError::Coded {
             code: "unmask_not_permitted".into(),
             message: format!(
@@ -471,14 +474,30 @@ pub async fn dispatch_unmask(
         Some(enc_meta) => fetch_and_decrypt(app_id, &args, &enc_meta).await?,
         None => fetch_plaintext_parent(app_id, &args).await?,
     };
+    // Both arms ran exactly one SELECT and both `?`, so reaching here means it
+    // succeeded. Neither goes through `exec::run_sql`, so neither was billed
+    // before 2026-09-01.
+    crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
 
     // Step 4 — audit the granted unmask. We do this AFTER the plaintext
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
     // ghost "granted" row in the audit log (the failure surfaces a
     // typed error; the audit table reflects only completed unmasks).
     write_audit_unmask_row(app_id, &args, &mask_meta.classification, "granted").await?;
+    meter_audit_write(app_id);
 
     Ok(UnmaskFieldResult { plaintext })
+}
+
+/// One audit-row append: one write op, one row.
+///
+/// Every unmask writes exactly one, granted or denied, and none of them goes
+/// through `exec::exec_mutation`, so none was billed before 2026-09-01. Call
+/// this only after the write's `?` has succeeded - metering is a success-arm
+/// signal, and an audit row that failed to land must not be charged for.
+fn meter_audit_write(app_id: &str) {
+    crate::metrics::emit_db_metric(app_id, crate::metrics::DB_WRITES, 1);
+    crate::metrics::emit_db_metric(app_id, crate::metrics::DB_ROWS_WRITTEN, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,6 +1099,7 @@ pub async fn dispatch_bulk_unmask(
             Some(&unauthorized),
         )
         .await?;
+        meter_audit_write(app_id);
         return Err(DbError::Coded {
             code: "bulk_unmask_partial_unauthorized".into(),
             message: format!(
@@ -1119,6 +1139,10 @@ pub async fn dispatch_bulk_unmask(
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
                 None => fetch_plaintext_parent(app_id, &single_args).await?,
             };
+            // One SELECT per (row, column) pair. The bulk call writes a single
+            // audit row for the whole request, but it reads once per cell, and
+            // the read cost is what this counts.
+            crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
             row_map.insert(requested_col.clone(), plaintext);
         }
     }
@@ -1132,6 +1156,7 @@ pub async fn dispatch_bulk_unmask(
         None,
     )
     .await?;
+    meter_audit_write(app_id);
 
     Ok(out)
 }
@@ -1273,6 +1298,7 @@ pub async fn authorize_query_hint(
             Some(&unauthorized),
         )
         .await?;
+        meter_audit_write(app_id);
         return Err(DbError::Coded {
             code: "unmask_not_permitted".into(),
             message: format!(
@@ -1328,7 +1354,9 @@ pub async fn audit_query_hint_granted(
         "granted",
         None,
     )
-    .await
+    .await?;
+    meter_audit_write(app_id);
+    Ok(())
 }
 
 /// Rewrite rows from a `find` result so the
@@ -1384,6 +1412,10 @@ pub async fn dispatch_unmask_for_query(
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
                 None => fetch_plaintext_parent(app_id, &single_args).await?,
             };
+            // One SELECT per (row, column) pair. The bulk call writes a single
+            // audit row for the whole request, but it reads once per cell, and
+            // the read cost is what this counts.
+            crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
             if let Some(obj) = row.as_object_mut() {
                 obj.insert(col.clone(), Value::String(plaintext));
             }

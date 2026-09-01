@@ -62,28 +62,11 @@ use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
 
-/// Raw usage metrics a db op emits in its SUCCESS arm (metering-as-
-/// infrastructure). `db_reads` counts each read op (query/count),
-/// `db_writes` each mutation op, `db_rows_written` the affected/RETURNING
-/// row count of a mutation. Platform-measured — emitted by trusted Rust at
-/// the exec boundary, not by app code; none are fixed platform counters, so
-/// they flow through `AppUsage.custom`.
-const DB_READS: &str = "db_reads";
-const DB_WRITES: &str = "db_writes";
-const DB_ROWS_WRITTEN: &str = "db_rows_written";
-
-/// Emit a per-app db metric in the success arm. Pulls the meter handle from
-/// the per-isolate context (stamped on `DbPlugin::register`); a no-op when no
-/// meter is configured (test harness). Synchronous lock-free atomic bump —
-/// adds no await and cannot fail the op.
-fn emit_db_metric(app_id: &str, metric: &str, n: u64) {
-    if n == 0 {
-        return;
-    }
-    if let Some(h) = context::with(|c| c.meter_handle(app_id)) {
-        h.record(metric, n);
-    }
-}
+// The metric names and the emit point moved to `crate::metrics` on 2026-09-01.
+// They were private to this file, which made the BILLED surface accidentally
+// equal to "whatever flows through `run_sql` / `exec_mutation`" - and the search
+// family and every unmask statement do not.
+use crate::metrics::{DB_READS, DB_ROWS_WRITTEN, DB_WRITES, emit_db_metric};
 
 fn sqlite_shared_crud_unavailable() -> DbError {
     DbError::Configuration {
