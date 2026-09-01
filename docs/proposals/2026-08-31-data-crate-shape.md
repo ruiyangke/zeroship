@@ -1663,7 +1663,7 @@ one was found by a different lens, and none of them creates a crate.
 
 | # | move | why it blocks things | measured cost |
 | --- | --- | --- | --- |
-| 0.1 | `DbError::to_op_error` out to an extension trait in the V8 tier | it is the ONLY thing making `DbError` link V8; until it moves, every crate holding `DbError` links the V8 runtime - including the relay | 73 call sites, **11 files**, call syntax unchanged |
+| 0.1 | `DbError::to_op_error` out to an extension trait in the V8 tier | it is the ONLY thing making `DbError` link V8; until it moves, every crate holding `DbError` links the V8 runtime - including the relay | **53 call sites, 10 files**, call syntax unchanged |
 | 0.2 | `auth/util.rs` helpers (hex, random, calendar) to a neutral home | a database driver crate would otherwise depend on an `auth` module to encode hex (test-tier today, but test builds must compile) | 7 exports, callers in 2 SQLite files |
 | 0.3 | `encryption/` and row-to-JSON below the vendors | `encryption` is 7 edges from EACH backend; row-to-JSON is two vendor converters in one file | `encryption/` 1,591 lines; `keys.rs:318` also carries `PluginDbConsumer` |
 | 0.4 | make `PgSqlExecutor` / `PgLockManager` driver-neutral | they name `compio_postgres::OwnedPooledClient` in their BOUNDS, so a contract crate built from them ships a vendor | `backend/mod.rs:755`, `:786` |
@@ -1671,6 +1671,30 @@ one was found by a different lens, and none of them creates a crate.
 
 **Then, and only then, the split becomes file moves.** `BackendHandle` goes up with the engine
 (settled); `context.rs` follows it.
+
+**0.1's figure was wrong twice and is now decomposed, because it is the number someone will plan
+against.** This document said "73 call sites across 11 files"; a reviewer measured 68 across 13. Both
+were counting different things:
+
+```
+  84   raw `to_op_error` occurrences (naive grep)
+  73   after dropping comment lines        <- the document's "73", which is OCCURRENCES not calls
+  18   of those are in error.rs itself (the definition and its impl block)
+  53   real `.to_op_error()` CALL SITES outside error.rs   <- the number that matters
+  10   files needing a `use` of the extension trait
+```
+
+**Third time in this document that occurrences have been reported as call sites** - the others being
+the SQLite census (a literal spelling standing in for a semantic dependency) and the 782 unassigned
+lines. The pattern is stable enough to state as a rule: *a grep counts text; a cost needs the thing
+the text refers to.*
+
+**And a boundary check the number prompted, which passes.** Two of the ten files are CDC-tier:
+`replication.rs` and `replication_ops.rs`. If production relay code called `to_op_error`, an
+adapter-owned extension trait would drag the V8 tier into the relay - the exact inversion Phase 0.1
+exists to prevent. It does not: `replication.rs:819` is under `#[cfg(test)]` (opened `:598`), and
+`replication_ops.rs:28`/`:41` are the V8 diagnostic bridge, which is adapter-tier by nature and stays.
+**So the extension trait can live in the adapter without the relay ever needing it.**
 
 ### Phase 0.5 - two audits that must precede ANY crate boundary
 
