@@ -5299,6 +5299,55 @@ mod tests {
     }
 
     #[compio::test]
+    async fn housekeeping_releases_pool_before_discarding_hook_closed_entry() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let hook_events = Rc::clone(&events);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |client| {
+            hook_events
+                .borrow_mut()
+                .push(park_query_events_on_housekeeping_wake(
+                    client,
+                    HousekeepingPoolWake::Drop,
+                ));
+            client.force_close();
+            Box::pin(async { Ok(()) })
+        });
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(pool);
+
+        let keep_running = Box::pin(compio::time::timeout(
+            Duration::from_secs(5),
+            Pool::housekeep(&weak),
+        ))
+        .await
+        .expect("housekeeping did not finish after discarding the ineligible entry");
+        let observer_count = events.borrow().len();
+        let pool_gone = weak.upgrade().is_none();
+
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
+
+        assert_eq!(observer_count, 1, "hook did not install its observer");
+        assert!(!keep_running, "ineligible entry cleanup retained the pool");
+        assert!(pool_gone, "ineligible entry cleanup retained the pool");
+    }
+
+    #[compio::test]
     async fn housekeeping_stops_when_after_connect_drops_the_pool() {
         let (address, finish_tx, count_rx, server) = accepting_postgres_server();
         let mut config = PoolConfig {
