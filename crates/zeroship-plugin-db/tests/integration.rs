@@ -3695,7 +3695,7 @@ async fn pgvector_available(pool: &Pool) -> bool {
 /// `pgvector/pgvector:pg16` (see docs/runbooks/docker-compose.md) and
 /// run with `--ignored` to exercise this path.
 #[compio::test]
-#[ignore = "requires pgvector — swap `pg-test` image to pgvector/pgvector:pg16"]
+#[ignore = "needs pgvector: run with --ignored against a pgvector image (see .claude/runbooks/dbbind-pg-harness.md)"]
 async fn vector_search_returns_k_nearest() {
     use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
@@ -3766,7 +3766,7 @@ async fn vector_search_returns_k_nearest() {
         let v = mk_unit(i, dims);
         let lit = fmt_vec(&v);
         pool.execute(
-            &format!("INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::vector)"),
+            &format!("INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"),
             &[&lit as &(dyn compio_postgres::types::ToSql + Sync)],
         )
         .await
@@ -3938,7 +3938,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
 /// `Internal`. The shape contract: the error message MUST mention the
 /// expected vs. actual dim count.
 #[compio::test]
-#[ignore = "requires pgvector — swap `pg-test` image to pgvector/pgvector:pg16"]
+#[ignore = "needs pgvector: run with --ignored against a pgvector image (see .claude/runbooks/dbbind-pg-harness.md)"]
 async fn vector_dimension_mismatch_rejected_at_insert() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -3975,7 +3975,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
     let lit = format!("[{}]", parts.join(","));
     let result = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::vector)"),
+            &format!("INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"),
             &[&lit],
         )
         .await;
@@ -6011,7 +6011,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 }
 
 #[compio::test]
-#[ignore = "requires pgvector — swap `pg-test` image to pgvector/pgvector:pg16"]
+#[ignore = "needs pgvector: run with --ignored against a pgvector image (see .claude/runbooks/dbbind-pg-harness.md)"]
 async fn vector_search_runs_under_per_app_role_via_rls() {
     use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
@@ -6053,7 +6053,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     );
     admin_pool
         .execute(
-            &format!("INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::vector)"),
+            &format!("INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"),
             &[&"[1,0]" as &(dyn compio_postgres::types::ToSql + Sync)],
         )
         .await
