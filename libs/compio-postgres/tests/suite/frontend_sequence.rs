@@ -453,3 +453,165 @@ async fn transaction_frames(process_id: i32, commit: bool) -> Vec<(String, Strin
         })
         .collect()
 }
+
+fn copy_in_response(columns: u16) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(0); // overall text format
+    body.extend_from_slice(&columns.to_be_bytes());
+    for _ in 0..columns {
+        body.extend_from_slice(&0u16.to_be_bytes());
+    }
+    backend_frame(b'G', &body)
+}
+
+fn error_response(code: &str, message: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(b'S');
+    body.extend_from_slice(b"ERROR\0");
+    body.push(b'C');
+    body.extend_from_slice(code.as_bytes());
+    body.push(0);
+    body.push(b'M');
+    body.extend_from_slice(message.as_bytes());
+    body.push(0);
+    body.push(0);
+    backend_frame(b'E', &body)
+}
+
+fn serve_copy_in(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec<u8>)>) {
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let mut tag = [0u8; 1];
+        if stream.read_exact(&mut tag).is_err() {
+            return;
+        }
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes(length) as usize;
+        let mut body = vec![0u8; length - 4];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        let tag = tag[0];
+        let _ = tags.send((tag, body.clone()));
+        match tag {
+            b'P' => pending.extend_from_slice(&backend_frame(b'1', b"")),
+            b'B' => pending.extend_from_slice(&backend_frame(b'2', b"")),
+            b'D' => {
+                let mut p = Vec::new();
+                p.extend_from_slice(&0u16.to_be_bytes());
+                pending.extend_from_slice(&backend_frame(b't', &p));
+                pending.extend_from_slice(&backend_frame(b'n', b""));
+            }
+            b'E' | b'Q' => {
+                pending.extend_from_slice(&copy_in_response(1));
+                let _ = stream.write_all(&pending);
+                let _ = stream.flush();
+                pending.clear();
+            }
+            b'S' => {
+                pending.extend_from_slice(&ready_for_query());
+                let _ = stream.write_all(&pending);
+                let _ = stream.flush();
+                pending.clear();
+            }
+            b'c' => {
+                let mut r = command_complete(b"COPY 1");
+                r.extend_from_slice(&ready_for_query());
+                let _ = stream.write_all(&r);
+                let _ = stream.flush();
+            }
+            b'f' => {
+                let mut r = error_response("57014", "copy from stdin failed");
+                r.extend_from_slice(&ready_for_query());
+                let _ = stream.write_all(&r);
+                let _ = stream.flush();
+            }
+            b'X' => return,
+            _ => {}
+        }
+    }
+}
+
+/// A completed COPY IN ends with `CopyData`, `CopyDone`, Sync.
+///
+/// MEASURED: `P D S B E S d c S`. The prepare and the execute are separate
+/// Sync round trips, as for any query, and only then does the sink stream.
+#[compio::test]
+async fn a_completed_copy_in_ends_with_copy_done_and_sync() {
+    let (seq, _) = Box::pin(copy_in_frames(631, false)).await;
+    assert_eq!(
+        seq, "PDSBESdcS",
+        "the COPY IN success sequence changed shape (got {seq})"
+    );
+}
+
+/// An abandoned COPY IN terminates with `CopyFail` then Sync.
+///
+/// `copy_in.rs` states the contract in prose - "a producerless extended query
+/// must terminate with `CopyFail + Sync`" - and this is the only place the
+/// FRAME itself is asserted; no other test in the suite names a `CopyFail` tag.
+///
+/// It is NOT the only guard, and saying so would overstate it. Both halves are
+/// already observable through behaviour: deleting the Sync fails 13 tests
+/// here, and giving the reason a non-empty string fails 10, because the live
+/// resync tests read the server error text that reason produces. What this
+/// test adds is the claim stated directly rather than inferred from recovery.
+///
+/// The abort is only observable if the client outlives the sink. An earlier
+/// version of this test dropped the client immediately after the sink and saw
+/// `PDSBES` with no `f` at all, which reads as "the driver never aborts" and
+/// is wrong: the socket had closed before the abort could be written. Hence
+/// the follow-up query, which forces the connection to resolve the COPY first.
+#[compio::test]
+async fn an_abandoned_copy_in_sends_copy_fail_then_sync() {
+    let (seq, copy_fail_body) = Box::pin(copy_in_frames(632, true)).await;
+    assert!(
+        seq.starts_with("PDSBESfS"),
+        "an abandoned COPY IN did not terminate with CopyFail then Sync (got {seq})"
+    );
+    assert_eq!(
+        copy_fail_body,
+        Some(vec![0]),
+        "CopyFail must carry an empty reason string"
+    );
+}
+
+/// Drive one COPY IN against a recording peer. Returns the frontend tag
+/// sequence and the body of the `CopyFail` frame if one was sent.
+async fn copy_in_frames(process_id: i32, abandon: bool) -> (String, Option<Vec<u8>>) {
+    use futures_util::SinkExt;
+    let (tags_tx, tags_rx) = std::sync::mpsc::channel();
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        serve_copy_in(&mut stream, &tags_tx);
+    });
+    let addr = server.addr;
+    let _ = Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async move {
+        let client = connect_scripted(addr).await;
+        if let Ok(sink) = client.copy_in::<_, bytes::Bytes>("COPY t FROM STDIN").await {
+            let mut sink = Box::pin(sink);
+            if abandon {
+                drop(sink);
+                // The abort needs somewhere to be observed; see the test doc.
+                let _ = client.simple_query("SELECT 1").await;
+            } else {
+                let _ = sink.send(bytes::Bytes::from_static(b"1\n")).await;
+                let _ = sink.close().await;
+            }
+        }
+        drop(client);
+    }))
+    .await;
+    server.finish();
+
+    let frames: Vec<(u8, Vec<u8>)> = tags_rx.try_iter().filter(|(t, _)| *t != b'X').collect();
+    let copy_fail = frames
+        .iter()
+        .find(|(t, _)| *t == b'f')
+        .map(|(_, body)| body.clone());
+    (frames.iter().map(|(t, _)| *t as char).collect(), copy_fail)
+}
