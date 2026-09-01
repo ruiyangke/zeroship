@@ -550,8 +550,20 @@ labels `FieldDescriptor` **"Untrusted"** in its own doc comment.
 So putting the fence on `writeClass` **hands the attacker the fence's
 configuration**. A creator edits one JSON file to
 `"created_by": { ..., "writeClass": "creator" }`, the overwrite never runs, and
-the audit column is forgeable. That is the DB-3 shape from AGENTS.md,
-reintroduced by the fix for DB-3's sibling. The precedent is already live:
+the audit column is forgeable. That is the DB-3 *shape* from AGENTS.md,
+reintroduced by the fix for DB-3's sibling.
+
+**Severity, stated honestly rather than at its most alarming.** The second
+reviewer moderated this and the moderation is correct: the forgery is available
+at **deploy time**, not at runtime. Running app JS cannot reach the descriptor -
+it is bound natively before creator modules evaluate (`descriptor.rs:34-46`,
+`lib.rs:383-397`) - so this is not DB-3's live privilege escalation. And nothing
+privileged consumes `created_by` today. It is **audit-integrity**, and the reason
+it still blocks the design is that an audit column a tenant can author is not an
+audit column, which is precisely what the `serverAuthored` class was introduced
+to establish.
+
+The precedent for descriptor-trusting behaviour is already live:
 `prefix_for_collection` (`system_fields_pass.rs:128-135`) honours a
 descriptor-declared `idPrefix` **unvalidated**, so a descriptor claiming
 `idPrefix: "usr"` mints platform-shaped user ids from the worker today.
@@ -657,6 +669,44 @@ from `:517` whenever a value is *present*, independent of `required` entirely.
 `@zeroship/db`.** Fixing that asymmetry is a precondition for this proposal, not
 a consequence of it, and it is the one defect that survives every redesign so far
 because it lives in neither the strip nor the descriptor.
+
+## The `serverAuthored` fix has an invisible hole, one authentication state over
+
+**Patched where the code lives, the overwrite leaves anonymous requests
+forgeable - and the test that looks like it guards this stays green.**
+
+`inject_into_object:263-273` wraps the whole actor block in `if let Some(actor)
+= actor_id`, with the comment *"No actor -> leave absent so the DDL's `NULL`
+default fires."* The natural reading of "overwrite rather than inject-when-absent"
+is to flip the `!obj.contains_key(...)` guards **inside that Some-arm**. Do that
+and the `None` arm is still a passthrough: an app serving an unauthenticated
+request delivers a creator-supplied `created_by: "usr_VICTIM"` to the wire
+untouched.
+
+**And the existing test cannot catch it.**
+`insert_leaves_created_by_absent_when_no_actor` (`:707-719`) asserts the doc has
+no `created_by` after the pass - but it feeds in `{"title": "hi"}`, which never
+had one. It pins *"no actor -> no injection"*, not *"no actor -> a supplied
+value is removed"*. It stays green through the naive patch, and criterion 7's
+new test will be written with an actor bound, because every test in that file
+binds one.
+
+**So the specification must be explicit:** for a `serverAuthored` field the
+supplied key is **removed unconditionally**, and then the actor - or nothing -
+replaces it. "Overwrite" is not a sufficient instruction.
+
+## The gate must DELETE the key, not skip the check
+
+A second implementation constraint, from the same review.
+`validateDoc` copies the value **before** classifying it missing
+(`validate.ts:497-498`: `if (key in doc) result[key] = doc[key]`, then
+`const value = result[key]`). The `missing` branch ends in `continue`
+(`:515`), which leaves that copy in `result`.
+
+So a gate that merely *skips the required check* lets a creator-supplied
+`created_at: null` ride the wire as an explicit NULL into a `NOT NULL` column
+(`query.rs:212` emits `created_at TIMESTAMPTZ NOT NULL`), turning today's silent
+drop into a 23502 at the database. The gate must remove the key from `result`.
 
 ## And criterion 5 would silently delete `| null` from three columns
 
