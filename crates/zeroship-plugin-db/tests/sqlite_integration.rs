@@ -4407,7 +4407,17 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         }
         let control = client
             .query_typed(
-                r#"SELECT COUNT(*) FROM "default"."users" WHERE id = 'control_row'"#,
+                // KEYED ON EMAIL, NOT ON THE SUPPLIED id. The procedure inserts
+                // `{ id: "control_row", ... }`, and the write path DISCARDS that
+                // and mints a typed id - the row lands as
+                // `user_034HHQXErG6U2Eb6CiCTu0`. `id` is in
+                // IMMUTABLE_SYSTEM_FIELDS (`crud/system_fields_pass.rs:46`), and
+                // on INSERT a caller-supplied value is replaced silently, where
+                // an UPDATE touching the same field is refused loudly (`:399`,
+                // `:428`). So `WHERE id = 'control_row'` matched nothing and this
+                // assertion read 0 - which looked exactly like the outer
+                // transaction having been rolled back, and was not.
+                r#"SELECT COUNT(*) FROM "default"."users" WHERE email = 'control@example.com'"#,
                 &[],
             )
             .await
