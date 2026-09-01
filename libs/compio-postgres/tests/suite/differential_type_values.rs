@@ -1313,6 +1313,169 @@ async fn native_scalar_codecs_round_trip_identically() {
     assert_eq!(ours.char_, [i8::MIN, -1, 0, 1, i8::MAX]);
 }
 
+fn array_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("array-format-empty", "ARRAY[]::text[]", "text[]"),
+        RawCase::new(
+            "array-format-null-element",
+            "ARRAY['first', NULL, E'line\\nlast']::text[]",
+            "text[]",
+        ),
+        RawCase::new(
+            "array-format-multidimensional",
+            "ARRAY[['a', NULL], ['c', 'd']]::text[]",
+            "text[]",
+        ),
+        RawCase::new(
+            "array-format-lower-bound-three",
+            "'[3:5]={a,b,c}'::text[]",
+            "text[]",
+        ),
+    ]
+}
+
+fn tokio_array_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_array_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeArrayShapeObservation {
+    multidimensional: ValueOutcome<Vec<Option<String>>>,
+    lower_values: Vec<String>,
+    server_lower_bound: i32,
+    server_dimensions: String,
+    rebound_lower_bound: i32,
+    rebound_dimensions: String,
+}
+
+fn tokio_native_array_shape_observation(url: String) -> NativeArrayShapeObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(
+                "SELECT ARRAY[['a', NULL], ['c', 'd']]::text[], \
+                        '[3:5]={a,b,c}'::text[], \
+                        array_lower('[3:5]={a,b,c}'::text[], 1), \
+                        array_dims('[3:5]={a,b,c}'::text[])",
+                &[],
+            )
+            .await
+            .expect("tokio native array decode");
+        let multidimensional = match row.try_get::<_, Vec<Option<String>>>(0) {
+            Ok(value) => ValueOutcome::Value(value),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let lower_values: Vec<String> = row.get(1);
+        let rebound = client
+            .query_one(
+                "SELECT array_lower($1::text[], 1), array_dims($1::text[])",
+                &[&lower_values],
+            )
+            .await
+            .expect("tokio native lower-bound rebound");
+        NativeArrayShapeObservation {
+            multidimensional,
+            lower_values,
+            server_lower_bound: row.get(2),
+            server_dimensions: row.get(3),
+            rebound_lower_bound: rebound.get(0),
+            rebound_dimensions: rebound.get(1),
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_native_array_shape_observation() -> NativeArrayShapeObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(
+            "SELECT ARRAY[['a', NULL], ['c', 'd']]::text[], \
+                    '[3:5]={a,b,c}'::text[], \
+                    array_lower('[3:5]={a,b,c}'::text[], 1), \
+                    array_dims('[3:5]={a,b,c}'::text[])",
+            &[],
+        )
+        .await
+        .expect("compio native array decode");
+    let multidimensional = match row.try_get::<_, Vec<Option<String>>>(0) {
+        Ok(value) => ValueOutcome::Value(value),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let lower_values: Vec<String> = row.get(1);
+    let rebound = client
+        .query_one(
+            "SELECT array_lower($1::text[], 1), array_dims($1::text[])",
+            &[&lower_values],
+        )
+        .await
+        .expect("compio native lower-bound rebound");
+    NativeArrayShapeObservation {
+        multidimensional,
+        lower_values,
+        server_lower_bound: row.get(2),
+        server_dimensions: row.get(3),
+        rebound_lower_bound: rebound.get(0),
+        rebound_dimensions: rebound.get(1),
+    }
+}
+
+/// Both drivers preserve array wire shape in text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_array_text_and_binary_codecs() {
+    let cases = array_format_cases();
+    let theirs = tokio_array_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_array_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let empty = decode_array(&ours[0].binary_decoded.0).expect("decode empty array");
+    assert!(empty.dimensions.is_empty());
+    assert!(empty.values.is_empty());
+
+    let nullable = decode_array(&ours[1].binary_decoded.0).expect("decode nullable array");
+    assert_eq!(nullable.dimensions, [(3, 1)]);
+    assert!(nullable.has_null);
+    assert_eq!(nullable.values[1], None);
+
+    let multidimensional =
+        decode_array(&ours[2].binary_decoded.0).expect("decode multidimensional array");
+    assert_eq!(multidimensional.dimensions, [(2, 1), (2, 1)]);
+    assert_eq!(multidimensional.values.len(), 4);
+    assert_eq!(ours[2].text_decoded, "{{a,NULL},{c,d}}");
+
+    let lower_bound = decode_array(&ours[3].binary_decoded.0).expect("decode lower-bound array");
+    assert_eq!(lower_bound.dimensions, [(3, 3)]);
+    assert_eq!(ours[3].text_decoded, "[3:5]={a,b,c}");
+
+    // The wire carrier above proves both drivers preserve the server's shape.
+    // Their shared Vec codec cannot represent it: it refuses two dimensions
+    // but silently discards a non-1 lower bound and writes 1 on rebound.
+    let theirs = tokio_native_array_shape_observation(common::plaintext_url());
+    let ours = compio_native_array_shape_observation().await;
+    assert_eq!(ours, theirs);
+    assert_eq!(ours.multidimensional, ValueOutcome::LocalFailure);
+    assert_eq!(ours.lower_values, ["a", "b", "c"]);
+    assert_eq!(ours.server_lower_bound, 3);
+    assert_eq!(ours.server_dimensions, "[3:5]");
+    assert_eq!(ours.rebound_lower_bound, 1);
+    assert_eq!(ours.rebound_dimensions, "[1:3]");
+}
+
+/// Desired invariant blocked by both Vec codecs discarding array lower bounds.
+#[ignore = "both postgres-types Vec codecs normalize [3:5] to [1:3]"]
+#[compio::test]
+async fn native_array_codecs_must_not_discard_lower_bounds() {
+    let theirs = tokio_native_array_shape_observation(common::plaintext_url());
+    let ours = compio_native_array_shape_observation().await;
+    assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
+    assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
