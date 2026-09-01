@@ -1107,44 +1107,20 @@ pub(crate) fn dispatch_update_many<'s>(
     // `dispatch_update_one`'s rationale).
     let actor_id = system_fields_pass::current_actor_id(&state);
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let hints = match write_pipeline::inspect_update(&app, &coll, &update) {
-            Ok(hints) => hints,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-        let cas_version = match system_fields_pass::extract_cas_version(&filter, &coll) {
-            Ok(version) => version,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move {
+        let hints = write_pipeline::inspect_update(&app, &coll, &update)?;
+        let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
         if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(
-                    DbError::multi_row_version_filter_unsupported(&coll).to_op_error(),
-                ),
-                request_id,
-            };
+            return Err(DbError::multi_row_version_filter_unsupported(&coll));
         }
 
         // The descriptor entry, resolved once for the whole op: the per-row
         // randomised-encryption decision, the SQLite boolean lowering and the
         // target-row probe all read it. An undeclared collection rejects.
-        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
-            Ok(schema) => schema,
-            Err(e) => return reject_op(resolver, request_id, e),
-        };
+        let schema = crate::descriptor::collection_schema(&binding, &coll)?;
         let per_row_encrypted_update =
             write_pipeline::update_requires_per_row_encryption(&schema, &update);
         let autobump = query::SystemFieldAutoBump {
@@ -1155,10 +1131,7 @@ pub(crate) fn dispatch_update_many<'s>(
             skip_updated_by: hints.creator_supplied_updated_by,
         };
         if per_row_encrypted_update {
-            let frame = match crate::transaction::AtomicWriteFrame::begin(route).await {
-                Ok(frame) => frame,
-                Err(e) => return reject_op(resolver, request_id, e),
-            };
+            let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
             let work_result: Result<usize, DbError> = async {
                 let target_rows = write_pipeline::resolve_target_row_ids(
                     frame.route(),
@@ -1256,35 +1229,25 @@ pub(crate) fn dispatch_update_many<'s>(
                 Ok(affected)
             }
             .await;
-            return match frame.finish(work_result).await {
-                Ok(affected) => OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::usize_count_as_f64(affected),
-                    request_id,
-                },
-                Err(e) => OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                },
-            };
+            // `finish` is the commit/rollback boundary and already takes and
+            // returns a `Result<usize, DbError>` - the same shape `settle`
+            // wants - so the frame is committed or rolled back exactly once
+            // whichever way the work went. Do NOT `?` the work_result above it.
+            return frame.finish(work_result).await;
         }
 
         let mut update = update;
-        if let Err(e) = write_pipeline::apply(
+        write_pipeline::apply(
             &binding,
             &coll,
             &mut update,
             write_pipeline::ApplyMode::Update { row_pk: "" },
         )
-        .await
-        {
-            return reject_op(resolver, request_id, e);
-        }
+        .await?;
         maybe_lower_sqlite_boolean_update(&schema, &mut update);
         let mut sql_filter = filter.clone();
         maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
-        let built = query::build_update_many_with_system_fields(
+        let bq = query::build_update_many_with_system_fields(
             &app,
             &coll,
             &schema,
@@ -1292,52 +1255,31 @@ pub(crate) fn dispatch_update_many<'s>(
             &update,
             current_sql_dialect(),
             &autobump,
-        );
-        let bq = match built {
-            Ok(bq) => bq,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
-                    request_id,
-                };
+        )
+        .map_err(DbError::from)?;
+        let rows =
+            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+        // CAS path on updateMany: with `{ id, version: N }` the
+        // RETURNING is at most one row. Same empty-check as
+        // updateOne so the SDK's CAS contract holds for both
+        // entry points.
+        if let Some(expected_version) = cas_version {
+            if rows.is_empty() {
+                let row_id = filter
+                    .as_object()
+                    .and_then(|o| o.get("id"))
+                    .and_then(|v| v.as_str());
+                return Err(DbError::version_mismatch(&coll, row_id, expected_version));
             }
-        };
-        match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await {
-            Ok(rows) => {
-                // CAS path on updateMany: with `{ id, version: N }` the
-                // RETURNING is at most one row. Same empty-check as
-                // updateOne so the SDK's CAS contract holds for both
-                // entry points.
-                if let Some(expected_version) = cas_version {
-                    if rows.is_empty() {
-                        let row_id = filter
-                            .as_object()
-                            .and_then(|o| o.get("id"))
-                            .and_then(|v| v.as_str());
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(
-                                DbError::version_mismatch(&coll, row_id, expected_version)
-                                    .to_op_error(),
-                            ),
-                            request_id,
-                        };
-                    }
-                }
-                OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::row_count_as_f64(rows),
-                    request_id,
-                }
-            }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
         }
-    }));
+        // Both arms resolve to a COUNT, so both return `usize` and the adapter
+        // lowers once. The encrypted arm already did (`usize_count_as_f64`);
+        // this arm used `row_count_as_f64(rows)`, which is `rows.len() as f64` -
+        // the same `ResolveValue::F64`, so unifying changes no output.
+        Ok(rows.len())
+        },
+        crate::v8_bridge::usize_count_as_f64,
+    )));
 
     promise
 }
