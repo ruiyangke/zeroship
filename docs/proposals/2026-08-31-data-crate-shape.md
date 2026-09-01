@@ -383,6 +383,14 @@ as measured. **State the shape and name the command that produces the figure.** 
 matter here are outputs of `./tests/vendor_embedding_gate.sh`,
 `tests/lib/tier_signature_census.sh` and `git rev-list --count origin/main..HEAD`.
 
+**And a moving count is not automatically progress.** The census says so in its own footer, about a
+figure this document used to carry: the 2026-08-31 headline "49 violations" was *right by
+cancellation* - an under-reading instrument and a stale `tier()` map erred in opposite directions by
+the same amount. Two defects producing one plausible number is the worst case for a written-down
+figure, because nothing about it looks wrong. Before reading any movement in that census as a fix,
+check that `tier()` still matches the placement table. It currently does: the PG arm names
+`pg_error.rs` and `pg_introspect.rs`, so the map was updated with the moves that created them.
+
 **No CI has ever run any of this.** This branch has never been pushed - the standing rule is
 commit-only - so it sits hundreds of commits ahead of `origin/main` and `.github/workflows/ci.yml`
 describes an intent, not an executed check. **The local commands are the only oracles, and a gate
