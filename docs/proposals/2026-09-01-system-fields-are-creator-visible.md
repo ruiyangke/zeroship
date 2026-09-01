@@ -88,6 +88,126 @@ materialises a value. This is what stops honest disclosure from re-introducing
 the upsert-counter reset, since `default: 1` then means "the database defaults
 it", not "send 1".
 
+### No hardcoded field lists. Values come from named generators.
+
+Operator directive: neither TypeScript nor Rust hardcodes the system field
+names, and values are derived from rules - a set of generators, referenced from
+the descriptor.
+
+**This is what makes the 24+ duplicate lists dissolve**, which five review rounds
+kept rediscovering and none could fix, because every proposed fix needed a list
+of its own.
+
+**The charter is the trusted home for the bindings.**
+`crates/zeroship-migrate-server/src/policy.rs:58` does
+`include_str!(".../confined-system-shape.inject.toml")` - the charter is
+operator-shipped and compiled into the binary, unlike the descriptor, which is
+creator-authored (`apply.rs:61-65`). Putting generator bindings in the charter
+is what keeps them out of reach of a hand-edited `.zship`, which is exactly how
+the `writeClass` design died in round 3.
+
+Generators are a CLOSED, named set implemented once in Rust - `now`, `typedId`,
+`actor`, `increment` covers the specified fields. Closed matters: an open set
+means arbitrary code deciding platform values.
+
+What stops being hardcoded: `SYSTEM_FIELD_NAMES` and `IMMUTABLE_SYSTEM_FIELDS`
+in Rust, the SDK list in `install-schema.ts`, the three copies in `types.ts`,
+the two prose error strings in `error.rs`, and the field-naming inside
+`system_fields_pass.rs`, which iterates the descriptor and invokes the named
+generator instead. The three per-dialect DDL emitters are already
+charter-driven through `ResolvedInject`. Adding an eighth system field becomes
+a charter line rather than a fourteen-file change.
+
+**OPEN AND STRUCTURAL:** the worker does not have the charter today - only the
+migrate server does. If the worker takes generator bindings from the descriptor
+alone, a tampered `.zship` can re-point `created_by`, which is the round-3 hole
+reopened. `include_str!`-ing the same TOML into plugin-db closes it: the worker
+reads bindings from operator-shipped data and treats the descriptor as a mirror
+it can verify.
+
+### default, generator and update rule are THREE axes, not two
+
+| | Runs where | Applies to | Limited by |
+| --- | --- | --- | --- |
+| **default** | the database (DDL `DEFAULT`) | *any* insert omitting the column, including migration DML, CDC backfill, raw SQL | what SQL can express, per dialect |
+| **generator** | the platform, before the row is sent | only writes through the runtime | nothing; vendor-neutral, can mint a typed id |
+| **update rule** | the query builder, on later writes | UPDATE, not INSERT | - |
+
+The third is easy to miss and the specification leans on it hardest: **`updated_at`
+-> "NOW() every time" is not a default at all.** A DDL default fires only on
+INSERT; the re-stamp is emitted by the builder (`query.rs:6331`). Likewise
+`version`'s `1` is a default and its `+1` is an update rule.
+
+They are independent, which today's tree proves. `inject_into_object` injects
+only `id`, `created_by`, `updated_by`; its comment says `created_at` /
+`updated_at` / `version` / `deleted_at` are "intentionally NOT injected - the DB
+default fires".
+
+| field | default (DDL) | generator | update rule |
+| --- | --- | --- | --- |
+| `created_at` | `NOW()` | - | immutable |
+| `updated_at` | `NOW()` | - | re-stamp |
+| `version` | `1` | - | increment |
+| `id` | **none** | `typedId` | immutable |
+| `created_by` | none (`NULL`) | `actor` | immutable |
+| `deleted_at` | none (`NULL`) | - | lifecycle |
+
+`version` has a default and no generator; `id` has a generator and no default.
+Neither is describable on the other's axis - that is the proof they are separate.
+
+Collapsing them costs something either way. Generators alone lose the backstop,
+since migration DML, CDC backfill and raw SQL never reach the runtime. Defaults
+alone force every value to be SQL-expressible per dialect, which `typedId` is
+not, and which keeps #134 alive because `NOW()` and `CURRENT_TIMESTAMP` render
+differently.
+
+So they are LAYERS: **generator is the normal path, default is the backstop**,
+which is already how `created_by` works. Moving the timestamps to
+runtime-assigned therefore ADDS a generator; it does not replace the default.
+
+**For the SDK the distinction does not matter.** Both mean "the caller need not
+supply this" and "the client must not materialise a value", so `validateDoc` can
+test for either and treat them identically. The distinction matters to the
+producer (which goes in the DDL) and the runtime (which one it executes).
+
+### `updatable` plus `generatorRuns`, not an update enum
+
+A boolean alone cannot carry it: `created_at` and `updated_at` are both
+un-writable by the creator and differ entirely in what the platform does.
+
+But an enum (`immutable | restamp | increment`) is worse, because it answers TWO
+questions with one value - may the creator write it, and what does the platform
+do. **That conflation is already a live bug.** `query.rs:6313` reads
+`if !doc_has_version { version = COALESCE(version,0) + 1 }`, so a creator-supplied
+`version` SUPPRESSES the platform's increment; `updated_at` has the same shape at
+`:6331` via `doc_has_updated_at`. Permission and mechanism share one flag, so
+exercising one disables the other. An enum reproduces that coupling one layer up.
+
+Two independent properties instead:
+
+- **`updatable`** - may creator code write this? A permission. Drives generated
+  types and error messages.
+- **`generatorRuns`** - when does the platform compute it? A mechanism. Drives
+  the write pipeline.
+
+| field | `updatable` | generator | runs on |
+| --- | --- | --- | --- |
+| `created_at` | false | `now` | insert |
+| `updated_at` | false | `now` | insert, update |
+| `version` | false | `increment` | insert, update |
+| `id` | false | `typedId` | insert |
+| `created_by` | false | `actor` | insert |
+| ordinary column | true | - | - |
+
+`created_at` and `updated_at` now differ in exactly one cell. And because the two
+properties are separate, a creator-supplied value can never silently switch the
+platform's rule off - there is no shared flag to overload.
+
+**Unresolved:** `deleted_at` is written by neither insert nor update - it is set
+by `delete()` and cleared by `restore()`. So `generatorRuns` needs operation
+names rather than the two write verbs, or `deleted_at` needs a third answer.
+Worth settling now rather than when soft-delete is first switched on.
+
 ### Does this need the descriptor extended? Almost not at all.
 
 A descriptor field today looks like this (measured, hitcounter):
