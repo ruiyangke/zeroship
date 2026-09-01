@@ -449,7 +449,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 pub async fn query_portal(
     client: &Arc<InnerClient>,
     portal: &Portal,
@@ -892,7 +891,6 @@ impl RowStream {
     }
 }
 
-#[allow(dead_code)]
 pub async fn sync(client: &InnerClient) -> Result<(), Error> {
     let buf = Bytes::from_static(b"S\0\0\0\x04");
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
