@@ -3464,7 +3464,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 #[test]
 fn p8a2_per_app_emit_suppression_integration() {
     use zeroship_plugin_db::broker::{
-        emit_local, is_app_suppressed, suppress_app, unsuppress_app, ChangeOp, SubscriptionMessage,
+        ChangeOp, SubscriptionMessage, emit_local, is_app_suppressed, suppress_app, unsuppress_app,
     };
 
     zeroship_plugin_db::broker::drop_app(None);
@@ -6318,6 +6318,129 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     .await
     .expect("unmask must read under the per-app role");
     assert_eq!(result.plaintext, "123-45-6789");
+
+    drop(login_pool);
+    let _ = admin_pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+    release_pg(admin_pool).await;
+}
+
+/// PG + masked + **ENCRYPTED** + unmask: the matrix cell that never existed.
+///
+/// `fetch_and_decrypt`'s PostgreSQL arm reads the raw column as
+/// `Option<&str>` (`crud/unmask.rs:546-547`). For an ENCRYPTED column the raw
+/// sibling is BYTEA, and `&str: FromSql::accepts` refuses BYTEA -
+/// `libs/compio-postgres/vendor/postgres-types/src/lib.rs:729-742` lists
+/// VARCHAR/TEXT/BPCHAR/NAME/UNKNOWN plus citext/ltree and falls through to
+/// `false` for everything else. `Row::get_inner` consults `accepts` BEFORE
+/// decoding, and does so even for NULL (`libs/compio-postgres/src/row.rs:256`).
+///
+/// The funnel additionally binds every result in BINARY format
+/// (`libs/compio-postgres/src/query.rs:186`), so the `\xHHHH...` text rendering
+/// that the comment at `crud/unmask.rs:543-545` describes is not what arrives
+/// either. Two independent reasons, one outcome:
+/// `DbError::internal("unmask: get column value: ...")` at `crud/unmask.rs:548`.
+///
+/// WHY NOTHING CAUGHT IT. Every live PG unmask fixture declares a masked but
+/// UNENCRYPTED column, so this arm was never entered; the encrypted round-trip
+/// test never unmasks; and the SQLite twin passes because it reads
+/// `TypedCell::Blob` (`crud/unmask.rs:585`).
+///
+/// THIS IS THE SIBLING OF `unmask_fetch_runs_under_per_app_role_via_rls` WITH
+/// EXACTLY ONE VARIABLE CHANGED: the column is encrypted. Same role, same
+/// column grants, same role-bound policy, same login pool, same dispatch call.
+/// That is deliberate - a failure here cannot be a missing grant, a missing
+/// audit table or an unprovisioned role, because those would fail the sibling
+/// too. The only new thing is the BYTEA raw column.
+#[compio::test]
+async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
+    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+
+    let url = require_pg().await;
+    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    // Synthetic 32-byte root key, same shape as the encrypted round-trip gate.
+    let _keys = with_root_key("default", &"b".repeat(64));
+
+    let app = "p6a_unmask_encrypted";
+    let coll = "users";
+    let role = provision_app_with_role(&admin_pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    let schema = json!({
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" }
+        }
+    });
+    let ssn_raw = raw_column_name("ssn");
+    // The emitter decides the raw sibling's type. For an encrypted column that
+    // is BYTEA, which is the whole point of this test - so build the DDL rather
+    // than hand-spelling it, or the fixture proves nothing about the runtime.
+    let create_table = build_create_table_with_fks(app, coll, &schema, &FkEmission::Inline)
+        .expect("emitter must build the users DDL");
+    admin_pool.batch_execute(&create_table).await.unwrap();
+
+    // Real ciphertext from the platform's own encryptor, under the AAD the read
+    // path recomputes: canonical_aad(collection, column, Some(row_pk)) for the
+    // randomised mode (crud/unmask.rs:503-510).
+    let backend = PostgresBackend::new(admin_pool.clone(), url.clone());
+    let key = backend
+        .resolve_key(app, "default")
+        .await
+        .expect("resolve_key");
+    let aad = encryption::canonical_aad(coll, "ssn", Some(b"u1"));
+    let ct = backend
+        .encrypt(&key, EncryptionMode::Randomised, b"123-45-6789", &aad)
+        .expect("encrypt");
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
+    admin_pool
+        .execute(
+            &format!(
+                "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
+                 VALUES ('u1', decode($1, 'base64')::bytea, '***-**-6789')"
+            ),
+            &[&b64.as_str()],
+        )
+        .await
+        .unwrap();
+    support::grant_runtime_select_columns(&admin_pool, app, coll, &["id", &ssn_raw]).await;
+    install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+    let login_role = "p6a_unmask_enc_login";
+    let (login_url, login_pool) =
+        provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app).await;
+
+    zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+
+    let result = unmask::dispatch_unmask(
+        &DbBinding::cold_start(app),
+        UnmaskFieldArgs {
+            collection: coll.to_string(),
+            row_pk: "u1".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(json!({ "kind": "auto" })),
+            reason: Some("encrypted unmask regression".to_string()),
+        },
+    )
+    .await;
+
+    // Surface the real error rather than a bare unwrap panic: today this is
+    // `unmask: get column value: error deserializing column 0` and the message
+    // is the evidence that the failure is the BYTEA decode and nothing else.
+    let unmasked = result.unwrap_or_else(|e| {
+        panic!("unmask of an ENCRYPTED column must recover the plaintext, got: {e:?}")
+    });
+    assert_eq!(unmasked.plaintext, "123-45-6789");
 
     drop(login_pool);
     let _ = admin_pool

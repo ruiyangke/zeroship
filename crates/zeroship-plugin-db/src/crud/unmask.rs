@@ -540,13 +540,32 @@ async fn fetch_and_decrypt(
                 hint: None,
             });
         }
-        // BYTEA arrives over the text protocol as a `\xHHHH...`
-        // hex string. We parse it back to raw bytes here (mirror
-        // the decode in `decrypt_row_on_read`).
-        let value: Option<&str> = rows[0]
-            .try_get::<_, Option<&str>>(0)
+        // READ THE RAW SIBLING AS BYTES, NOT TEXT.
+        //
+        // The raw sibling of an ENCRYPTED column is BYTEA, and this funnel binds
+        // every result in BINARY format (`libs/compio-postgres/src/query.rs:186`),
+        // so there is no text rendering to parse.
+        //
+        // This asked for `Option<&str>` until 2026-09-01, and that is refused
+        // outright rather than mis-parsed: `&str: FromSql::accepts` takes
+        // VARCHAR/TEXT/BPCHAR/NAME/UNKNOWN plus citext/ltree and nothing else
+        // (`libs/compio-postgres/vendor/postgres-types/src/lib.rs:729-742`), and
+        // `Row::get_inner` consults `accepts` BEFORE decoding, even for NULL
+        // (`libs/compio-postgres/src/row.rs:256`). So EVERY unmask of an
+        // encrypted column on PostgreSQL failed, 100% of the time, with
+        // `unmask: get column value: error deserializing column 0`. The comment
+        // that used to sit here described `\xHHHH...` text arriving over the
+        // text protocol - the legacy shape `decrypt_row_on_read` still keeps a
+        // compatibility arm for, and one this call has never produced.
+        //
+        // Nothing caught it because every live PG unmask fixture declared a
+        // masked but UNENCRYPTED column, and the SQLite twin below reads
+        // `TypedCell::Blob` and was always correct. The regression test is
+        // `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`.
+        let value: Option<&[u8]> = rows[0]
+            .try_get::<_, Option<&[u8]>>(0)
             .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
-        let hex_str = value.ok_or_else(|| DbError::ValidationFailed {
+        let bytes = value.ok_or_else(|| DbError::ValidationFailed {
             code: "unmask_value_null",
             message: format!(
                 "column '{}' on row '{}' is NULL; nothing to unmask",
@@ -554,9 +573,8 @@ async fn fetch_and_decrypt(
             ),
             hint: None,
         })?;
-        let bytes = hex_to_bytes(hex_str)?;
         let key = pg.resolve_key(app_id, &enc_meta.key_id).await?;
-        let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
+        let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, bytes, &aad)?;
         return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
     }
 
@@ -741,41 +759,14 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
     }
 }
 
-/// Parse a Postgres `\x`-prefixed hex string into raw bytes. Mirrors
-/// `crate::crud::encryption_pass::hex_to_bytes` — duplicated here so
-/// `unmask` doesn't depend on that module's privacy boundary.
-///
-/// Only reachable through `fetch_and_decrypt`'s PG arm.
-#[allow(dead_code)]
-fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
-    let hex = s.strip_prefix("\\x").unwrap_or(s);
-    if !hex.len().is_multiple_of(2) {
-        return Err(DbError::internal(format!(
-            "unmask: BYTEA text has odd hex length: {}",
-            hex.len()
-        )));
-    }
-    let bytes = hex.as_bytes();
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    for i in (0..bytes.len()).step_by(2) {
-        let hi = nibble(bytes[i])?;
-        let lo = nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-#[allow(dead_code)]
-fn nibble(c: u8) -> Result<u8, DbError> {
-    match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(DbError::internal(format!(
-            "unmask: BYTEA text contains non-hex byte 0x{c:02x}"
-        ))),
-    }
-}
+// `hex_to_bytes` and `nibble` lived here until 2026-09-01, carrying
+// `#[allow(dead_code)]` and a doc line claiming they were "only reachable
+// through `fetch_and_decrypt`'s PG arm". That arm asked BYTEA for a `&str` and
+// so could never reach them - the driver refused the column before any hex
+// existed to parse. Their only caller was their own unit test, which is the
+// built-tested-unreferenced shape: a test proving a helper works says nothing
+// about whether anything uses it. Reading the column as `&[u8]` removes the
+// text detour entirely, so both are gone rather than re-homed.
 
 // ---------------------------------------------------------------------------
 // Audit row writer
@@ -1984,15 +1975,6 @@ mod tests {
         let s = wrap_plaintext_per_wraps(&[0xde, 0xad, 0xbe, 0xef], "bytes").unwrap();
         // base64 of [0xde, 0xad, 0xbe, 0xef] is `3q2+7w==`.
         assert_eq!(s, "3q2+7w==");
-    }
-
-    #[test]
-    fn hex_to_bytes_round_trip_with_prefix() {
-        assert_eq!(
-            hex_to_bytes("\\xdeadbeef").unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert_eq!(hex_to_bytes("\\x").unwrap(), Vec::<u8>::new());
     }
 
     // ---------------------------------------------------------------
