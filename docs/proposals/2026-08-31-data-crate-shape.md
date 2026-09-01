@@ -176,7 +176,7 @@ had no home until someone enumerated, and enumerating found seven more like it.
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
 | `error.rs` | 1,703 | **must be split.** `DbError` is core; `to_op_error` links V8 and belongs in the adapter. 11 files, measured. |
 | ~~`context.rs`~~ | 1,688 | **RESOLVED by the `BackendHandle` finding.** It holds `Option<BackendHandle>` (`:422`) and constructs both variants (`:561`, `:587`), so it follows the enum UP into `data-engine`. |
-| `auth/` | 1,459 | session setup and `SET LOCAL ROLE`. Runs per connection, so engine - but it is also a security fence, which argues for a home where it cannot be bypassed. |
+| `auth/` | 1,459 | **it is THREE things wearing one name - see below.** |
 | `service.rs` | 606 | **it straddles, and its own header proves it.** |
 | `cdc_lifecycle.rs` | 523 | bridges V8 subscription leases to one consumer per process. Stays worker-side (established), but adapter or engine is open. |
 | `change_stream_pg.rs` | 315 | **orphaned by Full.** It is "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" - and the consumer it owns moves to the relay. |
@@ -185,6 +185,34 @@ had no home until someone enumerated, and enumerating found seven more like it.
 The last two are consequences of the Full decision and did not exist as problems before it. Neither
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
+
+#### `auth/` does not place because it is not one thing
+
+Its callers say so. Every reference from outside the module, comment lines stripped:
+
+| caller | reaches for | what that is |
+| --- | --- | --- |
+| `exec.rs:316` | `bootstrap::autocommit_local_session_setup_sql` | **session setup - hot path** |
+| `transaction/mod.rs:219` | `bootstrap::tx_session_setup_sql` | **session setup - hot path** |
+| `drop_namespace.rs:167` | `bootstrap::drop_per_app_role` | **role lifecycle** |
+| `backend/sqlite/session_minter.rs:51`, `:626` | `util::{hex_decode, hex_encode, format_unix_millis}` | **not auth** |
+| `backend/sqlite/mod.rs:1167`, `:1174`, `:1176` | `util::{DEFAULT_TOKEN_TTL_SECS, getrandom_or_fallback, iso_timestamp_after}` | **not auth** |
+
+**`auth/util.rs` is not authentication.** Its whole public surface is
+`getrandom_or_fallback`, `iso_timestamp_after`, `format_unix_millis`, `civil_from_days` (a calendar
+algorithm), `hex_encode`, `hex_decode` and one TTL constant. Random bytes, date arithmetic and a hex
+codec, filed under `auth/` for historical reasons.
+
+**And that is a live blocker for the SQLite extraction, in miniature.** `data-sqlite` would need
+`hex_encode` and `getrandom_or_fallback` - so either those helpers move to `data-core`, or a database
+driver crate declares a dependency on an *auth* module in order to encode hex. The first is correct
+and the second would be embarrassing, but nothing in the current tree forces the choice, which is
+exactly why it survives.
+
+So `auth/` splits three ways: session setup to `data-engine` (it is on the statement and transaction
+paths), the generic helpers to `data-core`, and role lifecycle wherever teardown lands - noting that
+#55 found teardown is itself unwired with test-only callers, so that third piece may not need a home
+so much as a decision about whether it lives at all.
 
 #### `service.rs` straddles two tiers, and its own header is the evidence
 
