@@ -186,74 +186,13 @@ pub struct ObservedAuthority {
     pub ceiling: MaskCeiling,
 }
 
-/// Why a `Deny` was returned. Every reason is creator-visible, distinct, and
-/// non-retryable, and they differ in what the next action should be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DenyReason {
-    /// A permanent tombstone. There is nothing to re-resolve to.
-    AppDeprovisioned,
-    /// The subject is alive under a new incarnation, or the record answering
-    /// names a different subject entirely. This handle is dead; a freshly
-    /// resolved binding is not, so re-resolving is the correct next action.
-    ///
-    /// A caller that cannot tell this from a tombstone either re-resolves
-    /// against a deprovisioned app forever or gives up on a live one.
-    StaleAppIncarnation,
-    /// The cluster or timeline answering is not the one the binding captured.
-    /// Re-resolving locally does not help; this is an operational fault, not a
-    /// lifecycle event.
-    AuthorityDomainMismatch,
-    /// PostgreSQL refused the session's `SET LOCAL ROLE` because the worker
-    /// login no longer holds the app-role membership. Authorization already
-    /// failed closed; this reason supplies the terminal remedy.
-    GrantRevoked,
-}
-
-impl DenyReason {
-    /// The creator-visible code. These reach the caller as typed terminal
-    /// errors, never as an audit row only.
-    #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::AppDeprovisioned => "APP_DEPROVISIONED",
-            Self::StaleAppIncarnation => "STALE_APP_INCARNATION",
-            Self::AuthorityDomainMismatch => "AUTHORITY_DOMAIN_MISMATCH",
-            Self::GrantRevoked => "GRANT_REVOKED",
-        }
-    }
-
-    /// None of the reasons is retryable. That is the point of a terminal denial:
-    /// none of them is improved by trying again.
-    ///
-    /// Non-retryable is **not** the same as indistinguishable - see the
-    /// variants' own docs for what each tells the caller to do instead.
-    #[must_use]
-    pub const fn retryable(self) -> bool {
-        false
-    }
-
-    /// The reasons the authority-observation classifier itself can return.
-    pub const AUTHORITY: [Self; 3] = [
-        Self::AppDeprovisioned,
-        Self::StaleAppIncarnation,
-        Self::AuthorityDomainMismatch,
-    ];
-
-    /// Every reason from either an authority observation or classified session
-    /// setup, for tests that rule on the closed set.
-    pub const ALL: [Self; 4] = [
-        Self::AppDeprovisioned,
-        Self::StaleAppIncarnation,
-        Self::AuthorityDomainMismatch,
-        Self::GrantRevoked,
-    ];
-}
-
-impl fmt::Display for DenyReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.code())
-    }
-}
+// `DenyReason` moved to `crate::error` on 2026-08-31. It is domain vocabulary -
+// the reason a session was refused, creator-visible and non-retryable - not a
+// reducer implementation detail. Keeping it here made `error.rs` (core) import
+// from `transaction::reducer` (engine), i.e. the contract crate would have
+// depended on the engine that depends on it. Moving the TYPE down resolves the
+// cycle without moving any logic.
+pub use crate::error::DenyReason;
 
 /// The classifier's verdict. Exactly one of three, and the classifier is
 /// total: every observation produces one.
