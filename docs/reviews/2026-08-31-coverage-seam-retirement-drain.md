@@ -314,3 +314,39 @@ files the intervening commit touched.
 `unjudged`. There are 35 of them, mostly trait-method declarations and generics
 with no instantiation, and folding them into the pass column is how missing data
 reads as a clean result.
+
+## The soak's RSS rule fails about one run in three with no code change
+
+Measured 2026-08-31 at `ce74f9de6`: three soak runs, same commit, same command,
+same dedicated container.
+
+    run   pool_acquires  pool_releases  delta_kib  preceding_sum  tail_sum  verdict
+    A     82382          82382          36         206204         208024    GROWING
+    B     82259          82259          68         209212         208860    stable
+    C     82561          82561          136        206556         206972    stable
+
+Run A failed the suite. Nothing changed between the three.
+
+The rule compares the RSS sum over the final quartile against the preceding
+window, allowing 64 KiB per sample of noise (`RSS_GROWTH_NOISE_BAND_KIB`,
+`benches/soak.rs:56`). Over 21-sample windows that band is 1344 KiB, and the
+runs land either side of it by small margins - A exceeded by 476 KiB, and the
+previous cycle's passing run cleared it by only 184 KiB.
+
+**The shape says there is no leak.** The RSS series oscillates between about
+9.8 MB and 10.1 MB for the whole run, and the whole-run endpoint delta is 36 KiB
+- 0.37% of resident size - on a run performing over 100,000 operations. A leak
+would climb; this jitters around a flat baseline.
+
+Two things follow, and the second is the useful one:
+
+- **A single red soak is not evidence of a leak.** Re-run before reporting one.
+  This instrument has a false-positive rate around 1 in 3 at the current band.
+- **`delta_kib` and the verdict measure different things, and can disagree.**
+  Run C has the LARGEST endpoint delta of the three (136 KiB) and passes, while
+  run A has the smallest (36 KiB) and fails. Quoting `delta_kib` as though it
+  were the thing the rule decides on - which is easy to do, since it is printed
+  first - would get the reasoning exactly backwards.
+
+Pool accounting was exact in all three runs, which is the part of this soak that
+has never been ambiguous: `pool_acquires == pool_releases` to the unit.
