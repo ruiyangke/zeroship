@@ -492,6 +492,17 @@ where
                             }
                         }
                         .map_err(Error::io)?
+                        // Which line enforces that guarantee differs by arm, and
+                        // only one of them is this `expect`. Deleting the
+                        // completeness check for async tags fails exactly
+                        // `connect_raw::tests::handshake_charges_a_padded_notice_its_whole_frame`,
+                        // and it panics at the `[..frame_len]` slice above with
+                        // "range end index 131111 out of range for slice of length
+                        // 16375" - the Detached arm never reaches here. `Shared`
+                        // hands the whole buffer to `parse`, which answers
+                        // `Ok(None)` on a short frame, so this message describes
+                        // that arm alone. No test drives it; both arms are guarded
+                        // by the same check, and the slice is the one that bites.
                         .expect(
                             "the preceding frame-length check guarantees a complete async message",
                         );
