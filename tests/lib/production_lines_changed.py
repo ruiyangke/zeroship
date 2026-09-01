@@ -23,8 +23,16 @@ for _rev in _args:
     ).returncode:
         sys.exit(f"not a commit: {_rev}")
 base, head = _args
-files=subprocess.run(["git","diff","--name-only",f"{base}..{head}","--","libs/compio-postgres/src"],
+# `vendor/` is production, not third-party decoration: Cargo.toml carries
+# `postgres-types = { path = "vendor/postgres-types" }`, so its ToSql impls are
+# literally the bytes this driver puts on the wire. Omitting it reported
+# "TOTAL production lines: 0" for the commit that changed the CIDR is_cidr
+# flag - a wire-format change reading as test-only, which is the one verdict
+# this tool exists to prevent.
+PRODUCTION = ["libs/compio-postgres/src", "libs/compio-postgres/vendor"]
+files=subprocess.run(["git","diff","--name-only",f"{base}..{head}","--",*PRODUCTION],
                      capture_output=True,text=True).stdout.split()
+files=[f for f in files if f.endswith(".rs")]
 def test_spans(src):
     spans=[]
     for i,l in enumerate(src):
