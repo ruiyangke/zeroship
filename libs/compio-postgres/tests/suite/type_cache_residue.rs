@@ -1,4 +1,5 @@
-use compio_postgres::{Client, Error};
+use compio_postgres::{Client, Error, QueryOutcome};
+use futures_util::StreamExt;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -40,10 +41,13 @@ fn failing_custom_type_query(type_name: &str) -> String {
 
 #[compio::test]
 async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails() {
+    const BARRIER: &str = "SELECT 1 /* cpg_query_diag_observer_barrier */";
+
     let url = test_url();
     let client = connect(&url)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let mut events = client.query_events();
     let type_name = common::test_object_name("cpg_query_diag_text_enum");
     create_failing_custom_type_fixture(&client, &type_name).await;
     let query = failing_custom_type_query(&type_name);
@@ -62,6 +66,44 @@ async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails(
         .batch_execute("ROLLBACK")
         .await
         .expect("the outer query error left the transaction recoverable");
+    client
+        .simple_query(BARRIER)
+        .await
+        .expect("the outer query error left the session observable");
+
+    let observed = compio::time::timeout(Duration::from_secs(5), async {
+        let mut observed = Vec::new();
+        loop {
+            let event = events
+                .next()
+                .await
+                .expect("query observer closed before the barrier");
+            let reached_barrier = event.sql() == BARRIER;
+            observed.push(event);
+            if reached_barrier {
+                break observed;
+            }
+        }
+    })
+    .await
+    .expect("query observer did not reach the barrier");
+    let target: Vec<_> = observed
+        .iter()
+        .filter(|event| event.sql() == query)
+        .collect();
+    assert_eq!(
+        target.len(),
+        1,
+        "out-of-band outer error emitted zero or multiple events"
+    );
+    match target[0].outcome() {
+        QueryOutcome::DatabaseError { code } => assert_eq!(
+            code.as_ref(),
+            Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO)
+        ),
+        other => panic!("expected database error observation, got {other:?}"),
+    }
+
     let value: i32 = client
         .query_one("SELECT 1", &[])
         .await
@@ -100,6 +142,77 @@ async fn query_typed_preserves_the_outer_error_when_type_resolution_fails() {
         .expect("the outer query error left the session reusable")
         .get(0);
     assert_eq!(value, 1);
+}
+
+/// `PostgreSQL`'s recursive containment check follows `typelem` only for true
+/// arrays. A custom base type can therefore advertise a composite as its
+/// element while using a different subscript handler, and that composite can
+/// contain the base type. The catalog is healthy and the values are usable,
+/// but this resolver follows raw `typelem` and sees base -> composite -> base.
+#[compio::test]
+async fn accepted_custom_element_cycle_is_reported() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let composite = common::test_object_name("cpg_cycle_composite");
+        let base = common::test_object_name("cpg_cycle_base");
+        let input = common::test_object_name("cpg_cycle_input");
+        let output = common::test_object_name("cpg_cycle_output");
+
+        client
+            .batch_execute(&format!(
+                "CREATE TYPE pg_temp.{composite} AS (n int4); \
+                 CREATE TYPE pg_temp.{base}; \
+                 CREATE FUNCTION pg_temp.{input}(cstring) \
+                     RETURNS pg_temp.{base} AS 'jsonb_in' \
+                     LANGUAGE internal IMMUTABLE STRICT; \
+                 CREATE FUNCTION pg_temp.{output}(pg_temp.{base}) \
+                     RETURNS cstring AS 'jsonb_out' \
+                     LANGUAGE internal IMMUTABLE STRICT; \
+                 CREATE TYPE pg_temp.{base} ( \
+                     INPUT = pg_temp.{input}, \
+                     OUTPUT = pg_temp.{output}, \
+                     INTERNALLENGTH = variable, \
+                     STORAGE = extended, \
+                     ELEMENT = pg_temp.{composite}, \
+                     SUBSCRIPT = pg_catalog.jsonb_subscript_handler \
+                 ); \
+                 ALTER TYPE pg_temp.{composite} \
+                     ADD ATTRIBUTE b pg_temp.{base}"
+            ))
+            .await
+            .expect("PostgreSQL rejected its valid custom-element cycle");
+
+        let oid: i64 = client
+            .query_one(
+                &format!("SELECT 'pg_temp.{base}'::regtype::oid::int8"),
+                &[],
+            )
+            .await
+            .expect("read the custom base type OID without resolving its shape")
+            .get(0);
+        let failure = client
+            .prepare(&format!("SELECT NULL::pg_temp.{base}"))
+            .await
+            .expect_err("the recursive type graph was accepted as acyclic");
+        assert_eq!(
+            common::error_chain(&failure),
+            format!(
+                "error parsing response from server: cycle detected resolving postgres type with OID {oid}"
+            )
+        );
+
+        let value: i32 = client
+            .query_one("SELECT 1", &[])
+            .await
+            .expect("cycle detection left the session reusable")
+            .get(0);
+        assert_eq!(value, 1);
+    })
+    .await
+    .expect("custom-element cycle test exceeded its watchdog");
 }
 
 async fn assert_stale_helpers_are_retired(

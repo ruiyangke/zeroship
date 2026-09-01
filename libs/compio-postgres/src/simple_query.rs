@@ -8,7 +8,7 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::command_tag::extract_row_affected;
-use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
+use crate::connection::RequestMessages;
 use crate::copy_in::CopyInReceiver;
 use crate::{Error, SimpleQueryMessage, SimpleQueryRow};
 use bytes::Bytes;
@@ -187,21 +187,14 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
 ) -> Result<Responses, Error> {
     debug!("executing statement batch: {query}");
 
-    let must_prequeue_copy_abort = may_enter_copy_in(query);
     let query = encode(client, query)?;
     let cleanup = encode(client, cleanup)?;
-    if !must_prequeue_copy_abort {
-        return client
-            .send_with_error_cleanup(FrontendMessage::Raw(query), FrontendMessage::Raw(cleanup));
-    }
-
-    let responses = client.send(producerless_request(query, true))?;
-    drop(client.send_with(
-        RequestMessages::Single(FrontendMessage::Raw(cleanup)),
-        RequestDisposition::Housekeeping,
-        TransactionEffect::MayChange,
-    )?);
-    Ok(responses)
+    // This is deliberately not an arbitrary-SQL entry point. Its sole caller
+    // supplies `RELEASE <quoted savepoint>`, and `quote_identifier` encloses
+    // the whole name while doubling embedded quotes. Caller input therefore
+    // cannot add a statement-leading `COPY`, so the paired request never needs
+    // the producerless COPY-abort path used by `start_batch_execute`.
+    client.send_with_error_cleanup(FrontendMessage::Raw(query), FrontendMessage::Raw(cleanup))
 }
 
 /// Drain the response stream `start_batch_execute` returned.

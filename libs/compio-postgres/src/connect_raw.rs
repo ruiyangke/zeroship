@@ -1490,7 +1490,85 @@ mod tests {
     use futures_util::StreamExt;
     use std::time::Duration;
 
+    /// `expect_err` cannot interpolate the loop variable, so name the failing
+    /// status explicitly when the refusal does not happen.
+    trait UnwrapErrForStatus {
+        fn unwrap_err_or_else_msg(self, status: crate::tls::ClientCertStatus) -> Error;
+    }
+
+    impl UnwrapErrForStatus for Result<(), Error> {
+        fn unwrap_err_or_else_msg(self, status: crate::tls::ClientCertStatus) -> Error {
+            match self {
+                Ok(()) => panic!("sslcertmode=require was not honoured for {status:?}"),
+                Err(error) => error,
+            }
+        }
+    }
+
     const EXPECTED_DELAYED_MESSAGE_LIMIT: usize = 256;
+
+    /// `sslcertmode=require` is a demand that the connection be authenticated
+    /// by a client certificate, so every way of NOT having sent one must be a
+    /// refusal. Two of the five arms had never run - `NotSent` and `Unknown` -
+    /// and both are the dangerous direction: had either returned `Ok`, a caller
+    /// demanding certificate authentication would have proceeded without one.
+    ///
+    /// The `Unknown` arm is the subtler of the two. It fires when the TLS
+    /// backend cannot report what it did, and refusing there is a choice: the
+    /// alternative is to assume success, which is exactly the assumption this
+    /// setting exists to forbid.
+    #[test]
+    fn sslcertmode_require_refuses_every_status_but_sent() {
+        use crate::tls::ClientCertStatus;
+
+        let required = "host=h sslcertmode=require"
+            .parse::<Config>()
+            .expect("parse a sslcertmode=require config");
+
+        check_ssl_cert_mode(&required, ClientCertStatus::Sent)
+            .expect("a sent certificate satisfies the demand");
+
+        for (status, expected) in [
+            (ClientCertStatus::NotApplicable, "did not request"),
+            (ClientCertStatus::NotRequested, "did not request"),
+            (ClientCertStatus::NotSent, "without a valid SSL certificate"),
+            (ClientCertStatus::Unknown, "did not report"),
+        ] {
+            let error = check_ssl_cert_mode(&required, status).unwrap_err_or_else_msg(status);
+            // The setting name lives in the SOURCE, not in the top-level
+            // Display, which renders only "authentication error". Walk the
+            // chain or the assertion below would be checking the wrong string.
+            let rendered = std::iter::successors(std::error::Error::source(&error), |error| {
+                std::error::Error::source(*error)
+            })
+            .fold(format!("{error}"), |chain, error| {
+                format!("{chain}: {error}")
+            });
+            assert!(
+                rendered.contains("sslcertmode=require"),
+                "the refusal must name the setting: {rendered}"
+            );
+            assert!(
+                rendered.contains(expected),
+                "{status:?} must say why it failed, wanted {expected:?}: {rendered}"
+            );
+        }
+
+        // The whole check is scoped to `require`; any other mode returns early
+        // regardless of status, which is what keeps a plaintext connection from
+        // being refused for lacking a certificate nobody asked for.
+        let default = "host=h".parse::<Config>().expect("parse a default config");
+        for status in [
+            ClientCertStatus::NotApplicable,
+            ClientCertStatus::NotRequested,
+            ClientCertStatus::NotSent,
+            ClientCertStatus::Sent,
+            ClientCertStatus::Unknown,
+        ] {
+            check_ssl_cert_mode(&default, status)
+                .expect("only sslcertmode=require inspects the status");
+        }
+    }
 
     /// Replays one coalesced backend read, then fails every frontend write.
     /// This isolates the handshake's already-buffered diagnosis choice from
@@ -1914,6 +1992,86 @@ mod tests {
         assert_eq!(
             error.code().map(crate::error::SqlState::code),
             Some("57P01")
+        );
+    }
+
+    /// One text column, which is the shape both target-session probes read.
+    fn single_column_row_description(name: &str) -> Vec<u8> {
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0i32.to_be_bytes()); // table oid
+        body.extend_from_slice(&0i16.to_be_bytes()); // column id
+        body.extend_from_slice(&25i32.to_be_bytes()); // text
+        body.extend_from_slice(&(-1i16).to_be_bytes()); // type size
+        body.extend_from_slice(&(-1i32).to_be_bytes()); // type modifier
+        body.extend_from_slice(&0i16.to_be_bytes()); // text format
+        frame(b'T', &body)
+    }
+
+    fn single_column_data_row(value: &[u8]) -> Vec<u8> {
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(value);
+        frame(b'D', &body)
+    }
+
+    fn target_probe_script(column: &str, value: &[u8]) -> Vec<u8> {
+        let mut script = single_column_row_description(column);
+        script.extend_from_slice(&single_column_data_row(value));
+        script.extend_from_slice(&frame(b'C', b"SHOW\0"));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+        script
+    }
+
+    /// The message lives in the SOURCE chain; the top-level Display renders
+    /// only "error connecting to server".
+    fn probe_error_chain(error: &Error) -> String {
+        std::iter::successors(std::error::Error::source(error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        })
+    }
+
+    async fn target_probe_rejects(attrs: TargetSessionAttrs, column: &str, value: &[u8]) -> Error {
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: target_probe_script(column, value),
+            offset: 0,
+            output: vec![],
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.phase = HandshakePhase::Complete;
+        probe_target_session_attrs(&mut handshake, attrs, &mut HashMap::new())
+            .await
+            .expect_err("the probe accepted a value outside its documented set")
+    }
+
+    /// Both probes answer a fixed question with a fixed vocabulary - `on`/`off`
+    /// for `transaction_read_only`, `t`/`f` for `pg_is_in_recovery`. Anything
+    /// else must be refused rather than guessed at: the probe decides whether
+    /// this session may take writes, so reading an unknown value as "false"
+    /// would route writes at a standby. Neither refusal had ever run.
+    #[compio::test]
+    async fn a_target_probe_refuses_a_value_outside_its_vocabulary() {
+        let read_only = target_probe_rejects(
+            TargetSessionAttrs::ReadWrite,
+            "transaction_read_only",
+            b"maybe",
+        )
+        .await;
+        assert!(
+            probe_error_chain(&read_only).contains("invalid transaction_read_only"),
+            "transaction_read_only refusal named the wrong thing: {read_only}"
+        );
+
+        let recovery =
+            target_probe_rejects(TargetSessionAttrs::Standby, "pg_is_in_recovery", b"yes").await;
+        assert!(
+            probe_error_chain(&recovery).contains("invalid pg_is_in_recovery"),
+            "pg_is_in_recovery refusal named the wrong thing: {recovery}"
         );
     }
 

@@ -483,15 +483,7 @@ where
         }
     }
 
-    /// Consume the buffer, returning the underlying stream. Any unflushed
-    /// writes and unparsed reads are discarded.
-    #[allow(dead_code)]
-    pub fn into_inner(self) -> S {
-        self.inner
-    }
-
     /// Borrow the underlying stream mutably (used for TLS upgrade).
-    #[allow(dead_code)]
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }
@@ -535,7 +527,8 @@ where
     }
 
     /// Append data to the write buffer (no I/O until flush).
-    #[allow(dead_code)]
+    // Used by `buf_stream::tests` to exercise serialized flush behavior.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn write(&mut self, data: &[u8]) {
         self.write_buf.extend_from_slice(data);
     }

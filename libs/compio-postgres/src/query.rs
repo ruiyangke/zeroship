@@ -203,7 +203,11 @@ pub async fn query_text_params(
 
     loop {
         match responses.next().await? {
-            Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
+            // Same portal rule as `execute_text_params`: this sends
+            // `describe(b'P', ...)`, and a portal Describe answers with
+            // RowDescription or NoData. ParameterDescription belongs to a
+            // STATEMENT Describe, which only the `b'S'` paths below issue.
+            Message::ParseComplete | Message::BindComplete => {}
             Message::NoData => {
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], vec![]),
@@ -236,6 +240,25 @@ pub async fn query_text_params(
                 });
             }
             _ => return Err(Error::unexpected_message()),
+        }
+    }
+}
+
+fn map_execute_text_bind_error(error: frontend::BindError) -> Error {
+    match error {
+        frontend::BindError::Serialization(io_err) => {
+            // The names and format counts are fixed and bounded. The one
+            // remaining route is a Bind body above `i32::MAX`, which needs
+            // more than 2 GiB of caller-owned text to construct. Keep the
+            // resource-bound refusal without a suite-sized allocation.
+            Error::encode(io_err)
+        }
+        frontend::BindError::Conversion(boxed) => {
+            // `bind` shares the serializer's boxed error type with its
+            // values-count encoder. More than `u16::MAX` values therefore
+            // reaches this arm even though both serializer arms return
+            // `Ok`; the bind-count test pins that upstream classification.
+            Error::encode(std::io::Error::other(format!("bind: {boxed}")))
         }
     }
 }
@@ -278,12 +301,10 @@ pub async fn execute_text_params(
             std::iter::once(1i16), // results: binary (no rows for a DML, but keep uniform)
             buf,
         )
-        .map_err(|e| match e {
-            frontend::BindError::Serialization(io_err) => Error::encode(io_err),
-            frontend::BindError::Conversion(boxed) => {
-                Error::encode(std::io::Error::other(format!("bind: {boxed}")))
-            }
-        })?;
+        .map_err(map_execute_text_bind_error)?;
+        // These fixed-size messages use the literal empty portal name. Their
+        // encoders can only fail for an interior NUL or an overflowing message
+        // body, neither of which those inputs can contain.
         frontend::describe(b'P', "", buf).map_err(Error::encode)?;
         frontend::execute("", 0, buf).map_err(Error::encode)?;
         frontend::sync(buf);
@@ -295,10 +316,7 @@ pub async fn execute_text_params(
     let mut copy_out_refused = false;
     loop {
         match responses.next().await? {
-            Message::ParseComplete
-            | Message::BindComplete
-            | Message::ParameterDescription(_)
-            | Message::RowDescription(_) => {}
+            Message::ParseComplete | Message::BindComplete | Message::RowDescription(_) => {}
             Message::NoData => rows = 0,
             Message::DataRow(_) => {}
             Message::CommandComplete(body) => {
@@ -449,7 +467,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 pub async fn query_portal(
     client: &Arc<InnerClient>,
     portal: &Portal,
@@ -892,7 +909,6 @@ impl RowStream {
     }
 }
 
-#[allow(dead_code)]
 pub async fn sync(client: &InnerClient) -> Result<(), Error> {
     let buf = Bytes::from_static(b"S\0\0\0\x04");
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
@@ -905,7 +921,7 @@ pub async fn sync(client: &InnerClient) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_bind, query_text_params};
+    use super::{encode_bind, map_execute_text_bind_error, query_text_params};
     use crate::Statement;
     use crate::client::Client;
     use crate::codec::FrontendMessage;
@@ -1055,5 +1071,23 @@ mod tests {
         let error = encode_bind(&statement, params, "", &mut buf).unwrap_err();
 
         assert_eq!(error.to_string(), "error encoding message to server");
+    }
+
+    #[test]
+    fn execute_text_bind_serialization_preserves_its_encode_error_source() {
+        let error = map_execute_text_bind_error(
+            postgres_protocol::message::frontend::BindError::Serialization(std::io::Error::other(
+                "sentinel serialization",
+            )),
+        );
+
+        assert_eq!(error.to_string(), "error encoding message to server");
+        assert_eq!(
+            error
+                .source()
+                .expect("serialization error lost its source")
+                .to_string(),
+            "sentinel serialization"
+        );
     }
 }

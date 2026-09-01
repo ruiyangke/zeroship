@@ -1825,7 +1825,7 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         match range {
             None => fields.push(None),
             Some(range) => {
-                let slice = buf.get(range).ok_or_else(eof_identify_row)?;
+                let slice = &buf[range];
                 fields.push(Some(
                     std::str::from_utf8(slice)
                         .map_err(|e| Error::parse(std::io::Error::other(e)))?,
@@ -1863,15 +1863,6 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         xlogpos: required(2, "xlogpos")?.to_string(),
         dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
     })
-}
-
-/// The `UnexpectedEof` error returned when the `IDENTIFY_SYSTEM`
-/// `DataRow` body is truncated mid-field.
-fn eof_identify_row() -> Error {
-    Error::parse(std::io::Error::new(
-        std::io::ErrorKind::UnexpectedEof,
-        "IDENTIFY_SYSTEM DataRow truncated",
-    ))
 }
 
 /// `IDENTIFY_SYSTEM` completed its response without returning the row it is
@@ -1947,7 +1938,7 @@ fn postgres_microseconds_since_epoch() -> i64 {
 ///
 /// Reference: https://www.postgresql.org/docs/16/protocol-logicalrep-message-formats.html
 pub mod pgoutput {
-    use bytes::Bytes;
+    use bytes::{Buf, Bytes};
 
     /// One pgoutput logical-decoding message.
     #[derive(Debug, Clone, PartialEq)]
@@ -2797,7 +2788,10 @@ pub mod pgoutput {
                 let subxid = read_u32(&mut cur)?;
                 let (abort_lsn, abort_timestamp) = match cur.len() {
                     0 => (None, None),
-                    16 => (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?)),
+                    // The exact-length guard makes both eight-byte reads
+                    // infallible. Using `Buf` directly removes two impossible
+                    // `UnexpectedEof` exits from this decoder.
+                    16 => (Some(cur.get_u64()), Some(cur.get_i64())),
                     remaining => {
                         return Err(DecodeError::TrailingData {
                             message: message_name(tag),
@@ -2975,6 +2969,59 @@ mod tests {
             drop_target: Some(crate::cancel_token::CancelDropTarget::Replication(
                 Arc::new(AtomicBool::new(false)),
             )),
+        }
+    }
+
+    fn redacting_test_cancel_token(socket_secret: &str, key_secret: &'static [u8]) -> CancelToken {
+        let mut token = test_cancel_token();
+        token.socket_config = Some(SocketConfig {
+            addr: Addr::tcp(
+                "127.0.0.1:5432"
+                    .parse()
+                    .expect("valid loopback socket address"),
+            ),
+            hostname: Some(socket_secret.to_owned()),
+            port: 5432,
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: Encryption::Plaintext,
+            ssl_sni: true,
+            ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
+        });
+        token.process_id = 314_159;
+        token.secret_key = Some(
+            CancelKey::new(bytes::Bytes::from_static(key_secret))
+                .expect("valid sentinel cancel key"),
+        );
+        token
+    }
+
+    fn format_under_watchdog<F>(label: &'static str, format: F) -> String
+    where
+        F: FnOnce() -> String + Send + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(format())
+                .expect("watchdog receiver dropped before formatting completed");
+        });
+
+        match receiver.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(rendered) => {
+                worker.join().expect("Debug formatter thread panicked");
+                rendered
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{label} Debug formatting did not complete under the watchdog")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().expect("Debug formatter thread panicked");
+                unreachable!("a successful formatter sends its rendered string")
+            }
         }
     }
 
@@ -4031,6 +4078,135 @@ mod tests {
         assert_eq!(ruled_on, 19, "the complete legal tag set must be ruled on");
     }
 
+    /// `StreamAbort` carries an OPTIONAL 16-byte tail (abort LSN plus abort
+    /// timestamp), and the decoder selects it by matching `cur.len()` exactly.
+    /// Every existing fixture uses the 0-byte form, so the 16-byte arm was
+    /// unbound: widening its guard to also admit 8 bytes, or defaulting the
+    /// timestamp, changed nothing that any test observed. Both are proved by
+    /// this test now.
+    ///
+    /// The exactness matters beyond decoding a value. The arm reads with
+    /// `Buf::get_u64`, which PANICS rather than erroring when short, so the
+    /// length match is the only thing standing between a truncated tail and a
+    /// panicked replication task; a partial tail must reach `TrailingData`.
+    #[test]
+    fn stream_abort_decodes_its_optional_tail_and_refuses_a_partial_one() {
+        const ABORT_LSN: u64 = 0x0102_0304_0506_0708;
+        const ABORT_TS: i64 = 0x1112_1314_1516_1718;
+
+        let mut full = vec![b'A'];
+        full.extend_from_slice(&7u32.to_be_bytes()); // xid
+        full.extend_from_slice(&9u32.to_be_bytes()); // subxid
+        full.extend_from_slice(&ABORT_LSN.to_be_bytes());
+        full.extend_from_slice(&ABORT_TS.to_be_bytes());
+
+        let mut decoder = pgoutput::Decoder::new();
+        decoder
+            .decode(&[b'S', 0, 0, 0, 7, 1])
+            .expect("StreamStart opens the block");
+        decoder
+            .decode(&[b'E'])
+            .expect("StreamStop closes it, as StreamAbort requires");
+        match decoder
+            .decode(&full)
+            .expect("a 16-byte tail is well formed")
+        {
+            pgoutput::PgOutputMessage::StreamAbort {
+                xid,
+                subxid,
+                abort_lsn,
+                abort_timestamp,
+            } => {
+                assert_eq!((xid, subxid), (7, 9));
+                assert_eq!(abort_lsn, Some(ABORT_LSN), "abort LSN was not decoded");
+                assert_eq!(
+                    abort_timestamp,
+                    Some(ABORT_TS),
+                    "abort timestamp was not decoded"
+                );
+            }
+            other => panic!("expected StreamAbort, got {other:?}"),
+        }
+
+        // Half a tail must be refused, not read past. Eight bytes is exactly
+        // the width that a widened guard would wrongly admit.
+        let partial = full[..full.len() - 8].to_vec();
+        let mut decoder = pgoutput::Decoder::new();
+        decoder
+            .decode(&[b'S', 0, 0, 0, 7, 1])
+            .expect("StreamStart opens the block");
+        decoder
+            .decode(&[b'E'])
+            .expect("StreamStop closes it, as StreamAbort requires");
+        let error = decoder
+            .decode(&partial)
+            .expect_err("a half-written abort tail is not a complete message");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("StreamAbort") && rendered.contains("trailing"),
+            "the refusal must name the message and the leftover: {rendered}"
+        );
+    }
+
+    /// Required pgoutput fields must reject a frame ending at each field
+    /// boundary, including the two-phase and streaming variants that a normal
+    /// round trip rarely emits. Use the stateful decoder because the public
+    /// stateless helper deliberately refuses stream-terminal message tags.
+    #[test]
+    fn rare_pgoutput_messages_refuse_every_truncated_required_field() {
+        fn fixed(tag: u8, body_len: usize) -> Vec<u8> {
+            let mut frame = vec![tag];
+            frame.resize(body_len + 1, 0);
+            frame
+        }
+
+        let mut prepare = fixed(b'P', 1 + 8 + 8 + 8 + 4);
+        prepare.push(0); // empty gid
+        let mut commit_prepared = fixed(b'K', 1 + 8 + 8 + 8 + 4);
+        commit_prepared.push(0); // empty gid
+        let mut rollback_prepared = fixed(b'r', 1 + 8 + 8 + 8 + 8 + 4);
+        rollback_prepared.push(0); // empty gid
+        let mut stream_prepare = fixed(b'p', 1 + 8 + 8 + 8 + 4);
+        stream_prepare.push(0); // empty gid
+        let mut update = fixed(b'U', 4);
+        update.push(b'K');
+        update.extend_from_slice(&0u16.to_be_bytes()); // empty old-key tuple
+        update.push(b'N');
+        update.extend_from_slice(&0u16.to_be_bytes()); // empty new tuple
+
+        let cases: [(&str, Vec<u8>, &[usize]); 6] = [
+            ("Prepare", prepare, &[2, 10, 18, 26, 30]),
+            ("CommitPrepared", commit_prepared, &[2, 10, 18, 26, 30]),
+            (
+                "RollbackPrepared",
+                rollback_prepared,
+                &[2, 10, 18, 26, 34, 38],
+            ),
+            ("StreamCommit", fixed(b'c', 4 + 1 + 8 + 8 + 8), &[6, 14, 22]),
+            ("StreamPrepare", stream_prepare, &[2, 10, 18, 26, 30]),
+            ("Update after old tuple", update, &[8]),
+        ];
+
+        let mut ruled_on = 0;
+        for (message, frame, cuts) in cases {
+            pgoutput::Decoder::new()
+                .decode(&frame)
+                .unwrap_or_else(|error| panic!("valid {message} fixture failed: {error}"));
+            for cut in cuts {
+                let error = pgoutput::Decoder::new().decode(&frame[..*cut]).unwrap_err();
+                assert!(
+                    matches!(&error, pgoutput::DecodeError::UnexpectedEof),
+                    "{message} truncated at byte {cut} reached {error}"
+                );
+                ruled_on += 1;
+            }
+        }
+        assert_eq!(
+            ruled_on, 25,
+            "every selected field boundary must be ruled on"
+        );
+    }
+
     /// PostgreSQL rejects the six currently-zero flags in its own pgoutput
     /// reader. StreamStart is also constrained to 0 or 1; coercing byte 2 to
     /// true here disagrees with PostgreSQL's `byte == 1` interpretation. Keep
@@ -4319,6 +4495,123 @@ mod tests {
             release: None,
             cancel_token: test_cancel_token(),
         }
+    }
+
+    /// Every `pgoutput::DecodeError` message, rendered. `Display` for this
+    /// enum had 29 coverage regions and not one had ever run, so all eight
+    /// messages a caller sees when replication decoding fails were unproved
+    /// text. Each case asserts the message names the value that distinguishes
+    /// it - the tag byte, the field, the count - because a message that omits
+    /// its input is what makes a 3am failure unreproducible.
+    #[test]
+    fn every_pgoutput_decode_error_names_what_it_rejected() {
+        use crate::replication::pgoutput::DecodeError;
+
+        let cases: Vec<(DecodeError, &[&str])> = vec![
+            (DecodeError::UnexpectedEof, &["unexpected EOF"]),
+            (DecodeError::InvalidUtf8, &["invalid UTF-8"]),
+            (DecodeError::UnknownTag(0x5a), &["unknown tag", "0x5a"]),
+            (
+                DecodeError::UnknownTupleFormat(0x07),
+                &["unknown tuple column format", "0x07"],
+            ),
+            (
+                DecodeError::TrailingData {
+                    message: "Relation",
+                    remaining: 3,
+                },
+                &["Relation", "3", "trailing"],
+            ),
+            (
+                DecodeError::InvalidField {
+                    message: "Update",
+                    field: "tuple kind",
+                    value: 0x4b,
+                    expected: "K, O or N",
+                },
+                &["Update", "tuple kind", "0x4b", "K, O or N"],
+            ),
+            (
+                DecodeError::InvalidStreamSequence {
+                    message: "StreamStop",
+                    reason: "no stream is open",
+                },
+                &["StreamStop", "no stream is open"],
+            ),
+            (
+                DecodeError::StreamingNeedsDecoder,
+                &["pgoutput::Decoder", "stateful"],
+            ),
+        ];
+
+        for (error, fragments) in cases {
+            let rendered = format!("{error}");
+            assert!(
+                rendered.starts_with("pgoutput: "),
+                "every decode error must name its subsystem: {rendered}"
+            );
+            for fragment in fragments {
+                assert!(
+                    rendered.contains(fragment),
+                    "{rendered:?} does not name {fragment:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replication_connection_debug_is_bounded_and_omits_private_state() {
+        const PARAMETER_KEY: &str = "debug-parameter-key-6bc75da2";
+        const PARAMETER_VALUE: &str = "debug-parameter-value-f25e0f78";
+        const TRANSPORT_SECRET: &str = "debug-connection-transport-b7888034";
+        const SOCKET_SECRET: &str = "debug-connection-socket-4c76e56a";
+        const KEY_SECRET: &[u8] = b"debug-connection-cancel-key-7f4ca91d";
+
+        let debug = format_under_watchdog("ReplicationConnection", || {
+            let mut connection = replication_connection_over(TRANSPORT_SECRET.as_bytes().to_vec());
+            connection
+                .parameters
+                .insert(PARAMETER_KEY.to_owned(), PARAMETER_VALUE.to_owned());
+            connection.in_flight.busy = true;
+            connection.in_flight.poisoned = true;
+            connection.cancel_token = redacting_test_cancel_token(SOCKET_SECRET, KEY_SECRET);
+            format!("{connection:?}")
+        });
+
+        assert!(
+            debug.contains("socket_config: Some(\"<redacted>\")")
+                && debug.contains("secret_key: Some(\"<redacted>\")"),
+            "replication connection Debug lost cancel-token redaction markers: {debug}"
+        );
+        for secret in [
+            PARAMETER_KEY,
+            PARAMETER_VALUE,
+            TRANSPORT_SECRET,
+            SOCKET_SECRET,
+            std::str::from_utf8(KEY_SECRET).expect("ASCII key sentinel"),
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "replication connection Debug leaked {secret}: {debug}"
+            );
+        }
+        assert!(
+            !debug.contains(&format!("{:?}", TRANSPORT_SECRET.as_bytes()))
+                && !debug.contains(&format!("{KEY_SECRET:?}"))
+                && !debug.contains(&format!("{:?}", bytes::Bytes::from_static(KEY_SECRET))),
+            "replication connection Debug leaked omitted bytes: {debug}"
+        );
+        assert!(
+            debug.starts_with(
+                "ReplicationConnection { parameter_count: 1, in_flight: InFlight { busy: true, \
+                 poisoned: true }, has_release: false, cancel_token: CancelToken {"
+            ),
+            "replication connection Debug changed shape: {debug}"
+        );
+        assert!(
+            debug.ends_with(" }, .. }"),
+            "replication connection Debug lost its non-exhaustive marker: {debug}"
+        );
     }
 
     fn copy_both_response(body: &[u8]) -> Vec<u8> {
@@ -5348,6 +5641,63 @@ mod tests {
             release: None,
             cancel_token: test_cancel_token(),
         }
+    }
+
+    #[test]
+    fn replication_stream_debug_is_bounded_and_omits_private_state() {
+        const TRANSPORT_SECRET: &str = "debug-stream-transport-51ac68d9";
+        const SOCKET_SECRET: &str = "debug-stream-socket-af3e7a21";
+        const KEY_SECRET: &[u8] = b"debug-stream-cancel-key-d83bc927";
+
+        let debug = format_under_watchdog("ReplicationStream", || {
+            let mut stream = stream_over(TRANSPORT_SECRET.as_bytes().to_vec());
+            stream.lsn = LsnTracker {
+                received: 4_369,
+                processed: 8_738,
+            };
+            stream.copy_response =
+                crate::copy_format::CopyResponse::from_wire(&[1, 0, 2, 0, 0, 0, 1])
+                    .expect("valid binary CopyBoth response metadata");
+            stream.in_flight.busy = true;
+            stream.in_flight.poisoned = true;
+            stream.cancel_token = redacting_test_cancel_token(SOCKET_SECRET, KEY_SECRET);
+            format!("{stream:?}")
+        });
+
+        assert!(
+            debug.contains("socket_config: Some(\"<redacted>\")")
+                && debug.contains("secret_key: Some(\"<redacted>\")"),
+            "replication stream Debug lost cancel-token redaction markers: {debug}"
+        );
+        for secret in [
+            TRANSPORT_SECRET,
+            SOCKET_SECRET,
+            std::str::from_utf8(KEY_SECRET).expect("ASCII key sentinel"),
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "replication stream Debug leaked {secret}: {debug}"
+            );
+        }
+        assert!(
+            !debug.contains(&format!("{:?}", TRANSPORT_SECRET.as_bytes()))
+                && !debug.contains(&format!("{KEY_SECRET:?}"))
+                && !debug.contains(&format!("{:?}", bytes::Bytes::from_static(KEY_SECRET))),
+            "replication stream Debug leaked omitted bytes: {debug}"
+        );
+        assert!(
+            debug.starts_with(
+                "ReplicationStream { lsn: LsnTracker { received: 4369, processed: 8738 }, \
+                 copy_response: CopyResponse { format: Binary, column_formats: [Text, Binary] }, \
+                 in_flight: InFlight { busy: true, poisoned: true }, has_release: false, \
+                 cancel_token: CancelToken {"
+            ),
+            "replication stream Debug changed shape: {debug}"
+        );
+        assert!(
+            debug.ends_with(" }, .. }"),
+            "replication stream Debug lost its non-exhaustive marker: {debug}"
+        );
     }
 
     /// A message header whose declared length is below the 4 bytes the length

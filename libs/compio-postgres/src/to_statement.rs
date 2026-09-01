@@ -166,3 +166,44 @@ impl ToStatement for Uncached<'_> {
 }
 
 impl Sealed for Uncached<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_statement_type_debug_redacts_query_text() {
+        const QUERY_SECRET: &str = "SELECT 'to-statement-query-secret-4b92e7ad'";
+        const UNCACHED_SECRET: &str = "SELECT 'to-statement-uncached-secret-e31c86f5'";
+
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let statement_debug = format!("{:?}", ToStatementType::Statement(&statement));
+        assert!(
+            statement_debug.starts_with("Statement("),
+            "prepared-statement Debug did not name its variant: {statement_debug}"
+        );
+
+        let query_exposed = format!("{QUERY_SECRET:?}");
+        let query_debug = format!("{:?}", ToStatementType::Query(QUERY_SECRET));
+        assert!(
+            query_debug.contains("Query(\"<redacted>\")"),
+            "query Debug did not mark the text redaction: {query_debug}"
+        );
+        assert!(
+            !query_debug.contains(&query_exposed) && !query_debug.contains(QUERY_SECRET),
+            "query Debug leaked SQL text: {query_debug}"
+        );
+
+        let uncached_exposed = format!("{UNCACHED_SECRET:?}");
+        let uncached_debug = format!("{:?}", ToStatementType::Uncached(UNCACHED_SECRET));
+        assert!(
+            uncached_debug.contains("Uncached(\"<redacted>\")"),
+            "uncached query Debug did not mark the text redaction: {uncached_debug}"
+        );
+        assert!(
+            !uncached_debug.contains(&uncached_exposed)
+                && !uncached_debug.contains(UNCACHED_SECRET),
+            "uncached query Debug leaked SQL text: {uncached_debug}"
+        );
+    }
+}

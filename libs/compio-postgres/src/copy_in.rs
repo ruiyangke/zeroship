@@ -20,9 +20,15 @@ use pin_project_lite::pin_project;
 use postgres_protocol::message::backend::{CommandCompleteBody, Message};
 use postgres_protocol::message::frontend;
 use postgres_protocol::message::frontend::CopyData;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 
 /// Internal message type flowing from user code to the connection task.
@@ -67,6 +73,13 @@ enum CopyInState {
 pub struct CopyInReceiver {
     receiver: mpsc::Receiver<CopyInMessage>,
     state: CopyInState,
+    #[cfg(test)]
+    poll_observed: Option<Arc<AtomicBool>>,
+}
+
+#[cfg(test)]
+pub(crate) struct CopyInTestProducer {
+    _sender: mpsc::Sender<CopyInMessage>,
 }
 
 impl CopyInReceiver {
@@ -74,7 +87,36 @@ impl CopyInReceiver {
         CopyInReceiver {
             receiver,
             state: CopyInState::Streaming,
+            #[cfg(test)]
+            poll_observed: None,
         }
+    }
+
+    /// Build an open COPY producer channel for connection-state fixtures.
+    ///
+    /// `initial` distinguishes a request whose first frontend batch is ready
+    /// from the real publication-before-send interval in `copy_in_inner`. The
+    /// optional observer lets a scripted reader wait until the connection has
+    /// registered the request and polled that still-empty producer.
+    #[cfg(test)]
+    pub(crate) fn for_connection_test(
+        initial: Option<FrontendMessage>,
+        poll_observed: Option<Arc<AtomicBool>>,
+    ) -> (Self, CopyInTestProducer) {
+        let (mut sender, receiver) = mpsc::channel(1);
+        if let Some(initial) = initial {
+            sender
+                .try_send(CopyInMessage::Message(initial))
+                .expect("a new test COPY channel accepts its initial frame");
+        }
+        (
+            Self {
+                receiver,
+                state: CopyInState::Streaming,
+                poll_observed,
+            },
+            CopyInTestProducer { _sender: sender },
+        )
     }
 
     /// Build a connection-owned COPY producer for an API which can execute a
@@ -90,6 +132,8 @@ impl CopyInReceiver {
         Self {
             receiver: Self::producerless_receiver(initial),
             state: CopyInState::ExtendedFailing { reason },
+            #[cfg(test)]
+            poll_observed: None,
         }
     }
 
@@ -103,6 +147,8 @@ impl CopyInReceiver {
         Self {
             receiver: Self::producerless_receiver(initial),
             state: CopyInState::SimpleFailing { reason },
+            #[cfg(test)]
+            poll_observed: None,
         }
     }
 
@@ -141,6 +187,10 @@ impl Stream for CopyInReceiver {
     type Item = FrontendMessage;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
+        #[cfg(test)]
+        if let Some(observer) = &self.poll_observed {
+            observer.store(true, Ordering::Release);
+        }
         if self.is_done() {
             return Poll::Ready(None);
         }
@@ -188,10 +238,22 @@ impl Stream for CopyInReceiver {
 #[derive(Clone, Copy)]
 enum SinkState {
     Active,
-    Closing,
     Reading,
     ReadingAfterClose,
     Finished(u64),
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_DONE_TEST_HOOK: RefCell<Option<Box<dyn FnOnce() + Send>>> =
+        RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_before_done_test_hook(hook: Box<dyn FnOnce() + Send>) {
+    BEFORE_DONE_TEST_HOOK.with(|slot| {
+        assert!(slot.borrow_mut().replace(hook).is_none());
+    });
 }
 
 fn copy_row_count(body: &CommandCompleteBody) -> Result<u64, Error> {
@@ -311,34 +373,23 @@ where
                     match self.as_mut().poll_flush(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(error)) if error.is_closed() => {
-                            // The connection can close its COPY producer only
-                            // after it has published any decoded backend
-                            // messages. Prefer that queued ErrorResponse to the
-                            // local sender-disconnected symptom.
-                            *self.as_mut().project().state = SinkState::Reading;
-                            continue;
-                        }
                         Poll::Ready(Err(error)) => {
                             self.as_mut().clear_copy_mode();
                             return Poll::Ready(Err(error));
                         }
                     }
-                    let sender_ready = {
-                        let mut this = self.as_mut().project();
-                        this.sender
-                            .as_mut()
-                            .poll_ready(cx)
-                            .map_err(|_| Error::closed())
-                    };
-                    match sender_ready {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(_)) => {
-                            *self.as_mut().project().state = SinkState::Reading;
-                            continue;
-                        }
+
+                    #[cfg(test)]
+                    if let Some(hook) = BEFORE_DONE_TEST_HOOK.with(|slot| slot.borrow_mut().take())
+                    {
+                        hook();
                     }
+
+                    // On this active sink, a successful `poll_flush` just
+                    // established readiness for this same sender handle. No
+                    // task runs between that poll and this send. A receiver on
+                    // another thread can still close concurrently, and
+                    // `start_send` reports that race below.
                     let send_result = {
                         let mut this = self.as_mut().project();
                         this.sender
@@ -350,22 +401,14 @@ where
                         *self.as_mut().project().state = SinkState::Reading;
                         continue;
                     }
-                    *self.as_mut().project().state = SinkState::Closing;
-                }
-                SinkState::Closing => {
-                    let sender_closed = {
-                        let this = self.as_mut().project();
-                        this.sender.poll_close(cx).map_err(|_| Error::closed())
-                    };
-                    match sender_closed {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Ok(())) => {
-                            *self.as_mut().project().state = SinkState::ReadingAfterClose;
-                        }
-                        Poll::Ready(Err(_)) => {
-                            *self.as_mut().project().state = SinkState::Reading;
-                        }
+                    {
+                        let mut this = self.as_mut().project();
+                        // `futures_channel::mpsc::Sender::poll_close` does
+                        // exactly this and returns `Ready(Ok(()))`; it has no
+                        // pending or error state for us to preserve.
+                        this.sender.as_mut().get_mut().disconnect();
                     }
+                    *self.as_mut().project().state = SinkState::ReadingAfterClose;
                 }
                 SinkState::Reading | SinkState::ReadingAfterClose => {
                     let response = {
@@ -690,11 +733,14 @@ async fn send_initial_copy_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{CopyInReceiver, CopyInSink, SinkState, copy_in_inner, send_initial_copy_message};
+    use super::{
+        CopyInReceiver, CopyInSink, SinkState, copy_in_inner, send_initial_copy_message,
+        set_before_done_test_hook,
+    };
     use crate::client::{Client, CopyMode, ResponseMessages};
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
-    use crate::connection::RequestMessages;
+    use crate::connection::{Request, RequestMessages};
     use crate::copy_format::CopyResponse;
     use crate::error::{DbError, SqlState};
     use crate::{Error, Statement};
@@ -707,7 +753,16 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::marker::PhantomData;
+    use std::pin::Pin;
     use std::task::{Context, Poll};
+
+    type CopySinkFixture = (
+        Client,
+        mpsc::UnboundedReceiver<Request>,
+        Pin<Box<CopyInSink<Bytes>>>,
+        CopyInReceiver,
+        mpsc::Sender<ResponseMessages>,
+    );
 
     fn admin_shutdown() -> DbError {
         let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
@@ -722,6 +777,247 @@ mod tests {
             }
             _ => panic!("scripted 57P01 did not decode as ErrorResponse"),
         }
+    }
+
+    fn parse_backend_frame(mut frame: BytesMut, description: &str) -> Message {
+        Message::parse(&mut frame)
+            .unwrap_or_else(|error| panic!("parse {description}: {error}"))
+            .unwrap_or_else(|| panic!("{description} was incomplete"))
+    }
+
+    fn command_complete(tag: &[u8]) -> Message {
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'C');
+        frame.put_u32(u32::try_from(tag.len() + 5).unwrap());
+        frame.extend_from_slice(tag);
+        frame.put_u8(0);
+        parse_backend_frame(frame, "scripted CommandComplete")
+    }
+
+    fn ready_for_query() -> Message {
+        parse_backend_frame(
+            BytesMut::from(&b"Z\0\0\0\x05I"[..]),
+            "scripted ReadyForQuery",
+        )
+    }
+
+    fn backend_copy_done() -> Message {
+        parse_backend_frame(BytesMut::from(&b"c\0\0\0\x04"[..]), "scripted CopyDone")
+    }
+
+    fn copy_sink_fixture(state: SinkState) -> CopySinkFixture {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let crate::connection::Request {
+            messages,
+            sender: response_sender,
+            ..
+        } = requests
+            .try_recv()
+            .expect("receive the scripted COPY request");
+        let receiver = match messages {
+            RequestMessages::CopyIn(receiver) => receiver,
+            RequestMessages::Single(_) => panic!("scripted COPY request was not streaming"),
+        };
+        let sink = Box::pin(CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        });
+
+        (client, requests, sink, receiver, response_sender)
+    }
+
+    #[compio::test]
+    async fn duplicate_copy_completion_is_rejected() {
+        let (_client, _requests, mut sink, _receiver, mut response_sender) =
+            copy_sink_fixture(SinkState::Reading);
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command_complete(b"COPY 1")),
+                Ok(command_complete(b"COPY 2")),
+                Ok(ready_for_query()),
+            ])))
+            .expect("deliver duplicate COPY completions");
+
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("duplicate CommandComplete messages confirmed the COPY");
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }
+
+    #[compio::test]
+    async fn ready_without_copy_completion_is_rejected() {
+        let (_client, _requests, mut sink, _receiver, mut response_sender) =
+            copy_sink_fixture(SinkState::Reading);
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Ok(
+                ready_for_query(),
+            )])))
+            .expect("deliver ReadyForQuery without CommandComplete");
+
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("ReadyForQuery alone confirmed the COPY");
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }
+
+    #[compio::test]
+    async fn copy_completion_parse_error_survives_a_later_message() {
+        let (_client, _requests, mut sink, _receiver, mut response_sender) =
+            copy_sink_fixture(SinkState::Reading);
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command_complete(b"COPY \xff")),
+                Ok(backend_copy_done()),
+                Ok(ready_for_query()),
+            ])))
+            .expect("deliver malformed COPY completion");
+
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("a later CopyDone erased the malformed command tag");
+        assert_eq!(error.to_string(), "error parsing response from server");
+    }
+
+    #[compio::test]
+    async fn pending_copy_flush_keeps_the_sink_active() {
+        let (_client, _requests, mut sink, mut receiver, mut response_sender) =
+            copy_sink_fixture(SinkState::Active);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        for byte in [b'a', b'b'] {
+            assert!(matches!(
+                futures_util::Sink::poll_ready(sink.as_mut(), &mut context),
+                Poll::Ready(Ok(()))
+            ));
+            futures_util::Sink::start_send(sink.as_mut(), Bytes::from(vec![byte; 4097]))
+                .expect("queue backpressured COPY data");
+        }
+
+        assert!(matches!(
+            sink.as_mut().poll_finish(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(sink.as_ref().get_ref().state, SinkState::Active));
+        assert!(matches!(
+            receiver.next().await,
+            Some(FrontendMessage::CopyData(_))
+        ));
+
+        assert!(matches!(
+            sink.as_mut().poll_finish(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            sink.as_ref().get_ref().state,
+            SinkState::ReadingAfterClose
+        ));
+        assert!(matches!(
+            receiver.next().await,
+            Some(FrontendMessage::CopyData(_))
+        ));
+        match receiver
+            .next()
+            .await
+            .expect("resumed finish omitted CopyDone + Sync")
+        {
+            FrontendMessage::Raw(bytes) => {
+                assert_eq!(&bytes[..], &[b'c', 0, 0, 0, 4, b'S', 0, 0, 0, 4]);
+            }
+            FrontendMessage::CopyData(_) => panic!("the COPY terminal was encoded as data"),
+        }
+
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command_complete(b"COPY 2")),
+                Ok(ready_for_query()),
+            ])))
+            .expect("deliver COPY completion after backpressure");
+        let rows = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect("the resumed COPY finish failed");
+        assert_eq!(rows, 2);
+    }
+
+    #[compio::test]
+    async fn disconnected_finish_preserves_a_queued_server_error() {
+        let (client, _requests, mut sink, receiver, mut response_sender) =
+            copy_sink_fixture(SinkState::Active);
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                Error::from_db_error(admin_shutdown()),
+            )])))
+            .expect("deliver terminal COPY error");
+        drop(receiver);
+
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("the disconnected COPY producer hid its server error");
+        assert_eq!(error.code(), Some(&SqlState::ADMIN_SHUTDOWN));
+        client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                Bytes::from_static(b"next request"),
+            )))
+            .unwrap_or_else(|error| panic!("finish left COPY mode armed: {error}"));
+    }
+
+    #[compio::test]
+    async fn done_send_close_race_preserves_a_queued_server_error() {
+        let (client, _requests, mut sink, receiver, mut response_sender) =
+            copy_sink_fixture(SinkState::Active);
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                Error::from_db_error(admin_shutdown()),
+            )])))
+            .expect("deliver terminal COPY error");
+        set_before_done_test_hook(Box::new(move || drop(receiver)));
+
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("the raced COPY producer close hid its server error");
+        assert_eq!(error.code(), Some(&SqlState::ADMIN_SHUTDOWN));
+        client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                Bytes::from_static(b"next request"),
+            )))
+            .unwrap_or_else(|error| panic!("raced finish left COPY mode armed: {error}"));
     }
 
     #[test]
@@ -1198,7 +1494,7 @@ mod tests {
             assert!(
                 !matches!(
                     sink.as_ref().get_ref().state,
-                    SinkState::Active | SinkState::Closing | SinkState::Finished(_)
+                    SinkState::Active | SinkState::Finished(_)
                 ),
                 "the pending close poll did not reach response reading"
             );
@@ -1242,7 +1538,10 @@ mod tests {
                 .unwrap_or_else(|error| {
                     panic!("flush swallowed the completed COPY response: {error}")
                 });
-            sink.as_mut().finish().await
+            let first = sink.as_mut().finish().await?;
+            let repeated = sink.as_mut().finish().await?;
+            assert_eq!(repeated, first, "repeated finish changed the COPY count");
+            Ok::<_, Error>(first)
         })
         .await
         .expect("cancelled-close regression timed out")
