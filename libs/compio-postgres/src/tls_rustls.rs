@@ -2438,6 +2438,40 @@ mod tests {
         );
     }
 
+    /// The RFC 5929 upgrade must also apply on the RSASSA-PSS path, which
+    /// reads its digest from AlgorithmIdentifier parameters through a SECOND
+    /// table, `Digest::for_hash_oid`. Its SHA-1 arm had zero executed regions,
+    /// so a PSS certificate naming SHA-1 went through an unexecuted branch to
+    /// reach a security-relevant decision.
+    ///
+    /// Both digests here are 32 bytes, so the length proves nothing; the
+    /// assertion compares the VALUE against SHA-256 of the DER.
+    #[test]
+    fn end_point_hash_upgrades_a_pss_sha1_signature_to_sha256() {
+        let (cert, hash) =
+            endpoint_hash_fixture(include_str!("../tests/data/rsa_pss_sha1_cert.pem"));
+        assert_eq!(
+            hash,
+            sha2::Sha256::digest(cert.as_ref()).to_vec(),
+            "PSS parameters naming SHA-1 must bind with SHA-256"
+        );
+    }
+
+    /// `sha512-256WithRSAEncryption` selects the truncated SHA-512/256, which
+    /// is NOT SHA-256 despite the matching 32-byte width. Both the table entry
+    /// and the `Digest::hash` arm were unexecuted, so nothing had ever proved
+    /// this picks the truncated variant rather than the one it looks like.
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_sha512_256() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha512_256_cert.pem"));
+        assert_eq!(hash, sha2::Sha512_256::digest(cert.as_ref()).to_vec());
+        assert_ne!(
+            hash,
+            sha2::Sha256::digest(cert.as_ref()).to_vec(),
+            "SHA-512/256 must not be confused with SHA-256; both are 32 bytes"
+        );
+    }
+
     /// RFC 5929 section 4.1 upgrades MD5 and SHA-1 signatures to SHA-256 for
     /// `tls-server-end-point`, so a SHA-1-signed certificate must bind with a
     /// 32-byte SHA-256 hash and never a 20-byte SHA-1 one. Binding the weaker
