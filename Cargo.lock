@@ -1127,6 +1127,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-postgres",
+ "uuid",
  "whoami",
  "x509-parser",
  "zeroize",
@@ -4415,6 +4416,7 @@ dependencies = [
  "fallible-iterator 0.2.0",
  "postgres-protocol",
  "time",
+ "uuid",
 ]
 
 [[package]]

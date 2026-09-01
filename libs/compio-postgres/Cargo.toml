@@ -195,10 +195,12 @@ tokio-postgres = { version = "=0.7.18", default-features = false, features = [
     "runtime",
     "with-chrono-0_4",
     "with-time-0_3",
+    "with-uuid-1",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
 chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
 time = { workspace = true }
+uuid = { workspace = true }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream

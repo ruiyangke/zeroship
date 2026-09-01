@@ -22,6 +22,7 @@
 
 use std::error::Error;
 use std::future::Future;
+use std::net::IpAddr;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -294,7 +295,8 @@ fn compio_simple_value(
 const FORMAT_RENDERING_SQL: &str = "SET TIME ZONE 'UTC'; \
      SET DateStyle = 'ISO, YMD'; \
      SET IntervalStyle = 'postgres'; \
-     SET bytea_output = 'hex'";
+     SET bytea_output = 'hex'; \
+     SET lc_monetary = 'C'";
 
 fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
     on_tokio(url, move |client| async move {
@@ -1799,6 +1801,264 @@ async fn both_drivers_agree_on_json_text_and_binary_codecs() {
         expected_wire.extend_from_slice(text.as_bytes());
         assert_eq!(observation.binary_decoded.0, expected_wire, "{name}: wire");
     }
+}
+
+fn extended_scalar_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new(
+            "scalar-uuid",
+            "'ffffffff-0000-8000-8000-0123456789ab'::uuid",
+            "uuid",
+        ),
+        RawCase::new("scalar-inet-v4-prefix", "'192.0.2.129/24'::inet", "inet"),
+        RawCase::new(
+            "scalar-inet-v6-prefix",
+            "'2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet",
+            "inet",
+        ),
+        RawCase::new("scalar-cidr-v4", "'192.0.2.128/25'::cidr", "cidr"),
+        RawCase::new("scalar-cidr-v6", "'2001:db8:abcd:ef00::/56'::cidr", "cidr"),
+        RawCase::new("scalar-macaddr", "'08:00:2b:01:02:03'::macaddr", "macaddr"),
+        RawCase::new("scalar-bit-nine", "B'101010101'::bit(9)", "bit(9)"),
+        RawCase::new("scalar-varbit-empty", "B''::varbit", "varbit"),
+        RawCase::new("scalar-varbit-nine", "B'101010101'::varbit(9)", "varbit(9)"),
+        RawCase::new("scalar-oid-max", "4294967295::oid", "oid"),
+        RawCase::new("scalar-money-max", "'92233720368547758.07'::money", "money"),
+        RawCase::new("scalar-money-negative-cent", "'-0.01'::money", "money"),
+    ]
+}
+
+fn tokio_extended_scalar_format_observations(
+    url: String,
+    cases: Vec<RawCase>,
+) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_extended_scalar_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeExtendedScalarObservation {
+    uuid_decoded: uuid::Uuid,
+    uuid_rebound: uuid::Uuid,
+    inet4_decoded: IpAddr,
+    inet4_server_text: String,
+    inet4_server_mask: i32,
+    inet4_rebound: IpAddr,
+    inet4_rebound_text: String,
+    inet4_rebound_mask: i32,
+    inet4_rebound_wire: Wire,
+    inet6_decoded: IpAddr,
+    inet6_server_text: String,
+    inet6_server_mask: i32,
+    inet6_rebound: IpAddr,
+    inet6_rebound_text: String,
+    inet6_rebound_mask: i32,
+    inet6_rebound_wire: Wire,
+    oid_decoded: u32,
+    oid_rebound: u32,
+}
+
+const NATIVE_EXTENDED_SCALAR_DECODE_SQL: &str = "SELECT \
+    'ffffffff-0000-8000-8000-0123456789ab'::uuid, \
+    '192.0.2.129/24'::inet, ('192.0.2.129/24'::inet)::text, \
+        masklen('192.0.2.129/24'::inet), \
+    '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
+        ('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet)::text, \
+        masklen('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet), \
+    4294967295::oid";
+
+const NATIVE_EXTENDED_SCALAR_REBOUND_SQL: &str = "SELECT \
+    $1::uuid, \
+    $2::inet, ($2::inet)::text, masklen($2::inet), $2::inet, \
+    $3::inet, ($3::inet)::text, masklen($3::inet), $3::inet, \
+    $4::oid";
+
+fn tokio_native_extended_scalar_observation(url: String) -> NativeExtendedScalarObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_EXTENDED_SCALAR_DECODE_SQL, &[])
+            .await
+            .expect("tokio native extended-scalar decode");
+        let uuid_decoded = row.get(0);
+        let inet4_decoded = row.get(1);
+        let inet6_decoded = row.get(4);
+        let oid_decoded = row.get(7);
+        let rebound = client
+            .query_one(
+                NATIVE_EXTENDED_SCALAR_REBOUND_SQL,
+                &[&uuid_decoded, &inet4_decoded, &inet6_decoded, &oid_decoded],
+            )
+            .await
+            .expect("tokio native extended-scalar encode");
+        NativeExtendedScalarObservation {
+            uuid_decoded,
+            uuid_rebound: rebound.get(0),
+            inet4_decoded,
+            inet4_server_text: row.get(2),
+            inet4_server_mask: row.get(3),
+            inet4_rebound: rebound.get(1),
+            inet4_rebound_text: rebound.get(2),
+            inet4_rebound_mask: rebound.get(3),
+            inet4_rebound_wire: rebound.get(4),
+            inet6_decoded,
+            inet6_server_text: row.get(5),
+            inet6_server_mask: row.get(6),
+            inet6_rebound: rebound.get(5),
+            inet6_rebound_text: rebound.get(6),
+            inet6_rebound_mask: rebound.get(7),
+            inet6_rebound_wire: rebound.get(8),
+            oid_decoded,
+            oid_rebound: rebound.get(9),
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_native_extended_scalar_observation() -> NativeExtendedScalarObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_EXTENDED_SCALAR_DECODE_SQL, &[])
+        .await
+        .expect("compio native extended-scalar decode");
+    let uuid_decoded = row.get(0);
+    let inet4_decoded = row.get(1);
+    let inet6_decoded = row.get(4);
+    let oid_decoded = row.get(7);
+    let rebound = client
+        .query_one(
+            NATIVE_EXTENDED_SCALAR_REBOUND_SQL,
+            &[&uuid_decoded, &inet4_decoded, &inet6_decoded, &oid_decoded],
+        )
+        .await
+        .expect("compio native extended-scalar encode");
+    NativeExtendedScalarObservation {
+        uuid_decoded,
+        uuid_rebound: rebound.get(0),
+        inet4_decoded,
+        inet4_server_text: row.get(2),
+        inet4_server_mask: row.get(3),
+        inet4_rebound: rebound.get(1),
+        inet4_rebound_text: rebound.get(2),
+        inet4_rebound_mask: rebound.get(3),
+        inet4_rebound_wire: rebound.get(4),
+        inet6_decoded,
+        inet6_server_text: row.get(5),
+        inet6_server_mask: row.get(6),
+        inet6_rebound: rebound.get(5),
+        inet6_rebound_text: rebound.get(6),
+        inet6_rebound_mask: rebound.get(7),
+        inet6_rebound_wire: rebound.get(8),
+        oid_decoded,
+        oid_rebound: rebound.get(9),
+    }
+}
+
+/// Supported extended scalars agree in text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_extended_scalar_text_and_binary_codecs() {
+    let cases = extended_scalar_format_cases();
+    let theirs = tokio_extended_scalar_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_extended_scalar_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let expected = [
+        (
+            "scalar-uuid",
+            "ffffffff-0000-8000-8000-0123456789ab",
+            "ffffffff0000800080000123456789ab",
+        ),
+        (
+            "scalar-inet-v4-prefix",
+            "192.0.2.129/24",
+            "02180004c0000281",
+        ),
+        (
+            "scalar-inet-v6-prefix",
+            "2001:db8:abcd:ef01:2345:6789:abcd:ef01/73",
+            "0349001020010db8abcdef0123456789abcdef01",
+        ),
+        ("scalar-cidr-v4", "192.0.2.128/25", "02190104c0000280"),
+        (
+            "scalar-cidr-v6",
+            "2001:db8:abcd:ef00::/56",
+            "0338011020010db8abcdef000000000000000000",
+        ),
+        ("scalar-macaddr", "08:00:2b:01:02:03", "08002b010203"),
+        ("scalar-bit-nine", "101010101", "00000009aa80"),
+        ("scalar-varbit-empty", "", "00000000"),
+        ("scalar-varbit-nine", "101010101", "00000009aa80"),
+        ("scalar-oid-max", "4294967295", "ffffffff"),
+        (
+            "scalar-money-max",
+            "$92,233,720,368,547,758.07",
+            "7fffffffffffffff",
+        ),
+        ("scalar-money-negative-cent", "-$0.01", "ffffffffffffffff"),
+    ];
+    for (observation, (name, text, binary_hex)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: wire"
+        );
+    }
+
+    let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
+    let ours = compio_native_extended_scalar_observation().await;
+    assert_eq!(ours, theirs);
+    let expected_uuid = uuid::Uuid::parse_str("ffffffff-0000-8000-8000-0123456789ab").unwrap();
+    assert_eq!(ours.uuid_decoded, expected_uuid);
+    assert_eq!(ours.uuid_rebound, expected_uuid);
+    assert_eq!(ours.oid_decoded, u32::MAX);
+    assert_eq!(ours.oid_rebound, u32::MAX);
+
+    assert_eq!(ours.inet4_decoded, "192.0.2.129".parse::<IpAddr>().unwrap());
+    assert_eq!(ours.inet4_rebound, ours.inet4_decoded);
+    assert_eq!(ours.inet4_server_text, "192.0.2.129/24");
+    assert_eq!(ours.inet4_server_mask, 24);
+    assert_eq!(ours.inet4_rebound_text, "192.0.2.129/32");
+    assert_eq!(ours.inet4_rebound_mask, 32);
+    assert_eq!(hex(&ours.inet4_rebound_wire.0), "02200004c0000281");
+
+    assert_eq!(
+        ours.inet6_decoded,
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01"
+            .parse::<IpAddr>()
+            .unwrap()
+    );
+    assert_eq!(ours.inet6_rebound, ours.inet6_decoded);
+    assert_eq!(
+        ours.inet6_server_text,
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01/73"
+    );
+    assert_eq!(ours.inet6_server_mask, 73);
+    assert_eq!(
+        ours.inet6_rebound_text,
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01/128"
+    );
+    assert_eq!(ours.inet6_rebound_mask, 128);
+    assert_eq!(
+        hex(&ours.inet6_rebound_wire.0),
+        "0380001020010db8abcdef0123456789abcdef01"
+    );
+}
+
+/// Desired invariant blocked by both `IpAddr` codecs discarding INET prefixes.
+#[ignore = "both postgres-types IpAddr codecs discard INET prefix lengths"]
+#[compio::test]
+async fn native_inet_codecs_must_not_discard_prefix_lengths() {
+    let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
+    let ours = compio_native_extended_scalar_observation().await;
+    assert_eq!(ours.inet4_server_mask, ours.inet4_rebound_mask);
+    assert_eq!(theirs.inet4_server_mask, theirs.inet4_rebound_mask);
+    assert_eq!(ours.inet6_server_mask, ours.inet6_rebound_mask);
+    assert_eq!(theirs.inet6_server_mask, theirs.inet6_rebound_mask);
 }
 
 #[derive(Debug, PartialEq, Eq)]
