@@ -94,6 +94,50 @@ crate boundary exists". The better end state is that it becomes **unnecessary** 
 fence than a dependency that is not declared. Keep it until the manifests do the work; do not build
 more instrumentation in its place.
 
+#### THE FENCE ABOVE DOES NOT HOLD AS WRITTEN. It fences the SPELLING, not the TYPE.
+
+Found by review 2026-09-01, verified by hand at `f340d9356` before being recorded here.
+
+`E0433` is a **path-resolution** error. It stops a crate naming `compio_postgres::Error`. It says
+nothing about a crate **holding a value** of that type, and one is handed across today through a
+public struct field:
+
+- `crates/zeroship-schema/Cargo.toml:15` declares `compio-postgres = { workspace = true }`.
+- `crates/zeroship-schema/src/error.rs:31` declares `pub source: compio_postgres::Error` on
+  `SchemaError`.
+- `crates/zeroship-plugin-db/src/error.rs:942` is `impl From<zeroship_schema::error::SchemaError> for
+  DbError`, and its body at `:944` is `coded_sql(&format!("diff: {}", e.context), e.source)`.
+
+That body passes a live `compio_postgres::Error` into a Postgres classifier, and **the token
+`compio_postgres` does not appear on the line.** A `data-core` whose manifest omits the driver
+compiles it, because type inference never needs the path. The impl block carries no `cfg`, so it
+compiles in every production build regardless of whether any caller is test-gated.
+
+`data-core` must declare `zeroship-schema`: it owns `DbError` and three `From` impls over
+`zeroship-schema` types, and at least one has a production root (`crud/mask_backfill.rs:89`, inside
+the unconditional `pub mod mask_backfill;`). So the floor is
+`data-core -> zeroship-schema -> compio-postgres`, and constraint 2 is violated by the boundary this
+document proposes, not by any code that can be cleaned up under it.
+
+**The fix is a boundary change, not a lint.** Split `zeroship-schema` on the same line as everything
+else: the DDL builders, descriptors, `MaskKind` and sentinel codec are driver-free and belong in
+`data-core`; `diff.rs`'s live introspection needs the driver and belongs in `data-postgres`;
+`SchemaError` travels with the introspection and never crosses into the core. Either delete
+`error.rs:942` and inline the conversion vendor-side, or give `data-postgres` a
+`translate_schema_error(SchemaError) -> DbError` free function - which is exactly the "per-vendor
+translator" shape constraint 3 already settles on.
+
+**This document had already made this argument, against a different crate, and did not apply it
+here.** See the passage quoting `zeroship-data-plan`'s manifest refusing `zeroship-schema` because
+"depending on it would drag a live PostgreSQL driver into a crate whose whole claim is that it can be
+built and tested without a database". Same reasoning, same driver, and `data-core` is the crate this
+document then assigns three `From` impls over `zeroship-schema` types.
+
+**Read the manifest fence as necessary and not sufficient.** It is still worth having - it makes the
+easy violation impossible. It does not survive a vendor type re-exported through a public field, and
+nothing in the tree currently detects that: both censuses `cd` into `crates/zeroship-plugin-db/src`
+and never look at a dependency's public API.
+
 ## How to read this document
 
 **It is written correction-in-place: where a claim was wrong, the wrong claim is QUOTED and then
@@ -328,7 +372,7 @@ found it: Phase 0.1 in the execution order.
 | module | lines | why it does not place |
 | --- | --- | --- |
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
-| `error.rs` | 1,703 | **cannot be split cleanly at all, and one of the three reasons is a language rule rather than a placement choice.** (1) `to_op_error` belongs in the adapter but cannot go until the dispatch surface does - 44 of its 51 production callers are engine-tier. (2) It names `compio_postgres` in **eight** signatures (`from_pg` `:355`, `coded_sql` `:731`, `walk_pg_chain` `:907`, five more). (3) **The orphan rule pins five `From` impls here permanently** - see below. |
+| `error.rs` | 1,703 | **cannot be split cleanly at all, and one of the three reasons is a language rule rather than a placement choice.** (1) `to_op_error` belongs in the adapter but cannot go until the dispatch surface does - 44 of its 51 production callers are engine-tier. (2) It names `compio_postgres` in **eight** signatures (`from_pg` `:355`, `coded_sql` `:731`, `walk_pg_chain` `:907`, five more). (3) ~~**The orphan rule pins five `From` impls here permanently**~~ - **WRONG, corrected 2026-09-01: there are SEVEN `From` impls in the crate and the orphan rule makes NONE of them illegal.** See the correction under the next heading. |
 
 > ## SETTLED 2026-08-31, operator decision: a NEUTRAL error hierarchy with per-vendor translators
 >
@@ -358,6 +402,47 @@ found it: Phase 0.1 in the execution order.
 > The move: `from_pg` (`error.rs:355-404`), `coded_sql` (`:731`) and `walk_pg_chain` (`:907`) go to
 > `data-postgres`; the five `From` impls are deleted; `to_op_error` goes to the adapter by the same
 > rule. `data-core` then names no vendor and no runtime.
+
+#### CORRECTION 2026-09-01: the orphan rule constrains NOTHING here. The constraint is the dependency floor.
+
+Re-derived by hand at `f340d9356`, and it contradicts this section in three ways.
+
+**There are seven `From` impls, not five, and every one is legal wherever it is going.** The rule is
+that `impl From<A> for B` is legal in the crate owning `A` **or** `B`. Every impl in the crate owns
+its **destination**:
+
+| impl | destination | goes to | orphan-rule status |
+| --- | --- | --- | --- |
+| `error.rs:875` `From<zeroship_core::…::PerAppRoleNameError>` | `DbError` | data-core | legal |
+| `error.rs:886` `From<crate::query::QueryError>` | `DbError` | data-core | legal |
+| `error.rs:942` `From<zeroship_schema::error::SchemaError>` | `DbError` | data-core | legal, but see the manifest-fence correction |
+| `error.rs:956` `From<zeroship_schema::error::MaskSentinelError>` | `DbError` | data-core | legal |
+| `transaction/driver.rs:656` `From<DbError>` | `OpenSessionError` | data-engine | legal |
+| `transaction/driver.rs:662` `From<SessionSetupError>` | `OpenSessionError` | data-engine | legal |
+| `backend/sqlite/session.rs:1331` `From<Rc<SqliteSession>>` | `SqliteSessionHandle` | data-sqlite | legal |
+
+**The one impl the orphan rule ever bound is already deleted.** `impl From<compio_postgres::Error> for
+DbError` was the only one with both sides foreign to its destination crate, and it went in
+`a4ed5e3d0` - recorded in this document's own landed table at the top. `grep` now finds the string
+only in a guard comment at `error.rs:1415`. This section still lists it first and still reasons from
+it.
+
+**So the conclusion "`data-core`'s floor is fixed by coherence" is a category error.** Coherence is
+satisfied by all seven. What actually constrains `data-core` is its **dependency floor** -
+`{zeroship-core, zeroship-schema}` - and `zeroship-schema` is the vendor carrier. That is a placement
+problem with a placement fix, not a language rule to be worked around.
+
+**What survives, and it is the important half.** The prescription above - vendor translators as free
+functions in the vendor crates, `to_op_error` in the adapter, `data-core` naming no vendor - is
+correct and is what constraint 3 settles on. It is *cheaper* than this section costed it, because the
+construct it was budgeting to fight is already gone. Keep the move; drop the justification.
+
+**Two placement notes this section gets wrong in passing.** `error.rs:886` `From<crate::query::QueryError>`
+cannot be deleted by Track A from inside plugin-db: `crate::query` is `pub use zeroship_schema::query;`
+(`lib.rs:94`), so the type lives in another crate. And `error.rs:956`
+`From<MaskSentinelError>` is **production, not test-gated** - its caller `crud/mask_backfill.rs:89`
+sits in the unconditional `pub mod mask_backfill;` (`crud/mod.rs:84`), which makes
+`data-core -> zeroship-schema` a production edge rather than a test-only one.
 >
 > **AND THE TRANSLATORS MUST BE FREE FUNCTIONS, WHICH IS NOT FREE.** `from_pg` is an **inherent
 > method** - `error.rs:355`, inside `impl DbError {` opened at `:294` - and an inherent impl is legal
@@ -2000,7 +2085,7 @@ one was found by a different lens, and none of them creates a crate.
 | 0.2 | `auth/util.rs` helpers (hex, random, calendar) to a neutral home | a database driver crate would otherwise depend on an `auth` module to encode hex (test-tier today, but test builds must compile) | 7 exports, callers in 2 SQLite files |
 | 0.3 | `encryption/` and row-to-JSON below the vendors | `encryption` is 7 edges from EACH backend; row-to-JSON is two vendor converters in one file | `encryption/` 1,591 lines; `keys.rs:318` also carries `PluginDbConsumer` |
 | 0.4 | make `PgSqlExecutor` / `PgLockManager` driver-neutral | they name `compio_postgres::OwnedPooledClient` in their BOUNDS, so a contract crate built from them ships a vendor | `backend/mod.rs:755`, `:786` |
-| 0.5 | resolve the `v8_bridge` two-way cycle | `v8_bridge.rs:34` imports SQLite types while both backends call back into it | 5 back-edges |
+| ~~0.5~~ **CLOSED 2026-09-01** | ~~resolve the `v8_bridge` two-way cycle~~ | **Done.** `v8_bridge.rs` names 0 vendor types; `backend/` and `exec.rs` make 0 calls into it. Decoders live in `backend/pg_row_json.rs` + `backend/sqlite/row_json.rs`. | 0 back-edges |
 
 **Then, and only then, the split becomes file moves.** `BackendHandle` goes up with the engine
 (settled); `context.rs` follows it.
@@ -2173,10 +2258,37 @@ most likely "the engine returns a description of what to continue with, the adap
 
 **What this changes about the plan.** 0.1 is not "lift 33 functions", and it is not independently
 shippable in the strong sense - it rests on 0.3 (row-to-JSON below the vendors), because `exec.rs` and
-both backends reach `v8_bridge` for row conversion. **Sequence 0.3 before 0.1.** The honest description
+both backends reach `v8_bridge` for row conversion. ~~**Sequence 0.3 before 0.1.**~~ The honest description
 of 0.1 is *invert the op-completion protocol across 18 dispatch functions plus `run_op`*, and no figure
 in this document prices that. It is still worth doing first, and it is still worth doing if the split
 is cancelled - but it is a redesign of how `env.db` returns results, not a file move.
+
+> **SUPERSEDED 2026-09-01: "Sequence 0.3 before 0.1" is dead, and so is Phase 0 item 0.5. Both
+> prerequisites are closed.** Re-measured at `f340d9356`:
+>
+> - `grep -c 'compio_postgres\|rusqlite' crates/zeroship-plugin-db/src/v8_bridge.rs` -> **0**. The
+>   vendor row decoders were extracted to `backend/pg_row_json.rs` and `backend/sqlite/row_json.rs`.
+> - `grep -rn v8_bridge crates/zeroship-plugin-db/src/backend/ crates/zeroship-plugin-db/src/exec.rs`
+>   -> **no matches**. Neither backend nor `exec.rs` reaches up any more, so 0.3 has no back-edge left
+>   to remove and 0.1 does not rest on it.
+> - The fn-pointer hand-up this section calls *"the single hardest thing in the way of a V8-free
+>   engine"* is gone: `transform: …rehydrate_masked_values` now sits at `v8_bridge.rs:693`,
+>   adapter-side, selected by the adapter rather than stored by the engine (`be05db271`).
+>
+> **An implementer following the execution order as written would start on work that is already
+> done.** Phase 0's table still lists 0.5 as an open blocker while this document's own landed table at
+> the top records the commit that retired it. Neither carries a correction marker, in a document that
+> marks corrections aggressively everywhere else - the disclaimer at the top covers *numbers*, and
+> these are *instructions*.
+>
+> **What is actually next for 0.1, measured rather than estimated.** The protocol inversion is
+> largely built: of 17 CRUD dispatches, **15 now run on an inversion helper** (9 on `run_op`, 6 on
+> `settle`), and the remaining 2 hand-rolled futures in `dispatch_search` / `dispatch_near` are real
+> work bodies, not rejection arms - the 9 rejection arms were converted to `spawn_rejection`. The
+> blocker that remains is the one this section names correctly: **V8 in the SIGNATURE.** 22 dispatch
+> entry points take `&mut v8::PinScope`; 4 do not. The 4 V8-free ones carry **27 test call sites**
+> between them; the 22 carry **zero**. That is the cost of 0.1 stated as coverage rather than as file
+> count, and it is why the extraction is worth doing on its own terms.
 
 `run_op` (`:138`) and `reject_op` (`:236`) are the two of the 39 that take only `v8::Global`, never a
 `PinScope`. They are the shape the rest should be converted TO, not more work to be done.
