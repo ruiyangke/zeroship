@@ -440,6 +440,17 @@ green through it, because its input never had the key.
 6. `insert({ id: "post_abc" })` is **refused**. **Inverted by the decision** -
    #126 asked for a round-trip and does not get one; what it gets is a signal
    instead of silence.
+
+   **This is the other half of a security fix, not an ergonomic preference.**
+   The prefix fence closes the DESCRIPTOR vector: a descriptor can no longer
+   declare `idPrefix: "usr"` and have the worker mint platform-user-shaped ids.
+   It does not close the DIRECT vector, because minting is conditional -
+   `system_fields_pass.rs:256` is `if !obj.contains_key("id")`, so a
+   creator-supplied `id` is preserved verbatim and `insert({ id: "usr_SOMEONE" })`
+   writes that value today. Verified 2026-09-01. Until an assigned field's
+   supplied value is REMOVED at the pass (step 5), the fence is half built, and
+   the half that is missing is the one an attacker reaches without touching a
+   generated file.
 7. `insert({ created_by: "usr_SOMEONE_ELSE" })` is refused, INCLUDING on an
    anonymous request. The naive patch flips the guards inside
    `if let Some(actor)` and leaves the `None` arm a passthrough.
