@@ -401,11 +401,28 @@ Its callers say so. Every reference from outside the module, comment lines strip
 algorithm), `hex_encode`, `hex_decode` and one TTL constant. Random bytes, date arithmetic and a hex
 codec, filed under `auth/` for historical reasons.
 
-**And that is a live blocker for the SQLite extraction, in miniature.** `data-sqlite` would need
-`hex_encode` and `getrandom_or_fallback` - so either those helpers move to `data-core`, or a database
-driver crate declares a dependency on an *auth* module in order to encode hex. The first is correct
-and the second would be embarrassing, but nothing in the current tree forces the choice, which is
-exactly why it survives.
+**That looked like a live blocker for the SQLite extraction. IT IS TEST-ONLY, AND THIS PARAGRAPH
+OVERSTATED IT** - corrected 2026-08-31 by review, verified. It said `data-sqlite` "would need
+`hex_encode` and `getrandom_or_fallback`", implying a shipped production edge. Every SQLite caller of
+`auth::util` is gated: `sqlite/mod.rs:1143` is `#[cfg(feature = "test-helpers")]` and the calls at
+`:1167`, `:1174`, `:1176` sit under it; `session_minter.rs:36` and `:84` are
+`#[cfg(any(test, feature = "test-helpers"))]`.
+
+So the real statement is narrower and still worth acting on: **a `data-sqlite` crate's TEST surface
+would depend on an auth module to encode hex.** Production builds would not. The helpers still belong
+in `data-core` - `auth/util.rs` is random bytes, calendar arithmetic and a hex codec by its own
+contents - but this is tidiness plus test-build correctness, not a production dependency inversion.
+
+**And the same shape hides a sharper one.** `backend/sqlite/session_minter.rs:113` names
+`PluginDbConsumer`, the ADAPTER-owned declared-env identity (`lib.rs:74`), also test-gated. Under
+`--features test-helpers` a future `data-sqlite` would need a dependency on the adapter - the exact
+inversion the split exists to prevent - and it would be invisible in a default build. Fix by giving
+`data-sqlite` its own test consumer, or by deleting the test-only session-minter surface.
+
+*Why this matters beyond the two modules:* it is the feature-unification hazard again, one layer
+down. These edges are absent from the shipped graph and present under `test-helpers` - and this
+document has already measured that cargo unifies features across packages in one invocation. A
+dependency that only exists under a test feature is still a dependency the workspace has to satisfy.
 
 So `auth/` splits three ways: session setup to `data-engine` (it is on the statement and transaction
 paths), the generic helpers to `data-core`, and role lifecycle wherever teardown lands - noting that
