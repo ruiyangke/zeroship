@@ -186,6 +186,90 @@ The last two are consequences of the Full decision and did not exist as problems
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
 
+#### A CRATE SPLIT ERASES `pub(crate)`, AND THIS CRATE USES IT AS A SHIPPED FENCE - and it has already been burned by exactly this
+
+Rust has no cross-crate `pub(crate)`. Every `pub(crate)` symbol whose module ends up on the far side
+of a cut becomes **unconditionally `pub`**. This crate uses that modifier deliberately as a
+production fence: `lib.rs` carries THIRTEEN two-arm pairs of the shape
+
+```rust
+#[cfg(not(feature = "test-helpers"))]  pub(crate) mod crud;   // lib.rs:127-128
+#[cfg(feature = "test-helpers")]       pub        mod crud;   // lib.rs:129-130
+```
+
+plus four modules `pub(crate)` with no widening arm at all (`context`, `v8_bridge`, `descriptor`,
+`change_stream_pg`) and one fully private (`cdc_lifecycle`). Named casualties if their modules move:
+
+| symbol | what it is |
+| --- | --- |
+| `crud/unmask.rs:311` `sanitize_app_actor` | **the DB-3 patch** AGENTS.md calls load-bearing |
+| `tx_route.rs:92` `TxRoute::capture` | the ONLY constructor, V8-scoped on purpose; `:45-56` says a dispatcher that forgets it "**fails to compile**" |
+| `binding.rs:37-40` `DbBinding::cold_start` | test-gated because "**this gate is what makes that checkable**" (`:30-36`) |
+| `context.rs:1173`, `:1179` `with` / `with_mut` | hands out `&mut ThreadDbContext`, i.e. every co-resident tenant's live connection - the SEC-1 fence |
+
+**AND THE PRECEDENT IS IN THE TREE, WITH A FALSE CLAIM ATTACHED.** `plugin-db/src/lib.rs:137-139`
+says of the earlier `zeroship-schema` extraction: "The original `pub(crate)` vs `pub` (under
+`test-helpers`) visibility **is preserved by the cfg gate**."
+
+It is not. `crates/zeroship-schema/src/lib.rs:78` is `pub mod diff;` - unconditional. The gate
+preserves the SPELLING `crate::diff` inside plugin-db; it does nothing about
+`zeroship_schema::diff::compute_diff`, which any crate reaches with one dependency line. **The last
+time this codebase pushed a module down into a leaf crate, the production fence evaporated and a
+comment was written claiming it had not.**
+
+**Prerequisite, not artefact:** before any module moves, produce the list of symbols going
+`pub(crate) -> pub` and say for each whether the fence was load-bearing. Three of the four above are
+named security controls elsewhere in this repository.
+
+*This also compounds with the cargo-unification measurement above.* Today `test-helpers` gates
+visibility inside ONE crate, so a bad unification widens one crate. After the split, `plugin-db`'s
+test targets must enable `data-engine/test-helpers`, `data-core/test-helpers`,
+`data-sqlite/test-helpers` - and the same unification widens FOUR crates at once.
+
+#### The contract crate would depend on the relay, which this document's own rule forbids
+
+`backend/mod.rs` declares `BrokerPauseGuard` (`:910`) and `SchemaPendingGuard` (`:1318`), and they
+are the **return types of two `pub trait ChangeStream` methods** (`:863`, `:873`). Their bodies:
+
+```rust
+pub(crate) fn new(app_id: String) -> Self {
+    crate::wal_consumer::suppress_app(&app_id);          // :931
+impl Drop for BrokerPauseGuard {
+    fn drop(&mut self) {
+        crate::wal_consumer::unsuppress_app(&self.app_id);      // :940
+        crate::broker::resume_app_with_resync(&self.app_id);    // :945
+```
+
+So the contract half of `backend/mod.rs` - bound for `data-core` - calls into `wal_consumer`
+(`data-cdc-server`) and `broker` (`data-engine`). Against the declared arrows that is
+`data-core -> data-cdc-server` and `data-core -> data-engine`: **two cycles.**
+
+And it breaks the target block's own rule. `plugin-db` is declared "NOT -> data-cdc-server; the
+worker must not link the relay". That holds on the DIRECT edge and is violated **transitively**,
+twice: `plugin-db -> data-engine -> data-cdc-server` (via `exec.rs:485`, `:557`, `:588` and
+`cdc_lifecycle.rs:270`) and `plugin-db -> data-engine -> data-core -> data-cdc-server` (via the
+guard above).
+
+**"What to build NOW" measured the wrong direction.** It established the relay's OUT-edges - "Zero
+`crate::backend`. Zero `crate::encryption`." - and concluded the tier extracts cleanly. It never
+measured the worker's IN-edges to `wal_consumer`, which are five live production sites.
+
+#### There are TWO suppression mechanisms, and Track B found only one
+
+This is a direct extension of the dedup-fence blocker, discovered through the cycle above.
+`wal_consumer`'s process-global `SUPPRESSED_APPS` has **two** writers, not one:
+
+- `SuppressGuard::activate` (`wal_consumer.rs:781`) - held by the consumer for its whole lifetime.
+  This is the one Track B analyses.
+- `BrokerPauseGuard` (`backend/mod.rs:930`, `:940`) - taken by orchestrator code AROUND an operation,
+  through `ChangeStream::pause_broker`, and it pairs its release with a `Resync` push to every
+  active subscription.
+
+**So the relay's suppression handshake must cover both**, and the second one is harder: it is not a
+lifecycle transition but a bracket around an arbitrary operation, and its release triggers a
+subscriber resync. A handshake designed only for "consumer started / consumer stopped" will not carry
+it.
+
 #### The last three are one cluster, and they are REWRITTEN rather than relocated
 
 `cdc_lifecycle.rs` (523), `change_stream_pg.rs` (315) and `replication_ops.rs` (47) all exist for one
