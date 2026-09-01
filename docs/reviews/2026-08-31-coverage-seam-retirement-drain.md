@@ -104,6 +104,41 @@ excluded:
     replication.rs  167 of 3368   95.04%
     tls_sansio.rs   140 of 1282   89.08%
 
+## The same misreading a THIRD time, and this one reached a brief
+
+I briefed an agent that `Pool::query` and `Pool::batch_execute` were "never
+executed". Half of that was wrong, and the aggregate check says so plainly:
+
+    Pool::query              15 regions   14 executed   <- already covered
+    Pool::query_text_params  15 regions    0 executed   <- actually dead
+    Pool::execute            15 regions   14 executed   <- already covered
+    Pool::batch_execute      14 regions    0 executed   <- actually dead
+
+The dead spans I had eyeballed were lines 2012-2017 and 2047-2052 - which are
+`query_text_params` and `batch_execute`, NOT `query`. I attributed them to the
+neighbouring function by reading line numbers instead of resolving the enclosing
+`fn`.
+
+Two consequences, both worth stating:
+
+- `pool_batch_execute_runs_the_batch_and_restores_pool_accounting` closes a real
+  gap. `pool_query_runs_the_statement_and_restores_pool_accounting` does not -
+  `command_timeout::pool_convenience_queries_enter_the_command_scope` already
+  calls `pool.query`. It still earns its place, because it asserts the pool
+  accounting returns to baseline and the existing tests do not, but it is not a
+  never-executed find.
+- **`Pool::query_text_params` is still dead** and no test names it. That is the
+  gap the brief should have pointed at.
+
+A probe caught the mistake rather than a re-read: the lease-leak mutation failed
+THREE tests, two of them pre-existing (`integration::pool_reuse` and the
+command-timeout one). A wrapper nothing exercised could not have had two
+pre-existing tests fail on it, and that mismatch is what prompted the recheck.
+
+**Resolve the enclosing `fn`, do not read line numbers.** Three misreads now,
+all the same shape: auth refusals, the 2PC decoders, and this. The aggregate
+form has been right every time it was actually run.
+
 ## A per-line lookup into the coverage segments is NOT "did this line run"
 
 Recorded because it nearly cost a dispatch. Reading segment counts line by line,
