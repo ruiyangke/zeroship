@@ -663,8 +663,62 @@ vendor-free capability traits go to core; the closed sum `BackendHandle` is comp
 where composition may name vendors - the adapter, or the `backend_selection.rs` that `cddaa3731`
 introduced. Monomorphised dispatch is preserved, not replaced.
 
-That shape is UNPROVEN and should go to a review round before implementation. This document has now
-been wrong once about this file, by proposing a fix its own doc comment refuses.
+That shape went to a three-way review round. **It was wrong, and all three reviewers refuted it for
+the same reason.** The corrected answer is below.
+
+### `backend/mod.rs` is DISSOLVED, not tiered - three reviewers, one answer (2026-09-01)
+
+**Where all three converge, independently:**
+
+1. **`ChangeStream` is the blocker, and it is not vendor-free.** Its two guard return types
+   (`BrokerPauseGuard` `:929`, `SchemaPendingGuard` `:1337`) have `Drop` bodies that ARE the six
+   `crate::broker::` calls (`:950`, `:959`, `:964`, `:1350`, `:1360`, `:1363`). Move `ChangeStream`
+   to core and the leg goes to core with it. Opus measured the result in-crate - a new
+   `CORE <-> ENGINE` cycle at 5 up / 38 down. Fable named the crate-level consequence:
+   `data-core -> data-engine` against `data-engine -> data-core` is a Cargo cycle, unbuildable.
+   Codex traced the same path as `ENGINE -> SQLITE -> CORE -> ENGINE`. **The split as proposed
+   relabels the cycle rather than closing it - the identical failure mode as re-tiering `broker.rs`.**
+
+2. **`BackendHandle` goes to ENGINE.** Not core (it names both vendors), and NOT the adapter: eight
+   ENGINE files consume it - `crud/mod.rs`, `crud/read_pipeline.rs`, `crud/unmask.rs`,
+   `crud/mask_policy.rs`, `transaction/mod.rs`, `transaction/driver.rs`, `exec.rs`,
+   `drop_namespace.rs`. Placing it above ENGINE would mint ~20 new upward edges onto the one cycle
+   still open. Nothing below ENGINE names it in code; every below-ENGINE hit is a doc comment.
+
+3. **The cut is to DELETE `pause_broker` and `engage_schema_pending`**, not to port them. No
+   production caller (#118); both impls are byte-identical self-less expressions
+   (`change_stream_pg.rs:270`, `backend/sqlite/cdc.rs:786`); and the one production pause consumer
+   already routes around them - `cdc_lifecycle.rs:270` and `:287` call
+   `broker::SuppressGuard::activate` directly in BOTH arms, with `:283-286` explaining it declines
+   "the general pause guard" because the Drop-resync is unwanted. The guards become plain ENGINE
+   structs beside `broker.rs`. The surviving `ChangeStream` (`deprovision`, `spawn_consumer`,
+   `type ConsumerHandle`) is then genuinely core-safe.
+
+**"The eight vendor-free capability traits" was wrong: it is SIX.** Two reviewers caught it
+independently. `PgSqlExecutor` (`:774`) is ungated but NOT vendor-free - its super-bound is
+`SqlExecutor<Client = compio_postgres::OwnedPooledClient>` and `pool_handle` returns
+`&Rc<compio_postgres::Pool>` in a production signature (`:780`). It goes to PG, or dies with #114.
+And `EncryptedColumn` (`:1144`) is better placed in ENCRYPT than CORE: both impls bind
+`type KeyHandle = crate::encryption::aead::AeadKey` (`postgres.rs:781`, `sqlite/mod.rs:1626`).
+CORE is mechanically legal; ENCRYPT matches the boundary.
+
+**Three doc-drift findings in this one file, each verified, each the "reads as protection" shape:**
+
+- `:939-941` documents `suppress_app` as a `HashSet::insert` no-op, while `broker.rs:766` is a
+  refcounted `HashMap<String, usize>` whose comment says *"Counts, rather than a set, prevent one
+  overlapping guard from unsuppressing another."* **The doc describes the exact bug the refcount
+  prevents**, in the reassuring register. Tracked as #129.
+- `:1457-1460` says `Backend` exists so tests "assert the concrete backends implement the whole
+  sub-trait set". Its actual bound (`:1462-1463`) is
+  `SqlExecutor + LockManager + SchemaIntrospect` - **three of thirteen.**
+- Both drifted for the same reason: nobody uses the surface they document.
+
+**And the instrument cannot see any of this.** See #128: the direction census drops every
+`backend/*` internal edge by TWO independent mechanisms - no bare `backend)` arm in `tier_of_target`
+(the extractor's second segment is lowercase-only, so `crate::backend::BackendHandle` captures bare
+`backend` and falls to CONTESTED), and `selfmod` at `:285` keying on the first path segment. **They
+mask each other: fixing either alone changes nothing** - measured, by a one-variable control whose
+diff was empty. No post-split green from that census can be believed until both land.
 
 ### Three earlier choices, taken by the operator on 2026-08-31:
 
