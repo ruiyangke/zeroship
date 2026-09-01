@@ -805,9 +805,6 @@ where
                 }
                 None => {
                     self.drain_buffered_backend_frames().await?;
-                    if let Some(error) = self.record_buffered_server_error() {
-                        return Err(error);
-                    }
                     // Client side dropped. Send Terminate and begin
                     // graceful shutdown.
                     trace!("receiver closed, sending Terminate");
@@ -974,41 +971,7 @@ where
         if let Err(error) = self.drain_buffered_backend_frames().await {
             return error;
         }
-        self.record_buffered_server_error().unwrap_or(local)
-    }
-
-    /// Record and publish a complete buffered diagnosis using the same
-    /// ownership rules as ordinary protocol dispatch.
-    fn record_buffered_server_error(&mut self) -> Option<Error> {
-        let server = take_buffered_server_error(&mut self.stream)?;
-        // The response sender may synchronously wake a pooled borrower whose
-        // Drop path decides reuse from this byte. Publish retirement before any
-        // diagnosis becomes visible, just as the ordinary read-error path does.
-        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-        if let Some(error) = server.as_db_error() {
-            // A DbError cannot be duplicated through Error's generic terminal
-            // wrapper without losing its SQLSTATE. Rebuild it from the parsed
-            // value for the owning response and keep the request-local copy as
-            // a fallback if that response channel is backpressured.
-            if let Some(response) = self.responses.front_mut() {
-                // Both production callers first drain every complete buffered
-                // frame through ordinary dispatch, which fills this same slot;
-                // an incomplete ErrorResponse cannot reach this scanner.
-                remember_server_error(&response.request_server_error, error);
-                let _ = response
-                    .sender
-                    .try_send(ResponseMessages::Observed(VecDeque::from([Err(
-                        Error::from_db_error(error.clone()),
-                    )])));
-            }
-            if server_error_ends_session(error) || self.responses.is_empty() {
-                // The preceding complete-frame drain also records terminal
-                // ErrorResponses through ordinary dispatch; a partial frame
-                // cannot be parsed by this fallback scanner.
-                remember_server_error(&self.terminal_server_error, error);
-            }
-        }
-        Some(server)
+        local
     }
 
     /// Handle a request received from the client (serialized path).
@@ -1203,64 +1166,6 @@ fn first_ascii_server_error(messages: &BackendMessages) -> Option<DbError> {
         return None;
     };
     DbError::parse(&mut body.fields()).ok()
-}
-
-/// Consume a complete ErrorResponse already over-read behind the response
-/// which made the serialized loop attempt another frontend write.
-///
-/// This never reads the socket: a failed write has already retired the
-/// session, and waiting for additional bytes could hang on a one-way failure.
-/// Complete asynchronous frames are dispatched before this scanner; any other
-/// frame still belongs to ordinary protocol dispatch.
-///
-/// **THIS COPY CANNOT RETURN `Some` IN PRODUCTION, AND ITS TWIN IN
-/// `replication.rs` CAN.** Both of this one's callers reach it only through
-/// `record_buffered_server_error`, and both run `drain_buffered_backend_frames`
-/// first (the `receiver`-closed arm, and `prefer_buffered_server_error`). That
-/// drain returns only when the head frame is
-/// incomplete or the buffer holds fewer than five bytes - and this scanner
-/// refuses both, at the `peek_u32_be(1)?` and the `buf().len() < total_len`
-/// guard. Nothing reads the socket between the two, so the buffer cannot
-/// change. The replication copy is live because its three call sites invoke it
-/// DIRECTLY after a failed flush, with no drain in front; four tests bind it,
-/// one per call site.
-///
-/// Measured 2026-08-31, not merely argued: panicking on the `Some` arm here
-/// leaves all 1445 tests passing, while the same mutation applied to the
-/// replication twin fails exactly its four. So a mutation report calling this
-/// copy unbound is CORRECT, and a test written to satisfy it would have to
-/// call this private function with a hand-built buffer - binding a path the
-/// system cannot take. Whether the defensive scanner earns its place, or
-/// `record_buffered_server_error` should collapse to its `unwrap_or(local)`
-/// fallback, is a design decision and not a test gap.
-fn take_buffered_server_error<S>(stream: &mut BufStream<S>) -> Option<Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    loop {
-        let length = stream.peek_u32_be(1)?;
-        if length < 4 || stream.validate_length(length).is_err() {
-            return None;
-        }
-        let total_len = usize::try_from(length).ok()?.checked_add(1)?;
-        if stream.buf().len() < total_len {
-            return None;
-        }
-
-        match stream.buf()[0] {
-            b'E' => {
-                let mut frame = stream.buf().split_to(total_len);
-                return match Message::parse(&mut frame).ok()?? {
-                    Message::ErrorResponse(body) => Some(Error::db(body)),
-                    _ => None,
-                };
-            }
-            b'N' | b'A' | b'S' => {
-                let _ = stream.buf().split_to(total_len);
-            }
-            _ => return None,
-        }
-    }
 }
 
 fn server_error_ends_session(error: &DbError) -> bool {
