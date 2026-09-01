@@ -320,24 +320,45 @@ twice: `plugin-db -> data-engine -> data-cdc-server` (via `exec.rs:485`, `:557`,
 `cdc_lifecycle.rs:270`) and `plugin-db -> data-engine -> data-core -> data-cdc-server` (via the
 guard above).
 
-> **CORRECTION, 2026-08-31: three of the four citations for the FIRST cycle are test-only, and the
-> paragraph presents them as production edges.** `exec.rs` opens its `#[cfg(test)]` region at
-> **`:370`** (file is 1,769 lines), so `:485`, `:557` and `:588` are all test code. The surviving
-> production citation is `cdc_lifecycle.rs:270` (its test region opens at `:485`), and the SECOND
-> cycle is unaffected - `backend/mod.rs:931`/`:940` sit far above its `:1684` boundary.
+> **RETRACTED, 2026-08-31, same day it was written. The paragraph above is CORRECT; the correction
+> that briefly sat here was wrong, and it is the most instructive error in this document.**
 >
-> **This is not a pedantic distinction, because a test-only edge is a different edge.** It makes
-> `data-cdc-server` a DEV-dependency of `data-engine`, which Cargo permits outright (dev-dependency
-> cycles are legal) and which never reaches a shipped binary. The stated harm - "the worker must not
-> link the relay" - does not follow from a dev-dependency: the worker links what its normal
-> dependencies pull in, and a test target is not the worker. So cycle 1 is real but rests on one
-> citation, not four, and its severity is a fraction of what is written above.
+> It claimed `exec.rs:485`, `:557` and `:588` were test-only, on the grounds that `exec.rs` "opens its
+> `#[cfg(test)]` region at `:370`". It does not. `exec.rs:370` is a `#[cfg(test)]` attribute on a
+> single *statement inside a production function*:
 >
-> Left standing rather than rewritten, because the paragraph's conclusion survives and the *way* it
-> failed is the point: **this document has now presented test-tier code as production in three
-> separate places** (here, the SQLite feature-gate census, and Phase 0.1's own earlier text). Every
-> instance was found by checking a line number against a `#[cfg(test)]` boundary - a check that costs
-> one `awk` and was not run for four rounds.
+> ```rust
+> if !route.in_tx() {
+>     #[cfg(test)]
+>     tests::record_sqlite_shared_route();      // <- :370, a test hook in live code
+>     return backend.query_json(sql, params).await;
+> ```
+>
+> The real test module is `#[cfg(test)] mod tests {` at **`:670-671`**. All three cited lines are
+> **production**, the transitive cycle is real exactly as first written, and both cycles stand.
+>
+> **The instrument was "first `#[cfg(test)]` in the file", and that is not a test-region boundary.**
+> It is wrong wherever a production function carries a test hook, which is common here. Measured
+> across the crate, the lines it wrongly discards as test code:
+>
+> ```
+>              first #[cfg(test)]   real `mod tests`   production lines wrongly hidden
+> exec.rs             370                 671                    301
+> crud/mask_policy    92                  463                    371
+> broker.rs           209                1034                    825
+> lib.rs              269                (none at all)          1088
+> ```
+>
+> `crud/mask_policy.rs` is the one that bites: hidden inside its 371 discarded lines is
+> **`dispatch_set_mask_policy_field` at `:431`, an 18th V8-signature dispatch function**, and a 44th
+> engine-tier `to_op_error` call at `:449` - both missed by Phase 0.1's census below.
+>
+> **Why this is worth the space.** The retracted text was not a guess; it was measured, committed, and
+> written up with a rule attached ("a check that costs one `awk`"). The awk ran correctly and answered
+> a question adjacent to the one being asked - *where is the first cfg(test) attribute* rather than
+> *where does the test module begin*. That is the identical failure this document catalogues in four
+> other instruments, committed by the person cataloguing them, in a paragraph congratulating the
+> catalogue. **Precision about a boundary is not the same as knowing where the boundary is.**
 
 **"What to build NOW" measured the wrong direction.** It established the relay's OUT-edges - "Zero
 `crate::backend`. Zero `crate::encryption`." - and concluded the tier extracts cleanly. It never
