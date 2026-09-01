@@ -161,3 +161,38 @@ line numbers no longer point at the code described.
 Treat the list in the prompt as a fixed string, not as a live finding set. It
 has now been re-derived twice, on 2026-08-31 and 2026-09-01, with the same
 result both times.
+
+## The seventh item, the one carried as UNVERIFIED, settled 2026-09-01
+
+The prompt carries a seventh entry the other six do not have a verdict for:
+
+> `copy_in.rs` poll_ready/poll_flush treating the sink's OWN close as a lost
+> connection and draining away CommandComplete + ReadyForQuery (UNVERIFIED -
+> decide whether poll_flush's `sender.is_closed()` is reachable from our own
+> poll_close before fixing)
+
+Answering the question as posed: **our own close does close the sender**, and
+that is not a deduction - `copy_in.rs:1502` already asserts it, with the
+message "the pending close poll did not close its own sender". So
+`sender.is_closed()` is indeed true after our own `poll_close`.
+
+**The false-disconnection branch is still unreachable in that state**, for a
+reason visible three lines above it. `poll_flush` computes
+
+    let closed_by_sink = matches!(self.state, SinkState::ReadingAfterClose);
+
+and takes the diagnosis only on `disconnected && !closed_by_sink`. The same
+transition that closes the sender sets `ReadingAfterClose` (`:411`), which is
+exactly the state `closed_by_sink` tests. `SinkState::Finished` returns `Ok`
+at the top of the function before any of this. `poll_close` itself routes to
+`poll_finish`, which never calls `poll_flush` at all.
+
+**And the guard is bound.** Replacing it with `let closed_by_sink = false;`
+fails exactly one test out of 702:
+
+    copy_in::tests::flush_after_cancelled_close_preserves_copy_completion
+
+which is named for the scenario the finding describes. So: the hazard is real
+in principle, a guard exists for precisely it, and a test holds that guard in
+place. There is nothing to fix here, and the entry can be retired rather than
+carried as UNVERIFIED.
