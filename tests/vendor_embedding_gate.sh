@@ -58,19 +58,53 @@ FAIL=0
 ok()  { printf '  ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-SRC="crates/zeroship-plugin-db/src"
 VENDORS='compio_postgres|rusqlite'
+
+# ROOTS. Decision 5 says "the core and every OTHER non-vendor crate", and the
+# first version of this gate scanned exactly one crate - which reported green
+# while `zeroship-schema/src/error.rs:31` held `pub source: compio_postgres::Error`
+# one crate BELOW the one being scanned. That is #97, and it is the floor the
+# proposal places `data-core` on (#101), so a vendor in it is the violation at
+# its most load-bearing point.
+#
+# Twenty workspace crates name a vendor. MOST OF THEM LEGITIMATELY DO - the
+# migrate dialect backends are dialect implementations, and the services talk to
+# their own driver. Scanning all twenty would report noise and train people to
+# ignore this gate. The roots below are the crates the data-plane split requires
+# to be vendor-free, and adding one is a design decision, not housekeeping.
+ROOTS="
+crates/zeroship-plugin-db/src
+crates/zeroship-schema/src
+"
 
 # Files that are ALLOWED to name a vendor: the vendor tiers themselves, plus the
 # CDC tier, which the target explicitly gives its own `compio-postgres`
 # dependency (it is a service peer of the migration server, not a data-plane
 # layer). Everything else in the crate is non-vendor and is ruled on.
+#
+# The KEY for a file is `<crate>/<path after src/>` - e.g.
+# `zeroship-plugin-db/error.rs`. Qualifying by crate is not decoration: with two
+# roots, `error.rs` names a file in BOTH, and an unqualified key would let one
+# crate's baseline entry silently excuse the other's violation.
+file_key() {
+  local p="${1#crates/}"
+  printf '%s/%s\n' "${p%%/src/*}" "${p#*/src/}"
+}
+
 is_vendor_tier() {
-  case "${1#"$SRC"/}" in
-    backend/postgres.rs|backend/pg_*.rs|backend/sqlite/*) return 0 ;;
-    replication.rs|slot_reaper.rs|wal_consumer.rs|change_stream_pg.rs) return 0 ;;
+  case "$(file_key "$1")" in
+    zeroship-plugin-db/backend/postgres.rs) return 0 ;;
+    zeroship-plugin-db/backend/pg_*.rs|zeroship-plugin-db/backend/sqlite/*) return 0 ;;
+    zeroship-plugin-db/replication.rs|zeroship-plugin-db/slot_reaper.rs) return 0 ;;
+    zeroship-plugin-db/wal_consumer.rs|zeroship-plugin-db/change_stream_pg.rs) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Map a baseline key back to a path, across roots.
+key_to_path() {
+  local crate="${1%%/*}" rest="${1#*/}"
+  printf 'crates/%s/src/%s\n' "$crate" "$rest"
 }
 
 # --------------------------------------------------------------------------
@@ -85,18 +119,27 @@ is_vendor_tier() {
 # public field. Every entry carries the task that DELETES it - an entry with no
 # owner is a permanent exception, and this list does not have those.
 BASELINE_FILES="
-exec.rs
-backend/mod.rs
-transaction/driver.rs
-transaction/mod.rs
-transaction/cancel.rs
-auth/bootstrap.rs
-backend/lock_guard.rs
-context.rs
-drop_namespace.rs
-lib.rs
-service.rs
+zeroship-plugin-db/exec.rs
+zeroship-plugin-db/backend/mod.rs
+zeroship-plugin-db/transaction/driver.rs
+zeroship-plugin-db/transaction/mod.rs
+zeroship-plugin-db/transaction/cancel.rs
+zeroship-plugin-db/auth/bootstrap.rs
+zeroship-plugin-db/backend/lock_guard.rs
+zeroship-plugin-db/context.rs
+zeroship-plugin-db/drop_namespace.rs
+zeroship-plugin-db/lib.rs
+zeroship-plugin-db/service.rs
+zeroship-schema/error.rs
+zeroship-schema/diff.rs
 "
+# zeroship-schema/error.rs is #97 itself, and adding the second root is what
+# made it visible. `pub source: compio_postgres::Error` at :31 sits in the crate
+# the proposal places `data-core` ON (#101) - the violation at its most
+# load-bearing point, one crate BELOW everything this gate previously scanned.
+# 6f3a482f6 moved its only CONSUMER into the PG tier (pg_error.rs:175); the
+# DEFINITION is untouched, so #97 is half done and the entry stays until the
+# field is gone.
 # exec.rs              5  Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
 #                         the neutral-row decision; see roled_rows in pg_autocommit.
 # backend/mod.rs       4  BackendHandle names BOTH vendors, which is why this file
@@ -124,7 +167,7 @@ n_ruled=0
 n_new=0
 while IFS= read -r f; do
   is_vendor_tier "$f" && continue
-  rel="${f#"$SRC"/}"
+  rel="$(file_key "$f")"
   n_ruled=$((n_ruled + 1))
 
   # Production region only: everything before the file's first column-0
@@ -144,7 +187,7 @@ while IFS= read -r f; do
   awk -v b="$boundary" -v pat="$VENDORS" \
       'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { printf "       %d: %s\n", NR, $0 }' "$f" \
     | head -5
-done < <(find "$SRC" -name '*.rs' | LC_ALL=C sort)
+done < <(find $ROOTS -name '*.rs' 2>/dev/null | LC_ALL=C sort)
 
 [ "$n_new" -eq 0 ] && ok "no new vendor embedding across $n_ruled non-vendor file(s)"
 
@@ -165,7 +208,7 @@ n_baseline=0
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
   n_baseline=$((n_baseline + 1))
-  f="$SRC/$rel"
+  f="$(key_to_path "$rel")"
   if [ ! -f "$f" ]; then
     bad "baseline names $rel, which does not exist - delete the entry"
     continue
