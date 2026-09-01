@@ -637,8 +637,37 @@ experiment per cut rather than trusting the region table: **"no callers found" a
 it" are different claims, and only the compiler settles the second.** The restore is clean -
 `cargo check -p zeroship-schema --all-targets` returns 0 errors at `13,814` lines.
 
-Delete the tests that reach the dead code in the same change. They are the only thing making it look
-alive, and keeping them is how the next reader concludes it still runs.
+Delete the tests whose SUBJECT is the dead code, in the same change. They are the only thing making
+it look alive, and keeping them is how the next reader concludes it still runs.
+
+**BUT NOT BLANKET-DELETE, AND THIS IS A PREREQUISITE STEP 0 DOES NOT OTHERWISE HAVE - measured
+2026-08-31.** A round-two review flagged that some tests use a dead DDL builder only as FIXTURE
+SETUP; the correction went into #91's conditions and never into this section, which kept saying
+"delete the tests that reach the dead code" without qualification. Measured scope:
+
+- `crates/zeroship-plugin-db/tests/mask_flip.rs:104` defines `async fn fixture(...)`, the shared
+  setup helper, which calls `build_create_table_with_fks` at `:111`. **All 7 tests in that file route
+  through it.**
+- `:829` additionally calls `build_create_indexes` - a builder from the INDEX region, which the
+  review did not mention, so the fixture dependency spans BOTH dead regions rather than one.
+- `crates/zeroship-plugin-db/tests/column_grants.rs:63` imports the same builder and uses it at
+  `:155`; that file holds 5 tests.
+
+**Twelve live tests, and their subjects are exactly what must not regress:**
+`a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext` (an information-leak oracle),
+`the_raw_column_is_refused_on_every_inbound_surface`,
+`no_write_verb_hands_back_a_column_the_descriptor_does_not_declare` (L24's regression guard),
+`the_real_value_is_still_stored_and_still_reachable_by_the_audited_path`, and
+`a_masked_predicate_is_lowered_for_the_change_stream`.
+
+The first of those matters MORE after #45 settled, not less: masking is now explicitly a hygiene
+feature the creator relies on, so the test proving a range filter cannot narrow the plaintext is the
+test proving the feature works at all.
+
+**So Step 0 is not pure subtraction.** Its real first move is migrating those twelve tests' fixture
+onto a sanctioned provisioning path - the migration engine, or whatever `#95`'s work settles for
+provisioning a scratch app schema - and only then deleting the builders. Any costing of Step 0 as
+"delete N lines" is missing that step.
 
 **This qualifies #1 (decision 10, "remove all DDL from plugin-db").** The DDL left plugin-db's own
 source but stayed reachable through `zeroship-schema`, which plugin-db depends on and re-exports as
