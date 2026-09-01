@@ -12,8 +12,8 @@
 //!
 //! A masked column used to store PLAINTEXT under the field's own name and the
 //! mask in a `<col>_masked` sibling. The projection substituted
-//! `"ssn_masked" AS "ssn"`, but `build_where_with_dialect(filter, params,
-//! dialect)` takes no schema hint and so COULD NOT: `find({ ssn: { $gt: v } })`
+//! `"ssn_masked" AS "ssn"`, but the filter builder previously ignored its
+//! schema hint and so COULD NOT: `find({ ssn: { $gt: v } })`
 //! rendered `WHERE "ssn" > $1` and compared against plaintext. The caller never
 //! saw a value and did not need to - the set of matching rows IS the answer, and
 //! repeated probes binary-search it, with no authorization check on the path and
@@ -556,11 +556,16 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     let refusals: Vec<(&str, bool)> = vec![
         (
             "filter key",
-            build_where(&json!({ raw.clone(): "x" }), &mut Vec::new()).is_err(),
+            build_where(
+                &json!({ raw.clone(): "x" }),
+                &mut Vec::new(),
+                &schema,
+            )
+            .is_err(),
         ),
         (
-            // The arm that takes no schema hint at all, and that `$group.by`
-            // ten lines below it does validate.
+            // The aggregate matcher and `$group.by` below both validate
+            // against the same declared shape.
             "aggregate $match",
             build_aggregate(
                 "app1",
@@ -627,7 +632,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 
     // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
     // it, a validator that refused everything would pass all seven above.
-    assert!(build_where(&json!({ "ssn": "x" }), &mut Vec::new()).is_ok());
+    assert!(build_where(&json!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
     assert!(build_distinct("app1", "people", "ssn", &json!({}), &schema).is_ok());
     assert!(validate_field_name("ssn").is_ok());
     assert!(build_find_with_schema(

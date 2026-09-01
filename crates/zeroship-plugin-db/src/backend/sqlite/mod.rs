@@ -1410,6 +1410,10 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // that fails on a missing operator.
         vector::reject_inner_product(metric)?;
 
+        // Resolve the declared shape before lowering the filter: timestamp
+        // bind conversion is schema-driven, just like boolean lowering.
+        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+
         // Build the filter WHERE clause via the shared lowering. The
         // builder emits `$N` placeholders + a parallel params Vec.
         // We use the raw `build_where` (not `build_find`) so we
@@ -1417,7 +1421,13 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // returns the WHERE expression text directly (or an empty
         // string if `filter` is non-object / `Null`).
         let mut params: Vec<String> = Vec::new();
-        let where_expr = crate::query::build_where(filter, &mut params).map_err(DbError::from)?;
+        let where_expr = crate::query::build_where_with_dialect(
+            filter,
+            &mut params,
+            &schema_hint,
+            crate::query::SqlDialect::Sqlite,
+        )
+        .map_err(DbError::from)?;
 
         // Inline the query vector as a hex BLOB literal. SQLite's
         // x'…' syntax is the canonical form for binary literals and
@@ -1444,7 +1454,6 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // The base-table projection is the descriptor's field list; a
         // collection this deploy does not declare is refused rather than
         // searched with `t.*`.
-        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
         let sql = vector::build_vector_search_sql(
             app_id,
             collection,
@@ -1468,7 +1477,7 @@ fn build_spatial_near_base_query(
     filter: &serde_json::Value,
     schema_hint: &serde_json::Value,
 ) -> Result<crate::query::BuiltQuery, DbError> {
-    crate::query::build_find_with_schema(
+    crate::query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         app_id,
         collection,
         filter,
@@ -1477,6 +1486,9 @@ fn build_spatial_near_base_query(
         /* order_by */ None,
         /* select   */ None,
         schema_hint,
+        /* unmask_columns */ &[],
+        /* filter_soft_deleted */ false,
+        crate::query::SqlDialect::Sqlite,
     )
     .map_err(DbError::from)
 }
