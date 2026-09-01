@@ -255,6 +255,18 @@ fn inject_into_object(
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
     // `id` — auto-mint when absent.
+    //
+    // A creator-supplied `id` is still honoured here, and that is a KNOWN GAP
+    // rather than the intended end state: the prefix validator fences the
+    // descriptor vector, but a document carrying `id: "usr_..."` is written
+    // verbatim. See `insert_refuses_a_creator_supplied_id`, which is ignored
+    // with the reason.
+    //
+    // The refusal cannot live in this function. This pass is documented and
+    // tested as IDEMPOTENT, and a check keyed on `id` being present cannot
+    // distinguish a creator's value from one this pass minted on an earlier
+    // call. It belongs at the caller boundary, where "supplied by the creator"
+    // is still knowable.
     if !obj.contains_key("id") {
         let prefix = prefix_for_collection(schema, collection)?;
         let minted = zeroship_core::typed_id::generate(&prefix);
@@ -612,6 +624,46 @@ mod tests {
             other => panic!("expected reserved-prefix refusal, got {other:?}"),
         }
         assert!(doc.get("id").is_none(), "refusal must happen before minting");
+    }
+
+    /// The other half of the id fence. The prefix validator closed the
+    /// DESCRIPTOR vector - a descriptor can no longer declare `idPrefix: "usr"`
+    /// and have the worker mint a platform-shaped id. It does not close the
+    /// DIRECT one, because minting is conditional on `id` being absent, so a
+    /// supplied value is written verbatim.
+    ///
+    /// This is the vector an attacker reaches without touching a generated
+    /// file, so the refusal is security behaviour rather than ergonomics.
+    #[test]
+    #[ignore = "the refusal cannot live in this pass: it is documented and tested as idempotent, \
+                so a check keyed on `id` being present cannot tell a creator's value from one an \
+                earlier call minted. Move the refusal to the caller boundary, then un-ignore."]
+    fn insert_refuses_a_creator_supplied_id() {
+        let mut doc = json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
+        let result =
+            apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
+
+        match result {
+            Err(DbError::ValidationFailed { code, .. }) => {
+                assert_eq!(code, "platform_assigned_field");
+            }
+            other => panic!("expected a refusal of the supplied id, got {other:?}"),
+        }
+    }
+
+    /// The control. Refusing every supplied id would also pass the test above,
+    /// so prove an ordinary insert still mints rather than erroring.
+    #[test]
+    fn insert_without_an_id_still_mints_one() {
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("an insert that supplies no id must be accepted");
+
+        let minted = doc
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("the pass must mint an id when none was supplied");
+        assert!(minted.starts_with("post_"), "minted id was {minted}");
     }
 
     // ---- declared idPrefix wins over derivation --------------------
