@@ -1938,7 +1938,7 @@ fn postgres_microseconds_since_epoch() -> i64 {
 ///
 /// Reference: https://www.postgresql.org/docs/16/protocol-logicalrep-message-formats.html
 pub mod pgoutput {
-    use bytes::Bytes;
+    use bytes::{Buf, Bytes};
 
     /// One pgoutput logical-decoding message.
     #[derive(Debug, Clone, PartialEq)]
@@ -2788,7 +2788,10 @@ pub mod pgoutput {
                 let subxid = read_u32(&mut cur)?;
                 let (abort_lsn, abort_timestamp) = match cur.len() {
                     0 => (None, None),
-                    16 => (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?)),
+                    // The exact-length guard makes both eight-byte reads
+                    // infallible. Using `Buf` directly removes two impossible
+                    // `UnexpectedEof` exits from this decoder.
+                    16 => (Some(cur.get_u64()), Some(cur.get_i64())),
                     remaining => {
                         return Err(DecodeError::TrailingData {
                             message: message_name(tag),
@@ -4073,6 +4076,65 @@ mod tests {
             ruled_on += 1;
         }
         assert_eq!(ruled_on, 19, "the complete legal tag set must be ruled on");
+    }
+
+    /// Required pgoutput fields must reject a frame ending at each field
+    /// boundary, including the two-phase and streaming variants that a normal
+    /// round trip rarely emits. Use the stateful decoder because the public
+    /// stateless helper deliberately refuses stream-terminal message tags.
+    #[test]
+    fn rare_pgoutput_messages_refuse_every_truncated_required_field() {
+        fn fixed(tag: u8, body_len: usize) -> Vec<u8> {
+            let mut frame = vec![tag];
+            frame.resize(body_len + 1, 0);
+            frame
+        }
+
+        let mut prepare = fixed(b'P', 1 + 8 + 8 + 8 + 4);
+        prepare.push(0); // empty gid
+        let mut commit_prepared = fixed(b'K', 1 + 8 + 8 + 8 + 4);
+        commit_prepared.push(0); // empty gid
+        let mut rollback_prepared = fixed(b'r', 1 + 8 + 8 + 8 + 8 + 4);
+        rollback_prepared.push(0); // empty gid
+        let mut stream_prepare = fixed(b'p', 1 + 8 + 8 + 8 + 4);
+        stream_prepare.push(0); // empty gid
+        let mut update = fixed(b'U', 4);
+        update.push(b'K');
+        update.extend_from_slice(&0u16.to_be_bytes()); // empty old-key tuple
+        update.push(b'N');
+        update.extend_from_slice(&0u16.to_be_bytes()); // empty new tuple
+
+        let cases: [(&str, Vec<u8>, &[usize]); 6] = [
+            ("Prepare", prepare, &[2, 10, 18, 26, 30]),
+            ("CommitPrepared", commit_prepared, &[2, 10, 18, 26, 30]),
+            (
+                "RollbackPrepared",
+                rollback_prepared,
+                &[2, 10, 18, 26, 34, 38],
+            ),
+            ("StreamCommit", fixed(b'c', 4 + 1 + 8 + 8 + 8), &[6, 14, 22]),
+            ("StreamPrepare", stream_prepare, &[2, 10, 18, 26, 30]),
+            ("Update after old tuple", update, &[8]),
+        ];
+
+        let mut ruled_on = 0;
+        for (message, frame, cuts) in cases {
+            pgoutput::Decoder::new()
+                .decode(&frame)
+                .unwrap_or_else(|error| panic!("valid {message} fixture failed: {error}"));
+            for cut in cuts {
+                let error = pgoutput::Decoder::new().decode(&frame[..*cut]).unwrap_err();
+                assert!(
+                    matches!(&error, pgoutput::DecodeError::UnexpectedEof),
+                    "{message} truncated at byte {cut} reached {error}"
+                );
+                ruled_on += 1;
+            }
+        }
+        assert_eq!(
+            ruled_on, 25,
+            "every selected field boundary must be ruled on"
+        );
     }
 
     /// PostgreSQL rejects the six currently-zero flags in its own pgoutput
