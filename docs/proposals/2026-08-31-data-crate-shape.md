@@ -1930,10 +1930,30 @@ from the type side and was never checked from the caller side.
 > extension trait can legally serve them. What remains of 0.1 afterwards is relocating one method and
 > adding one `use`."*
 >
-> Classified by position, **36 of the 43 sit inside the `async move` future, not the V8 prologue** -
-> `crud/mod.rs` 31, `crud/unmask.rs` 4, `transaction/mod.rs` 1. Only 6 are in `PinScope`-bearing code
-> (`crud/mod.rs:2134`, `:2339`; `transaction/mod.rs:661`, `:850`, `:1181`, `:1193`); the 7th,
-> `crud/mod.rs:243`, is inside `reject_op`, a helper the futures call.
+> Classified by position - **re-measured here rather than taken from the review that raised it, and
+> the reviewer's figure was off by two:**
+>
+> ```
+>                        async future    sync prologue
+>   crud/mod.rs               28              6
+>   crud/unmask.rs             4              0
+>   crud/mask_policy.rs        1              0
+>   transaction/mod.rs         1              4
+>                        ----------------------------
+>                             34             10   = 44
+> ```
+>
+> **34 of the 44 sit inside the `async move` future**, not the V8 prologue. The review reported 36 of
+> 43, counting `crud/mod.rs:2160`, `:2179` and `:2222` as async; they are not. Each is
+> `let op_err: OpError = err.to_op_error();` on the line *immediately before* its
+> `spawned_ops.push(...)` - the value is constructed synchronously and then moved into the future. They
+> read as "inside the dispatch" and are lexically outside it. Of the 10 sync sites, 9 are in
+> `PinScope`-bearing prologue code and the 10th, `crud/mod.rs:243`, is inside `reject_op`, a helper the
+> futures call.
+>
+> **The conclusion is unchanged and slightly strengthened by the correction.** The split of interest is
+> not 36/7 or 34/10 in particular - it is that the large majority live in the half that is supposed to
+> become the engine.
 >
 > **So "the calls travel with it" depends entirely on where you cut.** Cut at the `v8::` signature -
 > where the census points - and 36 of 43 stay engine-side, still needing `OpError`, and the extension
