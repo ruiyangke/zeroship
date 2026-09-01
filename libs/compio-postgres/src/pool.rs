@@ -1958,7 +1958,17 @@ impl Pool {
                 }
                 Err(e) => {
                     // `permit` drops here -> total -= 1.
-                    eprintln!("[compio-postgres] housekeeper: failed to create connection: {e}");
+                    // A dial that failed BECAUSE the pool closed under us is
+                    // shutdown fallout, not an operational fault: `close`
+                    // drops the transport, so the attempt in flight always
+                    // ends in a communication error. Reporting it would put a
+                    // connection failure in the log of every clean shutdown.
+                    // The same `closed` check guards the summary below.
+                    if weak.upgrade().is_some_and(|pool| !pool.closed.get()) {
+                        eprintln!(
+                            "[compio-postgres] housekeeper: failed to create connection: {e}"
+                        );
+                    }
                     break;
                 }
             }
@@ -4821,6 +4831,122 @@ mod tests {
         drop(front);
         pool.wake_one_waiter();
         assert_eq!(youngest_count.load(Ordering::Relaxed), 1);
+    }
+
+    const CLOSED_HOUSEKEEPER_TEST: &str =
+        "a_housekeeper_treats_a_connect_failure_after_close_as_shutdown";
+    const CLOSED_HOUSEKEEPER_CHILD_ARG: &str = "cpg-pool-closed-housekeeper-child";
+
+    fn closed_housekeeper_test_filter() -> String {
+        match module_path!().split_once("::") {
+            Some((_crate_root, module)) if !module.is_empty() => {
+                format!("{module}::{CLOSED_HOUSEKEEPER_TEST}")
+            }
+            _ => CLOSED_HOUSEKEEPER_TEST.to_owned(),
+        }
+    }
+
+    fn run_closed_housekeeper_child() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = futures_channel::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).unwrap();
+            let remaining = u32::from_be_bytes(length) as usize - length.len();
+            let mut startup = vec![0u8; remaining];
+            stream.read_exact(&mut startup).unwrap();
+            let _ = started_tx.send(());
+            release_rx.recv().expect("release the refused handshake");
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close the refused handshake");
+        });
+
+        let runtime = compio::runtime::Runtime::new().expect("create child compio runtime");
+        runtime.block_on(async move {
+            let config = PoolConfig {
+                max_size: 1,
+                min_idle: 1,
+                ..PoolConfig::default()
+            };
+            let mut pool = test_pool(config, Vec::new(), 0, 0);
+            pool.transport = Transport::resolve(
+                format!("postgres://postgres@{address}/fake?sslmode=disable")
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap();
+            let pool = Rc::new(pool);
+            let weak = Rc::downgrade(&pool);
+            let housekeeping = compio::runtime::spawn(async move { Pool::housekeep(&weak).await });
+
+            compio::time::timeout(Duration::from_secs(5), started_rx)
+                .await
+                .expect("housekeeper never sent a startup packet")
+                .expect("handshake fixture dropped its start signal");
+            assert_eq!(
+                pool.total_count(),
+                1,
+                "housekeeper did not reserve refill capacity"
+            );
+
+            pool.close().await;
+            assert!(pool.is_closed());
+            release_tx
+                .send(())
+                .expect("refused-handshake server stopped early");
+            let keep_running = compio::time::timeout(Duration::from_secs(5), housekeeping)
+                .await
+                .expect("closed-pool housekeeping did not finish")
+                .expect("closed-pool housekeeping task panicked");
+            assert!(!keep_running, "closed housekeeper requested another tick");
+            assert_eq!(
+                pool.total_count(),
+                0,
+                "failed refill kept its capacity reservation"
+            );
+        });
+        server.join().expect("refused-handshake server panicked");
+    }
+
+    #[test]
+    fn a_housekeeper_treats_a_connect_failure_after_close_as_shutdown() {
+        if std::env::args().any(|argument| argument == CLOSED_HOUSEKEEPER_CHILD_ARG) {
+            run_closed_housekeeper_child();
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("resolve the unit-test executable");
+        let output = std::process::Command::new(executable)
+            .args([
+                "--exact",
+                &closed_housekeeper_test_filter(),
+                "--nocapture",
+                "--test-threads=1",
+                "--skip",
+                CLOSED_HOUSEKEEPER_CHILD_ARG,
+            ])
+            .output()
+            .expect("run the isolated closed-housekeeper child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success(),
+            "the isolated closed-housekeeper child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("running 1 test")
+                && stdout.contains("test result: ok. 1 passed; 0 failed"),
+            "the child did not run exactly the intended test\nstdout:\n{stdout}"
+        );
+        assert!(
+            !stderr.contains("housekeeper: failed to create connection:"),
+            "shutdown fallout was logged as an operational connection failure\nstderr:\n{stderr}"
+        );
     }
 
     thread_local! {
