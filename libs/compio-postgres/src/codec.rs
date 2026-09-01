@@ -1132,6 +1132,39 @@ mod tests {
         frame
     }
 
+    /// The frame scan refuses a malformed header instead of walking through it.
+    /// A declared length below 4 is impossible on the wire - the length counts
+    /// its own four bytes - and advancing past it one byte at a time re-reads
+    /// the length field as a frame header, so a payload byte can be reported as
+    /// a frame tag. That is a false answer to "did the backend enter COPY
+    /// mode".
+    ///
+    /// **The two halves of that condition are bound as a PAIR, not
+    /// individually, and this was measured rather than assumed.** Removing
+    /// `length < 4 || next > self.0.len()` entirely fails this test. Removing
+    /// EITHER half alone does not: with only `length < 4`, the sub-minimum
+    /// frame is refused directly; with only `next > self.0.len()`, the one-byte
+    /// advance lands on a length field reading 0x70 and overruns the batch, so
+    /// the other half catches it one iteration later. Both roads end at `None`.
+    ///
+    /// A first version of this test asserted two cases and bound NEITHER - both
+    /// mutations left it green, because the bounds-checked `get` at the top of
+    /// the loop already returns `None` for an offset past the end. The probe is
+    /// what caught that; the test passing did not.
+    #[test]
+    fn first_matching_tag_refuses_a_sub_minimum_frame_length() {
+        let mut short = vec![b'X'];
+        short.extend_from_slice(&0u32.to_be_bytes()); // impossible: length < 4
+        short.extend_from_slice(b"payload");
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(short.as_slice()));
+
+        assert_eq!(
+            messages.first_matching_tag(&[0x00]),
+            None,
+            "a sub-minimum length let the scan re-read the length field as a header"
+        );
+    }
+
     #[test]
     fn first_matching_tag_advances_past_the_entire_leading_frame() {
         let bytes = [
