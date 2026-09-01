@@ -5,17 +5,17 @@
 //! free of `compio_postgres::Client` direct
 //! references and go through the trait instead.
 //!
-//! The methods are intentionally thin — they forward to the existing
-//! free functions in `crate::diff` / `crate::query` that already do the
-//! work. The point of this file is to *name the seam*, not to relocate
-//! every line of SQL.
+//! The methods are intentionally thin — they forward to PG-tier helpers
+//! beside this module or to vendor-neutral builders in `crate::query`.
+//! The point of this file is to *name the seam*: PostgreSQL catalog SQL
+//! lives in `pg_introspect`, not in the schema floor.
 //!
 //! **No method here emits DDL.** Schema belongs to `zeroship-migrate`,
 //! which authors the pgvector `USING ivfflat` and PostGIS `USING gist`
 //! indexes from the declared `t.vector()` / `t.geoPoint()` fields
 //! (`zeroship-migrate-core/src/render/declarative.rs`, `vector_index_snapshot`
 //! / `geo_index_snapshot`). The two `pg_extension` capability probes below
-//! are the only catalog reads that survive.
+//! are the only production catalog reads that survive.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,6 +26,8 @@ use crate::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
+#[cfg(any(test, feature = "test-helpers"))]
+use super::pg_introspect;
 use super::{
     DialectBuilder, GeoPoint, LockManager, PgSqlExecutor, SpatialIndex, SqlExecutor, VectorIndex,
     VectorMetric,
@@ -415,18 +417,17 @@ impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        // `read_live_schema` lives in the leaf crate `zeroship-schema` and
-        // returns `SchemaError` (it cannot name `DbError`). The PG-tier
+        // The PG-tier reader returns its local `SchemaError`; the sibling
         // translator re-creates the exact `coded_sql("diff: …", e)` shape, so
-        // SQLSTATE classification and the operator-facing message are
-        // preserved verbatim.
-        crate::diff::read_live_schema(&self.pool, app_id)
+        // SQLSTATE classification and the operator-facing message stay
+        // unchanged while the schema snapshot remains vendor-neutral.
+        pg_introspect::read_live_schema(&self.pool, app_id)
             .await
             .map_err(pg_error::classify_schema_error)
     }
 
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        crate::diff::estimate_row_count(&self.pool, app_id, collection)
+        pg_introspect::estimate_row_count(&self.pool, app_id, collection)
             .await
             .map_err(pg_error::classify_schema_error)
     }

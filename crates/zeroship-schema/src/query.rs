@@ -1480,9 +1480,9 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
-/// what the migration engine emits and what the runtime parser
-/// ([`crate::mask_codec::parse_encryption_sentinel`], via `read_live_schema`)
-/// expects. Returns the empty vector when no column is encrypted.
+/// what the migration engine emits and what each vendor-tier catalog reader's
+/// runtime parser ([`crate::mask_codec::parse_encryption_sentinel`]) expects.
+/// Returns the empty vector when no column is encrypted.
 #[must_use]
 pub fn build_encryption_sentinel_comments(
     app_id: &str,
@@ -2373,8 +2373,8 @@ pub fn build_mask_sentinel_comment_for_field(
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
 /// engine generates is byte-identical across both dialect emitters. The
-/// parser side lives in `read_live_schema` (PG `pg_attribute` comment regex) /
-/// the SQLite `sqlite_master.sql` regex.
+/// parser side lives in the PostgreSQL tier's `pg_attribute` comment reader /
+/// the SQLite tier's `sqlite_master.sql` reader.
 ///
 /// The returned string INCLUDES the surrounding `/* … */` comment delimiters so
 /// it can be embedded verbatim into DDL (PG ignores it at parse time; SQLite

@@ -82,6 +82,10 @@ pub(crate) mod pg_autocommit;
 // PostgreSQL error classification. PG tier: SQLSTATE and driver source-chain
 // inspection translate into the neutral `crate::error::DbError` hierarchy.
 pub mod pg_error;
+// PostgreSQL catalog introspection into the vendor-neutral schema snapshot.
+// Gated with the SchemaIntrospect capability and both backend impls below.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) mod pg_introspect;
 // PostgreSQL per-app session setup SQL. PG tier: `SET LOCAL ROLE` and the GUC
 // names are dialect. The budgets they render are core policy - see
 // `crate::budgets`. `pub` so `auth::bootstrap` can re-export for its callers.
@@ -568,8 +572,8 @@ pub trait LockManager: SqlExecutor {
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
-    /// [`crate::diff::LiveSchema`]; alternate backends would produce
-    /// the same shape from their own catalog tables.
+    /// [`crate::diff::LiveSchema`]; each vendor tier populates that neutral
+    /// shape from its own catalog.
     type LiveSchema;
 
     /// Introspect the live schema for an app. Returns the typed

@@ -165,13 +165,10 @@ pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
     err
 }
 
-/// Translate the schema leaf's PostgreSQL introspection error at the PG tier.
-///
-/// `SchemaError::source` is a driver value even though the field-access call
-/// site does not spell the driver. Consuming it here keeps that vendor value
-/// out of `crate::error` as well as keeping the direct vendor name out.
+/// Translate the PG introspection module's contextual driver error into the
+/// backend-neutral error hierarchy.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) fn classify_schema_error(e: zeroship_schema::error::SchemaError) -> DbError {
+pub(crate) fn classify_schema_error(e: super::pg_introspect::SchemaError) -> DbError {
     coded_sql(&format!("diff: {}", e.context), e.source)
 }
 

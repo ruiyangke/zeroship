@@ -9,8 +9,8 @@
 //!
 //! # What it replaced
 //!
-//! `crud::introspect_schema` read the LIVE PostgreSQL catalog
-//! (`zeroship_schema::diff::read_live_schema`) and re-derived
+//! `crud::introspect_schema` read the LIVE PostgreSQL catalog through the
+//! reader now located at `backend::pg_introspect::read_live_schema` and re-derived
 //! `{ type, encrypted?, mask? }` from the `zsenc:` / `__zsmask:` column
 //! comments the migration engine had written. That was:
 //!
@@ -21,7 +21,7 @@
 //!   `geoPoint` tokens at all, and it never carried `vectorDims` or `idPrefix` -
 //!   three facts live consumers need and one (`vectorDims`) whose absence is a
 //!   hard `DbError::internal`. It also DROPPED the mask sibling's name, which
-//!   `read_live_schema` had already recovered, so every consumer re-derived it
+//!   that catalog reader had already recovered, so every consumer re-derived it
 //!   by string formatting.
 //! * **the only ungated production catalog read in the crate**, on the hot path
 //!   of every read and every write, behind a per-thread singleflight and a
