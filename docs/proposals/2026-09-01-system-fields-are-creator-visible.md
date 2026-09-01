@@ -519,10 +519,124 @@ the migration engine already treats system columns as *data resolved once and
 passed in*. The proposal is not inventing a pattern; it is extending the one the
 authoritative layer already uses to the layers that hardcode instead.
 
-**Enforcement stays in Rust.** The descriptor is produced by the migration
+~~**Enforcement stays in Rust.** The descriptor is produced by the migration
 service and consumed by the worker, so `writeClass` is state a separate service
-writes and the worker only reads - the one shape the privilege invariant permits.
-The TS side mirrors it for types and error messages, and is not a fence.
+writes and the worker only reads - the one shape the privilege invariant
+permits.~~
+
+## ROUND 3 KILLED THIS TOO, AND THE FIRST DEFECT IS A SECURITY INVERSION
+
+**The descriptor is CREATOR-SUPPLIED. The paragraph above is backwards in both
+halves, and the tree says so in its own words.**
+
+`crates/zeroship-migrate-server/src/apply.rs:61-65`:
+
+```
+/// WHAT THIS PROVES IS ORDERING, NOT TRUTH. The value is client-declared: a
+/// creator who hand-edits both generated files can make them agree about a
+/// lie. Closing that needs the server to re-render the descriptor from the
+/// documents it just applied and refuse a mismatch, which is a separate
+/// change and owes a byte-identity gate first.
+```
+
+`schema.runtime.json` is generated on the creator's machine
+(`sdks/vite-plugin/src/gen-types/index.ts:43`), packed into the `.zship`
+(`sdks/vite-plugin/src/zship.ts:527`), and the deploy gate is hash equality
+against that same client-declared value
+(`crates/zeroship-control/src/registry.rs:551`). The migration server never
+re-derives it. `crates/zeroship-migrate-core/src/render/declarative.rs:160`
+labels `FieldDescriptor` **"Untrusted"** in its own doc comment.
+
+So putting the fence on `writeClass` **hands the attacker the fence's
+configuration**. A creator edits one JSON file to
+`"created_by": { ..., "writeClass": "creator" }`, the overwrite never runs, and
+the audit column is forgeable. That is the DB-3 shape from AGENTS.md,
+reintroduced by the fix for DB-3's sibling. The precedent is already live:
+`prefix_for_collection` (`system_fields_pass.rs:128-135`) honours a
+descriptor-declared `idPrefix` **unvalidated**, so a descriptor claiming
+`idPrefix: "usr"` mints platform-shaped user ids from the worker today.
+
+**The correction is MONOTONIC, not replacement.** Rust keeps a hardcoded floor -
+`IMMUTABLE_SYSTEM_FIELDS` plus a hardcoded `serverAuthored` set - and the
+descriptor's `writeClass` may only **narrow** capability, never widen it. There
+is precedent for exactly this: `render/gen_types.rs:356-359` stamps
+`readable`/`filterable`/`sortable`/`projectable` as descriptor-declared booleans
+that are unconditionally `true`, so a tampered `false` can only restrict.
+
+**And the cost of that correction must be stated, because it deletes the
+design's headline benefit.** Under intersection, the two readers that are
+*fences* keep their own hardcoded lists - the duplication does not collapse for
+them. That is the right outcome, not a regression: **a security list must be
+duplicated in the trusted layer; only the ergonomic ones may be derived.** The
+proposal's "seven lists become readers of one property" is therefore wrong as
+stated, and the honest version is "the ergonomic lists collapse; the fences stay
+hardcoded, deliberately, and gain a comment saying why".
+
+**Second defect: the predicate is fail-open.** `writeClass !== "creator"` was the
+gate. Nothing stamps `"creator"` - `TypeBuilder.toFieldDef()` (`types.ts:1142`)
+carries no write class, nor do the injections at `install-schema.ts:583`/`:588`,
+nor the raw-object bypass at `:297`. So `undefined !== "creator"` is `true` for
+every creator field and `required` stops being enforced anywhere. It must gate on
+the explicit non-creator classes. The proposal also contradicted itself: `:387`
+says the fold emits it, and the requiredness item said "No fold change".
+
+**Third defect: gating `:511` is not enough.** `validate.ts:508-510` materialises
+`def.default` *before* the required check, so `version` (the one system field
+with a default) would ship `version: 1` on the wire from every SDK insert, for a
+column the pass deliberately leaves to the DDL default
+(`system_fields_pass.rs:274-278`). And `validateUnionDoc` is a **second**
+`required` site (`validate.ts:578`) that the fix never reaches: it builds its
+result from the matched *variant* map (`:567`), and system fields are top-level
+entries, never variant entries, so **for union collections #126 stays broken
+after the strip is removed**.
+
+**Fourth: this is a v3 descriptor, not a v2.** `install-schema.ts:68-74` states
+the rule the version number encodes - a consumer that stops deriving something
+itself, and instead depends on a property being present on every field, is
+exactly the situation that moved v1 to v2. A layer that deletes its list of seven
+and relies on `writeClass` being present is that situation. The proposal
+specified no bump.
+
+**Fifth: at least 24 lists, not nine.** Including a *third* in `types.ts`
+(`:2196-2205`, `_knownFieldNames`), three per-dialect DDL emitters in
+`zeroship-schema/src/query.rs` (`:208`, `:322`, `:449`), an unnamed second copy
+of `IMMUTABLE_SYSTEM_FIELDS` in the upsert exclusion (`query.rs:6296`), and the
+migration engine's charter `policies/confined-system-shape.inject.toml:96-102`.
+Two of them **cannot** read a descriptor property even in principle:
+`data-plan/src/projection.rs:53-56` deliberately takes no dependency on
+`zeroship-schema`, and the charter is consumed at migration-apply time, before a
+descriptor exists.
+
+## The defect that outlives every version of this design
+
+**The three timestamp columns cannot be written back at the type they are read
+out as, and no version of `writeClass` touches the code that refuses them.**
+
+- Read emits numbers: `backend/pg_row_json.rs:121-137` decodes TIMESTAMP to
+  `Value::Number(unix_ms)`, and `crud/read_pipeline.rs:162` normalises
+  `created_at` / `updated_at` / `deleted_at` by **hardcoded name** on every
+  backend.
+- The types agree: `sdks/db/src/types.ts:175-176` declares
+  `created_at: number; updated_at: number`.
+- Write refuses numbers: `sdks/db/src/validate.ts:277-284` - a `date` or
+  `timestamp` field requires `value instanceof Date` or a parseable ISO string,
+  else *"must be a Date or ISO 8601 date string"*.
+
+The committed descriptors type all three as `"type": "date"`. So the moment the
+strip is gone, reading a row and writing it back throws. This invalidates
+acceptance criterion 1's own example (`created_at: t.timestamp()` typechecks as
+`number` and fails at runtime) and **falsifies the "CANNOT FAIL" annotation on
+criterion 3**: that annotation rests on `checkPartial` skipping unknown keys
+(`validate.ts:613-614`), which is true only while the strip exists. Once
+`updated_at` is a known key, `checkField` runs at `:616` and refuses the number.
+
+`writeClass` cannot help: it gates the `required` branch, and `checkField` fires
+from `:517` whenever a value is *present*, independent of `required` entirely.
+
+**The strip has been masking a pre-existing `date` round-trip asymmetry in
+`@zeroship/db`.** Fixing that asymmetry is a precondition for this proposal, not
+a consequence of it, and it is the one defect that survives every redesign so far
+because it lives in neither the strip nor the descriptor.
 
 **What this does not do.** It does not make `created_at` declarable by a creator
 in a migration; the engine refuses that at `table_shape.rs:361-376` and this
