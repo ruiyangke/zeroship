@@ -339,7 +339,14 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         ),
         mk(
             "deleteMany",
-            build_delete_many(app, COLLECTION, schema, &json!({ "id": "psn_ins" })).unwrap(),
+            build_delete_many(
+                app,
+                COLLECTION,
+                schema,
+                &json!({ "id": "psn_ins" }),
+                d,
+            )
+            .unwrap(),
         ),
     ]
 }
