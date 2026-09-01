@@ -1182,36 +1182,6 @@ fn remember_server_error(slot: &Mutex<Option<DbError>>, error: &DbError) {
     }
 }
 
-/// Preserve an ErrorResponse which teardown cannot deliver without violating
-/// the pending-response FIFO. The request-local slot is intentionally the
-/// only visibility for a nonterminal SQL error; publishing it globally would
-/// misattribute it to unrelated callers.
-fn preserve_queued_server_error(
-    messages: &BackendMessages,
-    response: Option<&Response>,
-    terminal_server_error: &Mutex<Option<DbError>>,
-    tx_status: &AtomicU8,
-) -> Result<(), Error> {
-    let Some(error) = first_server_error(messages)? else {
-        return Ok(());
-    };
-
-    let ends_session = server_error_ends_session(&error);
-    if ends_session || response.is_none() {
-        // Match normal dispatch for FATAL/PANIC and for an ErrorResponse with
-        // no owning request. Publish terminal poison before request-local
-        // visibility, just as ordinary dispatch does.
-        remember_server_error(terminal_server_error, &error);
-    }
-    if ends_session {
-        tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-    }
-    if let Some(response) = response {
-        remember_server_error(&response.request_server_error, &error);
-    }
-    Ok(())
-}
-
 /// Preserve only a diagnosis whose bytes remain unambiguous after a
 /// client_encoding change. Normal response delivery has stopped at this
 /// point: callers receive the saved SQLSTATE when teardown closes their
@@ -2092,9 +2062,6 @@ where
     // immediately available FIFO response ahead of it.
     let mut flush_failure: Option<Error> = None;
     let mut flush_failure_reader_yielded = false;
-    let mut flush_failure_diagnostic_started = false;
-    let mut flush_failure_response_offset = 0usize;
-    let mut flush_failure_encoding_retired = false;
     // An unsupported client_encoding retires immediately, but the server may
     // already owe responses for an earlier flushed prefix. While the current
     // frontend flush is pending its tail is excluded; a successful flush
@@ -2202,6 +2169,9 @@ where
                         continue;
                     }
                     Poll::Ready(None) => {
+                        // The production reader publishes `Terminal` before
+                        // dropping this channel. Only a task panic or abort can
+                        // close it without that FIFO event.
                         read_terminal = Some(None);
                         continue;
                     }
@@ -2227,195 +2197,86 @@ where
             // (3) Deliver a stashed batch whose sender now has room. Honour
             // the FIFO gate: while a batch is stashed, no new inbound frame
             // may be dispatched ahead of it.
-            if let Some(response) = pending_responses.front_mut() {
-                let sender_poll = if flush_failure_diagnostic_started {
-                    Poll::Pending
-                } else {
-                    response.sender.poll_ready(cx)
-                };
-                match sender_poll {
-                    Poll::Ready(_) => {
-                        // Err (consumer hung up) still counts as "ready":
-                        // start_send below is a no-op drop in that case.
-                        if let Some(PendingResponse {
-                            mut sender,
-                            messages,
-                            ..
-                        }) = pending_responses.pop_front()
-                        {
-                            let _ = sender.start_send(messages);
-                        }
-                        continue;
-                    }
-                    Poll::Pending => {
-                        if flush_failure.is_none() {
-                            return Poll::Pending;
-                        }
-                        flush_failure_diagnostic_started = true;
-
-                        // Delivery must remain behind the stashed batch, but
-                        // teardown must not discard a response the reader has
-                        // already decoded. Inspect immediately queued events
-                        // without dispatching normal batches: only their
-                        // ErrorResponse enters the matching request's private
-                        // diagnosis slot. Track completed responses locally so
-                        // multiple queued batches still map to their owners.
-                        loop {
-                            match read_rx.poll_next_unpin(cx) {
-                                Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
-                                    message,
-                                    acknowledgement,
-                                }))) => {
-                                    let result = match message {
-                                        BackendMessage::Async { message, .. }
-                                            if !flush_failure_encoding_retired =>
-                                        {
-                                            match route_async(parameters, async_sender, message) {
-                                                Ok(DispatchOutcome::Continue) => Ok(()),
-                                                Ok(DispatchOutcome::RetireAfterDiagnostics(_)) => {
-                                                    tx_status.store(
-                                                        READ_RETIRED_STATUS,
-                                                        Ordering::Release,
-                                                    );
-                                                    flush_failure_encoding_retired = true;
-                                                    Ok(())
-                                                }
-                                                Err(error) => Err(error),
-                                            }
-                                        }
-                                        BackendMessage::Async { .. } => Ok(()),
-                                        BackendMessage::Normal {
-                                            messages,
-                                            request_complete,
-                                            deferred_error,
-                                        } => {
-                                            let result = if flush_failure_encoding_retired {
-                                                preserve_retirement_server_error(
-                                                    &messages,
-                                                    responses.get(flush_failure_response_offset),
-                                                    terminal_server_error,
-                                                    tx_status,
-                                                );
-                                                Ok(())
-                                            } else {
-                                                preserve_queued_server_error(
-                                                    &messages,
-                                                    responses.get(flush_failure_response_offset),
-                                                    terminal_server_error,
-                                                    tx_status,
-                                                )
-                                            };
-                                            if request_complete {
-                                                flush_failure_response_offset += 1;
-                                            }
-                                            if deferred_error.is_some() {
-                                                tx_status
-                                                    .store(READ_RETIRED_STATUS, Ordering::Release);
-                                            }
-                                            result
-                                        }
-                                    };
-                                    if let Some(acknowledgement) = acknowledgement {
-                                        let _ = acknowledgement.send(());
-                                    }
-                                    if let Err(diagnostic_error) = result {
-                                        read_terminal = Some(Some(diagnostic_error));
-                                    }
-                                    if read_terminal.is_some() {
-                                        break;
-                                    }
-                                }
-                                Poll::Ready(Some(ReadEvent::Terminal(terminal))) => {
-                                    read_terminal = Some(Some(terminal));
-                                    break;
-                                }
-                                Poll::Ready(None) => {
-                                    read_terminal = Some(None);
-                                    break;
-                                }
-                                Poll::Pending => {
-                                    return poll_flush_failure(
-                                        cx,
-                                        &mut flush_failure,
-                                        &mut flush_failure_reader_yielded,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Some(PendingResponse {
+                mut sender,
+                messages,
+                ..
+            }) = pending_responses.pop_front()
+            {
+                // `deliver_batch` is the sole constructor and stashes a fresh
+                // futures-mpsc sender clone. Readiness is per handle, so that
+                // clone owns one immediate slot even when the original sender
+                // is parked. Its first send can only succeed or observe a
+                // disconnected consumer; it cannot backpressure this flush.
+                let _ = sender.try_send(messages);
+                continue;
             }
 
             // (4) FIFO gate clear (no stashed batch) -> dispatch one inbound
-            // frame, unless we already saw a terminal read event.
-            if read_terminal.is_none() {
-                match read_rx.poll_next_unpin(cx) {
-                    Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
-                        message,
-                        acknowledgement,
-                    }))) => {
-                        let result = (Dispatch {
-                            parameters,
-                            responses,
-                            pending_responses,
-                            async_sender,
-                            tx_status,
-                            in_flight_requests,
-                            terminal_server_error,
-                            copy_error_may_owe_extra_ready,
-                        })
-                        .handle_message(message);
-                        // Dispatch has now completed or paused the matching
-                        // obligation. Only now may the reader submit another
-                        // socket read.
-                        if matches!(&result, Ok(DispatchOutcome::RetireAfterDiagnostics(_))) {
+            // frame. A terminal event returned above, so the option is absent.
+            debug_assert!(read_terminal.is_none());
+            match read_rx.poll_next_unpin(cx) {
+                Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
+                    message,
+                    acknowledgement,
+                }))) => {
+                    let result = (Dispatch {
+                        parameters,
+                        responses,
+                        pending_responses,
+                        async_sender,
+                        tx_status,
+                        in_flight_requests,
+                        terminal_server_error,
+                        copy_error_may_owe_extra_ready,
+                    })
+                    .handle_message(message);
+                    // Dispatch has now completed or paused the matching
+                    // obligation. Only now may the reader submit another
+                    // socket read.
+                    if matches!(&result, Ok(DispatchOutcome::RetireAfterDiagnostics(_))) {
+                        tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                    }
+                    if let Some(acknowledgement) = acknowledgement {
+                        let _ = acknowledgement.send(());
+                    }
+                    match result {
+                        Ok(DispatchOutcome::Continue) => {}
+                        Ok(DispatchOutcome::RetireAfterDiagnostics(error)) => {
                             tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                            retirement = Some(FlushRetirement {
+                                error,
+                                response_offset: 0,
+                                response_count: responses.len().saturating_sub(1),
+                                include_tail_after_flush,
+                                flush_complete: false,
+                                stopped: false,
+                            });
                         }
-                        if let Some(acknowledgement) = acknowledgement {
-                            let _ = acknowledgement.send(());
+                        Err(error) => {
+                            // A dispatch error retires the session, so the next
+                            // trip around the loop abandons this useless flush.
+                            read_terminal = Some(Some(error));
                         }
-                        match result {
-                            Ok(DispatchOutcome::Continue) => {}
-                            Ok(DispatchOutcome::RetireAfterDiagnostics(error)) => {
-                                tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-                                retirement = Some(FlushRetirement {
-                                    error,
-                                    response_offset: 0,
-                                    response_count: responses.len().saturating_sub(1),
-                                    include_tail_after_flush,
-                                    flush_complete: false,
-                                    stopped: false,
-                                });
-                            }
-                            Err(error) => {
-                                // A dispatch error retires the session, so the next
-                                // trip around the loop abandons this useless flush.
-                                read_terminal = Some(Some(error));
-                            }
-                        }
-                        continue;
-                    }
-                    Poll::Ready(Some(ReadEvent::Terminal(error))) => {
-                        read_terminal = Some(Some(error));
-                        continue;
-                    }
-                    Poll::Ready(None) => {
-                        // The reader ended without a published I/O error.
-                        read_terminal = Some(None);
-                        continue;
-                    }
-                    Poll::Pending => {
-                        return poll_flush_failure(
-                            cx,
-                            &mut flush_failure,
-                            &mut flush_failure_reader_yielded,
-                        );
                     }
                 }
+                Poll::Ready(Some(ReadEvent::Terminal(error))) => {
+                    read_terminal = Some(Some(error));
+                }
+                Poll::Ready(None) => {
+                    // The production reader publishes `Terminal` before
+                    // dropping this channel. Treat a task panic or abort as
+                    // a fail-closed reader disappearance.
+                    read_terminal = Some(None);
+                }
+                Poll::Pending => {
+                    return poll_flush_failure(
+                        cx,
+                        &mut flush_failure,
+                        &mut flush_failure_reader_yielded,
+                    );
+                }
             }
-
-            // Flush still pending, nothing left to drain this wake.
-            return poll_flush_failure(cx, &mut flush_failure, &mut flush_failure_reader_yielded);
         }
     })
     .await;
@@ -4737,6 +4598,16 @@ mod tests {
         frame
     }
 
+    fn unsupported_encoding_message() -> BackendMessage {
+        let mut frame =
+            BytesMut::from(parameter_status_frame("client_encoding", "LATIN1").as_slice());
+        let frame_len = frame.len();
+        let message = Message::parse(&mut frame)
+            .expect("decode the scripted ParameterStatus")
+            .expect("the scripted ParameterStatus was incomplete");
+        BackendMessage::Async { message, frame_len }
+    }
+
     #[allow(clippy::future_not_send, clippy::type_complexity)]
     async fn run_gated_copy_retirement(
         wire: Vec<u8>,
@@ -5326,6 +5197,416 @@ mod tests {
         .expect("parked-flush timeout test exceeded its watchdog");
     }
 
+    #[compio::test]
+    async fn copy_data_flush_retirement_does_not_wait_for_an_unowed_response() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let stream = BufStream::new(YieldingWriteSplitStream);
+            let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+                panic!("the yielding-write fixture did not split");
+            };
+            drop(read_half);
+            write_frontend(
+                &mut write_half,
+                FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted COPY data")),
+            )
+            .expect("buffer the scripted COPY data");
+
+            let (mut read_tx, mut read_rx) = mpsc::channel(1);
+            read_tx
+                .try_send(ReadEvent::Message(ReadEnvelope {
+                    message: unsupported_encoding_message(),
+                    acknowledgement: None,
+                }))
+                .expect("queue the encoding change");
+            let (read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            let (response_tx, _response_rx) = mpsc::channel(1);
+            let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+            let mut pending_responses = VecDeque::new();
+            let tx_status = AtomicU8::new(b'I');
+
+            let (write_result, terminal) = flush_with_read_draining(
+                &mut write_half,
+                &mut read_rx,
+                &mut read_terminal_rx,
+                &Mutex::new(HashMap::new()),
+                &mut responses,
+                &mut pending_responses,
+                None,
+                &tx_status,
+                &AtomicUsize::new(1),
+                &Mutex::new(None),
+                &Cell::new(false),
+                false,
+            )
+            .await;
+            drop(read_tx);
+            drop(read_terminal_tx);
+
+            let error =
+                write_result.expect_err("a response-free COPY flush waited for an unowed response");
+            assert!(error.is_config());
+            assert!(terminal.is_none(), "the fixture invented a read failure");
+            assert_eq!(responses.len(), 1, "retirement consumed the COPY owner");
+            assert!(pending_responses.is_empty());
+            assert_eq!(tx_status.load(Ordering::Acquire), READ_RETIRED_STATUS);
+        })
+        .await
+        .expect("response-free COPY retirement exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn flush_retirement_stops_at_copy_input() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+                panic!("the parked-write fixture did not split");
+            };
+            drop(read_half);
+            write_frontend(
+                &mut write_half,
+                FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+            )
+            .expect("buffer the scripted request");
+
+            let (mut read_tx, mut read_rx) = mpsc::channel(2);
+            read_tx
+                .try_send(ReadEvent::Message(ReadEnvelope {
+                    message: unsupported_encoding_message(),
+                    acknowledgement: None,
+                }))
+                .expect("queue the encoding change");
+            let (acknowledgement, acknowledged) = oneshot::channel();
+            read_tx
+                .try_send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: BackendMessages::from_test_bytes(BytesMut::from(
+                            copy_in_response_frame().as_slice(),
+                        )),
+                        request_complete: false,
+                        deferred_error: None,
+                    },
+                    acknowledgement: Some(acknowledgement),
+                }))
+                .expect("queue CopyInResponse behind the encoding change");
+            let (read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            let (response_tx, _response_rx) = mpsc::channel(1);
+            let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+            let mut pending_responses = VecDeque::new();
+
+            let (write_result, terminal) = flush_with_read_draining(
+                &mut write_half,
+                &mut read_rx,
+                &mut read_terminal_rx,
+                &Mutex::new(HashMap::new()),
+                &mut responses,
+                &mut pending_responses,
+                None,
+                &AtomicU8::new(b'I'),
+                &AtomicUsize::new(1),
+                &Mutex::new(None),
+                &Cell::new(false),
+                true,
+            )
+            .await;
+            drop(read_tx);
+            drop(read_terminal_tx);
+
+            acknowledged
+                .await
+                .expect("retirement did not acknowledge CopyInResponse");
+            let error = write_result.expect_err("CopyInResponse left retirement waiting");
+            assert!(error.is_config());
+            assert!(terminal.is_none(), "the fixture invented a read failure");
+            assert!(write_started.get(), "the flush never became pending");
+            assert!(
+                write_future_dropped.get(),
+                "retirement did not cancel the now-useless pending flush"
+            );
+        })
+        .await
+        .expect("copy-input flush retirement exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn flush_drains_a_freshly_stashed_batch_before_completing() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(3);
+        for _ in 0..2 {
+            read_tx
+                .try_send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: BackendMessages::empty(),
+                        request_complete: false,
+                        deferred_error: None,
+                    },
+                    acknowledgement: None,
+                }))
+                .expect("queue a partial response batch");
+        }
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        completed_response_batch(b'I').as_slice(),
+                    )),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the completing response batch");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let mut pending_responses = VecDeque::new();
+        let in_flight_requests = AtomicUsize::new(1);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &AtomicU8::new(b'I'),
+            &in_flight_requests,
+            &Mutex::new(None),
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        write_result.expect("the yielding flush failed");
+        acknowledged
+            .await
+            .expect("normal dispatch did not acknowledge the completing batch");
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        assert!(responses.is_empty());
+        assert!(pending_responses.is_empty());
+        assert_eq!(in_flight_requests.load(Ordering::Acquire), 0);
+        let _first = response_rx
+            .try_recv()
+            .expect("first batch was not delivered");
+        let _second = response_rx
+            .try_recv()
+            .expect("second batch was not delivered");
+        let third = response_rx
+            .try_recv()
+            .expect("the freshly stashed third batch was not delivered");
+        assert!(matches!(
+            third,
+            ResponseMessages::Raw(messages) | ResponseMessages::Filtered(messages)
+                if messages.ready_for_query_status() == Some(b'I')
+        ));
+    }
+
+    #[compio::test]
+    async fn flush_dispatch_error_cancels_the_pending_write() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+                panic!("the parked-write fixture did not split");
+            };
+            drop(read_half);
+            write_frontend(
+                &mut write_half,
+                FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+            )
+            .expect("buffer the scripted request");
+
+            let (mut read_tx, mut read_rx) = mpsc::channel(1);
+            read_tx
+                .try_send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: BackendMessages::from_test_bytes(BytesMut::from(
+                            completed_response_batch(b'I').as_slice(),
+                        )),
+                        request_complete: true,
+                        deferred_error: None,
+                    },
+                    acknowledgement: None,
+                }))
+                .expect("queue unsolicited ReadyForQuery");
+            let (read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            let tx_status = AtomicU8::new(b'I');
+
+            let (write_result, terminal) = flush_with_read_draining(
+                &mut write_half,
+                &mut read_rx,
+                &mut read_terminal_rx,
+                &Mutex::new(HashMap::new()),
+                &mut VecDeque::new(),
+                &mut VecDeque::new(),
+                None,
+                &tx_status,
+                &AtomicUsize::new(0),
+                &Mutex::new(None),
+                &Cell::new(false),
+                true,
+            )
+            .await;
+            drop(read_tx);
+            drop(read_terminal_tx);
+
+            write_result.expect("a read dispatch error was returned as a write failure");
+            let error = terminal
+                .expect("the flush discarded its dispatch error")
+                .expect("the dispatch error became a bare channel close");
+            assert_eq!(error.to_string(), "unexpected message from server");
+            assert_eq!(tx_status.load(Ordering::Acquire), READ_RETIRED_STATUS);
+            assert!(write_started.get(), "the flush never became pending");
+            assert!(
+                write_future_dropped.get(),
+                "the dispatch error left the pending write alive"
+            );
+        })
+        .await
+        .expect("dispatch-error flush test exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn flush_reader_disappearance_cancels_the_pending_write() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+                panic!("the parked-write fixture did not split");
+            };
+            drop(read_half);
+            write_frontend(
+                &mut write_half,
+                FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+            )
+            .expect("buffer the scripted request");
+
+            let (read_tx, mut read_rx) = mpsc::channel(1);
+            drop(read_tx);
+            let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            let mut responses = VecDeque::new();
+            let mut pending_responses = VecDeque::new();
+
+            let (write_result, terminal) = flush_with_read_draining(
+                &mut write_half,
+                &mut read_rx,
+                &mut read_terminal_rx,
+                &Mutex::new(HashMap::new()),
+                &mut responses,
+                &mut pending_responses,
+                None,
+                &AtomicU8::new(b'I'),
+                &AtomicUsize::new(0),
+                &Mutex::new(None),
+                &Cell::new(false),
+                true,
+            )
+            .await;
+
+            write_result.expect("reader disappearance became a write failure");
+            assert!(
+                matches!(terminal, Some(None)),
+                "reader disappearance was not reported to connection teardown"
+            );
+            assert!(write_started.get(), "the flush never became pending");
+            assert!(
+                write_future_dropped.get(),
+                "reader disappearance left the pending write alive"
+            );
+        })
+        .await
+        .expect("reader-disappearance flush test exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn flush_retirement_reports_reader_disappearance() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+                panic!("the parked-write fixture did not split");
+            };
+            drop(read_half);
+            write_frontend(
+                &mut write_half,
+                FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+            )
+            .expect("buffer the scripted request");
+
+            let (mut read_tx, mut read_rx) = mpsc::channel(1);
+            read_tx
+                .try_send(ReadEvent::Message(ReadEnvelope {
+                    message: unsupported_encoding_message(),
+                    acknowledgement: None,
+                }))
+                .expect("queue the encoding change");
+            drop(read_tx);
+            let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            let mut responses = VecDeque::new();
+            let mut pending_responses = VecDeque::new();
+            let tx_status = AtomicU8::new(b'I');
+
+            let (write_result, terminal) = flush_with_read_draining(
+                &mut write_half,
+                &mut read_rx,
+                &mut read_terminal_rx,
+                &Mutex::new(HashMap::new()),
+                &mut responses,
+                &mut pending_responses,
+                None,
+                &tx_status,
+                &AtomicUsize::new(0),
+                &Mutex::new(None),
+                &Cell::new(false),
+                true,
+            )
+            .await;
+
+            let error = write_result.expect_err("retirement ignored reader disappearance");
+            assert!(error.is_config());
+            assert!(
+                matches!(terminal, Some(None)),
+                "retirement discarded the reader disappearance"
+            );
+            assert_eq!(tx_status.load(Ordering::Acquire), READ_RETIRED_STATUS);
+            assert!(write_started.get(), "the flush never became pending");
+            assert!(
+                write_future_dropped.get(),
+                "retirement left the pending write alive"
+            );
+        })
+        .await
+        .expect("retired reader-disappearance test exceeded its watchdog");
+    }
+
     /// The serialized fallback used to stop on the unsupported ParameterStatus
     /// and drop the SQLSTATE for the second request which it had already
     /// flushed. A CommandComplete prefix gives the loop a dispatch point at
@@ -5865,219 +6146,6 @@ mod tests {
         drop(request_tx);
     }
 
-    async fn queued_error_slots_after_backpressured_flush(
-        messages: BackendMessages,
-    ) -> (RequestServerError, Arc<Mutex<Option<DbError>>>) {
-        let read_half_dropped = Rc::new(Cell::new(false));
-        let stream = BufStream::new(WriteFailingSplitStream {
-            read_half_dropped: Rc::clone(&read_half_dropped),
-        });
-        let (read_half, mut write_half) = match stream.try_into_split() {
-            Ok(halves) => halves,
-            Err(_) => panic!("the flush-failure fixture did not split"),
-        };
-        drop(read_half);
-        write_frontend(
-            &mut write_half,
-            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
-        )
-        .expect("buffer the scripted request");
-
-        let request_complete = messages.ready_for_query_status().is_some();
-        let (mut read_tx, mut read_rx) = mpsc::channel(1);
-        read_tx
-            .try_send(ReadEvent::Message(ReadEnvelope {
-                message: BackendMessage::Normal {
-                    messages,
-                    request_complete,
-                    deferred_error: None,
-                },
-                acknowledgement: None,
-            }))
-            .expect("queue the decoded server error");
-        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
-
-        let (response_tx, _response_rx) = mpsc::channel(1);
-        let request_server_error = Arc::default();
-        let mut responses = VecDeque::from([Response {
-            sender: response_tx,
-            disposition: RequestDisposition::Awaited,
-            transaction_effect: TransactionEffect::MayChange,
-            prepare_cleanup: None,
-            statement: None,
-            observation: None,
-            bind_complete_seen: false,
-            read_obligation: ReadObligation::new(None, false),
-            request_server_error: Arc::clone(&request_server_error),
-        }]);
-
-        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
-        for _ in 0..2 {
-            blocked_sender
-                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
-                .expect("the pending response sender filled too early");
-        }
-        assert!(
-            blocked_sender
-                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
-                .is_err(),
-            "the pending response sender was not backpressured"
-        );
-        let mut pending_responses = VecDeque::from([PendingResponse {
-            sender: blocked_sender,
-            messages: ResponseMessages::Raw(BackendMessages::empty()),
-            disposition: RequestDisposition::Awaited,
-        }]);
-        let terminal_server_error = Arc::new(Mutex::new(None));
-        let (write_result, terminal) = flush_with_read_draining(
-            &mut write_half,
-            &mut read_rx,
-            &mut read_terminal_rx,
-            &Mutex::new(HashMap::new()),
-            &mut responses,
-            &mut pending_responses,
-            None,
-            &AtomicU8::new(b'I'),
-            &AtomicUsize::new(1),
-            &terminal_server_error,
-            &Cell::new(false),
-            true,
-        )
-        .await;
-
-        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
-        assert_eq!(
-            write_error.as_io().map(std::io::Error::kind),
-            Some(std::io::ErrorKind::BrokenPipe)
-        );
-        assert!(terminal.is_none(), "the fixture invented a read failure");
-        assert!(read_half_dropped.get());
-
-        (request_server_error, terminal_server_error)
-    }
-
-    #[compio::test]
-    async fn backpressured_flush_nested_drain_preserves_the_read_error() {
-        let read_half_dropped = Rc::new(Cell::new(false));
-        let stream = BufStream::new(WriteFailingSplitStream {
-            read_half_dropped: Rc::clone(&read_half_dropped),
-        });
-        let (read_half, mut write_half) = match stream.try_into_split() {
-            Ok(halves) => halves,
-            Err(_) => panic!("the nested-drain fixture did not split"),
-        };
-        drop(read_half);
-        write_frontend(
-            &mut write_half,
-            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
-        )
-        .expect("buffer the scripted request");
-
-        let (mut read_tx, mut read_rx) = mpsc::channel(1);
-        read_tx
-            .try_send(ReadEvent::Terminal(Error::io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "scripted reset during nested drain",
-            ))))
-            .expect("queue the terminal read for the nested drain");
-        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
-
-        let (response_tx, _response_rx) = mpsc::channel(1);
-        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
-        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
-        for _ in 0..2 {
-            blocked_sender
-                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
-                .expect("the pending response sender filled too early");
-        }
-        assert!(
-            blocked_sender
-                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
-                .is_err(),
-            "the pending response sender was not backpressured"
-        );
-        let mut pending_responses = VecDeque::from([PendingResponse {
-            sender: blocked_sender,
-            messages: ResponseMessages::Raw(BackendMessages::empty()),
-            disposition: RequestDisposition::Awaited,
-        }]);
-        let parameters = Mutex::new(HashMap::new());
-        let tx_status = AtomicU8::new(b'I');
-        let in_flight_requests = AtomicUsize::new(1);
-        let terminal_server_error = Mutex::new(None);
-
-        let (write_result, terminal) = flush_with_read_draining(
-            &mut write_half,
-            &mut read_rx,
-            &mut read_terminal_rx,
-            &parameters,
-            &mut responses,
-            &mut pending_responses,
-            None,
-            &tx_status,
-            &in_flight_requests,
-            &terminal_server_error,
-            &Cell::new(false),
-            true,
-        )
-        .await;
-
-        write_result.expect("the terminal read did not outrank the failed flush");
-        let terminal = terminal
-            .expect("the nested drain discarded the terminal read")
-            .expect("the nested drain downgraded the read error to channel closure");
-        assert_eq!(
-            terminal.as_io().map(std::io::Error::kind),
-            Some(std::io::ErrorKind::ConnectionReset)
-        );
-        assert_eq!(
-            pending_responses.len(),
-            1,
-            "the backpressure gate cleared before the nested drain"
-        );
-        assert_eq!(
-            tx_status.load(Ordering::Acquire),
-            READ_RETIRED_STATUS,
-            "the fixture did not drive the flush-failure path"
-        );
-        assert!(read_half_dropped.get());
-    }
-
-    #[compio::test]
-    async fn backpressured_flush_fatal_records_the_terminal_slot() {
-        let messages = BackendMessages::from_test_bytes(BytesMut::from(
-            fatal_error_frame("57P01", "scripted backend shutdown").as_slice(),
-        ));
-        let (_, terminal_server_error) =
-            queued_error_slots_after_backpressured_flush(messages).await;
-
-        assert_eq!(
-            terminal_server_error
-                .lock()
-                .as_ref()
-                .map(|error: &DbError| error.code().code()),
-            Some("57P01"),
-            "the queued FATAL did not reach the terminal slot"
-        );
-    }
-
-    #[compio::test]
-    async fn backpressured_flush_error_records_the_request_slot() {
-        let (request_server_error, _) = queued_error_slots_after_backpressured_flush(
-            error_response_batch("23505", "scripted unique violation"),
-        )
-        .await;
-
-        assert_eq!(
-            request_server_error
-                .lock()
-                .as_ref()
-                .map(|error: &DbError| error.code().code()),
-            Some("23505"),
-            "the queued ErrorResponse did not reach its request slot"
-        );
-    }
-
     #[compio::test]
     async fn queued_server_error_outranks_a_simultaneous_flush_failure() {
         let read_half_dropped = Rc::new(Cell::new(false));
@@ -6213,163 +6281,6 @@ mod tests {
             recorder.seen.load(Ordering::Acquire),
             READ_RETIRED_STATUS,
             "the write-dead session woke its borrower before pool poison"
-        );
-        assert!(read_half_dropped.get());
-    }
-
-    /// A response already parked behind one caller's backpressure must keep
-    /// later responses out of the delivery FIFO. That does not make a decoded
-    /// ErrorResponse disappear: if the simultaneous write failure tears the
-    /// connection down, the later request still needs its SQLSTATE through the
-    /// request-scoped diagnosis side channel.
-    #[compio::test]
-    async fn backpressured_flush_failure_preserves_a_queued_server_error() {
-        let read_half_dropped = Rc::new(Cell::new(false));
-        let stream = BufStream::new(WriteFailingSplitStream {
-            read_half_dropped: Rc::clone(&read_half_dropped),
-        });
-        let (read_half, mut write_half) = match stream.try_into_split() {
-            Ok(halves) => halves,
-            Err(_) => panic!("the flush-failure fixture did not split"),
-        };
-        drop(read_half);
-        write_frontend(
-            &mut write_half,
-            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
-        )
-        .expect("buffer the scripted request");
-
-        let (mut read_tx, mut read_rx) = mpsc::channel(1);
-        read_tx
-            .try_send(ReadEvent::Message(ReadEnvelope {
-                message: BackendMessage::Normal {
-                    messages: error_response_batch("23505", "scripted unique violation"),
-                    request_complete: true,
-                    deferred_error: None,
-                },
-                acknowledgement: None,
-            }))
-            .expect("queue the decoded server response");
-        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
-
-        let (request_tx, mut request_rx) = mpsc::unbounded();
-        let client = crate::client::Client::new(
-            request_tx,
-            crate::config::SslMode::Disable,
-            crate::config::SslNegotiation::Postgres,
-            0,
-            Some(0.into()),
-            None,
-        );
-        let mut caller = client
-            .inner()
-            .send(RequestMessages::Single(FrontendMessage::Raw(
-                bytes::Bytes::from_static(b"scripted later request"),
-            )))
-            .expect("enqueue the later scripted request");
-        let Request {
-            messages: _,
-            sender,
-            disposition,
-            transaction_effect,
-            prepare_cleanup,
-            statement,
-            observation,
-            request_server_error,
-        } = request_rx
-            .try_recv()
-            .expect("the client did not enqueue its request");
-        let mut responses = VecDeque::from([Response {
-            sender,
-            disposition,
-            transaction_effect,
-            prepare_cleanup,
-            statement,
-            observation,
-            bind_complete_seen: false,
-            read_obligation: ReadObligation::new(None, false),
-            request_server_error,
-        }]);
-
-        // `futures_channel::mpsc` tracks capacity per sender handle. Fill this
-        // exact handle so the earlier pending response remains the active FIFO
-        // gate for the entire flush-failure poll.
-        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
-        for _ in 0..2 {
-            blocked_sender
-                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
-                .expect("the pending response sender filled too early");
-        }
-        assert!(
-            blocked_sender
-                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
-                .is_err(),
-            "the pending response sender was not backpressured"
-        );
-        let mut pending_responses = VecDeque::from([PendingResponse {
-            sender: blocked_sender,
-            messages: ResponseMessages::Raw(BackendMessages::empty()),
-            disposition: RequestDisposition::Awaited,
-        }]);
-        let parameters = Mutex::new(HashMap::new());
-        let tx_status = AtomicU8::new(b'I');
-        let in_flight_requests = AtomicUsize::new(1);
-        let terminal_server_error = Mutex::new(None);
-
-        let (write_result, terminal) = flush_with_read_draining(
-            &mut write_half,
-            &mut read_rx,
-            &mut read_terminal_rx,
-            &parameters,
-            &mut responses,
-            &mut pending_responses,
-            None,
-            &tx_status,
-            &in_flight_requests,
-            &terminal_server_error,
-            &Cell::new(false),
-            true,
-        )
-        .await;
-        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
-        assert_eq!(
-            write_error.as_io().map(std::io::Error::kind),
-            Some(std::io::ErrorKind::BrokenPipe)
-        );
-        assert!(terminal.is_none(), "the fixture invented a read failure");
-
-        // Model `Connection::run` teardown. Delivery remains blocked, but the
-        // decoded diagnosis must survive closure of the response sender.
-        drop(responses);
-        drop(pending_responses);
-        let error = match caller.next().await {
-            Err(error) => error,
-            Ok(_) => panic!("response channel closure hid its queued ErrorResponse"),
-        };
-        assert_eq!(
-            error.code().map(|code| code.code()),
-            Some("23505"),
-            "backpressured flush failure discarded queued SQLSTATE 23505: {error}"
-        );
-        assert!(
-            !error.is_closed(),
-            "the preserved server diagnosis still classified the session as a local close"
-        );
-        // There was an assertion here that the later ErrorResponse was not
-        // attributed to the earlier blocked request, reading an Arc handed to
-        // that `PendingResponse`. It could never fail: a batch becomes a
-        // `PendingResponse` only once it is detached from its `Response`, and
-        // every `remember_server_error` call site takes a `Response`, so
-        // nothing could write through that handle. The property is structural,
-        // not a runtime outcome, and the field it read is gone.
-        assert!(
-            terminal_server_error.lock().is_none(),
-            "a nonterminal request error leaked into the connection-global diagnosis"
-        );
-        assert_eq!(
-            tx_status.load(Ordering::Acquire),
-            READ_RETIRED_STATUS,
-            "the failed flush left the physical session reusable"
         );
         assert!(read_half_dropped.get());
     }
