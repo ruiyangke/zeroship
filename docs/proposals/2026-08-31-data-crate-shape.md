@@ -19,10 +19,10 @@ precisely the defect that produced six of this document's contradictions.
 | what | where | status |
 | --- | --- | --- |
 | the crate graph | "Target" | operator-proposed, five crates; only three to be built now |
-| which modules move | Track B's table, and ONLY that table | conditional on the open Full/Partial decision |
+| which modules move | the placement table; Track B's table for the CDC stays/moves detail | SETTLED: Full |
 | what to delete | "Step 0" | blocked on a fixture migration, see that section |
 | the query-builder port | "Track A" | ungated since #45 settled |
-| the CDC extraction | "Track B" | **Full vs Partial is OPEN** |
+| the CDC extraction | "Track B" | **SETTLED: FULL.** The worker loses `REPLICATION`. |
 | the SQLite feature gate | "The backends" | three measured obstacles; recommendation is against |
 | the plugin-db rename | "The rename that is NOT happening" | WITHDRAWN; kept only for its cost measurement |
 | everything still undecided | "Not decided" | - |
@@ -294,10 +294,30 @@ This is a direct extension of the dedup-fence blocker, discovered through the cy
   through `ChangeStream::pause_broker`, and it pairs its release with a `Resync` push to every
   active subscription.
 
-**So the relay's suppression handshake must cover both**, and the second one is harder: it is not a
-lifecycle transition but a bracket around an arbitrary operation, and its release triggers a
-subscriber resync. A handshake designed only for "consumer started / consumer stopped" will not carry
-it.
+**THREE, NOT TWO. This paragraph said "two writers, not one" and was ALSO an undercount** - corrected
+within one cycle of correcting it from one to two. The third:
+
+- `cdc_lifecycle.rs:270` - `let startup_suppression = SuppressGuard::activate(app_id)` bracketing
+  `spawn_consumer`, dropped immediately after.
+
+And the three are **not independent brackets; they are a protocol with a deliberate overlap**, which
+that site states outright (`:266-269`): the snapshot "is emitted only after readiness, so writes in
+this startup window are represented by that snapshot. **The consumer installs its own overlapping
+guard before it reports ready; the overlap prevents a local-plus-WAL duplicate-delivery gap.**"
+
+| bracket | lifetime |
+| --- | --- |
+| `wal_consumer.rs:781` `SuppressGuard` in `run_supervised_controlled` | the consumer's whole life, across reconnect backoff |
+| `cdc_lifecycle.rs:270` `SuppressGuard` | the startup window, **deliberately overlapping the above** |
+| `backend/mod.rs:930-945` `BrokerPauseGuard` | a bracket around an arbitrary operation; its release pushes a `Resync` to every active subscription |
+
+**So the relay handshake must reproduce three bracket shapes AND their overlap invariant** - a
+signal protocol that merely says "suppressed / not suppressed" loses the property the overlap exists
+to guarantee, and loses it in the direction that duplicates rather than drops.
+
+*Twice now this document has stated a count of suppression writers and been wrong. The first said
+one, the second said two. Both were produced by tracing outward from a site I already knew rather
+than enumerating the callers of `suppress_app` / `SuppressGuard::activate`.*
 
 #### The last three are one cluster, and they are REWRITTEN rather than relocated
 
@@ -690,7 +710,7 @@ they are rules rather than descriptions:
 
 1. **Track B's table is the module inventory.** The lines above are a reading aid; where they and the
    table differ, the table wins.
-2. **The CDC rows in both places are conditional on the Full/Partial decision, which is STILL OPEN**
+2. **The CDC rows were conditional on Full-vs-Partial. That is SETTLED: FULL**
    (see "Not decided"). Under Partial only `slot_reaper` moves and the worker keeps decoding, which
    makes "WAL stream, slot authority" above wrong. An implementer must settle Full-vs-Partial before
    reading either list as an instruction.
@@ -1638,7 +1658,7 @@ left the other stale - and did so twice, for two different modules, in two conse
 
 A table of "how I reasoned badly" cannot catch that, because the cause is not reasoning. The fix is
 structural and now stated where it binds: **Track B's table is the only module inventory, and the
-target block names crates only.** Diagnosing every defect as a thinking error is its own bias - it
+placement table is the inventory, and the target block wins nothing.** Diagnosing every defect as a thinking error is its own bias - it
 implies the remedy is to think harder, when the remedy here was to keep one list.
 
 The practical rule: grep answers spelling, the compiler answers "is this named", and neither answers
