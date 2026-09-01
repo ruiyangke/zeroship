@@ -538,6 +538,48 @@ job, and it is far smaller than the crate-wide framing implies - but note WHY it
 search family was ported to the IR under #12, and unmask was explicitly deferred then to avoid a
 collision. This is that deferral coming due.
 
+### `zeroship-schema` does not get MOVED. About 14,000 of its 16,775 lines get DELETED
+
+Asked by the operator on 2026-09-01 - should it fold into the query-builder, or into a backend
+vendor? Both framings assume relocation. **Measure reachability first and the question changes.**
+
+**Not a vendor, and this one is decidable.** `query.rs` mentions `dialect` **363 times** and owns
+`pub enum SqlDialect { Postgres, Sqlite }` (`:107`). It is dialect-PARAMETERISED - one builder
+serving N dialects. Folding it into `data-postgres` would put SQLite DDL emission inside the
+Postgres crate, or make both vendors duplicate 13,814 lines. It sits ABOVE the vendors by
+construction.
+
+**And not into the query-builder either, which is a correction to what I first proposed.** Moving
+a string builder into the crate written to obsolete it is the "two intermediate versions" the
+pre-launch stance forbids. Decision 1 already says: *wire the typed IR in and DELETE the string
+builder it was written to replace.*
+
+**Reachability, measured at `cddaa3731`:**
+
+| piece | lines | production callers |
+| --- | --- | --- |
+| `query.rs` DDL - `build_create_table_with_fks`, `build_add_column`, `build_create_schema`, ... | part of 13,814 | **ZERO.** Every hit in `plugin-db/src` is a doc comment; the two real uses in `crud/write_pipeline.rs` (`:678`, `:809`) are past its `#[cfg(test)]` at `:629` |
+| `query.rs` DML - `build_aggregate`, `build_count`, `build_delete_many`, `build_distinct`, ... | rest of 13,814 | live, and `data-plan` is their replacement |
+| `diff.rs` `compute_diff` | part of 2,144 | test-only; the LIVE twin is `zeroship-migrate-core/src/schema/diff.rs:418` |
+| `diff.rs` introspection | (already gone) | moved to `backend/pg_introspect.rs`, 2026-09-01 |
+| `diff.rs` TYPES - `MaskKind`, `Classification`, `MaskMeta`, `EncryptionMeta` | rest of 2,144 | **live** - named by the engine's masking policy AND both vendors |
+| `mask_codec.rs`, `ident.rs`, `descriptors.rs`, `error.rs` | 745 | live |
+
+**`zeroship-migrate-core` does NOT depend on `zeroship-schema`** - checked in its manifest, not
+inferred. Its 131 same-named `build_*` references are its OWN `schema/query.rs`. That is #92's
+"live twin" confirmed structurally, and it means the DDL half here is duplicated work with no
+consumer.
+
+**So the crate disappears by deletion, not relocation:** roughly 14,000 lines deleted, roughly
+2,000-2,500 of vocabulary re-homed to core. Sequence: finish Track A -> delete the string builder
+-> re-home what is left.
+
+**The caveat that stops this being cheap.** "No production caller" is not "safe to delete". The DDL
+builders are reached by **49 references in `sqlite_integration.rs` and 11 in `integration.rs`** -
+tests pinning real DDL behaviour. Deleting the builders means migrating those onto the migration
+engine's renderer, which is exactly the Step-0 deletion this document already sequences. The cost
+is deletion PLUS test migration, not a 14,000-line move.
+
 ### Is `data-engine` portable across vendors? No, and the measurement says exactly why
 
 Asked directly by the operator on 2026-09-01, because an earlier phrasing here - "the part of the
