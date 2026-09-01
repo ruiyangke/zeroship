@@ -154,6 +154,38 @@ the split exists to undo.
 Hence `zeroship-data-engine`. The count is **six**, and it is six because the modules are six things,
 not because six is a nicer number.
 
+### Where every module lands, and the eight that need a decision rather than a placement
+
+All 57,427 lines assigned. **The point of the exercise is the second table, not the first** - `crud/`
+had no home until someone enumerated, and enumerating found seven more like it.
+
+| destination | modules | lines |
+| --- | --- | --- |
+| `plugin-db` (thin) | `v8_classes/` 3,455, `v8_bridge.rs` 867, `lib.rs` (the `DbPlugin` part) | ~5,700 |
+| `data-engine` | `crud/` 12,972, `transaction/` 8,592, `exec.rs` 1,769, `broker.rs` 1,937, `read_set.rs` 659, `tx_route.rs` 267, `tx_scope.rs` 142, `drop_namespace.rs` 218, `cross_app_fk.rs` 235 | ~26,800 |
+| `data-core` | `error.rs` 1,703 (less one method), `descriptor.rs` 139, the driver-neutral half of `backend/mod.rs` | ~3,000 |
+| `data-encryption` (if split) | `encryption/` | 1,591 |
+| `data-postgres` | `backend/postgres.rs` | 1,477 |
+| `data-sqlite` | `backend/sqlite/` | 9,485 |
+| `data-cdc-server` | `wal_consumer.rs` 1,440, `replication.rs` 908, `slot_reaper.rs` 593 | 2,941 |
+
+**And the eight that do not place cleanly.** Each needs an answer before the split, not during it:
+
+| module | lines | why it does not place |
+| --- | --- | --- |
+| `backend/mod.rs` | 2,201 | **must be split.** The contract half is core; `BackendHandle` names `Rc<SqliteBackend>` and `Rc<PostgresBackend>` by value, so putting it in core creates `core -> sqlite -> core`. Where the composition enum lives is the first thing to settle. |
+| `error.rs` | 1,703 | **must be split.** `DbError` is core; `to_op_error` links V8 and belongs in the adapter. 11 files, measured. |
+| `context.rs` | 1,688 | holds a `BackendHandle` per isolate, so it inherits whatever `BackendHandle` decides. Isolate-scoped, which argues adapter; vendor-typed, which argues not. |
+| `auth/` | 1,459 | session setup and `SET LOCAL ROLE`. Runs per connection, so engine - but it is also a security fence, which argues for a home where it cannot be bypassed. |
+| `service.rs` | 606 | `DbService::new` parses the runtime URL and selects a backend. Construction, so it sits wherever backend selection ends up. |
+| `cdc_lifecycle.rs` | 523 | bridges V8 subscription leases to one consumer per process. Stays worker-side (established), but adapter or engine is open. |
+| `change_stream_pg.rs` | 315 | **orphaned by Full.** It is "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" - and the consumer it owns moves to the relay. |
+| `replication_ops.rs` | 47 | a V8 bridge that calls `replication::watchdog_query` (`:33`), which moves. Becomes a cross-process call, or the diagnostic goes away. |
+
+The last two are consequences of the Full decision and did not exist as problems before it. Neither
+is large; both are load-bearing, because they are the seam where the worker used to own its own
+stream and now must ask another process about it.
+
 **A clarification this document owes the reader.** Track B argues "the broker stays in the worker",
 and that is about the PROCESS - V8 subscription objects hold `broker::Subscription` handles directly,
 so it cannot move to another machine. **A crate boundary is not a process boundary.** The broker moves
