@@ -22,8 +22,8 @@ the objective.**
     domain                 DbError . TypedCell/TypedRows . ChangeEvent/ChangeOp . descriptor
 ```
 
-Six review rounds found roughly 100 separate defects. Under this rule they are **one defect in five
-places** - a dependency pointing outward:
+Six review rounds found a long list of separate defects. Under this rule they are **one defect in
+five places** - a dependency pointing outward:
 
 | finding | the violation |
 | --- | --- |
@@ -95,42 +95,42 @@ zeroship-migrate-server         the migration service host
 ```
 
 The count is **six** because the modules are six things, not because six is a nicer number. `crud/` +
-`transaction/` + `exec.rs` is ~23,000 lines of pipeline and reducer that is not a contract, not a
-driver, not the grammar and not the relay; putting it in `data-core` would make the core the big
-crate again with drivers attached, which is the thing the split exists to undo.
+`transaction/` + `exec.rs` is the single largest block in the crate, and it is pipeline and reducer -
+not a contract, not a driver, not the grammar, not the relay. Putting it in `data-core` would make the
+core the big crate again with drivers attached, which is the thing the split exists to undo.
 
 ---
 
 ## `plugin-db` is a very thin layer joining Rust to V8
 
 Operator decision, 2026-08-31. It keeps its name and loses almost everything else: the V8 marshalling
-boundary and the `env.db` op surface, and that is all. Measured, that is `v8_classes/` 3,455 +
-`v8_bridge.rs` 867 + `lib.rs` 1,357 + `tx_scope.rs` 142 = **~5,800 of 58,368 lines, about 10%.**
+boundary and the `env.db` op surface, and that is all. That is `v8_classes/`, `v8_bridge.rs`, the
+`DbPlugin` part of `lib.rs`, and `tx_scope.rs` - **around a tenth of today's crate.**
 
 **Three things this makes mandatory that were previously weighed as options:**
 
 1. **The protocol inversion is required.** The 39 V8-signature functions belong in the thin layer -
-   they *are* the boundary. Their `async move` bodies are not: those are ~987 lines of query pipeline.
-   The engine must stop returning `OpResult`/`ResolveValue` and return data the adapter lowers. There
-   is no version of "thin" that survives leaving the pipeline inside the dispatch functions.
+   they *are* the boundary. Their `async move` bodies are not - those bodies are query pipeline. The
+   engine must stop returning `OpResult`/`ResolveValue` and return data the adapter lowers. There is
+   no version of "thin" that survives leaving the pipeline inside the dispatch functions.
 2. **Row decoding must leave `v8_bridge.rs`.** `:432`/`:471`/`:498` take `&compio_postgres::Row`, and
    `lib.rs:559`/`:588` are always-compiled `pub` bench exports naming the same. A thin layer joining
    Rust to V8 cannot link a database driver.
 3. **`context.rs` does not stay.** It holds `Option<Rc<Pool>>` (`:178`) and
-   `TxConnection::Postgres(OwnedPooledClient)` (`:80`), has **zero** `v8::` references, and is called
-   ~37 times from `exec.rs` and ~36 from `transaction/driver.rs`. A per-thread cache of live vendor
-   connections is not a V8 marshalling concern.
+   `TxConnection::Postgres(OwnedPooledClient)` (`:80`), has **zero** `v8::` references, and its
+   callers are overwhelmingly `exec.rs` and `transaction/driver.rs` rather than the adapter fringe. A
+   per-thread cache of live vendor connections is not a V8 marshalling concern.
 
 ---
 
 ## `zeroship-schema` is DELETED, not moved
 
-Roughly 14,000 of its 16,827 lines go; ~2,000-2,500 of vocabulary is re-homed to core.
+The large majority of the crate is deleted; a small vocabulary core is re-homed.
 
-It is **not a vendor**: `query.rs` mentions `dialect` 363 times and owns
-`pub enum SqlDialect { Postgres, Sqlite }` (`:107`). It is dialect-PARAMETERISED - one builder serving
-N dialects - so folding it into `data-postgres` would put SQLite DDL emission inside the Postgres
-crate. It sits above the vendors by construction.
+It is **not a vendor**: `query.rs` owns `pub enum SqlDialect { Postgres, Sqlite }` (`:107`) and
+threads `dialect` through pervasively. It is dialect-PARAMETERISED - one builder serving N dialects -
+so folding it into `data-postgres` would put SQLite DDL emission inside the Postgres crate. It sits
+above the vendors by construction.
 
 And it does **not** fold into the query-builder either: moving a string builder into the crate written
 to obsolete it is the "two intermediate versions" the pre-launch stance forbids.
@@ -145,12 +145,11 @@ to obsolete it is the "two intermediate versions" the pre-launch stance forbids.
 | `mask_codec.rs`, `ident.rs`, `descriptors.rs`, `error.rs` | live |
 
 `zeroship-migrate-core` does **not** depend on `zeroship-schema` - checked in its manifest, not
-inferred. Its 131 same-named `build_*` references are its own `schema/query.rs`.
+inferred. Its same-named `build_*` references are its own `schema/query.rs`.
 
 **The caveat that stops this being cheap.** "No production caller" is not "safe to delete". The DDL
-builders are reached by **49 references in `sqlite_integration.rs` and 11 in `integration.rs`** -
-tests pinning real DDL behaviour. The cost is deletion PLUS migrating those onto the migration
-engine's renderer.
+builders are reached from `sqlite_integration.rs` and `integration.rs` by tests pinning real DDL
+behaviour. The cost is deletion PLUS migrating those onto the migration engine's renderer.
 
 ---
 
@@ -181,8 +180,8 @@ with #114. `EncryptedColumn` belongs in ENCRYPT, not CORE: both impls bind
 `type KeyHandle = crate::encryption::aead::AeadKey`.
 
 **The enum stays; `dyn` is refused for measured reasons.** These are `async fn`-in-trait, so object
-safety needs `Box<dyn Future>` per call - a per-CRUD-op allocation on a path that runs ~200K times/sec
-under load. The associated types cannot be erased without losing the concrete client that
+safety needs `Box<dyn Future>` per call - a per-CRUD-op allocation on the hottest path in the data
+plane. The associated types cannot be erased without losing the concrete client that
 `LockManager::acquire_advisory_lock` takes by `&Self::Client`. The backend set is closed, and an enum
 is the canonical shape for a closed sum. Monomorphised dispatch is preserved, not replaced.
 
@@ -201,16 +200,17 @@ written to replace. Not "leave both and revisit".
 **3. Keep `zeroship-migrate-mysql`.** The in-sourced engine stays dialect-complete so it does not
 diverge from upstream, accepting that zeroship targets only PostgreSQL and SQLite. A stated trade.
 Keeping the CODE and paying the BUILD are separable: `zeroship-migrate/Cargo.toml` declares no
-`[features]`, so 20,018 lines of MySQL compile for every dependant while nothing selects that dialect.
+`[features]`, so the whole MySQL dialect compiles for every dependant while nothing selects it - the
+addon's only two callers hardcode `dialect: "postgres"`.
 
 **4. NO RAW SQL IN THE ENGINE.** Adding a database must require ZERO changes to `data-engine`. This is
 the acceptance test for decision 1 stated as an outcome: if supporting a new vendor means editing
 `data-engine`, decision 1 has not landed.
 
-The measured surface is far smaller than the framing implies. A naive grep returns 57 hits; **eight
-are production**, the rest sit past a column-0 `#[cfg(test)]` or inside a one-arm-gated module, and
-two are error-message strings beginning "UPDATE patch attempted to overwrite..." that a keyword grep
-cannot distinguish from SQL.
+The real surface is far smaller than the framing implies. A naive grep for statement keywords in
+engine-tier files is mostly noise: most hits sit past a column-0 `#[cfg(test)]` or inside a
+one-arm-gated module, and two are error-message strings beginning "UPDATE patch attempted to
+overwrite..." that a keyword grep cannot distinguish from SQL. Opening the lines leaves this:
 
 | site | disposition |
 | --- | --- |
@@ -231,11 +231,11 @@ never. Already violated in the tree (#97), and decision 5 makes that a blocker r
 
 ## Is `data-engine` portable? No, and the measurement says why
 
-**What is vendor-agnostic:** 37 production backend-dispatch sites in ~25,000 engine lines. About
-10,400 of those lines have ZERO dispatch sites - `crud/mask_pass.rs` (1,285), `system_fields_pass.rs`
-(1,132), `write_pipeline.rs` (1,023), `encryption_pass.rs` (840), `bytes_pass.rs` (338),
-`transaction/reducer/` (3,149), `broker.rs` (2,069). Those survive a new vendor untouched. That is the
-argument against folding the engine into the backends, and it holds.
+**What is vendor-agnostic:** backend dispatch is sparse across the engine, and a large block of it has
+ZERO dispatch sites - `crud/mask_pass.rs`, `system_fields_pass.rs`, `write_pipeline.rs`,
+`encryption_pass.rs`, `bytes_pass.rs`, the production `transaction/reducer/`, and `broker.rs`. Those
+survive a new vendor untouched. That is the argument against folding the engine into the backends, and
+it holds.
 
 **What is not portable, and it is three separate things:**
 
@@ -265,12 +265,15 @@ edge that exists and is not one relocation away; it appears only after the execu
 | `data-cdc-server` | `wal_consumer.rs`, `replication.rs`, `slot_reaper.rs` |
 
 **The `data-engine` row is the weakest line in this table.** It reads as whole modules moving intact.
-Five do not: `crud/`, `transaction/`, `tx_route.rs`, `crud/unmask.rs` and `tx_scope.rs` contain **39
-production functions whose signatures carry `v8::`** - `run_op`, all 17 `dispatch_*`,
-`transaction_dispatch` and the promise finalizer chain - totalling 117 production `v8::` references
-inside a crate whose entire premise is that it does not link V8. `tx_scope.rs` is not a split at all:
-all six of its production functions are V8 context-map manipulation, so it moves to the adapter whole.
-The others are dispatch stacked on engine and must be cut along that line first.
+Five do not: `crud/`, `transaction/`, `tx_route.rs`, `crud/unmask.rs` and `tx_scope.rs` hold
+**production functions whose signatures carry `v8::`** - `run_op`, the `dispatch_*` family,
+`transaction_dispatch` and the promise finalizer chain - inside a crate whose entire premise is that
+it does not link V8. `tx_scope.rs` is not a split at all: all of its production functions are V8
+context-map manipulation, so it moves to the adapter whole. The others are dispatch stacked on engine
+and must be cut along that line first.
+
+`tests/lib/tier_signature_census.sh` is the instrument that enumerates them; read the current count
+from a run rather than from this document.
 
 **The error hierarchy is neutral with per-vendor translators** (Spring Data's shape). `DbError`'s 14
 variants name a vendor type **zero** times - the type was never the problem, only the translation is
@@ -300,14 +303,13 @@ in the crate owns its destination. The real constraint is the dependency floor a
 | - | extend the gate to `zeroship-schema` - found a second bearer nobody had recorded | `e96849f0a` |
 | 2 | PG introspection out of the floor crate into `backend/pg_introspect.rs` | `fffa857b0` |
 
-Gate result: **12 passed, 2 arms, 0 refusals**, 65 non-vendor files examined against a floor of 25,
-and all 11 baseline entries still describe live violations.
+The gate passes, and its baseline arm confirms every recorded entry still describes a live violation -
+so the baseline is not rotting into a rubber stamp.
 
-**Remaining decision-5 surface: 21 occurrences across 11 files, ALL inside `zeroship-plugin-db`** -
-`exec.rs` (5), `backend/mod.rs` (4), `transaction/driver.rs` (2), `auth/bootstrap.rs` (2),
-`backend/lock_guard.rs` (2), and one each in `transaction/mod.rs`, `transaction/cancel.rs`,
-`context.rs`, `drop_namespace.rs`, `lib.rs`, `service.rs`. The floor crate is clean, which was the
-point of doing it first.
+**The remaining decision-5 surface is entirely inside `zeroship-plugin-db`.** The floor crate is
+clean, which was the point of doing it first: a vendor in the floor is inherited by every crate above
+it. `./tests/vendor_embedding_gate.sh` prints the current file list; do not copy it here, because the
+whole job is to shrink it.
 
 ### THE CAVEAT THAT REORDERED EVERYTHING
 
@@ -342,17 +344,16 @@ one. Phase 0 is still worth doing first and is still individually shippable; **i
   load-bearing. Four are named security controls (`sanitize_app_actor`, `TxRoute::capture`,
   `DbBinding::cold_start`, `context::with_mut`). This repository has already shipped this mistake once
   and written a comment claiming it had not.
-- **The dead-code decision.** ~1,000 lines are self-declared unreachable (`cross_app_fk.rs`,
-  `drop_namespace.rs`, `crud/mask_backfill.rs`), plus `read_set.rs` (659), inert on both ends.
-  **Giving dead code a crate is how the existing clusters got there.** Decide delete-or-wire BEFORE
-  assigning.
+- **The dead-code decision.** Several modules are self-declared unreachable - `cross_app_fk.rs`,
+  `drop_namespace.rs`, `crud/mask_backfill.rs` - plus `read_set.rs`, inert on both ends. **Giving
+  dead code a crate is how the existing clusters got there.** Decide delete-or-wire BEFORE assigning.
 - **The tier-signature audit.** For each module, does any signature name a crate its assigned tier may
   not depend on? This catches what a module walk and a type walk both miss.
 
 ### Phase 1 - needs no new prerequisites
 
-- **Step 0's deletion**, once its prerequisite lands: migrate the 12 live security tests off the dead
-  DDL builders onto the engine's renderer.
+- **Step 0's deletion**, once its prerequisite lands: migrate the live security tests off the dead DDL
+  builders onto the engine's renderer.
 - **`data-cdc-server`**, which needs neither `data-core` nor `data-postgres` (measured: zero
   `crate::backend`, zero `crate::encryption`). Its cost is four edits, of which the suppression
   handshake is the hard one - three brackets with an overlap invariant.
@@ -366,12 +367,21 @@ with `plugin-db` reduced to the adapter.
 
 ## Constraints that will be got wrong if not stated
 
-**No CI has ever run any of this.** Measured 2026-09-01: this branch is **859 commits** ahead of
-`origin/main`, and the standing rule is commit-only, never push. `.github/workflows/ci.yml` describes
-an intent, not an executed check. **The local commands are the only oracles, and a gate nobody runs is
-a census with a stricter name.** Demonstrated twice in one day: the `-p zeroship` breakage (#93) sat
-inside `ci.yml` itself, and `sqlite_integration.rs` was RED for four days (#124) while `ci.yml:726`
-invoked it correctly - because the two commands a person reaches for locally both exclude that target.
+**Do not embed counts that the work itself changes.** Line totals, occurrence tallies, gate arm
+numbers, commit gaps and per-module sizes all rot within days, and this document has already been
+wrong about every one of them - its figures for the branch gap and for two crates' sizes had all
+drifted by the time anyone re-derived them. A stale number is worse than no number, because it reads
+as measured. **State the shape and name the command that produces the figure.** The counts that
+matter here are outputs of `./tests/vendor_embedding_gate.sh`,
+`tests/lib/tier_signature_census.sh` and `git rev-list --count origin/main..HEAD`.
+
+**No CI has ever run any of this.** This branch has never been pushed - the standing rule is
+commit-only - so it sits hundreds of commits ahead of `origin/main` and `.github/workflows/ci.yml`
+describes an intent, not an executed check. **The local commands are the only oracles, and a gate
+nobody runs is a census with a stricter name.** Demonstrated twice in one day: the `-p zeroship`
+breakage (#93) sat inside `ci.yml` itself, and `sqlite_integration.rs` was RED for days (#124) while
+`ci.yml` invoked it correctly - because the two commands a person reaches for locally both exclude
+that target. Re-derive the gap with `git rev-list --count origin/main..HEAD` if it matters.
 
 *Do not cite a `gh` 404 as evidence the repository is absent: the `gh` account differs from the
 remote's owner, and GitHub returns 404 for private repositories the caller cannot see. The commit gap
@@ -415,8 +425,8 @@ the other stale - twice, for two modules, in consecutive rounds. The placement t
   rounds.
 - **`zeroship-migrate-server`** is a service HOST, not engine. Left in the `migrate-*` family; a
   `-service` suffix is arguable.
-- **Feature-gating the SQLite backend** - a decision, not a discovery. It removes 9,485 lines from the
-  production worker and hardens a guard the worker already implements at runtime.
+- **Feature-gating the SQLite backend** - a decision, not a discovery. It removes the whole SQLite
+  backend from the production worker and hardens a guard the worker already implements at runtime.
 - **`AGENTS.md`'s `zeroship-schema` entry** needs correcting with this work, saying "present but
   uncalled" rather than deleting the clauses, so the next reader does not re-add them. Its contents
   clauses are true as descriptions of what the file HOLDS; the "reused by the migration engine" clause
