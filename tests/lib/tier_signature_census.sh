@@ -57,11 +57,34 @@
 #      error.rs - the single edge that started this whole investigation.
 #      Now: bare OpError/OpResult/ResolveValue/SharedState count too.
 #
-# AND ONE POSITION IT STILL CANNOT SEE, stated rather than silently missing:
-# `impl` headers. error.rs:797 `impl From<compio_postgres::Error> for DbError` is
-# a real vendor edge in a CORE-tier module and no `fn` line starts it. Adding
-# impl-header parsing needs a different collector; until then, that edge is known
-# and uncounted.
+# READ THE TOTAL AS A FLOOR, NOT A COUNT. Nine defects were found in this script
+# on 2026-08-31, each by a different check, and each moved the headline:
+#
+#     49  -> 80   defects 1-4 (test boundary, one-line sigs, EOF flush, bare runtime names)
+#     80  -> 95   defects 5-6 (mid-file test modules, bare vendor names)
+#     95  -> 91   defects 7-9 (test-region imports leaking into the production
+#                              scan, brace-depth defeated by string literals,
+#                              compound `#[cfg(all(test, ...))]` unmatched)
+#
+# The composition is trustworthy and individually verified; the TOTAL is not
+# settled. auth/bootstrap.rs currently reports 6 where hand-reading its
+# production region finds 3 signature lines, so the multi-line collector still
+# over-counts somewhere. Every figure this script prints should be cited as
+# "at least N, by this instrument at this commit" - never as a census.
+#
+# AND TWO POSITIONS IT STILL CANNOT SEE, stated rather than silently missing:
+#
+#   - `impl` HEADERS. error.rs:797 `impl From<compio_postgres::Error> for DbError`
+#     is a real vendor edge in a CORE-tier module and no `fn` line starts it.
+#     This is NOT merely a counting gap: the orphan rule makes that impl legal
+#     only in the crate owning DbError, so it CANNOT follow from_pg down into
+#     data-postgres. data-core keeps the driver dependency, or the impl is
+#     deleted, or the pg error is newtyped. A design decision, not a TODO.
+#   - ASSOCIATED-TYPE BINDINGS. `type LiveSchema = crate::diff::LiveSchema;`
+#     (backend/postgres.rs:340, backend/sqlite/mod.rs:803) binds a contract's
+#     associated type to a zeroship-schema type through two renames; grepping
+#     postgres.rs for `zeroship_schema` finds nothing. A `type X = ...;` inside
+#     an impl is not a fn signature and never will be seen here.
 #
 # TWO REGIONS
 #   default   PRODUCTION region, foreign crates in function SIGNATURES.
@@ -91,15 +114,78 @@ esac
 [ -d "$SRC" ] || { echo "tier_signature_census: no such tree: $SRC" >&2; exit 1; }
 cd "$SRC" || exit 1
 
-# First line of the terminal test module, or "" if the file has none.
-# Defect 1: this is NOT "the first #[cfg(test)]".
-test_mod_line() {
-  awk '
-    /^[[:space:]]*#\[cfg\(test\)\]/ { pend = NR; next }
-    pend && /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]/ { print pend; exit }
-    /^[[:space:]]*$/ { next }        # blank lines may sit between the two
+# Emit the PRODUCTION lines of a file, comments dropped, test-module regions
+# excised by brace depth.
+#
+# DEFECT 5 (found after the first four were fixed): truncating at the first
+# cfg(test)-gated `mod` is still wrong, because a file may hold a gated module
+# in the MIDDLE and resume production code after it. Three do:
+#   lib.rs                    gated mod at :432, production resumes at :559
+#   auth/bootstrap.rs         gated mod at :511, production resumes at :564
+#   v8_classes/subscription.rs gated mod at :216, production resumes at :279
+# The lib.rs case is the one that stings: :559 `row_to_json_for_bench(row:
+# &compio_postgres::Row)` and :588 are the row-to-JSON adapter surface that the
+# ADAPTER:compio_postgres rule below was added specifically to expose. The rule
+# was correct and could never fire, because the region cut removed its subject.
+# Excising regions instead of truncating fixes all three.
+# DEFECT 8, and the reason this is a COLUMN rule rather than a brace rule:
+# counting braces is defeated by braces inside string literals. auth/bootstrap.rs
+# has a nested `mod live_reserved_sweep_tests` at :702 inside `mod tests` (:577);
+# brace-depth tracking closed the outer region early on a literal and let the
+# nested module's `use compio_postgres::{Client, NoTls};` reach the production
+# scan. A reviewer hit the same trap from the other side, getting a false alarm
+# on backend/postgres.rs from string-literal braces.
+#
+# In rustfmt'd code a top-level test module opens at column 0 and closes with a
+# line that is exactly `}` at column 0. That is unambiguous regardless of what
+# the body contains. Nested modules never reach column 0, so they are excised
+# with their parent for free.
+region_filter() {   # $1 = file, $2 = "prod" | "test"
+  awk -v WANT="$2" '
+    /^[[:space:]]*(\/\/\/|\/\/!|\/\/)/ { next }
+    # DEFECT 9: match COMPOUND cfgs, not just the bare `#[cfg(test)]` string.
+    # auth/bootstrap.rs:701 is `#[cfg(all(test, feature = "live-db-tests"))]`, so
+    # a bare matcher read its whole test module as production and admitted
+    # `use compio_postgres::{Client, NoTls}` into the production import set -
+    # which then matched every mention of `Client`, including the SqlExecutor
+    # ASSOCIATED TYPE, reporting 11 where the answer is 3.
+    !intest && /^#\[cfg\(.*(^|[^A-Za-z_])test([^A-Za-z_]|$).*\)\]/ { pend = 1; next }
+    pend && /^(pub )?mod [A-Za-z_]+ \{/ { pend = 0; intest = 1; if (WANT=="test") print; next }
+    pend && /^[[:space:]]*$/ { next }
     { pend = 0 }
+    intest {
+      if (WANT == "test") print
+      if ($0 == "}") intest = 0      # column-0 close ends the module
+      next
+    }
+    WANT == "prod" { print }
   ' "$1"
+}
+prod_lines() { region_filter "$1" prod; }
+test_lines() { region_filter "$1" test; }
+
+# Does this file have any test region at all?
+has_tests() { grep -qP '^\s*#\[cfg\(test\)\]' "$1"; }
+
+# DEFECT 6: defect 4's bare-name fix was applied to ONE marker of four. The
+# runtime marker learned to see unqualified imports; compio_postgres, rusqlite
+# and v8 still demanded the qualified spelling. So
+#   use compio_postgres::Pool;  ...  fn f(pool: &Pool)
+# was invisible - costing auth/bootstrap.rs:267/:564, context.rs:541/:554 and
+# service.rs:395. Resolve each file's own imports into the pattern.
+#
+# DEFECT 7, introduced BY the defect-6 fix and caught before publishing: reading
+# `use` lines from the whole FILE pulls in test-only imports and applies them to
+# the production scan. auth/bootstrap.rs:704 is `use compio_postgres::{Client,
+# NoTls};` inside a test module; admitting `Client` as a bare alternative matched
+# every production mention of the word - including the `SqlExecutor::Client`
+# ASSOCIATED TYPE, which is not a vendor reference at all - and reported 11 where
+# the answer is 3. Reads the same region being scanned, on stdin.
+imported_names() {
+  grep -oP "^\s*use\s+${1}::\{?\K[^;]+" 2>/dev/null \
+    | tr -d '{}' | tr ',' '\n' \
+    | sed 's/.*:://; s/\s\+as\s\+/ /; s/^\s*//; s/\s*$//' \
+    | awk 'NF && $0 ~ /^[A-Z]/ { print $NF }' | sort -u | tr '\n' '|' | sed 's/|$//'
 }
 
 # Destination crate per module, from the proposal's assignment table.
@@ -144,12 +230,18 @@ allowed() {
 # naming crate::v8_bridge or crate::v8_classes points INTO the adapter, which is
 # the direction a layered split exists to forbid. No crate-name marker can
 # express it.
+# $1 marker, $2 the region text being scanned. Defect 6: bare-name alternatives
+# are resolved from the imports OF THAT REGION, per marker, so
+# `use compio_postgres::Pool;` makes a later `&Pool` visible. Previously only the
+# runtime marker did this, and it read the whole file (see defect 7).
 marker_re() {
+  local extra
+  extra=$(printf '%s\n' "$2" | imported_names "$1")
   case "$1" in
-    v8)               echo '(^|[^A-Za-z0-9_])v8::' ;;
-    zeroship_runtime) echo '(^|[^A-Za-z0-9_])(zeroship_runtime::|OpError|OpResult|ResolveValue|SharedState)' ;;
-    compio_postgres)  echo '(^|[^A-Za-z0-9_])compio_postgres::' ;;
-    rusqlite)         echo '(^|[^A-Za-z0-9_])rusqlite::' ;;
+    v8)               echo "(^|[^A-Za-z0-9_])(v8::${extra:+|$extra})" ;;
+    zeroship_runtime) echo "(^|[^A-Za-z0-9_])(zeroship_runtime::|OpError|OpResult|ResolveValue|SharedState${extra:+|$extra})" ;;
+    compio_postgres)  echo "(^|[^A-Za-z0-9_])(compio_postgres::${extra:+|$extra})" ;;
+    rusqlite)         echo "(^|[^A-Za-z0-9_])(rusqlite::${extra:+|$extra})" ;;
     upward)           echo 'crate::(v8_bridge|v8_classes)' ;;
   esac
 }
@@ -160,18 +252,18 @@ echo "--------------------------------------------------------------------------
 viol=0; rows=0
 while read -r f; do
   t=$(tier "$f")
-  tm=$(test_mod_line "$f")
   if [ "$TEST_REGION" -eq 1 ]; then
-    [ -z "$tm" ] && continue          # no test module: nothing to say in this mode
-    start=$tm
+    has_tests "$f" || continue        # no test region: nothing to say in this mode
+    region=$(test_lines "$f")
   else
-    cut=${tm:-$(wc -l < "$f")}
+    region=$(prod_lines "$f")
   fi
+  [ -z "$region" ] && continue
   for m in v8 zeroship_runtime compio_postgres rusqlite upward; do
-    re=$(marker_re "$m")
+    re=$(marker_re "$m" "$region")
     if [ "$TEST_REGION" -eq 1 ]; then
       # Occurrences, not signatures: a test body has no signature to inspect.
-      n=$(tail -n +"$start" "$f" | grep -vP '^\s*(///|//!|//)' | grep -cP "$re")
+      n=$(printf '%s\n' "$region" | grep -cP "$re")
     elif [ "$m" = upward ]; then
       # `upward` is ALWAYS an occurrence scan, never a signature scan. A module
       # reaches up through `use crate::v8_bridge::...` and through expressions
@@ -180,9 +272,9 @@ while read -r f; do
       # nothing and reports a clean tier that is not clean. Scanning signatures
       # for this marker returned 0 across the whole crate while 12 real upward
       # references existed.
-      n=$(head -n "$cut" "$f" | grep -vP '^\s*(///|//!|//)' | grep -cP "$re")
+      n=$(printf '%s\n' "$region" | grep -cP "$re")
     else
-      n=$(head -n "$cut" "$f" | grep -vP '^\s*(///|//!|//)' | awk -v RE="$re" '
+      n=$(printf '%s\n' "$region" | awk -v RE="$re" '
         function flush(  ) { if (c && sig ~ RE) k++; c = 0 }
         # Defect 2: test the fn line itself before moving on - a one-line
         # signature terminates immediately and used to be skipped by `next`.
