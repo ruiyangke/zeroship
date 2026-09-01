@@ -832,6 +832,18 @@ Re-run accordingly at `70bb94b17`, 180s on the dedicated 5470:
 `pool_acquires == pool_releases` exactly, and `falls=4` again confirms the RSS
 rule was exercised rather than sitting in its degenerate flat-series mode.
 
+Chaos 1 re-run at the same commit, restart issued 40s into `phase=measure`:
+
+    soak result=failed: pooled query worker: run pooled scalar query failed: db error
+    live_connections_at_failure=0
+    watchdog messages: 0    panics: 0
+
+Identical to 2026-08-26, 08-27 and the earlier run today. The failure is the
+point - the soak's floors assume a stable server - and what matters is its
+shape: a db error reached the caller rather than a hang, the driver's live
+connection count was zero at the failure so connections were released rather
+than leaked, and the container came back healthy.
+
 Measured 2026-08-31, `5b11ab1fb..8df74effc` (about fifty commits): **0 production
 lines across all twelve changed files.** Every one of the 837 changed non-comment
 lines is inside a test span. So the soak, the three chaos scenarios and the
