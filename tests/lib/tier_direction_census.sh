@@ -222,15 +222,64 @@ prod() {
     { print }' "$1"
 }
 
+# Is this file's module declared ONLY behind a test gate in its parent?
+#
+# DEFECT 5, found 2026-09-01 by a reviewer re-deriving a count the brief handed
+# out as settled. `prod()` was taught (defect 4) to see an item-level `#[cfg]`
+# INSIDE a file. It still could not see a gate one directory up, on the parent's
+# `mod` line - and a per-file scan structurally cannot. So `crud/mask_drift.rs`
+# contributed SIX edge rows, including one of the eight `ENGINE -> SQLITE`
+# down-edges, while its sole declaration is
+#
+#     crud/mod.rs:90  #[cfg(any(test, feature = "test-helpers"))]
+#     crud/mod.rs:91  pub mod mask_drift;
+#
+# i.e. it is in no production build at all. The true production count for that
+# cycle is 7 down, not 8.
+#
+# THIS MATTERS BEYOND ONE FILE: the header promises the count is a FLOOR. For
+# UP-edges it is. For DOWN-edges it was not - the census could OVER-count, and a
+# floor that can over-count is not a floor. Anyone doing arithmetic on down-edge
+# tallies (progress on the ADAPTER <-> ENGINE cycle runs through this same
+# scanner) was measuring test-only code.
+#
+# The rule mirrors `prod()`'s: a module declared TWICE is the two-arm
+# production/test-helpers pair and is production. Declared ONCE and gated, it is
+# test-only. Declared once ungated, production.
+declared_test_only() {
+  local rel="$1" modname parent decls gated
+  modname="$(basename "$rel" .rs)"
+  case "$rel" in
+    */*) parent="$(dirname "$rel")/mod.rs"
+         # A `foo/mod.rs` is declared by its GRANDparent as `mod foo;`.
+         if [ "$modname" = mod ]; then
+           modname="$(basename "$(dirname "$rel")")"
+           parent="$(dirname "$(dirname "$rel")")/mod.rs"
+           [ "$(dirname "$(dirname "$rel")")" = "." ] && parent="./lib.rs"
+         fi ;;
+    *)   parent="./lib.rs" ;;
+  esac
+  [ -f "$parent" ] || return 1
+  decls=$(grep -cE "^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${modname}[[:space:]]*;" "$parent")
+  [ "$decls" -eq 1 ] || return 1
+  # Exactly one declaration: is the line above it a cfg gate?
+  gated=$(grep -B1 -E "^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${modname}[[:space:]]*;" "$parent" \
+            | grep -cE '^[[:space:]]*#\[cfg\((any\()?test|^[[:space:]]*#\[cfg\(feature[[:space:]]*=[[:space:]]*"test-helpers"')
+  [ "$gated" -ge 1 ]
+}
+
 EDGES="$(mktemp)"
 trap 'rm -f "$EDGES"' EXIT
 
+n_test_only=0
 printf '%-9s %-34s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
 echo "----------------------------------------------------------------------------------------------"
 while read -r f; do
   rel="${f#./}"
   st=$(tier_of_file "$f")
   [ "$st" = CONTESTED ] && continue
+  # Defect 5: a module gated one-arm in its PARENT is in no production build.
+  declared_test_only "$rel" && { n_test_only=$((n_test_only + 1)); continue; }
   sr=$(rank "$st")
   # Own module name, for skipping self-references.
   case "$rel" in */*) selfmod="${rel%%/*}" ;; *) selfmod="${rel%.rs}" ;; esac
@@ -306,6 +355,10 @@ if [ "$MODE" = "--contested" ]; then
     [ "$(tier_of_file "$f")" = CONTESTED ] && echo "  ${f#./}"
   done | sort -u
 else
+  echo "TEST-ONLY: $n_test_only file(s) whose module is gated one-arm in its parent"
+  echo "  were excluded. Their edges are not in any production build; counting them"
+  echo "  is how the down-edge tallies over-reported (defect 5 in this header)."
+  echo
   echo "UNJUDGED: $n_contested file(s) have no settled tier and were SKIPPED."
   echo "  Every edge into or out of them is absent from the table above. Run"
   echo "  '$0 --contested' to list them. A file added without a tier_of_file arm"
@@ -315,5 +368,7 @@ echo
 echo "Every verdict is relative to tier_of_file/tier_of_target above, which are a"
 echo "copy of the proposal's assignment table. Re-draw a boundary there and re-draw"
 echo "it here in the same commit, or this reports on a shape nobody proposed."
-echo "Read the count as a FLOOR: see the DEFECTS block in this header for what it"
-echo "has already been blind to, twice."
+echo "UP-edge counts are a FLOOR - the DEFECTS block in this header lists what this"
+echo "script has already been blind to. DOWN-edge counts were NOT a floor until"
+echo "2026-09-01: they could OVER-report, because test-only modules were scanned."
+echo "See defect 5. Re-derive any tally before doing arithmetic on it."
