@@ -55,9 +55,26 @@ for the acceptance criteria, but neither forces the other.
 The default naming strategy is `naming.asIs` (`:1008`), but `naming.snakeCase`
 is a supported opt-in (`:936`). Under `snakeCase`, a creator declaring
 `createdAt` is **not refused** - `createdAt` is not in the list - and it resolves
-to column `created_at`, the system column. The check is simultaneously too
-strict for snake_case authors and blind to the camelCase authors who actually
-collide. Whatever policy replaces it must key on the **resolved column name**.
+to column `created_at`, the system column. Whatever policy replaces it must key
+on the **resolved column name**.
+
+**MEASURED.** `naming.snakeCase.toColumn` is
+`s.replace(/[A-Z]/g, c => '_' + c.toLowerCase())` (`sdks/db/src/types.ts:347`),
+and through `normalizeSchema`:
+
+| Declared | Resolved column | Refused? |
+| --- | --- | --- |
+| `created_at` | `created_at` | **yes**, `RESERVED_SYSTEM_FIELD_NAME` |
+| `createdAt` | `created_at` | **no** |
+| `updatedBy` | `updated_by` | **no** |
+
+The framing in the first draft was too generous to the current code. It is not
+that the fence is "too strict for one spelling and blind to another": **both
+spellings resolve to the same column**, so both collide identically, and the
+fence catches exactly one of them - the one a camelCase-authoring creator is
+least likely to write. A creator on `snakeCase` who writes `createdAt`, which is
+the spelling the naming strategy exists to support, silently acquires the
+platform's audit column.
 
 **2. Two system fields are already exposed, under different spellings.**
 `model()` injects `deletedAt` at `:583` when soft-delete is on and `version` at
