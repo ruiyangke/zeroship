@@ -4087,6 +4087,327 @@ const TYPED_TEMPORAL_REBOUND_SQL: &str = "SELECT \
      $7::timestamp::text, $8::timestamp::text, \
      $9::timestamptz::text, $10::timestamptz::text";
 
+#[cfg(feature = "with-jiff-0_2")]
+#[derive(Debug, PartialEq, Eq)]
+struct BoundJiffTimeObservation {
+    server_text: String,
+    server_wire: Wire,
+    decoded: ValueOutcome<String>,
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeJiffObservation {
+    decoded: [String; 4],
+    server_wires: [Wire; 11],
+    outbound_wires: [Vec<u8>; 10],
+    rebound: Vec<String>,
+    time_24: ValueOutcome<String>,
+    submicro_input: String,
+    submicro_outbound_wire: Vec<u8>,
+    submicro_bind: ValueOutcome<BoundJiffTimeObservation>,
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+fn tokio_jiff_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native Jiff encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+fn compio_jiff_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native Jiff encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+fn tokio_native_jiff_observation(url: String) -> NativeJiffObservation {
+    on_tokio(url, |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set tokio Jiff temporal rendering");
+        let row = client
+            .query_one(TYPED_TEMPORAL_SQL, &[])
+            .await
+            .expect("tokio-postgres native Jiff decode");
+
+        let date: jiff::civil::Date = row.get(0);
+        let datetime: jiff::civil::DateTime = row.get(1);
+        let timestamp: jiff::Timestamp = row.get(2);
+        let time: jiff::civil::Time = row.get(3);
+        let date_neg: tokio_types::Date<jiff::civil::Date> = row.get(4);
+        let date_pos: tokio_types::Date<jiff::civil::Date> = row.get(5);
+        let datetime_neg: tokio_types::Timestamp<jiff::civil::DateTime> = row.get(6);
+        let datetime_pos: tokio_types::Timestamp<jiff::civil::DateTime> = row.get(7);
+        let timestamp_neg: tokio_types::Timestamp<jiff::Timestamp> = row.get(8);
+        let timestamp_pos: tokio_types::Timestamp<jiff::Timestamp> = row.get(9);
+        let time_24 = match row.try_get::<_, jiff::civil::Time>(10) {
+            Ok(value) => ValueOutcome::Value(value.to_string()),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+
+        let server_wires = std::array::from_fn(|index| row.get(index));
+        let outbound_wires = [
+            tokio_jiff_wire(&date, &tokio_types::Type::DATE),
+            tokio_jiff_wire(&datetime, &tokio_types::Type::TIMESTAMP),
+            tokio_jiff_wire(&timestamp, &tokio_types::Type::TIMESTAMPTZ),
+            tokio_jiff_wire(&time, &tokio_types::Type::TIME),
+            tokio_jiff_wire(&date_neg, &tokio_types::Type::DATE),
+            tokio_jiff_wire(&date_pos, &tokio_types::Type::DATE),
+            tokio_jiff_wire(&datetime_neg, &tokio_types::Type::TIMESTAMP),
+            tokio_jiff_wire(&datetime_pos, &tokio_types::Type::TIMESTAMP),
+            tokio_jiff_wire(&timestamp_neg, &tokio_types::Type::TIMESTAMPTZ),
+            tokio_jiff_wire(&timestamp_pos, &tokio_types::Type::TIMESTAMPTZ),
+        ];
+        let rebound = client
+            .query_one(
+                TYPED_TEMPORAL_REBOUND_SQL,
+                &[
+                    &date,
+                    &datetime,
+                    &timestamp,
+                    &time,
+                    &date_neg,
+                    &date_pos,
+                    &datetime_neg,
+                    &datetime_pos,
+                    &timestamp_neg,
+                    &timestamp_pos,
+                ],
+            )
+            .await
+            .expect("tokio-postgres native Jiff rebound");
+
+        let submicro = jiff::civil::Time::new(23, 59, 59, 999_999_500)
+            .expect("construct Jiff sub-microsecond edge");
+        let submicro_outbound_wire = tokio_jiff_wire(&submicro, &tokio_types::Type::TIME);
+        let submicro_bind = match client
+            .query_one("SELECT ($1::time)::text, $1::time", &[&submicro])
+            .await
+        {
+            Ok(row) => {
+                let decoded = match row.try_get::<_, jiff::civil::Time>(1) {
+                    Ok(value) => ValueOutcome::Value(value.to_string()),
+                    Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+                    Err(error) => {
+                        ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned())
+                    }
+                };
+                ValueOutcome::Value(BoundJiffTimeObservation {
+                    server_text: row.get(0),
+                    server_wire: row.get(1),
+                    decoded,
+                })
+            }
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+
+        NativeJiffObservation {
+            decoded: [
+                date.to_string(),
+                datetime.to_string(),
+                timestamp.to_string(),
+                time.to_string(),
+            ],
+            server_wires,
+            outbound_wires,
+            rebound: (0..10).map(|index| rebound.get(index)).collect(),
+            time_24,
+            submicro_input: submicro.to_string(),
+            submicro_outbound_wire,
+            submicro_bind,
+        }
+    })
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_jiff_observation() -> NativeJiffObservation {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set compio Jiff temporal rendering");
+    let row = client
+        .query_one(TYPED_TEMPORAL_SQL, &[])
+        .await
+        .expect("compio-postgres native Jiff decode");
+
+    let date: jiff::civil::Date = row.get(0);
+    let datetime: jiff::civil::DateTime = row.get(1);
+    let timestamp: jiff::Timestamp = row.get(2);
+    let time: jiff::civil::Time = row.get(3);
+    let date_neg: compio_types::Date<jiff::civil::Date> = row.get(4);
+    let date_pos: compio_types::Date<jiff::civil::Date> = row.get(5);
+    let datetime_neg: compio_types::Timestamp<jiff::civil::DateTime> = row.get(6);
+    let datetime_pos: compio_types::Timestamp<jiff::civil::DateTime> = row.get(7);
+    let timestamp_neg: compio_types::Timestamp<jiff::Timestamp> = row.get(8);
+    let timestamp_pos: compio_types::Timestamp<jiff::Timestamp> = row.get(9);
+    let time_24 = match row.try_get::<_, jiff::civil::Time>(10) {
+        Ok(value) => ValueOutcome::Value(value.to_string()),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+
+    let server_wires = std::array::from_fn(|index| row.get(index));
+    let outbound_wires = [
+        compio_jiff_wire(&date, &compio_types::Type::DATE),
+        compio_jiff_wire(&datetime, &compio_types::Type::TIMESTAMP),
+        compio_jiff_wire(&timestamp, &compio_types::Type::TIMESTAMPTZ),
+        compio_jiff_wire(&time, &compio_types::Type::TIME),
+        compio_jiff_wire(&date_neg, &compio_types::Type::DATE),
+        compio_jiff_wire(&date_pos, &compio_types::Type::DATE),
+        compio_jiff_wire(&datetime_neg, &compio_types::Type::TIMESTAMP),
+        compio_jiff_wire(&datetime_pos, &compio_types::Type::TIMESTAMP),
+        compio_jiff_wire(&timestamp_neg, &compio_types::Type::TIMESTAMPTZ),
+        compio_jiff_wire(&timestamp_pos, &compio_types::Type::TIMESTAMPTZ),
+    ];
+    let rebound = client
+        .query_one(
+            TYPED_TEMPORAL_REBOUND_SQL,
+            &[
+                &date,
+                &datetime,
+                &timestamp,
+                &time,
+                &date_neg,
+                &date_pos,
+                &datetime_neg,
+                &datetime_pos,
+                &timestamp_neg,
+                &timestamp_pos,
+            ],
+        )
+        .await
+        .expect("compio-postgres native Jiff rebound");
+
+    let submicro = jiff::civil::Time::new(23, 59, 59, 999_999_500)
+        .expect("construct Jiff sub-microsecond edge");
+    let submicro_outbound_wire = compio_jiff_wire(&submicro, &compio_types::Type::TIME);
+    let submicro_bind = match client
+        .query_one("SELECT ($1::time)::text, $1::time", &[&submicro])
+        .await
+    {
+        Ok(row) => {
+            let decoded = match row.try_get::<_, jiff::civil::Time>(1) {
+                Ok(value) => ValueOutcome::Value(value.to_string()),
+                Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+                Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+            };
+            ValueOutcome::Value(BoundJiffTimeObservation {
+                server_text: row.get(0),
+                server_wire: row.get(1),
+                decoded,
+            })
+        }
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+
+    NativeJiffObservation {
+        decoded: [
+            date.to_string(),
+            datetime.to_string(),
+            timestamp.to_string(),
+            time.to_string(),
+        ],
+        server_wires,
+        outbound_wires,
+        rebound: (0..10).map(|index| rebound.get(index)).collect(),
+        time_24,
+        submicro_input: submicro.to_string(),
+        submicro_outbound_wire,
+        submicro_bind,
+    }
+}
+
+/// Jiff's finite carriers and generic infinity wrappers agree with the server.
+/// Its bare time refuses 24:00, while sub-microsecond input truncates to the
+/// last representable microsecond instead of producing an undecodable 24:00.
+#[cfg(feature = "with-jiff-0_2")]
+#[compio::test]
+async fn native_jiff_codecs_cover_temporal_edges_and_remain_closed() {
+    let theirs = tokio_native_jiff_observation(common::plaintext_url());
+    let ours = compio_native_jiff_observation().await;
+    assert_eq!(ours, theirs);
+
+    assert_eq!(
+        ours.decoded,
+        [
+            "0000-01-01",
+            "1999-12-31T23:59:59.999999",
+            "2001-02-02T22:20:06.123456Z",
+            "23:59:59.999999",
+        ]
+    );
+    assert_eq!(
+        ours.rebound,
+        [
+            "0001-01-01 BC",
+            "1999-12-31 23:59:59.999999",
+            "2001-02-02 22:20:06.123456+00",
+            "23:59:59.999999",
+            "-infinity",
+            "infinity",
+            "-infinity",
+            "infinity",
+            "-infinity",
+            "infinity",
+        ]
+    );
+
+    let expected_wires = [
+        "fff4da8b",
+        "ffffffffffffffff",
+        "00001f591d6b53c0",
+        "000000141dd75fff",
+        "80000000",
+        "7fffffff",
+        "8000000000000000",
+        "7fffffffffffffff",
+        "8000000000000000",
+        "7fffffffffffffff",
+        "000000141dd76000",
+    ];
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        if index < ours.outbound_wires.len() {
+            assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        }
+    }
+    assert_eq!(ours.time_24, ValueOutcome::LocalFailure);
+
+    assert_eq!(ours.submicro_input, "23:59:59.9999995");
+    assert_eq!(hex(&ours.submicro_outbound_wire), "000000141dd75fff");
+    let ValueOutcome::Value(bound) = &ours.submicro_bind else {
+        panic!(
+            "Jiff sub-microsecond bind did not reach the server: {:?}",
+            ours.submicro_bind
+        );
+    };
+    assert_eq!(bound.server_text, "23:59:59.999999");
+    assert_eq!(hex(&bound.server_wire.0), "000000141dd75fff");
+    assert_eq!(
+        bound.decoded,
+        ValueOutcome::Value("23:59:59.999999".to_owned())
+    );
+}
+
 #[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
 #[derive(Debug, PartialEq, Eq)]
 struct TypedTemporalObservation {

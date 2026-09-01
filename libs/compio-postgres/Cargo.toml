@@ -38,7 +38,10 @@ with-geo-types-0_7 = [
     "postgres-types/with-geo-types-0_7",
     "tokio-postgres/with-geo-types-0_7",
 ]
-with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
+with-jiff-0_2 = [
+    "postgres-types/with-jiff-0_2",
+    "tokio-postgres/with-jiff-0_2",
+]
 with-smol_str-01 = ["postgres-types/with-smol_str-01"]
 with-cidr-0_3 = [
     "postgres-types/with-cidr-0_3",
@@ -223,6 +226,7 @@ eui48 = { version = "1", default-features = false }
 bit-vec = "0.9"
 serde_json = "1"
 geo-types = "0.7"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream
