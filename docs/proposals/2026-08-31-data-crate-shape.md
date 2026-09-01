@@ -173,7 +173,7 @@ had no home until someone enumerated, and enumerating found seven more like it.
 
 | module | lines | why it does not place |
 | --- | --- | --- |
-| `backend/mod.rs` | 2,201 | **must be split.** The contract half is core; `BackendHandle` names `Rc<SqliteBackend>` and `Rc<PostgresBackend>` by value, so putting it in core creates `core -> sqlite -> core`. Where the composition enum lives is the first thing to settle. |
+| `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
 | `error.rs` | 1,703 | **must be split.** `DbError` is core; `to_op_error` links V8 and belongs in the adapter. 11 files, measured. |
 | `context.rs` | 1,688 | holds a `BackendHandle` per isolate, so it inherits whatever `BackendHandle` decides. Isolate-scoped, which argues adapter; vendor-typed, which argues not. |
 | `auth/` | 1,459 | session setup and `SET LOCAL ROLE`. Runs per connection, so engine - but it is also a security fence, which argues for a home where it cannot be bypassed. |
@@ -185,6 +185,34 @@ had no home until someone enumerated, and enumerating found seven more like it.
 The last two are consequences of the Full decision and did not exist as problems before it. Neither
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
+
+#### `BackendHandle` goes UP, not down - settled by measurement, 2026-08-31
+
+This was named above as "the first thing to settle" and it took one grep. Inside `backend/mod.rs`,
+`BackendHandle` occurs at exactly five places: the enum (`:1475`), its impl (`:1489`), and three
+lines inside tests (`:1897`, `:1922`, `:1929`). **None of the file's 13 `pub trait` declarations
+mentions it.** The contract is completely independent of the composition enum.
+
+So the split is clean and the arrow is the opposite of the one that worried us:
+
+```
+  data-engine     BackendHandle { Postgres(Rc<..>), Sqlite(Rc<..>) }   -> both vendors
+       |                                                                  (it composes them)
+  data-core       the traits                                           -> NEITHER vendor
+       |    \
+  data-postgres  data-sqlite    impl the traits
+```
+
+The vendor-naming enum belongs in the layer that already depends on both vendors, which is exactly
+the layer that dispatches on it. Putting it in core was never necessary; it only looked necessary
+because it currently shares a FILE with the contract.
+
+**And the repo already does this, in the family this plan keeps citing as precedent.**
+`zeroship-migrate/src/lib.rs:61-65` names all three vendors in `SHIPPING: [&BackendVendor; 3]` - the
+facade, at the top - while `zeroship-migrate-backend`, the contract crate, declares no driver at all.
+Same shape, one layer up. The closed-enum choice also survives: `backend/mod.rs:1455-1464` records
+that the enum exists for monomorphisation on the hot path, and nothing about moving it up changes
+that.
 
 **A clarification this document owes the reader.** Track B argues "the broker stays in the worker",
 and that is about the PROCESS - V8 subscription objects hold `broker::Subscription` handles directly,
