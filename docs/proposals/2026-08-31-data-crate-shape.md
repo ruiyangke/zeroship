@@ -186,6 +186,35 @@ The last two are consequences of the Full decision and did not exist as problems
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
 
+#### `read_set.rs` is production-inert on BOTH ends, so live queries are coarse-grained today
+
+Raised by review, verified independently here, and it is a behavioural fact about shipped code rather
+than a placement question.
+
+**Producer.** The only writer of the capture buffer is `Active::begin` (`read_set.rs:396`), and
+`Active` is `#[cfg(test)]` (`:386`, `:391`). The one other `borrow_mut` (`:422`) is inside
+`#[cfg(test)] impl Drop for Active` - a clear, not a write. So in any production build
+`CURRENT_BUFFER` is always `None`, `is_active()` (`:430`) always returns false, and
+`record_if_active` never records.
+
+**Consumer.** `Subscription::set_read_set` (`broker.rs:267`) has NO caller outside `broker.rs`'s own
+test module - every hit is `:1298`, `:1333`, `:1349`, `:1358`, all inside the `#[cfg(test)]` region.
+So `Subscription.read_set` is always `None` in production and the filtering early-return always
+fires.
+
+**Therefore every subscriber receives every change for its collection today**, unfiltered by read
+set. Whether that is a known trade or an unnoticed gap is not a question this document can answer -
+but a plan that assigns `read_set.rs` (659 lines) to a crate is answering the wrong question about
+it. It is a **fifth** built-tested-unreferenced cluster, alongside the four this document already
+names, and it deserves the same disposition: delete or wire, not relocate.
+
+**One correction it forces on Step 0.** The mask-liveness finding cites `read_set.rs:320` as one of
+TWO live consumers proving `MaskKind` survives. That path is production-unreachable, so the citation
+is bad. **The conclusion holds** on the other root - `crud/mask_pass.rs:81` and
+`crud/write_pipeline.rs:237` are genuinely live - but it rests on one root rather than two, and this
+document should not have counted a `cfg(test)`-gated path as evidence of liveness while making
+exactly that argument about other modules.
+
 #### A CRATE SPLIT ERASES `pub(crate)`, AND THIS CRATE USES IT AS A SHIPPED FENCE - and it has already been burned by exactly this
 
 Rust has no cross-crate `pub(crate)`. Every `pub(crate)` symbol whose module ends up on the far side
