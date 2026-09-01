@@ -218,8 +218,38 @@ So:
 | `change_stream_pg.rs` | **replaced.** It is "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" (`:1-4`); after Full the worker has no consumer to own. Its logic is absorbed into the relay client. |
 | `replication_ops.rs` | **decide, do not port.** A V8 diagnostic calling `replication::watchdog_query` (`:33`). Either it becomes a relay RPC or the diagnostic goes away; porting it verbatim buys a cross-process call for a debugging aid. |
 
-With that, **every one of the 57,427 lines has a destination or an explicit decision**, and the
-enumeration is complete.
+**THAT CLAIM WAS FALSE WHEN FIRST WRITTEN. IT SAID "every one of the 57,427 lines has a destination
+or an explicit decision", AND 782 LINES WERE NEVER MENTIONED** - found by adding up my own tables
+rather than waiting for a reviewer to do it:
+
+```
+  adapter        5,679      contested      8,681
+  engine        26,791      ---
+  encryption     1,591      accounted     56,645
+  postgres       1,477      tree total    57,427
+  sqlite         9,485      UNACCOUNTED      782
+  cdc-server     2,941
+```
+
+The 782:
+
+| module | lines | disposition |
+| --- | --- | --- |
+| `test_support/` | 336 | test scaffolding; follows whichever crate its subject lands in |
+| `backend/lock_guard.rs` | 397 | `#[cfg(any(test, feature = "test-helpers"))]` (`backend/mod.rs:72`), so it is in NO production build; it follows `backend/` and needs no production home |
+| `binding.rs` | 49 | **a real omission.** It defines `DbBinding` - the identity of the bound database, held by `Collection` (`v8_classes/collection.rs:36`) and named by both backends. Two rounds were spent arguing about this type's NAME and the assignment forgot to place it. |
+
+`DbBinding` belongs in `data-core`: it is the vocabulary every tier uses to say WHICH database, it
+carries no behaviour beyond two strings (`binding.rs:13`), and both vendors name it.
+
+**The method failure is worth naming because it is the same one this document keeps finding in
+others.** The walk enumerated modules and then wrote up the ones I had an OPINION about. Modules I
+had nothing to say about silently left the ledger - and the arithmetic that would have caught it was
+a claim I made rather than a sum I computed. **"All N lines are assigned" is a total; totals are
+checked by adding, not by asserting.** Same shape as the table that summed to 13,163 under a printed
+13,560, one section of this document away.
+
+With those three placed, the enumeration is complete - and the total now reconciles.
 
 #### `auth/` does not place because it is not one thing
 
