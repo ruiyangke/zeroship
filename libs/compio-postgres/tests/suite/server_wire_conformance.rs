@@ -1915,3 +1915,278 @@ async fn discrete_range_bounds_are_valid_but_noncanonical() {
     assert_eq!(feedback.stored_text, "[2,4)");
     assert_eq!(feedback.stored_wire, server);
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecordFieldWireFixture {
+    oid: u32,
+    value: Option<Vec<u8>>,
+}
+
+impl RecordFieldWireFixture {
+    fn encoded<T>(field_type: &Type, payload_type: &Type, value: &T) -> Self
+    where
+        T: ToSql,
+    {
+        Self {
+            oid: field_type.oid(),
+            value: Some(outbound_wire(value, payload_type)),
+        }
+    }
+
+    fn null(field_type: &Type) -> Self {
+        Self {
+            oid: field_type.oid(),
+            value: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecordWireFixture {
+    fields: Vec<RecordFieldWireFixture>,
+}
+
+impl ToSql for RecordWireFixture {
+    fn to_sql(&self, _: &Type, out: &mut types::private::BytesMut) -> Result<IsNull, BoxError> {
+        let count = i32::try_from(self.fields.len()).expect("record field count fits i32");
+        out.extend_from_slice(&count.to_be_bytes());
+        for field in &self.fields {
+            out.extend_from_slice(&field.oid.to_be_bytes());
+            match &field.value {
+                Some(value) => {
+                    let len = i32::try_from(value.len()).expect("record field length fits i32");
+                    out.extend_from_slice(&len.to_be_bytes());
+                    out.extend_from_slice(value);
+                }
+                None => out.extend_from_slice(&(-1_i32).to_be_bytes()),
+            }
+        }
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::RECORD || matches!(ty.kind(), types::Kind::Composite(_))
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut types::private::BytesMut,
+    ) -> Result<IsNull, BoxError> {
+        <Self as ToSql>::to_sql(self, ty, out)
+    }
+}
+
+fn decode_record_wire(bytes: &[u8]) -> Vec<RecordFieldWireFixture> {
+    let mut reader = CopyReader::new(bytes);
+    let count = reader.i32();
+    assert!(count >= 0, "negative record field count");
+    let mut fields = Vec::with_capacity(usize::try_from(count).expect("nonnegative field count"));
+    for _ in 0..count {
+        let oid = u32::from_be_bytes(
+            reader
+                .take(4)
+                .try_into()
+                .expect("four-byte record field OID"),
+        );
+        let len = reader.i32();
+        let value = if len == -1 {
+            None
+        } else {
+            assert!(len >= 0, "invalid negative record field length");
+            Some(
+                reader
+                    .take(usize::try_from(len).expect("nonnegative record field length"))
+                    .to_vec(),
+            )
+        };
+        fields.push(RecordFieldWireFixture { oid, value });
+    }
+    assert!(
+        reader.remaining.is_empty(),
+        "record wire carried trailing bytes"
+    );
+    fields
+}
+
+#[allow(clippy::future_not_send)]
+async fn rejected_binary_copy(
+    client: &compio_postgres::Client,
+    label: &str,
+    sql_type: &str,
+    payload: &[u8],
+) -> String {
+    let table = common::test_object_name(&format!("cpg_wire_reject_{label}"));
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table}; \
+             CREATE TEMPORARY TABLE {table} (value {sql_type})"
+        ))
+        .await
+        .expect("create rejected binary COPY table");
+
+    let mut sink = Box::pin(
+        client
+            .copy_in(&format!(
+                "COPY {table} (value) FROM STDIN WITH (FORMAT binary)"
+            ))
+            .await
+            .expect("start rejected binary COPY"),
+    );
+    sink.as_mut()
+        .send(one_field_binary_copy(payload))
+        .await
+        .expect("send rejected binary COPY row");
+    let error = sink
+        .as_mut()
+        .finish()
+        .await
+        .expect_err("PostgreSQL accepted malformed record wire");
+    let message = common::error_chain(&error);
+    client
+        .batch_execute(&format!("DROP TABLE {table}"))
+        .await
+        .expect("drop rejected binary COPY table");
+    message
+}
+
+/// The test-only anonymous RECORD fixture matches zero fields, a typed NULL,
+/// and a mixed record's field count, OIDs, lengths, and payloads exactly.
+#[compio::test]
+async fn test_only_anonymous_record_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    let empty = RecordWireFixture { fields: Vec::new() };
+    assert_server_wire(
+        &client,
+        "empty anonymous record",
+        "ROW()",
+        &empty,
+        &Type::RECORD,
+    )
+    .await;
+
+    let typed_null = RecordWireFixture {
+        fields: vec![RecordFieldWireFixture::null(&Type::INT4)],
+    };
+    assert_server_wire(
+        &client,
+        "typed NULL anonymous record",
+        "ROW(NULL::int4)",
+        &typed_null,
+        &Type::RECORD,
+    )
+    .await;
+
+    let mixed = RecordWireFixture {
+        fields: vec![
+            RecordFieldWireFixture::encoded(&Type::INT4, &Type::INT4, &7_i32),
+            RecordFieldWireFixture::encoded(&Type::TEXT, &Type::TEXT, &"line\nvalue"),
+            RecordFieldWireFixture::null(&Type::INT8),
+        ],
+    };
+    let ours = outbound_wire(&mixed, &Type::RECORD);
+    assert_eq!(
+        ours,
+        server_wire(&client, "ROW(7::int4, E'line\\nvalue'::text, NULL::int8)").await
+    );
+    assert_eq!(decode_record_wire(&ours), mixed.fields);
+}
+
+/// A named composite's resolved metadata supplies every field OID, including a
+/// domain OID. Correct manual framing round-trips; wrong counts and OIDs are
+/// rejected, proving that those words are semantic rather than decoration.
+#[compio::test]
+async fn test_only_named_composite_wire_matches_and_enforces_metadata() {
+    let client = compio_client().await;
+    let prefix = common::test_object_name("cpg_wire_record");
+    let domain = format!("{prefix}_domain");
+    let composite = format!("{prefix}_composite");
+    client
+        .batch_execute(&format!(
+            "CREATE DOMAIN pg_temp.{domain} AS int4; \
+             CREATE TYPE pg_temp.{composite} AS ( \
+                 id int4, tagged pg_temp.{domain}, label text, amount int8 \
+             )"
+        ))
+        .await
+        .expect("create record conformance types");
+
+    let composite_type = client
+        .prepare(&format!("SELECT NULL::pg_temp.{composite}"))
+        .await
+        .expect("resolve named composite type")
+        .columns()[0]
+        .type_()
+        .clone();
+    let types::Kind::Composite(fields) = composite_type.kind() else {
+        panic!("resolved named type was not composite");
+    };
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[0].type_(), &Type::INT4);
+    assert!(matches!(fields[1].type_().kind(), types::Kind::Domain(_)));
+    assert_ne!(fields[1].type_().oid(), Type::INT4.oid());
+    assert_eq!(fields[2].type_(), &Type::TEXT);
+    assert_eq!(fields[3].type_(), &Type::INT8);
+
+    let value = RecordWireFixture {
+        fields: vec![
+            RecordFieldWireFixture::encoded(fields[0].type_(), &Type::INT4, &7_i32),
+            RecordFieldWireFixture::encoded(fields[1].type_(), &Type::INT4, &8_i32),
+            RecordFieldWireFixture::encoded(fields[2].type_(), &Type::TEXT, &"line\nvalue"),
+            RecordFieldWireFixture::null(fields[3].type_()),
+        ],
+    };
+    let expression = format!(
+        "ROW(7::int4, 8::pg_temp.{domain}, E'line\\nvalue'::text, NULL::int8)\
+         ::pg_temp.{composite}"
+    );
+    let ours = outbound_wire(&value, &composite_type);
+    assert_eq!(ours, server_wire(&client, &expression).await);
+    assert_eq!(decode_record_wire(&ours), value.fields);
+
+    let feedback = copy_feedback(
+        &client,
+        "named_composite",
+        &format!("pg_temp.{composite}"),
+        &ours,
+        &expression,
+    )
+    .await;
+    assert!(feedback.equal, "named composite changed during COPY");
+    assert_eq!(feedback.stored_wire, ours);
+
+    let mut wrong_oid = ours.clone();
+    wrong_oid[4..8].copy_from_slice(&Type::INT8.oid().to_be_bytes());
+    let oid_error = rejected_binary_copy(
+        &client,
+        "record_oid",
+        &format!("pg_temp.{composite}"),
+        &wrong_oid,
+    )
+    .await;
+    assert!(
+        oid_error.contains("binary data has type") && oid_error.contains("expected"),
+        "unexpected field-OID rejection: {oid_error}"
+    );
+
+    let mut wrong_count = ours.clone();
+    wrong_count[..4].copy_from_slice(&3_i32.to_be_bytes());
+    let count_error = rejected_binary_copy(
+        &client,
+        "record_count",
+        &format!("pg_temp.{composite}"),
+        &wrong_count,
+    )
+    .await;
+    assert!(
+        count_error.contains("record") || count_error.contains("columns"),
+        "unexpected field-count rejection: {count_error}"
+    );
+
+    client
+        .batch_execute(&format!(
+            "DROP TYPE pg_temp.{composite}; DROP DOMAIN pg_temp.{domain}"
+        ))
+        .await
+        .expect("drop record conformance types");
+}
