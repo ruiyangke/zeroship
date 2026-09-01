@@ -4804,6 +4804,92 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_retirement_drains_the_already_flushed_response_prefix() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: unsupported_encoding_message(),
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the encoding change");
+        let producer = compio::runtime::spawn(async move {
+            acknowledged
+                .await
+                .expect("retirement did not acknowledge the encoding change");
+            read_tx
+                .send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: error_response_batch("22012", "scripted division by zero"),
+                        request_complete: true,
+                        deferred_error: None,
+                    },
+                    acknowledgement: None,
+                }))
+                .await
+                .expect("queue the already-flushed response");
+            std::future::pending::<()>().await;
+        });
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (prefix_tx, _prefix_rx) = mpsc::channel(1);
+        let prefix_server_error = Arc::default();
+        let prefix_response = Response {
+            sender: prefix_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&prefix_server_error),
+        };
+        let (tail_tx, _tail_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([prefix_response, scripted_awaited_response(tail_tx)]);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(2),
+            &Mutex::new(None),
+            &Cell::new(false),
+            false,
+        )
+        .await;
+        let _ = producer.cancel().await;
+
+        assert_eq!(
+            prefix_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("22012"),
+            "retirement skipped the already-flushed response prefix"
+        );
+        let error = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(error.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+    }
+
+    #[compio::test]
     async fn flush_time_encoding_retirement_preserves_a_queued_server_error() {
         let stream = BufStream::new(YieldingWriteSplitStream);
         let (read_half, mut write_half) = match stream.try_into_split() {
