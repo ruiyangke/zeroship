@@ -5,6 +5,10 @@
  * `export default { schema: { ... } }`.
  */
 
+import type { PlatformAssignment } from "./generated/confined-system-shape.generated";
+
+export type { PlatformAssignment, PlatformAssignmentEvent } from "./generated/confined-system-shape.generated";
+
 /** Generic plain object type used throughout the SDK. */
 export type PlainObject = Record<string, unknown>;
 
@@ -888,6 +892,33 @@ export interface FieldDef {
   unique?: boolean;
   index?: boolean;
   default?: FieldDefaultValue | (() => FieldDefaultValue);
+  /**
+   * Who computes this field's value, and when. Present iff the PLATFORM owns
+   * the value; absent for every field the caller owns.
+   *
+   * **The slot is the override policy, and that is the whole point of having
+   * two slots.** `assign` means the platform computes the value and a
+   * caller-supplied one is not accepted. `default` means a fallback the caller
+   * OVERRIDES by supplying anything. They are not two spellings of the same
+   * idea and a field may carry both: `version` is `assign = increment(1)` with
+   * a DDL `DEFAULT 1`, because the generator is the normal path and the DDL
+   * default is the backstop for writes that never reach the runtime (migration
+   * DML, CDC backfill, raw SQL).
+   *
+   * Everything else a consumer might want here is DERIVED from the presence of
+   * this property and is deliberately not stored beside it - "not required of
+   * the caller", "the client must not materialise a value", "a caller-supplied
+   * value is refused" all follow from it, and `immutable` follows from
+   * `on === "insert"`. A second property restating any of them would be a
+   * second source of truth for one fact.
+   *
+   * Populated from the operator charter
+   * (`policies/confined-system-shape.inject.toml`) rather than from the
+   * creator-authored descriptor, which is why it can be trusted: the descriptor
+   * is client-declared and a creator who hand-edits it can make it say
+   * anything.
+   */
+  assign?: PlatformAssignment;
   min?: number;
   max?: number;
   enum?: (string | number)[];

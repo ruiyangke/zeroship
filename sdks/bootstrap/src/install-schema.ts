@@ -47,6 +47,8 @@ import {
   type WithRelations,
   type PlainObject,
   type FieldDef,
+  CONFINED_SYSTEM_SHAPE_COLUMN_NAMES,
+  CONFINED_SYSTEM_SHAPE_ASSIGNMENTS,
 } from "@zeroship/db/internal";
 
 // ---------------------------------------------------------------------------
@@ -223,26 +225,48 @@ function isFieldDef(value: unknown): value is FieldDef {
 }
 
 /**
- * **P7 PR 1** — SDK-side mirror of the Rust-side `SYSTEM_FIELD_NAMES`
- * constant (`crates/zeroship-schema/src/query.rs`). The seven names are
- * platform-managed system fields; creator schemas cannot declare
- * fields with these names. Fences at schema-declaration time so the
- * failure shows up immediately in `pnpm dev`, matching the spec's
- * "throw at app-boot time" requirement.
+ * The platform-managed column names, taken from the operator charter
+ * (`policies/confined-system-shape.inject.toml`) via its generated projection.
+ * Creator schemas cannot declare fields with these names; fencing at
+ * schema-declaration time surfaces the failure in `pnpm dev` rather than after
+ * a worker round-trip.
  *
- * Drift between this list and the Rust constant would let creators
- * declare a field the SDK accepts but the runtime refuses (or vice-
- * versa); both lists MUST be updated together.
+ * **This used to be seven string literals restating the charter**, with a
+ * doc-comment asking the reader to keep them in step with the Rust side by
+ * hand. It is now derived, so an eighth platform column is a charter line and
+ * `tests/inject_policy_mirror_gate.sh` fails if the projection goes stale
+ * against the fragment. The hand-sync instruction is gone because there is
+ * nothing left to sync.
  */
-const SYSTEM_FIELD_NAMES: readonly string[] = Object.freeze([
-  "id",
-  "created_at",
-  "updated_at",
-  "created_by",
-  "updated_by",
-  "version",
-  "deleted_at",
-]);
+const SYSTEM_FIELD_NAMES: readonly string[] = CONFINED_SYSTEM_SHAPE_COLUMN_NAMES;
+
+/**
+ * Copy a descriptor-supplied `FieldDef`, stamping the charter's assignment onto
+ * it when the field IS one of the platform's columns.
+ *
+ * **The authority is the charter, not the descriptor, and that is the point.**
+ * `crates/zeroship-migrate-server/src/apply.rs` says outright that the
+ * descriptor is client-declared - a creator who hand-edits the generated files
+ * can make them agree about a lie - so a binding read out of the descriptor
+ * would be a binding the creator controls. Reading it from the operator charter
+ * instead means a hand-edited `.zship` cannot re-point who computes `id`.
+ *
+ * Matching is by COLUMN NAME because that is what a v2 descriptor is keyed by:
+ * its fields are already-resolved wire `FieldDef`s under snake_case column
+ * names (see `RuntimeCollectionDescriptorV2`). A creator's own field never
+ * reaches this branch under a platform name - `normalizeSchema` refuses those
+ * below - so a match here is a platform column, not a collision.
+ *
+ * An `assign` already present on the def is left alone rather than overwritten,
+ * so that when the descriptor starts carrying bindings itself (the mirror the
+ * worker verifies) this function does not silently mask a disagreement between
+ * the two. Today no descriptor carries one.
+ */
+function withPlatformAssignment(name: string, def: FieldDef): FieldDef {
+  const assign = CONFINED_SYSTEM_SHAPE_ASSIGNMENTS[name];
+  if (assign === undefined || def.assign !== undefined) return { ...def };
+  return { ...def, assign };
+}
 
 /**
  * Converts a SchemaInput into a NormalizedSchema. Every field value
@@ -283,7 +307,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
     // user schemas on the strict path even if a builder exposed a string
     // `type`).
     if (!isTypeBuilder(rawVal) && isFieldDef(rawVal)) {
-      result[key] = { ...(rawVal as FieldDef) };
+      result[key] = withPlatformAssignment(key, rawVal as FieldDef);
       continue;
     }
     // **P7 PR 1** — refuse creator-declared fields whose names collide
