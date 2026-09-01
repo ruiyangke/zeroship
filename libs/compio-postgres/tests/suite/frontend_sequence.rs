@@ -747,3 +747,64 @@ async fn suspended_portal_frames(process_id: i32) -> (String, Option<Vec<u8>>) {
         .map(|(_, body)| body.clone());
     (frames.iter().map(|(t, _)| *t as char).collect(), close)
 }
+
+/// Dropping a prepared statement costs its own Close plus Sync round trip.
+///
+/// MEASURED: `P D S` `C S` `Q Q` - the Close carries kind `S` and the server
+/// name, and it is followed by its own Sync BEFORE any later work. It is not
+/// batched onto the next request.
+///
+/// This pins a round-trip cost, not a correctness bug. Closing eagerly is
+/// correct; `identical_sql_has_distinct_names_and_each_drop_closes_one`
+/// already proves the server sees the close, through `pg_prepared_statements`.
+/// What no test says is that each drop buys a full round trip of its own, so
+/// batching them - a reasonable optimisation - would be invisible, and so
+/// would the reverse regression of closing eagerly inside a hot loop.
+///
+/// The kind byte matters for the same reason it does on the portal side:
+/// `S` closes the prepared statement, `P` would close a portal of that name.
+#[compio::test]
+async fn dropping_a_statement_sends_its_own_close_and_sync() {
+    let (seq, close_body) = Box::pin(statement_close_frames(661)).await;
+    assert_eq!(
+        seq, "PDSCSQ",
+        "the statement drop changed shape (got {seq})"
+    );
+    let close_body = close_body.expect("dropping a statement sent no Close frame");
+    assert_eq!(
+        close_body.first().copied(),
+        Some(b'S'),
+        "Close targeted {:?}, not the prepared statement",
+        close_body.first().map(|b| *b as char)
+    );
+}
+
+/// Prepare a statement, drop it, then issue one query. Returns the tag
+/// sequence and the Close frame body.
+async fn statement_close_frames(process_id: i32) -> (String, Option<Vec<u8>>) {
+    let (tags_tx, tags_rx) = std::sync::mpsc::channel();
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        serve_recording(&mut stream, &tags_tx);
+    });
+    let addr = server.addr;
+    let _ = Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async move {
+        let client = connect_scripted(addr).await;
+        let statement = client.prepare("SELECT n").await.expect("prepare");
+        drop(statement);
+        // One later request, so a batched Close would show up after it rather
+        // than before. Measured, it arrives before: the drop is its own trip.
+        let _ = client.simple_query("SELECT 1").await;
+        drop(client);
+    }))
+    .await;
+    server.finish();
+
+    let frames: Vec<(u8, Vec<u8>)> = tags_rx.try_iter().filter(|(t, _)| *t != b'X').collect();
+    let close = frames
+        .iter()
+        .find(|(t, _)| *t == b'C')
+        .map(|(_, body)| body.clone());
+    (frames.iter().map(|(t, _)| *t as char).collect(), close)
+}
