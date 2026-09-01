@@ -51,10 +51,23 @@ rejecting every insert.** The committed descriptors mark `id`, `created_at` and
 `updated_at` as `"required": true` **with no `default`**
 (`examples/db-hitcounter/generated/zeroship/schema.runtime.json:9,20,31`; only
 `version` carries `default: 1` at `:62-65`). `validateDoc` errors on exactly
-that shape - `else if (def.required)` at `sdks/db/src/validate.ts:511-512`. Put
-the seven back in `_schema` and `insert({ path: "/x" })` throws
-`ValidationError: id is required, created_at is required, updated_at is
-required`.
+that shape - `else if (def.required)` at `sdks/db/src/validate.ts:511-512`.
+
+**MEASURED, with a control.** Two arms through `validateDoc`, differing only in
+whether the descriptor's system fields are present in the schema. The field defs
+were copied verbatim from the committed
+`examples/db-hitcounter/generated/zeroship/schema.runtime.json`, so the arms test
+the shape that ships rather than one invented for the probe:
+
+| Schema | `validateDoc({ path: "/x" })` |
+| --- | --- |
+| stripped (today) | accepted, keeps `path` |
+| unstripped (proposed) | **`Validation failed: id is required, created_at is required, updated_at is required`** |
+
+`version` survives only because it is the one system field carrying a `default`
+(`:62-65`), which the `if (def.default !== undefined)` branch at `:509` consumes
+before the `required` branch is reached. That is the whole mechanism, and it is
+why the fix belongs at the requiredness check rather than at the field list.
 
 The strip's own introducing commit says so. `363b0edcb` added it alongside a
 test named **"does not require runtime descriptor system fields in insert
