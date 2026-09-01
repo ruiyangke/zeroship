@@ -26,6 +26,7 @@ use crate::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
+use super::pg_autocommit;
 use super::{
     DialectBuilder, GeoPoint, LockManager, PgSqlExecutor, SpatialIndex, SqlExecutor, VectorIndex,
     VectorMetric,
@@ -135,6 +136,80 @@ impl PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
+/// Pooled execution under this app's role fence.
+///
+/// These are the ONLY way a caller outside `backend/` reaches a pooled
+/// connection. Each one narrows the connection to `app_id`'s role before the
+/// statement runs and reverts at COMMIT; there is deliberately no entry point
+/// that hands out `&Pool`, because a caller holding the pool can open a bare
+/// checkout carrying the shared login role and reach a tenant schema unfenced.
+/// The tree records one occasion that happened - see the comment above the
+/// audit INSERT in `crud/unmask.rs`.
+///
+/// The three shapes exist because the callers want three different things; the
+/// reasoning, including why the byte reader cannot go through JSON, is in
+/// [`crate::backend::pg_autocommit`].
+impl PostgresBackend {
+    /// Run `sql` under this app's role and render the rows as JSON objects.
+    ///
+    /// # Errors
+    ///
+    /// Propagates pool checkout, session setup, statement and COMMIT failures.
+    pub(crate) async fn query_roled_json(
+        &self,
+        app_id: &str,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        pg_autocommit::roled_json(&self.pool, app_id, sql, params).await
+    }
+
+    /// Read column 0 of the first row as raw bytes, under this app's role.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::query_roled_json`], plus a decode failure if column 0 is not
+    /// byte-typed.
+    pub(crate) async fn read_roled_scalar_bytes(
+        &self,
+        app_id: &str,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<pg_autocommit::ScalarRead<Vec<u8>>, DbError> {
+        pg_autocommit::roled_scalar_bytes(&self.pool, app_id, sql, params).await
+    }
+
+    /// Read column 0 of the first row as text, under this app's role.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::query_roled_json`], plus a decode failure if column 0 is not
+    /// text-typed. A BYTEA column is refused rather than mis-parsed; use
+    /// [`Self::read_roled_scalar_bytes`].
+    pub(crate) async fn read_roled_scalar_text(
+        &self,
+        app_id: &str,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<pg_autocommit::ScalarRead<String>, DbError> {
+        pg_autocommit::roled_scalar_text(&self.pool, app_id, sql, params).await
+    }
+
+    /// Run a statement under this app's role, discarding any result rows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::query_roled_json`].
+    pub(crate) async fn execute_roled(
+        &self,
+        app_id: &str,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<(), DbError> {
+        pg_autocommit::roled_statement(&self.pool, app_id, sql, params).await
+    }
+}
+
 // Capability impls -- four blocks, one per sub-trait:
 //
 //   1. `impl SqlExecutor for PostgresBackend`      -- 3 methods.
@@ -466,14 +541,7 @@ impl VectorIndex for PostgresBackend {
         .map_err(DbError::from)?;
 
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = crate::exec::query_postgres_pool_with_autocommit_role(
-            &self.pool,
-            app_id,
-            &bq.sql,
-            &param_refs,
-        )
-        .await?;
-        Ok(crate::backend::pg_row_json::rows_to_json_value(&rows))
+        self.query_roled_json(app_id, &bq.sql, &param_refs).await
     }
 }
 
@@ -562,14 +630,7 @@ impl SpatialIndex for PostgresBackend {
         )
         .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = crate::exec::query_postgres_pool_with_autocommit_role(
-            &self.pool,
-            app_id,
-            &bq.sql,
-            &param_refs,
-        )
-        .await?;
-        Ok(crate::backend::pg_row_json::rows_to_json_value(&rows))
+        self.query_roled_json(app_id, &bq.sql, &param_refs).await
     }
 }
 

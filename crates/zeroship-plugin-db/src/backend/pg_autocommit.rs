@@ -1,0 +1,215 @@
+//! PostgreSQL pooled ("autocommit") execution under the per-app role fence.
+//!
+//! **PG TIER.** Every function here is PostgreSQL dialect and vendor types:
+//! `SET LOCAL ROLE`, an explicit `BEGIN`/`COMMIT` around a single statement,
+//! and `compio_postgres` rows. The policy these encode - which timeouts, which
+//! role - lives one tier down in [`crate::budgets`], and the SQL that renders
+//! it is [`crate::backend::pg_session_sql`].
+//!
+//! # Why this module exists
+//!
+//! The funnel below lived in `crate::exec` (ENGINE tier) until 2026-09-01, and
+//! `backend/postgres.rs` reached UP into it from two search methods. That was
+//! the whole of the `PG <-> ENGINE` tier cycle: a cycle is not a bad edge, it
+//! is a pair of crates that cannot be separated at all, because cargo cannot
+//! express mutual dependency. Sinking the funnel into the tier that owns its
+//! dialect removes the upward half; what remains is `ENGINE -> PG`, which is
+//! rank 3 -> 2 and legal.
+//!
+//! # Why there is no single "row" return
+//!
+//! The five production callers want three different things, and one neutral row
+//! type would have to lie to at least one of them:
+//!
+//! - the two search methods want JSON, and get it via
+//!   [`crate::backend::pg_row_json::rows_to_json_value`];
+//! - the two unmask readers want ONE CELL, and one of them wants it as RAW
+//!   BYTES. Routing that through JSON is not an option:
+//!   `pg_row_json::column_to_json` base64-encodes BYTEA, so an encrypted
+//!   ciphertext would arrive as text and have to be decoded back before it
+//!   could be decrypted - re-introducing the text round-trip that made every
+//!   PostgreSQL unmask of an encrypted column fail until 2026-09-01;
+//! - the audit INSERT wants nothing at all.
+//!
+//! So each shape gets its own entry point. `roled_rows` remains for
+//! `crate::exec::run_sql`, whose callers are the whole CRUD surface and whose
+//! row vocabulary is a separate, open question.
+
+use std::rc::Rc;
+
+use serde_json::Value;
+
+use crate::backend::pg_session_sql::autocommit_local_session_setup_sql;
+use crate::error::DbError;
+
+/// The result of selecting a single cell: `SELECT <col> FROM <t> WHERE id = $1`.
+///
+/// Two independent things can go missing, and callers give each its own error,
+/// so collapsing them into one `Option` would throw away the distinction. The
+/// unmask readers report [`Self::NoRow`] as `unmask_not_found` and [`Self::Null`]
+/// as `unmask_value_null`; those codes are engine-tier policy and are minted by
+/// the caller, not here.
+pub(crate) enum ScalarRead<T> {
+    /// The query matched no row.
+    NoRow,
+    /// The row exists and the selected column is SQL NULL.
+    Null,
+    /// The row exists and the column holds a value.
+    Value(T),
+}
+
+/// Run `sql` on a pooled connection narrowed to `app_id`'s role, returning the
+/// raw driver rows.
+///
+/// This is the primitive the rest of the module is built on, and the one
+/// `crate::exec::run_sql` still needs because its own callers have not settled
+/// on a row vocabulary. Prefer one of the shaped wrappers below.
+///
+/// # Errors
+///
+/// Returns a typed database error if the pool checkout, the `BEGIN`, the
+/// per-app session setup, the statement itself, or the `COMMIT` fails.
+pub(crate) async fn roled_rows(
+    pool: &Rc<compio_postgres::Pool>,
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<compio_postgres::Row>, DbError> {
+    let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
+
+    // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
+    // inside an explicit transaction, exactly like the explicit-tx path
+    // (`tx_session_setup_sql`). `SET LOCAL` auto-reverts at COMMIT and at
+    // the implicit ROLLBACK the `compio_postgres::Transaction` issues on
+    // drop — so a setup error, a query error, OR a cancellation between
+    // setup and the would-be reset can no longer leave the pooled
+    // connection carrying this tenant's role + timeouts for the next
+    // checkout. The previous shape ran a session-level `SET ROLE` + a
+    // separate `RESET` that was skipped entirely when the future was
+    // cancelled mid-flight (no RAII guard, and the pool's Drop is
+    // synchronous so it cannot issue async RESET SQL).
+    let tx = client.transaction().await.map_err(|e| {
+        let mut err = DbError::from_pg(&e);
+        crate::error::prefix_message(
+            &mut err,
+            "db: autocommit BEGIN (per-app §17.5 + DB-1 guards): ",
+        );
+        err
+    })?;
+
+    let setup_sql = autocommit_local_session_setup_sql(app_id)?;
+    tx.simple_query(&setup_sql).await.map_err(|e| {
+        let mut classified = DbError::classify_pg_per_app_session_setup(&e, app_id);
+        crate::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
+        classified.into_db_error()
+    })?;
+
+    let rows = tx
+        .query_text_params(sql, params)
+        .await
+        .map_err(|e| DbError::from_pg(&e))?;
+
+    // COMMIT reverts the SET LOCAL state and releases the connection
+    // clean. On any early return above, `tx` is dropped instead, which
+    // rolls back (also reverting the SET LOCAL state) and marks the
+    // connection dirty so the pool drains it before the next checkout.
+    tx.commit().await.map_err(|e| {
+        let mut err = DbError::from_pg(&e);
+        crate::error::prefix_message(
+            &mut err,
+            "db: autocommit COMMIT (per-app §17.5 + DB-1 guards): ",
+        );
+        err
+    })?;
+
+    Ok(rows)
+}
+
+/// Run `sql` under the per-app role and render the rows as JSON objects.
+///
+/// # Errors
+///
+/// Propagates any error from [`roled_rows`].
+pub(crate) async fn roled_json(
+    pool: &Rc<compio_postgres::Pool>,
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<Value>, DbError> {
+    let rows = roled_rows(pool, app_id, sql, params).await?;
+    Ok(crate::backend::pg_row_json::rows_to_json_value(&rows))
+}
+
+/// Read column 0 of the first row as raw bytes, under the per-app role.
+///
+/// The bytes are returned uninterpreted. This is the entry point for reading an
+/// encrypted column's BYTEA sibling: the ciphertext must reach the decryptor
+/// exactly as stored, and `query_text_params` binds every result in BINARY
+/// format (`libs/compio-postgres/src/query.rs:186`), so no rendering happens.
+///
+/// # Errors
+///
+/// Propagates any error from [`roled_rows`], or reports a decode failure if
+/// column 0 is not a byte-typed column.
+pub(crate) async fn roled_scalar_bytes(
+    pool: &Rc<compio_postgres::Pool>,
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<ScalarRead<Vec<u8>>, DbError> {
+    let rows = roled_rows(pool, app_id, sql, params).await?;
+    let Some(row) = rows.first() else {
+        return Ok(ScalarRead::NoRow);
+    };
+    let value: Option<&[u8]> = row
+        .try_get::<_, Option<&[u8]>>(0)
+        .map_err(|e| DbError::internal(format!("db: read scalar bytes: {e}")))?;
+    Ok(match value {
+        Some(bytes) => ScalarRead::Value(bytes.to_vec()),
+        None => ScalarRead::Null,
+    })
+}
+
+/// Read column 0 of the first row as text, under the per-app role.
+///
+/// # Errors
+///
+/// Propagates any error from [`roled_rows`], or reports a decode failure if
+/// column 0 is not a text-typed column. `&str: FromSql::accepts` covers
+/// VARCHAR/TEXT/BPCHAR/NAME/UNKNOWN plus citext and ltree and nothing else, and
+/// `Row::get_inner` consults it BEFORE decoding, even for NULL - so pointing
+/// this at a BYTEA column is refused outright rather than mis-parsed. Use
+/// [`roled_scalar_bytes`] there.
+pub(crate) async fn roled_scalar_text(
+    pool: &Rc<compio_postgres::Pool>,
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<ScalarRead<String>, DbError> {
+    let rows = roled_rows(pool, app_id, sql, params).await?;
+    let Some(row) = rows.first() else {
+        return Ok(ScalarRead::NoRow);
+    };
+    let value: Option<&str> = row
+        .try_get::<_, Option<&str>>(0)
+        .map_err(|e| DbError::internal(format!("db: read scalar text: {e}")))?;
+    Ok(match value {
+        Some(text) => ScalarRead::Value(text.to_string()),
+        None => ScalarRead::Null,
+    })
+}
+
+/// Run a statement under the per-app role and discard any result rows.
+///
+/// # Errors
+///
+/// Propagates any error from [`roled_rows`].
+pub(crate) async fn roled_statement(
+    pool: &Rc<compio_postgres::Pool>,
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<(), DbError> {
+    roled_rows(pool, app_id, sql, params).await?;
+    Ok(())
+}
