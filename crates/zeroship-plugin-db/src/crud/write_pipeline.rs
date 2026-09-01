@@ -10,9 +10,15 @@ use crate::tx_route::TxRoute;
 use std::cell::RefCell;
 
 pub(crate) enum ApplyMode<'a> {
-    Insert { actor_id: Option<&'a str> },
-    InsertMany { actor_id: Option<&'a str> },
-    Update { row_pk: &'a str },
+    Insert {
+        actor_id: Option<&'a str>,
+    },
+    InsertMany {
+        actor_id: Option<&'a str>,
+    },
+    Update {
+        row_pk: &'a str,
+    },
     /// The only write mode whose PRE-pass issues SQL of its own: the
     /// deterministic-encryption conflict probe reads the existing row's
     /// id. That read has to land on the same connection the upsert
@@ -121,10 +127,7 @@ pub(crate) async fn apply(
     match mode {
         ApplyMode::Insert { actor_id } => {
             super::system_fields_pass::apply_system_fields_on_insert(
-                payload,
-                &schema,
-                collection,
-                actor_id,
+                payload, &schema, collection, actor_id,
             );
             let row_pk = row_pk_from_doc(payload);
             stages
@@ -134,22 +137,23 @@ pub(crate) async fn apply(
         }
         ApplyMode::InsertMany { actor_id } => {
             super::system_fields_pass::apply_system_fields_on_insert_many(
-                payload,
-                &schema,
-                collection,
-                actor_id,
+                payload, &schema, collection, actor_id,
             );
             let Some(docs) = payload.as_array_mut() else {
                 return Ok(());
             };
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
-                stages.apply_to_doc(app_id, collection, &row_pk, doc).await?;
+                stages
+                    .apply_to_doc(app_id, collection, &row_pk, doc)
+                    .await?;
             }
             Ok(())
         }
         ApplyMode::Update { row_pk } => {
-            stages.apply_to_update(app_id, collection, row_pk, payload).await?;
+            stages
+                .apply_to_update(app_id, collection, row_pk, payload)
+                .await?;
             Ok(())
         }
         ApplyMode::Upsert {
@@ -163,10 +167,7 @@ pub(crate) async fn apply(
                 "the upsert route must belong to the app being written"
             );
             super::system_fields_pass::apply_system_fields_on_insert(
-                payload,
-                &schema,
-                collection,
-                actor_id,
+                payload, &schema, collection, actor_id,
             );
             rewrite_upsert_doc_id_to_existing_row_id(
                 payload,
@@ -249,11 +250,7 @@ impl<'a> WriteStages<'a> {
         // ordering also means the ciphertext it deposits is never re-read as a
         // plain bytes value.
         if self.has_plain_bytes {
-            super::bytes_pass::encode_bytes_on_write(
-                schema,
-                super::current_sql_dialect(),
-                row,
-            )?;
+            super::bytes_pass::encode_bytes_on_write(schema, super::current_sql_dialect(), row)?;
         }
         // LAST. Every stage above reads and writes a masked field under its
         // LOGICAL key and knows nothing about the flip; this one moves the
@@ -298,11 +295,7 @@ impl<'a> WriteStages<'a> {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
         }
         if self.has_plain_bytes {
-            super::bytes_pass::encode_bytes_on_update(
-                schema,
-                super::current_sql_dialect(),
-                patch,
-            )?;
+            super::bytes_pass::encode_bytes_on_update(schema, super::current_sql_dialect(), patch)?;
         }
         // LAST, on the same sub-document the encryption pass wrote to (`$set`
         // when the patch uses one). A field the patch does not mention is
@@ -644,7 +637,9 @@ mod tests {
     use crate::binding::DbBinding;
     use crate::tx_route::TxRoute;
 
-    use super::{apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode};
+    use super::{
+        ApplyMode, apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys,
+    };
     use crate::backend::sqlite::SqliteBackend;
 
     #[test]
@@ -668,7 +663,9 @@ mod tests {
     fn db8_update_patch_validates_field_keys_not_operators() {
         use serde_json::json;
         // Plain field keys + a field-scoped operator value pass.
-        assert!(validate_update_patch_keys(&json!({ "name": "a", "views": { "$inc": 1 } })).is_ok());
+        assert!(
+            validate_update_patch_keys(&json!({ "name": "a", "views": { "$inc": 1 } })).is_ok()
+        );
         // $set's nested field keys are validated; the operator key itself is skipped.
         assert!(validate_update_patch_keys(&json!({ "$set": { "name": "a" } })).is_ok());
         assert!(validate_update_patch_keys(&json!({ "$set": { "ssn_masked": "x" } })).is_err());
@@ -678,8 +675,7 @@ mod tests {
     use crate::backend::{EncryptedColumn as _, EncryptionMode, SqlExecutor};
     use crate::encryption;
     use crate::query::{
-        build_create_table_with_fks_for_dialect, build_insert_with_dialect, FkEmission,
-        SqlDialect,
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, build_insert_with_dialect,
     };
     use crate::{cache_schema_for_tests, set_sqlite_backend_for_tests};
 
@@ -800,7 +796,8 @@ mod tests {
 
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                    .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file(app_id)
@@ -927,8 +924,8 @@ mod tests {
                     "updated_by": "usr_override"
                 }
             });
-            let update_hints = inspect_update(app_id, collection, &update_patch)
-                .expect("inspect update patch");
+            let update_hints =
+                inspect_update(app_id, collection, &update_patch).expect("inspect update patch");
             assert!(
                 update_hints.creator_supplied_updated_by,
                 "update system-field pre-pass should surface creator overrides",
@@ -976,8 +973,7 @@ mod tests {
                 )
                 .expect("decrypt update ciphertext");
             assert_eq!(
-                update_plaintext,
-                b"555-55-5555",
+                update_plaintext, b"555-55-5555",
                 "update pipeline must encrypt against the filter row id",
             );
 

@@ -14,7 +14,7 @@
 //!   handle returned by `acquire_dedicated_client`
 //!
 //! Each test spins up a per-test `tempfile::TempDir` and constructs a
-//! `SqliteBackend::new(db_dir)` directly - this deliberately bypasses
+//! `new_sqlite_backend(db_dir)` directly - this deliberately bypasses
 //! the per-isolate context plumbing the ATTACH threads
 //! through, so these tests pin the actor's behaviour in isolation.
 //! The higher-level orchestrator mirror is covered separately.
@@ -29,14 +29,16 @@ mod support;
 #[path = "parity/mod.rs"]
 mod parity;
 
+use zeroship_core::change_event::ChangeOp;
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
+use zeroship_plugin_db::backend_selection::{new_sqlite_backend, new_sqlite_backend_with_secrets};
 use zeroship_plugin_db::binding::DbBinding;
-use zeroship_plugin_db::broker::{ChangeOp, Subscription, SubscriptionMessage, subscribe};
+use zeroship_plugin_db::broker::{Subscription, SubscriptionMessage, subscribe};
 use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 
@@ -48,7 +50,7 @@ use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 /// connection on drop, which writes the final WAL checkpoint).
 fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open SqliteBackend");
+    let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open SqliteBackend");
     (backend, dir)
 }
 
@@ -110,7 +112,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
         // alias, so re-attach it before the schema-qualified name resolves.
         let backend =
-            SqliteBackend::new(PathBuf::from(dir.path())).expect("open the parity backend");
+            new_sqlite_backend(PathBuf::from(dir.path())).expect("open the parity backend");
         backend
             .attach_app_file("default")
             .await
@@ -1513,15 +1515,11 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
                 .expect("INSERT under backfill pause");
         }
 
-        // Give the publisher time to drain the 100 dropped packets
-        // BEFORE we drop the guard. Without this sleep the guard's
-        // resume_app_with_resync could push the `Resync` while
-        // packets are still in flight — they'd still be dropped (the
-        // suppression flag is per-packet), but the test invariant
-        // ("drain finds exactly one Resync") would be order-sensitive.
-        // With the sleep, every packet has been consumed BEFORE we
-        // drop the guard, so the Resync is the last thing the
-        // subscriber sees.
+        // Give the publisher time to drain the 100 dropped packets BEFORE we
+        // drop the guard. Suppression is sampled at dequeue time, so a packet
+        // still queued when the guard drops would be delivered. Draining first
+        // makes the intended window deterministic and leaves the closing
+        // Resync as the subscriber's only message.
         drain_publisher_long().await;
 
         // Drop the guard — calls unsuppress_app + emits one Resync
@@ -1806,13 +1804,11 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
                 .expect("INSERT under orchestrator-driven backfill pause");
         }
 
-        // Give the publisher time to drain the 100 dropped packets
-        // BEFORE the guard drops — same determinism rationale as the
-        // sibling fence above (the suppression flag is per-packet, so
-        // dropping the guard before the publisher finishes draining
-        // would still drop every in-flight packet, but the `Resync` we
-        // assert on must arrive AFTER the last dropped packet for
-        // `len == 1` to hold).
+        // Give the publisher time to drain the 100 dropped packets BEFORE the
+        // guard drops. The publisher samples suppression at dequeue time, so
+        // dropping first would allow still-queued packets through after the
+        // Resync. The drain pins the intended suppression window and `len ==
+        // 1` ordering.
         drain_publisher_long().await;
 
         // Drop the guard — calls `unsuppress_app` + emits one Resync
@@ -1857,7 +1853,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 // payload format are shared cross-backend; the PG arm exercises the
 // same gates via the `b8c_*` tests in `tests/integration.rs`.
 //
-// Every test below constructs `SqliteBackend::new_with_secrets(...)`
+// Every test below constructs `new_sqlite_backend_with_secrets(...)`
 // to bypass the env-var entry point - the secrets are deterministic
 // per test so a single `cargo test` invocation yields reproducible
 // HMAC signatures. The lone exception is `session_not_configured`,
@@ -1884,7 +1880,7 @@ fn backend_with_secrets(
     secret_prev: Option<Vec<u8>>,
 ) -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let backend = SqliteBackend::new_with_secrets(PathBuf::from(dir.path()), secret, secret_prev)
+    let backend = new_sqlite_backend_with_secrets(PathBuf::from(dir.path()), secret, secret_prev)
         .expect("open SqliteBackend with secrets");
     (backend, dir)
 }
@@ -2160,7 +2156,7 @@ fn session_nonce_too_short() {
 #[test]
 fn session_not_configured() {
     // Plan §11: a backend constructed via the env-var entry
-    // point (`SqliteBackend::new(...)`) without
+    // point (`new_sqlite_backend(...)`) without
     // `ZEROSHIP_SESSION_SECRET` set must defer the failure to first
     // mint, surfacing `DbError::Configuration { code: "not_configured" }`.
     //
@@ -3482,7 +3478,7 @@ const _procedures = { upsertInsert };
             "freshly inserted upsert row should start at version 1: {row}"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3590,7 +3586,7 @@ const _procedures = { upsertConflict };
             "conflict update must auto-bump version"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3728,7 +3724,7 @@ const _procedures = { upsertConflict };
             "deterministic conflict probe must rewrite to the existing row id"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3859,7 +3855,7 @@ const _procedures = { seed, updateByEmail };
             "update by non-id filter should still target the seeded row"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4010,7 +4006,7 @@ const _procedures = { seed, updateManyByName };
             );
         }
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4149,7 +4145,7 @@ const _procedures = { overflow };
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4318,7 +4314,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             "after rejection, the caller must observe that no prefix committed"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4644,7 +4640,7 @@ const _procedures = { seed, nestedCasUpdate };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4732,7 +4728,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -6281,7 +6277,7 @@ async fn unmask_setup_with_schema(
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(
-        SqliteBackend::new(std::path::PathBuf::from(dir.path())).expect("SqliteBackend::new"),
+        new_sqlite_backend(std::path::PathBuf::from(dir.path())).expect("SqliteBackend::new"),
     );
     backend
         .attach_app_file(app_id)
@@ -10119,7 +10115,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             ),
         );
 
-        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
+        let backend = Rc::new(new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend"));
         zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
 
         // Both statements go through `exec::exec_*_for_tests`, which is the

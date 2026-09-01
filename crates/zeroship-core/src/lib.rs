@@ -11,21 +11,19 @@ pub mod __private {
     pub use toml;
 }
 
-pub mod types;
 pub mod auth;
 pub mod auth_provider;
+pub mod change_event;
 pub mod client_ip;
+pub mod config;
+pub mod crypto;
 pub mod database_role;
 pub mod db_url;
 pub mod device_grant;
-pub mod typed_id;
-pub mod usage_event;
-pub mod net_policy;
-pub mod crypto;
-pub mod config;
 pub mod dispatch_frame;
-pub mod observability;
 pub mod logout_token;
+pub mod net_policy;
+pub mod observability;
 pub mod oidc_verify;
 pub mod pkce;
 pub mod preview_ports;
@@ -34,6 +32,9 @@ pub mod replication_names;
 pub mod service_assertion;
 pub mod service_identity;
 pub mod superjson;
+pub mod typed_id;
+pub mod types;
+pub mod usage_event;
 
 pub use superjson::Envelope;
 pub use types::*;

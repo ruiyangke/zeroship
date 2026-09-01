@@ -4,7 +4,8 @@
 //! This file installs the three hooks on the writer-actor's
 //! `rusqlite::Connection`, buffers per-transaction change events, and
 //! ships a `CommitPacket` over a `flume` channel to a publisher task
-//! that calls [`crate::broker::publish`] on the compio thread.
+//! that delegates to the consumer-supplied [`ChangeSink`] on the compio
+//! thread.
 //!
 //! ## Hook → publisher data flow
 //!
@@ -30,8 +31,17 @@
 //!                                                            session.query("PRAGMA …")
 //!                                                                  │
 //!                                                                  ▼
-//!                                                            broker::publish(&ChangeEvent)
+//!                                                            sink.publish(&ChangeEvent)
 //! ```
+//!
+//! ## Delivery-window semantics
+//!
+//! Suppression and schema-pending state are sampled after
+//! `recv_async().await`, once the publisher dequeues each packet. A guard that
+//! drops after the writer enqueues a `CommitPacket` but before the publisher
+//! dequeues it clears the state, so that queued event is delivered. The packet
+//! carries no enqueue-time disposition or epoch: this is dequeue-time
+//! filtering, not commit-window filtering.
 //!
 //! ## Cross-thread invariants
 //!
@@ -46,9 +56,9 @@
 //!   `sqlite3*` connection from within the preupdate hook. Column-name
 //!   resolution therefore happens lazily on the publisher side (compio
 //!   thread, post-COMMIT) via the session actor's `Query` command.
-//! - The broker is thread-local to the compio thread. The hook
-//!   **never** calls `broker::publish` directly; the only path is via
-//!   the `flume` channel and the publisher task.
+//! - The delivery sink is owned by the compio publisher task. The hook
+//!   **never** calls it directly; the only path is via the `flume` channel and
+//!   the publisher task.
 //!
 //! ## Column-name cache strategy
 //!
@@ -79,11 +89,12 @@ use base64::Engine;
 use rusqlite::Connection;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
+use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
 use crate::backend::sqlite::SqliteBackend;
+use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
 use crate::backend::sqlite::session::SqliteSession;
 use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
-use crate::broker::{ChangeEvent, ChangeOp};
 use crate::error::DbError;
 
 // ---------------------------------------------------------------------------
@@ -148,7 +159,7 @@ pub(crate) struct PendingEvent {
 /// commit sequence. (It said "the monotonic per-dispatcher sequence number"
 /// while the actor had one connection; the second one made that reading wrong.)
 ///
-/// The `ChangeEvent` shape (`crate::broker::ChangeEvent`) does NOT carry
+/// The `ChangeEvent` shape (`zeroship_core::change_event::ChangeEvent`) does NOT carry
 /// `commit_id` today — surfacing it requires a broker-schema change
 /// (plan §10 Q-P2-E) deferred until a subscriber consumes it. Any such change
 /// has to pair it with the connection identity first, or subscribers inherit
@@ -363,7 +374,10 @@ fn commit_callback(
     // sees the packet observes the commit_id the dispatcher would
     // observe next.
     let id = commit_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    let packet = CommitPacket { events, commit_id: id };
+    let packet = CommitPacket {
+        events,
+        commit_id: id,
+    };
 
     // With `flume::unbounded()`, `try_send` is structurally equivalent
     // to `send` — it never fails unless the receiver has dropped (a
@@ -492,18 +506,20 @@ fn is_filtered_relation(table: &str) -> bool {
 /// runtime is sound. The task never holds a borrow across `.await`
 /// other than through the session actor's mpsc reply channel, which is
 /// thread-safe by construction.
-pub(crate) fn spawn_publisher(
+pub(crate) fn spawn_publisher<S: ChangeSink>(
     session: Rc<SqliteSession>,
     invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
+    sink: S,
 ) -> compio::runtime::JoinHandle<()> {
-    compio::runtime::spawn(publisher_loop(session, invalidations, rx))
+    compio::runtime::spawn(publisher_loop(session, invalidations, rx, sink))
 }
 
-async fn publisher_loop(
+async fn publisher_loop<S: ChangeSink>(
     session: Rc<SqliteSession>,
     invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
+    sink: S,
 ) {
     // Per-task local cache: `(db_name, table) → Arc<Vec<String>>`. The
     // dispatcher's `column_cache` field is reserved for a future
@@ -540,15 +556,11 @@ async fn publisher_loop(
         let mut delivered: Vec<PendingEvent> = Vec::with_capacity(packet.events.len());
         for ev in packet.events {
             let app_id = ev.db_name.as_str();
-            if crate::broker::is_app_suppressed(app_id) {
-                suppressed_count += 1;
-                continue;
+            match sink.disposition(app_id) {
+                DeliveryDisposition::Deliver => delivered.push(ev),
+                DeliveryDisposition::Suppressed => suppressed_count += 1,
+                DeliveryDisposition::SchemaPending => schema_pending_count += 1,
             }
-            if crate::broker::is_schema_pending(app_id) {
-                schema_pending_count += 1;
-                continue;
-            }
-            delivered.push(ev);
         }
         if suppressed_count > 0 {
             tracing::debug!(
@@ -627,7 +639,11 @@ async fn publisher_loop(
             let pk: Option<String> = new_tuple
                 .get("id")
                 .cloned()
-                .or_else(|| old_tuple.as_ref().and_then(|tuple| tuple.get("id").cloned()))
+                .or_else(|| {
+                    old_tuple
+                        .as_ref()
+                        .and_then(|tuple| tuple.get("id").cloned())
+                })
                 .or(pending.pk);
 
             let event = ChangeEvent {
@@ -640,10 +656,10 @@ async fn publisher_loop(
                 old_tuple,
             };
 
-            // The broker is thread-local to THIS thread — safe to call
-            // directly. Suppression / schema-pending filtering already
-            // ran over the packet's events above (plan §9).
-            crate::broker::publish(&event);
+            // Suppression / schema-pending filtering already ran over the
+            // packet's events above (plan §9). The engine-provided sink owns
+            // the thread-affine broker call.
+            sink.publish(&event);
         }
     }
     // rx error = sender dropped (backend torn down). Exit cleanly.
@@ -682,17 +698,11 @@ async fn fetch_column_names(
 /// sees a populated map. NULL cells (`None` in the positional vec) are
 /// elided — matches the PG side, where pgoutput omits NULL columns
 /// from the tuple.
-fn tuple_from_positional(
-    names: &[String],
-    values: &[Option<String>],
-) -> HashMap<String, String> {
+fn tuple_from_positional(names: &[String], values: &[Option<String>]) -> HashMap<String, String> {
     let mut out = HashMap::with_capacity(values.len());
     for (i, cell) in values.iter().enumerate() {
         let Some(v) = cell else { continue };
-        let key = names
-            .get(i)
-            .cloned()
-            .unwrap_or_else(|| format!("c{i}"));
+        let key = names.get(i).cloned().unwrap_or_else(|| format!("c{i}"));
         out.insert(key, v.clone());
     }
     out
@@ -730,7 +740,10 @@ pub struct SqliteConsumerHandle;
 /// dispatcher's lifetime, so a deferred `provision` would just be a
 /// noop. That split would be worth revisiting if
 /// `provision`/`deprovision` ever grow per-app state.
-#[allow(dead_code, reason = "concrete adapter stays available for the sqlite change-stream capability surface")]
+#[allow(
+    dead_code,
+    reason = "concrete adapter stays available for the sqlite change-stream capability surface"
+)]
 #[derive(Debug)]
 pub struct SqliteChangeStream {
     backend: Rc<SqliteBackend>,

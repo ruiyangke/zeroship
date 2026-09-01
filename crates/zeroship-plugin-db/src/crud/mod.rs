@@ -805,8 +805,13 @@ pub(crate) fn dispatch_insert<'s>(
             let bq =
                 query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect())
                     .map_err(DbError::from)?;
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Insert,
+            )
+            .await?;
             read_pipeline::apply(
                 &binding,
                 &coll,
@@ -856,8 +861,13 @@ pub(crate) fn dispatch_insert_many<'s>(
                 current_sql_dialect(),
             )
             .map_err(DbError::from)?;
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Insert,
+            )
+            .await?;
             read_pipeline::apply(
                 &binding,
                 &coll,
@@ -1000,8 +1010,13 @@ pub(crate) fn dispatch_update_one<'s>(
                 &autobump,
             );
             let bq = built.map_err(DbError::from)?;
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await?;
             let result = read_pipeline::apply(
                 &binding,
                 &coll,
@@ -1176,7 +1191,7 @@ pub(crate) fn dispatch_update_many<'s>(
                             built,
                             frame.route(),
                             &coll,
-                            crate::broker::ChangeOp::Update,
+                            zeroship_core::change_event::ChangeOp::Update,
                         )
                         .await?
                         .len();
@@ -1222,8 +1237,13 @@ pub(crate) fn dispatch_update_many<'s>(
                 &autobump,
             )
             .map_err(DbError::from)?;
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await?;
             // CAS path on updateMany: with `{ id, version: N }` the
             // RETURNING is at most one row. Same empty-check as
             // updateOne so the SDK's CAS contract holds for both
@@ -1302,8 +1322,13 @@ pub(crate) fn dispatch_delete_one<'s>(
             // Tagged as Update because soft-delete IS an UPDATE
             // setting `deleted_at`. Subscribers wanting to react
             // to soft-deletes inspect `new_tuple.deleted_at`.
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await?;
             read_pipeline::apply(
                 &binding,
                 &coll,
@@ -1359,7 +1384,13 @@ pub(crate) fn dispatch_delete_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
+            exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await
         },
         crate::v8_bridge::row_count_as_f64,
     )));
@@ -1404,8 +1435,13 @@ pub(crate) fn dispatch_purge_one<'s>(
         request_id,
         built,
         move |bq| async move {
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Delete,
+            )
+            .await?;
             read_pipeline::apply(
                 &binding,
                 &coll,
@@ -1447,7 +1483,13 @@ pub(crate) fn dispatch_purge_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete).await
+            exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Delete,
+            )
+            .await
         },
         crate::v8_bridge::row_count_as_f64,
     )));
@@ -1494,8 +1536,13 @@ pub(crate) fn dispatch_restore_one<'s>(
         request_id,
         built,
         move |bq| async move {
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await?;
             read_pipeline::apply(
                 &binding,
                 &coll,
@@ -1551,7 +1598,13 @@ pub(crate) fn dispatch_restore_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
+            exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await
         },
         crate::v8_bridge::row_count_as_f64,
     )));
@@ -1855,8 +1908,13 @@ pub(crate) fn dispatch_upsert<'s>(
             // same -- re-fetch. Finer-grained read-set narrowing could
             // distinguish INSERT from UPDATE; this coarser tagging
             // doesn't need to.
-            let rows =
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                &route,
+                &coll,
+                zeroship_core::change_event::ChangeOp::Update,
+            )
+            .await?;
             read_pipeline::apply(
                 &binding,
                 &coll,

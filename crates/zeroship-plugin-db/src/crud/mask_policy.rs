@@ -765,7 +765,7 @@ mod tests {
     fn sqlite_mask_policy_async_round_trip() {
         run(async {
             let dir = tempfile::tempdir().expect("create tempdir");
-            let backend = crate::backend::sqlite::SqliteBackend::new(PathBuf::from(dir.path()))
+            let backend = crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
                 .expect("open sqlite backend");
             let policy = MaskPolicy::from_json(&json!({
                 "admin": ["public", "pii"],

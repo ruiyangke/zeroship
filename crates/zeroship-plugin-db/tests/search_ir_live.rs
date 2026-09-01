@@ -98,7 +98,10 @@ async fn report_server(pool: &Pool) -> i32 {
         .iter()
         .map(|r| format!("{}={}", r.get::<_, String>(0), r.get::<_, String>(1)))
         .collect();
-    println!("search oracle: server_version_num={version} extensions=[{}]", listed.join(" "));
+    println!(
+        "search oracle: server_version_num={version} extensions=[{}]",
+        listed.join(" ")
+    );
     version
 }
 
@@ -497,7 +500,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
         use zeroship_plugin_db::backend::{VectorIndex, VectorMetric as BackendMetric};
         use zeroship_plugin_db::binding::DbBinding;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sqlite = zeroship_plugin_db::backend::sqlite::SqliteBackend::new(
+        let sqlite = zeroship_plugin_db::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
         )
         .expect("open SqliteBackend");

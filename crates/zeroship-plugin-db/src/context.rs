@@ -39,10 +39,10 @@ use compio_postgres::{OwnedPooledClient, Pool};
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
 use crate::binding::DbBinding;
-use crate::broker::ChangeEvent;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::error::DbError;
 use crate::service::DbResourceKey;
+use zeroship_core::change_event::ChangeEvent;
 
 /// Result of trying to claim the per-thread backend initialisation slot.
 pub(crate) enum BackendInitState {
@@ -1232,8 +1232,8 @@ mod tests {
     use super::*;
 
     use crate::BackendUrl;
-    use crate::broker::{ChangeEvent, ChangeOp};
     use std::collections::HashMap;
+    use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
     fn dummy_event(collection: &str) -> ChangeEvent {
         ChangeEvent {
@@ -1587,7 +1587,7 @@ mod tests {
     async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
         use crate::backend::SqlExecutor as _;
         let backend =
-            crate::backend::sqlite::SqliteBackend::new(std::path::PathBuf::from(dir.path()))
+            crate::backend_selection::new_sqlite_backend(std::path::PathBuf::from(dir.path()))
                 .expect("open sqlite backend");
         let client = backend
             .acquire_dedicated_client("slot_state_probe")
