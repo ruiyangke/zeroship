@@ -242,7 +242,10 @@ pub(crate) async fn ensure_ready(app_id: &str) -> Result<(), DbError> {
 async fn start_on_current_isolate(app_id: &str) -> Result<RunningConsumer, DbError> {
     if crate::context::with(|context| context.backend().is_none()) {
         crate::init_pool_async().await.map_err(|message| {
-            DbError::config("cdc_start_failed", format!("db CDC startup failed: {message}"))
+            DbError::config(
+                "cdc_start_failed",
+                format!("db CDC startup failed: {message}"),
+            )
         })?;
     }
 
@@ -277,7 +280,14 @@ async fn start_on_current_isolate(app_id: &str) -> Result<RunningConsumer, DbErr
             let change_stream = backend
                 .as_change_stream_sqlite()
                 .expect("SQLite backend must expose its change stream");
-            let _handle = change_stream.spawn_consumer(app_id, &worker_id).await?;
+            // Match the Postgres startup window above. Use the startup-only
+            // suppression guard, whose Drop merely re-enables delivery; the
+            // general pause guard emits a Resync on Drop and would add a
+            // synthetic first message to every SQLite subscription.
+            let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
+            let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
+            drop(startup_suppression);
+            let _handle = handle?;
             Ok(RunningConsumer::Sqlite)
         }
     }
@@ -476,10 +486,7 @@ pub async fn shutdown_app(app_id: &str) {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn subscriber_count_for_tests(app_id: &str) -> usize {
-    manager()
-        .apps
-        .get(app_id)
-        .map_or(0, |app| app.subscribers)
+    manager().apps.get(app_id).map_or(0, |app| app.subscribers)
 }
 
 #[cfg(test)]

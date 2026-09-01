@@ -1260,8 +1260,10 @@ mod tests {
 
     fn install_sqlite_backend_for_test() -> (Rc<SqliteBackend>, tempfile::TempDir, ContextReset) {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let backend =
-            Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"));
+        let backend = Rc::new(
+            crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                .expect("open sqlite backend"),
+        );
         let reset = ContextReset;
         crate::context::with_mut(|c| {
             let _ = c.take_tx_client_for("app_sqlite");

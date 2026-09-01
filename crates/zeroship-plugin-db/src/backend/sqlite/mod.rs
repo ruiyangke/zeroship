@@ -37,6 +37,9 @@ use crate::backend::SchemaIntrospect;
 use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
 use crate::error::DbError;
 
+use self::change_sink::ChangeSink;
+
+pub(crate) mod change_sink;
 // `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
 // `preupdate_hook` install + worker->compio publisher integration).
 // Crate-private - the public consumer surface is
@@ -233,7 +236,9 @@ impl SqliteBackend {
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
-        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(&typed))
+        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+            &typed,
+        ))
     }
 
     /// Production constructor used by the runtime URL-scheme
@@ -249,14 +254,17 @@ impl SqliteBackend {
     /// control session in SQLite's in-memory mode and keeps a
     /// `tempfile::TempDir` alive for the lifetime of the backend so
     /// the per-app ATTACH files stay ephemeral too.
-    pub async fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
+    pub(crate) async fn open<S: ChangeSink>(
+        path: impl AsRef<Path>,
+        sink: S,
+    ) -> Result<Self, DbError> {
         let path = path.as_ref().to_path_buf();
         let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
             .await
             .map_err(|_| {
                 DbError::internal("SqliteBackend::open: spawn_blocking task panicked")
             })??;
-        Ok(Self::finish_open(opened))
+        Ok(Self::finish_open(opened, sink))
     }
 
     /// **Test helper** - open a [`crate::backend::BrokerPauseGuard`]
@@ -294,9 +302,9 @@ impl SqliteBackend {
     }
 
     #[allow(dead_code)]
-    pub fn new(db_dir: PathBuf) -> Result<Self, DbError> {
+    pub(crate) fn new<S: ChangeSink>(db_dir: PathBuf, sink: S) -> Result<Self, DbError> {
         let session_path = db_dir.join("zs-control.sqlite");
-        Self::open_with_session_path(db_dir, session_path)
+        Self::open_with_session_path(db_dir, session_path, sink)
     }
 
     fn open_blocking(path: PathBuf) -> Result<OpenedBackend, DbError> {
@@ -344,9 +352,13 @@ impl SqliteBackend {
         Self::open_session(db_dir, session_path, memory_db_dir)
     }
 
-    fn open_with_session_path(db_dir: PathBuf, session_path: PathBuf) -> Result<Self, DbError> {
+    fn open_with_session_path<S: ChangeSink>(
+        db_dir: PathBuf,
+        session_path: PathBuf,
+        sink: S,
+    ) -> Result<Self, DbError> {
         let opened = Self::open_session(db_dir, session_path, None)?;
-        Ok(Self::finish_open(opened))
+        Ok(Self::finish_open(opened, sink))
     }
 
     fn open_session(
@@ -355,8 +367,8 @@ impl SqliteBackend {
         memory_db_dir: Option<TempDir>,
     ) -> Result<OpenedBackend, DbError> {
         // CDC packet channel — worker thread (producer, via commit
-        // hook) → compio publisher task (consumer, calls
-        // broker::publish on this thread).
+        // hook) → compio publisher task (consumer, calls its ChangeSink on
+        // this thread).
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
 
         // Open the session WITH the packet sender so the worker
@@ -374,7 +386,7 @@ impl SqliteBackend {
         })
     }
 
-    fn finish_open(opened: OpenedBackend) -> Self {
+    fn finish_open<S: ChangeSink>(opened: OpenedBackend, sink: S) -> Self {
         let OpenedBackend {
             session,
             db_dir,
@@ -395,6 +407,7 @@ impl SqliteBackend {
             session.clone(),
             Rc::clone(&cdc_name_cache_invalidations),
             packet_rx,
+            sink,
         );
 
         // SessionMinter env-var read. Missing
@@ -453,10 +466,11 @@ impl SqliteBackend {
     /// entry point — production paths must route through env vars
     /// so the secret bytes don't enter the crate's public API.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn new_with_secrets(
+    pub(crate) fn new_with_secrets<S: ChangeSink>(
         db_dir: PathBuf,
         secret: Vec<u8>,
         secret_prev: Option<Vec<u8>>,
+        sink: S,
     ) -> Result<Self, DbError> {
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
         let cdc_name_cache_invalidations = Rc::new(RefCell::new(HashSet::new()));
@@ -468,6 +482,7 @@ impl SqliteBackend {
             session.clone(),
             Rc::clone(&cdc_name_cache_invalidations),
             packet_rx,
+            sink,
         );
 
         let nonce_cache =
@@ -1441,7 +1456,9 @@ impl crate::backend::VectorIndex for SqliteBackend {
         )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
-        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(&typed))
+        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+            &typed,
+        ))
     }
 }
 
@@ -1572,7 +1589,8 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
         for (d, idx) in scored {
             let row = &typed.rows[idx];
-            let mut obj = crate::backend::sqlite::row_json::typed_row_to_json_object(&typed.columns, row);
+            let mut obj =
+                crate::backend::sqlite::row_json::typed_row_to_json_object(&typed.columns, row);
             obj.insert(
                 "_distance_m".to_string(),
                 serde_json::Number::from_f64(d)
@@ -2374,7 +2392,7 @@ mod tests {
     fn memory_backend_tempdir_is_removed_on_drop() {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         let temp_dir_path = runtime.block_on(async {
-            let backend = SqliteBackend::open(":memory:")
+            let backend = crate::backend_selection::open_sqlite_backend(":memory:")
                 .await
                 .expect("open in-memory backend");
             let temp_dir_path = backend.db_dir().to_path_buf();

@@ -339,7 +339,7 @@ async fn exec_sqlite_json(
 /// On error the broker is untouched — partial writes produce no
 /// events. The error message is forwarded verbatim.
 ///
-/// `op` selects the [`crate::broker::ChangeOp`] tagged on the event;
+/// `op` selects the [`zeroship_core::change_event::ChangeOp`] tagged on the event;
 /// the caller knows whether it called `build_insert`, `build_update_one`,
 /// `build_delete_one`, etc. so we don't try to infer it from the SQL.
 ///
@@ -351,7 +351,7 @@ pub(crate) async fn exec_mutation_with_emit(
     bq: BuiltQuery,
     route: &TxRoute,
     collection: &str,
-    op: crate::broker::ChangeOp,
+    op: zeroship_core::change_event::ChangeOp,
 ) -> Result<Vec<Value>, DbError> {
     // `exec_mutation` returns the typed `Vec<Value>` already decoded
     // from `compio_postgres::Row`. Pre-fix we re-parsed our own JSON
@@ -403,7 +403,12 @@ fn backend_publishes_committed_changes() -> bool {
 /// the COMMIT-time drain would just defer the discard. Subscribers
 /// added mid-transaction would miss the event, mirroring the WAL
 /// consumer's same conservative-true contract.
-fn emit_for_rows(rows: &[Value], route: &TxRoute, collection: &str, op: crate::broker::ChangeOp) {
+fn emit_for_rows(
+    rows: &[Value],
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_core::change_event::ChangeOp,
+) {
     let app_id = route.app_id();
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
@@ -476,7 +481,7 @@ fn emit_for_rows(rows: &[Value], route: &TxRoute, collection: &str, op: crate::b
 fn queue_or_emit(
     route: &TxRoute,
     collection: &str,
-    op: crate::broker::ChangeOp,
+    op: zeroship_core::change_event::ChangeOp,
     pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
@@ -493,7 +498,7 @@ fn queue_or_emit(
         crate::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
     }
-    let ev = crate::broker::ChangeEvent {
+    let ev = zeroship_core::change_event::ChangeEvent {
         app_id: app_id.to_string(),
         collection: collection.to_string(),
         op,
@@ -518,7 +523,7 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 /// SEC-1: scoped to the committing app so one app's COMMIT can never
 /// fire a co-resident app's pre-commit events.
 pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
-    let queued: Vec<crate::broker::ChangeEvent> =
+    let queued: Vec<zeroship_core::change_event::ChangeEvent> =
         context::with_mut(|c| c.drain_pending_emits_for(app_id));
     for ev in queued {
         crate::broker::emit_local(
@@ -570,7 +575,7 @@ pub async fn exec_mutation_with_emit_for_tests(
     bq: crate::query::BuiltQuery,
     app_id: &str,
     collection: &str,
-    op: crate::broker::ChangeOp,
+    op: zeroship_core::change_event::ChangeOp,
 ) -> Result<Vec<Value>, String> {
     let route = ambient_route_for_tests(app_id);
     exec_mutation_with_emit(bq, &route, collection, op)
@@ -607,12 +612,11 @@ pub async fn exec_query_for_tests(
 mod tests {
     use super::*;
     use crate::backend::SqlExecutor as _;
-    use crate::backend::sqlite::SqliteBackend;
-    use crate::broker::ChangeOp;
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use zeroship_core::change_event::ChangeOp;
 
     thread_local! {
         /// Counter incremented every time the production code path
@@ -882,7 +886,7 @@ mod tests {
             "messages",
         );
 
-        let mk_event = |pk: i64| crate::broker::ChangeEvent {
+        let mk_event = |pk: i64| zeroship_core::change_event::ChangeEvent {
             app_id: "app_active_drain_pending_emits_on_commit_fires_every_queued_event".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
@@ -940,7 +944,7 @@ mod tests {
             "messages",
         );
 
-        let ev = crate::broker::ChangeEvent {
+        let ev = zeroship_core::change_event::ChangeEvent {
             app_id: "app_active_clear_pending_emits_drops_without_firing".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
@@ -1023,7 +1027,8 @@ mod tests {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                    .expect("open sqlite backend"),
             );
             context::with_mut(|c| c.set_sqlite_backend(Rc::clone(&backend)));
             let sub = crate::broker::subscribe(
@@ -1093,7 +1098,8 @@ mod tests {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                    .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file("app_exec")
@@ -1213,7 +1219,8 @@ mod tests {
             let app_id = "00000000-0000-7000-8000-0000000000e5";
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                    .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file(app_id)
@@ -1343,7 +1350,8 @@ mod tests {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                    .expect("open sqlite backend"),
             );
             context::with_mut(|c| {
                 c.clear_pool();
@@ -1415,7 +1423,8 @@ mod tests {
 
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()))
+                    .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file("app_exec_cancel")
@@ -1529,9 +1538,11 @@ mod tests {
             let dir_a = tempfile::tempdir().expect("tempdir a");
             let dir_b = tempfile::tempdir().expect("tempdir b");
             let backend_a =
-                SqliteBackend::new(PathBuf::from(dir_a.path())).expect("open backend a");
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir_a.path()))
+                    .expect("open backend a");
             let backend_b =
-                SqliteBackend::new(PathBuf::from(dir_b.path())).expect("open backend b");
+                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir_b.path()))
+                    .expect("open backend b");
 
             let _gate = backend_a.arm_next_command_gate_for_tests();
 

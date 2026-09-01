@@ -45,17 +45,18 @@ use compio_postgres::replication::{
     self as repl, ReplicationMessage, ReplicationStream, StartReplicationOptions,
     pgoutput::{self, OldTuple, PgOutputMessage, TupleColumn, TupleData},
 };
+use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
 use crate::broker::{
-    has_subscribers, publish, ChangeEvent, ChangeOp,
     // Per-app emit suppression lives in the broker, not here: none of it
     // decodes WAL. The consumer is a CONSUMER of the flag - it takes a
     // SuppressGuard for the life of its decode loop so the mutation path
     // stops emitting locally while WAL is authoritative.
     SuppressGuard,
+    has_subscribers,
+    publish,
 };
 use crate::error::DbError;
-
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -253,19 +254,13 @@ impl WalConsumer {
         let config = match url.parse::<compio_postgres::Config>() {
             Ok(config) => config,
             Err(e) => {
-                return startup_failure(
-                    startup,
-                    ConsumerError::Connect(e.to_string()),
-                );
+                return startup_failure(startup, ConsumerError::Connect(e.to_string()));
             }
         };
         let mut conn = match repl::connect_replication(compio_postgres::NoTls, &config).await {
             Ok(conn) => conn,
             Err(e) => {
-                return startup_failure(
-                    startup,
-                    ConsumerError::Connect(e.to_string()),
-                );
+                return startup_failure(startup, ConsumerError::Connect(e.to_string()));
             }
         };
         if let Err(e) = conn.identify_system().await {
@@ -396,11 +391,7 @@ impl WalConsumer {
     /// Apply one pgoutput message: maintain the relation cache and
     /// emit broker events for Insert/Update/Delete on this app's
     /// schema.
-    fn dispatch(
-        &self,
-        relations: &mut HashMap<u32, RelationEntry>,
-        msg: &PgOutputMessage,
-    ) {
+    fn dispatch(&self, relations: &mut HashMap<u32, RelationEntry>, msg: &PgOutputMessage) {
         match msg {
             PgOutputMessage::Relation {
                 rel_id,
@@ -520,11 +511,7 @@ impl WalConsumer {
             })
         });
 
-        let changed_columns: Vec<String> = rel
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
+        let changed_columns: Vec<String> = rel.columns.iter().map(|c| c.name.clone()).collect();
 
         let new_tuple_map = tuple_to_map(&rel.columns, tuple);
         let old_tuple_map = old_tuple.map(|t| tuple_to_map(&rel.columns, t));
@@ -680,10 +667,7 @@ pub(crate) async fn run_supervised_controlled(
         let attempt_started = std::time::Instant::now();
         let attempt = consumer.clone();
         let outcome = attempt
-            .run_controlled_once(
-                &shutdown,
-                if first_attempt { Some(&startup) } else { None },
-            )
+            .run_controlled_once(&shutdown, if first_attempt { Some(&startup) } else { None })
             .await;
         first_attempt = false;
 
@@ -748,8 +732,8 @@ mod tests {
     // left in place deliberately for this commit: relocating ~150 lines of test
     // alongside a production move would make one commit prove two things, and
     // the point of this one is that behaviour did not change.
-    use crate::broker::{emit_local, is_app_suppressed, suppress_app, unsuppress_app};
     use crate::broker::{Broker, SubscriptionMessage};
+    use crate::broker::{emit_local, is_app_suppressed, suppress_app, unsuppress_app};
     use compio_postgres::replication::pgoutput;
 
     // -------- emit_local --------
@@ -796,7 +780,10 @@ mod tests {
     #[test]
     fn emit_local_suppressed_when_consumer_active() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("xapp_emit_local_suppressed_when_consumer_active", "messages");
+        let sub = crate::broker::subscribe(
+            "xapp_emit_local_suppressed_when_consumer_active",
+            "messages",
+        );
 
         // Per-app suppression: the consumer for "xapp_emit_local_suppressed_when_consumer_active" is active, so
         // local-emit for "xapp_emit_local_suppressed_when_consumer_active" must be a no-op.
@@ -837,7 +824,10 @@ mod tests {
     #[test]
     fn ensure_replication_param_url_with_query() {
         let out = ensure_replication_param("postgres://u@h/db?sslmode=disable");
-        assert_eq!(out, "postgres://u@h/db?sslmode=disable&replication=database");
+        assert_eq!(
+            out,
+            "postgres://u@h/db?sslmode=disable&replication=database"
+        );
     }
 
     #[test]
@@ -882,7 +872,10 @@ mod tests {
         let err = WalConsumer::new("has\0nul", "worker-a", "postgres://localhost/db").unwrap_err();
         assert!(matches!(
             err,
-            DbError::ValidationFailed { code: "invalid_app_id", .. }
+            DbError::ValidationFailed {
+                code: "invalid_app_id",
+                ..
+            }
         ));
     }
 
@@ -896,7 +889,11 @@ mod tests {
         // NUL is the sole disallowed non-empty app-id character.
         let err = WalConsumer::new("bad\0id", "worker-a", "postgres://localhost/db").unwrap_err();
         match err {
-            DbError::ValidationFailed { code, message, hint } => {
+            DbError::ValidationFailed {
+                code,
+                message,
+                hint,
+            } => {
                 assert_eq!(code, "invalid_app_id");
                 assert!(
                     message.contains("must not contain NUL"),
@@ -917,9 +914,16 @@ mod tests {
     fn wal_consumer_new_missing_db_url_returns_configuration() {
         let err = WalConsumer::new("alpha", "worker-a", "").unwrap_err();
         match err {
-            DbError::Configuration { code, message, hint } => {
+            DbError::Configuration {
+                code,
+                message,
+                hint,
+            } => {
                 assert_eq!(code, "not_provisioned");
-                assert!(hint.is_some(), "configuration error should carry a remediation hint");
+                assert!(
+                    hint.is_some(),
+                    "configuration error should carry a remediation hint"
+                );
                 assert!(
                     message.contains("db_url"),
                     "message must mention db_url: {message}"
@@ -978,14 +982,22 @@ mod tests {
     #[test]
     fn dispatch_caches_relation_and_emits_insert() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp_dispatch_caches_relation_and_emits_insert", "messages");
+        let sub = crate::broker::subscribe(
+            "myapp_dispatch_caches_relation_and_emits_insert",
+            "messages",
+        );
         let c = make_consumer("myapp_dispatch_caches_relation_and_emits_insert");
         let mut rels = HashMap::new();
 
         // Pretend a Relation arrived first.
         c.dispatch(
             &mut rels,
-            &make_relation_msg(16384, "myapp_dispatch_caches_relation_and_emits_insert", "messages", &[(1, "id"), (0, "title")]),
+            &make_relation_msg(
+                16384,
+                "myapp_dispatch_caches_relation_and_emits_insert",
+                "messages",
+                &[(1, "id"), (0, "title")],
+            ),
         );
         assert!(rels.contains_key(&16384));
 
@@ -1011,20 +1023,25 @@ mod tests {
     #[test]
     fn dispatch_emits_typed_id_pk_for_text_primary_key() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp_dispatch_emits_typed_id_pk_for_text_primary_key", "messages");
+        let sub = crate::broker::subscribe(
+            "myapp_dispatch_emits_typed_id_pk_for_text_primary_key",
+            "messages",
+        );
         let c = make_consumer("myapp_dispatch_emits_typed_id_pk_for_text_primary_key");
         let mut rels = HashMap::new();
 
         c.dispatch(
             &mut rels,
-            &make_relation_msg(16384, "myapp_dispatch_emits_typed_id_pk_for_text_primary_key", "messages", &[(1, "id"), (0, "title")]),
+            &make_relation_msg(
+                16384,
+                "myapp_dispatch_emits_typed_id_pk_for_text_primary_key",
+                "messages",
+                &[(1, "id"), (0, "title")],
+            ),
         );
         c.dispatch(
             &mut rels,
-            &make_insert_msg(
-                16384,
-                &[Some("usr_02HXWALSUBSCRIPTIONPK"), Some("hello")],
-            ),
+            &make_insert_msg(16384, &[Some("usr_02HXWALSUBSCRIPTIONPK"), Some("hello")]),
         );
 
         match sub.pop() {
@@ -1065,7 +1082,8 @@ mod tests {
     #[test]
     fn dispatch_handles_relation_cache_miss() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp_dispatch_handles_relation_cache_miss", "messages");
+        let sub =
+            crate::broker::subscribe("myapp_dispatch_handles_relation_cache_miss", "messages");
         let c = make_consumer("myapp_dispatch_handles_relation_cache_miss");
         let mut rels = HashMap::new();
 
@@ -1087,7 +1105,12 @@ mod tests {
 
         c.dispatch(
             &mut rels,
-            &make_relation_msg(16384, "myapp_dispatch_emits_update_and_delete", "messages", &[(1, "id"), (0, "title")]),
+            &make_relation_msg(
+                16384,
+                "myapp_dispatch_emits_update_and_delete",
+                "messages",
+                &[(1, "id"), (0, "title")],
+            ),
         );
         c.dispatch(
             &mut rels,
@@ -1117,10 +1140,7 @@ mod tests {
         let m1 = sub.pop().expect("first event");
         let m2 = sub.pop().expect("second event");
         match (m1, m2) {
-            (
-                SubscriptionMessage::Change(u),
-                SubscriptionMessage::Change(d),
-            ) => {
+            (SubscriptionMessage::Change(u), SubscriptionMessage::Change(d)) => {
                 assert_eq!(u.op, ChangeOp::Update);
                 assert_eq!(u.pk.as_deref(), Some("7"));
                 assert_eq!(d.op, ChangeOp::Delete);
@@ -1169,13 +1189,19 @@ mod tests {
         unsuppress_app("app_a_p8a2_per_app_emit_suppression_app_a_only");
         unsuppress_app("app_b_p8a2_per_app_emit_suppression_app_a_only");
 
-        let sub_a = crate::broker::subscribe("app_a_p8a2_per_app_emit_suppression_app_a_only", "messages");
-        let sub_b = crate::broker::subscribe("app_b_p8a2_per_app_emit_suppression_app_a_only", "messages");
+        let sub_a =
+            crate::broker::subscribe("app_a_p8a2_per_app_emit_suppression_app_a_only", "messages");
+        let sub_b =
+            crate::broker::subscribe("app_b_p8a2_per_app_emit_suppression_app_a_only", "messages");
 
         // Activate suppression for app_a only.
         let _guard = SuppressGuard::activate("app_a_p8a2_per_app_emit_suppression_app_a_only");
-        assert!(is_app_suppressed("app_a_p8a2_per_app_emit_suppression_app_a_only"));
-        assert!(!is_app_suppressed("app_b_p8a2_per_app_emit_suppression_app_a_only"));
+        assert!(is_app_suppressed(
+            "app_a_p8a2_per_app_emit_suppression_app_a_only"
+        ));
+        assert!(!is_app_suppressed(
+            "app_b_p8a2_per_app_emit_suppression_app_a_only"
+        ));
 
         // Emit on app_a — must be a no-op.
         emit_local(
@@ -1203,7 +1229,9 @@ mod tests {
         );
 
         drop(_guard);
-        assert!(!is_app_suppressed("app_a_p8a2_per_app_emit_suppression_app_a_only"));
+        assert!(!is_app_suppressed(
+            "app_a_p8a2_per_app_emit_suppression_app_a_only"
+        ));
         crate::broker::drop_app(None);
     }
 
@@ -1268,9 +1296,7 @@ mod tests {
     fn is_fatal_io_error_default_is_retryable() {
         // A bare connection-refused IO error must be retryable —
         // restarting Postgres is the canonical case.
-        assert!(!is_fatal(&ConsumerError::Io(
-            "broken pipe".into()
-        )));
+        assert!(!is_fatal(&ConsumerError::Io("broken pipe".into())));
         assert!(!is_fatal(&ConsumerError::Connect(
             "connection refused".into()
         )));

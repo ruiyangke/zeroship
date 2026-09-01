@@ -108,6 +108,13 @@ pub mod v8_classes;
 pub(crate) mod backend;
 #[cfg(feature = "test-helpers")]
 pub mod backend;
+// The engine owns concrete backend composition because it supplies the
+// consumer-side ports implemented by the process broker. Integration targets
+// reach the same production composition under `test-helpers`.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod backend_selection;
+#[cfg(feature = "test-helpers")]
+pub mod backend_selection;
 pub(crate) mod context;
 // `cross_app_fk` is `pub` (not `pub(crate)`) because integration tests
 // in both `tests/integration.rs` (PG arm) and
@@ -826,7 +833,7 @@ pub async fn uninstall_tx_marker_for_tests(app_id: &str) {
 /// running real SQL.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
+pub fn push_pending_emit_for_tests(ev: zeroship_core::change_event::ChangeEvent) {
     ctx_mut(|c| c.push_pending_emit(ev));
 }
 
@@ -1082,7 +1089,7 @@ pub async fn init_pool_async() -> Result<(), String> {
                 ctx_mut(|c| c.set_pool(Rc::new(pool)));
             }
             BackendUrl::Sqlite { path } => {
-                let backend = crate::backend::sqlite::SqliteBackend::open(&path)
+                let backend = crate::backend_selection::open_sqlite_backend(&path)
                     .await
                     .map_err(DbError::into_string)?;
                 service::note_backend_open();

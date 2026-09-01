@@ -58,82 +58,10 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::task::Waker;
 
 use serde_json::Value;
+use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
 use crate::error::DbError;
 use crate::read_set::ReadSetEntry;
-
-// ---------------------------------------------------------------------------
-// Event shape
-// ---------------------------------------------------------------------------
-
-/// One change event flowing through the broker.
-///
-/// Constructed by the mutation callbacks (INSERT, UPDATE, DELETE) on
-/// success, and by the streaming WAL consumer from pgoutput frames, so
-/// the broker doesn't care whether it came from a local mutation or
-/// replication.
-///
-/// The shape mirrors the proposal §C1 "broker event":
-/// `{app_id, schema, table, op, pk, changed_columns, new_tuple_excerpt}`.
-/// `schema` is conflated with `app_id` (every app has its own schema
-/// named after `app_id`).
-#[derive(Debug, Clone)]
-pub struct ChangeEvent {
-    /// App that produced the event. Used by the routing table to
-    /// isolate tenants.
-    pub app_id: String,
-    /// Collection (= table inside the app schema).
-    pub collection: String,
-    /// Operation kind — `"insert"`, `"update"`, `"delete"`.
-    pub op: ChangeOp,
-    /// Logical row id of the affected row, if known. This is the
-    /// public `id` column serialized as text so typed ids and legacy
-    /// numeric ids share one wire shape.
-    pub pk: Option<String>,
-    /// Columns the mutation touched. For INSERT this is "every
-    /// declared column" — we only track the SET-side of UPDATE here.
-    /// Empty for DELETE.
-    pub changed_columns: Vec<String>,
-    /// Text-encoded column values for the affected row.
-    ///
-    /// - INSERT / UPDATE: the new tuple's column values.
-    /// - DELETE: the old tuple's column values (so a subscriber whose
-    ///   filter matched the now-deleted row still gets a `delete`
-    ///   event).
-    ///
-    /// Populated by the WAL consumer from pgoutput Insert/Update/Delete
-    /// frames; the local-emit fast path populates it from the mutation
-    /// handler's SET / WHERE clauses where available. May be empty when
-    /// neither path can produce a tuple (e.g. local-emit DELETE with no
-    /// row snapshot) — readers that find a missing column treat the
-    /// predicate as non-matching (see [`crate::read_set::Predicate::matches`]).
-    pub new_tuple: HashMap<String, String>,
-    /// Optional old-tuple snapshot for UPDATE events. When present, a
-    /// subscriber's predicate fires if EITHER `new_tuple` OR
-    /// `old_tuple` matches — captures "row left the view" semantics
-    /// alongside "row entered the view".
-    ///
-    /// `None` for INSERT (no old tuple exists) and DELETE (the old
-    /// tuple is already in `new_tuple` — see field doc above).
-    pub old_tuple: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeOp {
-    Insert,
-    Update,
-    Delete,
-}
-
-impl ChangeOp {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Insert => "insert",
-            Self::Update => "update",
-            Self::Delete => "delete",
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Subscription
@@ -839,7 +767,9 @@ static SUPPRESSED_APPS: LazyLock<Mutex<HashMap<String, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn suppressed_apps() -> std::sync::MutexGuard<'static, HashMap<String, usize>> {
-    SUPPRESSED_APPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SUPPRESSED_APPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Suppress local-emit for `app_id` in this process. Mutation callbacks
@@ -1333,7 +1263,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(ops, vec![ChangeOp::Insert, ChangeOp::Update, ChangeOp::Delete]);
+        assert_eq!(
+            ops,
+            vec![ChangeOp::Insert, ChangeOp::Update, ChangeOp::Delete]
+        );
     }
 
     #[test]
@@ -1427,7 +1360,10 @@ mod tests {
     fn b8b_read_set_narrowing_filters_irrelevant_events() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        s.set_read_set(vec![rs_entry("messages", serde_json::json!({ "userId": 42 }))]);
+        s.set_read_set(vec![rs_entry(
+            "messages",
+            serde_json::json!({ "userId": 42 }),
+        )]);
 
         // Matching event → delivered.
         b.publish(&ev_with_tuple(
@@ -1462,7 +1398,10 @@ mod tests {
         // should still see the event — the row "left the view".
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        s.set_read_set(vec![rs_entry("messages", serde_json::json!({ "userId": 42 }))]);
+        s.set_read_set(vec![rs_entry(
+            "messages",
+            serde_json::json!({ "userId": 42 }),
+        )]);
 
         let ev = ChangeEvent {
             app_id: "a".into(),
@@ -1478,7 +1417,10 @@ mod tests {
 
         // A subscriber on {userId: 7} sees neither side of the update.
         let s2 = b.subscribe("a", "messages");
-        s2.set_read_set(vec![rs_entry("messages", serde_json::json!({ "userId": 7 }))]);
+        s2.set_read_set(vec![rs_entry(
+            "messages",
+            serde_json::json!({ "userId": 7 }),
+        )]);
         b.publish(&ev);
         assert!(s2.pop().is_none());
     }
@@ -1560,7 +1502,10 @@ mod tests {
         // is mostly redundant with the bucket index, but we exercise
         // the entry.collection != event.collection branch explicitly.
         let s = Subscription::new(1, "a".into(), "messages".into(), 8);
-        s.set_read_set(vec![rs_entry("channels", serde_json::json!({ "userId": 42 }))]);
+        s.set_read_set(vec![rs_entry(
+            "channels",
+            serde_json::json!({ "userId": 42 }),
+        )]);
         let event = ChangeEvent {
             app_id: "a".into(),
             collection: "messages".into(),
@@ -1606,7 +1551,10 @@ mod tests {
             new_tuple: tuple,
             old_tuple: None,
         };
-        let frame = ws_frame("sub_42", &SubscriptionMessage::Change(std::sync::Arc::new(ev.clone())));
+        let frame = ws_frame(
+            "sub_42",
+            &SubscriptionMessage::Change(std::sync::Arc::new(ev.clone())),
+        );
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["type"], "zs.subscription.event");
         assert_eq!(v["handle"], "sub_42");
@@ -1620,7 +1568,10 @@ mod tests {
             v["event"].get("row").is_none(),
             "a change frame must carry no row payload: {frame}",
         );
-        assert!(!frame.contains("\"hi\""), "no cell values on the wire: {frame}");
+        assert!(
+            !frame.contains("\"hi\""),
+            "no cell values on the wire: {frame}"
+        );
     }
 
     #[test]
@@ -1642,9 +1593,15 @@ mod tests {
         // that only the matching client's frame buffer has an event.
         let mut b = Broker::new();
         let s_alice = b.subscribe("app", "messages");
-        s_alice.set_read_set(vec![rs_entry("messages", serde_json::json!({ "userId": 1 }))]);
+        s_alice.set_read_set(vec![rs_entry(
+            "messages",
+            serde_json::json!({ "userId": 1 }),
+        )]);
         let s_bob = b.subscribe("app", "messages");
-        s_bob.set_read_set(vec![rs_entry("messages", serde_json::json!({ "userId": 2 }))]);
+        s_bob.set_read_set(vec![rs_entry(
+            "messages",
+            serde_json::json!({ "userId": 2 }),
+        )]);
 
         // Event for Alice only.
         b.publish(&ev_with_tuple(
@@ -1767,7 +1724,10 @@ mod tests {
         // would be the Resync push (which must be skipped on closed).
         assert!(matches!(s1.pop(), Some(SubscriptionMessage::Closed)));
         b.resume_app_with_resync("a");
-        assert!(s1.pop().is_none(), "closed subscription must not receive Resync");
+        assert!(
+            s1.pop().is_none(),
+            "closed subscription must not receive Resync"
+        );
         assert!(matches!(s2.pop(), Some(SubscriptionMessage::Resync)));
     }
 
@@ -2037,7 +1997,10 @@ mod tests {
 
         // The field's own column holds the mask; the raw column holds the
         // stored (ciphertext) value. Neither is the plaintext.
-        assert_eq!(ev.new_tuple.get("ssn").map(String::as_str), Some(masked_text));
+        assert_eq!(
+            ev.new_tuple.get("ssn").map(String::as_str),
+            Some(masked_text)
+        );
         assert_eq!(
             ev.new_tuple.get(&raw_col).map(String::as_str),
             Some(raw_ciphertext_text),
@@ -2049,8 +2012,13 @@ mod tests {
         );
 
         for published in [
-            message_to_json(&SubscriptionMessage::Change(std::sync::Arc::new(ev.clone()))),
-            ws_frame("sub_x", &SubscriptionMessage::Change(std::sync::Arc::new(ev.clone()))),
+            message_to_json(&SubscriptionMessage::Change(std::sync::Arc::new(
+                ev.clone(),
+            ))),
+            ws_frame(
+                "sub_x",
+                &SubscriptionMessage::Change(std::sync::Arc::new(ev.clone())),
+            ),
         ] {
             assert!(
                 !published.contains(&raw_col),
