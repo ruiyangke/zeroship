@@ -69,7 +69,7 @@ rank() {
 prod() {
   awk '
     /^[[:space:]]*(\/\/\/|\/\/!|\/\/)/ { next }
-    !intest && /^#\[cfg\(.*(^|[^A-Za-z_])test([^A-Za-z_]|$).*\)\]/ { pend=1; next }
+    !intest && /^#\[cfg\(/ && /(^|[^A-Za-z_])test([^A-Za-z_]|$)/ { pend=1; next }
     pend && /^(pub )?mod [A-Za-z_]+ \{/ { pend=0; intest=1; next }
     pend && /^[[:space:]]*$/ { next }
     { pend=0 }
