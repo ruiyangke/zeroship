@@ -165,6 +165,37 @@ RENDERING of the assignment rule, not a second declaration of it.
 `typedId` has no SQL rendering, so it yields no DDL default - the absence falls
 out instead of needing a rule.
 
+**CORRECTION, found before the round-5 reviewers reported: `by` is a generator
+INVOCATION, not a bare name.** `SynthFn` is closed at three variants -
+`ConcatWs`, `SplitPart`, `Now` (`crates/zeroship-migrate-ir/src/expr.rs:156-163`).
+Checking each generator against it:
+
+| `by` | SQL rendering | DDL default | derives? |
+| --- | --- | --- | --- |
+| `now` | `SynthFn::Now` | `NOW()` / `CURRENT_TIMESTAMP` | yes |
+| `typedId` | none | none - the platform mints it | yes, as an absence |
+| `actor` | none | none - the column is `NULL` | yes, as an absence |
+| `increment` | none | **`DEFAULT 1`** | **NO** |
+
+`version`'s DDL default is the literal `1`, and `by = "increment"` does not
+express it: the insert-time SEED and the update-time BEHAVIOUR are different
+facts, and the bare name carries only the second. So "everything else is
+derived" was too strong as first written.
+
+The fix is not another top-level property. Generators are **parameterised** -
+`typedId` already needs a prefix (carried today as `idPrefix` on the field and
+read unvalidated by `prefix_for_collection`, `system_fields_pass.rs:128-135`),
+and `increment` needs a seed:
+
+```toml
+{ name = "version",    assign = { by = "increment(1)", on = "write"  } }
+{ name = "id",         assign = { by = "typedId(hit)", on = "insert" } }
+{ name = "created_at", assign = { by = "now",          on = "insert" } }
+```
+
+One property still, and the seed now has one home instead of appearing as a
+separate DDL default. `idPrefix` retires into the same slot.
+
 **It dissolves the coupling bug rather than guarding against it.** The previous
 draft split `updatable` from `generatorRuns` specifically to stop a creator value
 suppressing the platform's rule, because `query.rs:6313` reads
