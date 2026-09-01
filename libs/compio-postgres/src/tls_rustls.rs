@@ -2738,6 +2738,32 @@ mod tests {
         );
     }
 
+    /// Pointing `sslrootcert` at a PEM that holds no CERTIFICATE block - a key
+    /// file, most plausibly - must be refused by name. The refusal existed but
+    /// had never been produced: the arm had zero executed coverage regions, so
+    /// the only guidance a creator gets after aiming the setting at the wrong
+    /// file was unproved text.
+    #[cfg(unix)]
+    #[test]
+    fn sslrootcert_without_a_certificate_block_is_refused_by_name() {
+        let pem = sslkey_fixture(include_str!("../tests/data/encrypted_pkcs8_key.pem"));
+        let path = pem.path().to_str().unwrap();
+        let config = format!("host=h sslmode=verify-ca sslrootcert={path}")
+            .parse::<Config>()
+            .unwrap();
+        let error = MakeRustlsConnect::from_config(&config)
+            .expect_err("a file with no CERTIFICATE block is not a trust anchor");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("sslrootcert=") && chain.contains(path),
+            "the refusal must name the setting and the file: {chain}"
+        );
+        assert!(
+            chain.contains("no CERTIFICATE blocks"),
+            "the refusal must say what the file lacked: {chain}"
+        );
+    }
+
     #[test]
     fn sslcrldir_rebuilds_the_verifier_for_each_new_connection() {
         let config = "host=h sslmode=require sslcrldir=/definitely/missing/reloaded-crls"
