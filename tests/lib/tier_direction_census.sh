@@ -81,6 +81,31 @@
 #   UNRESOLVED and is counted - a future crate-root item must not be silently
 #   mis-tiered the way defect 2 mis-tiered these two.
 #
+#   4. prod() WAS BLIND TO AN ITEM-LEVEL cfg (found 2026-09-01, within an hour
+#      of the defect-1 fix, by a reviewer refuting a finding THIS SCRIPT had
+#      just produced and I had reported as verified).
+#      It excised `#[cfg(test)] mod X { .. }` REGIONS by the column-0 rule, and
+#      nothing else. A gated `impl` / `fn` / `const` / `mod x;` passed straight
+#      through as production. Proof, against the old filter:
+#          #[cfg(any(test, feature = "test-helpers"))]
+#          impl Foo { fn leaks() { crate::PluginDbConsumer } }
+#      printed in full. That is how backend/sqlite/session_minter.rs:116/:139/
+#      :154 were reported as production `SQLITE -> ADAPTER` violations when the
+#      whole impl is gated at :100 - the file's own comment at :107-109 says so,
+#      and the declared_env! calls even pass class `test`.
+#      It is the SAME instrument error the signature census header names as its
+#      artefact class, and the same one behind the exec.rs:370 retraction.
+#      FIX: the column-0 rule now covers ANY gated item - block, one-line
+#      declaration, or multi-line signature - and `#[cfg(not(...))]` is
+#      explicitly NOT a gate, since it is the PRODUCTION arm of the two-arm
+#      pattern and its `test-helpers` text would otherwise match.
+#      Controlled BOTH ways, because a filter that drops everything passes a
+#      one-directional check: four gated forms must vanish AND five live forms
+#      (including both cfg(not(..)) arms) must survive. An intermediate version
+#      passed the first half while silently eating a live impl whose gated
+#      neighbour closed its body inline.
+#      Cost of the miss: two FALSE cycles and one false task.
+#
 # TIER CYCLES - the question a crate split actually asks.
 #   The per-edge verdict judges ONE edge at a time, so it structurally cannot
 #   see a cycle: ENGINE -> SQLITE is rank 3 -> 2 and therefore "ok", while
@@ -88,13 +113,14 @@
 #   stray violation instead of as the hard blocker it is. Two crates that
 #   reference each other cannot be separated at all - cargo has no way to
 #   express it. Every run now ends with the cycle list.
-#   Measured 2026-09-01, first run: FIVE cycles, where the per-edge table had
-#   read as a scatter of 25 unrelated violations.
+#   Measured 2026-09-01, after defect 4 below was fixed: THREE cycles, where the
+#   per-edge table had read as a scatter of 24 unrelated violations.
 #     ADAPTER <-> ENGINE   (17 up / 7 down)  the dispatch surface
 #     ENGINE  <-> SQLITE   (4 up / 8 down)   the broker publish path
 #     ENGINE  <-> PG       (1/1)             backend/postgres.rs -> crate::exec
-#     ADAPTER <-> ENCRYPT  (1/1)  }  BOTH are crate::PluginDbConsumer reaching
-#     ADAPTER <-> SQLITE   (1/1)  }  up from below - ONE fix collapses two.
+#   The FIRST run reported FIVE, adding ADAPTER <-> ENCRYPT and
+#   ADAPTER <-> SQLITE. Both were FALSE, manufactured by defect 4: every edge
+#   involved sits inside a cfg-gated item. Do not cite the five-cycle figure.
 #
 # USAGE
 #   tests/lib/tier_direction_census.sh              # violations + cycles
@@ -165,9 +191,32 @@ rank() {
 prod() {
   awk '
     /^[[:space:]]*(\/\/\/|\/\/!|\/\/)/ { next }
+    # A column-0 #[cfg(...test...)] gates WHATEVER ITEM FOLLOWS - not only a
+    # `mod`. See defect 4 in the header: restricting this to `mod` let every
+    # gated `impl` / `fn` / `const` through as production.
+    # `#[cfg(not(...))]` is the PRODUCTION arm of a two-arm pattern, and the
+    # word `test` inside `not(feature = "test-helpers")` must NOT gate it.
+    # Matching it would drop the production half of all 24 two-arm sites.
+    !intest && /^#\[cfg\(not\(/ { pend=0; print; next }
     !intest && /^#\[cfg\(/ && /(^|[^A-Za-z_])test([^A-Za-z_]|$)/ { pend=1; next }
-    pend && /^(pub )?mod [A-Za-z_]+ \{/ { pend=0; intest=1; next }
+    # Further attributes and blank lines sit between the cfg and its item.
+    pend && /^#\[/ { next }
     pend && /^[[:space:]]*$/ { next }
+    pend && /^[a-zA-Z]/ { pend=0; seek=1 }
+    # `seek` spans the gated item HEADER, which may run over several lines for a
+    # multi-line signature. Resolve it three ways, and only the middle one opens
+    # a skipped block - an earlier version entered the block unconditionally and
+    # ate the next LIVE item when the gated one closed its body inline.
+    seek {
+      # `pub mod x;` / `pub use y;` / `const Z: T = v;` - one line, done.
+      if ($0 ~ /;[[:space:]]*$/) { seek=0; next }
+      # Body opens and closes on this line - done, no block to skip.
+      if ($0 ~ /\{/ && $0 ~ /\}/) { seek=0; next }
+      # Body opens here - skip to the column-0 close.
+      if ($0 ~ /\{[[:space:]]*$/) { seek=0; intest=1; next }
+      # Still inside a multi-line signature.
+      next
+    }
     { pend=0 }
     intest { if ($0 == "}") intest=0; next }
     { print }' "$1"
