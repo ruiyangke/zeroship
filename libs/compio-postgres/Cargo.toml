@@ -25,7 +25,10 @@ with-eui48-1 = ["postgres-types/with-eui48-1"]
 with-geo-types-0_7 = ["postgres-types/with-geo-types-0_7"]
 with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
 with-smol_str-01 = ["postgres-types/with-smol_str-01"]
-with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
+with-cidr-0_3 = [
+    "postgres-types/with-cidr-0_3",
+    "tokio-postgres/with-cidr-0_3",
+]
 # rustls-backed TLS: `MakeRustlsConnect` (src/tls_rustls.rs) plus the pool's
 # ability to open encrypted connections. rustls is pinned to `aws-lc-rs`, the
 # workspace's single crypto provider (see the root Cargo.toml comment on
@@ -201,6 +204,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
 time = { workspace = true }
 uuid = { workspace = true }
+cidr = "0.3.2"
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream

@@ -16,7 +16,11 @@ impl<'a> FromSql<'a> for IpCidr {
 
 impl ToSql for IpCidr {
     fn to_sql(&self, _: &Type, w: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
+        let is_cidr = w.len() + 2;
         types::inet_to_sql(self.first_address(), self.network_length(), w);
+        // `inet_to_sql` emits the INET flag. PostgreSQL's CIDR wire format
+        // uses the same payload with this byte set instead.
+        w[is_cidr] = 1;
         Ok(IsNull::No)
     }
 
