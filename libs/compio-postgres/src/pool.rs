@@ -1769,6 +1769,12 @@ impl Pool {
     /// reading or mutating pool state, never across a connection await.
     /// Returns false once the pool has been dropped or closed.
     async fn housekeep(weak: &Weak<Self>) -> bool {
+        // The sole production caller stores this task's handle inside the open
+        // pool, so dropping or closing the pool cancels a sleeping task before
+        // it can enter another cycle. These entry guards are construction-
+        // unreachable there; keeping the private one-cycle helper total over a
+        // Weak makes direct lifecycle tests possible without changing that
+        // ownership argument.
         let Some(pool) = weak.upgrade() else {
             return false;
         };
@@ -1817,18 +1823,18 @@ impl Pool {
             let target = pool.config.min_idle;
             let mut evicted_idle = 0usize;
             while idle.len() > target {
-                let lru_idx = idle
+                // The loop condition makes the idle set nonempty: `target` is
+                // a usize, so `idle.len() > target` implies `idle.len() >= 1`.
+                let (lru_idx, lru) = idle
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, e)| e.last_used)
-                    .map(|(i, _)| i);
-                match lru_idx {
-                    Some(idx) if idle[idx].is_idle_too_long(pool.config.idle_timeout) => {
-                        discarded.push(idle.swap_remove(idx));
-                        evicted_idle += 1;
-                    }
-                    _ => break,
+                    .expect("nonempty idle set has an LRU entry");
+                if !lru.is_idle_too_long(pool.config.idle_timeout) {
+                    break;
                 }
+                discarded.push(idle.swap_remove(lru_idx));
+                evicted_idle += 1;
             }
 
             (before, evicted_unusable, evicted_idle, discarded)
@@ -1893,12 +1899,14 @@ impl Pool {
 
             match transport.connect_one().await {
                 Ok(client) => {
+                    // `start_housekeeper_with_interval` retains this task's
+                    // handle in the pool. Dropping or closing the pool while
+                    // `connect_one` is pending cancels the task before the
+                    // await can resume; keep the fallible upgrade as the
+                    // boundary that enforces that ownership construction.
                     let Some(pool) = weak.upgrade() else {
                         return false;
                     };
-                    if pool.closed.get() {
-                        return false;
-                    }
                     pool.metrics.inc_created();
                     drop(pool);
 
@@ -1910,13 +1918,12 @@ impl Pool {
                     if pool.closed.get() {
                         return false;
                     }
-                    drop(pool);
                     if let Err(e) = after_connect {
-                        if let Some(pool) = weak.upgrade()
-                            && !pool.closed.get()
-                        {
-                            pool.metrics.inc_evictions();
-                        }
+                        // The successful open check above and the absence of
+                        // an await or callback make another weak/closed guard
+                        // impossible here.
+                        pool.metrics.inc_evictions();
+                        drop(pool);
                         eprintln!(
                             "[compio-postgres] housekeeper: after_connect rejected connection: {e}"
                         );
@@ -1929,11 +1936,8 @@ impl Pool {
                         let error = entry.ineligibility_error(|| {
                             pool_error("after_connect left connection unusable")
                         });
-                        if let Some(pool) = weak.upgrade()
-                            && !pool.closed.get()
-                        {
-                            pool.metrics.inc_evictions();
-                        }
+                        pool.metrics.inc_evictions();
+                        drop(pool);
                         eprintln!(
                             "[compio-postgres] housekeeper: after_connect left connection \
                              unusable: {error:?}"
@@ -1943,12 +1947,6 @@ impl Pool {
                         break;
                     }
 
-                    let Some(pool) = weak.upgrade() else {
-                        return false;
-                    };
-                    if pool.closed.get() {
-                        return false;
-                    }
                     created += 1;
                     let waker = pool.deposit_freed_entry(entry);
                     // The entry is now idle or assigned to the head waiter and
@@ -1960,22 +1958,19 @@ impl Pool {
                 }
                 Err(e) => {
                     // `permit` drops here -> total -= 1.
-                    if weak.upgrade().is_some_and(|pool| pool.closed.get()) {
-                        return false;
-                    }
                     eprintln!("[compio-postgres] housekeeper: failed to create connection: {e}");
                     break;
                 }
             }
         }
 
+        let Some(pool) = weak.upgrade() else {
+            return false;
+        };
+        if pool.closed.get() {
+            return false;
+        }
         if evicted > 0 || created > 0 {
-            let Some(pool) = weak.upgrade() else {
-                return false;
-            };
-            if pool.closed.get() {
-                return false;
-            }
             let after_idle = pool.idle.borrow().len();
             let active = pool.active.get();
             let total = pool.total.get();
@@ -1985,7 +1980,7 @@ impl Pool {
             );
         }
 
-        weak.upgrade().is_some_and(|pool| !pool.closed.get())
+        true
     }
 
     // -- Convenience methods ----------------------------------------------
@@ -4788,6 +4783,62 @@ mod tests {
         assert_eq!(youngest_count.load(Ordering::Relaxed), 1);
     }
 
+    thread_local! {
+        static HOUSEKEEPING_WAKE_POOL: RefCell<Option<Rc<Pool>>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy)]
+    enum HousekeepingPoolWake {
+        Drop,
+        Close,
+    }
+
+    impl HousekeepingPoolWake {
+        fn run(self) {
+            let pool = HOUSEKEEPING_WAKE_POOL
+                .with(|slot| slot.borrow_mut().take())
+                .expect("housekeeping wake ran without its pool fixture");
+            match self {
+                Self::Drop => drop(pool),
+                Self::Close => pool.begin_close(),
+            }
+        }
+    }
+
+    impl Wake for HousekeepingPoolWake {
+        fn wake(self: Arc<Self>) {
+            (*self).run();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            (**self).run();
+        }
+    }
+
+    fn install_housekeeping_wake_pool(pool: Rc<Pool>) {
+        HOUSEKEEPING_WAKE_POOL.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "a previous housekeeping wake fixture retained its pool"
+            );
+            *slot.borrow_mut() = Some(pool);
+        });
+    }
+
+    fn park_query_events_on_housekeeping_wake(
+        client: &Client,
+        action: HousekeepingPoolWake,
+    ) -> mpsc::UnboundedReceiver<crate::QueryEvent> {
+        let mut events = client.query_events();
+        let waker = Waker::from(Arc::new(action));
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            events.poll_next_unpin(&mut cx).is_pending(),
+            "fresh query-events receiver was not pending"
+        );
+        events
+    }
+
     #[compio::test]
     async fn live_pool_housekeeper_task_still_runs() {
         let config = PoolConfig {
@@ -4867,6 +4918,106 @@ mod tests {
             pool.housekeeper.borrow().is_none(),
             "closed pool restarted its housekeeper"
         );
+    }
+
+    #[compio::test]
+    async fn housekeeping_keeps_a_recent_idle_entry() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            idle_timeout: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(441);
+        let entry = PoolEntry::new(client, config.max_lifetime);
+        let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
+        let weak = Rc::downgrade(&pool);
+
+        assert!(Pool::housekeep(&weak).await);
+        assert_eq!(pool.idle_count(), 1, "recent idle entry was reaped");
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 0);
+    }
+
+    #[compio::test]
+    async fn housekeeping_stops_when_eviction_cleanup_drops_the_pool() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(442);
+        let events = park_query_events_on_housekeeping_wake(&client, HousekeepingPoolWake::Drop);
+        let expired = PoolEntry::new(client, Duration::ZERO);
+        let pool = Rc::new(test_pool(config, vec![expired], 0, 1));
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(pool);
+
+        assert!(!Pool::housekeep(&weak).await);
+        assert!(
+            weak.upgrade().is_none(),
+            "eviction cleanup did not release the last pool owner"
+        );
+        drop(events);
+    }
+
+    #[compio::test]
+    async fn housekeeping_stops_when_eviction_cleanup_closes_the_pool() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(443);
+        let events = park_query_events_on_housekeeping_wake(&client, HousekeepingPoolWake::Close);
+        let expired = PoolEntry::new(client, Duration::ZERO);
+        let pool = Rc::new(test_pool(config, vec![expired], 0, 1));
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(Rc::clone(&pool));
+
+        assert!(!Pool::housekeep(&weak).await);
+        assert!(pool.closed.get(), "eviction cleanup close was ignored");
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        drop(events);
+    }
+
+    #[compio::test]
+    async fn housekeeping_connect_failure_releases_its_reservation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/test?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+
+        assert!(
+            Box::pin(compio::time::timeout(
+                Duration::from_secs(5),
+                Pool::housekeep(&weak),
+            ))
+            .await
+            .expect("closed-peer housekeeping connection did not finish")
+        );
+        server.join().expect("closed-peer server panicked");
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0, "failed refill leaked its permit");
+        assert_eq!(pool.metrics.connections_created.get(), 0);
+        assert_eq!(pool.metrics.evictions.get(), 0);
     }
 
     #[compio::test]
@@ -5061,6 +5212,204 @@ mod tests {
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.total_count(), 0);
+
+        drop(pool);
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    #[compio::test]
+    async fn housekeeping_stops_when_after_connect_drops_the_pool() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |_| {
+            HousekeepingPoolWake::Drop.run();
+            Box::pin(async { Ok(()) })
+        });
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(pool);
+
+        assert!(
+            !Box::pin(compio::time::timeout(
+                Duration::from_secs(5),
+                Pool::housekeep(&weak),
+            ))
+            .await
+            .expect("housekeeping did not finish after its hook dropped the pool")
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "after_connect did not release the last pool owner"
+        );
+
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    #[compio::test]
+    async fn housekeeping_stops_when_after_connect_closes_the_pool() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |_| {
+            HousekeepingPoolWake::Close.run();
+            Box::pin(async { Ok(()) })
+        });
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(Rc::clone(&pool));
+
+        assert!(
+            !Box::pin(compio::time::timeout(
+                Duration::from_secs(5),
+                Pool::housekeep(&weak),
+            ))
+            .await
+            .expect("housekeeping did not finish after its hook closed the pool")
+        );
+        assert!(pool.closed.get(), "after_connect close was ignored");
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.connections_created.get(), 1);
+
+        drop(pool);
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    #[compio::test]
+    async fn housekeeping_reports_gone_after_failure_cleanup_drops_the_pool() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let (expired, _expired_receiver) = fake_client(444);
+        let expired = PoolEntry::new(expired, Duration::ZERO);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let hook_events = Rc::clone(&events);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |client| {
+            hook_events
+                .borrow_mut()
+                .push(park_query_events_on_housekeeping_wake(
+                    client,
+                    HousekeepingPoolWake::Drop,
+                ));
+            Box::pin(async { Err(pool_error("scripted housekeeping rejection")) })
+        });
+        let mut pool = test_pool(config, vec![expired], 0, 1);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(pool);
+
+        assert!(
+            !Box::pin(compio::time::timeout(
+                Duration::from_secs(5),
+                Pool::housekeep(&weak),
+            ))
+            .await
+            .expect("housekeeping failure cleanup did not finish")
+        );
+        assert_eq!(
+            events.borrow().len(),
+            1,
+            "hook did not install its observer"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "rejected connection cleanup retained the pool"
+        );
+
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    #[compio::test]
+    async fn housekeeping_reports_closed_after_failure_cleanup_closes_the_pool() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let (expired, _expired_receiver) = fake_client(445);
+        let expired = PoolEntry::new(expired, Duration::ZERO);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let hook_events = Rc::clone(&events);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |client| {
+            hook_events
+                .borrow_mut()
+                .push(park_query_events_on_housekeeping_wake(
+                    client,
+                    HousekeepingPoolWake::Close,
+                ));
+            Box::pin(async { Err(pool_error("scripted housekeeping rejection")) })
+        });
+        let mut pool = test_pool(config, vec![expired], 0, 1);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(Rc::clone(&pool));
+
+        assert!(
+            !Box::pin(compio::time::timeout(
+                Duration::from_secs(5),
+                Pool::housekeep(&weak),
+            ))
+            .await
+            .expect("housekeeping failure cleanup did not finish")
+        );
+        assert_eq!(
+            events.borrow().len(),
+            1,
+            "hook did not install its observer"
+        );
+        assert!(
+            pool.closed.get(),
+            "rejected connection cleanup close was ignored"
+        );
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.connections_created.get(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 2);
 
         drop(pool);
         let _ = finish_tx.send(());
@@ -5274,6 +5623,60 @@ mod tests {
         drop(pool);
         let _ = finish_tx.send(());
         assert_eq!(count_rx.recv().unwrap(), 3);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    #[compio::test]
+    async fn housekeeping_stops_when_refill_reap_closes_the_pool() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let (seeded, _seeded_receiver) = fake_client(97);
+        let events = park_query_events_on_housekeeping_wake(&seeded, HousekeepingPoolWake::Close);
+        let seeded_status = seeded.tx_status_handle();
+        let calls = Rc::new(Cell::new(0_usize));
+        let hook_calls = Rc::clone(&calls);
+        let mut config = PoolConfig {
+            max_size: 2,
+            min_idle: 2,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |_| {
+            hook_calls.set(hook_calls.get() + 1);
+            seeded_status.store(crate::connection::READ_RETIRED_STATUS, Ordering::Release);
+            Box::pin(async { Ok(()) })
+        });
+
+        let seeded = PoolEntry::new(seeded, Duration::from_secs(600));
+        let mut pool = test_pool(config, vec![seeded], 0, 1);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        install_housekeeping_wake_pool(Rc::clone(&pool));
+
+        assert!(
+            !Box::pin(compio::time::timeout(
+                Duration::from_secs(5),
+                Pool::housekeep(&weak),
+            ))
+            .await
+            .expect("housekeeping did not finish after refill reaping closed the pool")
+        );
+        assert_eq!(calls.get(), 1, "housekeeping connected after close");
+        assert!(pool.closed.get(), "refill reap close was ignored");
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.connections_created.get(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+
+        drop(events);
+        drop(pool);
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
         server.join().expect("fake PostgreSQL server panicked");
     }
 
