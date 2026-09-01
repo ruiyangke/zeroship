@@ -5278,6 +5278,70 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_dispatch_records_terminal_server_error_in_the_supplied_slot() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        server_error_frame("FATAL", "57P01", "scripted administrator shutdown")
+                            .as_slice(),
+                    )),
+                    request_complete: false,
+                    deferred_error: None,
+                },
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the terminal server diagnosis");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(1),
+            &terminal_server_error,
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        write_result.expect("the yielding flush failed");
+        acknowledged
+            .await
+            .expect("dispatch did not acknowledge the terminal diagnosis");
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("57P01"),
+            "flush dispatch did not update the supplied terminal-error slot"
+        );
+    }
+
+    #[compio::test]
     async fn flush_dispatch_consumes_the_copy_recovery_ready_state() {
         let stream = BufStream::new(YieldingWriteSplitStream);
         let Ok((read_half, mut write_half)) = stream.try_into_split() else {
