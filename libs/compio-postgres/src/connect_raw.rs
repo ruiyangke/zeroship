@@ -1995,6 +1995,86 @@ mod tests {
         );
     }
 
+    /// One text column, which is the shape both target-session probes read.
+    fn single_column_row_description(name: &str) -> Vec<u8> {
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0i32.to_be_bytes()); // table oid
+        body.extend_from_slice(&0i16.to_be_bytes()); // column id
+        body.extend_from_slice(&25i32.to_be_bytes()); // text
+        body.extend_from_slice(&(-1i16).to_be_bytes()); // type size
+        body.extend_from_slice(&(-1i32).to_be_bytes()); // type modifier
+        body.extend_from_slice(&0i16.to_be_bytes()); // text format
+        frame(b'T', &body)
+    }
+
+    fn single_column_data_row(value: &[u8]) -> Vec<u8> {
+        let mut body = 1i16.to_be_bytes().to_vec();
+        body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(value);
+        frame(b'D', &body)
+    }
+
+    fn target_probe_script(column: &str, value: &[u8]) -> Vec<u8> {
+        let mut script = single_column_row_description(column);
+        script.extend_from_slice(&single_column_data_row(value));
+        script.extend_from_slice(&frame(b'C', b"SHOW\0"));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+        script
+    }
+
+    /// The message lives in the SOURCE chain; the top-level Display renders
+    /// only "error connecting to server".
+    fn probe_error_chain(error: &Error) -> String {
+        std::iter::successors(std::error::Error::source(error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        })
+    }
+
+    async fn target_probe_rejects(attrs: TargetSessionAttrs, column: &str, value: &[u8]) -> Error {
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: target_probe_script(column, value),
+            offset: 0,
+            output: vec![],
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.phase = HandshakePhase::Complete;
+        probe_target_session_attrs(&mut handshake, attrs, &mut HashMap::new())
+            .await
+            .expect_err("the probe accepted a value outside its documented set")
+    }
+
+    /// Both probes answer a fixed question with a fixed vocabulary - `on`/`off`
+    /// for `transaction_read_only`, `t`/`f` for `pg_is_in_recovery`. Anything
+    /// else must be refused rather than guessed at: the probe decides whether
+    /// this session may take writes, so reading an unknown value as "false"
+    /// would route writes at a standby. Neither refusal had ever run.
+    #[compio::test]
+    async fn a_target_probe_refuses_a_value_outside_its_vocabulary() {
+        let read_only = target_probe_rejects(
+            TargetSessionAttrs::ReadWrite,
+            "transaction_read_only",
+            b"maybe",
+        )
+        .await;
+        assert!(
+            probe_error_chain(&read_only).contains("invalid transaction_read_only"),
+            "transaction_read_only refusal named the wrong thing: {read_only}"
+        );
+
+        let recovery =
+            target_probe_rejects(TargetSessionAttrs::Standby, "pg_is_in_recovery", b"yes").await;
+        assert!(
+            probe_error_chain(&recovery).contains("invalid pg_is_in_recovery"),
+            "pg_is_in_recovery refusal named the wrong thing: {recovery}"
+        );
+    }
+
     #[compio::test]
     async fn target_probe_write_failure_preserves_an_error_buffered_after_ready() {
         let mut script = frame(b'Z', b"I");
