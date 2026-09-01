@@ -1825,7 +1825,7 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         match range {
             None => fields.push(None),
             Some(range) => {
-                let slice = buf.get(range).ok_or_else(eof_identify_row)?;
+                let slice = &buf[range];
                 fields.push(Some(
                     std::str::from_utf8(slice)
                         .map_err(|e| Error::parse(std::io::Error::other(e)))?,
@@ -1863,15 +1863,6 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         xlogpos: required(2, "xlogpos")?.to_string(),
         dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
     })
-}
-
-/// The `UnexpectedEof` error returned when the `IDENTIFY_SYSTEM`
-/// `DataRow` body is truncated mid-field.
-fn eof_identify_row() -> Error {
-    Error::parse(std::io::Error::new(
-        std::io::ErrorKind::UnexpectedEof,
-        "IDENTIFY_SYSTEM DataRow truncated",
-    ))
 }
 
 /// `IDENTIFY_SYSTEM` completed its response without returning the row it is
