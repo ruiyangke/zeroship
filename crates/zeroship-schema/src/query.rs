@@ -2922,8 +2922,19 @@ fn def_to_constraints_for_dialect(
     // that defeats our deterministic-name idempotency contract. The uniqueness
     // marker is materialised through `build_create_indexes` instead.
 
-    // Default value
-    if let Some(default) = def.get("default") {
+    // Default value.
+    //
+    // An ENCRYPTED column never takes one. `t.encrypted(t.string())` keeps
+    // `type: "string"` and carries the `encrypted` block beside it, so the
+    // match below would take the string arm and write `DEFAULT '<plaintext>'`
+    // onto a BYTEA column - which PostgreSQL accepts, storing the literal
+    // bytes. The encryption pass cannot intervene: it substitutes ciphertext
+    // for values flowing through it, and a DDL default fires precisely when no
+    // value is supplied (migration DML, CDC backfill, raw SQL, non-SDK
+    // deploys). No default is correct for such a column, so it is dropped
+    // rather than translated.
+    let encrypted = def.get("encrypted").is_some();
+    if let Some(default) = def.get("default").filter(|_| !encrypted) {
         match def.get("type").and_then(|t| t.as_str()) {
             Some("string") => {
                 if let Some(s) = default.as_str() {
@@ -10021,6 +10032,47 @@ mod tests {
         assert!(sql.contains("\"profile\" JSONB"), "{sql}");
         // Defaults to an empty JSON object (like t.json()).
         assert!(sql.contains("DEFAULT '{}'::jsonb"), "{sql}");
+    }
+
+    /// An encrypted column must never carry a DDL default.
+    ///
+    /// `t.encrypted(t.string())` yields a FieldDef whose `type` stays
+    /// `"string"` with the `encrypted` block BESIDE it, not replacing it
+    /// (`sdks/db/src/types.ts:1746-1751`). The constraint emitter matches on
+    /// `type`, so without a guard it takes the `Some("string")` arm and writes
+    /// `DEFAULT '<plaintext>'` onto a column whose storage type is BYTEA.
+    ///
+    /// PostgreSQL accepts that and stores the literal bytes - measured on
+    /// pg18: `CREATE TEMP TABLE t (c BYTEA DEFAULT 'secret')` then
+    /// `INSERT ... DEFAULT VALUES` reads back `secret`.
+    ///
+    /// The encryption pass cannot defend it. That pass substitutes ciphertext
+    /// for values flowing THROUGH it, and a DDL default never does: it fires
+    /// for writes that omit the column entirely - migration DML, CDC backfill,
+    /// raw SQL, and non-SDK `zeroship.db.*` deploys, which
+    /// `crud/system_fields_pass.rs:29-32` names as first-class.
+    ///
+    /// So no DDL default is ever correct here, and the emitter drops it rather
+    /// than translating it.
+    #[test]
+    fn encrypted_column_never_emits_a_plaintext_ddl_default() {
+        let schema = json!({
+            "secret_note": {
+                "type": "string",
+                "encrypted": { "mode": "default", "wraps": "string" },
+                "default": "hunter2"
+            },
+        });
+        let sql =
+            build_create_table_with_fks("app1", "notes", &schema, &FkEmission::Inline).unwrap();
+        assert!(
+            !sql.contains("hunter2"),
+            "an encrypted column must not carry its declared default as plaintext DDL: {sql}"
+        );
+        assert!(
+            !sql.contains("\"secret_note\" BYTEA DEFAULT"),
+            "an encrypted column must carry no DDL default at all: {sql}"
+        );
     }
 
     #[test]
