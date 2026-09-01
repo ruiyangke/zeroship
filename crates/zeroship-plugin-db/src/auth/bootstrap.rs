@@ -25,6 +25,7 @@ use compio_postgres::Pool;
 use zeroship_core::database_role::per_app_role_name;
 
 use super::APP_ROLE_TEMPLATE;
+use crate::backend::pg_error;
 use crate::error::DbError;
 
 const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
@@ -62,10 +63,11 @@ const WORKER_WRITABLE_RESERVED_TABLE: &str = "__zeroship_audit_unmask";
 /// helper only prepends `"auth/bootstrap: <ctx>: "` to the message body.
 ///
 /// Variant-walking is shared with the other per-module helpers via
-/// [`crate::error::coded_sql`]; this is the `auth/bootstrap`-scoped
+/// [`crate::backend::pg_error::coded_sql`]; this is the
+/// `auth/bootstrap`-scoped
 /// thin wrapper.
 fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    crate::error::coded_sql(&format!("auth/bootstrap: {context}"), e)
+    pg_error::coded_sql(&format!("auth/bootstrap: {context}"), e)
 }
 
 /// Tiny helper for the existence + create pattern.

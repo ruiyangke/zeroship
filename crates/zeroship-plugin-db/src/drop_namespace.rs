@@ -52,7 +52,8 @@
 use compio_postgres::Pool;
 
 use crate::backend::BackendHandle;
-use crate::error::{prefix_message, DbError};
+use crate::backend::pg_error;
+use crate::error::{DbError, prefix_message};
 
 /// Options for [`drop_namespace`].
 #[derive(Debug, Clone)]
@@ -155,7 +156,7 @@ pub async fn drop_namespace(
     pool.query_text_params(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), &[])
         .await
         .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
+            let mut err = pg_error::classify(&e);
             prefix_message(&mut err, &format!("drop_namespace: DROP SCHEMA {app_id}: "));
             err
         })?;
@@ -173,10 +174,7 @@ pub async fn drop_namespace(
 /// Split out so the arm-matching lives in one place; the PG arm routes
 /// to `replication::drop_worker_slots`, the SQLite arm to its
 /// file-unlink teardown.
-async fn deprovision_change_stream(
-    backend: &BackendHandle,
-    app_id: &str,
-) -> Result<(), DbError> {
+async fn deprovision_change_stream(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     use crate::backend::ChangeStream;
     if let Some(pg) = backend.as_change_stream_pg() {
         return pg.deprovision(app_id).await;
@@ -199,7 +197,9 @@ mod tests {
             active_subscriptions: 3,
         };
         match o {
-            DropNamespaceOutcome::Deferred { active_subscriptions } => {
+            DropNamespaceOutcome::Deferred {
+                active_subscriptions,
+            } => {
                 assert_eq!(active_subscriptions, 3);
             }
             _ => panic!("expected Deferred"),

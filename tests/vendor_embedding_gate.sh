@@ -85,7 +85,6 @@ is_vendor_tier() {
 # public field. Every entry carries the task that DELETES it - an entry with no
 # owner is a permanent exception, and this list does not have those.
 BASELINE_FILES="
-error.rs
 exec.rs
 backend/mod.rs
 transaction/driver.rs
@@ -98,9 +97,6 @@ drop_namespace.rs
 lib.rs
 service.rs
 "
-# error.rs             9  PG error classification (SQLSTATE -> DbError) in the file
-#                         that owns the NEUTRAL error type. Moving to
-#                         backend/pg_error.rs - first move of the split.
 # exec.rs              5  Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
 #                         the neutral-row decision; see roled_rows in pg_autocommit.
 # backend/mod.rs       4  BackendHandle names BOTH vendors, which is why this file

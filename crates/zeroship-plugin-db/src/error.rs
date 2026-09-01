@@ -136,12 +136,10 @@ impl fmt::Display for DenyReason {
     }
 }
 
-
 /// Classified error origin for every fallible `plugin-db` helper.
 ///
-/// Construct via the variant directly, or via [`DbError::from_pg`] for
-/// Postgres-shaped errors (preserves SQLSTATE + walks the source chain
-/// so the cause reaches the JS console).
+/// Construct via the variant directly. Vendor tiers translate driver errors
+/// into this neutral hierarchy before handing them to core consumers.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum DbError {
@@ -266,7 +264,7 @@ pub(crate) struct SessionSetupError {
 }
 
 impl SessionSetupError {
-    fn new(disposition: SessionSetupDisposition, error: DbError) -> Self {
+    pub(crate) fn new(disposition: SessionSetupDisposition, error: DbError) -> Self {
         Self { disposition, error }
     }
 
@@ -329,147 +327,7 @@ pub const MISSING_ROLE_HINT: &str = "`zeroship migrate` creates the app's schema
      alone does not: the first `env.db` call is what discovers the role is \
      missing.";
 
-/// Does this server error match the role set by per-app session setup?
-///
-/// This discriminator is called only where the caller knows it just issued
-/// `SET LOCAL ROLE` for `app_id`. Provenance is the primary guard; SQLSTATE
-/// and the exact expected role name pin the measured server response.
-///
-/// The SQLSTATE alone is not enough. `SET LOCAL ROLE "missing"` reports **22023
-/// `invalid_parameter_value`** (measured against postgres:16 -- `LOCATION:
-/// call_string_check_hook, guc.c`), not 42704 `undefined_object`. 22023 is the
-/// generic "bad GUC value" code, shared with `SET statement_timeout = 'yes'`,
-/// so matching it alone would reclassify unrelated configuration failures as
-/// creator-facing.
-///
-/// Matching the exact role derived from `app_id` is stronger than sniffing the
-/// `app_<id>_role` shape. A pool DSN can use an app-shaped login name and return
-/// a FATAL 28000 during reconnect; that is an operator connection failure, not
-/// an app condition that `zeroship migrate` can repair.
-fn is_missing_per_app_session_role(
-    code: &compio_postgres::error::SqlState,
-    primary_message: &str,
-    app_id: &str,
-) -> bool {
-    use compio_postgres::error::SqlState;
-
-    let Ok(expected_role) = zeroship_core::database_role::per_app_role_name(app_id) else {
-        return false;
-    };
-    code == &SqlState::INVALID_PARAMETER_VALUE
-        && primary_message == format!("role \"{expected_role}\" does not exist")
-}
-
 impl DbError {
-    /// Classify an error returned by the per-app `SET LOCAL ROLE` batch.
-    ///
-    /// Call this only at the two session-setup sites, after connection
-    /// acquisition and transaction start have succeeded. All other Postgres
-    /// errors, including pool connection failures, must use [`Self::from_pg`].
-    pub(crate) fn classify_pg_per_app_session_setup(
-        e: &compio_postgres::Error,
-        app_id: &str,
-    ) -> SessionSetupError {
-        if e.as_db_error()
-            .is_some_and(|db| is_missing_per_app_session_role(db.code(), db.message(), app_id))
-        {
-            let msg = walk_pg_chain(e);
-            tracing::warn!(
-                error = %msg,
-                "per-app database role missing; app has not been migrated"
-            );
-            return SessionSetupError::new(
-                SessionSetupDisposition::Preserve,
-                DbError::config_hinted(
-                    SCHEMA_NOT_PROVISIONED,
-                    MISSING_ROLE_MESSAGE,
-                    MISSING_ROLE_HINT,
-                ),
-            );
-        }
-
-        if e.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) {
-            let msg = walk_pg_chain(e);
-            tracing::warn!(
-                error = %msg,
-                "per-app database role membership was revoked"
-            );
-            return SessionSetupError::new(
-                SessionSetupDisposition::Denied(DenyReason::GrantRevoked),
-                DbError::PermissionDenied {
-                    code: GRANT_REVOKED,
-                    message: GRANT_REVOKED_MESSAGE,
-                },
-            );
-        }
-
-        SessionSetupError::new(SessionSetupDisposition::Failed, Self::from_pg(e))
-    }
-
-    /// Test-only view of the contextual classifier's creator-facing error.
-    /// Production transaction code also consumes the private disposition.
-    #[cfg(feature = "test-helpers")]
-    pub fn classify_pg_per_app_session_setup_for_tests(
-        e: &compio_postgres::Error,
-        app_id: &str,
-    ) -> Self {
-        Self::classify_pg_per_app_session_setup(e, app_id).into_db_error()
-    }
-
-    /// Classify a `compio_postgres::Error` by SQLSTATE. Falls back to
-    /// [`DbError::Internal`] when the error has no code (e.g.
-    /// connection-layer errors that aren't class 08). Walks the source
-    /// chain so the message reaching JS includes the underlying
-    /// `DbError` body, not the bare wrapper kind.
-    pub fn from_pg(e: &compio_postgres::Error) -> Self {
-        use compio_postgres::error::SqlState;
-
-        let msg = walk_pg_chain(e);
-
-        let Some(code) = e.code() else {
-            // No SQLSTATE — usually a connection-layer error
-            // (transport, protocol, decode). Treat as transient.
-            return DbError::Transient { message: msg };
-        };
-
-        if code == &SqlState::UNIQUE_VIOLATION {
-            DbError::UniqueViolation {
-                message: scrub_constraint_detail(msg),
-            }
-        } else if code == &SqlState::FOREIGN_KEY_VIOLATION {
-            DbError::FkViolation {
-                message: scrub_constraint_detail(msg),
-            }
-        } else if code == &SqlState::NOT_NULL_VIOLATION {
-            DbError::NotNullViolation {
-                message: scrub_constraint_detail(msg),
-            }
-        } else if code == &SqlState::CHECK_VIOLATION {
-            DbError::CheckViolation {
-                message: scrub_constraint_detail(msg),
-            }
-        } else if code == &SqlState::T_R_SERIALIZATION_FAILURE
-            || code == &SqlState::T_R_DEADLOCK_DETECTED
-        {
-            DbError::Serialization { message: msg }
-        } else if code == &SqlState::LOCK_NOT_AVAILABLE || code == &SqlState::OBJECT_IN_USE {
-            DbError::LockContention { message: msg }
-        } else if code == &SqlState::DISK_FULL
-            || code == &SqlState::OUT_OF_MEMORY
-            || code == &SqlState::CONNECTION_EXCEPTION
-            || code == &SqlState::CONNECTION_DOES_NOT_EXIST
-            || code == &SqlState::CONNECTION_FAILURE
-            || code == &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
-            || code == &SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION
-        {
-            DbError::Transient { message: msg }
-        } else {
-            // Unknown SQLSTATE — leave classification to the catch-all
-            // but preserve the message so the SDK can debug.
-            DbError::Internal { message: msg }
-        }
-    }
-
     /// Stamp this `DbError` onto an `OpError` with the canonical
     /// `.code` for the variant. The runtime materialises a JS Error
     /// with `e.code` (and `e.hint` when present) — the SDK reads it
@@ -787,22 +645,6 @@ pub(crate) fn prefix_message(err: &mut DbError, prefix: &str) {
     }
 }
 
-/// Classify a `compio_postgres::Error` into a [`DbError`] and prepend a
-/// `"<context>: "` phrase to the resulting message body via
-/// [`prefix_message`]. The SQLSTATE-derived `.code` is preserved
-/// (`unique_violation`, `serialization_failure`, `transient`, …).
-///
-/// Replaces the per-file `coded_sql` duplicates that lived in `audit`,
-/// `auth::bootstrap`, `auth::keys`, `auth::session`, and `diff`. Each
-/// caller composes its module-scoped prefix into `context` (e.g.
-/// `"audit: INSERT migrations"`, `"diff: probe pg_attribute"`) so the
-/// operator-facing message keeps the same shape.
-pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    let mut err = DbError::from_pg(&e);
-    prefix_message(&mut err, &format!("{context}: "));
-    err
-}
-
 /// Return the first row from a query result slice, or surface a
 /// [`DbError::Internal`] naming the operation. Used to close the
 /// silent-empty-RETURNING bug class: callers that previously chained
@@ -813,10 +655,8 @@ pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 /// emits the same `DbError::Internal { message: "<op>: returned no
 /// row" }` shape for every empty-`RETURNING` site.
 ///
-/// Generic over the row type so test code can exercise the helper
-/// without constructing a `compio_postgres::Row` (whose constructors
-/// are crate-private). At the production call sites the type is
-/// always `&[compio_postgres::Row]`; tests pass `Vec<T>` for any `T`.
+/// Generic over the row type so core does not need to know any backend's row
+/// representation and test code can exercise the helper with plain values.
 pub(crate) fn first_row_or_internal<'a, R>(
     rows: &'a [R],
     op: &'static str,
@@ -857,20 +697,6 @@ impl std::fmt::Display for DbError {
 }
 
 impl std::error::Error for DbError {}
-
-// A `From<compio_postgres::Error> for DbError` stood here until 2026-08-31.
-// It is deleted, and it is not coming back: `DbError` is the vendor-neutral
-// error, and a `From` from a driver type is the one construct that pins the
-// crate owning `DbError` to that driver — the orphan rule allows the impl only
-// where `DbError` lives, so it could never move down to a Postgres crate.
-// Conversion is now spelled explicitly at every site via `DbError::from_pg`,
-// which is what all 45 existing call sites already did.
-//
-// The impl advertised "callers gain ergonomic `?`". Measured before deleting
-// it: across `plugin-db`, `zeroship-worker` and `zeroship-cli` under
-// `--all-targets --all-features`, exactly ONE thing depended on it, and it was
-// the test asserting the impl existed. Zero production `?` sites in three years
-// of code. The affordance was never taken.
 
 impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
     fn from(error: zeroship_core::database_role::PerAppRoleNameError) -> Self {
@@ -929,22 +755,6 @@ impl From<crate::query::QueryError> for DbError {
     }
 }
 
-// The live-introspection helpers
-// (`zeroship_schema::diff::{read_live_schema, estimate_row_count}`) are
-// in the leaf crate, which cannot name `DbError` (it is built
-// on `zeroship_runtime::OpError`). They return [`zeroship_schema::error::SchemaError`]
-// carrying the per-call-site context phrase + the raw driver error. This
-// `From` re-creates the exact pre-extraction shape: the diff layer wrapped
-// every introspection error as `coded_sql("diff: <context>", e)`, so we
-// re-attach the `"diff: "` prefix here and route through `coded_sql` so the
-// SQLSTATE-derived `.code` selection stays the single source of truth.
-// Behaviour at the V8 boundary is byte-identical to before the move.
-impl From<zeroship_schema::error::SchemaError> for DbError {
-    fn from(e: zeroship_schema::error::SchemaError) -> Self {
-        coded_sql(&format!("diff: {}", e.context), e.source)
-    }
-}
-
 // The mask-sentinel codec
 // (`zeroship_schema::mask_codec::parse_mask_sentinel`) was relocated into the
 // leaf crate and returns [`zeroship_schema::error::MaskSentinelError`] whose
@@ -959,192 +769,9 @@ impl From<zeroship_schema::error::MaskSentinelError> for DbError {
     }
 }
 
-/// Walk the `std::error::Error::source` chain so the JS console sees the
-/// underlying Postgres `DbError` body, not the bare wrapper kind. Mirrors
-/// the old `fmt_db_err` from `v8_bridge` so the message shape is
-/// preserved (`db: <wrapper> — caused by: <cause>`).
-/// DB-18: drop the Postgres `DETAIL` line from a constraint-violation message
-/// before it reaches app JS. PG puts the conflicting VALUE there (e.g.
-/// `Key (email)=(alice@example.com) already exists`), turning a unique/check
-/// probe into a value-exfiltration oracle for the app's own — possibly masked —
-/// columns. The primary message (violation class + constraint name, which the
-/// app author already knows from its own schema) is kept for conflict handling.
-fn scrub_constraint_detail(msg: String) -> String {
-    match msg.find("\nDETAIL:").or_else(|| msg.find("DETAIL:")) {
-        Some(idx) => msg[..idx].trim_end().to_string(),
-        None => msg,
-    }
-}
-
-fn walk_pg_chain(e: &compio_postgres::Error) -> String {
-    let mut msg = format!("db: {e}");
-    let mut cur: &dyn std::error::Error = e;
-    while let Some(src) = std::error::Error::source(cur) {
-        msg.push_str(&format!(" — caused by: {src}"));
-        cur = src;
-    }
-    msg
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn scrub_constraint_detail_drops_value_line_db18() {
-        // The DETAIL line (with the conflicting value) is removed; the primary
-        // message is kept for conflict handling.
-        let raw = "db: duplicate key value violates unique constraint \"users_email_key\"\n\
-                   DETAIL: Key (email)=(alice@example.com) already exists."
-            .to_string();
-        let scrubbed = scrub_constraint_detail(raw);
-        assert!(
-            !scrubbed.contains("alice@example.com"),
-            "value must be scrubbed: {scrubbed}"
-        );
-        assert!(
-            !scrubbed.contains("DETAIL"),
-            "DETAIL line must be gone: {scrubbed}"
-        );
-        assert!(
-            scrubbed.contains("unique constraint"),
-            "primary message kept: {scrubbed}"
-        );
-        // A message without a DETAIL line is unchanged.
-        let plain = "db: some other error".to_string();
-        assert_eq!(scrub_constraint_detail(plain.clone()), plain);
-    }
-
-    // -----------------------------------------------------------------
-    // `schema_not_provisioned` -- the missing per-app role classification.
-    //
-    // These drive `is_missing_per_app_session_role` directly rather than the
-    // contextual converter because `compio_postgres::Error` has no public
-    // constructor (its doc-hidden `test_utils` exposes Row/Statement/Column
-    // only). The real converter path, against a live server that actually
-    // reports the SQLSTATE, is covered by `tests/missing_role.rs`; these pin
-    // the discriminator's edges, which a live test cannot enumerate cheaply.
-    //
-    // WHAT THESE DO NOT CATCH:
-    //   - That both production setup sites call the contextual converter.
-    //     `tests/missing_role.rs` drives the converter with a live error; the
-    //     call sites are kept adjacent to the setup SQL in exec/transaction.
-    //   - A non-English server. PostgreSQL translates the primary message
-    //     under a non-C `lc_messages`, and the shape check would then miss.
-    //     The failure mode is a false NEGATIVE (today's `internal`
-    //     behaviour), never a false positive.
-    //   - A future PostgreSQL SQLSTATE change. The live test pins 22023 so a
-    //     changed server fails visibly instead of silently widening this set.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn per_app_role_composers_match_across_services() {
-        use compio_postgres::error::SqlState;
-
-        let app_id = "role_parity";
-        let role = zeroship_core::database_role::per_app_role_name(app_id)
-            .expect("parity fixture role name");
-        let quoted_role = crate::query::quote_ident(&role);
-
-        let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
-            app_id,
-            "zs_migrator_fixture",
-        )
-        .expect("migration fixture role name");
-        assert_eq!(
-            migration.role_name(),
-            role,
-            "data-plane and migration-service role composers diverged"
-        );
-
-        for setup_sql in [
-            crate::auth::bootstrap::tx_session_setup_sql(app_id)
-                .expect("transaction setup role name"),
-            crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id)
-                .expect("autocommit setup role name"),
-        ] {
-            assert!(
-                setup_sql.starts_with(&format!("SET LOCAL ROLE {quoted_role};")),
-                "data-plane setup SQL did not carry the shared role: {setup_sql}"
-            );
-        }
-
-        let server_message = format!("role \"{role}\" does not exist");
-        assert!(
-            is_missing_per_app_session_role(
-                &SqlState::INVALID_PARAMETER_VALUE,
-                &server_message,
-                app_id,
-            ),
-            "missing-role classifier did not recognize the shared role"
-        );
-    }
-
-    #[test]
-    fn missing_role_is_classified_from_the_measured_sqlstate() {
-        use compio_postgres::error::SqlState;
-
-        // Measured against postgres:16: `BEGIN; SET LOCAL ROLE
-        // "app_nonexistent_role"` reports
-        //   ERROR: 22023: role "app_nonexistent_role" does not exist
-        // NOT 42704. The message is verbatim server text.
-        assert!(is_missing_per_app_session_role(
-            &SqlState::INVALID_PARAMETER_VALUE,
-            r#"role "app_nonexistent_role" does not exist"#,
-            "nonexistent",
-        ));
-    }
-
-    #[test]
-    fn same_sqlstate_different_message_stays_unclassified() {
-        use compio_postgres::error::SqlState;
-
-        // ONE-VARIABLE CONTROL for the test above: identical SQLSTATE,
-        // different primary message. 22023 is the generic "bad GUC value"
-        // code -- `SET LOCAL statement_timeout = 'yes'` reports it too. If
-        // the discriminator keyed on SQLSTATE alone, this would be
-        // reclassified as a creator-facing configuration error and its
-        // message would ride out at 5xx.
-        assert!(!is_missing_per_app_session_role(
-            &SqlState::INVALID_PARAMETER_VALUE,
-            r#"invalid value for parameter "statement_timeout": "yes""#,
-            "nonexistent",
-        ));
-    }
-
-    #[test]
-    fn same_message_shape_different_sqlstate_stays_unclassified() {
-        use compio_postgres::error::SqlState;
-
-        // ONE-VARIABLE CONTROL on the other axis: the exact message shape
-        // the arm matches, under a SQLSTATE that is not a role failure.
-        // Proves the message check is a NARROWING condition, not the whole
-        // test -- a server that said this under 42P01 must not be treated
-        // as "not provisioned".
-        assert!(!is_missing_per_app_session_role(
-            &SqlState::UNDEFINED_TABLE,
-            r#"role "app_nonexistent_role" does not exist"#,
-            "nonexistent",
-        ));
-    }
-
-    #[test]
-    fn other_role_sqlstates_are_not_session_setup_missing_role() {
-        use compio_postgres::error::SqlState;
-
-        // 42704 and 28000 may carry the same primary message, but neither is
-        // the measured SET LOCAL ROLE failure at this contextual call site.
-        assert!(!is_missing_per_app_session_role(
-            &SqlState::UNDEFINED_OBJECT,
-            r#"role "app_x_role" does not exist"#,
-            "x",
-        ));
-        assert!(!is_missing_per_app_session_role(
-            &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
-            r#"role "app_x_role" does not exist"#,
-            "x",
-        ));
-    }
 
     #[test]
     fn missing_role_message_names_the_command_and_leaks_no_identity() {
@@ -1395,40 +1022,9 @@ mod tests {
         );
     }
 
-    /// `DbError` must not gain a blanket conversion from a driver error
-    /// again. This is the inverse of the test that stood here until
-    /// 2026-08-31, which asserted `From<compio_postgres::Error>` EXISTED
-    /// and whose only effect was to make its deletion a compile error.
-    ///
-    /// A driver `From` pins whichever crate owns `DbError` to that driver
-    /// by the orphan rule, so it can never move to a Postgres crate. The
-    /// vendor-neutral error is the point; explicit `DbError::from_pg` at
-    /// the call site is the house style, and all 45 existing sites use it.
-    ///
-    /// Compile-time assertion: `DbError: !From<compio_postgres::Error>`
-    /// cannot be written in stable Rust, so this pins the property the
-    /// only way available - the inherent classifier is still the single
-    /// source of truth, and nothing may route around it implicitly.
-    #[test]
-    fn dberror_classifies_pg_errors_only_through_from_pg() {
-        // `from_pg` takes a reference and stays inherent; if someone
-        // reintroduces `impl From<compio_postgres::Error> for DbError`,
-        // this call becomes ambiguous only for owned values, so the real
-        // guard is the reviewer plus the tier census. Pin the signature:
-        fn assert_classifier(f: fn(&compio_postgres::Error) -> DbError) -> bool {
-            // Function-pointer coercion fails to compile if `from_pg`
-            // changes shape - e.g. is made a `From` impl method or moved
-            // to take ownership.
-            std::ptr::fn_addr_eq(f, DbError::from_pg as fn(&compio_postgres::Error) -> DbError)
-        }
-        assert!(assert_classifier(DbError::from_pg));
-    }
-
     /// The helper returns the first element of a non-empty slice. The
-    /// test uses `Vec<i64>` rather than a real `compio_postgres::Row`
-    /// because the driver's `Row` constructors are crate-private; the
-    /// helper is generic over `R` precisely so this contract can be
-    /// pinned without a live DB.
+    /// test uses `Vec<i64>` because the helper is deliberately generic over
+    /// the backend row representation.
     #[test]
     fn first_row_or_internal_returns_first_on_non_empty() {
         let rows: Vec<i64> = vec![7, 8, 9];

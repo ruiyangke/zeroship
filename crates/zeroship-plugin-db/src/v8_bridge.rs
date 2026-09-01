@@ -24,12 +24,11 @@
 //!   used by every exec path. The `fmt_db_err` shim that used to sit
 //!   beside them is gone with its last caller (the deleted
 //!   `create_index_with_recovery_audited`); reach for
-//!   [`crate::error::DbError::from_pg`] directly so the SQLSTATE
+//!   [`crate::backend::pg_error::classify`] directly so the SQLSTATE
 //!   classification survives to the V8 boundary.
 
 use serde_json::Value;
 use zeroship_runtime::state::{ResolveValue, SharedState};
-
 
 // ---------------------------------------------------------------------------
 // State accessors
@@ -411,7 +410,6 @@ pub(crate) fn setup_js_promise<'s>(
     let request_id = state.borrow().executing_request_id;
     (global_resolver, request_id, promise)
 }
-
 
 #[cfg(test)]
 mod tests {

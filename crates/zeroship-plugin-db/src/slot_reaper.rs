@@ -22,7 +22,8 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 
-use crate::error::{prefix_message, DbError};
+use crate::backend::pg_error;
+use crate::error::{DbError, prefix_message};
 
 /// A slot must remain inactive and have no live worker lease for this long.
 pub const ABANDONED_INACTIVITY_THRESHOLD: Duration = Duration::from_secs(60 * 60);
@@ -141,7 +142,7 @@ fn managed_worker_token(slot_name: &str) -> Option<&str> {
 }
 
 fn pg_error(context: &str, error: &compio_postgres::Error) -> DbError {
-    let mut error = DbError::from_pg(error);
+    let mut error = pg_error::classify(error);
     prefix_message(&mut error, context);
     error
 }

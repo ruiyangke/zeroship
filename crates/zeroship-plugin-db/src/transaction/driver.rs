@@ -71,6 +71,7 @@ use std::time::{Duration, Instant};
 
 use compio_postgres::TransactionStatus;
 
+use crate::backend::pg_error;
 use crate::context::TxConnection;
 use crate::error::{DbError, SessionSetupDisposition, SessionSetupError};
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
@@ -800,7 +801,7 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
                     } else {
                         TerminalResult::Indeterminate
                     };
-                    (result, Some(DbError::from_pg(&error)))
+                    (result, Some(pg_error::classify(&error)))
                 }
             }
         }

@@ -866,7 +866,7 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
     let client = pool
         .get_owned()
         .await
-        .map_err(|e| error::DbError::from_pg(&e).into_string())?;
+        .map_err(|e| backend::pg_error::classify(&e).into_string())?;
     let scope = LockScope::GlobalApp {
         app_id: app_id.to_string(),
         name: name.to_string(),

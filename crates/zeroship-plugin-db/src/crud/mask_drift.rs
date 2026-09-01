@@ -423,7 +423,7 @@ async fn sample_rows_pg(
     let rows = pool
         .query_text_params(&sql, &empty)
         .await
-        .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        .map_err(|e| crate::backend::pg_error::classify(&e))?;
 
     let mut out: Vec<SampledRow> = Vec::with_capacity(rows.len());
     for row in rows {
@@ -752,7 +752,7 @@ async fn write_drift_audit_row(
             ],
         )
         .await
-        .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        .map_err(|e| crate::backend::pg_error::classify(&e))?;
         return Ok(());
     }
 
@@ -826,14 +826,14 @@ async fn ensure_drift_audit_table(app_id: &str) -> Result<(), DbError> {
         let empty: Vec<&str> = Vec::new();
         pool.query_text_params(&sql, &empty)
             .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+            .map_err(|e| crate::backend::pg_error::classify(&e))?;
         let idx_coll = format!(
             r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_mask_drift_coll_idx"
                ON "{app_id}"."__zeroship_audit_mask_drift" (collection, column_name, detected_at)"#
         );
         pool.query_text_params(&idx_coll, &empty)
             .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+            .map_err(|e| crate::backend::pg_error::classify(&e))?;
         return Ok(());
     }
 
@@ -941,7 +941,7 @@ pub async fn read_drift_audit_rows_for_tests(
         let rows = pool
             .query_text_params(&sql, &empty)
             .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+            .map_err(|e| crate::backend::pg_error::classify(&e))?;
         return Ok(rows
             .into_iter()
             .map(|r| {

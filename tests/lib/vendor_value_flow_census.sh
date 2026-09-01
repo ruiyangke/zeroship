@@ -115,7 +115,7 @@ tier_of_file() {
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
     ./crud/*|./transaction/*|./exec.rs|./broker.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./cross_app_fk.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
-    ./backend/postgres.rs|./backend/pg_row_json.rs)      echo PG ;;
+    ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_error.rs) echo PG ;;
     ./backend/sqlite/*)                                  echo SQLITE ;;
     ./encryption/*)                                      echo ENCRYPT ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
