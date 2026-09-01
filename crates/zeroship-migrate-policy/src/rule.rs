@@ -76,7 +76,8 @@ pub struct InjectSpec {
 }
 
 /// One injected column: enough to drive the resolver + the II.2.6b conformance
-/// check (name/type/nullable/default/collation). The `ty` is an opaque type token.
+/// check (name/type/nullable/default/assign/collation). The `ty` is an opaque type
+/// token.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InjectColumn {
     /// The column's (normalized) name.
