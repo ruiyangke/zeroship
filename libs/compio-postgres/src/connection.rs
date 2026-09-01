@@ -679,75 +679,13 @@ where
     /// transports this crate ships (plain socket and rustls) split, and use
     /// [`run_multiplexed`](Self::run_multiplexed) instead.
     async fn run_serialized(mut self) -> Result<(), Error> {
-        let mut terminating = false;
-
         loop {
-            // Step A - flush any batches that couldn't be delivered last
-            // iteration because the downstream `Sender<BackendMessages>`
-            // slot was still occupied. Doing this BEFORE any read keeps
-            // batch ordering correct (a second batch for the same request
-            // can never overtake the first).
-            self.drain_pending_responses().await;
+            // Step A - deliver batches stashed only to preserve wire order.
+            // Doing this BEFORE any read keeps a second batch for the same
+            // request from overtaking the first.
+            self.drain_pending_responses();
 
-            // Step B - clean shutdown once the client has gone away and
-            // all awaited work is done. Drop-time housekeeping has no
-            // receiver waiting for its response and must not delay shutdown.
-            if terminating && !has_awaited_response(&self.responses, &self.pending_responses) {
-                // NOT `?`: same reasoning as the Terminate write in Step E -
-                // the client is gone and the socket may already be released.
-                if let Err(e) = self.stream.flush().await {
-                    trace!("final flush failed, client already gone: {e}");
-                }
-                // Best-effort clean socket shutdown: closes the TLS
-                // session gracefully (rustls treats silent drop as a
-                // truncation attack) and emits a proper TCP FIN/ACK.
-                // The server may have already half-closed; swallow the
-                // expected `BrokenPipe` / `NotConnected` here.
-                if let Err(e) = self.stream.get_mut().shutdown().await {
-                    use std::io::ErrorKind::*;
-                    if !matches!(e.kind(), BrokenPipe | NotConnected) {
-                        trace!("stream shutdown non-fatal error: {e}");
-                    }
-                }
-                trace!("connection closed");
-                return Ok(());
-            }
-
-            // Step C - terminating branch: Terminate has been sent; we
-            // only drain any remaining inbound bytes until we see EOF or
-            // finish the awaited responses. No new requests.
-            if terminating {
-                match read_backend(&mut self.stream).await {
-                    Ok(msg) => self.dispatch_decoded_message(msg, true).await?,
-                    Err(e) => {
-                        self.record_terminal_read(&e);
-                        // THIS CLEAN-CLOSE ARM CANNOT FIRE, unlike its twin in
-                        // step D below. Step B already returned `Ok(())` for
-                        // `terminating && !has_awaited_response`, so reaching
-                        // step C means an awaited response EXISTS. The only
-                        // thing between that check and this one is the failed
-                        // read plus `record_terminal_read`, and
-                        // `publish_terminal_error` returns immediately on an
-                        // EOF rather than draining - so on the `is_eof` branch
-                        // the response deque is provably unchanged and the
-                        // second conjunct is still false. A non-EOF error may
-                        // drain, but then the FIRST conjunct is false.
-                        // Measured 2026-08-31: `panic!` here leaves all 1447
-                        // tests green. Kept as a structural mirror of step D,
-                        // whose identical arm IS reachable; a mutation report
-                        // calling it unbound is correct.
-                        if is_eof(&e)
-                            && !has_awaited_response(&self.responses, &self.pending_responses)
-                        {
-                            return Ok(());
-                        }
-                        return Err(e);
-                    }
-                }
-                continue;
-            }
-
-            // Step D - if responses are in-flight we MUST read the
+            // Step B - if responses are in-flight we MUST read the
             // socket to completion; racing the read future against
             // `receiver.next()` would drop an in-progress compio
             // submission, whose owned buffer (potentially already
@@ -784,7 +722,7 @@ where
                 continue;
             }
 
-            // Step E - idle. No responses in flight, nothing pending.
+            // Step C - idle. No responses in flight, nothing pending.
             // We await a new request. Unsolicited server messages
             // arriving here (LISTEN/NOTIFY, Notice, ParameterStatus)
             // remain in the kernel socket buffer and will be drained on
@@ -805,22 +743,32 @@ where
                 }
                 None => {
                     self.drain_buffered_backend_frames().await?;
-                    // Client side dropped. Send Terminate and begin
-                    // graceful shutdown.
+                    // Client side dropped with no awaited response left: the
+                    // response queue is empty at Step C, and no request can be
+                    // accepted after `None`. Send Terminate, then shut down;
+                    // there is no post-Terminate read state to service.
                     trace!("receiver closed, sending Terminate");
                     let buf = inner_encode_terminate();
+                    write_frontend(&mut self.stream, FrontendMessage::Raw(buf))
+                        .expect("raw Terminate encoding is infallible");
                     // NOT `?`, for the reason given on the multiplexed loop's
                     // Terminate: the client half is gone, so there is nobody
                     // left to report to, and the socket has usually been
                     // released already (`crate::release`).
-                    let mut goodbye = write_frontend(&mut self.stream, FrontendMessage::Raw(buf));
-                    if goodbye.is_ok() {
-                        goodbye = self.stream.flush().await;
-                    }
-                    if let Err(e) = goodbye {
+                    if let Err(e) = self.stream.flush().await {
                         trace!("Terminate not delivered, client already gone: {e}");
                     }
-                    terminating = true;
+                    // Best-effort clean socket shutdown closes the TLS session
+                    // gracefully and emits a proper TCP FIN/ACK. The server may
+                    // already have half-closed the socket.
+                    if let Err(e) = self.stream.get_mut().shutdown().await {
+                        use std::io::ErrorKind::*;
+                        if !matches!(e.kind(), BrokenPipe | NotConnected) {
+                            trace!("stream shutdown non-fatal error: {e}");
+                        }
+                    }
+                    trace!("connection closed");
+                    return Ok(());
                 }
             }
         }
@@ -870,7 +818,7 @@ where
         }
 
         if let Some(error) = deferred_error {
-            self.drain_pending_responses().await;
+            self.drain_pending_responses();
             publish_terminal_error(&error, &mut self.responses);
             return Err(error);
         }
@@ -881,7 +829,7 @@ where
     /// close. Neither the decoder nor encoding retirement reads the socket.
     async fn drain_buffered_backend_frames(&mut self) -> Result<(), Error> {
         loop {
-            self.drain_pending_responses().await;
+            self.drain_pending_responses();
 
             let Some(length) = self.stream.peek_u32_be(1) else {
                 return Ok(());
@@ -928,9 +876,7 @@ where
         }
     }
 
-    /// Deliver every stashed batch, waiting for downstream capacity, using the
-    /// `poll_ready` + `start_send` back-pressure dance tokio-postgres relies
-    /// on.
+    /// Deliver every stashed batch while preserving its wire-order gate.
     ///
     /// THIS IS THE SERIALIZED LOOP'S FIFO GATE, and it has to run before EVERY
     /// dispatch of an inbound frame, not merely at the top of the loop. While a
@@ -940,20 +886,19 @@ where
     /// rows in the stashed batch are never read. The multiplexed loop states
     /// the same rule as `accept_read = pending_responses.is_empty()` and as
     /// step (3) preceding step (4) in `flush_with_read_draining`.
-    async fn drain_pending_responses(&mut self) {
+    fn drain_pending_responses(&mut self) {
         while let Some(PendingResponse {
             mut sender,
             messages,
             ..
         }) = self.pending_responses.pop_front()
         {
-            // `Err` is a consumer that hung up between being stashed and now;
-            // the batch is dropped, matching tokio-postgres's `poll_read` when
-            // `poll_ready` returns `Err`. `start_send` can also fail for the
-            // same reason after a successful `poll_ready`; ignore it too.
-            if poll_fn(|cx| sender.poll_ready(cx)).await.is_ok() {
-                let _ = sender.start_send(messages);
-            }
+            // `deliver_batch` is the sole constructor and stashes a freshly
+            // cloned futures-mpsc sender. Readiness is per handle, so the clone
+            // owns one immediate slot even when the original sender is parked.
+            // Its first send can only succeed or observe a disconnected
+            // consumer; it cannot backpressure this serialized loop.
+            let _ = sender.try_send(messages);
         }
     }
 
@@ -1068,7 +1013,7 @@ where
                                     // read here reaches a consumer that has
                                     // caught up AHEAD of the batch already
                                     // stashed for it.
-                                    self.drain_pending_responses().await;
+                                    self.drain_pending_responses();
                                     let message = match read_backend(&mut self.stream).await {
                                         Ok(message) => message,
                                         Err(error) => {
@@ -1085,7 +1030,7 @@ where
                                 // before awaiting producer data, because the
                                 // producer cannot proceed until it sees that
                                 // very response.
-                                self.drain_pending_responses().await;
+                                self.drain_pending_responses();
                                 if read_obligation.copy_producer_finished() {
                                     return Ok(RequestOutcome::Continue);
                                 }
@@ -7137,7 +7082,7 @@ mod tests {
             // load they routinely arrive as separate decoder batches and the
             // COPY response is still queued and `Awaited` when the client drops.
             // `crate::release` then shuts the socket down under the driver's
-            // parked Step D read, and Step D will not call an EOF with an
+            // parked Step B read, and Step B will not call an EOF with an
             // awaited response a clean close - so `run` returns
             // `UnexpectedEof`, "connection closed by server", for what is
             // otherwise an ordinary shutdown. That is the whole of this test's
@@ -7219,6 +7164,13 @@ mod tests {
         flushes: usize,
     }
 
+    /// A serialized peer whose clean-shutdown call fails after accepting every
+    /// frontend write. The call counter makes the teardown path observable.
+    struct SerializedShutdownFailure {
+        chunks: VecDeque<Vec<u8>>,
+        shutdowns: Rc<Cell<usize>>,
+    }
+
     impl AsyncRead for ScriptedDuplex {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             read_scripted(&mut self.chunks, &mut None, buf).await
@@ -7269,6 +7221,28 @@ mod tests {
         }
     }
 
+    impl AsyncRead for SerializedShutdownFailure {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for SerializedShutdownFailure {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.shutdowns.set(self.shutdowns.get() + 1);
+            Err(std::io::Error::other("scripted shutdown failure"))
+        }
+    }
+
     fn fatal_error_frame(code: &str, message: &str) -> Vec<u8> {
         server_error_frame("FATAL", code, message)
     }
@@ -7289,6 +7263,136 @@ mod tests {
         frame.extend_from_slice(payload.as_bytes());
         frame.push(0);
         frame
+    }
+
+    fn serialized_raw_request(
+        disposition: RequestDisposition,
+        bytes: &'static [u8],
+    ) -> (Request, mpsc::Receiver<ResponseMessages>) {
+        let (sender, receiver) = mpsc::channel(1);
+        (
+            Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    bytes,
+                ))),
+                sender,
+                disposition,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            },
+            receiver,
+        )
+    }
+
+    /// An in-flight read has already delivered the awaited response when the
+    /// queued housekeeping write fails. Nobody can observe that maintenance
+    /// request, so it cannot replace the completed operation with a transport
+    /// error.
+    #[compio::test]
+    async fn serialized_in_flight_housekeeping_write_failure_is_ignored() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let (awaited, mut awaited_response) =
+            serialized_raw_request(RequestDisposition::Awaited, b"awaited request");
+        let (housekeeping, _housekeeping_response) =
+            serialized_raw_request(RequestDisposition::Housekeeping, b"housekeeping request");
+        request_sender.unbounded_send(awaited).unwrap();
+        request_sender.unbounded_send(housekeeping).unwrap();
+
+        let connection: Connection<SerializedSecondFlushFailure, SerializedSecondFlushFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedSecondFlushFailure {
+                    chunks: VecDeque::from([completed_response_batch(b'I')]),
+                    flushes: 0,
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::default(),
+                request_receiver,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
+                None,
+            );
+
+        let result = connection.run_serialized().await;
+
+        assert!(
+            result.is_ok(),
+            "in-flight housekeeping write escaped: {result:?}"
+        );
+        assert!(
+            awaited_response.try_recv().is_ok(),
+            "the awaited response was not delivered before housekeeping"
+        );
+    }
+
+    /// The idle path sees the same maintenance-only failure. It has no response
+    /// consumer to report to and closes cleanly for the same reason.
+    #[compio::test]
+    async fn serialized_idle_housekeeping_write_failure_is_ignored() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let (housekeeping, _housekeeping_response) =
+            serialized_raw_request(RequestDisposition::Housekeeping, b"housekeeping request");
+        request_sender.unbounded_send(housekeeping).unwrap();
+
+        let connection: Connection<SerializedSecondFlushFailure, SerializedSecondFlushFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedSecondFlushFailure {
+                    chunks: VecDeque::new(),
+                    flushes: 1,
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::default(),
+                request_receiver,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::default(),
+                Arc::default(),
+                None,
+            );
+
+        let result = connection.run_serialized().await;
+
+        assert!(
+            result.is_ok(),
+            "idle housekeeping write escaped: {result:?}"
+        );
+    }
+
+    /// Socket shutdown is best effort after the client has gone. An unusual
+    /// error kind is traced, not promoted to an operation error that nobody is
+    /// left to receive.
+    #[compio::test]
+    async fn serialized_shutdown_ignores_a_non_socket_state_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        drop(request_sender);
+        let shutdowns = Rc::new(Cell::new(0));
+        let connection: Connection<SerializedShutdownFailure, SerializedShutdownFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedShutdownFailure {
+                    chunks: VecDeque::new(),
+                    shutdowns: Rc::clone(&shutdowns),
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::default(),
+                request_receiver,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::default(),
+                Arc::default(),
+                None,
+            );
+
+        let result = connection.run_serialized().await;
+
+        assert!(
+            result.is_ok(),
+            "shutdown error escaped teardown: {result:?}"
+        );
+        assert_eq!(shutdowns.get(), 1, "serialized teardown skipped shutdown");
     }
 
     #[compio::test]
@@ -7453,16 +7557,10 @@ mod tests {
         );
     }
 
-    /// Step D's clean-close arm, which nothing reached: `panic!` on its
-    /// `return Ok(())` left all 1447 tests green. Its step C twin is spelled
-    /// identically and is UNREACHABLE, so the two cannot share a test.
-    ///
-    /// The state it needs is specific: still running (not terminating), the
-    /// response deque NOT empty, and yet nothing awaited - which is exactly a
-    /// dropped `Statement` or `Portal` whose `Close` is in flight when the
-    /// server goes away. That is a clean shutdown, not a failure, and reporting
-    /// an error would retire a pooled session over a `Close` nobody is waiting
-    /// for.
+    /// The in-flight-response clean-close arm needs a nonempty response deque
+    /// containing only housekeeping work: exactly a dropped `Statement` or
+    /// `Portal` whose `Close` is in flight when the server goes away. Reporting
+    /// that EOF would retire a pooled session over a `Close` nobody awaits.
     #[compio::test]
     async fn serialized_eof_with_only_housekeeping_in_flight_closes_cleanly() {
         let (request_sender, request_receiver) = mpsc::unbounded();
@@ -7494,7 +7592,7 @@ mod tests {
 
         // No chunks: the peer goes away the moment the loop reads, with the
         // housekeeping response still registered.
-        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
             BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
                 chunks: VecDeque::new(),
             })),
