@@ -14,11 +14,11 @@
 //! and compare the server's text witness. This is what keeps a shared codec
 //! mistake from passing merely because both Rust drivers descend from it.
 //!
-//! This crate's manifest enables none of tokio-postgres's optional chrono,
-//! time, UUID, or JSON codecs. Changing dependency features is outside this
-//! task's allowed file scope, so UUID/JSON and the full temporal range use the
-//! exact wire carrier; the always-on native `SystemTime` codec is compared
-//! directly. The deliberate 24:00 and infinity differences remain explicit.
+//! The oracle enables its chrono and time codecs so the optional temporal
+//! carriers are genuinely compared when this crate's matching features are
+//! selected. UUID and JSON still use the exact wire carrier because their
+//! oracle features are not enabled. The deliberate 24:00 and `SystemTime`
+//! infinity differences remain explicit.
 
 use std::error::Error;
 use std::future::Future;
@@ -1849,6 +1849,449 @@ async fn domains_over_every_value_family_round_trip_as_their_base_wire_type() {
         .batch_execute(&cleanup)
         .await
         .expect("drop shared domains and composite");
+}
+
+fn temporal_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("temporal-date-bc", "'4714-11-24 BC'::date", "date"),
+        RawCase::new(
+            "temporal-date-negative-infinity",
+            "'-infinity'::date",
+            "date",
+        ),
+        RawCase::new(
+            "temporal-date-positive-infinity",
+            "'infinity'::date",
+            "date",
+        ),
+        RawCase::new(
+            "temporal-timestamp-bc",
+            "'4714-11-24 00:00:00 BC'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamp-microsecond",
+            "'1999-12-31 23:59:59.999999'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamp-negative-infinity",
+            "'-infinity'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamp-positive-infinity",
+            "'infinity'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamptz-offset-microsecond",
+            "'2001-02-03 04:05:06.123456+05:45'::timestamptz",
+            "timestamptz",
+        ),
+        RawCase::new(
+            "temporal-timestamptz-negative-infinity",
+            "'-infinity'::timestamptz",
+            "timestamptz",
+        ),
+        RawCase::new(
+            "temporal-timestamptz-positive-infinity",
+            "'infinity'::timestamptz",
+            "timestamptz",
+        ),
+        RawCase::new(
+            "temporal-time-last-microsecond",
+            "'23:59:59.999999'::time",
+            "time",
+        ),
+        RawCase::new("temporal-time-end-of-day", "'24:00'::time", "time"),
+        RawCase::new(
+            "temporal-interval-mixed-signs",
+            "'1 mon -2 days 03:04:05.000006'::interval",
+            "interval",
+        ),
+    ]
+}
+
+fn tokio_temporal_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_temporal_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+fn tokio_interval_infinity_states(url: String) -> Vec<String> {
+    on_tokio(url, |client| async move {
+        let mut states = Vec::new();
+        for expression in ["'infinity'::interval", "'-infinity'::interval"] {
+            let error = client
+                .query_one(&format!("SELECT {expression}"), &[])
+                .await
+                .expect_err("PostgreSQL 16 accepted interval infinity");
+            states.push(
+                error
+                    .code()
+                    .expect("interval infinity refusal had no SQLSTATE")
+                    .code()
+                    .to_owned(),
+            );
+        }
+        states
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_interval_infinity_states() -> Vec<String> {
+    let client = compio_client().await;
+    let mut states = Vec::new();
+    for expression in ["'infinity'::interval", "'-infinity'::interval"] {
+        let error = client
+            .query_one(&format!("SELECT {expression}"), &[])
+            .await
+            .expect_err("PostgreSQL 16 accepted interval infinity");
+        states.push(
+            error
+                .code()
+                .expect("interval infinity refusal had no SQLSTATE")
+                .code()
+                .to_owned(),
+        );
+    }
+    states
+}
+
+/// Both drivers preserve temporal values through text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_temporal_text_and_binary_codecs() {
+    let cases = temporal_format_cases();
+    let theirs = tokio_temporal_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_temporal_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let expected = [
+        ("temporal-date-bc", "4714-11-24 BC", "ffda97a7"),
+        ("temporal-date-negative-infinity", "-infinity", "80000000"),
+        ("temporal-date-positive-infinity", "infinity", "7fffffff"),
+        (
+            "temporal-timestamp-bc",
+            "4714-11-24 00:00:00 BC",
+            "fd0f7cc1411fa000",
+        ),
+        (
+            "temporal-timestamp-microsecond",
+            "1999-12-31 23:59:59.999999",
+            "ffffffffffffffff",
+        ),
+        (
+            "temporal-timestamp-negative-infinity",
+            "-infinity",
+            "8000000000000000",
+        ),
+        (
+            "temporal-timestamp-positive-infinity",
+            "infinity",
+            "7fffffffffffffff",
+        ),
+        (
+            "temporal-timestamptz-negative-infinity",
+            "-infinity",
+            "8000000000000000",
+        ),
+        (
+            "temporal-timestamptz-positive-infinity",
+            "infinity",
+            "7fffffffffffffff",
+        ),
+        (
+            "temporal-time-last-microsecond",
+            "23:59:59.999999",
+            "000000141dd75fff",
+        ),
+        ("temporal-time-end-of-day", "24:00:00", "000000141dd76000"),
+    ];
+    for (name, text, binary_hex) in expected {
+        let observation = ours
+            .iter()
+            .find(|observation| observation.name == name)
+            .unwrap_or_else(|| panic!("no temporal observation named {name}"));
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: server binary"
+        );
+    }
+
+    let zoned = ours
+        .iter()
+        .find(|observation| observation.name == "temporal-timestamptz-offset-microsecond")
+        .expect("offset timestamptz observation");
+    assert_eq!(zoned.text_decoded, "2001-02-02 22:20:06.123456+00");
+    assert_eq!(
+        i64::from_be_bytes(zoned.binary_decoded.0.as_slice().try_into().unwrap()),
+        34_467_606_123_456
+    );
+
+    let interval = ours
+        .iter()
+        .find(|observation| observation.name == "temporal-interval-mixed-signs")
+        .expect("interval observation");
+    assert_eq!(
+        decode_interval(&interval.binary_decoded.0).unwrap(),
+        IntervalWire {
+            microseconds: 11_045_000_006,
+            days: -2,
+            months: 1,
+        }
+    );
+
+    let theirs = tokio_interval_infinity_states(common::plaintext_url());
+    let ours = compio_interval_infinity_states().await;
+    assert_eq!(ours, theirs);
+    assert_eq!(ours, ["22007", "22007"]);
+}
+
+const TYPED_TEMPORAL_SQL: &str = "SELECT \
+     '0001-01-01 BC'::date, \
+     '1999-12-31 23:59:59.999999'::timestamp, \
+     '2001-02-03 04:05:06.123456+05:45'::timestamptz, \
+     '23:59:59.999999'::time, \
+     '-infinity'::date, 'infinity'::date, \
+     '-infinity'::timestamp, 'infinity'::timestamp, \
+     '-infinity'::timestamptz, 'infinity'::timestamptz, \
+     '24:00'::time";
+
+const TYPED_TEMPORAL_REBOUND_SQL: &str = "SELECT \
+     $1::date::text, $2::timestamp::text, $3::timestamptz::text, $4::time::text, \
+     $5::date::text, $6::date::text, \
+     $7::timestamp::text, $8::timestamp::text, \
+     $9::timestamptz::text, $10::timestamptz::text";
+
+#[derive(Debug, PartialEq, Eq)]
+struct TypedTemporalObservation {
+    chrono_rebound: Vec<String>,
+    time_rebound: Vec<String>,
+    chrono_time_24: ValueOutcome<String>,
+    time_time_24: ValueOutcome<String>,
+}
+
+fn tokio_typed_temporal_observation(url: String) -> TypedTemporalObservation {
+    on_tokio(url, |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set tokio temporal rendering");
+        let row = client
+            .query_one(TYPED_TEMPORAL_SQL, &[])
+            .await
+            .expect("tokio typed temporal decode");
+
+        let chrono_date: chrono::NaiveDate = row.get(0);
+        let chrono_timestamp: chrono::NaiveDateTime = row.get(1);
+        let chrono_timestamptz: chrono::DateTime<chrono::Utc> = row.get(2);
+        let chrono_time: chrono::NaiveTime = row.get(3);
+        let chrono_date_neg: tokio_types::Date<chrono::NaiveDate> = row.get(4);
+        let chrono_date_pos: tokio_types::Date<chrono::NaiveDate> = row.get(5);
+        let chrono_timestamp_neg: tokio_types::Timestamp<chrono::NaiveDateTime> = row.get(6);
+        let chrono_timestamp_pos: tokio_types::Timestamp<chrono::NaiveDateTime> = row.get(7);
+        let chrono_timestamptz_neg: tokio_types::Timestamp<chrono::DateTime<chrono::Utc>> =
+            row.get(8);
+        let chrono_timestamptz_pos: tokio_types::Timestamp<chrono::DateTime<chrono::Utc>> =
+            row.get(9);
+        let chrono_time_24 = match row.try_get::<_, chrono::NaiveTime>(10) {
+            Ok(value) => ValueOutcome::Value(value.to_string()),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let rebound = client
+            .query_one(
+                TYPED_TEMPORAL_REBOUND_SQL,
+                &[
+                    &chrono_date,
+                    &chrono_timestamp,
+                    &chrono_timestamptz,
+                    &chrono_time,
+                    &chrono_date_neg,
+                    &chrono_date_pos,
+                    &chrono_timestamp_neg,
+                    &chrono_timestamp_pos,
+                    &chrono_timestamptz_neg,
+                    &chrono_timestamptz_pos,
+                ],
+            )
+            .await
+            .expect("tokio chrono temporal rebound");
+        let chrono_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+        let time_date: time::Date = row.get(0);
+        let time_timestamp: time::PrimitiveDateTime = row.get(1);
+        let time_timestamptz: time::OffsetDateTime = row.get(2);
+        let time_time: time::Time = row.get(3);
+        let time_date_neg: tokio_types::Date<time::Date> = row.get(4);
+        let time_date_pos: tokio_types::Date<time::Date> = row.get(5);
+        let time_timestamp_neg: tokio_types::Timestamp<time::PrimitiveDateTime> = row.get(6);
+        let time_timestamp_pos: tokio_types::Timestamp<time::PrimitiveDateTime> = row.get(7);
+        let time_timestamptz_neg: tokio_types::Timestamp<time::OffsetDateTime> = row.get(8);
+        let time_timestamptz_pos: tokio_types::Timestamp<time::OffsetDateTime> = row.get(9);
+        let time_time_24 = match row.try_get::<_, time::Time>(10) {
+            Ok(value) => ValueOutcome::Value(value.to_string()),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let rebound = client
+            .query_one(
+                TYPED_TEMPORAL_REBOUND_SQL,
+                &[
+                    &time_date,
+                    &time_timestamp,
+                    &time_timestamptz,
+                    &time_time,
+                    &time_date_neg,
+                    &time_date_pos,
+                    &time_timestamp_neg,
+                    &time_timestamp_pos,
+                    &time_timestamptz_neg,
+                    &time_timestamptz_pos,
+                ],
+            )
+            .await
+            .expect("tokio time temporal rebound");
+        let time_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+        TypedTemporalObservation {
+            chrono_rebound,
+            time_rebound,
+            chrono_time_24,
+            time_time_24,
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_typed_temporal_observation() -> TypedTemporalObservation {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set compio temporal rendering");
+    let row = client
+        .query_one(TYPED_TEMPORAL_SQL, &[])
+        .await
+        .expect("compio typed temporal decode");
+
+    let chrono_date: chrono::NaiveDate = row.get(0);
+    let chrono_timestamp: chrono::NaiveDateTime = row.get(1);
+    let chrono_timestamptz: chrono::DateTime<chrono::Utc> = row.get(2);
+    let chrono_time: chrono::NaiveTime = row.get(3);
+    let chrono_date_neg: compio_types::Date<chrono::NaiveDate> = row.get(4);
+    let chrono_date_pos: compio_types::Date<chrono::NaiveDate> = row.get(5);
+    let chrono_timestamp_neg: compio_types::Timestamp<chrono::NaiveDateTime> = row.get(6);
+    let chrono_timestamp_pos: compio_types::Timestamp<chrono::NaiveDateTime> = row.get(7);
+    let chrono_timestamptz_neg: compio_types::Timestamp<chrono::DateTime<chrono::Utc>> = row.get(8);
+    let chrono_timestamptz_pos: compio_types::Timestamp<chrono::DateTime<chrono::Utc>> = row.get(9);
+    let chrono_time_24 = match row.try_get::<_, chrono::NaiveTime>(10) {
+        Ok(value) => ValueOutcome::Value(value.to_string()),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let rebound = client
+        .query_one(
+            TYPED_TEMPORAL_REBOUND_SQL,
+            &[
+                &chrono_date,
+                &chrono_timestamp,
+                &chrono_timestamptz,
+                &chrono_time,
+                &chrono_date_neg,
+                &chrono_date_pos,
+                &chrono_timestamp_neg,
+                &chrono_timestamp_pos,
+                &chrono_timestamptz_neg,
+                &chrono_timestamptz_pos,
+            ],
+        )
+        .await
+        .expect("compio chrono temporal rebound");
+    let chrono_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+    let time_date: time::Date = row.get(0);
+    let time_timestamp: time::PrimitiveDateTime = row.get(1);
+    let time_timestamptz: time::OffsetDateTime = row.get(2);
+    let time_time: time::Time = row.get(3);
+    let time_date_neg: compio_types::Date<time::Date> = row.get(4);
+    let time_date_pos: compio_types::Date<time::Date> = row.get(5);
+    let time_timestamp_neg: compio_types::Timestamp<time::PrimitiveDateTime> = row.get(6);
+    let time_timestamp_pos: compio_types::Timestamp<time::PrimitiveDateTime> = row.get(7);
+    let time_timestamptz_neg: compio_types::Timestamp<time::OffsetDateTime> = row.get(8);
+    let time_timestamptz_pos: compio_types::Timestamp<time::OffsetDateTime> = row.get(9);
+    let time_time_24 = match row.try_get::<_, time::Time>(10) {
+        Ok(value) => ValueOutcome::Value(value.to_string()),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let rebound = client
+        .query_one(
+            TYPED_TEMPORAL_REBOUND_SQL,
+            &[
+                &time_date,
+                &time_timestamp,
+                &time_timestamptz,
+                &time_time,
+                &time_date_neg,
+                &time_date_pos,
+                &time_timestamp_neg,
+                &time_timestamp_pos,
+                &time_timestamptz_neg,
+                &time_timestamptz_pos,
+            ],
+        )
+        .await
+        .expect("compio time temporal rebound");
+    let time_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+    TypedTemporalObservation {
+        chrono_rebound,
+        time_rebound,
+        chrono_time_24,
+        time_time_24,
+    }
+}
+
+/// Upstream aliases `PostgreSQL` 24:00 to midnight; this port refuses the loss.
+#[compio::test]
+async fn time_24_refusal_matches_the_server_instead_of_tokio() {
+    let theirs = tokio_typed_temporal_observation(common::plaintext_url());
+    let ours = compio_typed_temporal_observation().await;
+
+    let expected = vec![
+        "0001-01-01 BC".to_owned(),
+        "1999-12-31 23:59:59.999999".to_owned(),
+        "2001-02-02 22:20:06.123456+00".to_owned(),
+        "23:59:59.999999".to_owned(),
+        "-infinity".to_owned(),
+        "infinity".to_owned(),
+        "-infinity".to_owned(),
+        "infinity".to_owned(),
+        "-infinity".to_owned(),
+        "infinity".to_owned(),
+    ];
+    assert_eq!(ours.chrono_rebound, expected);
+    assert_eq!(ours.time_rebound, expected);
+    assert_eq!(theirs.chrono_rebound, expected);
+    assert_eq!(theirs.time_rebound, expected);
+
+    assert_eq!(ours.chrono_time_24, ValueOutcome::LocalFailure);
+    assert_eq!(ours.time_time_24, ValueOutcome::LocalFailure);
+    assert_eq!(
+        theirs.chrono_time_24,
+        ValueOutcome::Value("00:00:00".to_owned())
+    );
+    assert_eq!(
+        theirs.time_time_24,
+        ValueOutcome::Value("0:00:00.0".to_owned())
+    );
 }
 
 /// PostgreSQL's temporal units, epoch, endpoints, and interval field order.

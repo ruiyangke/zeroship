@@ -191,7 +191,11 @@ optional = true
 # src/row.rs and their tests). So the suite was comparing a fixed driver
 # against an unfixed one, and would have read OUR correct behaviour as the
 # divergence. Move this deliberately when the port moves, never by resolution.
-tokio-postgres = { version = "=0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres = { version = "=0.7.18", default-features = false, features = [
+    "runtime",
+    "with-chrono-0_4",
+    "with-time-0_3",
+] }
 tokio = { version = "1", features = ["rt", "macros"] }
 chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
 time = { workspace = true }
