@@ -89,9 +89,37 @@ async fn require_pg() -> String {
     }
 }
 
+/// THIS SUITE MUST RUN WITH `--test-threads=1`. It is not a preference.
+///
+/// `SCHEMA` is one name shared by 156 references across this file, and
+/// [`setup`] below opens with `DROP SCHEMA ... CASCADE`. Twenty tests call it,
+/// so under default parallelism they race to destroy each other's fixture.
+///
+/// Measured 2026-09-01 against a live server: **18 failed in parallel, 83 passed
+/// with `--test-threads=1`**, and `filter_comparison_operators` failed in the
+/// parallel run and passed when run alone. Every failure sampled touches
+/// `SCHEMA`; the tests that do not touch it (`vector_search_returns_k_nearest`,
+/// 0 references) passed either way. That is the control.
+///
+/// **A parallel run looks exactly like 18 real regressions**, which is the
+/// expensive part: the names are all data-path tests (`aggregate_having`,
+/// `update_one_inc`, `mixed_update`), so it reads as a broken data plane rather
+/// than a broken harness.
+///
+/// The structural fix is a per-test schema name, or a guard returned by `setup`
+/// that serialises only the sharing tests and leaves the other ~60 parallel.
+/// Neither is done; until one is, run:
+///
+/// ```text
+/// PG_TEST_URL=... cargo test -p zeroship-plugin-db --features live-db-tests \
+///   --test integration -- --test-threads=1
+/// ```
 const SCHEMA: &str = "plugin_db_test";
 
 /// Set up the test schema and table. Drops and recreates on every call.
+///
+/// The `DROP ... CASCADE` is why this suite cannot run in parallel - see the
+/// note on [`SCHEMA`].
 async fn setup(pool: &Pool) {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
