@@ -2981,6 +2981,328 @@ async fn native_serde_json_codecs_cover_json_and_jsonb_wire_contracts() {
     assert_eq!(ours.version_two_error, "unsupported JSONB encoding version");
 }
 
+#[cfg(feature = "with-geo-types-0_7")]
+const NATIVE_GEO_DECODE_SQL: &str = "SELECT \
+    '(1.5,-2.25)'::point, '(1.5,-2.25)'::point, \
+        ('(1.5,-2.25)'::point)::text, \
+    '((3,4),(1,2))'::box, '((3,4),(1,2))'::box, \
+        ('((3,4),(1,2))'::box)::text, \
+    '[(1,2),(3,4),(5,6)]'::path, \
+        '[(1,2),(3,4),(5,6)]'::path, \
+        ('[(1,2),(3,4),(5,6)]'::path)::text, \
+    '((1,2),(3,4),(5,6))'::path, \
+        '((1,2),(3,4),(5,6))'::path, \
+        ('((1,2),(3,4),(5,6))'::path)::text, \
+    '((1,2),(3,4),(5,6))'::polygon, \
+        ('((1,2),(3,4),(5,6))'::polygon)::text";
+
+#[cfg(feature = "with-geo-types-0_7")]
+const NATIVE_GEO_REBOUND_SQL: &str = "SELECT \
+    $1::point, ($1::point)::text, \
+    $2::box, ($2::box)::text, \
+    $3::path, ($3::path)::text, \
+    $4::path, ($4::path)::text, \
+    $5::polygon, ($5::polygon)::text";
+
+#[cfg(feature = "with-geo-types-0_7")]
+#[derive(Debug, PartialEq)]
+struct NativeGeoObservation {
+    decoded_point: geo_types::Point<f64>,
+    decoded_box: geo_types::Rect<f64>,
+    decoded_paths: [geo_types::LineString<f64>; 2],
+    server_text: [String; 5],
+    server_wires: [Wire; 5],
+    outbound_wires: [Vec<u8>; 4],
+    rebound_text: [String; 5],
+    rebound_wires: [Wire; 5],
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn append_geo_point(wire: &mut Vec<u8>, point: (f64, f64)) {
+    wire.extend_from_slice(&point.0.to_be_bytes());
+    wire.extend_from_slice(&point.1.to_be_bytes());
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_point_wire(point: (f64, f64)) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(16);
+    append_geo_point(&mut wire, point);
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_box_wire(first: (f64, f64), second: (f64, f64)) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(32);
+    append_geo_point(&mut wire, first);
+    append_geo_point(&mut wire, second);
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_path_wire(closed: bool, points: &[(f64, f64)]) -> Vec<u8> {
+    let count = i32::try_from(points.len()).expect("PATH fixture count fits i32");
+    let mut wire = Vec::with_capacity(5 + points.len() * 16);
+    wire.push(u8::from(closed));
+    wire.extend_from_slice(&count.to_be_bytes());
+    for point in points {
+        append_geo_point(&mut wire, *point);
+    }
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_polygon_wire(points: &[(f64, f64)]) -> Vec<u8> {
+    let count = i32::try_from(points.len()).expect("POLYGON fixture count fits i32");
+    let mut wire = Vec::with_capacity(4 + points.len() * 16);
+    wire.extend_from_slice(&count.to_be_bytes());
+    for point in points {
+        append_geo_point(&mut wire, *point);
+    }
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn tokio_geo_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native geometry encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn compio_geo_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native geometry encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn tokio_native_geo_observation(url: String) -> NativeGeoObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_GEO_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native geometry decode");
+        let point: geo_types::Point<f64> = row.get(0);
+        let rectangle: geo_types::Rect<f64> = row.get(3);
+        let open_path: geo_types::LineString<f64> = row.get(6);
+        let closed_path: geo_types::LineString<f64> = row.get(9);
+        let polygon_wire: Wire = row.get(12);
+        let outbound_wires = [
+            tokio_geo_wire(&point, &tokio_types::Type::POINT),
+            tokio_geo_wire(&rectangle, &tokio_types::Type::BOX),
+            tokio_geo_wire(&open_path, &tokio_types::Type::PATH),
+            tokio_geo_wire(&closed_path, &tokio_types::Type::PATH),
+        ];
+        let rebound = client
+            .query_one(
+                NATIVE_GEO_REBOUND_SQL,
+                &[&point, &rectangle, &open_path, &closed_path, &polygon_wire],
+            )
+            .await
+            .expect("tokio-postgres native geometry encode");
+
+        NativeGeoObservation {
+            decoded_point: point,
+            decoded_box: rectangle,
+            decoded_paths: [open_path, closed_path],
+            server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(13)],
+            server_wires: [
+                row.get(1),
+                row.get(4),
+                row.get(7),
+                row.get(10),
+                polygon_wire,
+            ],
+            outbound_wires,
+            rebound_text: [
+                rebound.get(1),
+                rebound.get(3),
+                rebound.get(5),
+                rebound.get(7),
+                rebound.get(9),
+            ],
+            rebound_wires: [
+                rebound.get(0),
+                rebound.get(2),
+                rebound.get(4),
+                rebound.get(6),
+                rebound.get(8),
+            ],
+        }
+    })
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_geo_observation() -> NativeGeoObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_GEO_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native geometry decode");
+    let point: geo_types::Point<f64> = row.get(0);
+    let rectangle: geo_types::Rect<f64> = row.get(3);
+    let open_path: geo_types::LineString<f64> = row.get(6);
+    let closed_path: geo_types::LineString<f64> = row.get(9);
+    let polygon_wire: Wire = row.get(12);
+    let outbound_wires = [
+        compio_geo_wire(&point, &compio_types::Type::POINT),
+        compio_geo_wire(&rectangle, &compio_types::Type::BOX),
+        compio_geo_wire(&open_path, &compio_types::Type::PATH),
+        compio_geo_wire(&closed_path, &compio_types::Type::PATH),
+    ];
+    let rebound = client
+        .query_one(
+            NATIVE_GEO_REBOUND_SQL,
+            &[&point, &rectangle, &open_path, &closed_path, &polygon_wire],
+        )
+        .await
+        .expect("compio-postgres native geometry encode");
+
+    NativeGeoObservation {
+        decoded_point: point,
+        decoded_box: rectangle,
+        decoded_paths: [open_path, closed_path],
+        server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(13)],
+        server_wires: [
+            row.get(1),
+            row.get(4),
+            row.get(7),
+            row.get(10),
+            polygon_wire,
+        ],
+        outbound_wires,
+        rebound_text: [
+            rebound.get(1),
+            rebound.get(3),
+            rebound.get(5),
+            rebound.get(7),
+            rebound.get(9),
+        ],
+        rebound_wires: [
+            rebound.get(0),
+            rebound.get(2),
+            rebound.get(4),
+            rebound.get(6),
+            rebound.get(8),
+        ],
+    }
+}
+
+/// Native geometry carriers agree on coordinates. Direct bytes expose the
+/// shared BOX corner-order and closed PATH state losses; POLYGON stays raw
+/// because neither `geo-types` integration supplies a native polygon codec.
+#[cfg(feature = "with-geo-types-0_7")]
+#[compio::test]
+async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
+    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let ours = compio_native_geo_observation().await;
+    assert_eq!(ours, theirs);
+
+    let points = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
+    let expected_line = geo_types::LineString::from(points.to_vec());
+    assert_eq!(ours.decoded_point, geo_types::Point::new(1.5, -2.25));
+    assert_eq!(
+        ours.decoded_box,
+        geo_types::Rect::new((1.0, 2.0), (3.0, 4.0))
+    );
+    assert_eq!(ours.decoded_paths, [expected_line.clone(), expected_line]);
+    assert_eq!(
+        ours.server_text,
+        [
+            "(1.5,-2.25)",
+            "(3,4),(1,2)",
+            "[(1,2),(3,4),(5,6)]",
+            "((1,2),(3,4),(5,6))",
+            "((1,2),(3,4),(5,6))",
+        ]
+    );
+    assert_eq!(
+        ours.rebound_text,
+        [
+            "(1.5,-2.25)",
+            "(3,4),(1,2)",
+            "[(1,2),(3,4),(5,6)]",
+            "[(1,2),(3,4),(5,6)]",
+            "((1,2),(3,4),(5,6))",
+        ]
+    );
+
+    let point_wire = expected_geo_point_wire((1.5, -2.25));
+    let server_box_wire = expected_geo_box_wire((3.0, 4.0), (1.0, 2.0));
+    let codec_box_wire = expected_geo_box_wire((1.0, 2.0), (3.0, 4.0));
+    let open_path_wire = expected_geo_path_wire(false, &points);
+    let closed_path_wire = expected_geo_path_wire(true, &points);
+    let polygon_wire = expected_geo_polygon_wire(&points);
+
+    assert_eq!(
+        ours.server_wires.each_ref().map(|wire| wire.0.as_slice()),
+        [
+            point_wire.as_slice(),
+            server_box_wire.as_slice(),
+            open_path_wire.as_slice(),
+            closed_path_wire.as_slice(),
+            polygon_wire.as_slice(),
+        ]
+    );
+    assert_eq!(
+        ours.outbound_wires.each_ref().map(Vec::as_slice),
+        [
+            point_wire.as_slice(),
+            codec_box_wire.as_slice(),
+            open_path_wire.as_slice(),
+            open_path_wire.as_slice(),
+        ]
+    );
+    assert_eq!(
+        ours.rebound_wires.each_ref().map(|wire| wire.0.as_slice()),
+        [
+            point_wire.as_slice(),
+            server_box_wire.as_slice(),
+            open_path_wire.as_slice(),
+            open_path_wire.as_slice(),
+            polygon_wire.as_slice(),
+        ]
+    );
+
+    assert_ne!(ours.outbound_wires[1], ours.server_wires[1].0);
+    assert_ne!(ours.outbound_wires[3], ours.server_wires[3].0);
+    assert_eq!(ours.outbound_wires[2], ours.outbound_wires[3]);
+}
+
+/// Desired invariant blocked by both `Rect` codecs emitting BOX corners in
+/// the reverse of the server's binary order.
+#[cfg(feature = "with-geo-types-0_7")]
+#[ignore = "both geo-types Rect codecs emit PostgreSQL BOX corners in reverse order"]
+#[compio::test]
+async fn native_geo_rect_codecs_must_emit_server_box_order() {
+    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let ours = compio_native_geo_observation().await;
+    assert_eq!(ours.outbound_wires[1], ours.server_wires[1].0);
+    assert_eq!(theirs.outbound_wires[1], theirs.server_wires[1].0);
+}
+
+/// Desired invariant blocked because `LineString` has no closed-path state.
+#[cfg(feature = "with-geo-types-0_7")]
+#[ignore = "both geo-types LineString codecs discard PostgreSQL PATH closed state"]
+#[compio::test]
+async fn native_geo_path_codecs_must_preserve_closed_flag() {
+    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let ours = compio_native_geo_observation().await;
+    assert_eq!(ours.outbound_wires[3], ours.server_wires[3].0);
+    assert_eq!(theirs.outbound_wires[3], theirs.server_wires[3].0);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
