@@ -2438,6 +2438,28 @@ mod tests {
         );
     }
 
+    /// RFC 5929 section 4.1 upgrades MD5 and SHA-1 signatures to SHA-256 for
+    /// `tls-server-end-point`, so a SHA-1-signed certificate must bind with a
+    /// 32-byte SHA-256 hash and never a 20-byte SHA-1 one. Binding the weaker
+    /// digest would let a peer that can forge SHA-1 forge the channel binding
+    /// SCRAM-PLUS rests on.
+    ///
+    /// **Coverage cannot see this gap.** `sha1WithRSAEncryption` shares its
+    /// match arm with `sha256WithRSAEncryption`, which is already covered, so
+    /// the arm reports as executed either way. Only removing the SHA-1 OID from
+    /// that arm distinguishes the two, which is exactly the mutation that
+    /// proves this test.
+    #[test]
+    fn end_point_hash_upgrades_a_sha1_signature_to_sha256() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha1_cert.pem"));
+        assert_eq!(
+            hash.len(),
+            32,
+            "a SHA-1 signature must bind with SHA-256, not its own digest"
+        );
+        assert_eq!(hash, sha2::Sha256::digest(cert.as_ref()).to_vec());
+    }
+
     /// An Ed25519 certificate names no hash in its signature OID. We must
     /// report "no binding" rather than defaulting to SHA-256, because the
     /// server would not compute one either.
