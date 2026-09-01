@@ -2493,6 +2493,177 @@ async fn native_eui48_codecs_must_support_macaddr8() {
     assert!(theirs.macaddr8_decode_supported);
 }
 
+#[cfg(feature = "with-bit-vec-0_9")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeBitVecObservation {
+    decoded_bits: [Vec<bool>; 3],
+    server_text: [String; 3],
+    server_wires: [Wire; 3],
+    outbound_wires: [Vec<u8>; 3],
+    rebound_bits: [Vec<bool>; 3],
+    rebound_text: [String; 3],
+    rebound_wires: [Wire; 3],
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+const NATIVE_BIT_VEC_DECODE_SQL: &str = "SELECT \
+    B''::varbit, B''::varbit, (B''::varbit)::text, \
+    B'1'::bit(1), B'1'::bit(1), (B'1'::bit(1))::text, \
+    B'1011001110001'::varbit, B'1011001110001'::varbit, \
+        (B'1011001110001'::varbit)::text";
+
+#[cfg(feature = "with-bit-vec-0_9")]
+const NATIVE_BIT_VEC_REBOUND_SQL: &str = "SELECT \
+    $1::varbit, $1::varbit, ($1::varbit)::text, \
+    $2::bit(1), $2::bit(1), ($2::bit(1))::text, \
+    $3::varbit, $3::varbit, ($3::varbit)::text";
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn bit_vec_bits(value: &bit_vec::BitVec) -> Vec<bool> {
+    value.iter().collect()
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn tokio_bit_vec_wire(value: &bit_vec::BitVec, ty: &tokio_types::Type) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native bit-vector encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn compio_bit_vec_wire(value: &bit_vec::BitVec, ty: &compio_types::Type) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native bit-vector encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn tokio_native_bit_vec_observation(url: String) -> NativeBitVecObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_BIT_VEC_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native bit-vector decode");
+        let empty: bit_vec::BitVec = row.get(0);
+        let one: bit_vec::BitVec = row.get(3);
+        let thirteen: bit_vec::BitVec = row.get(6);
+        let outbound_wires = [
+            tokio_bit_vec_wire(&empty, &tokio_types::Type::VARBIT),
+            tokio_bit_vec_wire(&one, &tokio_types::Type::BIT),
+            tokio_bit_vec_wire(&thirteen, &tokio_types::Type::VARBIT),
+        ];
+        let rebound = client
+            .query_one(NATIVE_BIT_VEC_REBOUND_SQL, &[&empty, &one, &thirteen])
+            .await
+            .expect("tokio-postgres native bit-vector encode");
+
+        NativeBitVecObservation {
+            decoded_bits: [
+                bit_vec_bits(&empty),
+                bit_vec_bits(&one),
+                bit_vec_bits(&thirteen),
+            ],
+            server_text: [row.get(2), row.get(5), row.get(8)],
+            server_wires: [row.get(1), row.get(4), row.get(7)],
+            outbound_wires,
+            rebound_bits: [
+                bit_vec_bits(&rebound.get(0)),
+                bit_vec_bits(&rebound.get(3)),
+                bit_vec_bits(&rebound.get(6)),
+            ],
+            rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+            rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+        }
+    })
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_bit_vec_observation() -> NativeBitVecObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_BIT_VEC_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native bit-vector decode");
+    let empty: bit_vec::BitVec = row.get(0);
+    let one: bit_vec::BitVec = row.get(3);
+    let thirteen: bit_vec::BitVec = row.get(6);
+    let outbound_wires = [
+        compio_bit_vec_wire(&empty, &compio_types::Type::VARBIT),
+        compio_bit_vec_wire(&one, &compio_types::Type::BIT),
+        compio_bit_vec_wire(&thirteen, &compio_types::Type::VARBIT),
+    ];
+    let rebound = client
+        .query_one(NATIVE_BIT_VEC_REBOUND_SQL, &[&empty, &one, &thirteen])
+        .await
+        .expect("compio-postgres native bit-vector encode");
+
+    NativeBitVecObservation {
+        decoded_bits: [
+            bit_vec_bits(&empty),
+            bit_vec_bits(&one),
+            bit_vec_bits(&thirteen),
+        ],
+        server_text: [row.get(2), row.get(5), row.get(8)],
+        server_wires: [row.get(1), row.get(4), row.get(7)],
+        outbound_wires,
+        rebound_bits: [
+            bit_vec_bits(&rebound.get(0)),
+            bit_vec_bits(&rebound.get(3)),
+            bit_vec_bits(&rebound.get(6)),
+        ],
+        rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+        rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+    }
+}
+
+/// Native bit-vector codecs retain exact bit lengths, encode the declared bit
+/// count, and clear the unused low bits of the last wire byte.
+#[cfg(feature = "with-bit-vec-0_9")]
+#[compio::test]
+async fn native_bit_vec_codecs_cover_lengths_and_final_byte_padding() {
+    let theirs = tokio_native_bit_vec_observation(common::plaintext_url());
+    let ours = compio_native_bit_vec_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_bits = [
+        vec![],
+        vec![true],
+        vec![
+            true, false, true, true, false, false, true, true, true, false, false, false, true,
+        ],
+    ];
+    let expected_text = ["", "1", "1011001110001"];
+    let expected_wires = ["00000000", "0000000180", "0000000db388"];
+    let expected_wire_lengths = [4, 5, 6];
+    assert_eq!(ours.decoded_bits, expected_bits);
+    assert_eq!(ours.rebound_bits, expected_bits);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(
+            ours.server_wires[index].0.len(),
+            expected_wire_lengths[index]
+        );
+        assert_eq!(
+            ours.outbound_wires[index].len(),
+            expected_wire_lengths[index]
+        );
+        assert_eq!(
+            ours.rebound_wires[index].0.len(),
+            expected_wire_lengths[index]
+        );
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+    }
+    assert_eq!(ours.outbound_wires[2][5] & 0b0000_0111, 0);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
