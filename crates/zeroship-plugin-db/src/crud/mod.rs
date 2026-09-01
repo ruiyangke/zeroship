@@ -1472,7 +1472,14 @@ pub(crate) fn dispatch_purge_many<'s>(
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_delete_many(app_id, collection, &schema, &filter).map_err(DbError::from)
+        query::build_delete_many(
+            app_id,
+            collection,
+            &schema,
+            &filter,
+            current_sql_dialect(),
+        )
+        .map_err(DbError::from)
     });
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -1837,8 +1844,15 @@ pub(crate) fn dispatch_count<'s>(
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_count_with_soft_delete(app_id, collection, &filter, filter_soft_deleted)
-            .map_err(DbError::from)
+        query::build_count_with_soft_delete(
+            app_id,
+            collection,
+            &schema,
+            &filter,
+            filter_soft_deleted,
+            current_sql_dialect(),
+        )
+        .map_err(DbError::from)
     });
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(

@@ -403,6 +403,11 @@ transactionMatrix.config = { kind: "action" };
 
 async function typedRoundTrip(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
+    const payloadJson = {
+        nested: { ok: true },
+        items: [1, "two", false],
+        nullish: null,
+    };
     await coll.insert({
         title: "typed-roundtrip",
         flag: true,
@@ -411,17 +416,36 @@ async function typedRoundTrip(_input, _ctx) {
         rank: 41,
         occurred_at: new Date(TYPED_DATE_ISO),
         payload_bytes: TYPED_BYTES_B64,
-        payload_json: {
-            nested: { ok: true },
-            items: [1, "two", false],
-            nullish: null,
-        },
+        payload_json: payloadJson,
     });
-    const rows = await coll.find(
+    const sourceRows = await coll.find(
         { title: "typed-roundtrip", flag: 1 },
         { limit: 1 },
     );
-    return rows[0] ? projectTypedRow(rows[0]) : null;
+    const source = sourceRows[0];
+    if (!source) return null;
+
+    await coll.insert({
+        title: "typed-roundtrip-echo",
+        flag: true,
+        meta: { kind: "typed-echo" },
+        optional: "typed-echo",
+        rank: 42,
+        occurred_at: source.occurred_at,
+        payload_bytes: TYPED_BYTES_B64,
+        payload_json: payloadJson,
+    });
+    const echoRows = await coll.find(
+        {
+            title: "typed-roundtrip-echo",
+            occurred_at: { $gte: source.occurred_at },
+        },
+        { limit: 1 },
+    );
+    return {
+        source: projectTypedRow(source),
+        echo: echoRows[0] ? projectTypedRow(echoRows[0]) : null,
+    };
 }
 typedRoundTrip.config = { kind: "action" };
 
@@ -626,15 +650,29 @@ pub fn expected_tx_projection() -> Value {
 
 pub fn expected_typed_projection() -> Value {
     json!({
-        "title": "typed-roundtrip",
-        "flag": true,
-        "occurred_at": TYPED_DATE_MS,
-        "occurred_at_kind": "number",
-        "payload_bytes": typed_bytes_b64(),
-        "payload_json": {
-            "nested": { "ok": true },
-            "items": [1, "two", false],
-            "nullish": null
+        "source": {
+            "title": "typed-roundtrip",
+            "flag": true,
+            "occurred_at": TYPED_DATE_MS,
+            "occurred_at_kind": "number",
+            "payload_bytes": typed_bytes_b64(),
+            "payload_json": {
+                "nested": { "ok": true },
+                "items": [1, "two", false],
+                "nullish": null
+            }
+        },
+        "echo": {
+            "title": "typed-roundtrip-echo",
+            "flag": true,
+            "occurred_at": TYPED_DATE_MS,
+            "occurred_at_kind": "number",
+            "payload_bytes": typed_bytes_b64(),
+            "payload_json": {
+                "nested": { "ok": true },
+                "items": [1, "two", false],
+                "nullish": null
+            }
         }
     })
 }
