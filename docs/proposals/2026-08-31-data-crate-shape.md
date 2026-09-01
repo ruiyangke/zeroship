@@ -218,9 +218,28 @@ design decisions rather than cleanup:
 
 1. **`data-core` keeps the `compio-postgres` dependency.** Then the vendor-neutral contract crate is
    not vendor-neutral, and `data-sqlite` links the Postgres driver - the finding above, made permanent.
-2. **Delete the `From`.** Cheap and compiler-guided: `error.rs:794-796` says it exists so callers "gain
-   the ergonomic `?` operator", and reliance is small - one `e.into()` at `:732` against 17 explicit
-   `from_pg`/`coded_sql` sites. Every `?` that breaks is named by `rustc`.
+2. **Delete the `From`.** `error.rs:794-796` says it exists so callers "gain the ergonomic `?`
+   operator". The codebase already overwhelmingly does not use it: **45 production `from_pg` /
+   `coded_sql` call sites** (definitions excluded), 35 of them `DbError::from_pg` specifically,
+   against a single implicit `e.into()` at `:732`.
+
+   > *The figure above was published as 17 and is corrected here to 45. The review that raised it
+   > undercounted; my first re-count said 48 by matching `fn coded_sql(` definitions as if they were
+   > calls - **occurrences reported as call sites, in the check written to verify someone else's
+   > count.** The correction runs in the argument's favour: 45 explicit sites is stronger evidence
+   > that this codebase already prefers the explicit form than 17 was.*
+   >
+   > **The number that decides this is still unmeasured.** Explicit sites are unaffected by deleting
+   > the impl - they are already explicit. The cost is the IMPLICIT users: every `?` propagating a
+   > `compio_postgres::Error` into a `DbError`-returning function. That cannot be counted by grep,
+   > because `?` names neither type. **Delete the impl and let `rustc` enumerate the breaks** - one
+   > `cargo check`, and the list is exhaustive by construction. Deferred only because three read-only
+   > reviewers were reading this worktree when it was measured; mutating `error.rs` under them would
+   > have voided their verdicts.
+
+   Incidental finding from the recount: **`auth/bootstrap.rs:67` defines its own `coded_sql`**,
+   duplicating `error.rs:731` with the same signature. Ten of the 45 calls go to the local copy. Two
+   functions, one name, one crate - worth collapsing whether or not the split happens.
 3. **Newtype the pg error inside `data-postgres`** and impl `From<Newtype> for DbError` there. Legal,
    and it rewrites every conversion chain.
 
