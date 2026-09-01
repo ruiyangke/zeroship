@@ -391,6 +391,75 @@ not merely hide the audit columns, it silently discards a value the creator
 supplied. Acceptance criterion 6 still demonstrates it end to end; a traced
 mechanism is not a passing test.
 
+## End to end, through a real app
+
+`examples/db-hitcounter` is the whole problem at one-column scale.
+
+**The creator writes one column**
+(`migrations/20260711000000_create_hits.ts`):
+
+```ts
+table("hits").create({ columns: { path: t.text().notNull() } });
+```
+
+**The fold emits eight fields** (`generated/zeroship/schema.runtime.json`):
+
+```
+id           string  required=true   default=undefined
+created_at   date    required=true   default=undefined
+updated_at   date    required=true   default=undefined
+created_by   string  required=undefined
+updated_by   string  required=undefined
+version      int     required=true   default=1
+deleted_at   date    required=undefined
+path         string  required=true
+```
+
+The `required=true, default=undefined` on the first three is what breaks inserts
+the moment those fields enter the SDK schema. `version` is the sole exception,
+and only because of its default.
+
+**The generated types declare one field and index three others**
+(`generated/zeroship/env.db.ts`):
+
+```ts
+hits: defineSchema({ path: t.string().required() })
+  .index("hits_deleted_at_idx", ["deleted_at"])
+  .index("hits_updated_at_idx", ["updated_at"])
+  .index("hits_created_by_idx", ["created_by"]),
+```
+
+Three system columns named in the index specs of a schema that does not declare
+them. The incoherence this proposal is about, visible in a single generated file.
+
+**What an insert actually does today**, traced end to end:
+
+| Step | Site | Effect |
+| --- | --- | --- |
+| strip | `install-schema.ts:1072` | `_schema` becomes `{ path }` |
+| validate | `validate.ts:497` | iterates the schema, so only `path` survives |
+| outbound | `crud.ts:201` | `{ path }` reaches the wire |
+| Rust | `system_fields_pass.rs:257` | mints `id`; stamps `created_by`/`updated_by` from the actor |
+| DB | column defaults | fills `created_at`, `updated_at`, `version` |
+| return | `utils.ts:28` | copies every key - all eight come back |
+
+**So the app's own handler already reads a field its schema does not declare.**
+`src/index.ts` returns `inserted.data?.id`, and it works, because reads are not
+filtered and `Row<S>` carries all seven (`types.ts:195`).
+
+**The four things a creator can try, and what happens:**
+
+| Attempt | Today |
+| --- | --- |
+| read `row.created_at` | works, and typechecks |
+| filter / sort on `created_at` | works |
+| `insert({ id: "hit_MINE" })` | banned by `RowInput` (`types.ts:200-208`); cast past it and the value is **silently dropped** |
+| declare `created_at` in the migration | refused by the engine (`table_shape.rs:361-376`) |
+
+Reads and types already work. Only writes are blocked, and one of them fails
+silently. That is the entire delta this proposal addresses - and it is why the
+change is an INSERT-write change wearing a visibility description.
+
 ## The revised design, after two review rounds
 
 The two-edit version is dead. What replaces it is one idea, not four patches:
