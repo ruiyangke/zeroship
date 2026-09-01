@@ -3413,6 +3413,58 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::time::Duration;
 
+    /// Getters that share a return type with a sibling, and so cannot report a
+    /// mix-up.
+    ///
+    /// `get_service` and `get_service_file` are both `Option<&str>`;
+    /// `get_ssl_min_protocol_version` and `get_ssl_max_protocol_version` are
+    /// both built from `SslProtocolVersion`. Wire either pair to the other's
+    /// field and everything still compiles and still returns something a
+    /// caller would believe - a real path, a real TLS version. The min/max
+    /// pair is the one with teeth: a policy check reading the floor where it
+    /// meant the ceiling accepts versions it meant to refuse.
+    ///
+    /// Distinct values on both sides of each pair are the whole test. Equal
+    /// ones would pass for a swap.
+    ///
+    /// What each side actually binds, measured rather than assumed:
+    /// `get_service_file` and the `ssl_max_protocol_version` SETTER were the
+    /// unreached ones. `get_ssl_max_protocol_version` was already covered -
+    /// mutating it also failed
+    /// `tls_protocol_bounds_parse_with_libpq_defaults_and_spelling`, which
+    /// reaches it through DSN parsing rather than the setter.
+    mod getters_distinguish_their_siblings {
+        use super::super::{Config, SslProtocolVersion};
+
+        #[test]
+        fn service_and_service_file_do_not_return_each_other() {
+            let mut config = Config::new();
+            config.service("the-service-name");
+            config.service_file("/etc/pg_service.conf");
+
+            assert_eq!(config.get_service(), Some("the-service-name"));
+            assert_eq!(config.get_service_file(), Some("/etc/pg_service.conf"));
+        }
+
+        #[test]
+        fn the_tls_floor_and_ceiling_do_not_return_each_other() {
+            let mut config = Config::new();
+            config.ssl_min_protocol_version(SslProtocolVersion::TlsV1_2);
+            config.ssl_max_protocol_version(SslProtocolVersion::TlsV1_3);
+
+            assert_eq!(
+                config.get_ssl_min_protocol_version(),
+                SslProtocolVersion::TlsV1_2,
+                "the floor must not report the ceiling"
+            );
+            assert_eq!(
+                config.get_ssl_max_protocol_version(),
+                Some(SslProtocolVersion::TlsV1_3),
+                "the ceiling must not report the floor"
+            );
+        }
+    }
+
     /// What every parameter means when the caller says NOTHING.
     ///
     /// A wrong default is invisible in the same way a wrong unit is, and for
