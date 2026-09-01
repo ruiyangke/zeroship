@@ -2661,6 +2661,40 @@ mod tests {
         assert!(error.contains("same issuer"), "unexpected refusal: {error}");
     }
 
+    /// The same-issuer check applies WITHIN `sslcrl` too, not only across
+    /// `sslcrl` and `sslcrldir`. rustls selects the first CRL matching an
+    /// issuer, so a second one for that issuer is silently unused and a newer
+    /// revocation could be missed. The cross-setting form is covered below;
+    /// this single-setting arm had never run, and it carries its own `sslcrl:`
+    /// prefix that nothing had produced.
+    #[test]
+    fn two_crls_for_one_issuer_inside_sslcrl_are_refused() {
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let crl = CertificateRevocationListDer::from_pem_slice(pem.as_bytes())
+            .expect("parse the CRL fixture");
+        let error = verifier_for(
+            SslMode::VerifyFull,
+            roots_with(CA),
+            ConfiguredCrls {
+                file: vec![crl.clone(), crl],
+                directory: None,
+            },
+            &provider(),
+        )
+        .expect_err("a second CRL for the same issuer would be silently unused");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("sslcrl:"),
+            "the refusal must name the setting it came from: {cause}"
+        );
+        assert!(
+            cause.contains("same issuer"),
+            "the refusal must say why the second CRL is a problem: {cause}"
+        );
+    }
+
     #[test]
     fn sslcrl_and_sslcrldir_cannot_select_different_crls_for_one_issuer() {
         let pem = include_str!("../tests/data/stale_guard_crl.pem");
