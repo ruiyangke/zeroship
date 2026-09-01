@@ -511,6 +511,30 @@ runtime refusal for a backend it has no reason to contain, and a cargo feature k
 the same authority applied earlier. Do it because the fence belongs at compile time, not because it
 is cheap.
 
+**AND THERE IS A THIRD OBSTACLE, STRUCTURAL, THAT NEITHER THE GATE'S COST NOR ITS BENEFIT SURVIVES
+UNCHANGED.** CI builds the worker and the CLI in ONE cargo invocation:
+
+```
+cargo build --release -p zeroship-control -p zeroship-worker \
+    -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
+```
+(`.github/workflows/ci.yml:1829-1830`)
+
+The CLI is the dev tier and NEEDS SQLite; the worker must not have it. Cargo computes one feature set
+per package per invocation, so a single `plugin-db` would be built with the union and BOTH binaries
+would link it - the worker would contain the SQLite backend despite being "built without" the
+feature. Getting the benefit means splitting that into separate invocations, which compiles
+`plugin-db` twice and changes the CI job.
+
+**LIMIT OF THIS CLAIM, STATED BECAUSE IT CANNOT BE OBSERVED TODAY.** The feature does not exist, so
+there is nothing in the current tree to measure: I verified the CI vector (`ci.yml:1829-1830`) and the
+workspace resolver (`resolver = "3"`, `Cargo.toml:3` - which changes MSRV-aware version selection,
+not cross-package feature unification), but the unification itself is documented cargo behaviour
+rather than something I ran. **Before anyone builds the gate, prove it on a scratch workspace:** two
+packages depending on one library, one enabling a feature, built in a single invocation - then check
+whether the other gets it. If cargo does NOT unify here, this obstacle disappears and the gate is
+simply the relocation work. If it does, the gate needs a CI change as well.
+
 ## Measured starting point
 
 | crate | src lines | |
