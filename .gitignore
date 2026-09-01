@@ -63,3 +63,4 @@ docs/pilot/
 # TRACKED *.toml holding a literal at one - with no exception list, by design.
 # The same gate exempts untracked overlays deliberately, which is what this is.
 deploy/ops/zeroship.test.toml
+__pycache__/
