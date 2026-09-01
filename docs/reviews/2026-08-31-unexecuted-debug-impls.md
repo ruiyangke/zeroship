@@ -65,3 +65,36 @@ someone adding a field to `CancelToken` and rendering it by default.
 Note the ordering constraint for `Connection`: `connection.rs` is under active
 work in another worktree at the time of writing, so that one is deliberately
 left out of the first batch.
+
+## Correction: two of these were covered before I briefed them again
+
+The table above is a snapshot from `e98446875`, and it was cited as current on
+2026-08-31 in a brief that told an agent `ReplicationConnection` and
+`ReplicationStream` "both have `Debug` impls that no test has ever executed".
+
+That was false when written. `0fe11fa9f` had already added
+`replication_connection_debug_names_its_type` and
+`replication_stream_debug_names_its_type`, which execute both impls.
+
+The agent did the sensible thing with a target that was already covered: it
+REPLACED those two tests with stronger ones, adding a three-second formatting
+watchdog and asserting that stream state, parameter values, socket config and
+the cancel bearer key stay out of the rendered string. Net test count moved by
+zero, which is how the mistake surfaced - the predicted suite total came out
+right only because two tests were deleted as two were added.
+
+**This is the same error as the standing-findings list**, made by the same
+route: a recorded finding was quoted into new work without being re-derived
+against the tree. A coverage table is a measurement with a commit attached, not
+a standing fact, and the fix is the one that retired the findings list -
+re-derive, or do not cite.
+
+Rows known closed since this table was taken:
+
+    cancel_token.rs   CancelToken            closed (redaction proved)
+    tls_rustls.rs     RustlsConnect          closed
+    connection.rs     Connection             closed (deadlock watchdog)
+    replication.rs    ReplicationConnection  closed by 0fe11fa9f, later strengthened
+    replication.rs    ReplicationStream      closed by 0fe11fa9f, later strengthened
+
+Any remaining row must be re-measured before it is briefed again.
