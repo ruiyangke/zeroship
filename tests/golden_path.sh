@@ -12,7 +12,7 @@
 # gateway serve (static assets) + (best-effort) an RPC round-trip.
 #
 # Prereqs (see docs/runbooks/local-dev.md):
-#   - service/CLI binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
+#   - service/CLI binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-cli --bins
 #   - the zero-migrate CLI: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   - a Postgres reachable at $GOLDEN_PATH_DSN (default: the compose instance on :5440)
 #   - examples/starter deps installed (pnpm install) so `pnpm build` works
@@ -365,7 +365,7 @@ if [ "${#gp_missing_bins[@]}" -gt 0 ]; then
   echo "      Nothing below would measure the platform: the services never start." >&2
   echo "      Build them with:" >&2
   echo "        cargo build --release -p zeroship-control -p zeroship-worker \\" >&2
-  echo "          -p zeroship-gateway -p zeroship -p zeroship-migrate-server --bins" >&2
+  echo "          -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins" >&2
   exit 2
 fi
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || {

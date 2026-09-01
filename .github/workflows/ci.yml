@@ -84,7 +84,7 @@ jobs:
           fi
           pnpm --dir sdks/vite-plugin exec node --import tsx --eval ""
       - name: Build the CLI used by the project config gate
-        run: cargo build -p zeroship --bin zeroship
+        run: cargo build -p zeroship-cli --bin zeroship
       - name: Project config contract
         run: bash tests/project_config_gate.sh
       - run: cargo check --workspace
@@ -1560,12 +1560,12 @@ jobs:
       # `-p zeroship-control --bins` is what produces `dev-provision`, which
       # steps 9, 10, 11 and 12w use to stand up their own apps (step 3 uses it
       # only on the `--provision=dev-provision` arm this job does not take);
-      # `-p zeroship` produces the `zeroship` binary - the deploy CLI step 3 now
+      # `-p zeroship-cli` produces the `zeroship` binary - the deploy CLI step 3 now
       # drives, and the dev runtime `pnpm dev` spawns in steps 6, 7 and 9.
       - name: Build the release binaries the harness starts
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
-            -p zeroship-gateway -p zeroship --bins
+            -p zeroship-gateway -p zeroship-cli --bins
           # The platform schema is applied by the `zero-migrate` CLI now, which is
           # a Node program. `pnpm build` earlier in this job builds the napi addon
           # and the DSL; this builds the CLI itself, which the root build script
@@ -2308,7 +2308,7 @@ jobs:
       - name: Build the release binaries the harness starts
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
-            -p zeroship-gateway -p zeroship -p zeroship-migrate-server --bins
+            -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
           # The platform schema is applied by the `zero-migrate` CLI now, which is
           # a Node program. `pnpm build` earlier in this job builds the napi addon
           # and the DSL; this builds the CLI itself, which the root build script
