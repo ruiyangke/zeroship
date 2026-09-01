@@ -3695,7 +3695,6 @@ async fn pgvector_available(pool: &Pool) -> bool {
 /// `pgvector/pgvector:pg16` (see docs/runbooks/docker-compose.md) and
 /// run with `--ignored` to exercise this path.
 #[compio::test]
-#[ignore = "needs pgvector: run with --ignored against a pgvector image (see .claude/runbooks/dbbind-pg-harness.md)"]
 async fn vector_search_returns_k_nearest() {
     use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
@@ -3948,7 +3947,6 @@ async fn pgvector_extension_missing_reports_typed_error() {
 /// `Internal`. The shape contract: the error message MUST mention the
 /// expected vs. actual dim count.
 #[compio::test]
-#[ignore = "needs pgvector: run with --ignored against a pgvector image (see .claude/runbooks/dbbind-pg-harness.md)"]
 async fn vector_dimension_mismatch_rejected_at_insert() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -6028,7 +6026,6 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 }
 
 #[compio::test]
-#[ignore = "needs pgvector: run with --ignored against a pgvector image (see .claude/runbooks/dbbind-pg-harness.md)"]
 async fn vector_search_runs_under_per_app_role_via_rls() {
     use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
