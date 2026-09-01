@@ -128,7 +128,7 @@ pub(crate) async fn apply(
         ApplyMode::Insert { actor_id } => {
             super::system_fields_pass::apply_system_fields_on_insert(
                 payload, &schema, collection, actor_id,
-            );
+            )?;
             let row_pk = row_pk_from_doc(payload);
             stages
                 .apply_to_doc(app_id, collection, &row_pk, payload)
@@ -138,7 +138,7 @@ pub(crate) async fn apply(
         ApplyMode::InsertMany { actor_id } => {
             super::system_fields_pass::apply_system_fields_on_insert_many(
                 payload, &schema, collection, actor_id,
-            );
+            )?;
             let Some(docs) = payload.as_array_mut() else {
                 return Ok(());
             };
@@ -168,7 +168,7 @@ pub(crate) async fn apply(
             );
             super::system_fields_pass::apply_system_fields_on_insert(
                 payload, &schema, collection, actor_id,
-            );
+            )?;
             rewrite_upsert_doc_id_to_existing_row_id(
                 payload,
                 route,
@@ -672,6 +672,85 @@ mod tests {
         // A top-level reserved field key is rejected.
         assert!(validate_update_patch_keys(&json!({ "ssn_masked": "x" })).is_err());
     }
+
+    #[test]
+    fn write_pipeline_refuses_every_reserved_descriptor_id_prefix() {
+        run(async {
+            let collection = "people";
+            assert!(
+                !crate::query::RESERVED_ID_PREFIXES.is_empty(),
+                "the reserved-prefix fence must rule on at least one platform prefix"
+            );
+            for (index, &prefix) in crate::query::RESERVED_ID_PREFIXES.iter().enumerate() {
+                let app_id = format!("app_reserved_descriptor_id_prefix_{index}");
+                let binding = DbBinding::cold_start(&app_id);
+                crate::cache_schema_for_tests(
+                    &app_id,
+                    collection,
+                    serde_json::json!({
+                        "id": { "type": "id", "idPrefix": prefix },
+                        "name": { "type": "string" }
+                    }),
+                );
+                let mut doc = serde_json::json!({ "name": "Alice" });
+
+                let result = apply(
+                    &binding,
+                    collection,
+                    &mut doc,
+                    ApplyMode::Insert { actor_id: None },
+                )
+                .await;
+
+                match result {
+                    Err(crate::error::DbError::ValidationFailed { code, .. }) => {
+                        assert_eq!(code, "reserved_system_field_name");
+                    }
+                    other => panic!(
+                        "expected descriptor prefix '{prefix}' to be refused, got {other:?}"
+                    ),
+                }
+                assert!(
+                    doc.get("id").is_none(),
+                    "prefix '{prefix}' minted an id before refusal: {doc}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn write_pipeline_accepts_ordinary_descriptor_id_prefix() {
+        run(async {
+            let app_id = "app_ordinary_descriptor_id_prefix";
+            let collection = "people";
+            let binding = DbBinding::cold_start(app_id);
+            crate::cache_schema_for_tests(
+                app_id,
+                collection,
+                serde_json::json!({
+                    "id": { "type": "id", "idPrefix": "blog" },
+                    "name": { "type": "string" }
+                }),
+            );
+            let mut doc = serde_json::json!({ "name": "Alice" });
+
+            apply(
+                &binding,
+                collection,
+                &mut doc,
+                ApplyMode::Insert { actor_id: None },
+            )
+            .await
+            .expect("ordinary descriptor id prefix must be accepted");
+
+            let id = doc
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("accepted descriptor prefix must mint an id");
+            assert!(id.starts_with("blog_"), "minted id was {id}");
+        });
+    }
+
     use crate::backend::{EncryptedColumn as _, EncryptionMode, SqlExecutor};
     use crate::encryption;
     use crate::query::{
