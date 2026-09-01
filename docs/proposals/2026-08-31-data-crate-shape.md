@@ -186,6 +186,34 @@ The last two are consequences of the Full decision and did not exist as problems
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
 
+#### The module walk is blind to TYPES, and two of them have no destination
+
+The assignment was produced by enumerating modules. That method finds modules; it cannot find a type
+DEFINED in one module and NAMED by several, which is a different question and the one that decides
+whether a graph compiles. `BackendHandle` was exactly this shape and was caught only because it
+happened to share a file with the contract. Enumerated properly, two more:
+
+- **`ChangeOp` must travel with `ChangeEvent`.** The target block sends the event to
+  `zeroship-core::change_event` and stops there. But `ChangeEvent` (`broker.rs:81`) has a field
+  `pub op: ChangeOp` (`:88`), and `ChangeOp` is a separate enum at `:121`. Naming only the event in
+  the target is the kind of omission that compiles nowhere.
+- **`BuiltQuery` has no destination, and correctly so.** It is the CURRENT builder's output type
+  (`zeroship-schema/src/query.rs:72`, "A built SQL query with text parameters"), so it belongs to the
+  thing Track A deletes. It should not be placed; it should be **replaced** by the typed plan plus a
+  rendered-SQL type. Any assignment that finds it a crate is preserving the string builder by
+  accident.
+
+Other types the enumeration confirms are placed correctly: `broker::Subscription` (the adapter stores
+an opaque handle, an ordinary downward dependency), `CdcLease` (same shape), `SqliteSessionHandle`
+(vendor crate; the engine names it through its vendor edge), `TypedCell`/`TypedRows` (core, ideally
+renamed as neutral row vocabulary, with vendor decoding staying in each vendor), and `MaskKind`
+(core, shared vocabulary).
+
+**The lesson generalises past this document.** A file-granular walk answers "where does this file
+go"; a crate boundary is decided symbol-by-symbol. Three of this plan's hardest questions -
+`BackendHandle`, `error.rs`, `auth/` - were all "one file holds two tiers", and the walk found them
+only because each happened to be big enough to notice.
+
 #### `read_set.rs` is production-inert on BOTH ends, so live queries are coarse-grained today
 
 Raised by review, verified independently here, and it is a behavioural fact about shipped code rather
