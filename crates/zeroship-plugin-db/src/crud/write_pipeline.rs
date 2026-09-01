@@ -53,6 +53,30 @@ fn validate_user_doc_keys(doc: &Value) -> Result<(), DbError> {
     Ok(())
 }
 
+/// `id` is platform-assigned, so a creator-supplied one is refused rather than
+/// honoured.
+///
+/// **Why here and not in the system-fields pass.** That pass mints the id, and
+/// it is documented and tested as idempotent - so a check keyed on `id` being
+/// PRESENT cannot tell a creator's value from one the pass itself minted on an
+/// earlier call. This boundary runs on the raw document before any pass, so
+/// presence here means exactly one thing: the creator sent it.
+///
+/// Refused rather than silently dropped, so a creator cannot believe the id
+/// they chose is the id the row has.
+fn refuse_platform_assigned_id(doc: &Value) -> Result<(), DbError> {
+    let Some(obj) = doc.as_object() else {
+        return Ok(());
+    };
+    if obj.contains_key("id") {
+        return Err(DbError::validation(
+            "platform_assigned_field",
+            "`id` is assigned by the platform; remove it from the document",
+        ));
+    }
+    Ok(())
+}
+
 /// DB-8 (update patch): an update patch's top-level keys are either field names
 /// (`{ name: "x", views: { $inc: 1 } }`) or the document-level `$set`/`$setOnInsert`
 /// operators whose nested keys are field names. Validate the field-name keys
@@ -105,14 +129,26 @@ pub(crate) async fn apply(
     // truncation collision), or a reserved name (e.g. `ssn_masked`) straight into
     // a column. Run the same fence here, on the raw user keys, once.
     match &mode {
-        ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => validate_user_doc_keys(payload)?,
+        ApplyMode::Insert { .. } => {
+            validate_user_doc_keys(payload)?;
+            refuse_platform_assigned_id(payload)?;
+        }
         ApplyMode::InsertMany { .. } => {
             if let Some(docs) = payload.as_array() {
                 for doc in docs {
                     validate_user_doc_keys(doc)?;
+                    refuse_platform_assigned_id(doc)?;
                 }
             }
         }
+        // UPSERT DELIBERATELY DOES NOT REFUSE A SUPPLIED `id`, and this is an
+        // open question rather than a settled exemption. Upsert targets by
+        // `conflict_fields`, not by the document's id - so an id here is as
+        // unearned as it is on an insert. But `upsert(doc, { on: ["id"] })`
+        // needs the id present to match on, and whether that flow survives
+        // platform-assigned ids is a creator-facing semantics call. Refusing it
+        // here would decide that silently, so it is left and recorded.
+        ApplyMode::Upsert { .. } => validate_user_doc_keys(payload)?,
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
@@ -629,6 +665,38 @@ fn deterministic_conflict_probe_schema(
 
 #[cfg(test)]
 mod tests {
+    /// The direct half of the id fence. The prefix validator closed the
+    /// DESCRIPTOR vector; this closes the one an attacker reaches without
+    /// touching a generated file, by sending `id` on an ordinary insert.
+    #[test]
+    fn a_supplied_id_is_refused_at_the_document_boundary() {
+        let doc = serde_json::json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
+        match super::refuse_platform_assigned_id(&doc) {
+            Err(crate::error::DbError::ValidationFailed { code, .. }) => {
+                assert_eq!(code, "platform_assigned_field");
+            }
+            other => panic!("expected the supplied id to be refused, got {other:?}"),
+        }
+    }
+
+    /// The control. A fence that refused every document would satisfy the test
+    /// above, so prove an ordinary document still passes.
+    #[test]
+    fn a_document_without_an_id_passes_the_boundary() {
+        let doc = serde_json::json!({ "title": "hi" });
+        super::refuse_platform_assigned_id(&doc)
+            .expect("a document that supplies no id must be accepted");
+    }
+
+    /// A non-object payload must not panic or refuse - the shape checks belong
+    /// to the validators beside this one.
+    #[test]
+    fn a_non_object_payload_is_not_this_fence_s_business() {
+        let doc = serde_json::json!("not a document");
+        super::refuse_platform_assigned_id(&doc)
+            .expect("a non-object payload is another validator's concern");
+    }
+
     use std::path::PathBuf;
     use std::rc::Rc;
 
