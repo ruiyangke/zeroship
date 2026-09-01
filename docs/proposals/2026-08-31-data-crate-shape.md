@@ -37,6 +37,36 @@ turned out to be redesigns. It is also the test to apply to anything this docume
 `tests/lib/tier_signature_census.sh` is the instrument for exactly this rule - its `upward` marker
 measures adapter-inward violations directly, and its per-tier markers measure the rest.
 
+### Vendor neutrality in the core is enforced by the MANIFEST, not by discipline
+
+Settled 2026-08-31: the core crates are **strictly** vendor-neutral, and "strictly" means structurally
+rather than by convention or review.
+
+**The fence is the absence of the dependency.** `data-core`'s `Cargo.toml` lists neither
+`compio-postgres` nor `rusqlite` nor `zeroship-runtime`. You cannot name `compio_postgres::Error` in a
+crate that does not depend on `compio-postgres` - it is `E0433`, at compile time, for everyone,
+forever. No lint, no gate, no reviewer, no census run.
+
+This repository already uses exactly this technique: `serialize_derive_is_structurally_impossible`
+makes a capability unreachable by giving a crate an empty manifest rather than by forbidding its use.
+The same move applies here, and it is free - it is a file that does not list a line.
+
+**What that turns each open item into.** Every violation in the table above becomes a build failure
+the moment the crate exists, so the work is not "obey the rule" but "stop needing to break it":
+
+- `DbError` naming `compio_postgres` -> **the translator moves to each vendor as a free function.**
+  Done for the `From` impl (`a4ed5e3d0`); `from_pg`, `coded_sql` and `walk_pg_chain` follow.
+- `to_op_error` returning `OpError` -> moves to the adapter, which may name the runtime.
+- `crud/`, `transaction/` returning `OpResult` -> the protocol inversion.
+- backends calling `v8_bridge` -> row decode moves into each vendor.
+
+**And it retires the census, on purpose.** `tier_signature_census.sh` exists because today there is no
+boundary for the compiler to enforce, so a shell script measures what a manifest will later make
+impossible. That is its whole job, and its own header says it "becomes a gate the moment the first
+crate boundary exists". The better end state is that it becomes **unnecessary** - a script is a weaker
+fence than a dependency that is not declared. Keep it until the manifests do the work; do not build
+more instrumentation in its place.
+
 ## How to read this document
 
 **It is written correction-in-place: where a claim was wrong, the wrong claim is QUOTED and then
