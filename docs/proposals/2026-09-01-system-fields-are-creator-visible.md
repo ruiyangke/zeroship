@@ -378,6 +378,53 @@ not merely hide the audit columns, it silently discards a value the creator
 supplied. Acceptance criterion 6 still demonstrates it end to end; a traced
 mechanism is not a passing test.
 
+## The revised design, after two review rounds
+
+The two-edit version is dead. What replaces it is one idea, not four patches:
+**the write class becomes a property of the field in the descriptor, and every
+layer reads it instead of keeping its own list of seven names.**
+
+Add `writeClass` to the descriptor's `FieldDef`, emitted by the fold:
+
+| `writeClass` | Fields | Input on INSERT | Input on UPDATE | Required on input |
+| --- | --- | --- | --- | --- |
+| `creator` | everything else | yes | yes | per `required` |
+| `writeOnce` | `id`, `created_at` | yes | **refused** | never |
+| `serverAuthored` | `created_by`, `updated_by` | **overwritten** | **overwritten** | never |
+| `defaulted` | `updated_at`, `version` | yes | yes, wins over auto-bump | never |
+| `lifecycle` | `deleted_at` | no | **refused** | never |
+
+This resolves all four problems at once, each in the layer that owns it:
+
+1. **Requiredness (criterion 0).** `validateDoc` skips the `required` check when
+   `writeClass !== "creator"` (`validate.ts:511`). `required: true` keeps
+   meaning "NOT NULL in storage", which is what the fold means by it; it stops
+   meaning "the caller must supply it", which it never should have meant for a
+   platform-populated column. No fold change, no per-name list.
+2. **`created_by` forgery.** `inject_into_object` **overwrites** rather than
+   injecting-when-absent for `serverAuthored`
+   (`system_fields_pass.rs:266-273`). This is the narrowing that must land in
+   the same change as the widening.
+3. **`deleted_at`.** `check_keys_for_immutable_and_overrides` gains a
+   `lifecycle` arm instead of falling through `_ => {}` (`:438`), so the
+   `delete()` / `restore()` contract becomes real rather than documented.
+4. **Seven copies of the list.** `types.ts:174-182`, `types.ts:200-208`,
+   `collection.ts:208-216`, `install-schema.ts:249`, `render-env-db.ts:73-81`,
+   `zeroship-schema/src/query.rs:756`, `data-plan/src/projection.rs:58` all
+   become readers of one declared property. This is the part worth doing
+   properly; a fifth reviewer would otherwise find an eighth copy.
+
+**Enforcement stays in Rust.** The descriptor is produced by the migration
+service and consumed by the worker, so `writeClass` is state a separate service
+writes and the worker only reads - the one shape the privilege invariant permits.
+The TS side mirrors it for types and error messages, and is not a fence.
+
+**What this does not do.** It does not make `created_at` declarable by a creator
+in a migration; the engine refuses that at `table_shape.rs:361-376` and this
+proposal does not touch the engine. Criterion 1 is therefore scoped to the SDK
+surface until a separate change decides whether creators may re-declare a system
+column at all.
+
 ## Acceptance
 
 0. **NEW, and it gates everything else.** `insert({ path: "/x" })` on a
