@@ -1,6 +1,7 @@
 //! Runtime claims made by the query and COPY APIs.
 
 use bytes::Bytes;
+use compio_postgres::error::SqlState;
 use compio_postgres::{Client, Pool};
 use futures_util::{SinkExt, TryStreamExt};
 use std::time::Duration;
@@ -253,6 +254,93 @@ async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
     })
     .await
     .expect("execute_text_params claim exceeded its watchdog");
+}
+
+/// Bind's parameter count is a wire `u16`. The text adapter must surface that
+/// local serialization refusal as an encode error and leave its scratch buffer
+/// out of the next request.
+#[compio::test]
+async fn execute_text_params_reports_bind_count_overflow_without_poisoning_the_client() {
+    Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        let process_id = client.process_id();
+        let params = vec![None::<String>; usize::from(u16::MAX) + 1];
+
+        let error = client
+            .execute_text_params("SELECT 1", &params)
+            .await
+            .expect_err("more than u16::MAX parameters were encoded");
+        assert_eq!(
+            error.to_string(),
+            "error encoding message to server",
+            "bind count overflow was classified as a server response: {}",
+            common::error_chain(&error)
+        );
+
+        let observed_process_id: i32 = client
+            .query_one_scalar("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("bind overflow poisoned the next request");
+        assert_eq!(observed_process_id, process_id);
+    }))
+    .await
+    .expect("execute_text_params bind-overflow claim exceeded its watchdog");
+}
+
+/// A server-side cast refusal arrives through the response stream, not the
+/// frontend encoder. Preserve its SQLSTATE and drain through `ReadyForQuery` so
+/// the same physical session remains usable.
+#[compio::test]
+async fn execute_text_params_preserves_server_cast_errors() {
+    Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        let process_id = client.process_id();
+
+        let error = client
+            .execute_text_params("SELECT $1::int4", &[Some("not-an-int4".to_string())])
+            .await
+            .expect_err("PostgreSQL accepted invalid int4 text");
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::INVALID_TEXT_REPRESENTATION),
+            "execute_text_params replaced the server's cast error: {}",
+            common::error_chain(&error)
+        );
+
+        let observed_process_id: i32 = client
+            .query_one_scalar("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("server cast error poisoned the next request");
+        assert_eq!(observed_process_id, process_id);
+    }))
+    .await
+    .expect("execute_text_params cast-error claim exceeded its watchdog");
+}
+
+/// Dropping the unrun `Connection` closes the request receiver before this API
+/// can enqueue. That local closure must remain distinguishable from a protocol
+/// response error.
+#[compio::test]
+async fn execute_text_params_reports_a_closed_connection_before_enqueue() {
+    Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
+        let url = test_url();
+        let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        drop(connection);
+
+        let error = client
+            .execute_text_params("SELECT 1", &[])
+            .await
+            .expect_err("execute_text_params enqueued through a dropped Connection");
+        assert!(
+            error.is_closed(),
+            "a closed request channel was reported as {}",
+            common::error_chain(&error)
+        );
+    }))
+    .await
+    .expect("execute_text_params closed-connection claim exceeded its watchdog");
 }
 
 #[compio::test]

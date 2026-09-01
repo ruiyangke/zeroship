@@ -279,11 +279,24 @@ pub async fn execute_text_params(
             buf,
         )
         .map_err(|e| match e {
-            frontend::BindError::Serialization(io_err) => Error::encode(io_err),
+            frontend::BindError::Serialization(io_err) => {
+                // The names and format counts are fixed and bounded. The one
+                // remaining route is a Bind body above `i32::MAX`, which needs
+                // more than 2 GiB of caller-owned text to construct. Keep the
+                // resource-bound refusal without a suite-sized allocation.
+                Error::encode(io_err)
+            }
             frontend::BindError::Conversion(boxed) => {
+                // `bind` shares the serializer's boxed error type with its
+                // values-count encoder. More than `u16::MAX` values therefore
+                // reaches this arm even though both serializer arms return
+                // `Ok`; the bind-count test pins that upstream classification.
                 Error::encode(std::io::Error::other(format!("bind: {boxed}")))
             }
         })?;
+        // These fixed-size messages use the literal empty portal name. Their
+        // encoders can only fail for an interior NUL or an overflowing message
+        // body, neither of which those inputs can contain.
         frontend::describe(b'P', "", buf).map_err(Error::encode)?;
         frontend::execute("", 0, buf).map_err(Error::encode)?;
         frontend::sync(buf);
@@ -295,10 +308,7 @@ pub async fn execute_text_params(
     let mut copy_out_refused = false;
     loop {
         match responses.next().await? {
-            Message::ParseComplete
-            | Message::BindComplete
-            | Message::ParameterDescription(_)
-            | Message::RowDescription(_) => {}
+            Message::ParseComplete | Message::BindComplete | Message::RowDescription(_) => {}
             Message::NoData => rows = 0,
             Message::DataRow(_) => {}
             Message::CommandComplete(body) => {

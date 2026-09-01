@@ -4882,6 +4882,44 @@ fn expect_frontend_frame(stream: &mut TcpStream, expected_tag: u8) -> Vec<u8> {
     body
 }
 
+/// Drive `execute_text_params` against one complete scripted response.
+#[allow(clippy::future_not_send)]
+async fn execute_text_params_against(
+    process_id: i32,
+    response: Vec<u8>,
+) -> Result<u64, compio_postgres::Error> {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        expect_frontend_until_sync(&mut stream);
+        stream
+            .write_all(&response)
+            .expect("write scripted execute_text_params response");
+        stream
+            .flush()
+            .expect("flush scripted execute_text_params response");
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(common::suite_tls())
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let outcome = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        client.execute_text_params("UPDATE scripted SET value = value", &[]),
+    )
+    .await
+    .expect("execute_text_params hung on a complete scripted response");
+
+    drop(client);
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    server.finish();
+    outcome
+}
+
 /// Drive `prepare` against a peer that answers with `response`, and require the
 /// same three properties the simple-query helper does.
 async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> String {
@@ -4916,6 +4954,52 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     drop(client);
     server.finish();
     common::error_chain(&error)
+}
+
+/// Command tags are server-owned C strings, but the affected-row parser still
+/// has to reject a body that is not UTF-8.
+#[compio::test]
+async fn execute_text_params_rejects_non_utf8_command_tags() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut invalid_tag = backend_frame(b'1', b"");
+        invalid_tag.extend_from_slice(&backend_frame(b'2', b""));
+        invalid_tag.extend_from_slice(&backend_frame(b'n', b""));
+        invalid_tag.extend_from_slice(&backend_frame(b'C', b"UPDATE \xff\0"));
+        invalid_tag.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let error = execute_text_params_against(304, invalid_tag)
+            .await
+            .expect_err("execute_text_params accepted a non-UTF-8 command tag");
+        assert_eq!(error.to_string(), "error parsing response from server");
+        assert!(
+            common::error_chain(&error).contains("invalid utf-8"),
+            "the malformed command tag reported the wrong parse error: {}",
+            common::error_chain(&error)
+        );
+    }))
+    .await
+    .expect("execute_text_params malformed-tag test exceeded its outer watchdog");
+}
+
+/// This API describes a portal, while `PostgreSQL` only sends
+/// `ParameterDescription` in answer to a statement description.
+#[compio::test]
+async fn execute_text_params_rejects_parameter_description_for_its_portal() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut out_of_order = backend_frame(b'1', b"");
+        out_of_order.extend_from_slice(&backend_frame(b'2', b""));
+        out_of_order.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        out_of_order.extend_from_slice(&backend_frame(b'n', b""));
+        out_of_order.extend_from_slice(&backend_frame(b'C', b"UPDATE 0\0"));
+        out_of_order.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let error = execute_text_params_against(305, out_of_order)
+            .await
+            .expect_err("execute_text_params accepted ParameterDescription for a portal");
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }))
+    .await
+    .expect("execute_text_params message-order test exceeded its outer watchdog");
 }
 
 /// A complete Parse/Describe prefix is not the outcome of the extended query
