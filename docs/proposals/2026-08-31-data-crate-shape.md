@@ -1650,6 +1650,62 @@ do one on its own; ride it with a change that was already reshaping the crate. T
 the four NEW crates are the place to spend naming effort - they cost nothing, because nothing cites
 them yet.
 
+## Execution order
+
+Everything above is analysis. This section is the only part that says WHAT TO DO FIRST, and it exists
+because the prerequisites were discovered across four review rounds and landed wherever they were
+found. **Nothing here is new; it is the same findings, ordered by what blocks what.**
+
+**The shape of the answer: almost nothing can be extracted until five in-place refactors land.** Every
+one was found by a different lens, and none of them creates a crate.
+
+### Phase 0 - refactors inside today's crate, no new crates, each independently shippable
+
+| # | move | why it blocks things | measured cost |
+| --- | --- | --- | --- |
+| 0.1 | `DbError::to_op_error` out to an extension trait in the V8 tier | it is the ONLY thing making `DbError` link V8; until it moves, every crate holding `DbError` links the V8 runtime - including the relay | 73 call sites, **11 files**, call syntax unchanged |
+| 0.2 | `auth/util.rs` helpers (hex, random, calendar) to a neutral home | a database driver crate would otherwise depend on an `auth` module to encode hex (test-tier today, but test builds must compile) | 7 exports, callers in 2 SQLite files |
+| 0.3 | `encryption/` and row-to-JSON below the vendors | `encryption` is 7 edges from EACH backend; row-to-JSON is two vendor converters in one file | `encryption/` 1,591 lines; `keys.rs:318` also carries `PluginDbConsumer` |
+| 0.4 | make `PgSqlExecutor` / `PgLockManager` driver-neutral | they name `compio_postgres::OwnedPooledClient` in their BOUNDS, so a contract crate built from them ships a vendor | `backend/mod.rs:755`, `:786` |
+| 0.5 | resolve the `v8_bridge` two-way cycle | `v8_bridge.rs:34` imports SQLite types while both backends call back into it | 5 back-edges |
+
+**Then, and only then, the split becomes file moves.** `BackendHandle` goes up with the engine
+(settled); `context.rs` follows it.
+
+### Phase 0.5 - two audits that must precede ANY crate boundary
+
+- **The `pub(crate)` audit.** List every symbol that would go `pub(crate) -> pub`, and say for each
+  whether the fence was load-bearing. Four are named security controls (`sanitize_app_actor`,
+  `TxRoute::capture`, `DbBinding::cold_start`, `context::with_mut`). **This repository has already
+  shipped this mistake once** and written a comment claiming it had not.
+- **The dead-code decision.** ~1,000 lines are self-declared unreachable (`cross_app_fk.rs`,
+  `drop_namespace.rs`, `crud/mask_backfill.rs`), plus `read_set.rs` (659) which is inert on both
+  ends. **Giving dead code a crate is how the existing clusters got there.** Decide delete-or-wire
+  BEFORE assigning, not after.
+
+### Phase 1 - the two things that need no new prerequisites
+
+- **Step 0's deletion**, once its own prerequisite lands: migrate the 12 live security tests off the
+  dead DDL builders and onto the engine's renderer (already reachable - `plugin-db` dev-depends on
+  `migrate-server`, which pulls the facade).
+- **`data-cdc-server`**, which needs neither `data-core` nor `data-postgres` (measured: zero
+  `crate::backend`, zero `crate::encryption`). Its cost is the four Full edits, of which the
+  suppression handshake is the hard one - **three brackets with an overlap invariant.**
+
+### Phase 2 - the crates
+
+`data-query-builder` (rename only), then `data-core`, `data-postgres`, `data-sqlite`, `data-engine`,
+with `plugin-db` reduced to the adapter. **The count is not settled** - see the three-answers table
+and the `data-engine` disagreement.
+
+### What Phase 0 costs, and why it is the honest headline
+
+Five refactors, no new crates, no visible architectural change, and **every one of them improves the
+current tree on its own terms** - a `DbError` that does not link V8, contract traits that name no
+vendor, crypto that both backends share from below rather than beside. **If the crate split were
+cancelled tomorrow, Phase 0 would still be worth having.** That is the test a prerequisite should
+pass, and it is why this ordering is safe to start before the count is decided.
+
 ## Not decided
 
 - **`zeroship-migrate-server`** is a service HOST, not engine. Left in the `migrate-*` family for
