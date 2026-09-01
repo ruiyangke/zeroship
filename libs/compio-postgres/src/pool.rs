@@ -6287,6 +6287,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pooled_client_deref_mut_exposes_the_stored_client() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(100);
+        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        {
+            let exposed = std::ops::DerefMut::deref_mut(&mut held);
+            assert_eq!(exposed.process_id(), 100);
+            assert!(!exposed.is_closed(), "DerefMut returned a closed client");
+            exposed.__private_api_close();
+        }
+        assert!(
+            held.is_closed(),
+            "mutation through DerefMut did not reach the pooled Client"
+        );
+
+        drop(held);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
     #[compio::test]
     async fn pool_query_runs_the_statement_and_restores_pool_accounting() {
         const SQL: &str = "SELECT 42::int4 AS pool_query_wrapper_answer";
