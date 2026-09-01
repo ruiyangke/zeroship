@@ -31,6 +31,56 @@
 #   verdict for a placement nobody has decided. `--contested` lists them so the
 #   size of the blind spot is visible rather than silent.
 #
+# DEFECTS FOUND IN THIS SCRIPT, AND FIXED. Read the total as a FLOOR.
+#
+#   1. FIRST-PATH-SEGMENT TIERING (found 2026-09-01, by review).
+#      `tier()` was keyed on `${rel%%/*}`, so `backend/postgres.rs` resolved to
+#      module `backend`, hit the default arm, and became CONTESTED - skipped as
+#      a source and ignored as a target. The `postgres)` and `sqlite)` arms were
+#      therefore DEAD FOR EXACTLY THE FILES THEY EXIST TO JUDGE.
+#      Measured blast radius before the fix: 18,803 of 57,391 lines, 32.8% of
+#      the crate, unjudged as a source - all of backend/ (13,829), auth/ (1,459),
+#      context.rs (1,688), service.rs (606), cdc_lifecycle.rs (523),
+#      test_support/ (336), change_stream_pg.rs (315), replication_ops.rs (47).
+#      This was NOT the documented CONTESTED policy: backend/postgres.rs IS
+#      settled, and tier_signature_census.sh has always tiered it PG by matching
+#      the full path. The two instruments silently disagreed about 13,829 lines
+#      while both headers claimed to copy the same proposal table.
+#      FIX: tier on the full relative path, mirroring the signature census.
+#      It hid a real two-way cycle: backend/sqlite/cdc.rs calls up into
+#      crate::broker at :543/:547/:646 while crud/ calls down into sqlite
+#      encoders - neither arm was ever reported.
+#      AFTER the fix the blind spot is 6,377 lines / 11.1%, across 10 files that
+#      are genuinely unplaced (backend/mod.rs the contract tier, context.rs and
+#      service.rs which the proposal itself files as undecided). That is the
+#      honest residual, and it is the CONTESTED policy working as documented
+#      rather than a path bug wearing its name.
+#      Two violations became visible that no reviewer and neither census had
+#      ever reported, both production:
+#        backend/postgres.rs:469,565 -> crate::exec::query_postgres_pool_with_
+#          autocommit_role   (PG -> ENGINE, a vendor calling UP into the engine)
+#        backend/sqlite/session_minter.rs:116,139,154 -> crate::PluginDbConsumer
+#          (SQLITE -> ADAPTER, rank 2 -> 4)
+#
+#   2. THE TARGET REGEX COULD NOT MATCH A CAPITAL (same review).
+#      It was `crate::\K[a-z_0-9]+`, so a crate-root item spelled with an
+#      uppercase initial matched NOTHING. Control:
+#        printf 'use crate::PluginDbConsumer;\nuse crate::broker::X;\n' \
+#          | grep -oP 'crate::\K[a-z_0-9]+'
+#      prints `broker` and nothing else. That hid ENGINE -> ADAPTER
+#      (crud/mod.rs `crate::BackendUrl`) and ENCRYPT -> ADAPTER
+#      (encryption/keys.rs `crate::PluginDbConsumer`, a three-rank jump).
+#
+#   3. THE TARGET REGEX TRUNCATED TO ONE SEGMENT (same review).
+#      `crate::backend::sqlite::foo` and `crate::backend::postgres::foo` both
+#      collapsed to `backend`, so the two vendors were indistinguishable as
+#      targets even once they were tierable as sources.
+#
+#   An uppercase crate-root target is resolved by LOOKING IT UP in lib.rs
+#   rather than assuming it lives there. If it is not found, the row prints
+#   UNRESOLVED and is counted - a future crate-root item must not be silently
+#   mis-tiered the way defect 2 mis-tiered these two.
+#
 # USAGE
 #   tests/lib/tier_direction_census.sh              # violations
 #   tests/lib/tier_direction_census.sh --all        # every cross-tier edge
@@ -42,18 +92,49 @@ SRC="$ROOT/crates/zeroship-plugin-db/src"
 MODE="${1:-violations}"
 cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
 
-tier() {
+# Destination crate per FILE, keyed on the full relative path. This is a copy of
+# tier_signature_census.sh's tier(), deliberately - the two censuses judging the
+# same file differently is defect 1 above.
+tier_of_file() {
   case "$1" in
-    v8_classes|v8_bridge|lib|tx_scope)                    echo ADAPTER ;;
-    crud|transaction|exec|broker|read_set|tx_route|drop_namespace|cross_app_fk) echo ENGINE ;;
-    postgres)                                             echo PG ;;
-    sqlite)                                               echo SQLITE ;;
-    encryption)                                           echo ENCRYPT ;;
-    wal_consumer|replication|slot_reaper)                 echo CDC ;;
-    error|descriptor|binding)                             echo CORE ;;
-    *)                                                    echo CONTESTED ;;
+    ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
+    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./cross_app_fk.rs) echo ENGINE ;;
+    ./auth/bootstrap.rs)                                 echo ENGINE ;;
+    ./backend/postgres.rs|./backend/pg_row_json.rs)      echo PG ;;
+    ./backend/sqlite/*)                                  echo SQLITE ;;
+    ./encryption/*)                                      echo ENCRYPT ;;
+    ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
+    ./error.rs|./descriptor.rs|./binding.rs)             echo CORE ;;
+    *)                                                   echo CONTESTED ;;
   esac
 }
+
+# Destination crate per TARGET PATH, keyed on the 1-or-2 segments captured after
+# `crate::`. Distinct from tier_of_file because a target is a module path, not a
+# file path, and may be a crate-root item.
+tier_of_target() {
+  case "$1" in
+    backend::sqlite)                                     echo SQLITE ;;
+    backend::postgres|backend::pg_row_json)              echo PG ;;
+    v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
+    crud*|transaction*|exec*|broker*|read_set*|tx_route*|drop_namespace*|cross_app_fk*) echo ENGINE ;;
+    auth::bootstrap)                                     echo ENGINE ;;
+    encryption*)                                         echo ENCRYPT ;;
+    wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
+    error*|descriptor*|binding*)                         echo CORE ;;
+    [A-Z]*)
+      # A crate-root item. Resolve it rather than assume: lib.rs is where
+      # crate-root items live TODAY, and the script must say so out loud if that
+      # ever stops being true.
+      if grep -qE "(enum|struct|trait|type|fn|const)[[:space:]]+${1%%::*}\b|\b${1%%::*},$" lib.rs 2>/dev/null; then
+        echo ADAPTER
+      else
+        echo UNRESOLVED
+      fi ;;
+    *)                                                   echo CONTESTED ;;
+  esac
+}
+
 rank() {
   case "$1" in
     ADAPTER) echo 4 ;; ENGINE) echo 3 ;;
@@ -77,40 +158,44 @@ prod() {
     { print }' "$1"
 }
 
-printf '%-9s %-34s %-9s %-22s %s\n' FROM FILE TO TARGET VERDICT
-echo "-------------------------------------------------------------------------------------"
-viol=0; rows=0; skipped=0
+printf '%-9s %-34s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
+echo "----------------------------------------------------------------------------------------------"
 while read -r f; do
-  # Source module name: first path segment under src/, or the file stem.
   rel="${f#./}"
-  case "$rel" in */*) smod="${rel%%/*}" ;; *) smod="${rel%.rs}" ;; esac
-  st=$(tier "$smod")
-  if [ "$st" = CONTESTED ]; then skipped=$((skipped+1)); continue; fi
+  st=$(tier_of_file "$f")
+  [ "$st" = CONTESTED ] && continue
   sr=$(rank "$st")
+  # Own module name, for skipping self-references.
+  case "$rel" in */*) selfmod="${rel%%/*}" ;; *) selfmod="${rel%.rs}" ;; esac
 
-  prod "$f" | grep -oP 'crate::\K[a-z_0-9]+' | sort -u | while read -r tmod; do
-    [ "$tmod" = "$smod" ] && continue
-    tt=$(tier "$tmod")
+  prod "$f" | grep -oP 'crate::\K[A-Za-z_0-9]+(::[a-z_0-9]+)?' | sort -u | while read -r tpath; do
+    [ "${tpath%%::*}" = "$selfmod" ] && continue
+    tt=$(tier_of_target "$tpath")
     [ "$tt" = CONTESTED ] && continue
+    if [ "$tt" = UNRESOLVED ]; then
+      printf '%-9s %-34s %-10s %-26s %s\n' "$st" "$rel" "UNRESOLVED" "crate::$tpath" "** UNRESOLVED - tier it **"
+      continue
+    fi
     tr=$(rank "$tt")
     if [ "$tr" -lt "$sr" ]; then v=ok
     elif [ "$tr" -eq "$sr" ] && [ "$st" = "$tt" ]; then v=ok
     else v="** VIOLATION **"
     fi
     [ "$v" = ok ] && [ "$MODE" != "--all" ] && continue
-    printf '%-9s %-34s %-9s %-22s %s\n' "$st" "$rel" "$tt" "crate::$tmod" "$v"
+    printf '%-9s %-34s %-10s %-26s %s\n' "$st" "$rel" "$tt" "crate::$tpath" "$v"
   done
 done < <(find . -name '*.rs' | LC_ALL=C sort)
 
-echo "-------------------------------------------------------------------------------------"
+echo "----------------------------------------------------------------------------------------------"
 if [ "$MODE" = "--contested" ]; then
-  echo "Modules with no settled tier (neither judged nor trusted):"
+  echo "Files with no settled tier (neither judged nor trusted):"
   find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
-    rel="${f#./}"; case "$rel" in */*) m="${rel%%/*}" ;; *) m="${rel%.rs}" ;; esac
-    [ "$(tier "$m")" = CONTESTED ] && echo "  $rel"
+    [ "$(tier_of_file "$f")" = CONTESTED ] && echo "  ${f#./}"
   done | sort -u
 fi
 echo
-echo "Every verdict is relative to tier() above, which is a copy of the proposal's"
-echo "assignment table. Re-draw a boundary there and re-draw it here in the same"
-echo "commit, or this reports on a shape nobody proposed."
+echo "Every verdict is relative to tier_of_file/tier_of_target above, which are a"
+echo "copy of the proposal's assignment table. Re-draw a boundary there and re-draw"
+echo "it here in the same commit, or this reports on a shape nobody proposed."
+echo "Read the count as a FLOOR: see the DEFECTS block in this header for what it"
+echo "has already been blind to, twice."
