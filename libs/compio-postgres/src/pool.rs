@@ -5298,6 +5298,24 @@ mod tests {
         server.join().expect("fake PostgreSQL server panicked");
     }
 
+    /// WHAT THIS TEST WAS MEASURED TO BIND, which is less than its name says.
+    ///
+    /// The name claims the pool is released BEFORE the ineligible entry is
+    /// discarded. That ordering is NOT bound here: cloning an `Rc<Pool>` so a
+    /// reference deliberately outlives the entry leaves this test green,
+    /// because both references are gone again before `housekeep` returns and
+    /// the assertion only inspects the `Weak` afterwards.
+    ///
+    /// What it does bind is the ineligibility discard PATH - depositing a
+    /// hook-closed entry instead of discarding it fails this test. That path
+    /// was already covered by
+    /// `housekeeping_after_connect_ineligibility_records_an_eviction`, so this
+    /// adds a distinct scenario (a hook whose observer drops the pool on wake)
+    /// rather than closing a gap.
+    ///
+    /// Kept and documented rather than deleted or renamed: the scenario is
+    /// real, and a name that promises an ordering nobody verified is exactly
+    /// the thing worth writing down.
     #[compio::test]
     async fn housekeeping_releases_pool_before_discarding_hook_closed_entry() {
         let (address, finish_tx, count_rx, server) = accepting_postgres_server();
