@@ -783,68 +783,35 @@ pub(crate) fn dispatch_insert<'s>(
     // originated the insert.
     let actor_id = system_fields_pass::current_actor_id(&state);
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let mut doc = doc;
-        if let Err(e) = write_pipeline::apply(
-            &binding,
-            &coll,
-            &mut doc,
-            write_pipeline::ApplyMode::Insert {
-                actor_id: actor_id.as_deref(),
-            },
-        )
-        .await
-        {
-            return reject_op(resolver, request_id, e);
-        }
-        // `write_pipeline::apply` already refused an undeclared collection, so
-        // this resolution cannot fail here; it re-reads the same store entry
-        // rather than threading the schema back out through `apply`'s result.
-        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
-            Ok(schema) => schema,
-            Err(e) => return reject_op(resolver, request_id, e),
-        };
-        maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-        let built =
-            query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect());
-        let result = match built {
-            Ok(bq) => {
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
-            }
-            Err(e) => Err(DbError::from(e)),
-        };
-        match result {
-            Ok(rows) => {
-                let result = match read_pipeline::apply(
-                    &binding,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move {
+            let mut doc = doc;
+            write_pipeline::apply(
+                &binding,
+                &coll,
+                &mut doc,
+                write_pipeline::ApplyMode::Insert {
+                    actor_id: actor_id.as_deref(),
+                },
+            )
+            .await?;
+            // `write_pipeline::apply` already refused an undeclared collection, so
+            // this resolution cannot fail here; it re-reads the same store entry
+            // rather than threading the schema back out through `apply`'s result.
+            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+            maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
+            let bq =
+                query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect())
+                    .map_err(DbError::from)?;
+            let rows =
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await?;
+            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default())
                 .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
-                    request_id,
-                }
-            }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+        },
+        |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
+    )));
 
     promise
 }
