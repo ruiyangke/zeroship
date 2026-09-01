@@ -2969,6 +2969,59 @@ mod tests {
         }
     }
 
+    fn redacting_test_cancel_token(socket_secret: &str, key_secret: &'static [u8]) -> CancelToken {
+        let mut token = test_cancel_token();
+        token.socket_config = Some(SocketConfig {
+            addr: Addr::tcp(
+                "127.0.0.1:5432"
+                    .parse()
+                    .expect("valid loopback socket address"),
+            ),
+            hostname: Some(socket_secret.to_owned()),
+            port: 5432,
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: Encryption::Plaintext,
+            ssl_sni: true,
+            ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
+        });
+        token.process_id = 314_159;
+        token.secret_key = Some(
+            CancelKey::new(bytes::Bytes::from_static(key_secret))
+                .expect("valid sentinel cancel key"),
+        );
+        token
+    }
+
+    fn format_under_watchdog<F>(label: &'static str, format: F) -> String
+    where
+        F: FnOnce() -> String + Send + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(format())
+                .expect("watchdog receiver dropped before formatting completed");
+        });
+
+        match receiver.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(rendered) => {
+                worker.join().expect("Debug formatter thread panicked");
+                rendered
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{label} Debug formatting did not complete under the watchdog")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().expect("Debug formatter thread panicked");
+                unreachable!("a successful formatter sends its rendered string")
+            }
+        }
+    }
+
     fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
         frame.push(tag);
@@ -4313,14 +4366,57 @@ mod tests {
     }
 
     #[test]
-    fn replication_connection_debug_names_its_type() {
-        let connection = replication_connection_over(Vec::new());
+    fn replication_connection_debug_is_bounded_and_omits_private_state() {
+        const PARAMETER_KEY: &str = "debug-parameter-key-6bc75da2";
+        const PARAMETER_VALUE: &str = "debug-parameter-value-f25e0f78";
+        const TRANSPORT_SECRET: &str = "debug-connection-transport-b7888034";
+        const SOCKET_SECRET: &str = "debug-connection-socket-4c76e56a";
+        const KEY_SECRET: &[u8] = b"debug-connection-cancel-key-7f4ca91d";
 
-        let debug = format!("{connection:?}");
+        let debug = format_under_watchdog("ReplicationConnection", || {
+            let mut connection = replication_connection_over(TRANSPORT_SECRET.as_bytes().to_vec());
+            connection
+                .parameters
+                .insert(PARAMETER_KEY.to_owned(), PARAMETER_VALUE.to_owned());
+            connection.in_flight.busy = true;
+            connection.in_flight.poisoned = true;
+            connection.cancel_token = redacting_test_cancel_token(SOCKET_SECRET, KEY_SECRET);
+            format!("{connection:?}")
+        });
 
         assert!(
-            debug.starts_with("ReplicationConnection {"),
-            "replication connection Debug did not name its type: {debug}"
+            debug.contains("socket_config: Some(\"<redacted>\")")
+                && debug.contains("secret_key: Some(\"<redacted>\")"),
+            "replication connection Debug lost cancel-token redaction markers: {debug}"
+        );
+        for secret in [
+            PARAMETER_KEY,
+            PARAMETER_VALUE,
+            TRANSPORT_SECRET,
+            SOCKET_SECRET,
+            std::str::from_utf8(KEY_SECRET).expect("ASCII key sentinel"),
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "replication connection Debug leaked {secret}: {debug}"
+            );
+        }
+        assert!(
+            !debug.contains(&format!("{:?}", TRANSPORT_SECRET.as_bytes()))
+                && !debug.contains(&format!("{KEY_SECRET:?}"))
+                && !debug.contains(&format!("{:?}", bytes::Bytes::from_static(KEY_SECRET))),
+            "replication connection Debug leaked omitted bytes: {debug}"
+        );
+        assert!(
+            debug.starts_with(
+                "ReplicationConnection { parameter_count: 1, in_flight: InFlight { busy: true, \
+                 poisoned: true }, has_release: false, cancel_token: CancelToken {"
+            ),
+            "replication connection Debug changed shape: {debug}"
+        );
+        assert!(
+            debug.ends_with(" }, .. }"),
+            "replication connection Debug lost its non-exhaustive marker: {debug}"
         );
     }
 
@@ -5354,14 +5450,59 @@ mod tests {
     }
 
     #[test]
-    fn replication_stream_debug_names_its_type() {
-        let stream = stream_over(Vec::new());
+    fn replication_stream_debug_is_bounded_and_omits_private_state() {
+        const TRANSPORT_SECRET: &str = "debug-stream-transport-51ac68d9";
+        const SOCKET_SECRET: &str = "debug-stream-socket-af3e7a21";
+        const KEY_SECRET: &[u8] = b"debug-stream-cancel-key-d83bc927";
 
-        let debug = format!("{stream:?}");
+        let debug = format_under_watchdog("ReplicationStream", || {
+            let mut stream = stream_over(TRANSPORT_SECRET.as_bytes().to_vec());
+            stream.lsn = LsnTracker {
+                received: 4_369,
+                processed: 8_738,
+            };
+            stream.copy_response =
+                crate::copy_format::CopyResponse::from_wire(&[1, 0, 2, 0, 0, 0, 1])
+                    .expect("valid binary CopyBoth response metadata");
+            stream.in_flight.busy = true;
+            stream.in_flight.poisoned = true;
+            stream.cancel_token = redacting_test_cancel_token(SOCKET_SECRET, KEY_SECRET);
+            format!("{stream:?}")
+        });
 
         assert!(
-            debug.starts_with("ReplicationStream {"),
-            "replication stream Debug did not name its type: {debug}"
+            debug.contains("socket_config: Some(\"<redacted>\")")
+                && debug.contains("secret_key: Some(\"<redacted>\")"),
+            "replication stream Debug lost cancel-token redaction markers: {debug}"
+        );
+        for secret in [
+            TRANSPORT_SECRET,
+            SOCKET_SECRET,
+            std::str::from_utf8(KEY_SECRET).expect("ASCII key sentinel"),
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "replication stream Debug leaked {secret}: {debug}"
+            );
+        }
+        assert!(
+            !debug.contains(&format!("{:?}", TRANSPORT_SECRET.as_bytes()))
+                && !debug.contains(&format!("{KEY_SECRET:?}"))
+                && !debug.contains(&format!("{:?}", bytes::Bytes::from_static(KEY_SECRET))),
+            "replication stream Debug leaked omitted bytes: {debug}"
+        );
+        assert!(
+            debug.starts_with(
+                "ReplicationStream { lsn: LsnTracker { received: 4369, processed: 8738 }, \
+                 copy_response: CopyResponse { format: Binary, column_formats: [Text, Binary] }, \
+                 in_flight: InFlight { busy: true, poisoned: true }, has_release: false, \
+                 cancel_token: CancelToken {"
+            ),
+            "replication stream Debug changed shape: {debug}"
+        );
+        assert!(
+            debug.ends_with(" }, .. }"),
+            "replication stream Debug lost its non-exhaustive marker: {debug}"
         );
     }
 
