@@ -8411,6 +8411,85 @@ mod tests {
     }
 
     #[compio::test]
+    async fn serialized_copy_startup_delivers_stash_before_waiting_for_producer() {
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let (mut response_tx, mut response_rx) = mpsc::channel(1);
+        for _ in 0..2 {
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("prime the COPY response channel");
+        }
+        assert!(
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the COPY response sender was not capacity-full"
+        );
+
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let request = Request {
+            messages: RequestMessages::CopyIn(copy_in),
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            request_server_error: Arc::default(),
+        };
+        let (_request_tx, request_rx) = mpsc::unbounded();
+        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([vec![b'2', 0, 0, 0, 4], copy_in_response_frame()]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+
+        let mut handling = Box::pin(connection.handle_request(request));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            std::future::Future::poll(handling.as_mut(), &mut context).is_pending(),
+            "COPY startup did not park on its open producer"
+        );
+
+        response_rx.try_recv().expect("read first priming batch");
+        response_rx.try_recv().expect("read second priming batch");
+        let bind_complete = response_rx
+            .try_recv()
+            .expect("BindComplete was not drained before the second startup read");
+        assert!(matches!(
+            bind_complete,
+            ResponseMessages::Raw(messages) | ResponseMessages::Filtered(messages)
+                if messages.contains_tag(postgres_protocol::message::backend::BIND_COMPLETE_TAG)
+        ));
+        let copy_in_response = response_rx
+            .try_recv()
+            .expect("CopyInResponse was not drained before the producer wait");
+        assert!(matches!(
+            copy_in_response,
+            ResponseMessages::Raw(messages) | ResponseMessages::Filtered(messages)
+                if messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG)
+        ));
+    }
+
+    #[compio::test]
     async fn serialized_main_loop_preserves_stashed_batch_order() {
         let (connection, mut response, copy_request) =
             connection_with_stashed_batch(vec![completed_response_batch(b'I')]);
