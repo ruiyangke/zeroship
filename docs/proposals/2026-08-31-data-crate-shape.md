@@ -111,10 +111,12 @@ zeroship-data-sqlite            impl of the core contract.   -> data-core, rusql
 zeroship-data-cdc-server        service tier: WAL stream, slot authority, reaper. Peer of
                                 zeroship-migrate-server.
                                 -> compio-postgres, zeroship-core. NOT data-core, NOT data-postgres.
-zeroship-plugin-db              env.db surface, worker tier. impl NativePlugin. KEEPS ITS NAME.
-                                V8, crud, broker, subscription lifecycle.
-                                -> data-core, data-postgres, data-sqlite.
-                                NOT -> data-cdc-server. The worker must not link the relay.
+zeroship-plugin-db              THIN. The worker/runtime plugin ADAPTER ONLY: impl NativePlugin,
+                                the V8 objects, the V8 seam, per-isolate context. ~7,400 lines.
+                                -> data-engine. NOT -> data-cdc-server; the worker must not
+                                link the relay.
+zeroship-data-engine            the data plane's actual logic: crud pipeline, transactions,
+                                exec, broker. ~25,000 lines. -> data-core
 
 zeroship-core::change_event     the cross-process event type, beside usage_event and
                                 replication_names, which are already there.
@@ -123,7 +125,42 @@ zeroship-migrate-*              the engine, dialect-complete, untouched
 zeroship-migrate-server         the migration service host
 ```
 
-**The five crates above are the DESTINATION. Only three of them should be built now, and the
+### `plugin-db` becomes a THIN ADAPTER - operator decision, 2026-08-31
+
+**It keeps its name and loses almost everything else.** It becomes the worker/runtime plugin adapter
+only: the `NativePlugin` impl, the V8 objects, the V8 seam and per-isolate context. Everything else
+moves down.
+
+**That decision exposed a hole in the five-crate target, and the measurement is why the count grew.**
+`zeroship-plugin-db` is 57,427 lines:
+
+| module | lines | |
+| --- | --- | --- |
+| `backend/` | 13,560 | both drivers plus the shared trait |
+| `crud/` | 12,972 | the read/write pipeline |
+| `transaction/` | 8,592 | the SC-1 reducer and driver |
+| `v8_classes/` | 3,455 | Db, Collection, Subscription, Transaction |
+| `encryption/` | 1,591 | |
+| `auth/` | 1,459 | session setup, `SET LOCAL ROLE` |
+| top-level | 15,462 | broker 1,937, exec 1,769, error 1,703, context 1,688, wal_consumer 1,440, lib 1,357, replication 908, v8_bridge 867 |
+
+A genuine adapter is `lib.rs` + `v8_classes/` + `v8_bridge.rs` + `context.rs`, about **7,400 lines**.
+So roughly **50,000 lines need a destination**, and the five-crate target had one for most of them and
+**none for the largest single block**: `crud/` + `transaction/` + `exec.rs` is **~23,000 lines** of
+pipeline and reducer that is not a contract, not a driver, not the grammar and not the relay. Putting
+it in `data-core` would make the core the big crate again with drivers attached, which is the thing
+the split exists to undo.
+
+Hence `zeroship-data-engine`. The count is **six**, and it is six because the modules are six things,
+not because six is a nicer number.
+
+**A clarification this document owes the reader.** Track B argues "the broker stays in the worker",
+and that is about the PROCESS - V8 subscription objects hold `broker::Subscription` handles directly,
+so it cannot move to another machine. **A crate boundary is not a process boundary.** The broker moves
+DOWN into `data-engine` and still runs inside the worker process. The two statements are compatible,
+and the earlier phrasing could be read as "the broker must stay in `plugin-db`". It must not.
+
+**The five crates below are the DESTINATION. Only three of them should be built now, and the
 justification this document originally gave for the family is WRONG - corrected 2026-08-31 by review,
 verified twice.**
 
