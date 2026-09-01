@@ -1528,3 +1528,390 @@ async fn empty_vec_array_is_valid_but_noncanonical() {
     assert_eq!(feedback.stored_text, "{}");
     assert_eq!(feedback.stored_wire, server);
 }
+
+const RANGE_EMPTY: u8 = 0x01;
+const RANGE_LOWER_INCLUSIVE: u8 = 0x02;
+const RANGE_UPPER_INCLUSIVE: u8 = 0x04;
+const RANGE_LOWER_UNBOUNDED: u8 = 0x08;
+const RANGE_UPPER_UNBOUNDED: u8 = 0x10;
+
+#[derive(Clone, Debug)]
+enum FixtureRangeBound<T> {
+    Inclusive(T),
+    Exclusive(T),
+    Unbounded,
+}
+
+#[derive(Clone, Debug)]
+enum RangeWireFixture<T> {
+    Empty,
+    NonEmpty {
+        lower: FixtureRangeBound<T>,
+        upper: FixtureRangeBound<T>,
+    },
+}
+
+fn encode_fixture_range_bound<T>(
+    bound: &FixtureRangeBound<T>,
+    member_type: &Type,
+    out: &mut types::private::BytesMut,
+) -> Result<postgres_protocol::types::RangeBound<postgres_protocol::IsNull>, BoxError>
+where
+    T: ToSql,
+{
+    let encode = |value: &T, out: &mut types::private::BytesMut| {
+        <T as ToSql>::to_sql(value, member_type, out).map(|is_null| match is_null {
+            IsNull::No => postgres_protocol::IsNull::No,
+            IsNull::Yes => postgres_protocol::IsNull::Yes,
+        })
+    };
+    Ok(match bound {
+        FixtureRangeBound::Inclusive(value) => {
+            postgres_protocol::types::RangeBound::Inclusive(encode(value, out)?)
+        }
+        FixtureRangeBound::Exclusive(value) => {
+            postgres_protocol::types::RangeBound::Exclusive(encode(value, out)?)
+        }
+        FixtureRangeBound::Unbounded => postgres_protocol::types::RangeBound::Unbounded,
+    })
+}
+
+impl<T> RangeWireFixture<T>
+where
+    T: ToSql,
+{
+    fn encode(
+        &self,
+        member_type: &Type,
+        out: &mut types::private::BytesMut,
+    ) -> Result<(), BoxError> {
+        match self {
+            Self::Empty => postgres_protocol::types::empty_range_to_sql(out),
+            Self::NonEmpty { lower, upper } => postgres_protocol::types::range_to_sql(
+                |out| encode_fixture_range_bound(lower, member_type, out),
+                |out| encode_fixture_range_bound(upper, member_type, out),
+                out,
+            )?,
+        }
+        Ok(())
+    }
+}
+
+impl<T> ToSql for RangeWireFixture<T>
+where
+    T: ToSql,
+{
+    fn to_sql(&self, ty: &Type, out: &mut types::private::BytesMut) -> Result<IsNull, BoxError> {
+        let types::Kind::Range(member_type) = ty.kind() else {
+            panic!("expected range type");
+        };
+        self.encode(member_type, out)?;
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(ty.kind(), types::Kind::Range(member_type) if T::accepts(member_type))
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut types::private::BytesMut,
+    ) -> Result<IsNull, BoxError> {
+        <Self as ToSql>::to_sql(self, ty, out)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MultirangeWireFixture<T> {
+    ranges: Vec<RangeWireFixture<T>>,
+}
+
+impl<T> ToSql for MultirangeWireFixture<T>
+where
+    T: ToSql,
+{
+    fn to_sql(&self, ty: &Type, out: &mut types::private::BytesMut) -> Result<IsNull, BoxError> {
+        let types::Kind::Multirange(member_type) = ty.kind() else {
+            panic!("expected multirange type");
+        };
+        let count = i32::try_from(self.ranges.len()).expect("multirange member count fits i32");
+        out.extend_from_slice(&count.to_be_bytes());
+        for range in &self.ranges {
+            let length_offset = out.len();
+            out.extend_from_slice(&0_i32.to_be_bytes());
+            let value_offset = out.len();
+            range.encode(member_type, out)?;
+            let length =
+                i32::try_from(out.len() - value_offset).expect("multirange member length fits i32");
+            out[length_offset..value_offset].copy_from_slice(&length.to_be_bytes());
+        }
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(ty.kind(), types::Kind::Multirange(member_type) if T::accepts(member_type))
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut types::private::BytesMut,
+    ) -> Result<IsNull, BoxError> {
+        <Self as ToSql>::to_sql(self, ty, out)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedRangeWire {
+    flags: u8,
+    lower: Option<Vec<u8>>,
+    upper: Option<Vec<u8>>,
+}
+
+fn decode_range_wire(bytes: &[u8]) -> DecodedRangeWire {
+    let mut reader = CopyReader::new(bytes);
+    let flags = reader.take(1)[0];
+    let mut read_bound = || {
+        let len = reader.i32();
+        assert!(len >= 0, "range bound carried a negative length");
+        reader
+            .take(usize::try_from(len).expect("nonnegative range bound length"))
+            .to_vec()
+    };
+    let lower = (flags & (RANGE_EMPTY | RANGE_LOWER_UNBOUNDED) == 0).then(&mut read_bound);
+    let upper = (flags & (RANGE_EMPTY | RANGE_UPPER_UNBOUNDED) == 0).then(&mut read_bound);
+    assert!(
+        reader.remaining.is_empty(),
+        "range wire carried trailing bytes"
+    );
+    DecodedRangeWire {
+        flags,
+        lower,
+        upper,
+    }
+}
+
+fn decode_multirange_wire(bytes: &[u8]) -> Vec<DecodedRangeWire> {
+    let mut reader = CopyReader::new(bytes);
+    let count = reader.i32();
+    assert!(count >= 0, "negative multirange member count");
+    let mut ranges = Vec::with_capacity(usize::try_from(count).expect("nonnegative range count"));
+    for _ in 0..count {
+        let len = reader.i32();
+        assert!(len >= 0, "negative multirange member length");
+        ranges.push(decode_range_wire(reader.take(
+            usize::try_from(len).expect("nonnegative multirange member length"),
+        )));
+    }
+    assert!(
+        reader.remaining.is_empty(),
+        "multirange wire carried trailing bytes"
+    );
+    ranges
+}
+
+fn finite_numeric(digits: &[u16], display_scale: u16) -> NumericWireFixture {
+    NumericWireFixture {
+        digits: digits.to_vec(),
+        weight: 0,
+        sign: NUMERIC_POS,
+        display_scale,
+    }
+}
+
+struct NumericRangeCase {
+    name: &'static str,
+    expression: &'static str,
+    value: RangeWireFixture<NumericWireFixture>,
+    flags: u8,
+}
+
+fn numeric_range_cases() -> Vec<NumericRangeCase> {
+    let lower = || finite_numeric(&[1, 2_500], 2);
+    let upper = || finite_numeric(&[9, 7_500], 2);
+    vec![
+        NumericRangeCase {
+            name: "empty",
+            expression: "'empty'::numrange",
+            value: RangeWireFixture::Empty,
+            flags: RANGE_EMPTY,
+        },
+        NumericRangeCase {
+            name: "fully unbounded",
+            expression: "'(,)'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Unbounded,
+                upper: FixtureRangeBound::Unbounded,
+            },
+            flags: RANGE_LOWER_UNBOUNDED | RANGE_UPPER_UNBOUNDED,
+        },
+        NumericRangeCase {
+            name: "exclusive-exclusive",
+            expression: "'(1.25,9.75)'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Exclusive(lower()),
+                upper: FixtureRangeBound::Exclusive(upper()),
+            },
+            flags: 0,
+        },
+        NumericRangeCase {
+            name: "inclusive-exclusive",
+            expression: "'[1.25,9.75)'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Inclusive(lower()),
+                upper: FixtureRangeBound::Exclusive(upper()),
+            },
+            flags: RANGE_LOWER_INCLUSIVE,
+        },
+        NumericRangeCase {
+            name: "exclusive-inclusive",
+            expression: "'(1.25,9.75]'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Exclusive(lower()),
+                upper: FixtureRangeBound::Inclusive(upper()),
+            },
+            flags: RANGE_UPPER_INCLUSIVE,
+        },
+        NumericRangeCase {
+            name: "inclusive-inclusive",
+            expression: "'[1.25,9.75]'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Inclusive(lower()),
+                upper: FixtureRangeBound::Inclusive(upper()),
+            },
+            flags: RANGE_LOWER_INCLUSIVE | RANGE_UPPER_INCLUSIVE,
+        },
+        NumericRangeCase {
+            name: "lower-unbounded exclusive",
+            expression: "'(,9.75)'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Unbounded,
+                upper: FixtureRangeBound::Exclusive(upper()),
+            },
+            flags: RANGE_LOWER_UNBOUNDED,
+        },
+        NumericRangeCase {
+            name: "lower-unbounded inclusive",
+            expression: "'(,9.75]'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Unbounded,
+                upper: FixtureRangeBound::Inclusive(upper()),
+            },
+            flags: RANGE_LOWER_UNBOUNDED | RANGE_UPPER_INCLUSIVE,
+        },
+        NumericRangeCase {
+            name: "upper-unbounded exclusive",
+            expression: "'(1.25,)'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Exclusive(lower()),
+                upper: FixtureRangeBound::Unbounded,
+            },
+            flags: RANGE_UPPER_UNBOUNDED,
+        },
+        NumericRangeCase {
+            name: "upper-unbounded inclusive",
+            expression: "'[1.25,)'::numrange",
+            value: RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Inclusive(lower()),
+                upper: FixtureRangeBound::Unbounded,
+            },
+            flags: RANGE_UPPER_UNBOUNDED | RANGE_LOWER_INCLUSIVE,
+        },
+    ]
+}
+
+/// The test-only NUMRANGE adapter exercises the production low-level range
+/// helper. Every supported flags combination matches the server byte-for-byte.
+#[compio::test]
+async fn test_only_numeric_range_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    for case in numeric_range_cases() {
+        assert!(
+            RangeWireFixture::<NumericWireFixture>::accepts(&Type::NUM_RANGE),
+            "{}: fixture rejects NUMRANGE",
+            case.name
+        );
+        let ours = outbound_wire(&case.value, &Type::NUM_RANGE);
+        assert_eq!(
+            ours,
+            server_wire(&client, case.expression).await,
+            "{}: NUMRANGE wire mismatch",
+            case.name
+        );
+        assert_eq!(decode_range_wire(&ours).flags, case.flags, "{}", case.name);
+    }
+}
+
+/// The test-only NUMMULTIRANGE fixture validates the count and per-member
+/// length framing that `postgres-types` itself does not provide.
+#[compio::test]
+async fn test_only_numeric_multirange_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    let empty = MultirangeWireFixture::<NumericWireFixture> { ranges: Vec::new() };
+    assert_eq!(
+        outbound_wire(&empty, &Type::NUMMULTI_RANGE),
+        server_wire(&client, "'{}'::nummultirange").await
+    );
+
+    let value = MultirangeWireFixture {
+        ranges: vec![
+            RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Unbounded,
+                upper: FixtureRangeBound::Inclusive(finite_numeric(&[], 0)),
+            },
+            RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Inclusive(finite_numeric(&[1, 2_500], 2)),
+                upper: FixtureRangeBound::Exclusive(finite_numeric(&[2, 5_000], 1)),
+            },
+            RangeWireFixture::NonEmpty {
+                lower: FixtureRangeBound::Inclusive(finite_numeric(&[5], 0)),
+                upper: FixtureRangeBound::Unbounded,
+            },
+        ],
+    };
+    let ours = outbound_wire(&value, &Type::NUMMULTI_RANGE);
+    assert_eq!(
+        ours,
+        server_wire(&client, "'{(,0],[1.25,2.5),[5,)}'::nummultirange").await
+    );
+    let ranges = decode_multirange_wire(&ours);
+    assert_eq!(ranges.len(), 3);
+    assert_eq!(
+        ranges.iter().map(|range| range.flags).collect::<Vec<_>>(),
+        [
+            RANGE_LOWER_UNBOUNDED | RANGE_UPPER_INCLUSIVE,
+            RANGE_LOWER_INCLUSIVE,
+            RANGE_LOWER_INCLUSIVE | RANGE_UPPER_UNBOUNDED,
+        ]
+    );
+}
+
+/// The low-level helper cannot canonicalize discrete subtype bounds. Its valid
+/// `(1,3]` INT4RANGE bytes differ from the server's `[2,4)` bytes; binary COPY
+/// accepts them, preserves equality, and stores the canonical representation.
+#[compio::test]
+async fn discrete_range_bounds_are_valid_but_noncanonical() {
+    let client = compio_client().await;
+    let value = RangeWireFixture::NonEmpty {
+        lower: FixtureRangeBound::Exclusive(1_i32),
+        upper: FixtureRangeBound::Inclusive(3_i32),
+    };
+    let ours = outbound_wire(&value, &Type::INT4_RANGE);
+    let server = server_wire(&client, "'(1,3]'::int4range").await;
+    assert_eq!(decode_range_wire(&ours).flags, RANGE_UPPER_INCLUSIVE);
+    assert_eq!(decode_range_wire(&server).flags, RANGE_LOWER_INCLUSIVE);
+    assert_ne!(ours, server);
+
+    let feedback = copy_feedback(
+        &client,
+        "noncanonical_int4range",
+        "int4range",
+        &ours,
+        "'(1,3]'::int4range",
+    )
+    .await;
+    assert!(feedback.equal, "canonicalized INT4RANGE must remain equal");
+    assert_eq!(feedback.stored_text, "[2,4)");
+    assert_eq!(feedback.stored_wire, server);
+}
