@@ -144,8 +144,47 @@ The concept underneath is single. **Who computes the value, and when.**
 { name = "deleted_at", assign = { by = "now",       on = "delete" } }
 ```
 
-An ordinary creator column has no `assign`, and that absence is the whole of its
-description.
+~~An ordinary creator column has no `assign`, and that absence is the whole of its
+description.~~ **FALSE, and round 5 refuted it from the SDK's own docs.**
+`t.actor()` is documented as "available to creators who want their own
+actor-tracking columns (e.g. `last_edited_by`)"
+(`sdks/db/src/types.ts:1881-1886`), and `t.timestamp()` carries
+`.auto_now()` / `.auto_now_on_update()` (`:1044-1052`) - which are precisely
+`created_at` and `updated_at` semantics, already offered to creators.
+
+So `assign` is NOT a system-field concept. It is a general column concept that
+the system fields happen to use, and the creator API already promises it. That
+makes the design better, not worse: there is one mechanism, and the seven are
+ordinary columns whose `assign` is root-declared.
+
+### The trust boundary is the DECLARER, not the file
+
+**Round 5 found the hole, and it is round 3's mistake made again in a new place.**
+The earlier section says bindings are safe because they live in the charter,
+which `policy.rs:58` compiles in. The charter IS trusted. But **it is not the
+only source of injects.**
+
+`LoadContext` (`crates/zeroship-migrate-policy/src/document.rs:27-44`) makes
+exactly two things root-only: a `mandatory` inject, and `extends`. An UNTRUSTED
+creator draft loaded as `NonRootLayer` may still carry an ordinary `[[inject]]`,
+and those injects are unioned into the effective policy. So merely widening
+`WireColumn` with an `assign` key lets a creator draft declare one on a new,
+non-colliding column - and `created_by` becomes forgeable again by a different
+route.
+
+I reasoned "trusted container, therefore trusted contents" without asking who
+else may write that shape. That is exactly what killed `writeClass` in round 3.
+
+**The fix is an axis that already exists:** `assign` must be **root-only**,
+enforced at policy load beside `mandatory`, not merely placed in a root file.
+`PolicyDoc` retains rules but not their originating `LoadContext`
+(`compose.rs:1494-1507`), so the check belongs at load rather than at compose.
+
+**And it composes with the correction above.** Creator columns may carry an
+`assign` - that is what `t.actor()` and `.auto_now()` already promise - but a
+creator may not declare one on a SYSTEM column, and may not declare a
+root-reserved generator. The gate is on the declarer and the target, not on the
+property's existence.
 
 **Everything the earlier draft declared is a consequence:**
 
@@ -164,6 +203,54 @@ RENDERING of the assignment rule, not a second declaration of it.
 
 `typedId` has no SQL rendering, so it yields no DDL default - the absence falls
 out instead of needing a rule.
+
+## ROUND 5 KILLED THE DERIVATION, IN TWO PLACES, ONE OF THEM PLAINTEXT
+
+**1. Deriving the DDL default from `by` makes every row born soft-deleted.**
+`deleted_at` is `TIMESTAMPTZ NULL` with NO default (`query.rs:217`). Its binding
+is `{ by = "now", on = "delete" }`, so a derivation keyed on `by` gives it
+`DEFAULT NOW()`. Then: reads append `AND "deleted_at" IS NULL`
+(`query.rs:3405-3416`) and return **zero rows**; `delete()`'s inner SELECT
+carries the same predicate (`:4752`) so soft delete affects nothing forever; and
+`restore()`'s `deleted_at IS NOT NULL` guard (`:4648`) succeeds on live rows.
+
+And it breaks the argument this design used on itself. `:165` disposes of
+`typedId` with "no SQL rendering, so the absence falls out instead of needing a
+rule". For `deleted_at` the absence does NOT fall out, because `now` *does*
+render. Gating the derivation on `on` as well as `by` is a rule; `version`'s seed
+needs a second; `actor`'s absence a third. That is the accumulation the operator
+rejected, reappearing on the first field tested.
+
+**2. "Materialise function defaults, never the rest" writes PLAINTEXT into an
+encrypted column.** `t.encrypted(...)` produces a FieldDef whose `type` is
+`"string" | "number" | "bytes"` with an `encrypted` block beside it
+(`sdks/db/src/types.ts:1746-1751`). The DDL constraint emitter switches on
+`type` (`query.rs:2906-2954`), so it writes `DEFAULT 'secret'` onto a column
+whose storage type is `BYTEA`. That default is unreachable TODAY only because
+the SDK materialises the value client-side and the encryption pass substitutes
+ciphertext before the INSERT. **The proposed rule makes the DDL default the
+primary source**, so the plaintext lands on disk and the read path then tries to
+AEAD-decrypt it.
+
+Two further classes break the same rule, silently:
+- **No DDL default exists at all** for `t.timestamp().default(...)`,
+  `t.calendarDate()`, `t.bytes()`, `t.literal()`, `t.vector()`, `t.geoPoint()`,
+  `t.ref()` - the emitter handles five types and `_ => {}` swallows the rest
+  (`query.rs:2945`). The client stops sending, nothing supplies: `23502` on a
+  required column, silent NULL on a nullable one.
+- **The DDL default is the WRONG VALUE** for `t.json().default({theme:"dark"})`
+  and `t.array()`: `:2943-2944` discard the declared value and emit the empty
+  container. The row is born `{}`, with no error.
+
+**The rule cannot be repaired inside the no-lists constraint.** The proposed
+discriminator is `typeof def.default === "function"` (`validate.ts:509`), which
+is blind to the field's TYPE - and the type is what decides whether a DDL default
+exists. Fixing it needs a per-type table, which is a list. And no discriminator
+helps case 2: for an encrypted column no DDL default is ever correct.
+
+**Status: the derivation claim is withdrawn.** What survives is `assign` as the
+single description of who computes a value and when. What does NOT survive is
+"the DDL default falls out of it".
 
 **CORRECTION, found before the round-5 reviewers reported: `by` is a generator
 INVOCATION, not a bare name.** `SynthFn` is closed at three variants -
@@ -212,7 +299,40 @@ declared beside it. The charter says the rule once and both consumers read it.
 
 **Cost:** `on` needs a small closed vocabulary - `insert`, `write`, `delete`,
 `restore`. `deleted_at` stops being the awkward case the earlier draft flagged;
-it is `on = "delete"`, the same shape as everything else.
+it is `on = "delete"`, the same shape as everything else. Round 5 adds one gap:
+`restore` must CLEAR the column to `NULL`, and no generator in the set yields
+nothing, so the set needs a null-producing member or `on = "restore"` needs its
+own semantics (`query.rs:4716-4740`).
+
+**Cost in the engine, sized by round 5, and it is not small.** Adding `assign` to
+the charter touches: `WireColumn`, which is `deny_unknown_fields`
+(`document.rs:321-337`), so every consumer breaks on the first unknown key -
+including migrate-server, which parses the embedded ceiling at startup and exits
+on failure (`main.rs:245-257`); `InjectColumn`, which today maps only
+type/null/default/collation (`rule.rs:72-93`); collision semantics and canonical
+sealing, or two different generator bindings seal identically
+(`compose.rs:1483-1505`, `seal.rs:485-512`); `ResolvedInject`, which converts
+straight to `IrColumn` and has no assignment carrier
+(`table_shape.rs:150-201`); artifact projection, which discards synthesized
+defaults today (`lower.rs:10066-10102`); plus regenerating the committed TS
+fragment and rebuilding the shipped `.node` addon (`codegen.mjs:42-52`,
+`addon.ts:2-8`).
+
+**Removing `doc_has_version` / `doc_has_updated_at` is not a local edit.** If
+either key still reaches the builder afterwards, the generic loop emits
+`field = EXCLUDED.field` (`query.rs:6295-6304`) AND the now-unconditional
+automatic path emits a second assignment to the same target (`:6313-6333`) -
+two assignments to one column in a single `DO UPDATE SET`. The flags must go
+together with the guarantee that the keys never arrive. CAS is unaffected: it
+reads the filter independently (`system_fields_pass.rs:448-477`).
+
+**The worker charter include is cheap but not free.** No Cargo cycle -
+plugin-db has no edge to migrate-policy today and migrate-policy is a leaf. But
+the fragment cannot parse alone: it lacks `policy_version` by design
+(`confined-system-shape.inject.toml:4-8`), so plugin-db must concatenate a
+header exactly as the TypeScript ceiling already does
+(`confined-ceiling.ts:28-31`), and parse once at construction rather than per
+write.
 
 Naming is open (`assign` / `by` / `on` are placeholders). The shape is not: one
 property, two parts, everything else inferred.
