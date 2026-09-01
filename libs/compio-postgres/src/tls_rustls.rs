@@ -2541,6 +2541,17 @@ mod tests {
     }
 
     #[test]
+    fn crl_issuer_utf8_string_containing_only_c_whitespace_is_empty() {
+        let value = Any::from_tag_and_data(Tag::Utf8String, b" \t\n\x0b\x0c\r");
+
+        assert_eq!(
+            openssl_canonical_string(&value),
+            Ok(Some(Vec::new())),
+            "an issuer containing only C whitespace must canonicalize to the empty string"
+        );
+    }
+
+    #[test]
     fn crl_issuer_bmp_string_decodes_big_endian_two_byte_units() {
         // BMPString stores each Unicode scalar as one two-byte, big-endian unit.
         let encoded = [0x00, 0x61, 0x26, 0x03];
