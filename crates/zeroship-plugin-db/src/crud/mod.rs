@@ -782,8 +782,13 @@ pub(crate) fn dispatch_insert<'s>(
                     .map_err(DbError::from)?;
             let rows =
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await?;
-            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default())
-                .await
+            read_pipeline::apply(
+                &binding,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
         |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
     )));
@@ -828,8 +833,13 @@ pub(crate) fn dispatch_insert_many<'s>(
             .map_err(DbError::from)?;
             let rows =
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await?;
-            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default())
-                .await
+            read_pipeline::apply(
+                &binding,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
@@ -1062,7 +1072,10 @@ pub(crate) fn dispatch_update_one<'s>(
                 }
                 OpResult::JsValue {
                     resolver,
-                    value: crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::first_row_or_null_masked(
+                        result.rows,
+                        result.has_masked,
+                    ),
                     request_id,
                 }
             }
@@ -1111,172 +1124,172 @@ pub(crate) fn dispatch_update_many<'s>(
         resolver,
         request_id,
         async move {
-        let hints = write_pipeline::inspect_update(&app, &coll, &update)?;
-        let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
-        if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
-            return Err(DbError::multi_row_version_filter_unsupported(&coll));
-        }
+            let hints = write_pipeline::inspect_update(&app, &coll, &update)?;
+            let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
+            if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
+                return Err(DbError::multi_row_version_filter_unsupported(&coll));
+            }
 
-        // The descriptor entry, resolved once for the whole op: the per-row
-        // randomised-encryption decision, the SQLite boolean lowering and the
-        // target-row probe all read it. An undeclared collection rejects.
-        let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-        let per_row_encrypted_update =
-            write_pipeline::update_requires_per_row_encryption(&schema, &update);
-        let autobump = query::SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: actor_id.as_deref(),
-            skip_version: hints.creator_supplied_version,
-            skip_updated_at: hints.creator_supplied_updated_at,
-            skip_updated_by: hints.creator_supplied_updated_by,
-        };
-        if per_row_encrypted_update {
-            let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
-            let work_result: Result<usize, DbError> = async {
-                let target_rows = write_pipeline::resolve_target_row_ids(
-                    frame.route(),
-                    &coll,
-                    &filter,
-                    query::MAX_QUERY_LIMIT + 1,
-                    &schema,
-                )
-                .await?;
-                let target_limit = usize::try_from(query::MAX_QUERY_LIMIT)
-                    .expect("MAX_QUERY_LIMIT must be a positive usize");
-                if target_rows.len() > target_limit {
-                    return Err(DbError::validation_hinted(
-                        "update_many_target_limit_exceeded",
-                        format!(
-                            "updateMany matched more than {} rows; the maximum is {}",
-                            query::MAX_QUERY_LIMIT,
-                            query::MAX_QUERY_LIMIT
-                        ),
-                        format!(
-                            "Narrow the updateMany filter so one call targets at most {} rows.",
-                            query::MAX_QUERY_LIMIT
-                        ),
-                    ));
-                }
-                if target_rows.is_empty() {
-                    if let Some(expected_version) = cas_version {
-                        let row_id = filter
-                            .as_object()
-                            .and_then(|o| o.get("id"))
-                            .and_then(|v| v.as_str());
-                        return Err(DbError::version_mismatch(&coll, row_id, expected_version));
-                    }
-                    return Ok(0);
-                }
-
-                let target_count = target_rows.len();
-                let mut row_queries = Vec::with_capacity(target_count);
-                for target_row in &target_rows {
-                    let row_pk = target_row.row_pk.clone();
-                    let row_id = target_row.id_value.clone();
-                    let mut row_update = update.clone();
-                    write_pipeline::apply(
-                        &binding,
-                        &coll,
-                        &mut row_update,
-                        write_pipeline::ApplyMode::Update { row_pk: &row_pk },
-                    )
-                    .await?;
-                    maybe_lower_sqlite_boolean_update(&schema, &mut row_update);
-                    let mut row_filter = serde_json::json!({ "id": row_id });
-                    if let Some(expected_version) = cas_version {
-                        row_filter["version"] = Value::from(expected_version);
-                    }
-                    // The probe resolved this row by its primary-key `id`, so
-                    // the per-row statement does not need a second bounded
-                    // subquery. Using the many builder here preserves the
-                    // ordinary column-grant surface while the primary key still
-                    // bounds the statement to this exact row.
-                    row_queries.push(
-                        query::build_update_many_with_system_fields(
-                            &app,
-                            &coll,
-                            &schema,
-                            &row_filter,
-                            &row_update,
-                            current_sql_dialect(),
-                            &autobump,
-                        )
-                        .map_err(DbError::from)?,
-                    );
-                }
-
-                let mut affected = 0usize;
-                for built in row_queries {
-                    affected += exec_mutation_with_emit(
-                        built,
+            // The descriptor entry, resolved once for the whole op: the per-row
+            // randomised-encryption decision, the SQLite boolean lowering and the
+            // target-row probe all read it. An undeclared collection rejects.
+            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+            let per_row_encrypted_update =
+                write_pipeline::update_requires_per_row_encryption(&schema, &update);
+            let autobump = query::SystemFieldAutoBump {
+                dispatch_write: true,
+                actor_id: actor_id.as_deref(),
+                skip_version: hints.creator_supplied_version,
+                skip_updated_at: hints.creator_supplied_updated_at,
+                skip_updated_by: hints.creator_supplied_updated_by,
+            };
+            if per_row_encrypted_update {
+                let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
+                let work_result: Result<usize, DbError> = async {
+                    let target_rows = write_pipeline::resolve_target_row_ids(
                         frame.route(),
                         &coll,
-                        crate::broker::ChangeOp::Update,
+                        &filter,
+                        query::MAX_QUERY_LIMIT + 1,
+                        &schema,
                     )
-                    .await?
-                    .len();
-                }
-
-                if let Some(expected_version) = cas_version {
-                    if affected != target_count {
-                        let row_id = filter
-                            .as_object()
-                            .and_then(|o| o.get("id"))
-                            .and_then(|v| v.as_str());
-                        return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                    .await?;
+                    let target_limit = usize::try_from(query::MAX_QUERY_LIMIT)
+                        .expect("MAX_QUERY_LIMIT must be a positive usize");
+                    if target_rows.len() > target_limit {
+                        return Err(DbError::validation_hinted(
+                            "update_many_target_limit_exceeded",
+                            format!(
+                                "updateMany matched more than {} rows; the maximum is {}",
+                                query::MAX_QUERY_LIMIT,
+                                query::MAX_QUERY_LIMIT
+                            ),
+                            format!(
+                                "Narrow the updateMany filter so one call targets at most {} rows.",
+                                query::MAX_QUERY_LIMIT
+                            ),
+                        ));
                     }
-                }
-                Ok(affected)
-            }
-            .await;
-            // `finish` is the commit/rollback boundary and already takes and
-            // returns a `Result<usize, DbError>` - the same shape `settle`
-            // wants - so the frame is committed or rolled back exactly once
-            // whichever way the work went. Do NOT `?` the work_result above it.
-            return frame.finish(work_result).await;
-        }
+                    if target_rows.is_empty() {
+                        if let Some(expected_version) = cas_version {
+                            let row_id = filter
+                                .as_object()
+                                .and_then(|o| o.get("id"))
+                                .and_then(|v| v.as_str());
+                            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                        }
+                        return Ok(0);
+                    }
 
-        let mut update = update;
-        write_pipeline::apply(
-            &binding,
-            &coll,
-            &mut update,
-            write_pipeline::ApplyMode::Update { row_pk: "" },
-        )
-        .await?;
-        maybe_lower_sqlite_boolean_update(&schema, &mut update);
-        let mut sql_filter = filter.clone();
-        maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
-        let bq = query::build_update_many_with_system_fields(
-            &app,
-            &coll,
-            &schema,
-            &sql_filter,
-            &update,
-            current_sql_dialect(),
-            &autobump,
-        )
-        .map_err(DbError::from)?;
-        let rows =
-            exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
-        // CAS path on updateMany: with `{ id, version: N }` the
-        // RETURNING is at most one row. Same empty-check as
-        // updateOne so the SDK's CAS contract holds for both
-        // entry points.
-        if let Some(expected_version) = cas_version {
-            if rows.is_empty() {
-                let row_id = filter
-                    .as_object()
-                    .and_then(|o| o.get("id"))
-                    .and_then(|v| v.as_str());
-                return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                    let target_count = target_rows.len();
+                    let mut row_queries = Vec::with_capacity(target_count);
+                    for target_row in &target_rows {
+                        let row_pk = target_row.row_pk.clone();
+                        let row_id = target_row.id_value.clone();
+                        let mut row_update = update.clone();
+                        write_pipeline::apply(
+                            &binding,
+                            &coll,
+                            &mut row_update,
+                            write_pipeline::ApplyMode::Update { row_pk: &row_pk },
+                        )
+                        .await?;
+                        maybe_lower_sqlite_boolean_update(&schema, &mut row_update);
+                        let mut row_filter = serde_json::json!({ "id": row_id });
+                        if let Some(expected_version) = cas_version {
+                            row_filter["version"] = Value::from(expected_version);
+                        }
+                        // The probe resolved this row by its primary-key `id`, so
+                        // the per-row statement does not need a second bounded
+                        // subquery. Using the many builder here preserves the
+                        // ordinary column-grant surface while the primary key still
+                        // bounds the statement to this exact row.
+                        row_queries.push(
+                            query::build_update_many_with_system_fields(
+                                &app,
+                                &coll,
+                                &schema,
+                                &row_filter,
+                                &row_update,
+                                current_sql_dialect(),
+                                &autobump,
+                            )
+                            .map_err(DbError::from)?,
+                        );
+                    }
+
+                    let mut affected = 0usize;
+                    for built in row_queries {
+                        affected += exec_mutation_with_emit(
+                            built,
+                            frame.route(),
+                            &coll,
+                            crate::broker::ChangeOp::Update,
+                        )
+                        .await?
+                        .len();
+                    }
+
+                    if let Some(expected_version) = cas_version {
+                        if affected != target_count {
+                            let row_id = filter
+                                .as_object()
+                                .and_then(|o| o.get("id"))
+                                .and_then(|v| v.as_str());
+                            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                        }
+                    }
+                    Ok(affected)
+                }
+                .await;
+                // `finish` is the commit/rollback boundary and already takes and
+                // returns a `Result<usize, DbError>` - the same shape `settle`
+                // wants - so the frame is committed or rolled back exactly once
+                // whichever way the work went. Do NOT `?` the work_result above it.
+                return frame.finish(work_result).await;
             }
-        }
-        // Both arms resolve to a COUNT, so both return `usize` and the adapter
-        // lowers once. The encrypted arm already did (`usize_count_as_f64`);
-        // this arm used `row_count_as_f64(rows)`, which is `rows.len() as f64` -
-        // the same `ResolveValue::F64`, so unifying changes no output.
-        Ok(rows.len())
+
+            let mut update = update;
+            write_pipeline::apply(
+                &binding,
+                &coll,
+                &mut update,
+                write_pipeline::ApplyMode::Update { row_pk: "" },
+            )
+            .await?;
+            maybe_lower_sqlite_boolean_update(&schema, &mut update);
+            let mut sql_filter = filter.clone();
+            maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
+            let bq = query::build_update_many_with_system_fields(
+                &app,
+                &coll,
+                &schema,
+                &sql_filter,
+                &update,
+                current_sql_dialect(),
+                &autobump,
+            )
+            .map_err(DbError::from)?;
+            let rows =
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            // CAS path on updateMany: with `{ id, version: N }` the
+            // RETURNING is at most one row. Same empty-check as
+            // updateOne so the SDK's CAS contract holds for both
+            // entry points.
+            if let Some(expected_version) = cas_version {
+                if rows.is_empty() {
+                    let row_id = filter
+                        .as_object()
+                        .and_then(|o| o.get("id"))
+                        .and_then(|v| v.as_str());
+                    return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                }
+            }
+            // Both arms resolve to a COUNT, so both return `usize` and the adapter
+            // lowers once. The encrypted arm already did (`usize_count_as_f64`);
+            // this arm used `row_count_as_f64(rows)`, which is `rows.len() as f64` -
+            // the same `ResolveValue::F64`, so unifying changes no output.
+            Ok(rows.len())
         },
         crate::v8_bridge::usize_count_as_f64,
     )));
@@ -1892,8 +1905,13 @@ pub(crate) fn dispatch_upsert<'s>(
             // doesn't need to.
             let rows =
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
-            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default())
-                .await
+            read_pipeline::apply(
+                &binding,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
         |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
     )));
@@ -2097,7 +2115,10 @@ pub(crate) fn dispatch_search<'s>(
                 };
                 zeroship_runtime::state::OpResult::JsValue {
                     resolver,
-                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::rows_as_json_array_masked(
+                        result.rows,
+                        result.has_masked,
+                    ),
                     request_id,
                 }
             }
@@ -2264,7 +2285,10 @@ pub(crate) fn dispatch_near<'s>(
                 };
                 zeroship_runtime::state::OpResult::JsValue {
                     resolver,
-                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::rows_as_json_array_masked(
+                        result.rows,
+                        result.has_masked,
+                    ),
                     request_id,
                 }
             }
