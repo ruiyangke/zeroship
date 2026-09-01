@@ -173,6 +173,14 @@ resolution:
    `broker::SuppressGuard::activate` directly in BOTH arms. The surviving `ChangeStream` is then
    genuinely core-safe.
 
+   **Where the deletion stops, because this is easy to over-cut.** What goes is the two *trait
+   methods* on `ChangeStream` and their two impls (`change_stream_pg.rs`, `backend/sqlite/cdc.rs`).
+   Every remaining reference is a test, a `*_for_tests` helper on `SqliteBackend`, or a doc comment.
+   What STAYS is `BrokerPauseGuard` and `SchemaPendingGuard` as plain engine structs, and with them
+   the `broker::engage_schema_pending` / `disengage_schema_pending` free functions their construction
+   and `Drop` call - those are the guards' implementation, not the trait surface being removed. Delete
+   the free functions too and the surviving guards stop working.
+
 **Six vendor-free capability traits go to core**, not eight. `PgSqlExecutor` is ungated but not
 vendor-free - its super-bound is `SqlExecutor<Client = compio_postgres::OwnedPooledClient>` and
 `pool_handle` returns `&Rc<compio_postgres::Pool>` in a production signature. It goes to PG, or dies
