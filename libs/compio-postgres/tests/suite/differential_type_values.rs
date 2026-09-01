@@ -293,7 +293,8 @@ fn compio_simple_value(
 
 const FORMAT_RENDERING_SQL: &str = "SET TIME ZONE 'UTC'; \
      SET DateStyle = 'ISO, YMD'; \
-     SET IntervalStyle = 'postgres'";
+     SET IntervalStyle = 'postgres'; \
+     SET bytea_output = 'hex'";
 
 fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
     on_tokio(url, move |client| async move {
@@ -1474,6 +1475,224 @@ async fn native_array_codecs_must_not_discard_lower_bounds() {
     let ours = compio_native_array_shape_observation().await;
     assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
     assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
+}
+
+fn byte_string_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("bytea-format-empty", "decode('', 'hex')", "bytea"),
+        RawCase::new(
+            "bytea-format-high-bytes",
+            "decode('00ff5c0a80c3', 'hex')",
+            "bytea",
+        ),
+        RawCase::new("text-format-empty", "''::text", "text"),
+        RawCase::new(
+            "text-format-hostile-utf8",
+            "$cpg$line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}$cpg$::text",
+            "text",
+        ),
+        RawCase::new(
+            "varchar-format-trailing-spaces",
+            "$cpg$varying  \u{754c}\u{1f680}  $cpg$::varchar(32)",
+            "varchar(32)",
+        ),
+        RawCase::new("char-format-ascii-padding", "'xy'::char(8)", "char(8)"),
+        RawCase::new(
+            "char-format-unicode-padding",
+            "'\u{754c}\u{1f680}'::char(4)",
+            "char(4)",
+        ),
+    ]
+}
+
+fn tokio_byte_string_format_observations(
+    url: String,
+    cases: Vec<RawCase>,
+) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_byte_string_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeByteStringObservation {
+    decoded_bytea: [Vec<u8>; 2],
+    rebound_bytea: [Vec<u8>; 2],
+    decoded_strings: [String; 5],
+    rebound_strings: [String; 5],
+}
+
+const NATIVE_BYTE_STRING_DECODE_SQL: &str = "SELECT \
+    decode('', 'hex'), \
+    decode('00ff5c0a80c3', 'hex'), \
+    ''::text, \
+    $cpg$line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}$cpg$::text, \
+    $cpg$varying  \u{754c}\u{1f680}  $cpg$::varchar(32), \
+    'xy'::char(8), \
+    '\u{754c}\u{1f680}'::char(4)";
+
+const NATIVE_BYTE_STRING_REBOUND_SQL: &str = "SELECT \
+    $1::bytea, $2::bytea, $3::text, $4::text, $5::varchar(32), \
+    $6::char(8), $7::char(4)";
+
+fn tokio_native_byte_string_observation(url: String) -> NativeByteStringObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_BYTE_STRING_DECODE_SQL, &[])
+            .await
+            .expect("tokio native byte/string decode");
+        let decoded_bytea = [row.get(0), row.get(1)];
+        let decoded_strings = [row.get(2), row.get(3), row.get(4), row.get(5), row.get(6)];
+        let ascii_char_input = "xy".to_owned();
+        let unicode_char_input = "\u{754c}\u{1f680}".to_owned();
+        let rebound = client
+            .query_one(
+                NATIVE_BYTE_STRING_REBOUND_SQL,
+                &[
+                    &decoded_bytea[0],
+                    &decoded_bytea[1],
+                    &decoded_strings[0],
+                    &decoded_strings[1],
+                    &decoded_strings[2],
+                    &ascii_char_input,
+                    &unicode_char_input,
+                ],
+            )
+            .await
+            .expect("tokio native byte/string encode");
+        NativeByteStringObservation {
+            decoded_bytea,
+            rebound_bytea: [rebound.get(0), rebound.get(1)],
+            decoded_strings,
+            rebound_strings: [
+                rebound.get(2),
+                rebound.get(3),
+                rebound.get(4),
+                rebound.get(5),
+                rebound.get(6),
+            ],
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_native_byte_string_observation() -> NativeByteStringObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_BYTE_STRING_DECODE_SQL, &[])
+        .await
+        .expect("compio native byte/string decode");
+    let decoded_bytea = [row.get(0), row.get(1)];
+    let decoded_strings = [row.get(2), row.get(3), row.get(4), row.get(5), row.get(6)];
+    let ascii_char_input = "xy".to_owned();
+    let unicode_char_input = "\u{754c}\u{1f680}".to_owned();
+    let rebound = client
+        .query_one(
+            NATIVE_BYTE_STRING_REBOUND_SQL,
+            &[
+                &decoded_bytea[0],
+                &decoded_bytea[1],
+                &decoded_strings[0],
+                &decoded_strings[1],
+                &decoded_strings[2],
+                &ascii_char_input,
+                &unicode_char_input,
+            ],
+        )
+        .await
+        .expect("compio native byte/string encode");
+    NativeByteStringObservation {
+        decoded_bytea,
+        rebound_bytea: [rebound.get(0), rebound.get(1)],
+        decoded_strings,
+        rebound_strings: [
+            rebound.get(2),
+            rebound.get(3),
+            rebound.get(4),
+            rebound.get(5),
+            rebound.get(6),
+        ],
+    }
+}
+
+/// Both drivers preserve byte and string values in text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_byte_and_string_text_and_binary_codecs() {
+    let cases = byte_string_format_cases();
+    let theirs = tokio_byte_string_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_byte_string_format_observations(&cases).await;
+    assert_eq!(ours, theirs);
+
+    // BPCHAR's output function preserves its padding, while its cast to text
+    // removes it. The generic invariant therefore applies through VARCHAR;
+    // the two CHAR cases are checked against both server witnesses below.
+    assert_format_differential(&cases[..5], &ours[..5], &theirs[..5]);
+
+    let expected = [
+        ("bytea-format-empty", "\\x", ""),
+        ("bytea-format-high-bytes", "\\x00ff5c0a80c3", "00ff5c0a80c3"),
+        ("text-format-empty", "", ""),
+        (
+            "text-format-hostile-utf8",
+            "line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}",
+            "6c696e65206f6e650d0a6c696e652074776f095c2722202f2065cc81202f20f09f9880202f20f09f9a80202f20e280a8",
+        ),
+        (
+            "varchar-format-trailing-spaces",
+            "varying  \u{754c}\u{1f680}  ",
+            "76617279696e672020e7958cf09f9a802020",
+        ),
+    ];
+    for (observation, (name, text, binary_hex)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: wire"
+        );
+    }
+
+    for (observation, padded, rendered, binary_hex) in [
+        (&ours[5], "xy      ", "xy", "7879202020202020"),
+        (
+            &ours[6],
+            "\u{754c}\u{1f680}  ",
+            "\u{754c}\u{1f680}",
+            "e7958cf09f9a802020",
+        ),
+    ] {
+        assert_eq!(observation.text_decoded, padded);
+        assert_eq!(observation.binary_decoded_text, rendered);
+        assert_eq!(hex(&observation.binary_decoded.0), binary_hex);
+        assert_eq!(observation.binary_decoded, observation.binary_encoded);
+        assert_eq!(observation.binary_decoded, observation.text_encoded);
+        assert_eq!(observation.binary_encoded_text, rendered);
+        assert_eq!(observation.text_encoded_text, rendered);
+    }
+
+    let theirs = tokio_native_byte_string_observation(common::plaintext_url());
+    let ours = compio_native_byte_string_observation().await;
+    assert_eq!(ours, theirs);
+    assert_eq!(
+        ours.decoded_bytea,
+        [Vec::new(), vec![0, 0xff, 0x5c, 0x0a, 0x80, 0xc3]]
+    );
+    assert_eq!(ours.decoded_bytea, ours.rebound_bytea);
+    assert_eq!(
+        ours.decoded_strings,
+        [
+            String::new(),
+            "line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}".to_owned(),
+            "varying  \u{754c}\u{1f680}  ".to_owned(),
+            "xy      ".to_owned(),
+            "\u{754c}\u{1f680}  ".to_owned(),
+        ]
+    );
+    assert_eq!(ours.decoded_strings, ours.rebound_strings);
 }
 
 #[derive(Debug, PartialEq, Eq)]
