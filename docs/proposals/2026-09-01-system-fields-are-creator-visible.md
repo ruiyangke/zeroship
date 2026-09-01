@@ -72,13 +72,26 @@ named in one place and enforced on both sides of the V8 boundary:
 
 | Class | Fields | Creator may |
 | --- | --- | --- |
-| `readonly` | `id`, `created_at`, `created_by` | read, filter, sort |
-| `defaulted` | `updated_at`, `updated_by`, `version` | the above, and supply a value on write, which wins over the auto-bump |
-| `managed` | `deleted_at` | the above, but only through `delete()` / `restore()` |
+| `writeOnce` | `id`, `created_at`, `created_by` | read, filter, sort, and **set on INSERT**; never on UPDATE |
+| `defaulted` | `updated_at`, `updated_by`, `version` | the above, and supply a value on UPDATE, which wins over the auto-bump |
+| `managed` | `deleted_at` | the above, but the lifecycle runs through `delete()` / `restore()` |
 
-This is exactly the split `IMMUTABLE_SYSTEM_FIELDS` already enforces. The
-proposal does not invent a policy; it makes the SDK stop contradicting the one
-that ships.
+This is exactly the split the runtime already enforces. The proposal does not
+invent a policy; it makes the SDK stop contradicting the one that ships.
+
+**The first class is `writeOnce`, not `readonly`, and that correction is load-
+bearing.** `inject_into_object` (`system_fields_pass.rs:250`) auto-mints `id`
+only when absent (`:257`), injects `created_by` / `updated_by` only when absent
+(`:268`, `:271`), and never injects `created_at` / `updated_at` / `version` /
+`deleted_at` at all - its own comment at `:276-278` says "creator overrides flow
+through when present". **The INSERT path accepts creator-supplied values for all
+seven fields.** `IMMUTABLE_SYSTEM_FIELDS` is a post-INSERT fence, exactly as its
+doc comment says at `:42-46` ("write-once on INSERT").
+
+That is Salesforce's model precisely: audit fields are settable at create time
+(their "Set Audit Fields" permission) and never updatable afterwards. Calling
+these fields `readonly` would have described a restriction the runtime does not
+implement, and would have invited someone to add one.
 
 **Keep `id: t.id("prefix")`.** It is a prefix declaration, not an override, and
 it is already sanctioned at `:309-321`.
@@ -105,14 +118,22 @@ The narrowing this removes was never a security boundary. It was a schema-
 authoring fence enforced in the SDK, and `system_fields_pass.rs` is the fence
 that actually holds.
 
-## What this does not settle
+## This also explains task #126
 
-Whether `insert()` should accept a caller-supplied `id`. The observation that it
-is discarded is solid; the mechanism is still open (task #126), and this
-proposal deliberately leaves `id` in the `readonly` class rather than resolving
-that question by side effect. If a caller-supplied `id` is later accepted, it
-becomes a write-once-on-INSERT field, which is a change to
-`IMMUTABLE_SYSTEM_FIELDS`'s INSERT arm, not to this classification.
+#126 recorded that `insert()` silently discards a caller-supplied `id`, with the
+observation solid and the mechanism unknown. The mechanism is now bounded: the
+Rust path does **not** discard it. `system_fields_pass.rs:257` mints only
+`if !obj.contains_key("id")`, so a supplied `id` survives the runtime untouched.
+The discard therefore happens ABOVE Rust, in the SDK - and the only thing in the
+SDK that removes system fields from a collection's shape is the refusal/strip
+pair this proposal deletes.
+
+That makes #126 a likely side-effect fix rather than separate work, and it is
+the strongest practical argument for the change: the current design does not
+merely hide the audit columns, it silently drops a value the creator supplied.
+Acceptance criterion 6 below pins it, and it must be demonstrated rather than
+assumed - "likely" is not "measured", and the SDK payload path has not yet been
+traced end to end.
 
 ## Acceptance
 
@@ -127,4 +148,27 @@ becomes a write-once-on-INSERT field, which is a change to
    collision. This test fails on today's code (defect 1) and is the regression
    guard for it.
 5. Generated types for a collection include all seven system fields, with the
-   three `readonly` ones typed so an assignment is a compile error.
+   three `writeOnce` ones accepted in an INSERT payload and rejected in an
+   UPDATE patch at the type level.
+6. `insert({ id: "post_abc..." })` round-trips: the row is stored under the
+   supplied id and `find` returns it. This is #126, and it must be shown
+   failing before the change and passing after - the proposal argues the
+   mechanism is the SDK, and an untraced argument is not evidence.
+
+## Where the safety argument is weakest
+
+Widening a surface is easy to justify one field at a time and hard to justify
+in aggregate, so state the residual plainly: after this change, creator code
+can set `created_at` and `created_by` to any value on INSERT. It can already
+do so today (`system_fields_pass.rs:268` injects the actor only when the key is
+absent), so this proposal does not open the hole - but it does make it
+discoverable, and a discoverable hole gets used.
+
+The question that follows is whether `created_by` should be *server-authored*
+rather than write-once: the actor is known to the runtime, and letting app code
+name a different one makes the column unusable as an audit signal. That is a
+real decision and this proposal does not make it. It preserves current
+behaviour and surfaces it; if the answer is that `created_by` must be
+server-authored, that is a change to `inject_into_object`'s INSERT arm - a
+narrowing, and one worth doing separately so it is not smuggled in under a
+proposal whose stated purpose is to widen.
