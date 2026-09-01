@@ -71,6 +71,10 @@ use crate::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod lock_guard;
+/// PostgreSQL row -> JSON decoding. Travels with `postgres` into the Postgres
+/// crate; kept beside it rather than in the V8 adapter, which is where it lived
+/// until 2026-08-31 and which made this backend depend on the adapter.
+pub(crate) mod pg_row_json;
 pub mod postgres;
 // SQLite module — crate-private by default; under `test-helpers` it
 // becomes `pub` so the integration target (`tests/sqlite_integration.rs`)

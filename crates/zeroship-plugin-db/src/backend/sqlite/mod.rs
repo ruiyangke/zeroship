@@ -46,6 +46,10 @@ pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
 pub(crate) mod lock;
+/// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
+/// reads. Peer of `backend::pg_row_json`; see that module for why the two are
+/// deliberately not shared.
+pub(crate) mod row_json;
 // SC-2's reservation / cancellation / terminal-classification protocol.
 // Public because the cancellation surface (`SqliteCancelHandle`,
 // `TerminalOutcome`) is the contract a deadline or a dropped caller-side
@@ -229,7 +233,7 @@ impl SqliteBackend {
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
-        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
+        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(&typed))
     }
 
     /// Production constructor used by the runtime URL-scheme
@@ -1437,7 +1441,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
         )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
-        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
+        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(&typed))
     }
 }
 
@@ -1568,7 +1572,7 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
         for (d, idx) in scored {
             let row = &typed.rows[idx];
-            let mut obj = crate::v8_bridge::typed_row_to_json_object(&typed.columns, row);
+            let mut obj = crate::backend::sqlite::row_json::typed_row_to_json_object(&typed.columns, row);
             obj.insert(
                 "_distance_m".to_string(),
                 serde_json::Number::from_f64(d)

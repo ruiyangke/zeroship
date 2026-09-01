@@ -60,7 +60,7 @@ use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
-use crate::v8_bridge::rows_to_json_value;
+use crate::backend::pg_row_json::rows_to_json_value;
 
 /// Raw usage metrics a db op emits in its SUCCESS arm (metering-as-
 /// infrastructure). `db_reads` counts each read op (query/count),
@@ -383,7 +383,7 @@ async fn exec_sqlite_json(
             #[cfg(test)]
             tests::record_sqlite_tx_route();
             let typed = client.query_typed_internal(sql, params).await?;
-            Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
+            Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(&typed))
         }
         TxConnection::Postgres(_) => Err(DbError::internal(
             "db: sqlite backend active with postgres transaction connection",
