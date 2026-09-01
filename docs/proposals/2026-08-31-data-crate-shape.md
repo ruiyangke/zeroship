@@ -1,7 +1,34 @@
 # The final shape of the data crates
 
-Status: **planned, not started.** Every number here was measured on 2026-08-31 at `1bf9fdce4`.
+Status: **started 2026-08-31. Four refactors have landed; no crate has been created.**
 Line counts are `find src -name '*.rs' -exec cat {} + | wc -l`.
+
+| landed | what | effect |
+| --- | --- | --- |
+| `a4ed5e3d0` | delete `impl From<compio_postgres::Error> for DbError` | the one construct the orphan rule pinned to whichever crate owns `DbError`. Blast radius compiled first: **one break in the whole closure**, and it was the test asserting the impl existed. |
+| `c7ca2b790` | each backend decodes its own rows | `backend/pg_row_json.rs` + `backend/sqlite/row_json.rs`; `v8_bridge.rs` 867 -> 636 lines and names **no vendor type**. Retires plan item 0.5. |
+| `746cdd123` | per-app emit suppression -> `broker.rs` | none of it decoded WAL. `backend/sqlite/cdc.rs` no longer names the Postgres WAL decoder at all. |
+| `8fd340d77` | `DenyReason` -> `error.rs` | the core stopped importing the engine's transaction reducer. |
+
+**Three dependency cycles closed, each found by a different instrument** - and the middle one by no
+instrument at all, which is why `tests/lib/tier_direction_census.sh` now exists. It found the third on
+its first run.
+
+**Do not read a number below without re-running its command.** Figures in this document have gone stale
+within the hour more than once; the two censuses are the source of truth:
+
+```
+bash tests/lib/tier_signature_census.sh    # which foreign CRATE does a module name?
+bash tests/lib/tier_direction_census.sh    # which TIER does a module reach into?
+```
+
+Neither substitutes for the other. The contract tier called the CDC relay for weeks while the first
+reported nothing, because its `upward` marker only knows about the adapter.
+
+**What the direction census reports today is almost entirely one item.** Eight of its nine rows are the
+engine reaching into the adapter - that is Phase 0.1, the protocol inversion, and it is now the only
+structural work between here and drawing crate boundaries. The ninth is the relay's in-process
+`publish`, which the relay design already turns into a network hop.
 
 ## The governing principle, settled 2026-08-31
 
