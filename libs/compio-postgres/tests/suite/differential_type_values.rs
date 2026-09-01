@@ -1695,6 +1695,112 @@ async fn both_drivers_agree_on_byte_and_string_text_and_binary_codecs() {
     assert_eq!(ours.decoded_strings, ours.rebound_strings);
 }
 
+const JSON_KEY_ORDER_SOURCE: &str = r#"{"zz":0,"a":1,"bbb":2,"aa":3}"#;
+const JSON_KEY_ORDER_JSONB_TEXT: &str = r#"{"a": 1, "aa": 3, "zz": 0, "bbb": 2}"#;
+const JSON_UNICODE_SOURCE: &str =
+    r#"{"bmp":"\u00e9\u754c","pair":"\uD83D\uDE80","solidus":"\/","control":"\u0001"}"#;
+const JSON_UNICODE_JSONB_TEXT: &str =
+    r#"{"bmp": "é界", "pair": "🚀", "control": "\u0001", "solidus": "/"}"#;
+
+fn deep_json_source() -> String {
+    format!(
+        "{}{}{}",
+        "[".repeat(64),
+        r#"{"leaf":"\u754c"}"#,
+        "]".repeat(64)
+    )
+}
+
+fn deep_jsonb_text() -> String {
+    format!(
+        "{}{}{}",
+        "[".repeat(64),
+        r#"{"leaf": "界"}"#,
+        "]".repeat(64)
+    )
+}
+
+fn json_format_cases() -> Vec<RawCase> {
+    let deep = deep_json_source();
+    vec![
+        RawCase::new(
+            "json-format-key-order",
+            &format!("$json${JSON_KEY_ORDER_SOURCE}$json$::json"),
+            "json",
+        ),
+        RawCase::new(
+            "jsonb-format-key-order",
+            &format!("$json${JSON_KEY_ORDER_SOURCE}$json$::jsonb"),
+            "jsonb",
+        ),
+        RawCase::new(
+            "json-format-unicode-escapes",
+            &format!("$json${JSON_UNICODE_SOURCE}$json$::json"),
+            "json",
+        ),
+        RawCase::new(
+            "jsonb-format-unicode-escapes",
+            &format!("$json${JSON_UNICODE_SOURCE}$json$::jsonb"),
+            "jsonb",
+        ),
+        RawCase::new(
+            "json-format-deep-nesting",
+            &format!("$json${deep}$json$::json"),
+            "json",
+        ),
+        RawCase::new(
+            "jsonb-format-deep-nesting",
+            &format!("$json${deep}$json$::jsonb"),
+            "jsonb",
+        ),
+    ]
+}
+
+fn tokio_json_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_json_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Both drivers preserve JSON values through text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_json_text_and_binary_codecs() {
+    let cases = json_format_cases();
+    let theirs = tokio_json_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_json_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let deep_json = deep_json_source();
+    let deep_jsonb = deep_jsonb_text();
+    assert_eq!(deep_json.len(), 145, "deep JSON fixture changed shape");
+    assert_eq!(deep_jsonb.len(), 143, "deep JSONB fixture changed shape");
+    let expected = [
+        ("json-format-key-order", JSON_KEY_ORDER_SOURCE, false),
+        ("jsonb-format-key-order", JSON_KEY_ORDER_JSONB_TEXT, true),
+        ("json-format-unicode-escapes", JSON_UNICODE_SOURCE, false),
+        (
+            "jsonb-format-unicode-escapes",
+            JSON_UNICODE_JSONB_TEXT,
+            true,
+        ),
+        ("json-format-deep-nesting", &deep_json, false),
+        ("jsonb-format-deep-nesting", &deep_jsonb, true),
+    ];
+    for (observation, (name, text, is_jsonb)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        let mut expected_wire = Vec::with_capacity(text.len() + usize::from(is_jsonb));
+        if is_jsonb {
+            expected_wire.push(1);
+        }
+        expected_wire.extend_from_slice(text.as_bytes());
+        assert_eq!(observation.binary_decoded.0, expected_wire, "{name}: wire");
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
