@@ -1,4 +1,5 @@
-use compio_postgres::{Client, Error};
+use compio_postgres::{Client, Error, QueryOutcome};
+use futures_util::StreamExt;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -40,10 +41,13 @@ fn failing_custom_type_query(type_name: &str) -> String {
 
 #[compio::test]
 async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails() {
+    const BARRIER: &str = "SELECT 1 /* cpg_query_diag_observer_barrier */";
+
     let url = test_url();
     let client = connect(&url)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let mut events = client.query_events();
     let type_name = common::test_object_name("cpg_query_diag_text_enum");
     create_failing_custom_type_fixture(&client, &type_name).await;
     let query = failing_custom_type_query(&type_name);
@@ -62,6 +66,44 @@ async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails(
         .batch_execute("ROLLBACK")
         .await
         .expect("the outer query error left the transaction recoverable");
+    client
+        .simple_query(BARRIER)
+        .await
+        .expect("the outer query error left the session observable");
+
+    let observed = compio::time::timeout(Duration::from_secs(5), async {
+        let mut observed = Vec::new();
+        loop {
+            let event = events
+                .next()
+                .await
+                .expect("query observer closed before the barrier");
+            let reached_barrier = event.sql() == BARRIER;
+            observed.push(event);
+            if reached_barrier {
+                break observed;
+            }
+        }
+    })
+    .await
+    .expect("query observer did not reach the barrier");
+    let target: Vec<_> = observed
+        .iter()
+        .filter(|event| event.sql() == query)
+        .collect();
+    assert_eq!(
+        target.len(),
+        1,
+        "out-of-band outer error emitted zero or multiple events"
+    );
+    match target[0].outcome() {
+        QueryOutcome::DatabaseError { code } => assert_eq!(
+            code.as_ref(),
+            Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO)
+        ),
+        other => panic!("expected database error observation, got {other:?}"),
+    }
+
     let value: i32 = client
         .query_one("SELECT 1", &[])
         .await
