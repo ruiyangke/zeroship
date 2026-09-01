@@ -839,14 +839,31 @@ therefore points at the validator, not at the read path: narrowing reads to ISO
 strings would break the stated contract, `Row<S>`, and every creator already
 reading these as numbers.
 
-**UNVERIFIED, and it decides whether this is cheap or not:** I have not traced
-whether the PG write path can bind a Unix-ms number into a `TIMESTAMPTZ` column.
-Greps for `to_timestamp` / `epoch` / a ms conversion in `zeroship-schema`'s
-builder returned nothing, and a grep that matches nothing proves nothing. If no
-conversion exists, widening the validator merely moves the failure from the SDK
-to the driver, and edit 1 additionally needs a number-to-timestamp conversion on
-the write path. **Round 4 is asked to settle exactly this**, and no
-implementation should start until it is answered.
+**NOW MEASURED, against the live PG 18.6 container, and the answer is that
+widening the validator alone is NOT enough.** Three arms:
+
+| Arm | Statement | Result |
+| --- | --- | --- |
+| A - bare number | `INSERT INTO t VALUES (1756700000000)` | `ERROR: column "ts" is of type timestamp with time zone but expression is of type bigint` |
+| B - as text, how an untyped driver param arrives | `INSERT INTO t VALUES ('1756700000000')` | `ERROR: date/time field value out of range: "1756700000000"` |
+| C - explicit conversion | `to_timestamp(1756700000000 / 1000.0)` | `2025-09-01 04:13:20+00` |
+
+**Postgres refuses a Unix-ms value for `TIMESTAMPTZ` by BOTH routes** - as a
+number and as text. Only an explicit conversion works. So relaxing
+`validate.ts:277-284` on its own would move the failure from the SDK to the
+database, turning a clear `ValidationError` into a `22008` from the driver.
+
+Edit 1 therefore has two halves, and the proposal previously named one:
+
+1. accept Unix-ms numbers in `validate.ts` for `date`/`timestamp` fields, and
+2. **convert them on the write path** - the builder must emit `to_timestamp($n
+   / 1000.0)` (or the driver must bind a real timestamp type) for a numeric
+   value into a timestamp column.
+
+Half 2 is the load-bearing one and nothing in the tree does it today. SQLite
+stores timestamps as `TEXT` (`query.rs:1520`), so it needs its own arm and the
+two backends must be checked separately - a fix that satisfies one can silently
+break the other.
 
 **Criterion 5 is withdrawn.** It rested on the premise that the generated types
 hide system fields; they do not (`Row<S>` carries all seven), and un-eliding
