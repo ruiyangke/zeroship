@@ -44,9 +44,21 @@ decisions turned out to be redesigns. It is also the test for anything this docu
 Vendor neutrality in the core is enforced by the **manifest**, not by discipline. `data-core`'s
 `Cargo.toml` will list neither `compio-postgres` nor `rusqlite` nor `zeroship-runtime`. You cannot
 name `compio_postgres::Error` in a crate that does not depend on it - that is `E0433`, at compile
-time, for everyone, forever. No lint, no reviewer, no census run. This repository already uses the
-technique: `serialize_derive_is_structurally_impossible` makes a capability unreachable by giving a
-crate an empty manifest rather than by forbidding its use.
+time, for everyone, forever. No lint, no reviewer, no census run.
+
+**This repository already uses the technique, and it is already enforced on the exact crate the split
+renames.** `serialize_derive_is_structurally_impossible`
+(`crates/zeroship-data-plan/tests/no_sql_text_escape_hatch.rs:210`) reads the crate's own manifest,
+collects every name declared under `[dependencies]`, `[dev-dependencies]` and
+`[build-dependencies]`, and asserts the set is **empty** - its own comment: "the manifest declares no
+dependencies at all, so `serde` is not in scope and the derive would not compile even if someone
+wrote it."
+
+Two consequences worth naming. It enforces **zero dependencies**, not "no serde", so it is already
+the fence this document wants rather than an analogy to it. And it guards `zeroship-data-plan`,
+which becomes `data-query-builder` - so "ZERO dependencies, LEAF, and that stays load-bearing" in the
+target block is not an aspiration a future reviewer must uphold. It is a test that fails the moment
+anyone adds a line.
 
 **But `E0433` fences the SPELLING, not the TYPE.** It stops a crate *naming* a path. It says nothing
 about a crate *holding a value* of that type, and one is handed across today through a public field:
