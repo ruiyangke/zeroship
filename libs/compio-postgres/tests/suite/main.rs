@@ -79,6 +79,7 @@ mod error_fields;
 mod execute_row_counts;
 mod extended_query_copy_resync;
 mod frame_fuzz;
+mod frontend_sequence;
 mod generic_client;
 mod hostile_peer;
 mod hostile_session_gucs;
