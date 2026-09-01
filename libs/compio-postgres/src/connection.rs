@@ -5278,6 +5278,63 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_dispatch_consumes_the_copy_recovery_ready_state() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        &b"Z\0\0\0\x05I"[..],
+                    )),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the COPY recovery ReadyForQuery");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+        let copy_error_may_owe_extra_ready = Cell::new(true);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut VecDeque::new(),
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(0),
+            &Mutex::new(None),
+            &copy_error_may_owe_extra_ready,
+            true,
+        )
+        .await;
+
+        write_result.expect("the yielding flush failed");
+        acknowledged
+            .await
+            .expect("dispatch did not acknowledge the COPY recovery reply");
+        assert!(terminal.is_none(), "dispatch rejected the extra reply");
+        assert!(
+            !copy_error_may_owe_extra_ready.get(),
+            "flush dispatch did not consume the real COPY recovery state"
+        );
+    }
+
+    #[compio::test]
     async fn flush_drains_a_freshly_stashed_batch_before_completing() {
         let stream = BufStream::new(YieldingWriteSplitStream);
         let Ok((read_half, mut write_half)) = stream.try_into_split() else {
