@@ -8378,6 +8378,39 @@ mod tests {
     }
 
     #[compio::test]
+    async fn serialized_buffered_frame_drain_preserves_stashed_batch_order() {
+        let mut wire = notice_frame("prime buffered response");
+        wire.extend_from_slice(&completed_response_batch(b'I'));
+        let (mut connection, mut response, copy_request) =
+            connection_with_stashed_batch(vec![wire]);
+        drop(copy_request);
+
+        assert!(matches!(
+            read_backend(&mut connection.stream)
+                .await
+                .expect("read the priming notice"),
+            BackendMessage::Async {
+                message: Message::NoticeResponse(_),
+                ..
+            }
+        ));
+        connection
+            .drain_buffered_backend_frames()
+            .await
+            .expect("drain the over-read response frame");
+
+        let mut tags = Vec::new();
+        while let Ok(mut batch) = response.try_recv() {
+            tags.extend(batch_tags(&mut batch));
+        }
+        assert_eq!(
+            tags,
+            ["STASHED", "SELECT 1"],
+            "the buffered-frame drain overtook its existing response stash"
+        );
+    }
+
+    #[compio::test]
     async fn serialized_main_loop_preserves_stashed_batch_order() {
         let (connection, mut response, copy_request) =
             connection_with_stashed_batch(vec![completed_response_batch(b'I')]);
