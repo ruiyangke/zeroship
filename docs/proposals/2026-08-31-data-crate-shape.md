@@ -539,6 +539,33 @@ Two facts that shape everything below, both contradicting `AGENTS.md:143`:
   carries parallel copies of the same code, so the `data-*` family has no cross-family edge.
 - **`zeroship-data-plan` has zero production consumers.** It is a `[dev-dependencies]` entry in both
   dependants, and the `zeroship-schema` uses of it sit after `#[cfg(test)]` at `query.rs:6446`.
+
+  **AND THE STALL HAS A COST THAT #12 PREDICTED IN ADVANCE - measured 2026-08-31.** #12, the task
+  that built the IR families, closed with a conditional warning: *"the crate currently DUPLICATES
+  four constants and two fence tables that zeroship-schema owns rather than replacing them. If the
+  port stalls, that duplication is a liability - two copies of the reserved-name rules that can
+  drift."* The port stalled, so the condition is met and the liability is live.
+
+  `zeroship-data-plan/src/ident.rs` holds seven reservation surfaces:
+  `PLATFORM_RESERVED_COLLECTION_PREFIXES` (`:97`), `NAMESPACE_RESERVATIONS` (`:194`),
+  `BACKEND_CATALOG_RESERVATIONS` (`:210`), `COLUMN_RESERVATIONS` (`:222`), `ALIAS_RESERVATIONS`
+  (`:251`), `DERIVED_NAME_RESERVATIONS` (`:260`, empty) and `MASKED_SUFFIX` (`:457`).
+
+  **Exactly ONE of the seven is pinned against the other crates.**
+  `reserved_collection_prefixes_match_migration_engine` (`zeroship-schema/src/query.rs:10504-10515`)
+  asserts `PLATFORM_RESERVED_COLLECTION_PREFIXES` matches BOTH
+  `zeroship_migrate_core::schema::query::` and `zeroship_data_plan::ident::` - a genuinely good
+  three-way guard. Nothing guards the other six.
+
+  `MASKED_SUFFIX` shows what that costs: data-plan names it as a constant at `ident.rs:457`, while
+  `zeroship-schema` spells the same fact as a bare literal, `ReservedName::Suffix("_masked")`
+  (`query.rs:786`). One fact, two spellings, no test relating them.
+
+  **This is the third fork found in this dependency closure today**, after the two `mask_codec.rs`
+  copies (whose prefixes HAVE already diverged) and the DDL/index builders duplicated inside the
+  engine. The pattern is not carelessness: each fork was created deliberately, to keep a leaf crate
+  dependency-free, and each was expected to be temporary. **What makes them liabilities is stalling,
+  not forking** - which is an argument for finishing Track A rather than for never duplicating.
   #12 is marked complete; the consumer never landed.
 
 ## Step 0 - delete the dead. Independent, and first.
