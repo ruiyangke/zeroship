@@ -176,16 +176,18 @@ carry `v8::`** - `run_op`, all 17 `dispatch_*`, `transaction_dispatch` and the p
 totalling 117 production `v8::` references inside a crate whose entire premise is that it does not link
 V8. `tx_scope.rs` is struck out above because it is not a split at all: all six of its production
 functions are V8 context-map manipulation, so the file moves to the adapter whole. The others are
-dispatch stacked on engine and must be cut along that line first. `exec.rs` is the control - one
-`v8::` reference, none in a signature - which is what makes this a real seam rather than a grep
-artefact. Full measurement and the method that found it: Phase 0.1 in the execution order.
+dispatch stacked on engine and must be cut along that line first. `exec.rs` is the control *for V8* -
+one `v8::` reference, none in a signature - which is what makes this a real seam rather than a grep
+artefact. It is **not** a clean module: it names `compio_postgres` in four signatures and its own
+header calls it "the only consumer of `compio_postgres::Pool`". Full measurement and the method that
+found it: Phase 0.1 in the execution order.
 
 **And the eight that do not place cleanly.** Each needs an answer before the split, not during it:
 
 | module | lines | why it does not place |
 | --- | --- | --- |
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
-| `error.rs` | 1,703 | **must be split, but NOT FIRST.** `DbError` is core and carries one runtime edge (`:67`); `to_op_error` belongs in the adapter. It cannot go there until the dispatch surface does - 43 of its 49 production callers are engine-tier today. See Phase 0.1. |
+| `error.rs` | 1,703 | **must be split TWO ways, and neither is first.** (1) `to_op_error` belongs in the adapter but cannot go until the dispatch surface does - 43 of its 49 production callers are engine-tier. (2) **It names `compio_postgres` in six signatures** (`from_pg` `:355`, `coded_sql` `:731`, four more), so `data-core` is not vendor-neutral and `data-sqlite` would link the Postgres driver through it. Reason (2) was missed by every review round. See Phase 0.1. |
 | ~~`context.rs`~~ | 1,688 | **RESOLVED by the `BackendHandle` finding.** It holds `Option<BackendHandle>` (`:422`) and constructs both variants (`:561`, `:587`), so it follows the enum UP into `data-engine`. |
 | `auth/` | 1,459 | **it is THREE things wearing one name - see below.** |
 | `service.rs` | 606 | **it straddles, and its own header proves it.** |
@@ -1770,7 +1772,59 @@ dispatch layer stacked on an engine layer, and the line between them is the 39 f
 `tx_scope.rs` is not a split at all - all six of its production functions are V8, so it moves to the
 adapter whole.
 
-### Phase 0.5 - two audits that must precede ANY crate boundary
+#### The audit this should have been, run for every tier
+
+The V8 finding was luck: it fell out of trying to execute an unrelated item. The instrument that
+should have caught it is cheap and general - **for each module, does any function SIGNATURE name a
+crate the module's assigned tier is forbidden to depend on?** Run across all four marker crates
+(`v8`, `zeroship_runtime`, `compio_postgres`, `rusqlite`), comments stripped, `#[cfg(test)]` regions
+excluded:
+
+```
+TIER     FILE                       MARKER             SIGS
+ENGINE   crud/mod.rs                v8                   19
+ENGINE   transaction/mod.rs         v8                   10
+ENGINE   tx_scope.rs                v8                    4
+ENGINE   crud/unmask.rs             v8                    2
+ENGINE   tx_route.rs                v8                    1
+ENGINE   transaction/mod.rs         zeroship_runtime      1
+CORE     error.rs                   compio_postgres       6     <- NEW, not V8
+ENGINE   exec.rs                    compio_postgres       4     <- NEW, not V8
+ENGINE   transaction/mod.rs         compio_postgres       1
+ENGINE   transaction/driver.rs      compio_postgres       1
+                                                  total   49
+```
+
+**Two of these are new findings that have nothing to do with V8, and four review rounds did not
+surface either.**
+
+- **`error.rs` names `compio_postgres` in six signatures** - `from_pg(e: &compio_postgres::Error)`
+  at `:355`, `coded_sql(..., e: compio_postgres::Error)` at `:731`, and four more taking
+  `&compio_postgres::Error` or `&SqlState`. `error.rs` is assigned to `data-core`, the crate whose
+  entire premise is vendor neutrality and which every other crate depends on. As assigned,
+  **`data-sqlite` - 9,485 lines with no Postgres in it - would link the Postgres driver**, because the
+  shared error type classifies PG SQLSTATEs. The document searched for `from_pg` zero times before
+  this; the "reasons `error.rs` does not place cleanly" list named only the V8 edge.
+- **`exec.rs` names `compio_postgres` in four signatures and says so in its own header** - "the only
+  consumer of `compio_postgres::Pool`" - returning `Vec<compio_postgres::Row>` from three functions.
+  It is assigned to `data-engine`.
+
+**Together with the V8 result this is the measured form of the "junk drawer" objection.** `data-engine`
+as specified would link the V8 runtime *and* the Postgres driver. A crate that links both is not an
+engine layer; it is the present plugin with a few files removed and a new name. That criticism was
+raised in review as a judgement about cohesion and was answerable either way. It is now a fact about
+what the crate would compile against, and it is not answerable by argument.
+
+**The instrument itself needed one correction, which is the reason to report it rather than just its
+output.** The first run flagged `backend/sqlite/mod.rs` for naming `compio_postgres` - the SQLite
+backend importing the Postgres driver, easily the most alarming line in the table. All three hits were
+**doc comments** describing a `Client = compio_postgres::Client` pin: the multi-line signature
+collector absorbed continuation lines without stripping comments. Fixing it dropped the total from 51
+to 49 and removed the one finding that would have been briefed first. *An audit built to catch a
+class of error is not exempt from that class* - this one reported occurrences as signatures, which is
+the same failure it exists to find.
+
+### Phase 0.5 - three audits that must precede ANY crate boundary
 
 - **The `pub(crate)` audit.** List every symbol that would go `pub(crate) -> pub`, and say for each
   whether the fence was load-bearing. Four are named security controls (`sanitize_app_actor`,
@@ -1780,6 +1834,16 @@ adapter whole.
   `drop_namespace.rs`, `crud/mask_backfill.rs`), plus `read_set.rs` (659) which is inert on both
   ends. **Giving dead code a crate is how the existing clusters got there.** Decide delete-or-wire
   BEFORE assigning, not after.
+- **The tier-signature audit** - `tests/lib/tier_signature_census.sh`, added 2026-08-31, 49 violations
+  on its first run (see Phase 0.1). For each module, does any function signature name a crate its
+  assigned tier may not depend on? This is the check that catches what a module walk and a type walk
+  both miss, and it is the one that should have caught 0.1 before four rounds reviewed it. It is a
+  census, not a gate: it reports and does not rule, and it is deliberately not named `*_gate.sh` so
+  `tests/gate_arm_census.sh` does not adopt it. It becomes a gate - with arms and floors - the moment
+  the first crate boundary exists, so that "which crate may link V8" stops being a claim in a document
+  and becomes something CI rules on. **Its `tier()` map is a copy of the assignment table above, so
+  re-drawing any boundary invalidates every verdict it prints**; change both in the same commit or it
+  reports on a shape nobody proposed.
 
 ### Phase 1 - the two things that need no new prerequisites
 
