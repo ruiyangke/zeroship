@@ -522,6 +522,53 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     );
 }
 
+#[test]
+fn assignment_changes_tag() {
+    let reg = registry();
+    let source = |event: &str| {
+        format!(
+            r#"policy_version = 1
+[[inject]]
+scope = "all"
+columns = [
+  {{ name = "stamp", type = "timestamptz", nullable = false, assign = {{ by = "now", on = "{event}" }} }},
+]
+"#
+        )
+    };
+    let empty = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let insert = admit(
+        &RootCharter::parse_toml(&source("insert"), &reg).unwrap(),
+        &empty,
+        &reg,
+    )
+    .unwrap();
+    let write = admit(
+        &RootCharter::parse_toml(&source("write"), &reg).unwrap(),
+        &empty,
+        &reg,
+    )
+    .unwrap();
+    let sealed = seal(&insert, MAC_KEY, [9u8; 16], DIALECT, MATCHER, CHARTER_VER);
+    assert_eq!(
+        sealed.verify(
+            MAC_KEY,
+            &write,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CHARTER_VER,
+        ),
+        Err(SealError::TagMismatch),
+        "the seal must attest assignment policy and timing"
+    );
+}
+
 /// **The seal binds LAYER BOUNDARIES (H-4 / II.7).** Two policies with the SAME
 /// flattened grant set but DIFFERENT layer stacks encode differently, so a re-flatten
 /// tamper fails the MAC. Policy A is a 2-layer charter `overlay(base, env)` (env grants
