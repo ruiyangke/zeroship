@@ -943,6 +943,15 @@ pub(crate) fn dispatch_update_one<'s>(
                     // than a bespoke `ResolveValue::Json("null")`, because
                     // `first_row_or_null_masked(vec![], false)` lowers to exactly
                     // that string - so the success path has one shape, not two.
+                    //
+                    // THE `false` IS LOAD-BEARING; DO NOT DERIVE IT. An empty row
+                    // vector does NOT imply "nothing was masked": `read_pipeline`
+                    // computes `has_masked` from the SCHEMA, not from the rows, so
+                    // it is `true` for zero rows on any collection with a masked
+                    // column. Deriving it here - which reads like a consistency fix,
+                    // since every other arm does derive it - would silently turn
+                    // this arm's `ResolveValue::Json` into `JsonWithRehydration`
+                    // and hand JS a rehydration pass over `null`.
                     return Ok((Vec::new(), false));
                 };
                 Some(target_row)
