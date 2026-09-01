@@ -1681,6 +1681,11 @@ fn sasl_initial_payload(body: &[u8]) -> &[u8] {
 enum ScramTerminalFrame {
     InvalidVerifier,
     AuthenticationOkBeforeFinal,
+    /// A frame that is neither SaslFinal, AuthenticationOk nor ErrorResponse
+    /// AND has no dedicated pre-auth guard. BackendKeyData does have one -
+    /// "PostgreSQL sent BackendKeyData before authentication completed" - so it
+    /// never reaches the generic arm this exercises.
+    ParseCompleteInsteadOfFinal,
 }
 
 /// Drive a valid bare-SCRAM exchange through the client's proof, then replace
@@ -1732,6 +1737,9 @@ fn scram_server_through_client_final(terminal: ScramTerminalFrame) -> StubServer
             ScramTerminalFrame::AuthenticationOkBeforeFinal => {
                 response.extend_from_slice(&backend_frame(b'R', &0i32.to_be_bytes()));
             }
+            ScramTerminalFrame::ParseCompleteInsteadOfFinal => {
+                response.extend_from_slice(&backend_frame(b'1', b""));
+            }
         }
 
         // For the early-Ok case this is a second AuthenticationOk. An
@@ -1750,6 +1758,84 @@ fn scram_server_through_client_final(terminal: ScramTerminalFrame) -> StubServer
             .expect("flush scripted SCRAM terminal sequence");
         thread::sleep(Duration::from_millis(100));
     })
+}
+
+/// Offer SCRAM, take the client's initial response, then answer the
+/// AuthenticationSaslContinue slot with a frame that does not belong there.
+fn scram_server_wrong_continue_frame() -> StubServer {
+    StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+        stream
+            .write_all(&authentication_sasl_frame(b"SCRAM-SHA-256\0\0"))
+            .expect("offer scripted SCRAM");
+        stream.flush().expect("flush scripted SCRAM offer");
+
+        let initial = expect_frontend_frame_from(&mut stream, b'p');
+        assert_sasl_initial_response(&initial, "SCRAM-SHA-256", b"n,,n=");
+
+        // ParseComplete where AuthenticationSaslContinue is required. It has no
+        // dedicated pre-auth guard, so it reaches the generic refusal.
+        stream
+            .write_all(&backend_frame(b'1', b""))
+            .expect("write the out-of-place frame");
+        stream.flush().expect("flush the out-of-place frame");
+        thread::sleep(Duration::from_millis(100));
+    })
+}
+
+async fn scram_refusal_chain(server: StubServer, what: &str) -> String {
+    let mut config = stub_config(server.addr);
+    config.password("scripted-password");
+    let result = compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+        .await
+        .unwrap_or_else(|_| panic!("the {what} SCRAM exchange hung"));
+    server.finish();
+    match result {
+        Ok(pair) => {
+            drop(pair);
+            panic!("the driver accepted {what}")
+        }
+        Err(error) => common::error_chain(&error),
+    }
+}
+
+/// Both SASL slots refuse a frame that belongs to neither the exchange nor its
+/// documented alternatives. Each arm is a separate `Some(_)` in
+/// `authenticate_sasl`, and neither had ever run: a driver that fell through
+/// instead would carry an unauthenticated session forward.
+#[compio::test]
+async fn a_misplaced_frame_in_the_scram_continue_slot_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = scram_refusal_chain(
+            scram_server_wrong_continue_frame(),
+            "a misplaced frame in the SCRAM continue slot",
+        )
+        .await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "the continue slot reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("misplaced SCRAM continue test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_misplaced_frame_in_the_scram_final_slot_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = scram_refusal_chain(
+            scram_server_through_client_final(ScramTerminalFrame::ParseCompleteInsteadOfFinal),
+            "a misplaced frame in the SCRAM final slot",
+        )
+        .await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "the final slot reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("misplaced SCRAM final test exceeded its outer watchdog");
 }
 
 #[compio::test]
