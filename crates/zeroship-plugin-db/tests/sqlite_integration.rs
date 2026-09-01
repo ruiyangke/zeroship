@@ -4202,14 +4202,15 @@ fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
             r#"
 async function seed(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
+    // No `id` on either row: it is platform-assigned, so supplying one is
+    // refused at the document boundary. Nothing below reads these ids - every
+    // later assertion filters on `name` - so they were fixture convenience.
     await coll.insert({
-        id: "user_a",
         email: "alice@example.com",
         name: "Red Team",
         ssn: "123-45-6789"
     });
     await coll.insert({
-        id: "user_b",
         email: "bob@example.com",
         name: "Red Team",
         ssn: "222-33-4444"
