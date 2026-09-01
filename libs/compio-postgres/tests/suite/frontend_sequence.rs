@@ -615,3 +615,135 @@ async fn copy_in_frames(process_id: i32, abandon: bool) -> (String, Option<Vec<u
         .map(|(_, body)| body.clone());
     (frames.iter().map(|(t, _)| *t as char).collect(), copy_fail)
 }
+
+fn serve_portal(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec<u8>)>) {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut executes = 0;
+    loop {
+        let mut tag = [0u8; 1];
+        if stream.read_exact(&mut tag).is_err() {
+            return;
+        }
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes(length) as usize;
+        let mut body = vec![0u8; length - 4];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        let tag = tag[0];
+        let _ = tags.send((tag, body.clone()));
+        match tag {
+            b'Q' => {
+                pending.extend_from_slice(&command_complete(b"START TRANSACTION"));
+                pending.extend_from_slice(&ready_for_query());
+                let _ = stream.write_all(&pending);
+                let _ = stream.flush();
+                pending.clear();
+            }
+            b'P' => pending.extend_from_slice(&backend_frame(b'1', b"")),
+            b'B' => pending.extend_from_slice(&backend_frame(b'2', b"")),
+            b'D' => {
+                let mut p = Vec::new();
+                p.extend_from_slice(&0u16.to_be_bytes());
+                pending.extend_from_slice(&backend_frame(b't', &p));
+                pending.extend_from_slice(&one_int4_row_description());
+            }
+            b'E' => {
+                executes += 1;
+                pending.extend_from_slice(&one_int4_data_row(b"1"));
+                if executes == 1 {
+                    pending.extend_from_slice(&backend_frame(b's', b"")); // PortalSuspended
+                } else {
+                    pending.extend_from_slice(&command_complete(b"SELECT 1"));
+                }
+            }
+            b'C' => pending.extend_from_slice(&backend_frame(b'3', b"")), // CloseComplete
+            b'S' => {
+                pending.extend_from_slice(&ready_for_query());
+                let _ = stream.write_all(&pending);
+                let _ = stream.flush();
+                pending.clear();
+            }
+            b'X' => return,
+            _ => {}
+        }
+    }
+}
+
+/// Dropping a SUSPENDED portal closes it explicitly, and closes the portal
+/// rather than the statement.
+///
+/// MEASURED: `Q P D S B S E S C S`. The trailing `C S` is the drop - Close
+/// followed by Sync. Three portal test files (18 cases) already cover the
+/// EFFECT of abandoning a portal, that the session stays usable and the rows
+/// come back once; none of them observes the frame, so a driver that leaked
+/// the portal until end-of-transaction would pass all of them. On a long
+/// transaction that is a server-side resource held for no reason.
+///
+/// The Close body's first byte is the target kind, `P` for portal and `S` for
+/// prepared statement. Asserting it is the difference between "something was
+/// closed" and "the portal was closed": closing the STATEMENT here would also
+/// produce a `C`, and would be wrong while the statement is still cached.
+#[compio::test]
+async fn dropping_a_suspended_portal_closes_the_portal_not_the_statement() {
+    let (seq, close_body) = Box::pin(suspended_portal_frames(641)).await;
+    assert!(
+        seq.starts_with("QPDSBSESCS"),
+        "the suspended-portal drop changed shape (got {seq})"
+    );
+    let close_body = close_body.expect("dropping a suspended portal sent no Close frame");
+    assert_eq!(
+        close_body.first().copied(),
+        Some(b'P'),
+        "Close targeted {:?}, not the portal",
+        close_body.first().map(|b| *b as char)
+    );
+}
+
+/// Drive one suspended-portal drop against a recording peer. Returns the tag
+/// sequence and the body of the Close frame if one was sent.
+async fn suspended_portal_frames(process_id: i32) -> (String, Option<Vec<u8>>) {
+    use futures_util::TryStreamExt;
+
+    let (tags_tx, tags_rx) = std::sync::mpsc::channel();
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        serve_portal(&mut stream, &tags_tx);
+    });
+    let addr = server.addr;
+    let _ = Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async move {
+        let mut client = connect_scripted(addr).await;
+        let transaction = client.transaction().await.expect("begin the transaction");
+        let statement = transaction.prepare("SELECT n").await.expect("prepare");
+        let portal = transaction.bind(&statement, &[]).await.expect("bind");
+        {
+            // One page against a two-row portal leaves it SUSPENDED, which is
+            // the state whose cleanup this test is about.
+            let stream = transaction
+                .query_portal_raw(&portal, 1)
+                .await
+                .expect("fetch the first page");
+            let mut stream = Box::pin(stream);
+            while stream.as_mut().try_next().await.unwrap_or(None).is_some() {}
+        }
+        drop(portal);
+        // The close needs somewhere to be observed, exactly as the COPY abort
+        // does; dropping the client here would close the socket over it.
+        let _ = transaction.simple_query("SELECT 1").await;
+        drop(transaction);
+        drop(client);
+    }))
+    .await;
+    server.finish();
+
+    let frames: Vec<(u8, Vec<u8>)> = tags_rx.try_iter().filter(|(t, _)| *t != b'X').collect();
+    let close = frames
+        .iter()
+        .find(|(t, _)| *t == b'C')
+        .map(|(_, body)| body.clone());
+    (frames.iter().map(|(t, _)| *t as char).collect(), close)
+}
