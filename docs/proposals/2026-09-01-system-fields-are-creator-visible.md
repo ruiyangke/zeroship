@@ -158,13 +158,24 @@ authority.
 **Two things break that, and both must be closed in the same change.**
 
 **1. `assign` must be root-only at LOAD, not merely placed in a root file.**
-`LoadContext` (`crates/zeroship-migrate-policy/src/document.rs:27-44`) makes
-exactly two things root-only: a `mandatory` inject and `extends`. An untrusted
-creator draft loaded as `NonRootLayer` may still carry an ordinary `[[inject]]`,
-and those are unioned into the effective policy. Widening `WireColumn` with an
-`assign` key therefore lets a creator draft declare one on a new, non-colliding
-column. `PolicyDoc` retains rules but not their originating `LoadContext`
-(`compose.rs:1494-1507`), so the check belongs at load.
+**All three legs verified 2026-09-01.** `LoadContext`
+(`crates/zeroship-migrate-policy/src/document.rs:27-44`) documents itself as
+governing exactly two axes: `mandatory` injects are `RootCharter`-only, and
+`extends` is trusted-only. Nothing gates an ordinary `[[inject]]`. Those
+ordinary injects then UNION across layers - `compose.rs:1349` states
+"require/inject/validate rule-sets UNION (each at its own scope)" and `:1377`
+performs it. So an untrusted creator draft loaded as `NonRootLayer` may carry an
+`[[inject]]`, and it reaches the effective policy. Widening `WireColumn` with an
+`assign` key therefore lets a creator draft declare one.
+
+**And the collision comparator would not catch it.** `inject_specs_collide`
+(`compose.rs:1494`) compares exactly three column properties -
+`ca.ty != cb.ty || ca.nullable != cb.nullable || ca.default != cb.default`
+(`:1498-1499`). Two injects naming the SAME column with identical type,
+nullability and default but DIFFERENT `assign` do not collide: they union, and
+one wins arbitrarily. That is the attack, and it survives a comparator that is
+never taught the new field. `PolicyDoc` retains rules but not their originating
+`LoadContext`, so the check cannot be deferred - it belongs at load.
 
 **2. The worker has no charter today.** Only migrate-server does. If plugin-db
 takes bindings from the descriptor alone, a hand-edited `.zship` re-points them.
@@ -253,8 +264,8 @@ mirror against one, and state its limits as
    they move together, including migrate-server which parses at startup and
    exits on failure (`main.rs:245-257`); `InjectColumn` maps only
    type/null/default/collation (`rule.rs:72-93`); the collision comparator is
-   field-enumerated (`compose.rs:1494-1507`) and must learn `assign` or two
-   different bindings compare equal; the seal must encode it (`seal.rs:485-512`);
+   field-enumerated and must learn `assign` or two different bindings compare
+   equal; the seal must encode it (`seal.rs:485-512`);
    `ResolvedInject` converts straight to `IrColumn` with no assignment carrier
    (`table_shape.rs:150-201`); artifact projection discards synthesized defaults
    (`lower.rs:10066-10102`); plus regenerating the committed TS fragment
