@@ -965,6 +965,43 @@ than a separate job.
 
 ### The blocker no round found until now: moving `wal_consumer` severs the dedup fence
 
+```
+  TODAY, one process:
+
+    wal_consumer.rs:781   SuppressGuard::activate(app)
+                                |
+                                v
+                   static SUPPRESSED_APPS          <-- process-global
+                        (wal_consumer.rs:72)           Mutex<HashMap<..>>
+                                ^
+                                | is_app_suppressed(app)?
+                                |
+    exec.rs:485        mutation path: SKIP the local emit,
+                       "the WAL consumer owns the publish path"
+
+    => a change is delivered EXACTLY ONCE, via WAL.
+
+
+  AFTER A NAIVE SPLIT:
+
+    RELAY process                       WORKER process
+    +--------------------+              +----------------------------+
+    | SuppressGuard      |              | SUPPRESSED_APPS = EMPTY    |
+    |  writes ITS OWN    |              |          ^                 |
+    |  process's map     |              |          | returns false   |
+    +--------------------+              | exec.rs:485 -> EMITS       |
+             |                          |          |                 |
+             | ALSO delivers            |          v                 |
+             | the same change          |       broker               |
+             | over WAL                 |          |                 |
+             +------------------------> |          v                 |
+                                        |   subscriber sees it TWICE |
+                                        +----------------------------+
+
+    no error. no refusal. FAILS OPEN.
+```
+
+
 **Full extraction breaks local-emit suppression, and would double-deliver every change to every
 subscriber.** Traced 2026-08-31 from a call site a reviewer noticed but did not follow.
 
@@ -1061,6 +1098,28 @@ it keep decoding its own stream while only the privileged and destructive parts 
   declines to draw the line, so the only place it can be drawn is which process holds the attribute.
 - **Full** - the whole WAL side moves and the worker loses REPLICATION outright, satisfying the
   invariant rather than approximating it.
+
+```
+  PARTIAL                                FULL
+  move slot_reaper.rs only               move the whole WAL side
+
+  +---------------------+                +---------------------+
+  | WORKER              |                | WORKER              |
+  |  wal_consumer   *   |                |  broker             |
+  |  broker             |                |  cdc_lifecycle      |
+  |  REPLICATION    <---+-- still held   |  NOREPLICATION  <---+-- removed
+  +---------------------+                +----------+----------+
+  +---------------------+                           | wire protocol
+  | RELAY               |                +----------v----------+
+  |  slot_reaper        |                | RELAY               |
+  +---------------------+                |  wal_consumer       |
+                                         |  replication        |
+  The worker can STILL see every         |  slot_reaper        |
+  slot and drop any of them. The         |  REPLICATION        |
+  code moved; the CAPABILITY did not.    +---------------------+
+
+  => defence in depth                    => satisfies the invariant
+```
 
 ### What Full costs, every item verified against the tree
 
