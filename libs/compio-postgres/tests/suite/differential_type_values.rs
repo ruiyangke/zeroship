@@ -2295,6 +2295,204 @@ async fn native_cidr_codecs_preserve_prefixes_and_expose_upstream_flag_defect() 
     assert_ne!(theirs.outbound_wires[1], theirs.server_wires[1].0);
 }
 
+#[cfg(feature = "with-eui48-1")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeEui48Observation {
+    decoded: [[u8; 6]; 3],
+    server_text: [String; 3],
+    server_wires: [Wire; 3],
+    outbound_wires: [Vec<u8>; 3],
+    rebound: [[u8; 6]; 3],
+    rebound_text: [String; 3],
+    rebound_wires: [Wire; 3],
+    macaddr8_text: [String; 2],
+    macaddr8_wires: [Wire; 2],
+    macaddr8_encode_supported: bool,
+    macaddr8_decode_supported: bool,
+}
+
+#[cfg(feature = "with-eui48-1")]
+const NATIVE_EUI48_DECODE_SQL: &str = "SELECT \
+    '00:00:00:00:00:00'::macaddr, '00:00:00:00:00:00'::macaddr, \
+        ('00:00:00:00:00:00'::macaddr)::text, \
+    'ff:ff:ff:ff:ff:ff'::macaddr, 'ff:ff:ff:ff:ff:ff'::macaddr, \
+        ('ff:ff:ff:ff:ff:ff'::macaddr)::text, \
+    '08:00:2b:01:02:03'::macaddr, '08:00:2b:01:02:03'::macaddr, \
+        ('08:00:2b:01:02:03'::macaddr)::text, \
+    '08:00:2b:01:02:03:04:05'::macaddr8, \
+        ('08:00:2b:01:02:03:04:05'::macaddr8)::text, \
+    ('08:00:2b:01:02:03'::macaddr)::macaddr8, \
+        (('08:00:2b:01:02:03'::macaddr)::macaddr8)::text";
+
+#[cfg(feature = "with-eui48-1")]
+const NATIVE_EUI48_REBOUND_SQL: &str = "SELECT \
+    $1::macaddr, $1::macaddr, ($1::macaddr)::text, \
+    $2::macaddr, $2::macaddr, ($2::macaddr)::text, \
+    $3::macaddr, $3::macaddr, ($3::macaddr)::text";
+
+#[cfg(feature = "with-eui48-1")]
+fn tokio_eui48_wire(value: eui48::MacAddress, ty: &tokio_types::Type) -> Result<Vec<u8>, String> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    match tokio_types::ToSql::to_sql_checked(&value, ty, &mut wire) {
+        Ok(tokio_types::IsNull::No) => Ok(wire.to_vec()),
+        Ok(tokio_types::IsNull::Yes) => Err("unexpected NULL".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(feature = "with-eui48-1")]
+fn compio_eui48_wire(value: eui48::MacAddress, ty: &compio_types::Type) -> Result<Vec<u8>, String> {
+    let mut wire = compio_types::private::BytesMut::new();
+    match compio_types::ToSql::to_sql_checked(&value, ty, &mut wire) {
+        Ok(compio_types::IsNull::No) => Ok(wire.to_vec()),
+        Ok(compio_types::IsNull::Yes) => Err("unexpected NULL".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(feature = "with-eui48-1")]
+fn tokio_native_eui48_observation(url: String) -> NativeEui48Observation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_EUI48_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native EUI-48 decode");
+        let nil: eui48::MacAddress = row.get(0);
+        let broadcast: eui48::MacAddress = row.get(3);
+        let pattern: eui48::MacAddress = row.get(6);
+        let outbound_wires = [
+            tokio_eui48_wire(nil, &tokio_types::Type::MACADDR)
+                .expect("tokio-postgres nil EUI-48 encode"),
+            tokio_eui48_wire(broadcast, &tokio_types::Type::MACADDR)
+                .expect("tokio-postgres broadcast EUI-48 encode"),
+            tokio_eui48_wire(pattern, &tokio_types::Type::MACADDR)
+                .expect("tokio-postgres patterned EUI-48 encode"),
+        ];
+        let rebound = client
+            .query_one(NATIVE_EUI48_REBOUND_SQL, &[&nil, &broadcast, &pattern])
+            .await
+            .expect("tokio-postgres native EUI-48 encode");
+
+        NativeEui48Observation {
+            decoded: [nil.to_array(), broadcast.to_array(), pattern.to_array()],
+            server_text: [row.get(2), row.get(5), row.get(8)],
+            server_wires: [row.get(1), row.get(4), row.get(7)],
+            outbound_wires,
+            rebound: [
+                rebound.get::<_, eui48::MacAddress>(0).to_array(),
+                rebound.get::<_, eui48::MacAddress>(3).to_array(),
+                rebound.get::<_, eui48::MacAddress>(6).to_array(),
+            ],
+            rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+            rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+            macaddr8_text: [row.get(10), row.get(12)],
+            macaddr8_wires: [row.get(9), row.get(11)],
+            macaddr8_encode_supported: tokio_eui48_wire(pattern, &tokio_types::Type::MACADDR8)
+                .is_ok(),
+            macaddr8_decode_supported: row.try_get::<_, eui48::MacAddress>(9).is_ok(),
+        }
+    })
+}
+
+#[cfg(feature = "with-eui48-1")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_eui48_observation() -> NativeEui48Observation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_EUI48_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native EUI-48 decode");
+    let nil: eui48::MacAddress = row.get(0);
+    let broadcast: eui48::MacAddress = row.get(3);
+    let pattern: eui48::MacAddress = row.get(6);
+    let outbound_wires = [
+        compio_eui48_wire(nil, &compio_types::Type::MACADDR)
+            .expect("compio-postgres nil EUI-48 encode"),
+        compio_eui48_wire(broadcast, &compio_types::Type::MACADDR)
+            .expect("compio-postgres broadcast EUI-48 encode"),
+        compio_eui48_wire(pattern, &compio_types::Type::MACADDR)
+            .expect("compio-postgres patterned EUI-48 encode"),
+    ];
+    let rebound = client
+        .query_one(NATIVE_EUI48_REBOUND_SQL, &[&nil, &broadcast, &pattern])
+        .await
+        .expect("compio-postgres native EUI-48 encode");
+
+    NativeEui48Observation {
+        decoded: [nil.to_array(), broadcast.to_array(), pattern.to_array()],
+        server_text: [row.get(2), row.get(5), row.get(8)],
+        server_wires: [row.get(1), row.get(4), row.get(7)],
+        outbound_wires,
+        rebound: [
+            rebound.get::<_, eui48::MacAddress>(0).to_array(),
+            rebound.get::<_, eui48::MacAddress>(3).to_array(),
+            rebound.get::<_, eui48::MacAddress>(6).to_array(),
+        ],
+        rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+        rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+        macaddr8_text: [row.get(10), row.get(12)],
+        macaddr8_wires: [row.get(9), row.get(11)],
+        macaddr8_encode_supported: compio_eui48_wire(pattern, &compio_types::Type::MACADDR8)
+            .is_ok(),
+        macaddr8_decode_supported: row.try_get::<_, eui48::MacAddress>(9).is_ok(),
+    }
+}
+
+/// The six-byte native carrier agrees with the server. `macaddr8` remains a
+/// distinct eight-byte type that neither native codec accepts.
+#[cfg(feature = "with-eui48-1")]
+#[compio::test]
+async fn native_eui48_codecs_cover_macaddr_and_expose_macaddr8_limit() {
+    let theirs = tokio_native_eui48_observation(common::plaintext_url());
+    let ours = compio_native_eui48_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_bytes = [
+        [0, 0, 0, 0, 0, 0],
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        [0x08, 0x00, 0x2b, 0x01, 0x02, 0x03],
+    ];
+    let expected_text = [
+        "00:00:00:00:00:00",
+        "ff:ff:ff:ff:ff:ff",
+        "08:00:2b:01:02:03",
+    ];
+    let expected_wires = ["000000000000", "ffffffffffff", "08002b010203"];
+    assert_eq!(ours.decoded, expected_bytes);
+    assert_eq!(ours.rebound, expected_bytes);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+    }
+
+    assert_eq!(
+        ours.macaddr8_text,
+        ["08:00:2b:01:02:03:04:05", "08:00:2b:ff:fe:01:02:03"]
+    );
+    assert_eq!(
+        ours.macaddr8_wires.each_ref().map(|wire| hex(&wire.0)),
+        ["08002b0102030405", "08002bfffe010203"]
+    );
+    assert!(!ours.macaddr8_encode_supported);
+    assert!(!ours.macaddr8_decode_supported);
+}
+
+/// Desired invariant blocked by the six-byte-only `eui48::MacAddress` carrier.
+#[cfg(feature = "with-eui48-1")]
+#[ignore = "both eui48::MacAddress codecs reject PostgreSQL MACADDR8"]
+#[compio::test]
+async fn native_eui48_codecs_must_support_macaddr8() {
+    let theirs = tokio_native_eui48_observation(common::plaintext_url());
+    let ours = compio_native_eui48_observation().await;
+    assert!(ours.macaddr8_encode_supported);
+    assert!(ours.macaddr8_decode_supported);
+    assert!(theirs.macaddr8_encode_supported);
+    assert!(theirs.macaddr8_decode_supported);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
