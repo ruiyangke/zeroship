@@ -108,13 +108,13 @@ columns = [
   # (third_party/zero-migrate/crates/zeroship-migrate/src/model/table_shape.rs), so
   # all three spellings produce the identical SynthFn::Now IR, and the
   # dialect-aware render localizes THAT to CURRENT_TIMESTAMP for SQLite.
-  { name = "id",         type = "text",        nullable = false, collation = "bytewise" },
-  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "created_by", type = "text",        nullable = true,  collation = "bytewise" },
-  { name = "updated_by", type = "text",        nullable = true,  collation = "bytewise" },
-  { name = "version",    type = "integer",     nullable = false, default = "1" },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
+  { name = "id",         type = "text",        nullable = false, collation = "bytewise", assign = { by = "typedId",      on = "insert" } },
+  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()",      assign = { by = "now",          on = "insert" } },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()",      assign = { by = "now",          on = "write"  } },
+  { name = "created_by", type = "text",        nullable = true,  collation = "bytewise", assign = { by = "actor",        on = "insert" } },
+  { name = "updated_by", type = "text",        nullable = true,  collation = "bytewise", assign = { by = "actor",        on = "write"  } },
+  { name = "version",    type = "integer",     nullable = false, default = "1",          assign = { by = "increment(1)", on = "write"  } },
+  { name = "deleted_at", type = "timestamptz", nullable = true,                          assign = { by = "now",          on = "delete" } },
 ]
 indexes = [
   { name = "ix_deleted_at", columns = ["deleted_at"] },
