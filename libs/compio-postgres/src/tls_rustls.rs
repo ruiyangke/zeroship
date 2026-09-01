@@ -2316,6 +2316,46 @@ mod tests {
         assert_eq!(hash, sha2::Sha224::digest(cert.as_ref()).to_vec());
     }
 
+    /// SHA-512 is the widest digest the signature table selects, and until this
+    /// test nothing chose it: `Digest::Sha512`, and the `sha2::Sha512` arm of
+    /// `Digest::hash`, had zero executed coverage regions. A server presenting a
+    /// SHA-512-signed certificate would have computed its SCRAM-PLUS channel
+    /// binding through code no test had run.
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_sha512() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha512_cert.pem"));
+        assert_eq!(
+            hash.len(),
+            64,
+            "sha512WithRSAEncryption must select SHA-512"
+        );
+        assert_eq!(hash, sha2::Sha512::digest(cert.as_ref()).to_vec());
+    }
+
+    /// RSASSA-PSS reads its digest from AlgorithmIdentifier parameters through
+    /// `Digest::for_hash_oid`, a SECOND and separate table from the signature
+    /// OIDs above. Only its SHA-256 arm had ever run, so every other hash a PSS
+    /// certificate can name went through an unexecuted branch.
+    ///
+    /// `sha384_cert.pem` does NOT cover this: it is signed with
+    /// sha384WithRSAEncryption, which the signature table resolves directly and
+    /// which never consults `for_hash_oid` at all.
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_pss_sha384() {
+        let (cert, hash) =
+            endpoint_hash_fixture(include_str!("../tests/data/rsa_pss_sha384_cert.pem"));
+        assert_eq!(
+            hash.len(),
+            48,
+            "PSS parameters naming SHA-384 must select it"
+        );
+        assert_eq!(
+            hash,
+            sha2::Sha384::digest(cert.as_ref()).to_vec(),
+            "RSASSA-PSS must take SHA-384 from its AlgorithmIdentifier parameters"
+        );
+    }
+
     /// An Ed25519 certificate names no hash in its signature OID. We must
     /// report "no binding" rather than defaulting to SHA-256, because the
     /// server would not compute one either.
