@@ -1490,7 +1490,85 @@ mod tests {
     use futures_util::StreamExt;
     use std::time::Duration;
 
+    /// `expect_err` cannot interpolate the loop variable, so name the failing
+    /// status explicitly when the refusal does not happen.
+    trait UnwrapErrForStatus {
+        fn unwrap_err_or_else_msg(self, status: crate::tls::ClientCertStatus) -> Error;
+    }
+
+    impl UnwrapErrForStatus for Result<(), Error> {
+        fn unwrap_err_or_else_msg(self, status: crate::tls::ClientCertStatus) -> Error {
+            match self {
+                Ok(()) => panic!("sslcertmode=require was not honoured for {status:?}"),
+                Err(error) => error,
+            }
+        }
+    }
+
     const EXPECTED_DELAYED_MESSAGE_LIMIT: usize = 256;
+
+    /// `sslcertmode=require` is a demand that the connection be authenticated
+    /// by a client certificate, so every way of NOT having sent one must be a
+    /// refusal. Two of the five arms had never run - `NotSent` and `Unknown` -
+    /// and both are the dangerous direction: had either returned `Ok`, a caller
+    /// demanding certificate authentication would have proceeded without one.
+    ///
+    /// The `Unknown` arm is the subtler of the two. It fires when the TLS
+    /// backend cannot report what it did, and refusing there is a choice: the
+    /// alternative is to assume success, which is exactly the assumption this
+    /// setting exists to forbid.
+    #[test]
+    fn sslcertmode_require_refuses_every_status_but_sent() {
+        use crate::tls::ClientCertStatus;
+
+        let required = "host=h sslcertmode=require"
+            .parse::<Config>()
+            .expect("parse a sslcertmode=require config");
+
+        check_ssl_cert_mode(&required, ClientCertStatus::Sent)
+            .expect("a sent certificate satisfies the demand");
+
+        for (status, expected) in [
+            (ClientCertStatus::NotApplicable, "did not request"),
+            (ClientCertStatus::NotRequested, "did not request"),
+            (ClientCertStatus::NotSent, "without a valid SSL certificate"),
+            (ClientCertStatus::Unknown, "did not report"),
+        ] {
+            let error = check_ssl_cert_mode(&required, status).unwrap_err_or_else_msg(status);
+            // The setting name lives in the SOURCE, not in the top-level
+            // Display, which renders only "authentication error". Walk the
+            // chain or the assertion below would be checking the wrong string.
+            let rendered = std::iter::successors(std::error::Error::source(&error), |error| {
+                std::error::Error::source(*error)
+            })
+            .fold(format!("{error}"), |chain, error| {
+                format!("{chain}: {error}")
+            });
+            assert!(
+                rendered.contains("sslcertmode=require"),
+                "the refusal must name the setting: {rendered}"
+            );
+            assert!(
+                rendered.contains(expected),
+                "{status:?} must say why it failed, wanted {expected:?}: {rendered}"
+            );
+        }
+
+        // The whole check is scoped to `require`; any other mode returns early
+        // regardless of status, which is what keeps a plaintext connection from
+        // being refused for lacking a certificate nobody asked for.
+        let default = "host=h".parse::<Config>().expect("parse a default config");
+        for status in [
+            ClientCertStatus::NotApplicable,
+            ClientCertStatus::NotRequested,
+            ClientCertStatus::NotSent,
+            ClientCertStatus::Sent,
+            ClientCertStatus::Unknown,
+        ] {
+            check_ssl_cert_mode(&default, status)
+                .expect("only sslcertmode=require inspects the status");
+        }
+    }
 
     /// Replays one coalesced backend read, then fails every frontend write.
     /// This isolates the handshake's already-buffered diagnosis choice from
