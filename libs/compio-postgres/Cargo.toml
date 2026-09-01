@@ -21,7 +21,10 @@ with-uuid-1 = ["postgres-types/with-uuid-1"]
 with-time-0_3 = ["postgres-types/with-time-0_3"]
 with-bit-vec-0_8 = ["postgres-types/with-bit-vec-0_8"]
 with-bit-vec-0_9 = ["postgres-types/with-bit-vec-0_9"]
-with-eui48-1 = ["postgres-types/with-eui48-1"]
+with-eui48-1 = [
+    "postgres-types/with-eui48-1",
+    "tokio-postgres/with-eui48-1",
+]
 with-geo-types-0_7 = ["postgres-types/with-geo-types-0_7"]
 with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
 with-smol_str-01 = ["postgres-types/with-smol_str-01"]
@@ -205,6 +208,7 @@ chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
 time = { workspace = true }
 uuid = { workspace = true }
 cidr = "0.3.2"
+eui48 = { version = "1", default-features = false }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream
