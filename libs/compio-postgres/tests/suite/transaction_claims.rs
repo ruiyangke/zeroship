@@ -977,3 +977,77 @@ async fn committed_savepoint_is_removed_from_the_server_stack() {
     .await
     .expect("nested savepoint release test exceeded its watchdog");
 }
+
+/// Committing an ABORTED subtransaction takes the cleanup-carrying release
+/// path. `RELEASE <savepoint>` is refused inside an aborted subtransaction, so
+/// `commit()` arms a `ROLLBACK TO SAVEPOINT` that rides with the request and
+/// leaves the OUTER transaction usable.
+///
+/// `abandoned_failed_nested_commit_recovers_before_the_next_outer_operation`
+/// builds the same server state, but the status is still unsettled at that
+/// point, so its first poll parks on the settle barrier in `commit()` and the
+/// test abandons it there. That is a different claim, and it means nothing had
+/// ever run this arm: `start_batch_execute_with_error_cleanup` and
+/// `send_with_error_cleanup` both had zero executed coverage regions.
+#[compio::test]
+async fn failed_nested_commit_rolls_back_to_its_savepoint_and_spares_the_outer_writes() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_failed_nested_release");
+        client
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (value int NOT NULL)"))
+            .await
+            .unwrap();
+
+        let mut transaction = client.transaction().await.unwrap();
+        transaction
+            .execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
+            .await
+            .expect("the outer transaction could not write before its savepoint");
+
+        let name = common::test_object_name("cpg_failed_nested_release_sp");
+        let nested = transaction.savepoint(name).await.unwrap();
+        nested
+            .execute(&format!("INSERT INTO {table} VALUES (2)"), &[])
+            .await
+            .expect("the subtransaction could not write before it aborted");
+        let failure = nested
+            .batch_execute("SELECT 1 / 0")
+            .await
+            .expect_err("the nested transaction did not enter its aborted state");
+        assert_eq!(
+            failure.code(),
+            Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO)
+        );
+
+        // Run it to completion. This is the step the abandonment test omits.
+        let commit = nested.commit().await;
+        let error = commit
+            .expect_err("RELEASE inside an aborted subtransaction was reported as a clean commit");
+        assert_eq!(
+            error.code(),
+            Some(&compio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION),
+            "the failed nested commit failed for a reason other than its aborted block: {}",
+            common::error_chain(&error)
+        );
+
+        // The armed cleanup rolled back TO the savepoint rather than out of the
+        // whole transaction, so the outer block is still usable and still owns
+        // the row it wrote before taking the savepoint.
+        let count: i64 = transaction
+            .query_one(&format!("SELECT count(*)::int8 FROM {table}"), &[])
+            .await
+            .expect("the outer transaction was unusable after the failed nested commit")
+            .get(0);
+        assert_eq!(
+            count, 1,
+            "the failed nested commit did not roll back to its savepoint"
+        );
+        transaction.rollback().await.unwrap();
+    })
+    .await
+    .expect("failed nested commit test exceeded its watchdog");
+}
