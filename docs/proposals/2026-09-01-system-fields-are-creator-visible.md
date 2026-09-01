@@ -88,6 +88,72 @@ materialises a value. This is what stops honest disclosure from re-introducing
 the upsert-counter reset, since `default: 1` then means "the database defaults
 it", not "send 1".
 
+### Does this need the descriptor extended? Almost not at all.
+
+A descriptor field today looks like this (measured, hitcounter):
+
+```
+created_at: {"type":"date","required":true,"readable":true,"filterable":true,
+             "sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
+version:    {"type":"int","required":true,"default":1, ...same...}
+```
+
+**The slot already exists and is simply not filled.** `validateDoc`'s
+missing-value branch reads:
+
+```js
+if (def.default !== undefined) { materialise it }
+else if (def.required)        { error }
+```
+
+So the PRESENCE of a default already means "not required of the caller". Emit
+`created_at`'s real `NOW()` default and the requiredness break disappears with no
+new property - the bug goes away with the lie that caused it.
+
+The obstacle is the first branch, which materialises. That is what would put the
+string `"NOW()"` on the wire, and what already puts `version: 1` there and resets
+the upsert counter.
+
+**And that needs no new property either**, because the two kinds are already
+distinguishable by the default's own shape - `typeof def.default === "function"`
+is tested at `validate.ts:509` today:
+
+- a **function** default is creator-authored JS with no DDL equivalent, so it
+  must be computed client-side;
+- **anything else** is backed by a DDL `DEFAULT`, so the database supplies it and
+  the client must send nothing.
+
+"Materialise function defaults, never materialise the rest" is derivable from
+data already present. One branch, and it removes a write rather than adding a
+list.
+
+**The one real gap is `id`.** `id TEXT COLLATE "C" PRIMARY KEY` carries no DDL
+default at all - the platform mints it in Rust - so there is nothing truthful to
+put in `default`, and `id` stays required-of-caller. That is exactly the
+runtime-assigned kind, and it is a new VALUE the existing `default` slot can
+hold, not a new field:
+
+```
+id: { ..., default: { kind: "runtime", generator: "typedId", prefix: "hit" } }
+```
+
+Folding the prefix in here also retires `idPrefix`, which
+`prefix_for_collection` (`system_fields_pass.rs:128-135`) reads unvalidated
+today.
+
+| Change | New descriptor property? |
+| --- | --- |
+| emit the `NOW()` default that exists | no - fills the existing slot |
+| stop materialising non-function defaults | no - SDK-side, one branch |
+| `id` runtime-assigned | no new field; a new KIND of `default` |
+| update behaviour (immutable / re-stamp / increment) | **yes - and only this one** |
+
+**The last row is not needed for correctness.** Rust already enforces all three,
+and a client that never materialises defaults never sends those fields anyway.
+It buys error messages and generated types that make `created_at` unassignable
+in an update patch. It is also the piece that would drag in a descriptor version
+bump, so it is worth separating from the three above rather than bundling.
+
 **OPEN, and blocking implementation:**
 - naming for the two properties (placeholders above: source / on-update)
 - scope: the four fields specified, or all seven including `created_by`,
