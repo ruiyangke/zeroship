@@ -543,7 +543,7 @@ mod runtime_descriptor_binding_tests {
     }
 }
 
-/// **Bench-only**: thin wrapper around `v8_bridge::row_to_json` so the
+/// **Bench-only**: thin wrapper around `backend::pg_row_json::row_to_json` so the
 /// `bench_row_to_json` Criterion harness in `benches/` can measure the
 /// row-to-json index-lookup path without the bench having to live
 /// inside `v8_bridge` itself.
@@ -557,14 +557,14 @@ mod runtime_descriptor_binding_tests {
 #[doc(hidden)]
 #[must_use]
 pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
-    v8_bridge::row_to_json(row)
+    backend::pg_row_json::row_to_json(row)
 }
 
 /// **Bench-only**: the full `&[Row] → JSON-string` path the SDK sees on
 /// a `find().first()` (or any other `first_row_or_null`-resolving) call. Runs
 /// both halves the dispatcher executes between Postgres and V8:
 ///
-/// 1. `v8_bridge::rows_to_json_value` — decode every `Row` into a
+/// 1. `backend::pg_row_json::rows_to_json_value` — decode every `Row` into a
 ///    `serde_json::Value` (the same work `bench_row_to_json` covers
 ///    for a single row).
 /// 2. `crud::first_row_or_null` — take the first element, fall back
@@ -586,7 +586,7 @@ pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
 #[doc(hidden)]
 #[must_use]
 pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
-    let values = v8_bridge::rows_to_json_value(rows);
+    let values = backend::pg_row_json::rows_to_json_value(rows);
     values
         .into_iter()
         .next()

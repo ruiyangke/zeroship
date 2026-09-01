@@ -473,7 +473,7 @@ impl VectorIndex for PostgresBackend {
             &param_refs,
         )
         .await?;
-        Ok(crate::v8_bridge::rows_to_json_value(&rows))
+        Ok(crate::backend::pg_row_json::rows_to_json_value(&rows))
     }
 }
 
@@ -569,7 +569,7 @@ impl SpatialIndex for PostgresBackend {
             &param_refs,
         )
         .await?;
-        Ok(crate::v8_bridge::rows_to_json_value(&rows))
+        Ok(crate::backend::pg_row_json::rows_to_json_value(&rows))
     }
 }
 
