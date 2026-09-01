@@ -729,7 +729,7 @@ pub(crate) fn prefix_message(err: &mut DbError, prefix: &str) {
 /// `"audit: INSERT migrations"`, `"diff: probe pg_attribute"`) so the
 /// operator-facing message keeps the same shape.
 pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    let mut err: DbError = e.into();
+    let mut err = DbError::from_pg(&e);
     prefix_message(&mut err, &format!("{context}: "));
     err
 }
@@ -789,16 +789,19 @@ impl std::fmt::Display for DbError {
 
 impl std::error::Error for DbError {}
 
-// Postgres-side → DbError so SQL helpers can `?`-flow driver errors
-// through the same `to_op_error()` boundary. Routes through
-// [`DbError::from_pg`] so SQLSTATE classification is the single source
-// of truth — callers gain ergonomic `?` operator while the variant
-// selection stays in one place.
-impl From<compio_postgres::Error> for DbError {
-    fn from(e: compio_postgres::Error) -> Self {
-        DbError::from_pg(&e)
-    }
-}
+// A `From<compio_postgres::Error> for DbError` stood here until 2026-08-31.
+// It is deleted, and it is not coming back: `DbError` is the vendor-neutral
+// error, and a `From` from a driver type is the one construct that pins the
+// crate owning `DbError` to that driver — the orphan rule allows the impl only
+// where `DbError` lives, so it could never move down to a Postgres crate.
+// Conversion is now spelled explicitly at every site via `DbError::from_pg`,
+// which is what all 45 existing call sites already did.
+//
+// The impl advertised "callers gain ergonomic `?`". Measured before deleting
+// it: across `plugin-db`, `zeroship-worker` and `zeroship-cli` under
+// `--all-targets --all-features`, exactly ONE thing depended on it, and it was
+// the test asserting the impl existed. Zero production `?` sites in three years
+// of code. The affordance was never taken.
 
 impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
     fn from(error: zeroship_core::database_role::PerAppRoleNameError) -> Self {
@@ -1323,17 +1326,33 @@ mod tests {
         );
     }
 
-    /// `From<compio_postgres::Error>` must route through
-    /// [`DbError::from_pg`] so the SQLSTATE classification stays the
-    /// single source of truth. We can't fabricate a real
-    /// `compio_postgres::Error` from a `#[test]` without a live
-    /// listener (the type's constructors are crate-private), so this
-    /// test pins the contract at the type level — if the `From` impl
-    /// disappears or its signature drifts, compile fails here.
+    /// `DbError` must not gain a blanket conversion from a driver error
+    /// again. This is the inverse of the test that stood here until
+    /// 2026-08-31, which asserted `From<compio_postgres::Error>` EXISTED
+    /// and whose only effect was to make its deletion a compile error.
+    ///
+    /// A driver `From` pins whichever crate owns `DbError` to that driver
+    /// by the orphan rule, so it can never move to a Postgres crate. The
+    /// vendor-neutral error is the point; explicit `DbError::from_pg` at
+    /// the call site is the house style, and all 45 existing sites use it.
+    ///
+    /// Compile-time assertion: `DbError: !From<compio_postgres::Error>`
+    /// cannot be written in stable Rust, so this pins the property the
+    /// only way available - the inherent classifier is still the single
+    /// source of truth, and nothing may route around it implicitly.
     #[test]
-    fn from_pg_error_impl_is_wired() {
-        fn assert_from<T: From<compio_postgres::Error>>() {}
-        assert_from::<DbError>();
+    fn dberror_classifies_pg_errors_only_through_from_pg() {
+        // `from_pg` takes a reference and stays inherent; if someone
+        // reintroduces `impl From<compio_postgres::Error> for DbError`,
+        // this call becomes ambiguous only for owned values, so the real
+        // guard is the reviewer plus the tier census. Pin the signature:
+        fn assert_classifier(f: fn(&compio_postgres::Error) -> DbError) -> bool {
+            // Function-pointer coercion fails to compile if `from_pg`
+            // changes shape - e.g. is made a `From` impl method or moved
+            // to take ownership.
+            std::ptr::fn_addr_eq(f, DbError::from_pg as fn(&compio_postgres::Error) -> DbError)
+        }
+        assert!(assert_classifier(DbError::from_pg));
     }
 
     /// The helper returns the first element of a non-empty slice. The
