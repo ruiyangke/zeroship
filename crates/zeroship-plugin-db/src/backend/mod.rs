@@ -75,6 +75,10 @@ pub(crate) mod lock_guard;
 /// crate; kept beside it rather than in the V8 adapter, which is where it lived
 /// until 2026-08-31 and which made this backend depend on the adapter.
 pub(crate) mod pg_row_json;
+// PostgreSQL pooled execution under the per-app role fence. Lived in
+// `crate::exec` (ENGINE) until 2026-09-01, where it formed the upward half of
+// the `PG <-> ENGINE` tier cycle.
+pub(crate) mod pg_autocommit;
 // PostgreSQL per-app session setup SQL. PG tier: `SET LOCAL ROLE` and the GUC
 // names are dialect. The budgets they render are core policy - see
 // `crate::budgets`. `pub` so `auth::bootstrap` can re-export for its callers.

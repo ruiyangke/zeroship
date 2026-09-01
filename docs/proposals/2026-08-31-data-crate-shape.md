@@ -266,7 +266,7 @@ which half.
 | --- | --- | --- |
 | ADAPTER <-> ENGINE | 17 up / 7 down | the V8 dispatch surface |
 | ENGINE <-> SQLITE | 4 up / 8 down | `backend/sqlite/cdc.rs:543,547,646` -> `crate::broker` |
-| ENGINE <-> PG | 1 / 1 | `backend/postgres.rs:469,565` -> `crate::exec` |
+| ~~ENGINE <-> PG~~ | ~~1 / 1~~ | **CLOSED 2026-09-01**, see below |
 
 ### Where they converge
 
@@ -278,6 +278,12 @@ which half.
 - **Break ENGINE <-> PG first** - two of three, and the third's objection is about
   sequencing risk rather than dependency. It is the smallest cycle, it is the one concealing
   a live defect (below), and it is the only one that unblocks minting `data-postgres` at all.
+  **Done 2026-09-01, in three commits.** The budgets went to a CORE-tier `budgets.rs`, the
+  `SET LOCAL` batch to a PG-tier `backend/pg_session_sql.rs`, and the roled-autocommit funnel to
+  `backend/pg_autocommit.rs`. The middle step was not tidiness: the funnel calls
+  `autocommit_local_session_setup_sql`, so moving the funnel while the builder stayed in
+  `auth/bootstrap.rs` would have re-formed the same cycle under a different symbol. The census now
+  reports two cycles, and PG appears nowhere in its per-edge violation table.
 - **`ENGINE <-> SQLITE` is the cheapest.** Both a re-tiering (broker is nearly a leaf: its
   only production `crate::` edges are `error::DbError` and `read_set::ReadSetEntry`) and a
   `ChangeSink` port in core are proposed; both preserve drop semantics, which a plain event
@@ -299,17 +305,28 @@ unconditionally for any session not provably idle (`libs/compio-postgres/src/poo
 
 > the engine must not be able to obtain a connection it can issue SQL on without the fence.
 
-And that is violated **today**: `PgSqlExecutor::pool_handle()` (`backend/mod.rs:765`) hands the
-engine a raw `Rc<Pool>` on an unconditional trait. All three production callers currently route
-through the fenced funnel - but `crud/unmask.rs:864-877` records the one occasion the option was
-taken, "the single ungated production path in this crate that reached a tenant schema unfenced".
-Defence in depth caught that one; the fence did not exist. Deleting `pool_handle` and shipping
-only fenced entry points turns author discipline into a compile error, and after the split into
-`E0433`. Tracked as #114. `PostgresBackend::pool_exec` (`backend/postgres.rs:236-243`) is a
-second, latent instance: unfenced, no production PG caller yet, and exactly the neutral signature
-someone would reach for.
+And that was violated when this was written: `PgSqlExecutor::pool_handle()` (`backend/mod.rs:765`)
+hands out a raw `Rc<Pool>` on an unconditional trait. All three production callers routed through
+the fenced funnel - but `crud/unmask.rs` records the one occasion the option was taken, "the single
+ungated production path in this crate that reached a tenant schema unfenced". Defence in depth
+caught that one; the fence did not exist.
 
-### Where they disagree, and it is not settled
+**As of 2026-09-01 no production caller reaches a pool at all.** Those three callers were the last,
+and #110 moved them onto `PostgresBackend`'s roled entry points. The accessor still EXISTS, so this
+is author discipline made *unnecessary* rather than *impossible* - #114 finishes it by deleting the
+method.
+
+That task turned out not to be mechanical, which is worth recording. Its four remaining callers all
+sit in `crud::mask_drift`, gated `#[cfg(any(test, feature = "test-helpers"))]` at `crud/mod.rs:90`,
+and three of them issue `CREATE TABLE`/`CREATE INDEX` for the drift-audit table - DDL the per-app
+runtime role is deliberately not granted since decision 10 took DDL out of the data plane. Routing
+them through the fence would fail with `permission denied`. So the last step of "make the fence
+unbypassable" needs a decision about what privilege a test helper runs under, not a rename.
+
+`PostgresBackend::pool_exec` (`backend/postgres.rs:236-243`) is a second, latent instance:
+unfenced, no production PG caller yet, and exactly the neutral signature someone would reach for.
+
+### Where they disagreed, and how the constraints settled it
 
 What `crud/unmask.rs` should receive instead of `Vec<compio_postgres::Row>`:
 
@@ -330,6 +347,21 @@ and its variants are SQLite storage classes documented in SQLite terms. It looks
 not. This is the exact mirror of the boundary round's `LiveSchema` finding: there, a type that
 looks vendor-specific is shared; here, a type that looks neutral is vendor. **The name is not the
 tier**, in both directions.
+
+**The two shared constraints decided it, and they eliminate two of the three proposals outright.**
+Fable's `Vec<Value>` is refused by the ciphertext constraint - it is the base64 round-trip, which
+is the bug of #115 arriving by a different route. Codex's `TypedCell` is refused by the tier
+argument above. What ships is opus's shape under a name that says what it reads:
+`backend::pg_autocommit::ScalarRead<T> { NoRow, Null, Value(T) }`, generic so the encrypted reader
+takes `ScalarRead<Vec<u8>>` and the plaintext reader `ScalarRead<String>` - because those two
+callers differ in the column type they read, not in the outcomes they distinguish.
+
+The wider question the table implies - **one neutral row type for the whole data plane** - was
+NOT settled, and the implementation deliberately does not settle it. The five production callers
+want three different things (JSON for the two search methods, one cell for the two unmask readers,
+nothing for the audit INSERT), so each got the shape it uses. `roled_rows` still returns
+`Vec<compio_postgres::Row>` for `exec::run_sql`, whose callers are the whole CRUD surface; that
+one remains open.
 
 ### The review loop found a live bug, and it is fixed
 

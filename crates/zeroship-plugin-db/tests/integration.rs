@@ -6344,9 +6344,13 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
 ///
 /// The funnel additionally binds every result in BINARY format
 /// (`libs/compio-postgres/src/query.rs:186`), so the `\xHHHH...` text rendering
-/// that the comment at `crud/unmask.rs:543-545` describes is not what arrives
-/// either. Two independent reasons, one outcome:
-/// `DbError::internal("unmask: get column value: ...")` at `crud/unmask.rs:548`.
+/// the pre-fix comment described is not what arrives either. Two independent
+/// reasons, one outcome: a `DbError::internal` carrying `error deserializing
+/// column 0`. The read now goes through
+/// `backend::pg_autocommit::roled_scalar_bytes`, so on the pre-fix code the
+/// message was prefixed `unmask: get column value: ` and today it would be
+/// `db: read scalar bytes: `; this test asserts on the unmasked VALUE, not on
+/// either string.
 ///
 /// WHY NOTHING CAUGHT IT. Every live PG unmask fixture declares a masked but
 /// UNENCRYPTED column, so this arm was never entered; the encrypted round-trip
@@ -6434,9 +6438,9 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     )
     .await;
 
-    // Surface the real error rather than a bare unwrap panic: today this is
-    // `unmask: get column value: error deserializing column 0` and the message
-    // is the evidence that the failure is the BYTEA decode and nothing else.
+    // Surface the real error rather than a bare unwrap panic: on the pre-fix
+    // code this printed `error deserializing column 0`, which is the evidence
+    // that the failure is the BYTEA decode and nothing else.
     let unmasked = result.unwrap_or_else(|e| {
         panic!("unmask of an ENCRYPTED column must recover the plaintext, got: {e:?}")
     });

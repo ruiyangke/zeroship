@@ -511,8 +511,8 @@ async fn fetch_and_decrypt(
 
     // ---- PG arm ----
     if let Some(pg) = backend.as_encrypted_column_pg() {
-        use crate::backend::{EncryptedColumn as _, PgSqlExecutor as _};
-        let pool = pg.pool_handle();
+        use crate::backend::EncryptedColumn as _;
+        use crate::backend::pg_autocommit::ScalarRead;
         // The real value lives in the RAW column - the field's own column
         // holds the mask. This function and its SQLite twin are the only
         // readers of that column in the tree, and they sit behind
@@ -523,26 +523,9 @@ async fn fetch_and_decrypt(
             app_id,
             args.collection
         );
-        let rows = crate::exec::query_postgres_pool_with_autocommit_role(
-            pool,
-            app_id,
-            &sql,
-            &[&args.row_pk],
-        )
-        .await?;
-        if rows.is_empty() {
-            return Err(DbError::ValidationFailed {
-                code: "unmask_not_found",
-                message: format!(
-                    "row '{}' not found in '{}.{}'",
-                    args.row_pk, app_id, args.collection
-                ),
-                hint: None,
-            });
-        }
         // READ THE RAW SIBLING AS BYTES, NOT TEXT.
         //
-        // The raw sibling of an ENCRYPTED column is BYTEA, and this funnel binds
+        // The raw sibling of an ENCRYPTED column is BYTEA, and the funnel binds
         // every result in BINARY format (`libs/compio-postgres/src/query.rs:186`),
         // so there is no text rendering to parse.
         //
@@ -558,23 +541,43 @@ async fn fetch_and_decrypt(
         // text protocol - the legacy shape `decrypt_row_on_read` still keeps a
         // compatibility arm for, and one this call has never produced.
         //
+        // The same reasoning is why this reads bytes through
+        // `read_roled_scalar_bytes` rather than the JSON funnel the search
+        // methods use: `pg_row_json::column_to_json` base64-encodes BYTEA, so
+        // routing ciphertext through it would put the text round-trip back.
+        //
         // Nothing caught it because every live PG unmask fixture declared a
         // masked but UNENCRYPTED column, and the SQLite twin below reads
         // `TypedCell::Blob` and was always correct. The regression test is
         // `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`.
-        let value: Option<&[u8]> = rows[0]
-            .try_get::<_, Option<&[u8]>>(0)
-            .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
-        let bytes = value.ok_or_else(|| DbError::ValidationFailed {
-            code: "unmask_value_null",
-            message: format!(
-                "column '{}' on row '{}' is NULL; nothing to unmask",
-                args.column, args.row_pk
-            ),
-            hint: None,
-        })?;
+        let bytes = match pg
+            .read_roled_scalar_bytes(app_id, &sql, &[&args.row_pk])
+            .await?
+        {
+            ScalarRead::NoRow => {
+                return Err(DbError::ValidationFailed {
+                    code: "unmask_not_found",
+                    message: format!(
+                        "row '{}' not found in '{}.{}'",
+                        args.row_pk, app_id, args.collection
+                    ),
+                    hint: None,
+                });
+            }
+            ScalarRead::Null => {
+                return Err(DbError::ValidationFailed {
+                    code: "unmask_value_null",
+                    message: format!(
+                        "column '{}' on row '{}' is NULL; nothing to unmask",
+                        args.column, args.row_pk
+                    ),
+                    hint: None,
+                });
+            }
+            ScalarRead::Value(bytes) => bytes,
+        };
         let key = pg.resolve_key(app_id, &enc_meta.key_id).await?;
-        let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, bytes, &aad)?;
+        let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
         return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
     }
 
@@ -640,48 +643,43 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
 
     // ---- PG arm ----
     if let Some(pg) = backend.as_postgres() {
-        use crate::backend::PgSqlExecutor as _;
-        let pool = pg.pool_handle();
+        use crate::backend::pg_autocommit::ScalarRead;
         // The real value lives in the RAW column - the field's own column
         // holds the mask. This function and its SQLite twin are the only
         // readers of that column in the tree, and they sit behind
         // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
+        //
+        // Text, not bytes: this is the PLAINTEXT-storage path, so the raw
+        // sibling is the column's own declared type. The encrypted path above
+        // reads BYTEA and must use `read_roled_scalar_bytes`.
         let sql = format!(
             "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
             crate::query::raw_column_name(&args.column),
             app_id,
             args.collection
         );
-        let rows = crate::exec::query_postgres_pool_with_autocommit_role(
-            pool,
-            app_id,
-            &sql,
-            &[&args.row_pk],
-        )
-        .await?;
-        if rows.is_empty() {
-            return Err(DbError::ValidationFailed {
+        return match pg
+            .read_roled_scalar_text(app_id, &sql, &[&args.row_pk])
+            .await?
+        {
+            ScalarRead::NoRow => Err(DbError::ValidationFailed {
                 code: "unmask_not_found",
                 message: format!(
                     "row '{}' not found in '{}.{}'",
                     args.row_pk, app_id, args.collection
                 ),
                 hint: None,
-            });
-        }
-        let value: Option<&str> = rows[0]
-            .try_get::<_, Option<&str>>(0)
-            .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
-        return Ok(value
-            .ok_or_else(|| DbError::ValidationFailed {
+            }),
+            ScalarRead::Null => Err(DbError::ValidationFailed {
                 code: "unmask_value_null",
                 message: format!(
                     "column '{}' on row '{}' is NULL; nothing to unmask",
                     args.column, args.row_pk
                 ),
                 hint: None,
-            })?
-            .to_string());
+            }),
+            ScalarRead::Value(text) => Ok(text),
+        };
     }
 
     // ---- SQLite arm ----
@@ -833,8 +831,6 @@ async fn write_audit_unmask_row(
 
     // ---- PG arm ----
     if let Some(pg) = backend.as_postgres() {
-        use crate::backend::PgSqlExecutor as _;
-        let pool = pg.pool_handle();
         let sql = format!(
             r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
                (actor_id, actor_role, collection, row_pk, "column",
@@ -858,7 +854,7 @@ async fn write_audit_unmask_row(
         // `SET LOCAL ROLE` - the single ungated production path in this crate
         // that reached a tenant schema unfenced, while the two sibling readers
         // above (`fetch_and_decrypt`, `fetch_plaintext_parent`) took the same
-        // `pool_handle()` and routed it through this funnel. Since
+        // pool and routed it through the roled funnel. Since
         // `runtime_dependents_sql` grants the runtime role `WITH INHERIT
         // FALSE`, the bare form no longer has the privilege and this INSERT
         // fails with `permission denied for table __zeroship_audit_unmask` -
@@ -866,8 +862,16 @@ async fn write_audit_unmask_row(
         // return plaintext, would have failed every unmask rather than leaking
         // one. The funnel also brings the DB-1 statement/lock timeouts, which
         // the bare call never had.
-        crate::exec::query_postgres_pool_with_autocommit_role(
-            pool,
+        //
+        // As of 2026-09-01 no production caller reaches a pool at all: this
+        // file was the last one, and it now goes through `PostgresBackend`'s
+        // roled entry points. `PgSqlExecutor::pool_handle` still EXISTS, so
+        // the bare form is discouraged rather than impossible - its four
+        // remaining callers are all in the `test-helpers`-gated
+        // `crud::mask_drift`, and three of them issue DDL the per-app role is
+        // not granted, so they cannot simply be routed through this fence.
+        // Removing the accessor is tracked separately.
+        pg.execute_roled(
             app_id,
             &sql,
             &[

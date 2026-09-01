@@ -55,12 +55,12 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::backend::BackendHandle;
+use crate::backend::pg_row_json::rows_to_json_value;
 use crate::context;
 use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
-use crate::backend::pg_row_json::rows_to_json_value;
 
 /// Raw usage metrics a db op emits in its SUCCESS arm (metering-as-
 /// infrastructure). `db_reads` counts each read op (query/count),
@@ -276,69 +276,19 @@ pub(crate) async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec
     Ok(values)
 }
 
+/// Resolve the shared pool and run `sql` on it under `app_id`'s role.
+///
+/// The role fence, the `SET LOCAL` batch and the surrounding transaction are
+/// PostgreSQL dialect and live in [`crate::backend::pg_autocommit`]. They sat
+/// here until 2026-09-01, which put them one tier ABOVE the Postgres backend
+/// that called into them - the upward half of the `PG <-> ENGINE` cycle.
 async fn exec_postgres_autocommit_with_role(
     app_id: &str,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     let pool = ensure_postgres_pool_for_shared_sql().await?;
-    query_postgres_pool_with_autocommit_role(&pool, app_id, sql, params).await
-}
-
-pub(crate) async fn query_postgres_pool_with_autocommit_role(
-    pool: &Rc<compio_postgres::Pool>,
-    app_id: &str,
-    sql: &str,
-    params: &[&str],
-) -> Result<Vec<compio_postgres::Row>, DbError> {
-    let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
-
-    // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
-    // inside an explicit transaction, exactly like the explicit-tx path
-    // (`tx_session_setup_sql`). `SET LOCAL` auto-reverts at COMMIT and at
-    // the implicit ROLLBACK the `compio_postgres::Transaction` issues on
-    // drop — so a setup error, a query error, OR a cancellation between
-    // setup and the would-be reset can no longer leave the pooled
-    // connection carrying this tenant's role + timeouts for the next
-    // checkout. The previous shape ran a session-level `SET ROLE` + a
-    // separate `RESET` that was skipped entirely when the future was
-    // cancelled mid-flight (no RAII guard, and the pool's Drop is
-    // synchronous so it cannot issue async RESET SQL).
-    let tx = client.transaction().await.map_err(|e| {
-        let mut err = DbError::from_pg(&e);
-        crate::error::prefix_message(
-            &mut err,
-            "db: autocommit BEGIN (per-app §17.5 + DB-1 guards): ",
-        );
-        err
-    })?;
-
-    let setup_sql = crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id)?;
-    tx.simple_query(&setup_sql).await.map_err(|e| {
-        let mut classified = DbError::classify_pg_per_app_session_setup(&e, app_id);
-        crate::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
-        classified.into_db_error()
-    })?;
-
-    let rows = tx
-        .query_text_params(sql, params)
-        .await
-        .map_err(|e| DbError::from_pg(&e))?;
-
-    // COMMIT reverts the SET LOCAL state and releases the connection
-    // clean. On any early return above, `tx` is dropped instead, which
-    // rolls back (also reverting the SET LOCAL state) and marks the
-    // connection dirty so the pool drains it before the next checkout.
-    tx.commit().await.map_err(|e| {
-        let mut err = DbError::from_pg(&e);
-        crate::error::prefix_message(
-            &mut err,
-            "db: autocommit COMMIT (per-app §17.5 + DB-1 guards): ",
-        );
-        err
-    })?;
-
-    Ok(rows)
+    crate::backend::pg_autocommit::roled_rows(&pool, app_id, sql, params).await
 }
 
 async fn exec_sqlite_json(
@@ -383,7 +333,9 @@ async fn exec_sqlite_json(
             #[cfg(test)]
             tests::record_sqlite_tx_route();
             let typed = client.query_typed_internal(sql, params).await?;
-            Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(&typed))
+            Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+                &typed,
+            ))
         }
         TxConnection::Postgres(_) => Err(DbError::internal(
             "db: sqlite backend active with postgres transaction connection",
@@ -1716,7 +1668,7 @@ mod tests {
             // SET LOCAL role + timeouts are live on the backend.
             let cancelled = compio::time::timeout(
                 Duration::from_millis(100),
-                query_postgres_pool_with_autocommit_role(&pool, app_id, "SELECT pg_sleep(1)", &[]),
+                crate::backend::pg_autocommit::roled_rows(&pool, app_id, "SELECT pg_sleep(1)", &[]),
             )
             .await;
             assert!(
