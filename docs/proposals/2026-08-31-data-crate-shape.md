@@ -252,6 +252,103 @@ documented in `pg_catalog` language, but the SQLite backend deliberately reuses 
 snapshot DTO. It stays inward under every option. This is why all three reviewers insist the split is
 **by symbol, not by file** - a file-granularity move of `diff.rs` gets this wrong by construction.
 
+## The cycles, answered by a second three-way review (2026-09-01)
+
+The boundary round's own conclusion was that the boundary is not the binding constraint -
+**the cycles are**, because two crates that reference each other cannot be separated at all.
+So the same three reviewers were asked, independently: for each cycle, what is the correct
+mechanism? Not "move the file" - the mechanism, the resulting signature, and which side owns
+which half.
+
+`tests/lib/tier_direction_census.sh` now reports cycles directly. Three stand:
+
+| cycle | edges | what it is |
+| --- | --- | --- |
+| ADAPTER <-> ENGINE | 17 up / 7 down | the V8 dispatch surface |
+| ENGINE <-> SQLITE | 4 up / 8 down | `backend/sqlite/cdc.rs:543,547,646` -> `crate::broker` |
+| ENGINE <-> PG | 1 / 1 | `backend/postgres.rs:469,565` -> `crate::exec` |
+
+### Where they converge
+
+- **The protocol inversion can come LAST.** All three agree. It is mandatory under
+  constraint 1, but nothing depends on it: the files that must move for the two vendor
+  cycles (`broker.rs`, `read_set.rs`, `crud/mask_pass.rs`, `auth/bootstrap.rs`) contain
+  **zero** `v8::` occurrences. Doing it first also means doing part of it twice, because the
+  vendor fixes shrink its surface.
+- **Break ENGINE <-> PG first** - two of three, and the third's objection is about
+  sequencing risk rather than dependency. It is the smallest cycle, it is the one concealing
+  a live defect (below), and it is the only one that unblocks minting `data-postgres` at all.
+- **`ENGINE <-> SQLITE` is the cheapest.** Both a re-tiering (broker is nearly a leaf: its
+  only production `crate::` edges are `error::DbError` and `read_set::ReadSetEntry`) and a
+  `ChangeSink` port in core are proposed; both preserve drop semantics, which a plain event
+  channel would not - two of the three upward calls are *pull queries* inside the drop loop,
+  and a channel lets suppressed-window events queue past the guard.
+
+### The security constraint, re-tested and restated
+
+The previous round's claim - that role application and statement must stay atomic in one
+function - is **right about one shape and wrong as a general prohibition**. Verified
+independently by me and by two reviewers:
+
+`SET LOCAL` is transaction-scoped, and the revert rides `Transaction`'s `Drop`
+(`libs/compio-postgres/src/transaction.rs:81-105`), with `return_client` rolling back
+unconditionally for any session not provably idle (`libs/compio-postgres/src/pool.rs:1644-1646`).
+`Drop` is synchronous and fires wherever the value lives, so a crate boundary does not break it.
+
+**The real invariant is not placement. It is:**
+
+> the engine must not be able to obtain a connection it can issue SQL on without the fence.
+
+And that is violated **today**: `PgSqlExecutor::pool_handle()` (`backend/mod.rs:765`) hands the
+engine a raw `Rc<Pool>` on an unconditional trait. All three production callers currently route
+through the fenced funnel - but `crud/unmask.rs:864-877` records the one occasion the option was
+taken, "the single ungated production path in this crate that reached a tenant schema unfenced".
+Defence in depth caught that one; the fence did not exist. Deleting `pool_handle` and shipping
+only fenced entry points turns author discipline into a compile error, and after the split into
+`E0433`. Tracked as #114. `PostgresBackend::pool_exec` (`backend/postgres.rs:236-243`) is a
+second, latent instance: unfenced, no production PG caller yet, and exactly the neutral signature
+someone would reach for.
+
+### Where they disagree, and it is not settled
+
+What `crud/unmask.rs` should receive instead of `Vec<compio_postgres::Row>`:
+
+| | proposal |
+| --- | --- |
+| opus | a new `ScalarCell { Missing, Null, Bytes }` |
+| codex | `ScalarLookup { NoRow, Cell(TypedCell) }`, reusing SQLite's cell vocabulary |
+| fable | `Vec<serde_json::Value>` - the shape `pg_row_json` already produces |
+
+They agree on two constraints regardless of choice: **"no row" and "SQL NULL" must stay
+distinguishable** (they map to different typed errors, `unmask_not_found` vs
+`unmask_value_null`, and collapsing them invites a caller to lose one), and **ciphertext must
+not be routed through JSON** unless the base64 shape is deliberate, because
+`pg_row_json.rs:72` base64-encodes BYTEA while decryption needs raw bytes.
+
+Against reusing `TypedCell`: it is defined at `backend/sqlite/session.rs:170` - **SQLite tier** -
+and its variants are SQLite storage classes documented in SQLite terms. It looks neutral and is
+not. This is the exact mirror of the boundary round's `LiveSchema` finding: there, a type that
+looks vendor-specific is shared; here, a type that looks neutral is vendor. **The name is not the
+tier**, in both directions.
+
+### The review loop found a live bug, and it is fixed
+
+Two of the three independently found that **PostgreSQL unmask of an ENCRYPTED column failed 100%
+of the time**. `fetch_and_decrypt`'s PG arm asked BYTEA for `Option<&str>`;
+`&str: FromSql::accepts` refuses BYTEA and `get_inner` checks `accepts` before decoding. No test
+crossed it - every live PG unmask fixture is masked but unencrypted, and the SQLite twin is
+correct because it reads `TypedCell::Blob`.
+
+Reproduced against live Postgres, then fixed in `1621eb75b`, with a regression test that is a
+one-variable sibling of the passing fence test. See #115.
+
+**Note what this says about the instruments.** `crud/unmask.rs` names `compio_postgres` zero
+times; the row arrives by inference. The signature census reads signatures, the direction census
+reads `crate::` direction, the manifest fence reads path spellings, and
+`vendor_value_flow_census.sh` reads return types. A **wrong requested type on an inferred value**
+is outside all four. No instrument in this document would have found it; three reviewers reading
+code did.
+
 ## What was decided
 
 Three choices, taken by the operator on 2026-08-31:
