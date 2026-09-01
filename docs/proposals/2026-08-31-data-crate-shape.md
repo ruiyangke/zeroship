@@ -526,14 +526,34 @@ would link it - the worker would contain the SQLite backend despite being "built
 feature. Getting the benefit means splitting that into separate invocations, which compiles
 `plugin-db` twice and changes the CI job.
 
-**LIMIT OF THIS CLAIM, STATED BECAUSE IT CANNOT BE OBSERVED TODAY.** The feature does not exist, so
-there is nothing in the current tree to measure: I verified the CI vector (`ci.yml:1829-1830`) and the
-workspace resolver (`resolver = "3"`, `Cargo.toml:3` - which changes MSRV-aware version selection,
-not cross-package feature unification), but the unification itself is documented cargo behaviour
-rather than something I ran. **Before anyone builds the gate, prove it on a scratch workspace:** two
-packages depending on one library, one enabling a feature, built in a single invocation - then check
-whether the other gets it. If cargo does NOT unify here, this obstacle disappears and the gate is
-simply the relocation work. If it does, the gate needs a CI change as well.
+**MEASURED 2026-08-31 ON A SCRATCH WORKSPACE. IT UNIFIES.** This paragraph previously flagged the
+unification as documented cargo behaviour that could not be observed here, because the feature does
+not exist yet, and said "before anyone builds the gate, prove it on a scratch workspace". Done.
+
+Three crates - `featlib` with a default-off `sqlite` feature exposing
+`pub fn has_sqlite() -> bool { cfg!(feature = "sqlite") }`, `featworker` depending on it WITHOUT the
+feature, `featcli` depending on it WITH it - in a `resolver = "3"` workspace, mirroring
+`zeroship-worker` and `zeroship-cli`:
+
+```
+CONTROL  cargo run -p featworker              -> worker sees sqlite = false
+TEST     cargo build -p featworker -p featcli -> worker sees sqlite = TRUE
+                                                 cli    sees sqlite = true
+```
+
+The control proves the feature is genuinely off by default and the probe can tell the difference. The
+test is the CI vector, and the worker binary reports the feature ON because the CLI asked for it in
+the same invocation.
+
+**So a default-off `sqlite` feature would NOT keep the backend out of the worker binary that CI
+builds** - one `plugin-db` is compiled with the union and both binaries link it. Worse, it would look
+correct: the worker's own manifest would not name the feature, and nothing today would report the
+discrepancy.
+
+**Two consequences for anyone who builds the gate anyway.** It needs separate cargo invocations for
+the worker and the CLI, which compiles `plugin-db` twice and changes `ci.yml`. And it needs a GUARD
+of its own - an assertion that the shipped worker binary really lacks the SQLite symbols - because a
+gate whose bypass is invisible is the exact shape of fence this document keeps finding elsewhere.
 
 ## Measured starting point
 
