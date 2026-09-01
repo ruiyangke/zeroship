@@ -2501,6 +2501,39 @@ Everything above is analysis. This section is the only part that says WHAT TO DO
 because the prerequisites were discovered across four review rounds and landed wherever they were
 found. **Nothing here is new; it is the same findings, ordered by what blocks what.**
 
+### What has actually shipped, 2026-09-01
+
+The operator's direction is **move first, let the compiler produce the task list**. That works for
+structural edges and NOT for vendor embedding - see the caveat below, which was learned the
+expensive way and is why a gate landed before any move did.
+
+| # | move | commit | verified |
+| --- | --- | --- | --- |
+| - | close `ENGINE <-> PG`: roled-autocommit funnel into the vendor tier | `f77ead1d8` | census cycle gone; 84 live PG, 694 lib |
+| - | gate decision 5 BEFORE moving anything | `b2263ebc9` | 2 arms + floors, 3 controls, mutation-proved |
+| 1 | PG error classification out of `error.rs` into `backend/pg_error.rs` | `6f3a482f6` | `error.rs` names a vendor 0 times in production; 84 live PG, 694 lib, run by me |
+| - | extend the gate to `zeroship-schema` | `e96849f0a` | found a second bearer nobody had recorded |
+| 2 | PG introspection out of `zeroship-schema` into `backend/pg_introspect.rs` | in flight | acceptance is the MANIFEST, not the source |
+
+**THE CAVEAT THAT REORDERED EVERYTHING.** `git mv`-ing a file that NAMES a vendor into a new crate
+does not fail. Cargo simply wants the dependency declared; you declare it, and the build goes GREEN
+having made the violation permanent and official. **Structural edges fail loudly as `E0433`; vendor
+embedding fails silently.** So for decision 5 the compiler is not the task list -
+`tests/vendor_embedding_gate.sh` is, and it has to run before each move rather than after.
+
+That gate immediately showed decision 5's scope is **thirteen files, not the one public field #97
+named** - and, once pointed at a second root, that two of them are in `zeroship-schema`, the crate
+the split places `data-core` ON. Which reordered the queue: **the floor crate came before anything
+inside plugin-db**, because a vendor in the floor is inherited by every crate above it, and fixing
+plugin-db first would have produced a `data-core` that is neutral in name only.
+
+**The `zeroship-schema` move is small for a reason worth recording.** Its ENTIRE vendor surface
+served two functions with NO production caller: `read_live_schema` (`diff.rs:632`) and
+`estimate_row_count` (`:919`), reached only through `impl SchemaIntrospect for PostgresBackend`,
+which is gated at `backend/postgres.rs:413`, whose trait is gated at `backend/mod.rs:567`. Both ends
+gated. They are MOVED rather than deleted: #112's trait-ungating work is planned, so "should
+introspection exist" is open while "where does PostgreSQL introspection live" is not.
+
 **The shape of the answer: almost nothing can be extracted until five in-place refactors land.** Every
 one was found by a different lens, and none of them creates a crate.
 
