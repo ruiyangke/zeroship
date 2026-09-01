@@ -195,6 +195,69 @@ async fn connect_scripted(addr: SocketAddr) -> compio_postgres::Client {
     client
 }
 
+/// Serve a generic extended-query conversation, recording every frontend tag.
+///
+/// Responses are buffered and flushed on `Sync`, which is what a real backend
+/// does: the frontend is entitled to pipeline `P B D E` and only then wait.
+/// A responder that answered each frame immediately would let a driver that
+/// serialises round trips look identical to one that pipelines, and the whole
+/// point of this module is to tell those apart.
+///
+/// Returns when the client disconnects.
+fn serve_recording(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec<u8>)>) {
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let mut tag = [0u8; 1];
+        if stream.read_exact(&mut tag).is_err() {
+            return; // client hung up; nothing further to record
+        }
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes(length) as usize;
+        assert!(length >= 4, "frontend frame length is below its header");
+        let mut body = vec![0u8; length - 4];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        let tag = tag[0];
+        let _ = tags.send((tag, body.clone()));
+
+        match tag {
+            b'Q' => {
+                pending.extend_from_slice(&command_complete(b"BEGIN"));
+                pending.extend_from_slice(&ready_for_query());
+            }
+            b'P' => pending.extend_from_slice(&backend_frame(b'1', b"")),
+            b'B' => pending.extend_from_slice(&backend_frame(b'2', b"")),
+            // Describe on a statement answers ParameterDescription + NoData;
+            // these fixtures never select rows through the extended path.
+            b'D' => {
+                let mut parameters = Vec::new();
+                parameters.extend_from_slice(&0u16.to_be_bytes());
+                pending.extend_from_slice(&backend_frame(b't', &parameters));
+                pending.extend_from_slice(&backend_frame(b'n', b""));
+            }
+            b'E' => pending.extend_from_slice(&command_complete(b"BEGIN")),
+            b'C' => pending.extend_from_slice(&backend_frame(b'3', b"")),
+            b'X' => return,
+            _ => {}
+        }
+
+        if tag == b'Q' || tag == b'S' {
+            if tag == b'S' {
+                pending.extend_from_slice(&ready_for_query());
+            }
+            if stream.write_all(&pending).is_err() {
+                return;
+            }
+            let _ = stream.flush();
+            pending.clear();
+        }
+    }
+}
+
 /// The simple-query protocol is exactly one frame.
 ///
 /// `simple_query` must not reach for Parse or Bind: the whole point of `Q` is
@@ -319,4 +382,74 @@ async fn a_prepared_query_parses_and_executes_in_two_sync_round_trips() {
         tags, "PDSBES",
         "the extended-query sequence changed shape (got {tags})"
     );
+}
+
+/// Transaction control travels on the SIMPLE query protocol, one frame each.
+///
+/// MEASURED, not assumed, and the measurement corrected a wrong guess: the
+/// statement is `START TRANSACTION`, not `BEGIN`. Both are legal and mean the
+/// same thing to `PostgreSQL`, which is exactly why nothing else notices - the
+/// only other place that spelling is written down is a log-matching constant
+/// in `transaction_claims.rs`. Each is a single `Q`. That is
+/// the right shape - neither takes a parameter, so preparing them would buy
+/// nothing and cost a Parse plus a second round trip - but nothing else in the
+/// suite says so, and a change to the extended path would still pass every
+/// value-level test. The SQL text is asserted too, because a `Q` carrying the
+/// wrong statement is exactly as wrong as the wrong tag.
+#[compio::test]
+async fn begin_and_commit_are_one_simple_query_frame_each() {
+    assert_eq!(
+        Box::pin(transaction_frames(621, true)).await,
+        vec![
+            ("Q".to_owned(), "START TRANSACTION".to_owned()),
+            ("Q".to_owned(), "COMMIT".to_owned())
+        ],
+    );
+}
+
+/// The rollback arm, differing from the commit arm in exactly one call.
+#[compio::test]
+async fn begin_and_rollback_are_one_simple_query_frame_each() {
+    assert_eq!(
+        Box::pin(transaction_frames(622, false)).await,
+        vec![
+            ("Q".to_owned(), "START TRANSACTION".to_owned()),
+            ("Q".to_owned(), "ROLLBACK".to_owned())
+        ],
+    );
+}
+
+/// Drive one transaction against a recording peer and return `(tag, sql)` per
+/// frontend frame.
+async fn transaction_frames(process_id: i32, commit: bool) -> Vec<(String, String)> {
+    let (tags_tx, tags_rx) = std::sync::mpsc::channel();
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        serve_recording(&mut stream, &tags_tx);
+    });
+    let addr = server.addr;
+    compio::time::timeout(ASYNC_WATCHDOG, async move {
+        let mut client = connect_scripted(addr).await;
+        let transaction = client.transaction().await.expect("begin the transaction");
+        if commit {
+            transaction.commit().await.expect("commit");
+        } else {
+            transaction.rollback().await.expect("rollback");
+        }
+        drop(client);
+    })
+    .await
+    .expect("the scripted transaction exceeded its watchdog");
+    server.finish();
+
+    tags_rx
+        .try_iter()
+        .filter(|(tag, _)| *tag != b'X')
+        .map(|(tag, body)| {
+            let sql =
+                String::from_utf8_lossy(body.strip_suffix(&[0]).unwrap_or(&body)).into_owned();
+            ((tag as char).to_string(), sql)
+        })
+        .collect()
 }
