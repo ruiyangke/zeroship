@@ -136,6 +136,23 @@ async fn setup(pool: &Pool) {
             // explicit list of the seven system columns plus the declared
             // fields, so a table missing them is not a table `find` can serve.
             // Adding them makes the fixture look like what production reads.
+            //
+            // THE NULLABILITY MATTERS AS MUCH AS THE COLUMN LIST, and this
+            // fixture got it wrong until 2026-09-01: `created_at` and
+            // `updated_at` were declared nullable while the production emitter
+            // writes them NOT NULL (`zeroship-schema/src/query.rs:212-213`).
+            // Measured against pg18 with the statement `build_insert_many`
+            // emits for a mixed batch - it unions the column set across
+            // documents (`query.rs:4390`) and binds `unwrap_or(&Value::Null)`
+            // for a cell some other row supplied (`:4445`):
+            //
+            //   nullable fixture -> INSERT SUCCEEDS, storing created_at = NULL
+            //   NOT NULL (prod)  -> 23502 not-null violation
+            //
+            // So the lax fixture could not fail on the defect, and would have
+            // stored the silent-wrong value instead - the harder failure to
+            // notice. A fixture that claims to match production must match its
+            // CONSTRAINTS, not only its column names.
             r#"CREATE TABLE "{SCHEMA}"."notes" (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -143,8 +160,8 @@ async fn setup(pool: &Pool) {
                 category TEXT,
                 views INTEGER DEFAULT 0,
                 tags JSONB DEFAULT '[]'::jsonb,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 created_by TEXT,
                 updated_by TEXT,
                 version INTEGER NOT NULL DEFAULT 1,
@@ -1527,8 +1544,8 @@ async fn aggregate_having_postgres_docs_example() {
                 city TEXT,
                 temp_lo INTEGER,
                 temp_hi INTEGER,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 created_by TEXT,
                 updated_by TEXT,
                 version INTEGER NOT NULL DEFAULT 1,
@@ -3056,8 +3073,8 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             r#"CREATE TABLE "{app}"."users" (
                 id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 created_by TEXT,
                 updated_by TEXT,
                 version INTEGER NOT NULL DEFAULT 1,
