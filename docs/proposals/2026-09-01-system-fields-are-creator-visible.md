@@ -452,13 +452,23 @@ filtered and `Row<S>` carries all seven (`types.ts:195`).
 | Attempt | Today |
 | --- | --- |
 | read `row.created_at` | works, and typechecks |
-| filter / sort on `created_at` | works |
+| filter / sort on `created_at` | types work; **the value round-trip does not** - see below |
 | `insert({ id: "hit_MINE" })` | banned by `RowInput` (`types.ts:200-208`); cast past it and the value is **silently dropped** |
 | declare `created_at` in the migration | refused by the engine (`table_shape.rs:361-376`) |
 
 Reads and types already work. Only writes are blocked, and one of them fails
 silently. That is the entire delta this proposal addresses - and it is why the
 change is an INSERT-write change wearing a visibility description.
+
+**CORRECTION, from round 4.** "Filters already work" was recorded as settled and
+is true only of the **type surface**. The value round-trip on the filter path is
+broken today: `mapFilterOutbound` passes values verbatim
+(`sdks/db/src/utils.ts:98-103`) and `build_field_condition_with_dialect` binds
+them with no cast (`query.rs:5714-5744`), so `find({ created_at: { $gt:
+row.created_at } })` - filtering by the very value a read just returned - dies
+with `22008` on Postgres **before this proposal changes anything**. `validate.ts`
+cannot reach that path at all, which is a second reason Edit 1's conversion must
+live in Rust rather than in the validator.
 
 ## The revised design, after two review rounds
 
@@ -924,8 +934,46 @@ that are indexed (`query.rs:333-340`); and on read it is neither parseable shape
 `normalize_timestamp_value` leaves it a **string**, violating
 `SystemFields.created_at: number` with no error anywhere.
 
-So "widen the write side" is the worst of the three options as stated: **loud on
-Postgres, silently wrong in dev.**
+**And on Postgres it is not uniformly loud either - it is magnitude-dependent.**
+Measured on the same server:
+
+| Input | Result |
+| --- | --- |
+| `'1756700000000'::timestamptz` (13-digit epoch-ms) | `ERROR 22008: date/time field value out of range` |
+| `'20260901'::timestamptz` (8-digit) | **silently accepted as `2026-09-01 00:00:00+00`** |
+
+So a numeric timestamp is not merely rejected: some magnitudes are **reinterpreted
+as a concatenated calendar date** and stored wrong with no diagnostic. "Widen the
+write side" is therefore the worst of the three options as stated: **loud on
+Postgres for some values, silently wrong for others, and silently wrong in dev.**
+
+### SQLite already stores two incompatible spellings, and Edit 1 must pick one
+
+A second reviewer found this and it decides Edit 1's storage format. Two shapes
+land in the same TEXT column today:
+
+- the DDL default writes SQLite's `CURRENT_TIMESTAMP` - `YYYY-MM-DD HH:MM:SS`,
+  **space**-separated;
+- every creator-supplied timestamp crosses the V8 boundary as `toISOString()` -
+  `YYYY-MM-DDTHH:MM:SS.sssZ`, with a **`T`** (`v8_bridge.rs:263-281`).
+
+Reads look fine because the parser deliberately accepts both -
+`read_pipeline.rs:286` is `!matches!(b[10], b' ' | b'T')`. But **SQL comparison on
+a TEXT-affinity column is bytewise**, and `' '` is `0x20` while `'T'` is `0x54`.
+Measured, two rows, one query:
+
+```
+sqlite> SELECT ts FROM t ORDER BY ts ASC;
+2026-09-01 23:59:59         <- DDL default, 23:59:59
+2026-09-01T00:00:00.000Z    <- creator write, 00:00:00 the SAME day
+```
+
+A row stamped a second before midnight sorts **before** one written at midnight.
+Every ordering and range filter over a mixed-spelling column is wrong on the dev
+tier **today**, and `sqlite-divergences.md` does not mention it (its note covers
+resolution only). Edit 1 must land the ms-to-text conversion **and** re-base the
+DDL default onto one spelling in the same change. Pre-launch, dev databases are
+disposable, so that re-base is free now and never again.
 
 **The correct fix is the write-side mirror of `normalize_rows_on_read`, in
 Rust** - a `normalize_timestamps_on_write` stage in `write_pipeline.rs`, keyed on
