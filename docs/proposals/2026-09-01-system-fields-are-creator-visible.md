@@ -180,12 +180,31 @@ at construction.
 one identical line for every table of every app. `typedId`'s prefix is
 per-collection creator data, read from the descriptor by
 `prefix_for_collection` (`crud/system_fields_pass.rs:128-135`) **with no
-validation**: `RESERVED_ID_PREFIXES` exists (`zeroship-schema/src/query.rs:922`)
-and the *derived*-prefix path guards `usr` (`system_fields_pass.rs:60`,
-`:97-111`), but the descriptor-declared path bypasses both. A descriptor
-claiming `idPrefix: "usr"` mints platform-user-shaped ids from the worker. The
-fix is one call at the pass boundary and belongs to this change, because this
-change is what claims the worker stops trusting descriptor bindings.
+validation** - the declared value flows straight through `.map(str::to_string)`.
+
+**Verified 2026-09-01, and the asymmetry is sharper than "a missing check".**
+A complete validator already exists: `validate_id_prefix`
+(`zeroship-schema/src/query.rs:935`, reserved check at `:948`, backed by
+`RESERVED_ID_PREFIXES` at `:922`). It is called from four sites, and **every one
+of them is on the migration/DDL side** - `zeroship-schema/src/query.rs:1295`,
+`migrate-core/src/model/table_shape.rs:643`, `model/validate.rs:9112`,
+`render/declarative.rs:2173`. `zeroship-plugin-db` calls it **zero times**. The
+*derived*-prefix path has its own duplicate one-element list
+(`RESERVED_AUTO_PREFIXES`, `system_fields_pass.rs:60`, applied `:97-111`); the
+descriptor-declared path reaches neither.
+
+So the producer validates and the consumer does not, across an artifact boundary
+where the two need not agree: the descriptor is a separate file from the
+migration, and `apply.rs:61-65` says it is client-declared. A migration may
+declare `blog` and pass, while the descriptor the worker actually reads declares
+`usr`. That shape is already exercised in-tree -
+`crates/zeroship-bundle/tests/runtime_descriptor_ingest_test.rs:86` ingests a
+runtime descriptor carrying `{"type":"id","idPrefix":"usr"}`.
+
+A descriptor claiming `idPrefix: "usr"` therefore mints platform-user-shaped ids
+from the worker. The fix is one call to the existing validator at the pass
+boundary, and it belongs to this change, because this change is what claims the
+worker stops trusting descriptor bindings.
 
 ---
 
