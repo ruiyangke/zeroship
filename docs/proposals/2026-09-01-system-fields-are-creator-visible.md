@@ -58,7 +58,14 @@ A field declares **who computes its value, and when**:
 
 `by` is a generator **invocation**, not a bare name: `typedId` needs a prefix and
 `increment` needs a seed. `on` is a closed vocabulary: `insert`, `write`,
-`delete`, `restore`.
+`delete`.
+
+**`restore` is not an assignment event.** An earlier draft listed it as a fourth,
+which forced the vocabulary to contain an event no generator could serve -
+`restore()` writes `deleted_at = NULL` (`query.rs:4726`) and nothing in the set
+yields nothing. Restore is instead defined as **the inverse of delete**: it
+clears every field whose `assign` carries `on = "delete"`. One rule, no
+null-producing generator, and no field bound to an event that cannot fire.
 
 ### `assign` vs `default`: the slot is the override policy
 
@@ -269,25 +276,23 @@ key per-document does not survive the union: a batch where one row supplies
 `created_at` and another omits it drives an explicit `NULL` into a `NOT NULL`
 column. Normalise the batch, group by shape, or emit `DEFAULT`.
 
-**`deleted_at` needs a null-producing answer.** `restore()` assigns
-`deleted_at = NULL` (`query.rs:4726`), and no generator in the set yields
-nothing. Either the set gains a null-producing member, or `on = "restore"` gets
-its own semantics. As specified, `restore` is in the vocabulary and no field can
-bind to it.
-
-**`on` is a lattice, not four disjoint events.** The native soft-delete and
+**`on` is a lattice, not a set of disjoint events.** The native soft-delete and
 restore builders bump `version`, `updated_at` and `updated_by` in the same
 statement (`query.rs:4693-4714`, `:4720-4741`), so delete and restore must count
 as "write" for those three while remaining distinct events for `deleted_at`.
 And "write" must cover insert, or `updated_at` and `version` lose their DDL
-defaults.
+defaults. This is what makes `restore`-as-inverse cheap: it is not a fourth arm
+of the lattice, it is `write` plus the clearing of the `on = "delete"` fields.
 
-**Anonymous writes need a stated answer.** `created_by`/`updated_by` are injected
-only when an actor is bound (`system_fields_pass.rs:266`), and the update builder
-omits the SET clause the same way (`query.rs:4228-4232`), leaving `updated_by`
-naming an actor who did not make the last write. Read literally, `by = "actor"`
-means the generator runs on every write and yields NULL when unauthenticated -
-a behaviour change. The naive patch reproduces today's staleness, and the
+**Anonymous writes resolve to NULL, not to a stale actor.** `created_by`/
+`updated_by` are injected only when an actor is bound
+(`system_fields_pass.rs:266`), and the update builder omits the SET clause the
+same way (`query.rs:4228-4232`), leaving `updated_by` naming an actor who did
+not make the last write. **Decided: the generator runs on every write and yields
+NULL when unauthenticated.** Stale attribution is worse than absent attribution -
+it is a false claim about who touched a row, and anything reading `updated_by`
+for audit or authorization is entitled to believe it. This is a behaviour change
+and needs its own test. The naive patch reproduces today's staleness, and the
 existing test `insert_leaves_created_by_absent_when_no_actor` (`:707-719`) stays
 green through it, because its input never had the key.
 
@@ -328,8 +333,6 @@ green through it, because its input never had the key.
 
 ## Open
 
-- **`deleted_at`'s null generator** - the vocabulary gap above.
-- **Anonymous `updated_by`** - stale actor, or NULL.
 - **Where history import lives.** The decision moves external-id / original-
   timestamp import out of `env.db`; migration DML is the only remaining path, so
   step 8's fence must refuse `created_by`/`updated_by` and never `id` or
