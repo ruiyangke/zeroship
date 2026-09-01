@@ -146,6 +146,35 @@ moves down.
 
 A genuine adapter is `lib.rs` + `v8_classes/` + `v8_bridge.rs` + `context.rs`, about **7,400 lines**.
 
+> ## SETTLED 2026-08-31, operator decision: `plugin-db` is a VERY THIN layer joining Rust to V8
+>
+> Nothing else. Not a fat crate that happens to own the V8 classes - the V8 marshalling boundary and
+> the `env.db` op surface, and that is all. Measured, that is `v8_classes/` 3,455 + `v8_bridge.rs` 867
+> + `lib.rs` 1,357 + `tx_scope.rs` 142 = **~5,800 of 57,427 lines, about 10%.**
+>
+> **This makes three things mandatory that were being weighed as options:**
+>
+> 1. **The protocol inversion (0.1) is required, not optional.** The 39 V8-signature functions belong in
+>    the thin layer - they *are* the boundary. Their `async move` bodies are not: those are ~987 lines
+>    of query pipeline. A thin adapter cannot contain them, so the engine must stop returning
+>    `OpResult`/`ResolveValue` and return data the adapter lowers. There is no version of "thin" that
+>    survives leaving the pipeline inside the dispatch functions.
+> 2. **Row decoding must leave `v8_bridge.rs` (0.3a).** `v8_bridge.rs:432`/`:471`/`:498` take
+>    `&compio_postgres::Row`, and `lib.rs:559`/`:588` are always-compiled `pub` bench exports naming the
+>    same. **A thin layer joining Rust to V8 cannot link a database driver.** The census rows
+>    `ADAPTER v8_bridge.rs compio_postgres 3` and `ADAPTER lib.rs compio_postgres 4` are now hard
+>    violations rather than tolerated ones, and `allowed()` is already written to report them.
+> 3. **`context.rs` does not stay.** It holds `Option<Rc<Pool>>` (`:178`) and
+>    `TxConnection::Postgres(OwnedPooledClient)` (`:80`), has **zero** `v8::` references, and is called
+>    ~37 times from `exec.rs` and ~36 from `transaction/driver.rs` against a thin adapter fringe. A
+>    per-thread cache of live vendor connections is not a V8 marshalling concern. This resolves the
+>    contradiction flagged above **against** the adapter placement.
+>
+> **And it rejects the round-6 "three crates, keep `plugin-db` as it is" recommendation.** That option
+> was argued on the grounds that the extra boundaries remove no shipped dependency - true as measured,
+> and answered by the neutral-error decision above, which removes the dependency by design rather than
+> accepting it. Thin is the target; the crate count is whatever delivers it.
+
 > **This line contradicts the "eight that do not place cleanly" table and the "Then, and only then"
 > paragraph in the execution order, both of which send `context.rs` (1,688 lines) to `data-engine`.
 > Flagged 2026-08-31; not silently reconciled, because the right answer is now in doubt.**
@@ -209,6 +238,77 @@ found it: Phase 0.1 in the execution order.
 | --- | --- | --- |
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
 | `error.rs` | 1,703 | **cannot be split cleanly at all, and one of the three reasons is a language rule rather than a placement choice.** (1) `to_op_error` belongs in the adapter but cannot go until the dispatch surface does - 44 of its 51 production callers are engine-tier. (2) It names `compio_postgres` in **eight** signatures (`from_pg` `:355`, `coded_sql` `:731`, `walk_pg_chain` `:907`, five more). (3) **The orphan rule pins five `From` impls here permanently** - see below. |
+
+> ## SETTLED 2026-08-31, operator decision: a NEUTRAL error hierarchy with per-vendor translators
+>
+> **The finding below is real and the conclusion drawn from it - "therefore accept a vendor-bound
+> core, or build fewer crates" - is rejected. A core pinned to a driver is the thing to avoid, not a
+> constraint to design around.** The shape is Spring Data's: a vendor-neutral hierarchy in the core,
+> and a translator per vendor that maps driver errors into it.
+>
+> **This is cheap, and the measurement is why.** `DbError`'s **14 variants name a vendor type zero
+> times** - `UniqueViolation`, `FkViolation`, `NotNullViolation`, `CheckViolation`, `Serialization`,
+> `LockContention`, `Transient`, `PermissionDenied`, `Configuration`, `Coded`, `AccessDenied`,
+> `SchemaRefused`, `ValidationFailed`, `Internal`. That is already `DataAccessException`'s family. The
+> type was never the problem; **only the translation is vendor-bound**, and it sits in the wrong crate.
+>
+> ```
+>   data-core        DbError            the neutral hierarchy. No vendor, no runtime.
+>   data-postgres    translate(&compio_postgres::Error) -> DbError
+>   data-sqlite      translate(&rusqlite::Error)         -> DbError
+>   plugin-db        to_op_error(DbError) -> OpError      the adapter's own translator
+> ```
+>
+> **And the orphan rule stops applying, which is the point.** It binds `impl From<A> for B`, not
+> functions. `pub fn translate(e: &compio_postgres::Error) -> DbError` in `data-postgres` is legal
+> today - it is not a trait impl, so coherence has nothing to say about it. **Deleting the five `From`
+> impls does not work around the constraint; it removes the construct the constraint attaches to.**
+>
+> The move: `from_pg` (`error.rs:355-404`), `coded_sql` (`:731`) and `walk_pg_chain` (`:907`) go to
+> `data-postgres`; the five `From` impls are deleted; `to_op_error` goes to the adapter by the same
+> rule. `data-core` then names no vendor and no runtime.
+>
+> **AND THE TRANSLATORS MUST BE FREE FUNCTIONS, WHICH IS NOT FREE.** `from_pg` is an **inherent
+> method** - `error.rs:355`, inside `impl DbError {` opened at `:294` - and an inherent impl is legal
+> only in the crate owning the type, exactly like the `From`. So the sentence below claiming the `From`
+> is unmovable *"unlike `from_pg` and `coded_sql`"* is half wrong: `from_pg` and
+> `classify_pg_per_app_session_setup` (`:279-338`, which calls `Self::from_pg`) cannot follow the
+> vendor down **as methods** either. They become free functions in `data-postgres`, and that respells
+> **35 `DbError::from_pg(...)` call sites** and rethreads the session-setup classifier chain the
+> transaction driver consumes. Only `coded_sql` and `walk_pg_chain`, already free functions, move
+> without a shape change.
+>
+> Not an argument against the decision - it is the decision's real cost, and it was unpriced. Free
+> functions over an extension trait: an `.into_db_error()` idiom would be new to this codebase, and the
+> house style is already module-scoped named constructors over one shared classifier
+> (`error.rs:726-730`, and `auth/bootstrap.rs:67` is a delegating wrapper of exactly that shape, not a
+> duplicate implementation).
+>
+> **The deletion cost is MEASURED, not estimated.** A round-6 reviewer compiled it: on a hard-linked
+> copy of the tree mutated on a fresh inode (no worktree file written, asserted in-log), with a green
+> control run first, `--all-targets --all-features`, across every crate that can name `DbError`
+> (`plugin-db`, `zeroship-worker`, `zeroship-cli`). **Deleting the `From` breaks exactly one site, and
+> it is not a `?`:** `error.rs:1335`, the test `from_pg_error_impl_is_wired`, whose documented purpose
+> is to fail if the impl disappears. Zero production `?` sites. The complete diff is delete `:797-801`,
+> respell `:732` to `DbError::from_pg(&e)`, delete the 12-line test. **~18 lines.** The codebase never
+> once took the ergonomic-`?` offer the impl's own comment advertises.
+>
+> **The other four are not policy cases and should not be counted with it.** `From<QueryError>` dies
+> with Track A. `From<SchemaError>` has zero production callers - both sit behind `test-helpers` - and
+> dies with Step 0. `From<MaskSentinelError>`'s one caller is `crud/mask_backfill.rs`, itself
+> test-gated and self-declared unreachable. `From<PerAppRoleNameError>` is the **keeper**: six live
+> production `?` sites in `auth/bootstrap.rs`, and `zeroship-core` is in the floor regardless. So the
+> policy is two, stated separately: **vendor-boundary conversions are forbidden and live vendor-side as
+> free functions; family-internal conversions from crates already below the core may stay.**
+>
+> **Consequence for the crate count.** The strongest argument for three crates instead of six was that
+> `data-core` links the Postgres driver and the V8 runtime, so `data-sqlite` and the relay inherit both
+> and the split buys nothing. That argument is now void by construction - it described a design choice,
+> not a fact about the tree. The six-crate target is viable again on this axis; the cycles and the
+> dispatch surface are separate questions and still stand.
+>
+> **What still has to be measured:** every `?` that propagates a driver error today. Deleting the
+> impls is what enumerates them - `?` names neither type, so no grep can. One `cargo check`.
 
 **`DbError`'s five `From` impls fix `data-core`'s dependency floor by coherence, and the document has
 been costing this as if relocation were an option.** Found in round 5 by the reviewer assigned impl
