@@ -2061,6 +2061,240 @@ async fn native_inet_codecs_must_not_discard_prefix_lengths() {
     assert_eq!(theirs.inet6_server_mask, theirs.inet6_rebound_mask);
 }
 
+#[cfg(feature = "with-cidr-0_3")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeCidrObservation {
+    decoded_text: [String; 4],
+    decoded_masks: [u8; 4],
+    server_text: [String; 4],
+    server_masks: [i32; 4],
+    server_wires: [Wire; 4],
+    outbound_wires: [Vec<u8>; 4],
+    rebound_text: [String; 4],
+    rebound_masks: [i32; 4],
+    rebound_wires: [Wire; 4],
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+const NATIVE_CIDR_DECODE_SQL: &str = "SELECT \
+    '192.0.2.128/25'::cidr, '192.0.2.128/25'::cidr, \
+        ('192.0.2.128/25'::cidr)::text, masklen('192.0.2.128/25'::cidr), \
+    '2001:db8:abcd:ef00::/56'::cidr, '2001:db8:abcd:ef00::/56'::cidr, \
+        ('2001:db8:abcd:ef00::/56'::cidr)::text, \
+        masklen('2001:db8:abcd:ef00::/56'::cidr), \
+    '192.0.2.129/24'::inet, '192.0.2.129/24'::inet, \
+        ('192.0.2.129/24'::inet)::text, masklen('192.0.2.129/24'::inet), \
+    '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
+        '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
+        ('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet)::text, \
+        masklen('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet)";
+
+#[cfg(feature = "with-cidr-0_3")]
+const NATIVE_CIDR_REBOUND_SQL: &str = "SELECT \
+    ($1::cidr)::text, masklen($1::cidr), $1::cidr, \
+    ($2::cidr)::text, masklen($2::cidr), $2::cidr, \
+    ($3::inet)::text, masklen($3::inet), $3::inet, \
+    ($4::inet)::text, masklen($4::inet), $4::inet";
+
+#[cfg(feature = "with-cidr-0_3")]
+fn tokio_native_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql(value, ty, &mut wire)
+        .expect("tokio-postgres native network encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+fn compio_native_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql(value, ty, &mut wire)
+        .expect("compio-postgres native network encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+fn tokio_native_cidr_observation(url: String) -> NativeCidrObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_CIDR_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native CIDR decode");
+        let cidr4: cidr::IpCidr = row.get(0);
+        let cidr6: cidr::IpCidr = row.get(4);
+        let inet4: cidr::IpInet = row.get(8);
+        let inet6: cidr::IpInet = row.get(12);
+        let outbound_wires = [
+            tokio_native_wire(&cidr4, &tokio_types::Type::CIDR),
+            tokio_native_wire(&cidr6, &tokio_types::Type::CIDR),
+            tokio_native_wire(&inet4, &tokio_types::Type::INET),
+            tokio_native_wire(&inet6, &tokio_types::Type::INET),
+        ];
+        let rebound = client
+            .query_one(NATIVE_CIDR_REBOUND_SQL, &[&cidr4, &cidr6, &inet4, &inet6])
+            .await
+            .expect("tokio-postgres native CIDR encode");
+
+        NativeCidrObservation {
+            decoded_text: [
+                cidr4.to_string(),
+                cidr6.to_string(),
+                inet4.to_string(),
+                inet6.to_string(),
+            ],
+            decoded_masks: [
+                cidr4.network_length(),
+                cidr6.network_length(),
+                inet4.network_length(),
+                inet6.network_length(),
+            ],
+            server_text: [row.get(2), row.get(6), row.get(10), row.get(14)],
+            server_masks: [row.get(3), row.get(7), row.get(11), row.get(15)],
+            server_wires: [row.get(1), row.get(5), row.get(9), row.get(13)],
+            outbound_wires,
+            rebound_text: [
+                rebound.get(0),
+                rebound.get(3),
+                rebound.get(6),
+                rebound.get(9),
+            ],
+            rebound_masks: [
+                rebound.get(1),
+                rebound.get(4),
+                rebound.get(7),
+                rebound.get(10),
+            ],
+            rebound_wires: [
+                rebound.get(2),
+                rebound.get(5),
+                rebound.get(8),
+                rebound.get(11),
+            ],
+        }
+    })
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_cidr_observation() -> NativeCidrObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_CIDR_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native CIDR decode");
+    let cidr4: cidr::IpCidr = row.get(0);
+    let cidr6: cidr::IpCidr = row.get(4);
+    let inet4: cidr::IpInet = row.get(8);
+    let inet6: cidr::IpInet = row.get(12);
+    let outbound_wires = [
+        compio_native_wire(&cidr4, &compio_types::Type::CIDR),
+        compio_native_wire(&cidr6, &compio_types::Type::CIDR),
+        compio_native_wire(&inet4, &compio_types::Type::INET),
+        compio_native_wire(&inet6, &compio_types::Type::INET),
+    ];
+    let rebound = client
+        .query_one(NATIVE_CIDR_REBOUND_SQL, &[&cidr4, &cidr6, &inet4, &inet6])
+        .await
+        .expect("compio-postgres native CIDR encode");
+
+    NativeCidrObservation {
+        decoded_text: [
+            cidr4.to_string(),
+            cidr6.to_string(),
+            inet4.to_string(),
+            inet6.to_string(),
+        ],
+        decoded_masks: [
+            cidr4.network_length(),
+            cidr6.network_length(),
+            inet4.network_length(),
+            inet6.network_length(),
+        ],
+        server_text: [row.get(2), row.get(6), row.get(10), row.get(14)],
+        server_masks: [row.get(3), row.get(7), row.get(11), row.get(15)],
+        server_wires: [row.get(1), row.get(5), row.get(9), row.get(13)],
+        outbound_wires,
+        rebound_text: [
+            rebound.get(0),
+            rebound.get(3),
+            rebound.get(6),
+            rebound.get(9),
+        ],
+        rebound_masks: [
+            rebound.get(1),
+            rebound.get(4),
+            rebound.get(7),
+            rebound.get(10),
+        ],
+        rebound_wires: [
+            rebound.get(2),
+            rebound.get(5),
+            rebound.get(8),
+            rebound.get(11),
+        ],
+    }
+}
+
+/// Native CIDR carriers retain prefixes. The local encoder also emits the
+/// server's `is_cidr=1`; upstream emits `0`, which `PostgreSQL` accepts and then
+/// normalizes, so an ordinary round trip would hide that wire defect.
+#[cfg(feature = "with-cidr-0_3")]
+#[compio::test]
+async fn native_cidr_codecs_preserve_prefixes_and_expose_upstream_flag_defect() {
+    let theirs = tokio_native_cidr_observation(common::plaintext_url());
+    let ours = compio_native_cidr_observation().await;
+
+    assert_eq!(ours.decoded_text, theirs.decoded_text);
+    assert_eq!(ours.decoded_masks, theirs.decoded_masks);
+    assert_eq!(ours.server_text, theirs.server_text);
+    assert_eq!(ours.server_masks, theirs.server_masks);
+    assert_eq!(ours.server_wires, theirs.server_wires);
+    assert_eq!(ours.rebound_text, theirs.rebound_text);
+    assert_eq!(ours.rebound_masks, theirs.rebound_masks);
+    assert_eq!(ours.rebound_wires, theirs.rebound_wires);
+
+    let expected_text = [
+        "192.0.2.128/25",
+        "2001:db8:abcd:ef00::/56",
+        "192.0.2.129/24",
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01/73",
+    ];
+    assert_eq!(ours.decoded_text, expected_text);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    assert_eq!(ours.decoded_masks, [25, 56, 24, 73]);
+    assert_eq!(ours.server_masks, [25, 56, 24, 73]);
+    assert_eq!(ours.rebound_masks, [25, 56, 24, 73]);
+
+    let server_wire = [
+        "02190104c0000280",
+        "0338011020010db8abcdef000000000000000000",
+        "02180004c0000281",
+        "0349001020010db8abcdef0123456789abcdef01",
+    ];
+    let upstream_wire = [
+        "02190004c0000280",
+        "0338001020010db8abcdef000000000000000000",
+        server_wire[2],
+        server_wire[3],
+    ];
+    for index in 0..server_wire.len() {
+        assert_eq!(hex(&ours.server_wires[index].0), server_wire[index]);
+        assert_eq!(hex(&ours.rebound_wires[index].0), server_wire[index]);
+        assert_eq!(hex(&ours.outbound_wires[index]), server_wire[index]);
+        assert_eq!(hex(&theirs.outbound_wires[index]), upstream_wire[index]);
+    }
+    assert_ne!(theirs.outbound_wires[0], theirs.server_wires[0].0);
+    assert_ne!(theirs.outbound_wires[1], theirs.server_wires[1].0);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
