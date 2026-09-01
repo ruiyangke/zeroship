@@ -290,13 +290,17 @@ which half.
   channel would not - two of the three upward calls are *pull queries* inside the drop loop,
   and a channel lets suppressed-window events queue past the guard.
 
-### ENGINE <-> SQLITE: a dedicated round, two answers in, one reviewer still out
+### ENGINE <-> SQLITE: a dedicated round, three answers, three different mechanisms
 
 The two mechanisms the first round proposed - re-tier `broker.rs`, or port the call sites behind a
 `ChangeSink` - were put to three reviewers as a single question, with the correction below already
-supplied so nobody could re-derive it. **Both reviewers who have returned rejected BOTH mechanisms
-and proposed a third, and the two thirds are different from each other.** Codex is still running;
-this section is incomplete by construction and must not be read as settled.
+supplied so nobody could re-derive it. **All three rejected BOTH mechanisms. All three proposed a
+third. The three thirds are different from each other.**
+
+That is the useful outcome of the round, and it is worth stating before the table: a question that
+two rounds had treated as "pick one of two" had at least three better answers, and the disagreement
+is not about taste. Each reviewer optimised a different axis - opus minimised what sits at rank 0,
+fable minimised what moves, codex minimised what the lattice has to be told.
 
 **The correction they were given.** "`broker.rs` is nearly a leaf" is true of broker and misleading
 as a re-tiering basis, because it stops one level short. `broker.rs`'s production `crate::` edges
@@ -312,21 +316,86 @@ Mechanism 1 is not expensive, it is impossible. Tracked as #117; both censuses a
 blind to it (one reads `crate::`-rooted paths only, the other reads signature text, and this is a
 foreign crate named in a body).
 
-| | opus | fable |
-| --- | --- | --- |
-| mechanism | **split `broker.rs`.** The suppression gate (two `std`-only statics + accessors) is a genuine leaf and moves to CORE; the subscriber registry stays ENGINE; only `publish` ports, behind `ChangeSink` | **sever one type edge, then sink the whole bus.** Replace `SubscriptionInner.read_set: Option<Vec<ReadSetEntry>>` (`broker.rs:205`) with an opaque `EventFilter(Box<dyn Fn(&ChangeEvent) -> bool + Send>)` built by `read_set.rs`; `broker.rs` is then a true leaf and re-tiers to CORE whole |
-| what moves | gate + both guards to CORE; `ChangeSink` port in CORE; `BrokerSink` impl in ENGINE | nothing but `broker.rs`'s tier label and one field's type |
-| `cdc.rs:543/:547/:646` | `:543`/`:547` collapse to one `delivery_verdict()` call (2N global mutex acquisitions per packet become N) | unchanged, byte for byte; they become downward references |
-| depends on #98? | yes - the port's `publish(&ChangeEvent)` must name the event type at CORE rank | **no** - once broker is CORE, `cdc.rs:86`'s import is already downward |
+| | opus | fable | codex |
+| --- | --- | --- | --- |
+| mechanism | **split `broker.rs`.** The suppression gate (two `std`-only statics + accessors) is a genuine leaf and moves to CORE; the subscriber registry stays ENGINE; only `publish` ports, behind `ChangeSink` | **sever one type edge, then sink the whole bus.** Replace `SubscriptionInner.read_set: Option<Vec<ReadSetEntry>>` (`broker.rs:205`) with an opaque `EventFilter(Box<dyn Fn(&ChangeEvent) -> bool + Send>)` built by `read_set.rs`; `broker.rs` is then a true leaf and re-tiers to CORE whole | **the consumer owns the interface.** `ChangeSink` + `DeliveryDisposition` are defined in **`data-sqlite`**, because SQLite is the only caller; `data-engine` implements it as `BrokerChangeSink` and composes it |
+| what moves | gate + both guards to CORE; `ChangeSink` port in CORE; `BrokerSink` impl in ENGINE | nothing but `broker.rs`'s tier label and one field's type | nothing at all; a trait is added to the vendor crate and a sink threads through six SQLite constructors |
+| `cdc.rs:543/:547/:646` | `:543`/`:547` collapse to one `delivery_verdict()` call (2N global mutex acquisitions per packet become N) | unchanged, byte for byte; they become downward references | `:543`/`:547` collapse to one `disposition()` call; `:646` becomes `sink.publish` |
+| dispatch | `Arc<dyn ChangeSink>` | direct static calls | **generic `S: ChangeSink`**, monomorphised; `SqliteBackend` stays non-generic because only the spawned task owns `S` |
+| depends on #98? | yes - the port's `publish(&ChangeEvent)` must name the event type at CORE rank | **no** - once broker is CORE, `cdc.rs:86`'s import is already downward | yes |
+| census redraw | CORE arms gain the gate | 6 lines across two censuses | **none** |
 
-**Where they agree, and it is the part that matters most.** Both independently found that the two
-pull queries are **dead on the SQLite path**: `cdc_lifecycle.rs:270` takes `SuppressGuard::activate`
-in the `BackendHandle::Postgres` arm and `:276-282` does not in the Sqlite arm, while
-`engage_schema_pending` and `pause_broker` have no production caller anywhere. I verified both.
-So the "preserves drop semantics" property that justified both original mechanisms **cannot
-discriminate between any of them today** - no current test can observe the difference. Tracked as
-#118. Whichever mechanism ships must wire the SQLite arm symmetrically in the same change, or the
-cycle gets broken around a check that never fires.
+**Where they agree, and it is the part that matters most.** All three independently found that the
+two pull queries are **dead on the SQLite path**: `cdc_lifecycle.rs:270` takes
+`SuppressGuard::activate` in the `BackendHandle::Postgres` arm and `:276-282` does not in the Sqlite
+arm, while `engage_schema_pending` and `pause_broker` have no production caller anywhere. I verified
+it. Tracked as #118. Whichever mechanism ships must wire the SQLite arm symmetrically in the same
+change, or the cycle gets broken around a check that never fires.
+
+### The premise all three mechanisms were argued on is false
+
+Codex took that one step further and found the thing that actually settles how much the drop-
+semantics argument is worth. **The current implementation ALREADY permits the queue-past-the-guard
+behaviour the brief said a channel would introduce.** Verified:
+
+- `CommitPacket { events, commit_id }` (`cdc.rs:157-161`) carries **no** suppression state.
+- `try_send` at `:372` is the enqueue, on the SQLite writer thread, into a `flume::unbounded`
+  (`backend/sqlite/mod.rs:360`, `:461`) that never applies backpressure.
+- `recv_async().await` at `:516` is the dequeue, on the compio thread.
+- `is_app_suppressed` (`:543`) and `is_schema_pending` (`:547`) are sampled **after** the dequeue.
+
+So a guard dropped between a packet's enqueue and its dequeue clears the process-wide flag
+(`backend/mod.rs:948`, `:1348`) and the queued event **is delivered**. The flag is not per-packet.
+
+**And a test comment asserts the opposite.** `tests/sqlite_integration.rs:1519-1521` says in-flight
+packets "would still be dropped (the suppression flag is per-packet)". It is not. All three tests
+sleep to drain the publisher *before* dropping the guard (`:1516`, `:1641`, `:1809`), so the
+ordering that would expose this is never exercised. Fable found a narrower instance of the same
+class independently - an `.await` at `cdc.rs:583` between the check and the publish at `:646`.
+
+Consequence, and it is why this belongs in the design record rather than a task: **the "preserves
+drop semantics" property that justified every mechanism in two rounds is preserving something the
+code does not have.** The mechanism choice cannot be made on those grounds. If commit-window
+suppression is genuinely required, `CommitPacket` needs an enqueue-time disposition or epoch stamp -
+and no port, no re-tiering, and no crate boundary fixes that, because the gap is in the queue and
+not in the call graph. Tracked as #123.
+
+### Recommendation: codex's, and the falsifying experiment that ruled out the alternative
+
+**Take codex's mechanism.** Three reasons, in descending force:
+
+1. **It needs no lattice redraw.** `backend/sqlite/*` is already SQLITE; `broker` stays ENGINE. The
+   other two require editing tier tables in two censuses, and every time this project has redrawn a
+   boundary to dissolve a cycle, the redraw became the next defect.
+2. **Generic dispatch, not `dyn`.** The other two put virtual dispatch on the per-event CDC fan-out
+   path. `S: ChangeSink` monomorphises and `SqliteBackend` stays non-generic because only the
+   spawned task owns `S`.
+3. **It moves the least.** No masking relocation, no broker relocation, no dynamic filter on the hot
+   path. Given this document's record of reversing placement decisions, the mechanism that changes
+   no placement is the least likely to need reversing.
+
+Its cost, stated plainly: a `sink` parameter threads through six SQLite constructor signatures
+(`open`, `new`, `open_with_session_path`, `finish_open`, `spawn_publisher`, `publisher_loop`), and
+the composition root moves from `lib.rs:1084` into an engine-side selector.
+
+**Mechanism 1 was ruled out by experiment, not by argument.** Fable named the check that would
+falsify its own analysis, and I ran it: re-tier `broker.rs` to CORE while leaving `broker.rs:63`
+(`use crate::read_set::ReadSetEntry`) in place, and the census must print a fresh `CORE -> ENGINE`
+violation. It does:
+
+```
+CORE      broker.rs      ENGINE     crate::read_set     ** VIOLATION **
+TIER CYCLES:  CORE <-> ENGINE      1 edges one way, 36 the other
+```
+
+Re-tiering alone does not close the cycle, it **renames it and makes it far worse** - 36 edges in
+the return direction, because every engine module calls the broker. The severance is the load-
+bearing step, not the re-tier. That is one experiment settling a question two rounds of prose did
+not.
+
+**One genuine operator call is embedded**, and only fable's mechanism raises it: is the DB-12
+per-app subscription cap (`broker.rs:151`, `:522-531`) *bus self-protection* or *engine policy*?
+Under codex's mechanism it never arises, so it is not blocking.
 
 **Fable additionally found a defect in the instrument, and it is fixed.** One of the eight
 `ENGINE -> SQLITE` down-edges came from `crud/mask_drift.rs`, whose sole declaration
