@@ -121,6 +121,7 @@ mod replication_live;
 mod replication_publication_names;
 mod require_auth_enforcement;
 mod row_count_resync;
+mod server_wire_conformance;
 mod service_live;
 mod simple_query_copy_chain_resync;
 mod simple_query_copy_resync;
