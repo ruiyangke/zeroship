@@ -7,6 +7,95 @@ Operator directive, 2026-09-01: *"for the system fields, we should be
 transparent, we can make some fields readonly from creator code, just like
 salesforce, but we should expose these fields to creator, less restrictions."*
 
+## THE OPERATOR SPECIFIED THE DESIGN, 2026-09-01. Read this first.
+
+Everything below this section is the record of five review rounds that each
+killed the design before it. The operator then cut through it with a direct
+specification, and that specification supersedes the designs those rounds were
+arguing about. The rounds remain useful for the DEFECTS they measured - those
+are all still real - but not for the shapes they proposed.
+
+**The principle: the descriptor is transparent and hides nothing.**
+
+The current descriptor lies by omission and does so inconsistently. Measured:
+
+```
+DDL:        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()   (query.rs:212)
+descriptor: created_at  required=true  default=undefined
+            version     required=true  default=1
+```
+
+Same DDL line, same `DEFAULT` keyword: `version`'s literal default survives into
+the descriptor and `created_at`'s expression default is dropped. `required=true`
+is TRUE and should stay - the column really is NOT NULL. `default=undefined` is
+FALSE. Fixing the omission is the work; hiding more (which is what every design
+below proposed, in one form or another) is the wrong direction.
+
+**The four system fields, as specified:**
+
+| Field | Value | On update |
+| --- | --- | --- |
+| `created_at` | `NOW()` | immutable |
+| `updated_at` | `NOW()` | re-stamped every write |
+| `version` | `1` | auto-increment, controlled by the lock |
+| `id` | the system id generator | immutable |
+
+**All four are already implemented exactly this way.** Verified:
+DDL default at `query.rs:212-213`; immutability via `IMMUTABLE_SYSTEM_FIELDS`
+(`system_fields_pass.rs:46`); `"updated_at" = NOW()` when the doc omits it
+(`query.rs:6331`); `"version" = COALESCE(version,0) + 1` guarded by
+`doc_has_version` (`:6327`) with CAS through `extract_cas_version`
+(`system_fields_pass.rs:461`); and `typed_id::generate(prefix)` at
+`system_fields_pass.rs:258`. **The behaviour is right. Only the descriptor is
+silent about it.** No Rust change is implied by this specification.
+
+**Two orthogonal facts per field, not one.** `created_at` and `updated_at` share
+a source and differ entirely on update; `id` and `created_at` share immutability
+and differ entirely on source. Collapsing them into one property is what produced
+the `writeClass` churn below.
+
+- *where the value comes from*: database default, runtime-assigned, request
+  actor, or the caller
+- *what happens on update*: immutable, re-stamped, incremented, lifecycle-owned
+
+**Runtime-assigned defaults are a first-class kind**, not a special case for
+`id`. Three kinds exist today - a literal (`1`), a SQL expression (`NOW()`,
+dropped from the descriptor), and a JS function default evaluated in
+`validateDoc` (`types.ts:890`, `:1179`). The fourth is a value the platform
+assigns before the insert reaches the database, which is what `id`,
+`created_by` and `updated_by` already are as hardcoded cases.
+
+Two consequences make this preferable to a database default rather than merely
+different:
+
+1. **It is vendor-neutral by construction.** A DDL default is vendor-specific -
+   `NOW()` on Postgres, `CURRENT_TIMESTAMP` on SQLite - which is the shape the
+   standing directive pushes out of the engine. A runtime-assigned value is
+   computed once and every backend receives the same bytes.
+2. **It dissolves the SQLite spelling schism (task #134).** That bug exists
+   BECAUSE the DDL fills the value on one path and the runtime on another,
+   producing `2026-09-01 23:59:59` and `2026-09-01T00:00:00.000Z` in one TEXT
+   column, sorting wrongly. One writer, one spelling, no bug.
+
+The DDL default stays as a **backstop** for writes that never reach the runtime -
+migration DML, CDC backfill, direct SQL. Runtime-assigned and database default
+are layers, not alternatives; `created_by` already works this way.
+
+**The rule that keeps transparency safe:** a descriptor default is a statement
+about what the platform does, never an instruction the client executes. The SDK
+reads it for one purpose - the caller need not supply this field - and never
+materialises a value. This is what stops honest disclosure from re-introducing
+the upsert-counter reset, since `default: 1` then means "the database defaults
+it", not "send 1".
+
+**OPEN, and blocking implementation:**
+- naming for the two properties (placeholders above: source / on-update)
+- scope: the four fields specified, or all seven including `created_by`,
+  `updated_by`, `deleted_at`
+- whether "runtime-assigned" means the platform in Rust (authoritative,
+  unforgeable, fixes #134) or the worker in JS (open-ended, creator-written,
+  cannot hold anything the platform needs to be true)
+
 ## The finding: the runtime already implements this, and the SDK undoes it
 
 The two layers disagree, and the restrictive one is the SDK.
