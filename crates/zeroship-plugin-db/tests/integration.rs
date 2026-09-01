@@ -1516,6 +1516,84 @@ async fn timestamps_as_numbers() {
     release_pg(pool).await;
 }
 
+/// The other half of the contract the test above pins, and it does not hold.
+///
+/// `timestamps_as_numbers` inserts WITHOUT `created_at`, lets the DDL default
+/// fire, and asserts the value READS BACK as Unix milliseconds. It never writes
+/// one back, so it is blind by construction to the direction that is broken.
+///
+/// The declared contract is symmetric - `zeroship-schema/src/query.rs:2738-2739`
+/// calls `t.date()` "TIMESTAMPTZ stored as Unix-ms numbers at the SDK layer",
+/// and `sdks/db/src/types.ts:175-176` types the columns `number`. So a value the
+/// platform just returned must be writable back unchanged. It is not: nothing on
+/// the write path converts a JSON number for a timestamp column
+/// (`value_to_param_inner`, `query.rs:6168-6176`, renders the raw digits), the
+/// driver sends Parse with an empty OID list (`libs/compio-postgres/src/query.rs:153-159`),
+/// and PostgreSQL runs `timestamptz_in` on them.
+///
+/// MEASURED shape of the failure, on pg18:
+///   '1756700000000'::timestamptz -> ERROR 22008 date/time field value out of range
+///   '20260901'::timestamptz      -> SILENTLY ACCEPTED as 2026-09-01
+/// so this is not uniformly loud - some magnitudes are reinterpreted as a
+/// concatenated calendar date and stored wrong. SQLite stores the digits as
+/// text instead and corrupts ordering (see the SQLite spelling note in
+/// `docs/proposals/2026-09-01-system-fields-are-creator-visible.md`).
+///
+/// VERIFIED RED against pg18 on 2026-09-01, failing with exactly this, on the
+/// value the platform itself had just returned:
+///
+///   SqlState(E22008) date/time field value out of range: "1788281542306"
+///   where: unnamed portal parameter $3
+///
+/// It is `#[ignore]`d rather than committed red so the suite stays green, and
+/// the reason below is the literal current behaviour - NOT a placeholder. This
+/// crate has been burned once by statically-ignored tests whose stated reason
+/// was false (the three vector-search cases), so: un-ignore this the moment the
+/// write-side conversion lands, and if it then passes, the ignore was the only
+/// thing stale about it.
+#[compio::test]
+#[ignore = "known-red: no write-side Unix-ms -> timestamp conversion exists yet (task #132); \
+            fails E22008 on the value the read returned"]
+async fn timestamp_read_value_can_be_written_back() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    setup(&pool).await;
+
+    // Round 1: let the platform stamp `created_at`, and read it back.
+    let bq = build_insert(
+        SCHEMA,
+        "notes",
+        &notes_schema(),
+        // No `with_seed_id`: the `notes` fixture is `id SERIAL PRIMARY KEY`, so
+        // the sequence supplies it. That helper is for the `PG_SYSTEM_COLUMNS`
+        // tables, whose `id` is `TEXT PRIMARY KEY` with no default.
+        &json!({"title": "source", "category": "tech"}),
+    )
+    .unwrap();
+    let inserted = exec_mutation(&pool, bq).await;
+    let ts = inserted[0]["created_at"].as_i64().unwrap();
+
+    // Round 2: hand that exact value back, as the number the read produced.
+    let bq = build_insert(
+        SCHEMA,
+        "notes",
+        &notes_schema(),
+        &json!({"title": "echo", "category": "tech", "created_at": ts}),
+    )
+    .unwrap();
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let result = pool.query_text_params(&bq.sql, &param_refs).await;
+
+    assert!(
+        result.is_ok(),
+        "a `created_at` the platform just returned ({ts}) must be writable back, \
+         but the write path rejected it: {:?}. This is the read/write asymmetry \
+         the strip currently hides; see task #132.",
+        result.err()
+    );
+    release_pg(pool).await;
+}
+
 // ---------------------------------------------------------------------------
 // 21. Postgres docs HAVING example (weather table)
 // ---------------------------------------------------------------------------
