@@ -720,11 +720,11 @@ impl std::fmt::Debug for Broker {
 
 static BROKER: LazyLock<Mutex<Broker>> = LazyLock::new(|| Mutex::new(Broker::new()));
 
-/// Schema-pending decoder window (design section 16.7).
-///
-/// This is process-wide for the same reason as the broker: a deploy on
-/// one worker thread must reject a subscription opened concurrently on
-/// another worker thread in the same process.
+// Schema-pending decoder window (design section 16.7).
+//
+// This is process-wide for the same reason as the broker: a deploy on
+// one worker thread must reject a subscription opened concurrently on
+// another worker thread in the same process.
 // ---------------------------------------------------------------------------
 // Per-app emit suppression
 // ---------------------------------------------------------------------------
