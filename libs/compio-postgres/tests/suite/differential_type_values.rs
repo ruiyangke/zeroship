@@ -1479,6 +1479,397 @@ async fn native_array_codecs_must_not_discard_lower_bounds() {
     assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
 }
 
+#[cfg(feature = "array-impls")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeFixedArrayObservation {
+    decoded_exact: [i32; 3],
+    decoded_nullable: [Option<i32>; 3],
+    decoded_empty: [i32; 0],
+    too_few: ValueOutcome<[i32; 3]>,
+    too_many: ValueOutcome<[i32; 3]>,
+    too_few_error: String,
+    too_many_error: String,
+    decoded_lower: [i32; 3],
+    server_text: [String; 4],
+    server_wires: [Wire; 4],
+    outbound_wires: [Vec<u8>; 4],
+    rebound_exact: [i32; 3],
+    rebound_nullable: [Option<i32>; 3],
+    rebound_empty: [i32; 0],
+    rebound_lower: [i32; 3],
+    rebound_text: [String; 4],
+    rebound_wires: [Wire; 4],
+    server_lower_bound: i32,
+    server_dimensions: String,
+    rebound_lower_bound: i32,
+    rebound_dimensions: String,
+    bytea_accepts: bool,
+    bytea_array_accepts: bool,
+    bytea_server_text: String,
+    bytea_server_wire: Wire,
+    bytea_outbound_wire: Vec<u8>,
+    bytea_rebound_text: String,
+    bytea_rebound_wire: Wire,
+}
+
+#[cfg(feature = "array-impls")]
+const NATIVE_FIXED_ARRAY_DECODE_SQL: &str = "SELECT \
+    ARRAY[1,2,3]::int4[], (ARRAY[1,2,3]::int4[])::text, \
+    ARRAY[-2147483648,NULL,2147483647]::int4[], \
+        (ARRAY[-2147483648,NULL,2147483647]::int4[])::text, \
+    ARRAY[]::int4[], (ARRAY[]::int4[])::text, \
+    ARRAY[1,2]::int4[], ARRAY[1,2,3,4]::int4[], \
+    '[3:5]={1,2,3}'::int4[], ('[3:5]={1,2,3}'::int4[])::text, \
+        array_lower('[3:5]={1,2,3}'::int4[], 1), \
+        array_dims('[3:5]={1,2,3}'::int4[]), \
+    decode('0080ff', 'hex'), (decode('0080ff', 'hex'))::text";
+
+#[cfg(feature = "array-impls")]
+const NATIVE_FIXED_ARRAY_REBOUND_SQL: &str = "SELECT \
+    $1::int4[], ($1::int4[])::text, \
+    $2::int4[], ($2::int4[])::text, \
+    $3::int4[], ($3::int4[])::text, \
+    $4::int4[], ($4::int4[])::text, \
+        array_lower($4::int4[], 1), array_dims($4::int4[]), \
+    $5::bytea, ($5::bytea)::text";
+
+#[cfg(feature = "array-impls")]
+fn tokio_fixed_array_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres fixed-array encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "array-impls")]
+fn compio_fixed_array_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres fixed-array encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "array-impls")]
+fn tokio_fixed_array_decode_error(wire: &Wire) -> String {
+    <[i32; 3] as tokio_types::FromSql>::from_sql(&tokio_types::Type::INT4_ARRAY, &wire.0)
+        .expect_err("tokio-postgres accepted the wrong fixed-array length")
+        .to_string()
+}
+
+#[cfg(feature = "array-impls")]
+fn compio_fixed_array_decode_error(wire: &Wire) -> String {
+    <[i32; 3] as compio_types::FromSql>::from_sql(&compio_types::Type::INT4_ARRAY, &wire.0)
+        .expect_err("compio-postgres accepted the wrong fixed-array length")
+        .to_string()
+}
+
+#[cfg(feature = "array-impls")]
+fn tokio_native_fixed_array_observation(url: String) -> NativeFixedArrayObservation {
+    on_tokio(url, |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set deterministic rendering on tokio-postgres");
+        let row = client
+            .query_one(NATIVE_FIXED_ARRAY_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres fixed-array decode");
+        let decoded_exact: [i32; 3] = row.get(0);
+        let decoded_nullable: [Option<i32>; 3] = row.get(2);
+        let decoded_empty: [i32; 0] = row.get(4);
+        let too_few = match row.try_get::<_, [i32; 3]>(6) {
+            Ok(value) => ValueOutcome::Value(value),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let too_many = match row.try_get::<_, [i32; 3]>(7) {
+            Ok(value) => ValueOutcome::Value(value),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let too_few_wire: Wire = row.get(6);
+        let too_many_wire: Wire = row.get(7);
+        let decoded_lower: [i32; 3] = row.get(8);
+        let bytea = [0x00_u8, 0x80, 0xff];
+        let outbound_wires = [
+            tokio_fixed_array_wire(&decoded_exact, &tokio_types::Type::INT4_ARRAY),
+            tokio_fixed_array_wire(&decoded_nullable, &tokio_types::Type::INT4_ARRAY),
+            tokio_fixed_array_wire(&decoded_empty, &tokio_types::Type::INT4_ARRAY),
+            tokio_fixed_array_wire(&decoded_lower, &tokio_types::Type::INT4_ARRAY),
+        ];
+        let rebound = client
+            .query_one(
+                NATIVE_FIXED_ARRAY_REBOUND_SQL,
+                &[
+                    &decoded_exact,
+                    &decoded_nullable,
+                    &decoded_empty,
+                    &decoded_lower,
+                    &bytea,
+                ],
+            )
+            .await
+            .expect("tokio-postgres fixed-array rebound");
+        NativeFixedArrayObservation {
+            decoded_exact,
+            decoded_nullable,
+            decoded_empty,
+            too_few,
+            too_many,
+            too_few_error: tokio_fixed_array_decode_error(&too_few_wire),
+            too_many_error: tokio_fixed_array_decode_error(&too_many_wire),
+            decoded_lower,
+            server_text: [row.get(1), row.get(3), row.get(5), row.get(9)],
+            server_wires: [row.get(0), row.get(2), row.get(4), row.get(8)],
+            outbound_wires,
+            rebound_exact: rebound.get(0),
+            rebound_nullable: rebound.get(2),
+            rebound_empty: rebound.get(4),
+            rebound_lower: rebound.get(6),
+            rebound_text: [
+                rebound.get(1),
+                rebound.get(3),
+                rebound.get(5),
+                rebound.get(7),
+            ],
+            rebound_wires: [
+                rebound.get(0),
+                rebound.get(2),
+                rebound.get(4),
+                rebound.get(6),
+            ],
+            server_lower_bound: row.get(10),
+            server_dimensions: row.get(11),
+            rebound_lower_bound: rebound.get(8),
+            rebound_dimensions: rebound.get(9),
+            bytea_accepts: <[u8; 3] as tokio_types::ToSql>::accepts(&tokio_types::Type::BYTEA),
+            bytea_array_accepts: <[u8; 3] as tokio_types::ToSql>::accepts(
+                &tokio_types::Type::BYTEA_ARRAY,
+            ),
+            bytea_server_text: row.get(13),
+            bytea_server_wire: row.get(12),
+            bytea_outbound_wire: tokio_fixed_array_wire(&bytea, &tokio_types::Type::BYTEA),
+            bytea_rebound_text: rebound.get(11),
+            bytea_rebound_wire: rebound.get(10),
+        }
+    })
+}
+
+#[cfg(feature = "array-impls")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_fixed_array_observation() -> NativeFixedArrayObservation {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set deterministic rendering on compio-postgres");
+    let row = client
+        .query_one(NATIVE_FIXED_ARRAY_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres fixed-array decode");
+    let decoded_exact: [i32; 3] = row.get(0);
+    let decoded_nullable: [Option<i32>; 3] = row.get(2);
+    let decoded_empty: [i32; 0] = row.get(4);
+    let too_few = match row.try_get::<_, [i32; 3]>(6) {
+        Ok(value) => ValueOutcome::Value(value),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let too_many = match row.try_get::<_, [i32; 3]>(7) {
+        Ok(value) => ValueOutcome::Value(value),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let too_few_wire: Wire = row.get(6);
+    let too_many_wire: Wire = row.get(7);
+    let decoded_lower: [i32; 3] = row.get(8);
+    let bytea = [0x00_u8, 0x80, 0xff];
+    let outbound_wires = [
+        compio_fixed_array_wire(&decoded_exact, &compio_types::Type::INT4_ARRAY),
+        compio_fixed_array_wire(&decoded_nullable, &compio_types::Type::INT4_ARRAY),
+        compio_fixed_array_wire(&decoded_empty, &compio_types::Type::INT4_ARRAY),
+        compio_fixed_array_wire(&decoded_lower, &compio_types::Type::INT4_ARRAY),
+    ];
+    let rebound = client
+        .query_one(
+            NATIVE_FIXED_ARRAY_REBOUND_SQL,
+            &[
+                &decoded_exact,
+                &decoded_nullable,
+                &decoded_empty,
+                &decoded_lower,
+                &bytea,
+            ],
+        )
+        .await
+        .expect("compio-postgres fixed-array rebound");
+    NativeFixedArrayObservation {
+        decoded_exact,
+        decoded_nullable,
+        decoded_empty,
+        too_few,
+        too_many,
+        too_few_error: compio_fixed_array_decode_error(&too_few_wire),
+        too_many_error: compio_fixed_array_decode_error(&too_many_wire),
+        decoded_lower,
+        server_text: [row.get(1), row.get(3), row.get(5), row.get(9)],
+        server_wires: [row.get(0), row.get(2), row.get(4), row.get(8)],
+        outbound_wires,
+        rebound_exact: rebound.get(0),
+        rebound_nullable: rebound.get(2),
+        rebound_empty: rebound.get(4),
+        rebound_lower: rebound.get(6),
+        rebound_text: [
+            rebound.get(1),
+            rebound.get(3),
+            rebound.get(5),
+            rebound.get(7),
+        ],
+        rebound_wires: [
+            rebound.get(0),
+            rebound.get(2),
+            rebound.get(4),
+            rebound.get(6),
+        ],
+        server_lower_bound: row.get(10),
+        server_dimensions: row.get(11),
+        rebound_lower_bound: rebound.get(8),
+        rebound_dimensions: rebound.get(9),
+        bytea_accepts: <[u8; 3] as compio_types::ToSql>::accepts(&compio_types::Type::BYTEA),
+        bytea_array_accepts: <[u8; 3] as compio_types::ToSql>::accepts(
+            &compio_types::Type::BYTEA_ARRAY,
+        ),
+        bytea_server_text: row.get(13),
+        bytea_server_wire: row.get(12),
+        bytea_outbound_wire: compio_fixed_array_wire(&bytea, &compio_types::Type::BYTEA),
+        bytea_rebound_text: rebound.get(11),
+        bytea_rebound_wire: rebound.get(10),
+    }
+}
+
+/// Fixed arrays agree on values and exact wire bytes, including two shared
+/// shape defects that the active assertions pin independently of the oracle.
+#[cfg(feature = "array-impls")]
+#[compio::test]
+async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
+    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let ours = compio_native_fixed_array_observation().await;
+    assert_eq!(ours, theirs);
+
+    assert_eq!(ours.decoded_exact, [1, 2, 3]);
+    assert_eq!(
+        ours.decoded_nullable,
+        [Some(i32::MIN), None, Some(i32::MAX)]
+    );
+    assert_eq!(ours.decoded_empty, [0_i32; 0]);
+    assert_eq!(ours.too_few, ValueOutcome::LocalFailure);
+    assert_eq!(ours.too_many, ValueOutcome::LocalFailure);
+    assert_eq!(
+        ours.too_few_error,
+        "too few elements in array (expected 3, got 2)"
+    );
+    assert_eq!(
+        ours.too_many_error,
+        "excess elements in array (expected 3, got more than that)"
+    );
+    assert_eq!(ours.decoded_lower, [1, 2, 3]);
+    assert_eq!(
+        ours.server_text,
+        [
+            "{1,2,3}",
+            "{-2147483648,NULL,2147483647}",
+            "{}",
+            "[3:5]={1,2,3}",
+        ]
+    );
+
+    let exact_wire = "0000000100000000000000170000000300000001\
+        000000040000000100000004000000020000000400000003";
+    let nullable_wire = "0000000100000001000000170000000300000001\
+        0000000480000000ffffffff000000047fffffff";
+    let canonical_empty_wire = "000000000000000000000017";
+    let noncanonical_empty_wire = "0000000100000000000000170000000000000001";
+    let lower_three_wire = "0000000100000000000000170000000300000003\
+        000000040000000100000004000000020000000400000003";
+    assert_eq!(hex(&ours.server_wires[0].0), exact_wire);
+    assert_eq!(hex(&ours.server_wires[1].0), nullable_wire);
+    assert_eq!(hex(&ours.server_wires[2].0), canonical_empty_wire);
+    assert_eq!(hex(&ours.server_wires[3].0), lower_three_wire);
+    assert_eq!(hex(&ours.outbound_wires[0]), exact_wire);
+    assert_eq!(hex(&ours.outbound_wires[1]), nullable_wire);
+
+    // Both fixed-array codecs write a one-dimensional, zero-length array that
+    // PostgreSQL never emits. The server canonicalizes it back to ndim = 0.
+    assert_eq!(hex(&ours.outbound_wires[2]), noncanonical_empty_wire);
+    assert_ne!(ours.outbound_wires[2], ours.server_wires[2].0);
+    assert_eq!(hex(&ours.rebound_wires[2].0), canonical_empty_wire);
+
+    // A fixed Rust array has no lower-bound slot, so both codecs normalize the
+    // server's [3:5] array to [1:3] when writing it back.
+    assert_eq!(hex(&ours.outbound_wires[3]), exact_wire);
+    assert_ne!(ours.outbound_wires[3], ours.server_wires[3].0);
+    assert_eq!(ours.server_lower_bound, 3);
+    assert_eq!(ours.server_dimensions, "[3:5]");
+    assert_eq!(ours.rebound_lower_bound, 1);
+    assert_eq!(ours.rebound_dimensions, "[1:3]");
+
+    assert_eq!(ours.rebound_exact, [1, 2, 3]);
+    assert_eq!(
+        ours.rebound_nullable,
+        [Some(i32::MIN), None, Some(i32::MAX)]
+    );
+    assert_eq!(ours.rebound_empty, [0_i32; 0]);
+    assert_eq!(ours.rebound_lower, [1, 2, 3]);
+    assert_eq!(
+        ours.rebound_text,
+        ["{1,2,3}", "{-2147483648,NULL,2147483647}", "{}", "{1,2,3}",]
+    );
+    assert_eq!(hex(&ours.rebound_wires[0].0), exact_wire);
+    assert_eq!(hex(&ours.rebound_wires[1].0), nullable_wire);
+    assert_eq!(hex(&ours.rebound_wires[3].0), exact_wire);
+
+    // `[u8; N]` is deliberately a BYTEA specialization, not a BYTEA[] array.
+    assert!(ours.bytea_accepts);
+    assert!(!ours.bytea_array_accepts);
+    assert_eq!(ours.bytea_server_text, "\\x0080ff");
+    assert_eq!(ours.bytea_server_wire.0, [0x00, 0x80, 0xff]);
+    assert_eq!(ours.bytea_outbound_wire, [0x00, 0x80, 0xff]);
+    assert_eq!(ours.bytea_rebound_text, "\\x0080ff");
+    assert_eq!(ours.bytea_rebound_wire.0, [0x00, 0x80, 0xff]);
+}
+
+/// Desired invariant blocked by both fixed-array codecs emitting an empty
+/// array as one zero-length dimension instead of `PostgreSQL`'s canonical wire.
+#[cfg(feature = "array-impls")]
+#[ignore = "both postgres-types fixed-array codecs emit noncanonical empty-array wire"]
+#[compio::test]
+async fn native_fixed_array_codecs_must_emit_canonical_empty_wire() {
+    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let ours = compio_native_fixed_array_observation().await;
+    assert_eq!(ours.outbound_wires[2], ours.server_wires[2].0);
+    assert_eq!(theirs.outbound_wires[2], theirs.server_wires[2].0);
+}
+
+/// Desired invariant blocked by both fixed-array codecs discarding array
+/// lower bounds that their Rust carrier has no field in which to retain.
+#[cfg(feature = "array-impls")]
+#[ignore = "both postgres-types fixed-array codecs normalize [3:5] to [1:3]"]
+#[compio::test]
+async fn native_fixed_array_codecs_must_preserve_lower_bounds() {
+    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let ours = compio_native_fixed_array_observation().await;
+    assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
+    assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
+}
+
 fn byte_string_format_cases() -> Vec<RawCase> {
     vec![
         RawCase::new("bytea-format-empty", "decode('', 'hex')", "bytea"),
