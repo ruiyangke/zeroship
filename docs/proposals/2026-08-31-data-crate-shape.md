@@ -898,6 +898,48 @@ it keep decoding its own stream while only the privileged and destructive parts 
 - **Full** - the whole WAL side moves and the worker loses REPLICATION outright, satisfying the
   invariant rather than approximating it.
 
+### What Full costs, every item verified against the tree
+
+Four edits. The first two are design work; the last two are small and mechanical, and they are the
+ones a plan would forget because nothing in the crate graph points at them.
+
+**1. A wire protocol, not an adapter.** `ChangeEvent` derives `Debug, Clone` and nothing else
+(`broker.rs:80`), and its own doc records that `schema` is conflated with `app_id` (`:78`) - a
+conflation the decoupling work exists to undo. Track B owns authenticated framing, versioning, event
+identity and deduplication, reconnect and replay, backpressure, subscriber registration and
+grant-revision purging. Feeding `broker::publish` is the last adapter in that chain, not the design.
+
+**2. The suppression handoff, which is the blocker no review round found.** `SuppressGuard::activate`
+(`wal_consumer.rs:781`) writes `static SUPPRESSED_APPS` (`:72`), a process-global refcount that
+`exec.rs:485` reads on the mutation path. Move the writer to the relay and leave the reader in the
+worker and every change is delivered TWICE, silently. The relay must drive the worker's suppression
+state remotely, with TWO signals: "app X is WAL-fed now", and "app X is disconnected but its slot is
+retaining, KEEP suppressing" - the reconnect-backoff case `:777-781` singles out.
+
+**3. Invert the boot check.** `crates/zeroship-worker/src/db_posture.rs:123` currently reads:
+
+```rust
+if !posture.replication || !posture.bypass_rls {
+    return Err("worker database role requires only REPLICATION and BYPASSRLS for logical decoding")
+}
+```
+
+A `NOREPLICATION` worker FAILS THIS CHECK AT BOOT. The requirement must be inverted, not deleted -
+and note the two attributes share ONE condition, so a half-edit that drops the replication clause
+leaves `BYPASSRLS` required by accident rather than by decision. Decide `BYPASSRLS` deliberately at
+the same time.
+
+**4. A new migration revoking the attribute.**
+`db/migrations-ts/20260818000200_worker_database_authority.ts:35` grants it:
+`ALTER ROLE zeroship_worker WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT REPLICATION
+BYPASSRLS`, via raw SQL because "the role DSL does not expose PostgreSQL's REPLICATION attribute"
+(`:36`). The template for the reverse is two lines below at `:39`, where `zeroship_workflow_owner`
+gets `NOREPLICATION NOBYPASSRLS`.
+
+**And the payoff is measured, not argued** (see the probes above): `REPLICATION` confers
+see-every-slot AND drop-any-slot, cluster-wide, with no ownership check. Partial removes none of it,
+because the capability is the attribute and not the code's location.
+
 **Full is cheaper than an earlier draft of this document claimed - and the reason is now the
 measured one.** That draft said full extraction "adds a hop to every subscription". A second draft
 answered that "the broker stays, so LOCAL writes still short-circuit in-process with no network at
