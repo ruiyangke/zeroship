@@ -453,3 +453,11 @@ attribute, and never on the bare `fn`. The two detections are different -
 `--list` counts catch a stolen attribute, and only reading catches a stolen doc
 comment - which is the argument for preventing both at the insertion point
 instead of hunting them afterwards.
+
+**The blast radius was one.** A sweep for doc blocks that name the FOLLOWING
+function instead of their own flagged 11 candidates across the crate; reading
+the first line of each showed all 11 are ordinary cross-references
+("Ensure the read buffer has at least `min_bytes`", "Attempts to cancel the
+connection identified by a pool lease's token"). Zero real thefts besides the
+one repaired here, which was introduced the same day by an agent insertion
+rather than being a long-standing pattern.
