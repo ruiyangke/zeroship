@@ -3,12 +3,16 @@
 # do not survive transaction pooling, so these failures are the contract,
 # not a regression.
 #
-# commit:   f4ad1e5a0
+# commit:   57af3991a
 # features: tls,live-tls-tests,live-unix-socket   target: --test suite
-# runs:     3 at this commit -> 67, 68, 68
-# stable:   67 names below, present in ALL THREE runs
+# observed: 69 failures this run, 670 passing
 # flapper:  read_timeout::copy_input_time_is_not_charged_as_server_read_silence
-#           (present in 2 of 3; NOT listed, so a run missing it still matches)
+#           appeared in 2 of 3 runs at f4ad1e5a0 and in 0 of 1 here; it is
+#           NOT listed, so a run with or without it still matches.
+#
+# Since f4ad1e5a0 this list gained exactly two names, both tests ADDED by
+# 023c1701c. Every growth so far has been a new test meeting the pooler,
+# never an existing test starting to fail.
 backend_termination::a_checked_out_idle_pool_backend_is_discarded_after_termination
 backend_termination::a_checked_out_pool_backend_killed_mid_query_is_discarded
 backend_termination::all_idle_pool_backends_are_replaced_after_mass_termination
@@ -69,6 +73,8 @@ pool_hooks::before_acquire_false_discards_and_retries
 pool_lifetime::max_lifetime_rotates_without_a_housekeeper
 pool_transaction_isolation::a_terminated_backend_is_not_handed_to_the_next_borrower
 query_claims::copy_in_close_commits_input_and_keeps_the_client_usable
+query_claims::execute_text_params_preserves_server_cast_errors
+query_claims::execute_text_params_reports_bind_count_overflow_without_poisoning_the_client
 query_claims::pool_query_text_params_returns_its_lease
 query_observer::observer_reports_dropped_in_flight_future_cancelled_once
 startup_options::options_reaches_the_backend_in_both_connection_string_forms
