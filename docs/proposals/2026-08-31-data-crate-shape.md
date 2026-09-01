@@ -165,9 +165,27 @@ resolution:
    Move `ChangeStream` to core and the leg goes with it: `data-core -> data-engine` against
    `data-engine -> data-core` is a Cargo cycle, unbuildable. **Relabelling the cycle is not closing
    it.**
-2. **`BackendHandle` goes to ENGINE.** Not core (it names both vendors), and not the adapter: eight
-   ENGINE files consume it, so placing it above ENGINE would mint ~20 new upward edges. Every
-   below-ENGINE hit is a doc comment.
+2. **`BackendHandle` goes to ENGINE.** Not core (it names both vendors), and not the adapter: its
+   consumers are engine-tier, so placing it above them mints new upward edges.
+
+   **Re-derived 2026-09-01; the earlier consumer list was wrong in both directions.** It named
+   `crud/read_pipeline.rs`, `crud/unmask.rs` and `crud/mask_policy.rs`, none of which name the type
+   in code, and omitted `context.rs` and `cdc_lifecycle.rs`, which do. The code-level consumers are
+   `exec.rs`, `transaction/driver.rs`, `transaction/mod.rs`, `context.rs`, `drop_namespace.rs`,
+   `cdc_lifecycle.rs` and `crud/mod.rs`.
+
+   The correction **strengthens** the placement. No vendor file, no `error.rs` and no `lib.rs` names
+   it in code - every hit in those is a doc comment - so neither backend consumes it and neither does
+   the adapter. "Every below-ENGINE hit is a doc comment" survives; a filename-level grep is what
+   made it look otherwise, and briefly suggested an unavoidable vendor cycle that does not exist.
+
+   **It also couples the two open questions.** `context.rs` is among the heaviest consumers, and
+   `context.rs` is the module this document has never placed. Wherever `BackendHandle` lands,
+   `context.rs` either follows it or acquires an edge to it.
+
+   What this does NOT change: the engine still depends on both vendor crates, because
+   `BackendHandle`'s **definition** names `Rc<PostgresBackend>` and `Rc<SqliteBackend>`. That edge
+   comes from owning the type, not from consuming it, so no consumer census can retire it.
 3. **The cut is to DELETE `pause_broker` and `engage_schema_pending`**, not to port them. No
    production caller; both impls are byte-identical self-less expressions; and the one production
    pause consumer already routes around them - `cdc_lifecycle.rs:270` and `:287` call
