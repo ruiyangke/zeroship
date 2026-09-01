@@ -1,5 +1,28 @@
+"""Count non-comment, non-test lines a commit range touches under
+libs/compio-postgres/src.
+
+    production_lines_changed.py <base> <head>
+
+TWO POSITIONAL REVISIONS. No flags. This refuses anything else on purpose:
+it was called as `--range a~1..a --repo <dir>` for several commits, which bound
+base="--range" and head="a~1..a", and `git diff --name-only "--range..a~1..a"`
+names no files - so it printed "TOTAL production lines: 0" for every one of
+them. Zero is the answer that means "this commit is test-only", so a broken
+invocation produced exactly the reassuring result the caller was looking for.
+Validating argv is cheaper than noticing that.
+"""
 import subprocess, re, sys
-base, head = sys.argv[1], sys.argv[2]
+
+_args = sys.argv[1:]
+if len(_args) != 2 or any(a.startswith("-") for a in _args):
+    sys.exit(f"usage: {sys.argv[0]} <base> <head>   (two revisions, no flags)")
+for _rev in _args:
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{_rev}^{{commit}}"],
+        capture_output=True,
+    ).returncode:
+        sys.exit(f"not a commit: {_rev}")
+base, head = _args
 files=subprocess.run(["git","diff","--name-only",f"{base}..{head}","--","libs/compio-postgres/src"],
                      capture_output=True,text=True).stdout.split()
 def test_spans(src):
