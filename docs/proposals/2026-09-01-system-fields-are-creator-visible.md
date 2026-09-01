@@ -590,6 +590,26 @@ result from the matched *variant* map (`:567`), and system fields are top-level
 entries, never variant entries, so **for union collections #126 stays broken
 after the strip is removed**.
 
+**Third-and-a-half, and it is a DATA-INTEGRITY regression: every upsert would
+reset `version` to 1.** This follows from the `:508` defect above and is worth
+stating separately because it is silent corruption rather than a failed call.
+Once `validateDoc` materialises `version: 1` onto the payload:
+
+- `zeroship-schema/src/query.rs:6297` excludes only `id | created_at |
+  created_by` from the `DO UPDATE SET` list, so `version` gets
+  `"version" = EXCLUDED."version"` - that is, `1`.
+- `:6313` guards the auto-bump `"version" = COALESCE(...) + 1` behind
+  `if !doc_has_version`, which is now false.
+
+The comment at `:6322-6326` states the invariant being broken, verbatim: *"Every
+PG upsert took this branch: the insert-side system-fields pass deliberately
+leaves `version` to the DDL default, so `doc_has_version` is false on the
+dispatch path."* So every SDK upsert onto an existing row would reset the
+optimistic-concurrency counter, making a stale CAS predicate match again. This
+is the sharpest argument that the gate must cover `:508` as well as `:511`: a
+non-`creator` field must neither be required nor have its default materialised
+client-side, **because the platform's default is the DDL's**.
+
 **Fourth: this is a v3 descriptor, not a v2.** `install-schema.ts:68-74` states
 the rule the version number encodes - a consumer that stops deriving something
 itself, and instead depends on a property being present on every field, is
@@ -637,6 +657,42 @@ from `:517` whenever a value is *present*, independent of `required` entirely.
 `@zeroship/db`.** Fixing that asymmetry is a precondition for this proposal, not
 a consequence of it, and it is the one defect that survives every redesign so far
 because it lives in neither the strip nor the descriptor.
+
+## And criterion 5 would silently delete `| null` from three columns
+
+Un-eliding the seven from the generated `env.db.ts` - which criterion 5 describes
+as a two-line change at `render-env-db.ts:73-81`/`:129` - **erases nullability
+from `created_by`, `updated_by` and `deleted_at`, with no compiler diagnostic.**
+
+Today `Row<S> = InferSchema<S> & SystemFields` (`types.ts:195`), the seven are
+elided from the generated literal, and `SystemFields` (`types.ts:174-182`) is
+their sole source: `created_by: string | null`, `updated_by: string | null`,
+`deleted_at: number | null`.
+
+Un-elide, and the renderer emits builders from the descriptor. Those three carry
+**no `required`** in the committed descriptor, so they render `t.string()` /
+`t.timestamp()` - optional keys. The intersection then computes:
+
+```
+(string | undefined) & (string | null)
+  = (string & string) | (string & null) | (undefined & string) | (undefined & null)
+  = string
+```
+
+`| null` is gone. **Intersection narrows rather than errors**, so nothing fires
+anywhere in the build.
+
+The columns really are nullable - `zeroship-schema/src/query.rs:212-217` emits
+`created_by TEXT ... NULL`, `updated_by TEXT ... NULL`, `deleted_at TIMESTAMPTZ
+NULL`, and the charter agrees (`policies/confined-system-shape.inject.toml:99-102`,
+`nullable = true` for exactly those three). So every
+`if (row.deleted_at === null)` soft-delete check in creator code becomes a
+comparison TypeScript believes is impossible, against a column that is NULL in
+practice for every live row.
+
+Making criterion 5 correct requires either dropping `SystemFields` from `Row<S>`
+when the schema declares them, or emitting a nullable marker the renderer does
+not currently have. It is not a two-line deletion.
 
 **What this does not do.** It does not make `created_at` declarable by a creator
 in a migration; the engine refuses that at `table_shape.rs:361-376` and this
