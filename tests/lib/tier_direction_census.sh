@@ -130,9 +130,29 @@
 #      own peer rule - backend/sqlite/ must not name the Postgres decoder -
 #      was advertised and unenforced. It is clean today by luck.
 #      WHAT THE FIX REVEALS is larger than the defect: 66 references from
-#      tiered files reach SEVEN untiered targets, led by `crate::query` at 22
-#      and `crate::context` at 19. The query builder - the module decision 4
-#      routes ALL SQL through - has never been placed in the lattice at all.
+#      tiered files reached targets with no tier.
+#
+#   7. THE FIRST READING OF THAT 66 WAS WRONG, WITHIN THE HOUR, AND IT IS THE
+#      MORE USEFUL DEFECT. It was reported here as "seven untiered modules, led
+#      by `crate::query` at 22 - the module decision 4 routes ALL SQL through,
+#      never placed in the lattice". `crate::query` IS NOT A MODULE OF THIS
+#      CRATE. There is no query.rs and no query/ directory; lib.rs:94 says
+#      `pub use zeroship_schema::query;`, and lib.rs:150 does the same for
+#      `diff`. Both resolve to a DEPENDENCY crate, which is below every tier
+#      here by construction - cargo already forbids that cycle.
+#      The error was reading "the census has no arm for it" as "nobody has
+#      placed it", when the true cause was "it is not ours to place". A grep
+#      for the module NAME cannot tell those apart; only resolving the name
+#      can, which is why the fix RESOLVES rather than lists.
+#      FIX: `tier_of_target`'s default arm now checks lib.rs for a re-export
+#      and answers EXTERNAL, counted in its own bucket.
+#      MEASURED: 66 splits exactly into 42 unplaced + 24 external, and the
+#      violation count is 21 before and after - this changes what the dropped
+#      set MEANS, not what the census judges. The 42 are context (19),
+#      backend (13), metrics (5), cdc_lifecycle (4), init_pool_async (1).
+#      Consequence for the split: the query builder needs no new home. It has
+#      one, and decision 4's "everything goes to the query builder" already
+#      names a separate crate rather than proposing one.
 #
 # TIER CYCLES - the question a crate split actually asks.
 #   The per-edge verdict judges ONE edge at a time, so it structurally cannot
@@ -201,7 +221,19 @@ tier_of_target() {
       else
         echo UNRESOLVED
       fi ;;
-    *)                                                   echo CONTESTED ;;
+    *)
+      # Not a known module. Before calling it unplaced, ask whether it is a
+      # RE-EXPORT of a dependency crate: `pub use zeroship_schema::query;` makes
+      # `crate::query::quote_ident` resolve OUTSIDE this crate entirely, so it
+      # is a dependency edge, not an intra-crate placement question at all.
+      # Missing this is how 24 of 66 dropped references read as "modules nobody
+      # has tiered" on 2026-09-01, `crate::query` at 22 among them - the query
+      # builder, reported as unplaced when it is already its own crate.
+      if grep -qE "^pub use [a-z_][a-z_0-9]*::${1%%::*};" lib.rs 2>/dev/null; then
+        echo EXTERNAL
+      else
+        echo CONTESTED
+      fi ;;
   esac
 }
 
@@ -299,7 +331,8 @@ declared_test_only() {
 
 EDGES="$(mktemp)"
 DROPPED="$(mktemp)"
-trap 'rm -f "$EDGES" "$DROPPED"' EXIT
+EXTERNALS="$(mktemp)"
+trap 'rm -f "$EDGES" "$DROPPED" "$EXTERNALS"' EXIT
 
 n_test_only=0
 printf '%-9s %-34s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
@@ -343,6 +376,13 @@ while read -r f; do
     # needs its size to know what a clean run is worth. `crate::backend::X` with
     # an uppercase item lands here, because the extractor's second segment is
     # lowercase-only and the capture degrades to bare `backend`.
+    # A re-export resolves to a DEPENDENCY crate, which is strictly below every
+    # tier here by construction: cargo already forbids the cycle. It is not an
+    # unplaced module and must not be counted as one.
+    if [ "$tt" = EXTERNAL ]; then
+      printf '%s -> crate::%s\n' "$rel" "$tpath" >> "$EXTERNALS"
+      continue
+    fi
     if [ "$tt" = CONTESTED ]; then
       printf '%s -> crate::%s\n' "$rel" "$tpath" >> "$DROPPED"
       continue
@@ -427,12 +467,18 @@ else
   echo "  lands here, and a skipped file prints exactly what a clean file prints."
   echo
   n_dropped=$(sort -u "$DROPPED" 2>/dev/null | wc -l)
-  echo "DROPPED: $n_dropped reference(s) from a TIERED file to an UNTIERED target."
+  n_ext=$(sort -u "$EXTERNALS" 2>/dev/null | wc -l)
+  echo "DROPPED: $n_dropped reference(s) from a TIERED file to an UNTIERED module."
   echo "  These are the edges the table cannot judge from the OTHER side: the"
   echo "  source has a tier, the target does not, so the row is discarded. Until"
   echo "  2026-09-01 that discard was silent, which is defect 6 - the census could"
   echo "  report zero violations while dropping every edge in the region under"
   echo "  active design. Run '$0 --dropped' to list them."
+  echo
+  echo "EXTERNAL: $n_ext reference(s) resolve through a lib.rs re-export to a"
+  echo "  DEPENDENCY crate. Not a placement question - cargo already forbids the"
+  echo "  cycle. Counted apart from DROPPED because lumping the two is how the"
+  echo "  query builder was reported as an untiered module on 2026-09-01."
 fi
 echo
 echo "Every verdict is relative to tier_of_file/tier_of_target above, which are a"
