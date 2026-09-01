@@ -247,3 +247,70 @@ also uses `#[cfg(all(test, unix))]` and
 `#[cfg(all(test, target_os = "linux"))]`. Matching every cfg predicate that
 mentions `test` gives 53, of which `connect_socket.rs` contributes 0 - that zero
 is the control worth keeping.
+
+## Re-measured at `5cf613841`: 92.00%, and a live gap in savepoint commit
+
+    5905f885e   35254 lines   2904 missed   91.76%
+    5cf613841   35607 lines   2848 missed   92.00%
+
+The tree grew 353 lines and missed 56 fewer. Both controls confirm the previous
+cycle's work landed: `pool.rs::batch_execute` and `pool.rs::discard_unowned_entry`
+have left the dead list.
+
+### The finding: committing a FAILED savepoint is never executed
+
+`Transaction::commit` runs, but one branch inside it does not. At
+`transaction.rs:154` the commit path computes
+
+    let nested_failed = self.savepoint.is_some()
+        && self.client.transaction_status() == Some(TransactionStatus::Failed);
+
+and when that is true it releases the savepoint through a cleanup-carrying form
+(`:159-164`) that issues `ROLLBACK TO SAVEPOINT` if the `RELEASE` fails. That
+whole chain is dead:
+
+    transaction.rs:160   start_batch_execute_with_error_cleanup   entry, branch never taken
+    simple_query.rs:183  start_batch_execute_with_error_cleanup   0 executed regions
+    client.rs:1480       send_with_error_cleanup                  0 executed regions
+
+Nothing names it either: `nested_failed` appears only inside `transaction.rs`,
+and no test in the crate references the cleanup pair.
+
+The scenario is ordinary - open a transaction, take a savepoint, run a statement
+that errors, then commit - and the surrounding function has already produced one
+real bug. The comment at `:171-175` records that `self.done = true` used to be
+set BEFORE the COMMIT was enqueued, so an unwind mid-build left the transaction
+open on the server with nothing left to undo it. That was fixed on 2026-08-21.
+An untested branch in that same function is worth closing.
+
+### One flip this comparison cannot explain
+
+`client.rs::send_with_error_cleanup` and
+`simple_query.rs::start_batch_execute_with_error_cleanup` read as COVERED in the
+earlier JSON and DEAD in this one, with both files unchanged between the two
+commits and the newer run measuring a superset of targets. Coverage cannot
+legitimately shrink that way.
+
+The earlier JSON's provenance cannot be reconstructed - the log beside it records
+4 targets and 1005 tests against this run's 7 and 1478, but that log may not even
+belong to it. So the delta is uninterpretable, and the right response is not to
+explain it but to stop relying on it: **the claim to act on is the current run's,
+and it gets a `panic!` probe before any test is written**, exactly as every other
+never-executed claim this week has.
+
+### Two blind spots closed in the tool itself
+
+**Spans were resolved against the working tree.** A coverage JSON stores line
+numbers; the tool read source from disk. Running the same JSON after a commit
+that removed 26 lines from `client.rs` moved 6 genuinely dead functions -
+including `transaction.rs::query_text_params`, known dead - into a bucket that
+printed as though they were fine. `--commit <sha>` now reads source from git at
+the stamped sha. The control is exact: pinned reports 71 dead / 35 unjudged,
+drifted reports 65 / 41, and every one of the six differences lies in the two
+files the intervening commit touched.
+
+**A span with no regions was skipped silently.** That is not "covered" - it is
+"this run cannot speak about it". Those are now counted and listed as
+`unjudged`. There are 35 of them, mostly trait-method declarations and generics
+with no instantiation, and folding them into the pass column is how missing data
+reads as a clean result.
