@@ -350,3 +350,40 @@ Two things follow, and the second is the useful one:
 
 Pool accounting was exact in all three runs, which is the part of this soak that
 has never been ambiguous: `pool_acquires == pool_releases` to the unit.
+
+## Inserting a test above a bare `fn` line deletes the test that was there
+
+Adding a test to `replication.rs` by anchoring the insertion on
+
+    fn replication_connection_debug_is_bounded_and_omits_private_state() {
+
+silently destroyed that test. Attributes bind to what FOLLOWS them, so the
+pre-existing `#[test]` ended up attached to the newly inserted function, and the
+function it had belonged to was left bare:
+
+    #[test]                                   <- was for the Debug test
+    /// doc comment for the new test
+    #[test]
+    fn every_pgoutput_decode_error_...() { }  <- now carries TWO #[test]
+
+    fn replication_connection_debug_...() { } <- no attribute, no longer a test
+
+The suite still passed. The new test ran twice and the old one did not run at
+all, so the total moved by +1 and looked exactly like a clean addition.
+
+**The check that catches it costs one command**: list the tests and compare the
+count against the number of DISTINCT names.
+
+    cargo test -p compio-postgres --features ... --lib -- --list \
+      | grep ': test$' | sed 's/: test$//' | sort > listed.txt
+    wc -l < listed.txt ; sort -u listed.txt | wc -l
+
+Before the fix: 658 listed, 657 distinct, `uniq -d` naming the doubled test, and
+a diff against the same list at HEAD showing exactly which name had been LOST.
+After anchoring on `#[test]\n    fn ...` instead - so the attribute cannot be
+orphaned - 658 and 658, nothing lost.
+
+A suite total is not enough. It moved by the expected +1 in both the broken and
+the correct version; only the distinct-name count told them apart. Any tooling
+that inserts tests should anchor on the attribute, or on a doc-comment line
+above it, and never on the bare `fn`.
