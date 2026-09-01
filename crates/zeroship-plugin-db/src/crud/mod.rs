@@ -512,52 +512,6 @@ fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
     }
 }
 
-/// `first_row_or_null` variant that, when `has_masked` is
-/// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
-/// walks the parsed value and replaces `__zsmask__` sentinels with
-/// native `MaskedValue` instances. When `has_masked` is `false` this is
-/// identical to `first_row_or_null` (plain `JSON.parse`, no walk).
-fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
-    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
-    maybe_rehydrate(value, has_masked)
-}
-
-/// Lower a `Vec<Value>` result to the row count, as a JS `number`.
-/// Used by `updateMany` / `deleteMany` (resolves to the affected-row
-/// count).
-#[allow(clippy::cast_precision_loss)]
-fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
-    ResolveValue::F64(rows.len() as f64)
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn usize_count_as_f64(count: usize) -> ResolveValue {
-    ResolveValue::F64(count as f64)
-}
-
-/// `rows_as_json_array` variant that resolves via
-/// [`ResolveValue::JsonWithRehydration`] when `has_masked` is set. See
-/// [`first_row_or_null_masked`].
-fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
-    let value = Value::Array(rows).to_string();
-    maybe_rehydrate(value, has_masked)
-}
-
-/// Pick `ResolveValue::JsonWithRehydration` (walk the
-/// parsed value, mint `MaskedValue` for `__zsmask__` sentinels) when the
-/// result is known to carry masked columns; otherwise the plain
-/// `ResolveValue::Json` fast path (bulk `JSON.parse`, no walk).
-fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
-    if has_masked {
-        ResolveValue::JsonWithRehydration {
-            json,
-            transform: crate::v8_classes::masked_value::rehydrate_masked_values,
-        }
-    } else {
-        ResolveValue::Json(json)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // find — read path
 // ---------------------------------------------------------------------------
@@ -744,7 +698,7 @@ pub(crate) fn dispatch_find<'s>(
                 }
                 OpResult::JsValue {
                     resolver,
-                    value: rows_as_json_array_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -841,7 +795,7 @@ pub(crate) fn dispatch_insert<'s>(
                 };
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -921,7 +875,7 @@ pub(crate) fn dispatch_insert_many<'s>(
                 };
                 OpResult::JsValue {
                     resolver,
-                    value: rows_as_json_array_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -1161,7 +1115,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 }
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -1358,7 +1312,7 @@ pub(crate) fn dispatch_update_many<'s>(
             return match frame.finish(work_result).await {
                 Ok(affected) => OpResult::JsValue {
                     resolver,
-                    value: usize_count_as_f64(affected),
+                    value: crate::v8_bridge::usize_count_as_f64(affected),
                     request_id,
                 },
                 Err(e) => OpResult::JsValue {
@@ -1426,7 +1380,7 @@ pub(crate) fn dispatch_update_many<'s>(
                 }
                 OpResult::JsValue {
                     resolver,
-                    value: row_count_as_f64(rows),
+                    value: crate::v8_bridge::row_count_as_f64(rows),
                     request_id,
                 }
             }
@@ -1505,7 +1459,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             .await
         },
         |result: read_pipeline::ApplyResult| {
-            first_row_or_null_masked(result.rows, result.has_masked)
+            crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
         },
     )));
 
@@ -1553,7 +1507,7 @@ pub(crate) fn dispatch_delete_many<'s>(
         move |bq| async move {
             exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
         },
-        row_count_as_f64,
+        crate::v8_bridge::row_count_as_f64,
     )));
 
     promise
@@ -1607,7 +1561,7 @@ pub(crate) fn dispatch_purge_one<'s>(
             .await
         },
         |result: read_pipeline::ApplyResult| {
-            first_row_or_null_masked(result.rows, result.has_masked)
+            crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
         },
     )));
 
@@ -1641,7 +1595,7 @@ pub(crate) fn dispatch_purge_many<'s>(
         move |bq| async move {
             exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete).await
         },
-        row_count_as_f64,
+        crate::v8_bridge::row_count_as_f64,
     )));
 
     promise
@@ -1697,7 +1651,7 @@ pub(crate) fn dispatch_restore_one<'s>(
             .await
         },
         |result: read_pipeline::ApplyResult| {
-            first_row_or_null_masked(result.rows, result.has_masked)
+            crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
         },
     )));
 
@@ -1745,7 +1699,7 @@ pub(crate) fn dispatch_restore_many<'s>(
         move |bq| async move {
             exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
         },
-        row_count_as_f64,
+        crate::v8_bridge::row_count_as_f64,
     )));
 
     promise
@@ -1846,7 +1800,7 @@ pub(crate) fn dispatch_aggregate<'s>(
             .await
         },
         |result: read_pipeline::ApplyResult| {
-            rows_as_json_array_masked(result.rows, result.has_masked)
+            crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked)
         },
     )));
 
@@ -1939,7 +1893,7 @@ pub(crate) fn dispatch_distinct<'s>(
                     }
                 })
                 .collect();
-            maybe_rehydrate(Value::Array(flat).to_string(), result.has_masked)
+            crate::v8_bridge::maybe_rehydrate(Value::Array(flat).to_string(), result.has_masked)
         },
     )));
 
@@ -2076,7 +2030,7 @@ pub(crate) fn dispatch_upsert<'s>(
                 };
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -2287,7 +2241,7 @@ pub(crate) fn dispatch_search<'s>(
                 };
                 zeroship_runtime::state::OpResult::JsValue {
                     resolver,
-                    value: rows_as_json_array_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -2454,7 +2408,7 @@ pub(crate) fn dispatch_near<'s>(
                 };
                 zeroship_runtime::state::OpResult::JsValue {
                     resolver,
-                    value: rows_as_json_array_masked(result.rows, result.has_masked),
+                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
