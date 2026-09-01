@@ -26,7 +26,7 @@
 use std::future::Future;
 
 use serde_json::Value;
-use zeroship_runtime::state::{OpResult, ResolveValue};
+use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use crate::binding::DbBinding;
 use crate::error::DbError;
@@ -282,6 +282,31 @@ fn reject_op(
         value: ResolveValue::RejectError(err.to_op_error()),
         request_id,
     }
+}
+
+/// Reject a freshly-allocated promise without doing any async work.
+///
+/// The search-family dispatchers validate argument SHAPE on the synchronous
+/// half, before a query exists to run. The runtime only ever resolves a
+/// promise from a spawned op, so even an argument rejection has to be handed
+/// back as a future - one that awaits nothing and rejects immediately.
+///
+/// Callers still write their own `return promise;`. That is deliberate: this
+/// was a `reject_sync!` macro local to `dispatch_near` that hid the early
+/// return inside the expansion, and `dispatch_search` open-coded the same
+/// eight lines four times rather than reach for it. A function takes
+/// `resolver` by value, which is what each site needs (a V8
+/// `Global<PromiseResolver>` is not `Copy` and must MOVE into the future),
+/// and leaves the control flow visible at the site that performs it.
+fn spawn_rejection(
+    state: &SharedState,
+    resolver: v8::Global<v8::PromiseResolver>,
+    request_id: Option<u64>,
+    err: DbError,
+) {
+    state.borrow_mut().spawned_ops.push(Box::pin(
+        async move { reject_op(resolver, request_id, err) },
+    ));
 }
 
 fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
@@ -1857,8 +1882,6 @@ pub(crate) fn dispatch_search<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    use zeroship_runtime::state::OpError;
-
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1869,22 +1892,19 @@ pub(crate) fn dispatch_search<'s>(
         // Reject synchronously via the typed error path so the SDK sees
         // a coded error rather than a hang. Use `Configuration` because
         // the failure is shape-level, not data-level.
-        let err = DbError::Configuration {
-            code: "invalid_search_args",
-            message: "search: args must include `vector`".to_string(),
-            hint: Some(
-                "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
-                    .to_string(),
-            ),
-        };
-        let op_err: OpError = err.to_op_error();
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                request_id,
-            }
-        }));
+        spawn_rejection(
+            &state,
+            resolver,
+            request_id,
+            DbError::Configuration {
+                code: "invalid_search_args",
+                message: "search: args must include `vector`".to_string(),
+                hint: Some(
+                    "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
+                        .to_string(),
+                ),
+            },
+        );
         return promise;
     }
 
@@ -1898,38 +1918,33 @@ pub(crate) fn dispatch_search<'s>(
                 if let Some(n) = elem.as_f64() {
                     v.push(n as f32);
                 } else {
-                    let err = DbError::Configuration {
-                        code: "invalid_vector_arg",
-                        message: "search: every element of `vector` must be a number".to_string(),
-                        hint: None,
-                    };
-                    let op_err: OpError = err.to_op_error();
-                    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                        zeroship_runtime::state::OpResult::JsValue {
-                            resolver,
-                            value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                            request_id,
-                        }
-                    }));
+                    spawn_rejection(
+                        &state,
+                        resolver,
+                        request_id,
+                        DbError::Configuration {
+                            code: "invalid_vector_arg",
+                            message: "search: every element of `vector` must be a number"
+                                .to_string(),
+                            hint: None,
+                        },
+                    );
                     return promise;
                 }
             }
             v
         }
         None => {
-            let err = DbError::Configuration {
-                code: "invalid_vector_arg",
-                message: "search: `vector` must be an array of numbers".to_string(),
-                hint: None,
-            };
-            let op_err: OpError = err.to_op_error();
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                    request_id,
-                }
-            }));
+            spawn_rejection(
+                &state,
+                resolver,
+                request_id,
+                DbError::Configuration {
+                    code: "invalid_vector_arg",
+                    message: "search: `vector` must be an array of numbers".to_string(),
+                    hint: None,
+                },
+            );
             return promise;
         }
     };
@@ -1965,14 +1980,7 @@ pub(crate) fn dispatch_search<'s>(
     let schema = match crate::descriptor::collection_schema(&binding, collection) {
         Ok(schema) => schema,
         Err(e) => {
-            let op_err: OpError = e.to_op_error();
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                    request_id,
-                }
-            }));
+            spawn_rejection(&state, resolver, request_id, e);
             return promise;
         }
     };
@@ -2072,38 +2080,24 @@ pub(crate) fn dispatch_near<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    use zeroship_runtime::state::OpError;
-
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    // Local helper macro: reject the freshly-allocated promise with a
-    // typed `DbError` and return early. We use a macro instead of a
-    // closure because each call site needs to MOVE `resolver` (V8
-    // `Global<PromiseResolver>` is not `Copy`) into the spawned future,
-    // and the macro lets us early-return the same `promise` value the
-    // outer scope keeps a reference to.
-    macro_rules! reject_sync {
-        ($err:expr) => {{
-            let op_err: OpError = $err.to_op_error();
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                    request_id,
-                }
-            }));
-            return promise;
-        }};
-    }
-
     let field = match args.get("field").and_then(Value::as_str) {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => reject_sync!(DbError::Configuration {
-            code: "invalid_near_args",
-            message: "near: `field` must be a non-empty string".to_string(),
-            hint: Some("pass `{ field, point, radius, filter?, limit? }`".to_string()),
-        }),
+        _ => {
+            spawn_rejection(
+                &state,
+                resolver,
+                request_id,
+                DbError::Configuration {
+                    code: "invalid_near_args",
+                    message: "near: `field` must be a non-empty string".to_string(),
+                    hint: Some("pass `{ field, point, radius, filter?, limit? }`".to_string()),
+                },
+            );
+            return promise;
+        }
     };
 
     let point_obj = args.get("point");
@@ -2111,29 +2105,51 @@ pub(crate) fn dispatch_near<'s>(
     let lng = point_obj.and_then(|p| p.get("lng")).and_then(Value::as_f64);
     let (lat, lng) = match (lat, lng) {
         (Some(la), Some(ln)) => (la, ln),
-        _ => reject_sync!(DbError::Configuration {
-            code: "invalid_near_args",
-            message: "near: `point` must be `{ lat: number, lng: number }`".to_string(),
-            hint: None,
-        }),
+        _ => {
+            spawn_rejection(
+                &state,
+                resolver,
+                request_id,
+                DbError::Configuration {
+                    code: "invalid_near_args",
+                    message: "near: `point` must be `{ lat: number, lng: number }`".to_string(),
+                    hint: None,
+                },
+            );
+            return promise;
+        }
     };
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
-        reject_sync!(DbError::Configuration {
-            code: "invalid_near_args",
-            message: format!(
-                "near: `point` out of range: lat must be in [-90,90] and lng in [-180,180], got lat={lat} lng={lng}"
-            ),
-            hint: None,
-        });
+        spawn_rejection(
+            &state,
+            resolver,
+            request_id,
+            DbError::Configuration {
+                code: "invalid_near_args",
+                message: format!(
+                    "near: `point` out of range: lat must be in [-90,90] and lng in [-180,180], got lat={lat} lng={lng}"
+                ),
+                hint: None,
+            },
+        );
+        return promise;
     }
 
     let radius_m = match args.get("radius").and_then(Value::as_f64) {
         Some(r) if r > 0.0 && r.is_finite() => r,
-        _ => reject_sync!(DbError::Configuration {
-            code: "invalid_near_args",
-            message: "near: `radius` must be a positive number (metres)".to_string(),
-            hint: None,
-        }),
+        _ => {
+            spawn_rejection(
+                &state,
+                resolver,
+                request_id,
+                DbError::Configuration {
+                    code: "invalid_near_args",
+                    message: "near: `radius` must be a positive number (metres)".to_string(),
+                    hint: None,
+                },
+            );
+            return promise;
+        }
     };
 
     let limit = args
@@ -2151,7 +2167,10 @@ pub(crate) fn dispatch_near<'s>(
     // undeclared collection here keeps the rejection synchronous.
     let schema = match crate::descriptor::collection_schema(&binding, collection) {
         Ok(schema) => schema,
-        Err(e) => reject_sync!(e),
+        Err(e) => {
+            spawn_rejection(&state, resolver, request_id, e);
+            return promise;
+        }
     };
     maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
     let point = crate::backend::GeoPoint { lat, lng };
