@@ -3,6 +3,34 @@
 Status: **planned, not started.** Every number here was measured on 2026-08-31 at `1bf9fdce4`.
 Line counts are `find src -name '*.rs' -exec cat {} + | wc -l`.
 
+## How to read this document
+
+**It is written correction-in-place: where a claim was wrong, the wrong claim is QUOTED and then
+overturned, in the same paragraph.** That preserves why the mistake was reachable, which has been
+worth more than one re-derivation. It also means a sentence in quotation marks may be the OPPOSITE of
+what is currently believed, and three reviewers independently mistook history for instruction.
+
+So: **a paragraph that quotes a claim and corrects it is history. The correction is the live text.**
+
+This section is deliberately NAVIGATIONAL, not a summary. It names where each thing is decided and
+does not restate any of it - a third copy of a fact is a third thing that can go stale, which is
+precisely the defect that produced six of this document's contradictions.
+
+| what | where | status |
+| --- | --- | --- |
+| the crate graph | "Target" | operator-proposed, five crates; only three to be built now |
+| which modules move | Track B's table, and ONLY that table | conditional on the open Full/Partial decision |
+| what to delete | "Step 0" | blocked on a fixture migration, see that section |
+| the query-builder port | "Track A" | ungated since #45 settled |
+| the CDC extraction | "Track B" | **Full vs Partial is OPEN** |
+| the SQLite feature gate | "The backends" | three measured obstacles; recommendation is against |
+| the plugin-db rename | "The rename that is NOT happening" | WITHDRAWN; kept only for its cost measurement |
+| everything still undecided | "Not decided" | - |
+
+**Settled by the operator, and binding on the rest:** `#45` - `unmask()` stays worker-side and
+creator-controlled, masking is a hygiene feature rather than a containment boundary, and
+database-enforced column grants are not built. That is what ungates Track A's writes.
+
 ## What was decided
 
 Three choices, taken by the operator on 2026-08-31:
