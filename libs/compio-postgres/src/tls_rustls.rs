@@ -1985,6 +1985,88 @@ mod tests {
         );
     }
 
+    /// Write an embedded PEM to a 0600 temp file. `read_private_key_file`
+    /// refuses group- or world-readable keys, so a fixture committed at 0644
+    /// would fail on permissions before reaching the branch under test.
+    #[cfg(unix)]
+    fn sslkey_fixture(pem: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut key = tempfile::NamedTempFile::new().expect("create a private key fixture");
+        key.write_all(pem.as_bytes())
+            .expect("write the private key fixture");
+        std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600))
+            .expect("set private key fixture permissions");
+        key
+    }
+
+    #[cfg(unix)]
+    fn sslkey_error_chain(error: &Error) -> String {
+        std::iter::successors(std::error::Error::source(error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        })
+    }
+
+    /// An encrypted key with no `sslpassword` must say so. This message is the
+    /// only guidance a creator gets after forgetting the setting, and nothing
+    /// executed it: the whole encrypted-key error surface was unreached, while
+    /// only the successful decrypt is covered by the live TLS suite.
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_sslkey_without_a_password_names_sslpassword() {
+        let key = sslkey_fixture(include_str!("../tests/data/encrypted_pkcs8_key.pem"));
+        let error = private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect_err("an encrypted key cannot load without a passphrase");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("encrypted private key requires a non-empty sslpassword"),
+            "the error must name the missing sslpassword: {chain}"
+        );
+    }
+
+    /// An empty `sslpassword` is the same case as none. libpq treats an empty
+    /// passphrase as absent, and the `filter` that implements this would be a
+    /// no-op if removed, which no other test would notice.
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_sslkey_with_an_empty_password_names_sslpassword() {
+        let key = sslkey_fixture(include_str!("../tests/data/encrypted_pkcs8_key.pem"));
+        let error = private_key_from_config(key.path().to_str().unwrap(), Some(b""))
+            .expect_err("an empty passphrase cannot decrypt an encrypted key");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("encrypted private key requires a non-empty sslpassword"),
+            "an empty sslpassword must be treated as absent: {chain}"
+        );
+    }
+
+    /// A PEM that is not a private key at all must keep the rustls PEM error.
+    /// The comment above `private_key_from_config` states this outright -
+    /// "malformed plaintext keys must retain the existing rustls PEM error
+    /// instead of being misreported as a bad passphrase" - and nothing checked
+    /// it. Misreporting would send someone hunting for a wrong sslpassword when
+    /// the real fault is the file they pointed sslkey at.
+    #[cfg(unix)]
+    #[test]
+    fn a_certificate_given_as_sslkey_is_not_reported_as_a_passphrase_problem() {
+        let key = sslkey_fixture(include_str!("../tests/data/sha256_cert.pem"));
+        let error = private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect_err("a certificate is not a private key");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("cannot read PEM"),
+            "the error must report a PEM problem: {chain}"
+        );
+        assert!(
+            !chain.contains("sslpassword"),
+            "a non-key PEM must not be blamed on the passphrase: {chain}"
+        );
+    }
+
     /// 2030-01-01T00:00:00Z, comfortably inside both fixtures' validity
     /// (2026-08-19 to 2126-07-26).
     ///
