@@ -4365,6 +4365,68 @@ mod tests {
         }
     }
 
+    /// Every `pgoutput::DecodeError` message, rendered. `Display` for this
+    /// enum had 29 coverage regions and not one had ever run, so all eight
+    /// messages a caller sees when replication decoding fails were unproved
+    /// text. Each case asserts the message names the value that distinguishes
+    /// it - the tag byte, the field, the count - because a message that omits
+    /// its input is what makes a 3am failure unreproducible.
+    #[test]
+    fn every_pgoutput_decode_error_names_what_it_rejected() {
+        use crate::replication::pgoutput::DecodeError;
+
+        let cases: Vec<(DecodeError, &[&str])> = vec![
+            (DecodeError::UnexpectedEof, &["unexpected EOF"]),
+            (DecodeError::InvalidUtf8, &["invalid UTF-8"]),
+            (DecodeError::UnknownTag(0x5a), &["unknown tag", "0x5a"]),
+            (
+                DecodeError::UnknownTupleFormat(0x07),
+                &["unknown tuple column format", "0x07"],
+            ),
+            (
+                DecodeError::TrailingData {
+                    message: "Relation",
+                    remaining: 3,
+                },
+                &["Relation", "3", "trailing"],
+            ),
+            (
+                DecodeError::InvalidField {
+                    message: "Update",
+                    field: "tuple kind",
+                    value: 0x4b,
+                    expected: "K, O or N",
+                },
+                &["Update", "tuple kind", "0x4b", "K, O or N"],
+            ),
+            (
+                DecodeError::InvalidStreamSequence {
+                    message: "StreamStop",
+                    reason: "no stream is open",
+                },
+                &["StreamStop", "no stream is open"],
+            ),
+            (
+                DecodeError::StreamingNeedsDecoder,
+                &["pgoutput::Decoder", "stateful"],
+            ),
+        ];
+
+        for (error, fragments) in cases {
+            let rendered = format!("{error}");
+            assert!(
+                rendered.starts_with("pgoutput: "),
+                "every decode error must name its subsystem: {rendered}"
+            );
+            for fragment in fragments {
+                assert!(
+                    rendered.contains(fragment),
+                    "{rendered:?} does not name {fragment:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn replication_connection_debug_is_bounded_and_omits_private_state() {
         const PARAMETER_KEY: &str = "debug-parameter-key-6bc75da2";
