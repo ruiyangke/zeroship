@@ -162,19 +162,30 @@ had no home until someone enumerated, and enumerating found seven more like it.
 | destination | modules | lines |
 | --- | --- | --- |
 | `plugin-db` (thin) | `v8_classes/` 3,455, `v8_bridge.rs` 867, `lib.rs` (the `DbPlugin` part) | ~5,700 |
-| `data-engine` | `crud/` 12,972, `transaction/` 8,592, `exec.rs` 1,769, `broker.rs` 1,937, `read_set.rs` 659, `tx_route.rs` 267, `tx_scope.rs` 142, `drop_namespace.rs` 218, `cross_app_fk.rs` 235 | ~26,800 |
+| `data-engine` | `crud/` 12,972, `transaction/` 8,592, `exec.rs` 1,769, `broker.rs` 1,937, `read_set.rs` 659, `tx_route.rs` 267, ~~`tx_scope.rs` 142~~, `drop_namespace.rs` 218, `cross_app_fk.rs` 235 | ~26,700 |
 | `data-core` | `error.rs` 1,703 (less one method), `descriptor.rs` 139, the driver-neutral half of `backend/mod.rs` | ~3,000 |
 | `data-encryption` (if split) | `encryption/` | 1,591 |
 | `data-postgres` | `backend/postgres.rs` | 1,477 |
 | `data-sqlite` | `backend/sqlite/` | 9,485 |
 | `data-cdc-server` | `wal_consumer.rs` 1,440, `replication.rs` 908, `slot_reaper.rs` 593 | 2,941 |
 
+**The `data-engine` row is the weakest line in this table, and four review rounds did not catch why.**
+It reads as nine whole modules moving intact. Five of them do not: `crud/`, `transaction/`,
+`tx_route.rs`, `crud/unmask.rs` and `tx_scope.rs` contain **39 production functions whose signatures
+carry `v8::`** - `run_op`, all 17 `dispatch_*`, `transaction_dispatch` and the promise finalizer chain -
+totalling 117 production `v8::` references inside a crate whose entire premise is that it does not link
+V8. `tx_scope.rs` is struck out above because it is not a split at all: all six of its production
+functions are V8 context-map manipulation, so the file moves to the adapter whole. The others are
+dispatch stacked on engine and must be cut along that line first. `exec.rs` is the control - one
+`v8::` reference, none in a signature - which is what makes this a real seam rather than a grep
+artefact. Full measurement and the method that found it: Phase 0.1 in the execution order.
+
 **And the eight that do not place cleanly.** Each needs an answer before the split, not during it:
 
 | module | lines | why it does not place |
 | --- | --- | --- |
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
-| `error.rs` | 1,703 | **must be split.** `DbError` is core; `to_op_error` links V8 and belongs in the adapter. 11 files, measured. |
+| `error.rs` | 1,703 | **must be split, but NOT FIRST.** `DbError` is core and carries one runtime edge (`:67`); `to_op_error` belongs in the adapter. It cannot go there until the dispatch surface does - 43 of its 49 production callers are engine-tier today. See Phase 0.1. |
 | ~~`context.rs`~~ | 1,688 | **RESOLVED by the `BackendHandle` finding.** It holds `Option<BackendHandle>` (`:422`) and constructs both variants (`:561`, `:587`), so it follows the enum UP into `data-engine`. |
 | `auth/` | 1,459 | **it is THREE things wearing one name - see below.** |
 | `service.rs` | 606 | **it straddles, and its own header proves it.** |
@@ -718,12 +729,19 @@ dependencies. Judged against THAT, `data-core` as specified fails on three conte
   converts a `DbError` into the V8 op error type. That is a boundary-crossing conversion and belongs
   at the V8 seam by rights, not in a contract crate. **`DbError` itself needs no V8.**
 
-  Moving it to an extension trait defined in `plugin-db` (the V8 tier) touches **73 call sites across
-  11 files** - and the call SYNTAX does not change, so the edit is one `use` per file plus relocating
-  the method. That is 11 meaningful edits, not 73.
+  **The paragraph above is correct about the TYPE and wrong about the FIX; see Phase 0.1 in the
+  execution order, which was refuted by attempting it.** `DbError` does indeed need no V8, and
+  `error.rs` carries exactly one production runtime edge (`:67`). But moving the method to an
+  extension trait in the V8 tier cannot be done first: **43 of its production callers are engine-tier**,
+  and an adapter-owned trait is unreachable from below. Those 43 callers all sit inside functions that
+  already take a `v8::PinScope` - they are dispatch code mis-filed as engine - so the real prerequisite
+  is relocating that dispatch surface, after which this becomes a one-method move. Read this bullet as
+  *"the type is clean, the sequencing is not"*, never as a costed remedy.
 
-  So of the three reasons `data-core` cannot hold its proposed contents yet, this one has a cheap and
-  obviously-correct fix. The other two - row-to-JSON being two vendor converters, and `encryption`
+  So of the three reasons `data-core` cannot hold its proposed contents yet, this one looked like it
+  had a cheap and obviously-correct fix, and the appearance survived four review rounds because every
+  round re-audited the count instead of the direction. The other two - row-to-JSON being two vendor
+  converters, and `encryption`
   carrying `PluginDbConsumer` - do not, and neither does the absent `data-core -> data-query-builder`
   edge.
 - **Even `encryption`, the one genuinely neutral content, carries a plugin identity.**
@@ -1663,7 +1681,7 @@ one was found by a different lens, and none of them creates a crate.
 
 | # | move | why it blocks things | measured cost |
 | --- | --- | --- | --- |
-| 0.1 | `DbError::to_op_error` out to an extension trait in the V8 tier | it is the ONLY thing making `DbError` link V8; until it moves, every crate holding `DbError` links the V8 runtime - including the relay | **53 call sites, 10 files**, call syntax unchanged |
+| 0.1 | lift the **V8 dispatch surface** out of `crud/`, `transaction/`, `tx_scope.rs`, `tx_route.rs` and `crud/unmask.rs` | those modules are assigned to a v8-free engine crate and contain **39 production functions whose signatures carry `v8::`** - the whole `env.db` op surface. Nothing under them can move while they hold it | **39 functions / 117 production `v8::` refs**; `tx_scope.rs` moves whole |
 | 0.2 | `auth/util.rs` helpers (hex, random, calendar) to a neutral home | a database driver crate would otherwise depend on an `auth` module to encode hex (test-tier today, but test builds must compile) | 7 exports, callers in 2 SQLite files |
 | 0.3 | `encryption/` and row-to-JSON below the vendors | `encryption` is 7 edges from EACH backend; row-to-JSON is two vendor converters in one file | `encryption/` 1,591 lines; `keys.rs:318` also carries `PluginDbConsumer` |
 | 0.4 | make `PgSqlExecutor` / `PgLockManager` driver-neutral | they name `compio_postgres::OwnedPooledClient` in their BOUNDS, so a contract crate built from them ships a vendor | `backend/mod.rs:755`, `:786` |
@@ -1672,29 +1690,85 @@ one was found by a different lens, and none of them creates a crate.
 **Then, and only then, the split becomes file moves.** `BackendHandle` goes up with the engine
 (settled); `context.rs` follows it.
 
-**0.1's figure was wrong twice and is now decomposed, because it is the number someone will plan
-against.** This document said "73 call sites across 11 files"; a reviewer measured 68 across 13. Both
-were counting different things:
+**0.1 used to say something else, and it was refuted by trying to execute it.** Through four review
+rounds this row read: *move `DbError::to_op_error` to an extension trait in the V8 tier, 53 call sites,
+10 files.* The premise was that this method is the only thing making `DbError` link V8. On starting the
+edit, the first measurement taken - which tier actually CALLS it - killed the whole item:
 
 ```
-  84   raw `to_op_error` occurrences (naive grep)
-  73   after dropping comment lines        <- the document's "73", which is OCCURRENCES not calls
-  18   of those are in error.rs itself (the definition and its impl block)
-  53   real `.to_op_error()` CALL SITES outside error.rs   <- the number that matters
-  10   files needing a `use` of the extension trait
+production `.to_op_error()` call sites, by tier
+  43   ENGINE      crud/mod.rs, crud/unmask.rs, transaction/mod.rs
+   4   ADAPTER     v8_classes/{db,masked_value}.rs
+   2   CONTESTED   replication_ops.rs (the V8 diagnostic bridge)
 ```
 
-**Third time in this document that occurrences have been reported as call sites** - the others being
-the SQLite census (a literal spelling standing in for a semantic dependency) and the 782 unassigned
-lines. The pattern is stable enough to state as a rule: *a grep counts text; a cost needs the thing
-the text refers to.*
+An extension trait **cannot serve 43 engine-tier callers**. Put it in the adapter and the engine cannot
+reach it - the engine is below the adapter, not above it. Put it in the engine and the engine still
+names `OpError`, which is the exact coupling the item existed to remove. There is no third place while
+those callers sit where they sit.
 
-**And a boundary check the number prompted, which passes.** Two of the ten files are CDC-tier:
-`replication.rs` and `replication_ops.rs`. If production relay code called `to_op_error`, an
-adapter-owned extension trait would drag the V8 tier into the relay - the exact inversion Phase 0.1
-exists to prevent. It does not: `replication.rs:819` is under `#[cfg(test)]` (opened `:598`), and
-`replication_ops.rs:28`/`:41` are the V8 diagnostic bridge, which is adapter-tier by nature and stays.
-**So the extension trait can live in the adapter without the relay ever needing it.**
+**The trait is not the error; its POSITION IN THE ORDER was.** An adapter-owned extension trait is
+still the right end state, and it becomes both possible and nearly free - but only once the callers are
+adapter-side, which is a move this document listed nowhere. Sequenced first, as written, 0.1 is not
+expensive: it is unexecutable. That is a harder failure than a wrong estimate, and only attempting it
+surfaced it.
+
+**Why 43 engine-tier callers exist is the real finding.** They are not engine code. `crud/mod.rs:2108`
+is representative:
+
+```rust
+pub(crate) fn dispatch_search<'s>(
+    scope: &mut v8::PinScope<'s, '_>,          // a V8 scope
+    binding: DbBinding, collection: &str, args: Value,
+) -> v8::Local<'s, v8::Promise>                // a V8 promise
+```
+
+That is the runtime's op-dispatch layer, sitting in a module this document assigns wholesale to a
+**v8-free engine crate**. Measured across every module assigned outside the adapter tier:
+
+```
+  117   production `v8::` references          (comments and #[cfg(test)] excluded)
+   39   functions carrying `v8::` in their SIGNATURE
+        crud/mod.rs         19   run_op, reject_op, and all 17 dispatch_*
+        transaction/mod.rs  10   transaction_dispatch, the promise finalizer chain, resolve/reject
+        tx_scope.rs          6   ALL SIX production functions - the file is 142 lines of V8 context-map
+        crud/unmask.rs       2   dispatch_unmask_field, dispatch_bulk_unmask_field
+        tx_route.rs          1   capture
+        replication_ops.rs   1   already adapter-tier by nature; stays
+   exec.rs holds 1 v8:: ref, none in a signature - it is genuinely engine, and is the control
+   that shows this is a real distinction rather than a grep artefact.
+```
+
+**And the original item then collapses into a rounding error.** Every one of the 43 engine-tier
+`to_op_error` call sites - **43 of 43, no exceptions** - sits inside one of those V8-signature
+functions. Relocate the dispatch surface and the calls travel with it, landing adapter-side where the
+extension trait can legally serve them. What remains of 0.1 afterwards is *relocating one method and
+adding one `use`* - the 53-call-site figure was never the cost of the change, it was the cost of doing
+it in the wrong order. `error.rs` carries exactly one production runtime edge to begin with
+(`:67`, `use zeroship_runtime::state::OpError`), which is why the item looked cheap from the type side
+and was never checked from the caller side.
+
+**Two instrument failures produced this, and both are worth naming.** First, the check that was run
+instead of this one: *"if production relay code called `to_op_error`, an adapter-owned trait would drag
+V8 into the relay."* That check passed, honestly and irrelevantly - the relay does not call it. It
+examined the boundary the author was worried about rather than the boundary carrying the traffic, and
+passing it was taken as clearance to proceed. Second, the grep that was supposed to find exactly this
+was keyed to `->` and `Result<`, so it was **blind to parameter position** and reported `crud/` as
+having no signature-level `OpError` at all. *A guard finds what it is keyed to; ask what it is keyed to
+before believing what it did not find.*
+
+**Fourth time in this document that a measurement has been reported as something it was not** - the
+others being the SQLite census, the 782 unassigned lines, and 0.1's own earlier count. The first three
+were counting errors. This one was a wrong remedy that four review rounds did not catch, because every
+round audited the number and none re-derived the premise. The rule stands and gains a clause: *a grep
+counts text; a cost needs the thing the text refers to - and a remedy needs the direction the
+dependency actually runs.*
+
+**Consequence for the assignment table above:** the `data-engine` row is wrong as printed. `crud/`,
+`transaction/`, `tx_scope.rs`, `tx_route.rs` and `crud/unmask.rs` are not wholly engine; each is a
+dispatch layer stacked on an engine layer, and the line between them is the 39 functions above.
+`tx_scope.rs` is not a split at all - all six of its production functions are V8, so it moves to the
+adapter whole.
 
 ### Phase 0.5 - two audits that must precede ANY crate boundary
 
@@ -1724,11 +1798,23 @@ and the `data-engine` disagreement.
 
 ### What Phase 0 costs, and why it is the honest headline
 
-Five refactors, no new crates, no visible architectural change, and **every one of them improves the
-current tree on its own terms** - a `DbError` that does not link V8, contract traits that name no
-vendor, crypto that both backends share from below rather than beside. **If the crate split were
-cancelled tomorrow, Phase 0 would still be worth having.** That is the test a prerequisite should
-pass, and it is why this ordering is safe to start before the count is decided.
+Five refactors, no new crates, and **every one of them improves the current tree on its own terms** -
+a query engine that does not link V8, contract traits that name no vendor, crypto that both backends
+share from below rather than beside. **If the crate split were cancelled tomorrow, Phase 0 would still
+be worth having.** That is the test a prerequisite should pass, and it is why this ordering is safe to
+start before the count is decided.
+
+**This section said "no visible architectural change" until 0.1 was measured, and that is no longer
+true.** 0.1 is now the largest item in the phase, not the smallest: separating 39 dispatch functions
+from the query engine across five modules is a visible, reviewable change to how `env.db` is
+structured, and it should be planned as one. The claim it replaces - one method and ten `use` lines -
+was the reason the phase read as cheap. **Phase 0 is still worth doing first and is still individually
+shippable; it is not small.** Anyone sizing this work should take the 39 functions as the headline and
+treat 0.2 through 0.5 as the tail.
+
+The independent-value test survives the correction, and 0.1 arguably passes it hardest: a `dispatch_*`
+layer that owns V8 promise plumbing, sitting in the same module as the query builder it calls, is worth
+separating whether or not a single crate is ever created.
 
 ## Not decided
 
