@@ -1102,3 +1102,429 @@ async fn manual_interval_wire_matches_binary_copy() {
         .await;
     }
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct ArrayWire {
+    has_null: bool,
+    element_oid: u32,
+    dimensions: Vec<(i32, i32)>,
+    values: Vec<Option<Vec<u8>>>,
+}
+
+fn decode_array_wire(bytes: &[u8]) -> ArrayWire {
+    let mut reader = CopyReader::new(bytes);
+    let dimension_count = reader.i32();
+    assert!(dimension_count >= 0, "negative array dimension count");
+    let has_null = reader.i32() != 0;
+    let element_oid = u32::from_be_bytes(
+        reader
+            .take(4)
+            .try_into()
+            .expect("four-byte array element OID"),
+    );
+
+    let mut element_count = usize::from(dimension_count != 0);
+    let mut dimensions = Vec::with_capacity(
+        usize::try_from(dimension_count).expect("nonnegative array dimension count"),
+    );
+    for _ in 0..dimension_count {
+        let len = reader.i32();
+        assert!(len >= 0, "negative array dimension length");
+        let lower_bound = reader.i32();
+        element_count = element_count
+            .checked_mul(usize::try_from(len).expect("nonnegative array dimension length"))
+            .expect("array element count overflow");
+        dimensions.push((len, lower_bound));
+    }
+
+    let mut values = Vec::with_capacity(element_count);
+    for _ in 0..element_count {
+        let len = reader.i32();
+        if len == -1 {
+            values.push(None);
+        } else {
+            assert!(len >= 0, "invalid negative array element length");
+            values.push(Some(
+                reader
+                    .take(usize::try_from(len).expect("nonnegative array element length"))
+                    .to_vec(),
+            ));
+        }
+    }
+    assert!(
+        reader.remaining.is_empty(),
+        "array wire carried trailing bytes"
+    );
+    ArrayWire {
+        has_null,
+        element_oid,
+        dimensions,
+        values,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ArrayExpectation<'a> {
+    element_type: &'a Type,
+    dimensions: &'a [(i32, i32)],
+    has_null: bool,
+    element_count: usize,
+}
+
+#[allow(clippy::future_not_send)]
+async fn assert_array_server_wire<T>(
+    client: &compio_postgres::Client,
+    name: &str,
+    expression: &str,
+    value: &T,
+    array_type: &Type,
+    expected: ArrayExpectation<'_>,
+) where
+    T: ToSql,
+{
+    assert!(
+        <T as ToSql>::accepts(array_type),
+        "{name}: carrier rejects the array type"
+    );
+    let ours = outbound_wire(value, array_type);
+    assert_eq!(
+        ours,
+        server_wire(client, expression).await,
+        "{name}: direct array ToSql bytes differ from binary COPY"
+    );
+    let decoded = decode_array_wire(&ours);
+    assert_eq!(
+        decoded.element_oid,
+        expected.element_type.oid(),
+        "{name}: element OID"
+    );
+    assert_eq!(
+        decoded.dimensions, expected.dimensions,
+        "{name}: dimensions"
+    );
+    assert_eq!(decoded.has_null, expected.has_null, "{name}: NULL flag");
+    assert_eq!(
+        decoded.values.len(),
+        expected.element_count,
+        "{name}: element count"
+    );
+    assert_eq!(
+        decoded.values.iter().any(Option::is_none),
+        expected.has_null,
+        "{name}: NULL flag does not describe its elements"
+    );
+}
+
+/// Core fixed-width array carriers match the server's one-dimensional header,
+/// NULL flag, element OID, element lengths, and element bytes.
+#[compio::test]
+async fn fixed_width_core_arrays_match_binary_copy() {
+    let client = compio_client().await;
+    let bools: &[bool] = &[false, true, false];
+    assert_array_server_wire(
+        &client,
+        "bool slice",
+        "ARRAY[false, true, false]::bool[]",
+        &bools,
+        &Type::BOOL_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::BOOL,
+            dimensions: &[(3, 1)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+    let chars = vec![65_i8, 90_i8];
+    assert_array_server_wire(
+        &client,
+        "internal char Vec",
+        "ARRAY['A'::\"char\", 'Z'::\"char\"]",
+        &chars,
+        &Type::CHAR_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::CHAR,
+            dimensions: &[(2, 1)],
+            has_null: false,
+            element_count: 2,
+        },
+    )
+    .await;
+
+    let int2: Box<[i16]> = Box::from([i16::MIN, -1, 0, i16::MAX]);
+    assert_array_server_wire(
+        &client,
+        "int2 boxed slice",
+        "ARRAY[-32768, -1, 0, 32767]::int2[]",
+        &int2,
+        &Type::INT2_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::INT2,
+            dimensions: &[(4, 1)],
+            has_null: false,
+            element_count: 4,
+        },
+    )
+    .await;
+
+    let int4 = vec![Some(i32::MIN), None, Some(i32::MAX)];
+    assert_array_server_wire(
+        &client,
+        "nullable int4 Vec",
+        "ARRAY[-2147483648, NULL, 2147483647]::int4[]",
+        &int4,
+        &Type::INT4_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::INT4,
+            dimensions: &[(3, 1)],
+            has_null: true,
+            element_count: 3,
+        },
+    )
+    .await;
+    assert_eq!(
+        hex(&outbound_wire(&int4, &Type::INT4_ARRAY)),
+        "0000000100000001000000170000000300000001\
+         0000000480000000ffffffff000000047fffffff"
+    );
+
+    let int8 = vec![i64::MIN, 0, i64::MAX];
+    assert_array_server_wire(
+        &client,
+        "int8 Vec",
+        "ARRAY[-9223372036854775808, 0, 9223372036854775807]::int8[]",
+        &int8,
+        &Type::INT8_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::INT8,
+            dimensions: &[(3, 1)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+
+    let oids = vec![0_u32, 42, u32::MAX];
+    assert_array_server_wire(
+        &client,
+        "oid Vec",
+        "ARRAY[0::oid, 42::oid, 4294967295::oid]",
+        &oids,
+        &Type::OID_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::OID,
+            dimensions: &[(3, 1)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+}
+
+/// Floating-point arrays match the server at signed zero, infinities, and the
+/// canonical quiet-NaN payload emitted by Rust's constants.
+#[compio::test]
+async fn floating_point_core_arrays_match_binary_copy() {
+    let client = compio_client().await;
+    let float4 = vec![f32::NEG_INFINITY, -0.0, 0.0, f32::NAN, f32::INFINITY];
+    assert_array_server_wire(
+        &client,
+        "float4 Vec",
+        "ARRAY['-Infinity'::float4, '-0'::float4, 0::float4, \
+         'NaN'::float4, 'Infinity'::float4]",
+        &float4,
+        &Type::FLOAT4_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::FLOAT4,
+            dimensions: &[(5, 1)],
+            has_null: false,
+            element_count: 5,
+        },
+    )
+    .await;
+
+    let float8 = vec![f64::NEG_INFINITY, -0.0, 0.0, f64::NAN, f64::INFINITY];
+    assert_array_server_wire(
+        &client,
+        "float8 Vec",
+        "ARRAY['-Infinity'::float8, '-0'::float8, 0::float8, \
+         'NaN'::float8, 'Infinity'::float8]",
+        &float8,
+        &Type::FLOAT8_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::FLOAT8,
+            dimensions: &[(5, 1)],
+            has_null: false,
+            element_count: 5,
+        },
+    )
+    .await;
+}
+
+/// Core variable-length array carriers match the server for empty elements,
+/// text containing control/Unicode characters, and arbitrary BYTEA bytes.
+#[compio::test]
+async fn variable_length_core_arrays_match_binary_copy() {
+    let client = compio_client().await;
+    let text: &[&str] = &["", "line\nlast", "snowman ☃"];
+    assert_array_server_wire(
+        &client,
+        "text slice",
+        "ARRAY[''::text, E'line\\nlast', 'snowman ☃']",
+        &text,
+        &Type::TEXT_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::TEXT,
+            dimensions: &[(3, 1)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+
+    let varchar: Box<[String]> = Box::from(["alpha".to_owned(), String::new()]);
+    assert_array_server_wire(
+        &client,
+        "varchar boxed slice",
+        "ARRAY['alpha'::varchar, ''::varchar]",
+        &varchar,
+        &Type::VARCHAR_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::VARCHAR,
+            dimensions: &[(2, 1)],
+            has_null: false,
+            element_count: 2,
+        },
+    )
+    .await;
+
+    let names = vec!["alpha".to_owned(), "Beta_2".to_owned()];
+    assert_array_server_wire(
+        &client,
+        "name Vec",
+        "ARRAY['alpha'::name, 'Beta_2'::name]",
+        &names,
+        &Type::NAME_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::NAME,
+            dimensions: &[(2, 1)],
+            has_null: false,
+            element_count: 2,
+        },
+    )
+    .await;
+
+    let bpchar = vec!["x  ".to_owned(), "yz ".to_owned()];
+    assert_array_server_wire(
+        &client,
+        "padded bpchar Vec",
+        "ARRAY['x'::char(3), 'yz'::char(3)]",
+        &bpchar,
+        &Type::BPCHAR_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::BPCHAR,
+            dimensions: &[(2, 1)],
+            has_null: false,
+            element_count: 2,
+        },
+    )
+    .await;
+
+    let bytea = vec![Vec::new(), vec![0x00_u8, 0xff, 0x5c, 0x80]];
+    assert_array_server_wire(
+        &client,
+        "bytea Vec",
+        "ARRAY[decode('', 'hex'), decode('00ff5c80', 'hex')]",
+        &bytea,
+        &Type::BYTEA_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::BYTEA,
+            dimensions: &[(2, 1)],
+            has_null: false,
+            element_count: 2,
+        },
+    )
+    .await;
+}
+
+/// Timestamp arrays and `PostgreSQL`'s two vector types use the server's element
+/// OIDs and their required one- and zero-based lower bounds respectively.
+#[compio::test]
+async fn temporal_and_vector_core_arrays_match_binary_copy() {
+    let client = compio_client().await;
+    let epoch =
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(POSTGRES_EPOCH_FROM_UNIX_SECS);
+    let timestamps = vec![
+        epoch - std::time::Duration::from_micros(1),
+        epoch,
+        epoch + std::time::Duration::from_micros(1),
+    ];
+    assert_array_server_wire(
+        &client,
+        "SystemTime timestamp Vec",
+        "ARRAY['1999-12-31 23:59:59.999999'::timestamp, \
+         '2000-01-01 00:00:00'::timestamp, \
+         '2000-01-01 00:00:00.000001'::timestamp]",
+        &timestamps,
+        &Type::TIMESTAMP_ARRAY,
+        ArrayExpectation {
+            element_type: &Type::TIMESTAMP,
+            dimensions: &[(3, 1)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+
+    let int2vector = vec![i16::MIN, 0, i16::MAX];
+    assert_array_server_wire(
+        &client,
+        "int2vector Vec",
+        "'-32768 0 32767'::int2vector",
+        &int2vector,
+        &Type::INT2_VECTOR,
+        ArrayExpectation {
+            element_type: &Type::INT2,
+            dimensions: &[(3, 0)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+
+    let oidvector = vec![0_u32, 42, u32::MAX];
+    assert_array_server_wire(
+        &client,
+        "oidvector Vec",
+        "'0 42 4294967295'::oidvector",
+        &oidvector,
+        &Type::OID_VECTOR,
+        ArrayExpectation {
+            element_type: &Type::OID,
+            dimensions: &[(3, 0)],
+            has_null: false,
+            element_count: 3,
+        },
+    )
+    .await;
+}
+
+/// A core empty `Vec` emits one zero-length dimension instead of the server's
+/// canonical zero-dimensional header. Binary COPY accepts it, stores an equal
+/// array, and canonicalizes the header when emitting the stored value.
+#[compio::test]
+async fn empty_vec_array_is_valid_but_noncanonical() {
+    let client = compio_client().await;
+    let empty = Vec::<i32>::new();
+    let ours = outbound_wire(&empty, &Type::INT4_ARRAY);
+    let server = server_wire(&client, "'{}'::int4[]").await;
+    assert_eq!(decode_array_wire(&ours).dimensions, [(0, 1)]);
+    assert!(decode_array_wire(&server).dimensions.is_empty());
+    assert_ne!(ours, server);
+
+    let feedback =
+        copy_feedback(&client, "empty_int4_array", "int4[]", &ours, "'{}'::int4[]").await;
+    assert!(feedback.equal, "empty array must remain SQL-equal");
+    assert_eq!(feedback.stored_text, "{}");
+    assert_eq!(feedback.stored_wire, server);
+}
