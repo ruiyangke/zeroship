@@ -2024,6 +2024,26 @@ mod tests {
         );
     }
 
+    /// The eight-byte minimum guards peer-controlled input, and it had never
+    /// run. Dropping it panics the connection task instead of failing the
+    /// handshake - MEASURED, because the mechanism is not the one the code's
+    /// own comments suggest. Both `expect` messages cite this minimum, but
+    /// neither fires: on a seven-byte body `body[..4]` succeeds and
+    /// `body[4..8]` panics first with "range end index 8 out of range for
+    /// slice of length 7". The slice bound is the real protection; the
+    /// `expect`s only document it.
+    #[compio::test]
+    async fn a_truncated_negotiate_protocol_version_is_refused() {
+        let mut handshake = empty_handshake();
+        let error = handshake
+            .negotiate_protocol(Bytes::from_static(&[0, 3, 0, 0, 0, 0, 0]))
+            .expect_err("a seven-byte NegotiateProtocolVersion is not a complete message");
+        assert!(
+            probe_error_chain(&error).contains("truncated NegotiateProtocolVersion"),
+            "the refusal named the wrong thing: {error}"
+        );
+    }
+
     /// PostgreSQL may only report protocol options it was asked about, and the
     /// protocol reserves the `_pq_.` prefix for them. An option without it is a
     /// peer inventing a name, which must be refused rather than recorded.
