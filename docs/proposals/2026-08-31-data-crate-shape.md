@@ -146,9 +146,20 @@ moves down.
 
 A genuine adapter is `lib.rs` + `v8_classes/` + `v8_bridge.rs` + `context.rs`, about **7,400 lines**.
 
-> **This line contradicts `:191` and `:1733`, which send `context.rs` (1,688 lines) to `data-engine`.
-> Flagged 2026-08-31; not silently reconciled, because the right answer is now in doubt.** `:191`
-> declares the question "RESOLVED by the `BackendHandle` finding", and a round-5 reviewer refuted that:
+> **This line contradicts the "eight that do not place cleanly" table and the "Then, and only then"
+> paragraph in the execution order, both of which send `context.rs` (1,688 lines) to `data-engine`.
+> Flagged 2026-08-31; not silently reconciled, because the right answer is now in doubt.**
+>
+> *This flag cited those two claims by line number (`:191` and `:1733`) until 2026-08-31, when a
+> reviewer found that **both citations had gone stale** - `:191` had become a sentence about `exec.rs`
+> and `:1733` a blank line. The paragraph written to stop a contradiction going unnoticed could no
+> longer point at the contradiction. **Internal `:NNN` self-citations rot in a document being edited**,
+> and this one rotted inside the correction for exactly that class of failure. Cite headings, never
+> line numbers, for anything inside this file; `tests/doc_citation_gate.sh` checks citations into the
+> tree and cannot check a document's references to itself.*
+>
+> The placement table declares the question "RESOLVED by the `BackendHandle` finding", and a round-5
+> reviewer refuted that:
 > `context.rs` carries Postgres in its **fields**, not just in `BackendHandle` - `:80`
 > `TxConnection::Postgres(OwnedPooledClient)` and `:178` `pool: Option<Rc<Pool>>`. Field position is
 > invisible to the module walk, the type walk AND the signature census. A module holding a live PG
@@ -748,7 +759,7 @@ argued.** Counting `crate::<module>` reach out of the three modules that move (`
 
 | reaches | count | note |
 | --- | --- | --- |
-| `crate::broker` | 30 | becomes the wire this plan already prices |
+| `crate::broker` | ~~30~~ **1** | **one `use` line.** See below - the 30 was 1 production plus 29 test-region references. |
 | `crate::replication` | 5 | intra-group; moves with them |
 | `crate::error` | 3 | a service that never crosses V8 should define its own |
 | `crate::query` | 1 | `replication.rs:674`, inside `#[cfg(test)]` |
@@ -2073,23 +2084,30 @@ ENGINE   transaction/driver.rs      compio_postgres       1      1
                                                   total   49      80  (see the corrected run below)
 ```
 
-Current, from `tests/lib/tier_signature_census.sh` at `e81ff8783`:
+**Do not copy a census table into this document again. Run the command.**
 
 ```
-ENGINE   crud/mod.rs           v8 19, zeroship_runtime 7, upward 2
-ENGINE   transaction/mod.rs    v8 10, zeroship_runtime 3, compio_postgres 1, upward 2
-ENGINE   crud/unmask.rs        v8 2,  upward 4
-ENGINE   crud/mask_policy.rs   v8 1,  upward 2
-ENGINE   exec.rs               compio_postgres 5, upward 2
-ENGINE   transaction/driver.rs compio_postgres 1
-ENGINE   crud/system_fields_pass.rs   zeroship_runtime 1
-ENGINE   auth/bootstrap.rs     compio_postgres 1
-CORE     error.rs              compio_postgres 7, zeroship_runtime 1   <- to_op_error itself
-ADAPTER  v8_bridge.rs          compio_postgres 3                        <- names BOTH drivers
-SQLITE   backend/sqlite/mod.rs upward 3
-PG       backend/postgres.rs   upward 2
-                                                            total 80
+bash tests/lib/tier_signature_census.sh          # production signatures
+bash tests/lib/tier_signature_census.sh --tests  # test-region crossings
 ```
+
+The block that stood here was pinned to a commit and was **one commit stale within the hour** - it
+printed 80 across 12 rows while the script printed 91 across 24, because five further census defects
+were fixed after it was written. It is the same failure as the reconciliation arithmetic and the
+`context.rs` flag above: a number copied out of an instrument stops tracking the instrument. **The
+command is the citation.** What the output means, which does not go stale:
+
+- **`ENGINE crud/mod.rs` and `transaction/mod.rs`** carry the V8 dispatch surface. This is 0.1.
+- **`CORE error.rs`** names `compio_postgres` and `zeroship_runtime` - including `to_op_error` itself,
+  the edge the whole investigation started from - so the contract crate is neither vendor-neutral nor
+  runtime-free.
+- **`ADAPTER v8_bridge.rs` and `lib.rs`** name `compio_postgres`: the *thin adapter* links the Postgres
+  driver, via `v8_bridge.rs:432`/`:471`/`:498` taking `&compio_postgres::Row` and the two always-compiled
+  bench helpers at `lib.rs:559`/`:588`. This is 0.3, and it is why 0.3 comes before 0.1.
+- **`SQLITE`/`PG ... upward`** are the backends calling into the adapter: the cycle.
+
+Read the total as a floor. The script's own header records nine defects found in it in one day and
+says why the number is not settled.
 
 **Two of these are new findings that have nothing to do with V8, and four review rounds did not
 surface either.**
