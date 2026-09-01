@@ -186,6 +186,41 @@ The last two are consequences of the Full decision and did not exist as problems
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
 
+#### The last three are one cluster, and they are REWRITTEN rather than relocated
+
+`cdc_lifecycle.rs` (523), `change_stream_pg.rs` (315) and `replication_ops.rs` (47) all exist for one
+purpose: **the worker owning its own logical-decoding stream.** Full removes that purpose. So the
+question is not which crate they move to; it is what replaces them.
+
+`cdc_lifecycle.rs:1-15` states its job exactly: *"one consumer and one slot per `(app, worker
+process)`. Every native Subscription owns a `CdcLease`; the first lease that reaches its readiness
+handshake starts the consumer, all other isolates await the same startup result, and the last lease
+signals shutdown."* It is a **refcounter over subscriptions**, holding process-wide state behind a
+mutex that "protects only counters, state enums, and channel handles".
+
+**That refcounting survives Full unchanged in shape.** A worker still needs to know whether it has
+any subscribers for app X - not to start a local consumer any more, but to tell the relay to start
+and stop feeding it. First lease opens a relay session, last lease closes it. Same structure, a
+different thing being opened.
+
+**And it is the obvious home for the suppression handshake**, which Track B identifies as the blocker
+with no owner. `cdc_lifecycle` already knows first-lease and last-lease, and already holds
+cross-thread state; "app X is now WAL-fed, stop emitting locally" and "app X is disconnected but its
+slot is retaining, KEEP suppressing" are lifecycle transitions of exactly the kind it already
+tracks. Putting the suppression signal anywhere else means a second component learning the same
+subscription lifecycle.
+
+So:
+
+| module | after Full |
+| --- | --- |
+| `cdc_lifecycle.rs` | **stays and gains a job.** Becomes the relay-session lifecycle, and owns the suppression handshake. |
+| `change_stream_pg.rs` | **replaced.** It is "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" (`:1-4`); after Full the worker has no consumer to own. Its logic is absorbed into the relay client. |
+| `replication_ops.rs` | **decide, do not port.** A V8 diagnostic calling `replication::watchdog_query` (`:33`). Either it becomes a relay RPC or the diagnostic goes away; porting it verbatim buys a cross-process call for a debugging aid. |
+
+With that, **every one of the 57,427 lines has a destination or an explicit decision**, and the
+enumeration is complete.
+
 #### `auth/` does not place because it is not one thing
 
 Its callers say so. Every reference from outside the module, comment lines stripped:
