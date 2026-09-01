@@ -495,3 +495,33 @@ Two cautions that come with the tool:
   `shutdown` never runs may mean the test never exercised shutdown, which is a
   gap wearing a disguise. The split is a filter for ranking, not a licence to
   ignore the right-hand column.
+
+## A rewrite's own tests covered its branches but not its plumbing
+
+The flush rewrite (`fe29cc1f7`, 57 production lines) shipped with six tests and
+recorded reachability and behaviour proofs for each. A mutation audit scoped to
+exactly its changed lines found **three unbound sites**, all of the same kind,
+and each is now bound and independently re-proved:
+
+    copy_error_may_owe_extra_ready forwarded into flush dispatch
+    terminal_server_error          forwarded into flush dispatch
+    the retirement poison ORDERED before the reader acknowledgement
+
+The six original tests exercised the branches inside
+`flush_with_read_draining`. What none of them observed was whether the function
+hands the CALLER's state to dispatch. Replacing either forwarded reference with
+a throwaway `&Cell::new(false)` / `&Mutex::new(None)` left the whole suite green
+before this work: the branch still ran, it just wrote its result somewhere
+nobody read.
+
+The ordering case is the sharpest. Retirement stores `READ_RETIRED_STATUS`
+twice - once before the acknowledgement wakes the reader, once after, in the
+`RetireAfterDiagnostics` arm. Deleting the EARLY store leaves the final state
+identical, so any test asserting "the status is retired" still passes. Only a
+test observing the wake order catches it.
+
+**The lesson is about what a branch test proves.** "This arm executes and
+returns the right value" is not "this arm's effect reaches the caller", and a
+proof recorded per-branch does not cover the parameter plumbing between them.
+When a rewrite threads caller-owned state through a helper, the forwarding is a
+separate claim and needs a separate mutation - swap the argument, not the body.
