@@ -200,7 +200,7 @@ tier() {
     ./backend/sqlite/*)                                  echo "SQLITE" ;;
     ./encryption/*)                                      echo "ENCRYPT" ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo "CDC" ;;
-    ./error.rs|./descriptor.rs|./binding.rs)             echo "CORE" ;;
+    ./error.rs|./descriptor.rs|./binding.rs|./budgets.rs) echo "CORE" ;;
     *)                                                   echo "CONTESTED" ;;
   esac
 }

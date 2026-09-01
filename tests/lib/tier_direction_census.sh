@@ -23,7 +23,7 @@
 #     3  ENGINE     crud, transaction, exec, broker
 #     2  PG SQLITE CDC   drivers and the relay - peers, mutually forbidden
 #     1  ENCRYPT
-#     0  CORE       DbError, descriptor, binding
+#     0  CORE       DbError, descriptor, binding, budgets
 #
 #   CONTESTED modules have no settled destination, so they are neither judged
 #   nor trusted: they are skipped as a SOURCE and ignored as a TARGET. That is
@@ -145,7 +145,7 @@ tier_of_file() {
     ./backend/sqlite/*)                                  echo SQLITE ;;
     ./encryption/*)                                      echo ENCRYPT ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
-    ./error.rs|./descriptor.rs|./binding.rs)             echo CORE ;;
+    ./error.rs|./descriptor.rs|./binding.rs|./budgets.rs) echo CORE ;;
     *)                                                   echo CONTESTED ;;
   esac
 }
@@ -162,7 +162,7 @@ tier_of_target() {
     auth::bootstrap)                                     echo ENGINE ;;
     encryption*)                                         echo ENCRYPT ;;
     wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
-    error*|descriptor*|binding*)                         echo CORE ;;
+    error*|descriptor*|binding*|budgets*)                echo CORE ;;
     [A-Z]*)
       # A crate-root item. Resolve it rather than assume: lib.rs is where
       # crate-root items live TODAY, and the script must say so out loud if that

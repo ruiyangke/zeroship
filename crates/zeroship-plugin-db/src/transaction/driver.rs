@@ -1254,9 +1254,11 @@ fn destroy_session(app_id: &str) {
 /// third timer and no escalation past them - the session is withdrawn.
 fn budgets() -> TxBudgets {
     TxBudgets {
-        execution: Duration::from_millis(u64::from(
-            crate::auth::bootstrap::DB_IDLE_IN_TX_TIMEOUT_MS,
-        )),
+        // From `crate::budgets`, not from `auth::bootstrap`: this deadline binds
+        // the SQLite arm too, and reaching for it through the PostgreSQL
+        // session-setup module is what made a cross-backend policy number look
+        // like a PostgreSQL detail.
+        execution: Duration::from_millis(u64::from(crate::budgets::DB_IDLE_IN_TX_TIMEOUT_MS)),
         cancellation_sql: Duration::from_secs(5),
         terminal_sql: Duration::from_secs(10),
     }

@@ -154,6 +154,11 @@ pub(crate) mod v8_bridge;
 // THE schema authority for the data plane: the runtime descriptor this isolate
 // was built from. One resolution function, no `Option`, no catalog read.
 pub(crate) mod descriptor;
+// DB-1 execution budgets. CORE tier: cross-backend policy numbers, deliberately
+// separated from the PostgreSQL `SET LOCAL` strings that render them, because
+// the transaction driver derives BOTH backends' protocol deadline from one of
+// them. `pub` so the live suites can assert the guards they represent.
+pub mod budgets;
 // Process-wide ownership of the `env.db` primitive: validated configuration,
 // the plugin prototype, the stable thread-resource key, and the neutral
 // operator-lifecycle handle.
