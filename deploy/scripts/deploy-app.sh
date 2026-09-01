@@ -105,7 +105,7 @@ ssh "${SSH_OPTS[@]}" "$HOST" true || fail "cannot ssh to $HOST (ssh-add -l to ch
 CLI="$ROOT/target/release/zeroship"
 [ -x "$CLI" ] || CLI="$ROOT/target/debug/zeroship"
 [ -x "$CLI" ] || CLI="$(command -v zeroship || true)"
-[ -n "$CLI" ] && [ -x "$CLI" ] || fail "no zeroship binary (build with: cargo build --release -p zeroship)"
+[ -n "$CLI" ] && [ -x "$CLI" ] || fail "no zeroship binary (build with: cargo build --release -p zeroship-cli)"
 echo "ok  ssh, cli at $CLI"
 
 # -------------------------------------------------------------------- build

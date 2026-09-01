@@ -20,7 +20,7 @@ From the repo root:
 ```bash
 pnpm install --frozen-lockfile
 pnpm build
-cargo build -p zeroship
+cargo build -p zeroship-cli
 pnpm --dir examples/db-e2e build
 ```
 

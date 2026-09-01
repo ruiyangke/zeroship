@@ -41,7 +41,7 @@
 #   crates/cli/src/secrets.rs, the `ExposeChange::Add` arm of `merge_expose`,
 #   `current.iter().cloned().chain([key.to_string()]).collect()`
 #     ->  `vec![key.to_string()]`
-#   then `cargo build --release -p zeroship --bins`.
+#   then `cargo build --release -p zeroship-cli --bins`.
 #
 #   MEASURED 2026-08-09, not predicted: 35 passed / 0 failed becomes
 #   27 passed / 8 failed. The union row reports the server's list as
@@ -58,7 +58,7 @@
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
-#   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
+#   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-cli --bins
 #   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   pnpm install --filter ./examples/env-probe...
 #   docker (this script starts its OWN ephemeral Postgres)
@@ -140,7 +140,7 @@ usage_out="$("$BIN/zeroship" secret 2>&1)"
 if printf '%s\n' "$usage_out" | grep -q "secret expose-list"; then
   pass "PRECONDITION: $BIN/zeroship carries the \`secret expose\` subcommands"
 else
-  fail "PRECONDITION: $BIN/zeroship has no \`secret expose\` subcommand -- rebuild with \`cargo build --release -p zeroship --bins\`. Nothing below would be about the expose list."
+  fail "PRECONDITION: $BIN/zeroship has no \`secret expose\` subcommand -- rebuild with \`cargo build --release -p zeroship-cli --bins\`. Nothing below would be about the expose list."
   exit 2
 fi
 

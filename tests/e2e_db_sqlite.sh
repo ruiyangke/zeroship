@@ -6,7 +6,7 @@ cd "$ROOT"
 
 pnpm install --frozen-lockfile
 pnpm build
-cargo build -p zeroship
+cargo build -p zeroship-cli
 pnpm --dir examples/db-e2e typecheck
 pnpm --dir examples/db-e2e build
 pnpm --dir examples/db-e2e e2e

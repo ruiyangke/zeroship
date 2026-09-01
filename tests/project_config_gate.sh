@@ -91,13 +91,13 @@ for f in "$SCHEMA" "$FIXTURE" "$MINIMAL_FIXTURE" "$TS_DUMP" "$PROBE" "$CODEGEN_P
 done
 if [ ! -x "$BIN" ]; then
   echo "FAIL: no zeroship binary at $BIN"
-  echo "      Run: cargo build -p zeroship --bin zeroship"
+  echo "      Run: cargo build -p zeroship-cli --bin zeroship"
   exit 1
 fi
 DEPFILE="$BIN.d"
 if [ ! -f "$DEPFILE" ]; then
   echo "FAIL: no Cargo dependency record at $DEPFILE; the binary cannot be verified"
-  echo "      Run: cargo build -p zeroship --bin zeroship"
+  echo "      Run: cargo build -p zeroship-cli --bin zeroship"
   exit 1
 fi
 
@@ -148,7 +148,7 @@ process.stdout.write([...inputs].sort().join("\n") + "\n");
 NODE
 then
   echo "FAIL: could not read Cargo dependency record $DEPFILE"
-  echo "      Run: cargo build -p zeroship --bin zeroship"
+  echo "      Run: cargo build -p zeroship-cli --bin zeroship"
   exit 1
 fi
 
@@ -187,12 +187,12 @@ while IFS= read -r input; do
 done <"$WORK/binary-inputs"
 if [ -n "$MISSING_INPUT" ]; then
   echo "FAIL: $BIN was built from an input that no longer exists: $MISSING_INPUT"
-  echo "      Run: cargo build -p zeroship --bin zeroship"
+  echo "      Run: cargo build -p zeroship-cli --bin zeroship"
   exit 1
 fi
 if [ -n "$STALE_INPUT" ]; then
   echo "FAIL: stale zeroship binary: ${STALE_INPUT#"$ROOT"/} is newer than $BIN"
-  echo "      Run: cargo build -p zeroship --bin zeroship"
+  echo "      Run: cargo build -p zeroship-cli --bin zeroship"
   exit 1
 fi
 

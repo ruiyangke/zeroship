@@ -171,7 +171,7 @@ for path in \
   "$ROOT/sdks/db/dist/internal.js"; do
   [ -f "$path" ] || die "SDK build did not produce $path"
 done
-cargo build --release -p zeroship -p zeroship-auth \
+cargo build --release -p zeroship-cli -p zeroship-auth \
   >>"$BUILD_LOG" 2>&1 \
   || fail_from_log "$BUILD_LOG" "zeroship auth release build"
 pnpm --filter zero-migrate-cli build \

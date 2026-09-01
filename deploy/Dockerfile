@@ -237,7 +237,7 @@ RUN cargo build --release \
     -p zeroship-gateway \
     -p zeroship-worker \
     -p zeroship-auth \
-    -p zeroship \
+    -p zeroship-cli \
     -p zeroship-migrate-server
 
 # ---------------------------------------------------------------------------

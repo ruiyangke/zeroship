@@ -58,7 +58,7 @@
 #   MUTATE=stream-corrupt   the streamed bytes stop matching their checksum
 #
 # Prereqs (docs/runbooks/local-dev.md):
-#   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
+#   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-cli --bins
 #   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #   docker (Postgres on :5440 as compose-postgres-1; a MinIO container for the
 #     default s3 mode, image minio/minio)

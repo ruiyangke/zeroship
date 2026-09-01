@@ -122,7 +122,7 @@ ensure_dev_secrets() {
   done
 
   if command -v cargo >/dev/null 2>&1; then
-    if ( cd "$root" && cargo run -q -p zeroship --bin zeroship -- dev init ); then
+    if ( cd "$root" && cargo run -q -p zeroship-cli --bin zeroship -- dev init ); then
       missing="$(_dev_secrets_missing "$env_file" "$secrets_dir")"
       [ -n "$missing" ] || return 0
       echo "ensure_dev_secrets: cargo run dev init left these absent:" >&2

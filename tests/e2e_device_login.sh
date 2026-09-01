@@ -39,7 +39,7 @@
 #
 # Usage:  ./tests/e2e_device_login.sh
 # Needs:  docker, curl, node, openssl, and a release build:
-#           cargo build --release -p zeroship -p zeroship-control \
+#           cargo build --release -p zeroship-cli -p zeroship-control \
 #             -p zeroship-gateway -p zeroship-worker -p zeroship-auth
 #           pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
 #         plus a built example artifact:
