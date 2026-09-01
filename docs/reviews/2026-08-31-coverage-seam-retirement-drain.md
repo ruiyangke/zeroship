@@ -531,3 +531,42 @@ returns the right value" is not "this arm's effect reaches the caller", and a
 proof recorded per-branch does not cover the parameter plumbing between them.
 When a rewrite threads caller-owned state through a helper, the forwarding is a
 separate claim and needs a separate mutation - swap the argument, not the body.
+
+## Re-measured at `b8d77c37f`: 93.24%, and the production gap is smaller again
+
+    7a8fac9d1   34860 lines   3022 missed   91.33%
+    b8d77c37f   37197 lines   2516 missed   93.24%
+
+The tree grew about 2,300 lines and missed 506 fewer.
+
+The whole-crate production split, with two scaffolding files now excluded:
+
+    TOTAL uncovered 1590, of which production 715, scaffolding 875
+    EXCLUDED sqlstate.rs   233 uncovered lines
+    EXCLUDED test_utils.rs  67 uncovered lines
+
+**`test_utils.rs` was being counted as production and should not have been.**
+It is `#[doc(hidden)]` test-only scaffolding that is compiled UNCONDITIONALLY on
+purpose: it was behind a `test-utils` feature, and that flag quietly split the
+suite so `tests/serialized_loop.rs` stopped building and the crate's documented
+test command ran 24 fewer tests. Because it sits outside any `#[cfg(test)]`
+span, the span filter had no way to see that, and it inflated the production
+figure by 59-67 lines. `error/sqlstate.rs` is the same shape for a different
+reason - a generated table whose percentage means nothing.
+
+Both are now listed in `SCAFFOLDING` in `tests/lib/missing_production_lines.py`,
+and the tool PRINTS what it excluded. That last part is the important half: an
+exclusion nobody sees is indistinguishable from a gap nobody found, and this
+file already records two cases where a filter quietly swallowed evidence.
+
+Ranked production gaps after the exclusions:
+
+    tls_rustls.rs    86     the largest genuine one
+    tls_sansio.rs    40
+    transaction.rs   30
+    tls.rs           22
+    service.rs       11
+
+Much of the `tls_rustls.rs` remainder is the CRL and verifier error surface
+already judged modest, plus client-certificate paths that need the live TLS
+fixtures a fresh worktree does not have.
