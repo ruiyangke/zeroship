@@ -203,3 +203,60 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
         },
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bench entry points
+// ---------------------------------------------------------------------------
+//
+// These two lived in `lib.rs` until 2026-09-01, which put
+// `&compio_postgres::Row` into the signature of the crate advertised as a thin
+// Rust/V8 seam - two always-compiled `pub fn`s, no `cfg`, so a build could not
+// opt out of them. That is the same defect as the row decoders themselves being
+// in `v8_bridge.rs`, one level up: the wrapper moved without the driver type
+// moving with it.
+//
+// They are `pub` rather than `pub(crate)` because Criterion benches and the
+// integration test link this crate as an EXTERNAL dependency and cannot reach
+// `pub(crate)`. `lib.rs` re-exports both, so `zeroship_plugin_db::…_for_bench`
+// still resolves; a `pub use` names no type, so the adapter's signature surface
+// stays vendor-free. When this module becomes `data-postgres`, the benches move
+// with it and the re-export goes away.
+
+/// **Bench-only**: thin wrapper around [`row_to_json`] so the `bench_row_to_json`
+/// Criterion harness can measure the row-to-json index-lookup path.
+///
+/// `#[doc(hidden)]` keeps it off the public docs surface.
+/// `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
+/// compiled) is the matching `Row` synthesiser - see
+/// `crates/zeroship-plugin-db/benches/bench_row_to_json.rs` for the wiring.
+#[doc(hidden)]
+#[must_use]
+pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> Value {
+    row_to_json(row)
+}
+
+/// **Bench-only**: the full `&[Row] -> JSON-string` path the SDK sees on a
+/// `find().first()` (or any other `first_row_or_null`-resolving) call. Runs both
+/// halves the dispatcher executes between Postgres and V8:
+///
+/// 1. [`rows_to_json_value`] - decode every `Row` into a `serde_json::Value`
+///    (the same work `bench_row_to_json` covers for a single row).
+/// 2. take the first element, fall back to `Value::Null`, serialise once for
+///    `ResolveValue::Json`.
+///
+/// This composed path is a bottleneck: at wide rows (50 columns) the JSON string
+/// plus V8 `JSON.parse` tail dominates the read budget. The matching harness is
+/// `crates/zeroship-plugin-db/benches/bench_first_row_or_null.rs`.
+///
+/// Returns the raw JSON string (not a `ResolveValue`) so the bench measures the
+/// Rust-side cost in isolation. The remaining V8 `JSON.parse` cost is structural,
+/// lives in `zeroship-runtime`, and is not part of this microbench.
+#[doc(hidden)]
+#[must_use]
+pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
+    rows_to_json_value(rows)
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Null)
+        .to_string()
+}
