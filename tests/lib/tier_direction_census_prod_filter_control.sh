@@ -5,12 +5,22 @@
 # and how my first fix silently ate a live impl.
 #
 # Sources the LIVE function out of the census so this cannot drift from the
-# code it claims to test.
-CENSUS=/home/ruiyang/Projects/appbase/.worktrees/dbbind-impl/tests/lib/tier_direction_census.sh
-sed -n '/^prod() {/,/^}$/p' "$CENSUS" > /home/ruiyang/.claude/jobs/0153bf45/tmp/prod_live.sh
-. /home/ruiyang/.claude/jobs/0153bf45/tmp/prod_live.sh
+# code it claims to test. Resolve the census RELATIVE to this file - an absolute
+# path would pin the control to one machine's worktree.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CENSUS="$HERE/tier_direction_census.sh"
+[ -r "$CENSUS" ] || { echo "no census beside this control: $CENSUS" >&2; exit 2; }
 
-F=/home/ruiyang/.claude/jobs/0153bf45/tmp/cfgprobe2.rs
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+sed -n '/^prod() {/,/^}$/p' "$CENSUS" > "$TMP/prod_live.sh"
+# A silently empty extraction would make every check "pass" by printing nothing.
+grep -q 'awk' "$TMP/prod_live.sh" || { echo "prod() not extracted from $CENSUS" >&2; exit 2; }
+. "$TMP/prod_live.sh"
+
+F="$TMP/cfgprobe.rs"
 cat > "$F" <<'EOF'
 #[cfg(any(test, feature = "test-helpers"))]
 impl Gated {
