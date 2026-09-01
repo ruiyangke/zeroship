@@ -54,7 +54,7 @@ const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 
 /// Map a `rusqlite::Error` into a typed [`DbError`].
 ///
-/// The mapping mirrors [`crate::error::DbError::from_pg`]'s SQLSTATE
+/// The mapping mirrors [`crate::backend::pg_error::classify`]'s SQLSTATE
 /// switch — every variant the SDK branches on has a SQLite counter-
 /// part below. The message body always includes the rusqlite display
 /// and the extended code so operators can correlate against the SQLite
@@ -77,9 +77,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
         // [`crate::backend::sqlite::reservation::CANCELLED_CODE`], the code the
         // actor's terminal classifier reports: a caller cannot tell, and does
         // not need to tell, which of the two produced it.
-        rusqlite::Error::SqliteFailure(ffi_err, _)
-            if ffi_err.extended_code == SQLITE_INTERRUPT =>
-        {
+        rusqlite::Error::SqliteFailure(ffi_err, _) if ffi_err.extended_code == SQLITE_INTERRUPT => {
             DbError::Coded {
                 code: crate::backend::sqlite::reservation::CANCELLED_CODE.to_string(),
                 message: msg,
@@ -146,7 +144,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
         }
 
         // QueryReturnedNoRows is the rusqlite equivalent of the PG
-        // empty-RETURNING case. PG's `from_pg` doesn't have a peer
+        // empty-RETURNING case. PG's `classify` doesn't have a peer
         // — empty-RETURNING surfaces via `first_row_or_internal` —
         // but on SQLite the driver raises this variant explicitly
         // from `query_row` / `query_one`. Map to Internal so the
@@ -226,10 +224,13 @@ mod tests {
     fn unique_violation_maps_to_schema_refused_with_unique_code() {
         let db = from_sqlite(synth(SQLITE_CONSTRAINT_UNIQUE));
         match db {
-            DbError::SchemaRefused { code, envelope_json } => {
+            DbError::SchemaRefused {
+                code,
+                envelope_json,
+            } => {
                 assert_eq!(code, "unique_violation");
-                let v: serde_json::Value = serde_json::from_str(&envelope_json)
-                    .expect("envelope must be valid JSON");
+                let v: serde_json::Value =
+                    serde_json::from_str(&envelope_json).expect("envelope must be valid JSON");
                 assert_eq!(v["code"], "unique_violation");
             }
             other => panic!("expected SchemaRefused, got {other:?}"),
@@ -299,9 +300,9 @@ mod tests {
                 crate::backend::sqlite::reservation::CANCELLED_CODE,
                 "SQLITE_INTERRUPT must report the cancellation code"
             ),
-            other => panic!(
-                "SQLITE_INTERRUPT must not fall through to the catch-all; got {other:?}"
-            ),
+            other => {
+                panic!("SQLITE_INTERRUPT must not fall through to the catch-all; got {other:?}")
+            }
         }
     }
 

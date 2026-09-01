@@ -79,6 +79,9 @@ pub(crate) mod pg_row_json;
 // `crate::exec` (ENGINE) until 2026-09-01, where it formed the upward half of
 // the `PG <-> ENGINE` tier cycle.
 pub(crate) mod pg_autocommit;
+// PostgreSQL error classification. PG tier: SQLSTATE and driver source-chain
+// inspection translate into the neutral `crate::error::DbError` hierarchy.
+pub mod pg_error;
 // PostgreSQL per-app session setup SQL. PG tier: `SET LOCAL ROLE` and the GUC
 // names are dialect. The budgets they render are core policy - see
 // `crate::budgets`. `pub` so `auth::bootstrap` can re-export for its callers.

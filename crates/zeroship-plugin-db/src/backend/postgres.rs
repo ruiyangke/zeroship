@@ -26,13 +26,13 @@ use crate::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
-use super::pg_autocommit;
 use super::{
     DialectBuilder, GeoPoint, LockManager, PgSqlExecutor, SpatialIndex, SqlExecutor, VectorIndex,
     VectorMetric,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use super::{PgLockManager, SchemaIntrospect};
+use super::{pg_autocommit, pg_error};
 
 /// Single concrete impl of `Backend` backed by `compio_postgres`.
 ///
@@ -313,7 +313,7 @@ impl SqlExecutor for PostgresBackend {
             .pool
             .query_text_params(sql, params)
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| pg_error::classify(&e))?;
         Ok(rows.len() as u64)
     }
 
@@ -326,11 +326,11 @@ impl SqlExecutor for PostgresBackend {
         // into a prepared statement`. `batch_execute` issues a single
         // `Query` message and runs the `;`-separated statements in one
         // implicit transaction.
-        let client = self.pool.get().await.map_err(|e| DbError::from_pg(&e))?;
+        let client = self.pool.get().await.map_err(|e| pg_error::classify(&e))?;
         client
             .batch_execute(sql)
             .await
-            .map_err(|e| DbError::from_pg(&e))
+            .map_err(|e| pg_error::classify(&e))
     }
 
     async fn client_exec(
@@ -342,7 +342,7 @@ impl SqlExecutor for PostgresBackend {
         let rows = client
             .query_text_params(sql, params)
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| pg_error::classify(&e))?;
         Ok(rows.len() as u64)
     }
 }
@@ -362,7 +362,7 @@ impl LockManager for PostgresBackend {
             .query_text_params(sql, &[key1, key2])
             .await
             .map_err(|e| {
-                let mut err = DbError::from_pg(&e);
+                let mut err = pg_error::classify(&e);
                 // Decorate the message so operators can see which key
                 // failed (the bare SQLSTATE message often doesn't show
                 // the hash inputs).
@@ -387,7 +387,7 @@ impl LockManager for PostgresBackend {
         let rows = client
             .query_text_params(sql, &[key1, key2])
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| pg_error::classify(&e))?;
         let got: bool = rows
             .first()
             .map(|r| r.try_get::<_, bool>("got").unwrap_or(false))
@@ -405,7 +405,7 @@ impl LockManager for PostgresBackend {
         client
             .query_text_params(sql, &[key1, key2])
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| pg_error::classify(&e))?;
         Ok(())
     }
 }
@@ -415,20 +415,20 @@ impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        // `read_live_schema` lives in the leaf
-        // crate `zeroship-schema` and returns `SchemaError` (it cannot name
-        // `DbError`). `From<SchemaError> for DbError` re-creates the exact
-        // `coded_sql("diff: …", e)` shape, so the SQLSTATE classification +
-        // operator-facing message are preserved verbatim.
+        // `read_live_schema` lives in the leaf crate `zeroship-schema` and
+        // returns `SchemaError` (it cannot name `DbError`). The PG-tier
+        // translator re-creates the exact `coded_sql("diff: …", e)` shape, so
+        // SQLSTATE classification and the operator-facing message are
+        // preserved verbatim.
         crate::diff::read_live_schema(&self.pool, app_id)
             .await
-            .map_err(DbError::from)
+            .map_err(pg_error::classify_schema_error)
     }
 
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
         crate::diff::estimate_row_count(&self.pool, app_id, collection)
             .await
-            .map_err(DbError::from)
+            .map_err(pg_error::classify_schema_error)
     }
 }
 
@@ -489,7 +489,7 @@ impl PostgresBackend {
             .pool
             .query_text_params("SELECT 1 FROM pg_extension WHERE extname='vector'", &empty)
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| pg_error::classify(&e))?;
         let present = !rows.is_empty();
         *self.pgvector_available.borrow_mut() = Some(present);
         if present {
@@ -586,7 +586,7 @@ impl PostgresBackend {
             .pool
             .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &empty)
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| pg_error::classify(&e))?;
         let present = !rows.is_empty();
         *self.postgis_available.borrow_mut() = Some(present);
         if present {
@@ -1240,7 +1240,10 @@ mod backup_pg {
         if let Err(e) = backend.pool().query_text_params(&drop_sql, &empty).await {
             let _ = guard.release().await;
             return Err(DbError::Internal {
-                message: format!("restore: DROP SCHEMA failed: {}", DbError::from_pg(&e)),
+                message: format!(
+                    "restore: DROP SCHEMA failed: {}",
+                    crate::backend::pg_error::classify(&e)
+                ),
             });
         }
 
@@ -1327,7 +1330,7 @@ mod backup_pg {
             .pool()
             .query_text_params(sql, &[app_id, target_str.as_str()])
             .await
-            .map_err(|e| DbError::from_pg(&e))?;
+            .map_err(|e| crate::backend::pg_error::classify(&e))?;
         Ok(())
     }
 }

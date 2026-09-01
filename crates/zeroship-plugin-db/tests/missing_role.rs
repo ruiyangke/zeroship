@@ -5,13 +5,13 @@
 //! the autocommit session setup (`plugin_db::exec`) refuses before any
 //! creator SQL runs. The contextual session-setup classifier turns that
 //! measured failure into a creator-facing provisioning error; generic
-//! PostgreSQL errors remain on `DbError::from_pg`.
+//! PostgreSQL errors remain on `pg_error::classify`.
 //!
 //! This test exists because the discriminator's unit tests in
-//! `src/error.rs` CANNOT reach `from_pg`: `compio_postgres::Error` has no
-//! public constructor, so nothing in-process can synthesise the server
-//! error. Only a live server produces it. That also makes this the test that
-//! fails if the contextual session-setup arm is deleted.
+//! `backend/pg_error.rs` cannot construct a `compio_postgres::Error`: the
+//! driver exposes no public constructor, so only a live server can synthesise
+//! the measured failure. That also makes this the test that fails if the
+//! contextual session-setup arm is deleted.
 //!
 //! Requires: the test PostgreSQL named by the overlay
 //! (`deploy/ops/zeroship.test.toml`, written by
@@ -37,6 +37,7 @@
 //!     Those paths deliberately stay on the generic classifier.
 
 use compio_postgres::NoTls;
+use zeroship_plugin_db::backend::pg_error;
 use zeroship_plugin_db::error::DbError;
 
 fn test_url() -> String {
@@ -66,7 +67,10 @@ fn read_startup_packet(stream: &mut std::net::TcpStream) {
         .read_exact(&mut length)
         .expect("read startup packet length");
     let length = u32::from_be_bytes(length) as usize;
-    assert!(length >= 4, "startup packet length includes its four-byte header");
+    assert!(
+        length >= 4,
+        "startup packet length includes its four-byte header"
+    );
     let mut payload = vec![0_u8; length - 4];
     stream
         .read_exact(&mut payload)
@@ -99,8 +103,7 @@ fn accept_fake_client(listener: &std::net::TcpListener) -> std::net::TcpStream {
 fn spawn_pool_reconnect_server(role: &str) -> (String, std::thread::JoinHandle<()>) {
     use std::io::Write;
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind fake Postgres listener");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake Postgres listener");
     listener
         .set_nonblocking(true)
         .expect("make fake Postgres listener nonblocking");
@@ -113,8 +116,7 @@ fn spawn_pool_reconnect_server(role: &str) -> (String, std::thread::JoinHandle<(
         let mut success = Vec::new();
         push_backend_message(&mut success, b'R', &0_u32.to_be_bytes());
         push_backend_message(&mut success, b'Z', b"I");
-        warm
-            .write_all(&success)
+        warm.write_all(&success)
             .expect("complete warm Postgres handshake");
 
         let mut reconnect = accept_fake_client(&listener);
@@ -175,7 +177,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
         "missing-role SET LOCAL ROLE must report the measured SQLSTATE"
     );
 
-    let classified = DbError::classify_pg_per_app_session_setup_for_tests(&err, app_id);
+    let classified = pg_error::classify_pg_per_app_session_setup_for_tests(&err, app_id);
     drop(client);
     drain_pg().await;
     classified
@@ -279,7 +281,7 @@ async fn a_real_internal_pg_failure_is_still_internal() {
         "control must share the SQLSTATE of the case it controls for"
     );
 
-    let op = DbError::from_pg(&err).to_op_error();
+    let op = pg_error::classify(&err).to_op_error();
     drop(client);
     drain_pg().await;
     match &op.kind {
@@ -342,7 +344,7 @@ async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
         "the reconnect error must have the same app-shaped message as session setup"
     );
 
-    let op = DbError::from_pg(&err).to_op_error();
+    let op = pg_error::classify(&err).to_op_error();
     let code = match &op.kind {
         zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => code.clone(),
         other => panic!("expected CodedError, got {other:?}"),

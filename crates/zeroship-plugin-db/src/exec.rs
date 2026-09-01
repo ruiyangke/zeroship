@@ -55,6 +55,7 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::backend::BackendHandle;
+use crate::backend::pg_error;
 use crate::backend::pg_row_json::rows_to_json_value;
 use crate::context;
 use crate::context::TxConnection;
@@ -179,7 +180,7 @@ pub(crate) async fn run_sql(
         };
         // Put it back
         context::with_mut(|c| c.put_tx_client_for(app_id, client));
-        return result.map_err(|e| DbError::from_pg(&e));
+        return result.map_err(|e| pg_error::classify(&e));
     }
 
     // No transaction — use pool. On the SQLite arm the shared CRUD

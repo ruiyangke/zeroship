@@ -39,6 +39,7 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
+use crate::backend::pg_error;
 use crate::backend::pg_session_sql::autocommit_local_session_setup_sql;
 use crate::error::DbError;
 
@@ -75,7 +76,7 @@ pub(crate) async fn roled_rows(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
+    let mut client = pool.get().await.map_err(|e| pg_error::classify(&e))?;
 
     // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
     // inside an explicit transaction, exactly like the explicit-tx path
@@ -89,7 +90,7 @@ pub(crate) async fn roled_rows(
     // cancelled mid-flight (no RAII guard, and the pool's Drop is
     // synchronous so it cannot issue async RESET SQL).
     let tx = client.transaction().await.map_err(|e| {
-        let mut err = DbError::from_pg(&e);
+        let mut err = pg_error::classify(&e);
         crate::error::prefix_message(
             &mut err,
             "db: autocommit BEGIN (per-app §17.5 + DB-1 guards): ",
@@ -99,7 +100,7 @@ pub(crate) async fn roled_rows(
 
     let setup_sql = autocommit_local_session_setup_sql(app_id)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
-        let mut classified = DbError::classify_pg_per_app_session_setup(&e, app_id);
+        let mut classified = pg_error::classify_pg_per_app_session_setup(&e, app_id);
         crate::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
         classified.into_db_error()
     })?;
@@ -107,14 +108,14 @@ pub(crate) async fn roled_rows(
     let rows = tx
         .query_text_params(sql, params)
         .await
-        .map_err(|e| DbError::from_pg(&e))?;
+        .map_err(|e| pg_error::classify(&e))?;
 
     // COMMIT reverts the SET LOCAL state and releases the connection
     // clean. On any early return above, `tx` is dropped instead, which
     // rolls back (also reverting the SET LOCAL state) and marks the
     // connection dirty so the pool drains it before the next checkout.
     tx.commit().await.map_err(|e| {
-        let mut err = DbError::from_pg(&e);
+        let mut err = pg_error::classify(&e);
         crate::error::prefix_message(
             &mut err,
             "db: autocommit COMMIT (per-app §17.5 + DB-1 guards): ",

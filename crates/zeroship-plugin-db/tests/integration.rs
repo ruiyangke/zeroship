@@ -4020,7 +4020,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
     // string "db error" and puts the server's message only in the source chain,
     // so this assertion was checking a constant. Measured 2026-09-01 - the
     // server sends "expected 128 dimensions, not 256" and `{err}` shows none of
-    // it. Production is unaffected because `DbError::from_pg` walks the chain
+    // it. Production is unaffected because `pg_error::classify` walks the chain
     // (`walk_pg_chain`) rather than formatting; anything that formats a driver
     // error with `{}` for an operator loses the cause.
     let msg = format!("{err:?}");

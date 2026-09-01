@@ -33,7 +33,8 @@ use compio_postgres::Pool;
 use sha2::{Digest, Sha256};
 use zeroship_core::replication_names::{self, ReplicationNameError};
 
-use crate::error::{first_row_or_internal, prefix_message, DbError};
+use crate::backend::pg_error;
+use crate::error::{DbError, first_row_or_internal, prefix_message};
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
@@ -164,13 +165,10 @@ pub async fn ensure_worker_slot(
     // service creates and reconciles it while holding table-owner authority;
     // a worker may only prove the object exists.
     let exists: bool = !pool
-        .query_text_params(
-            publication_probe_sql(),
-            &[&pub_name],
-        )
+        .query_text_params(publication_probe_sql(), &[&pub_name])
         .await
         .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
+            let mut err = pg_error::classify(&e);
             prefix_message(&mut err, "replication: probe pg_publication: ");
             err
         })?
@@ -178,9 +176,7 @@ pub async fn ensure_worker_slot(
     if !exists {
         return Err(DbError::Configuration {
             code: "replication_publication_missing",
-            message: format!(
-                "replication: publication {pub_name} is missing for app {app_id}"
-            ),
+            message: format!("replication: publication {pub_name} is missing for app {app_id}"),
             hint: Some(
                 "apply the app migrations so zeroship-migrate-server reconciles the publication"
                     .to_string(),
@@ -197,7 +193,7 @@ pub async fn ensure_worker_slot(
         )
         .await
         .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
+            let mut err = pg_error::classify(&e);
             prefix_message(&mut err, "replication: probe pg_replication_slots: ");
             err
         })?;
@@ -246,7 +242,7 @@ pub async fn ensure_worker_slot(
                         ),
                     }
                 } else {
-                    let mut err = DbError::from_pg(&e);
+                    let mut err = pg_error::classify(&e);
                     prefix_message(
                         &mut err,
                         "replication: pg_create_logical_replication_slot: ",
@@ -356,10 +352,7 @@ pub struct SlotHealth {
 /// The query is in the proposal verbatim (R3) — kept as a single SQL
 /// string here so a code reader can compare it to the proposal text
 /// without translating from a query-builder DSL.
-pub async fn watchdog_query(
-    pool: &Pool,
-    app_id: &str,
-) -> Result<Vec<SlotHealth>, DbError> {
+pub async fn watchdog_query(pool: &Pool, app_id: &str) -> Result<Vec<SlotHealth>, DbError> {
     // Bind the exact per-app worker-slot prefix via `$1` below.
     let slot_prefix = worker_slot_name_prefix(app_id)?;
     let sql = r"SELECT
@@ -377,7 +370,7 @@ pub async fn watchdog_query(
         .query_text_params(sql, &[&slot_prefix])
         .await
         .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
+            let mut err = pg_error::classify(&e);
             prefix_message(&mut err, "replication: watchdog query: ");
             err
         })?;
@@ -433,11 +426,7 @@ pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
 /// This is the normal last-local-subscriber teardown. Other worker
 /// containers may still have subscribers and continue decoding the
 /// shared publication through their own slots.
-pub async fn drop_worker_slot(
-    pool: &Pool,
-    app_id: &str,
-    worker_id: &str,
-) -> Result<(), DbError> {
+pub async fn drop_worker_slot(pool: &Pool, app_id: &str, worker_id: &str) -> Result<(), DbError> {
     let slot = worker_slot_name(app_id, worker_id)?;
     drop_slot(pool, &slot).await
 }
@@ -459,7 +448,7 @@ pub async fn drop_worker_slots(pool: &Pool, app_id: &str) -> Result<(), DbError>
         )
         .await
         .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
+            let mut err = pg_error::classify(&e);
             prefix_message(&mut err, "replication: drop: enumerate worker slots: ");
             err
         })?;
@@ -480,7 +469,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
         )
         .await
         .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
+            let mut err = pg_error::classify(&e);
             prefix_message(&mut err, "replication: drop: probe slot active: ");
             err
         })?;
@@ -494,17 +483,11 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
                 // pg_terminate_backend takes the pid; we bind it as text
                 // and cast in-SQL to avoid threading an i32 param type.
                 let _ = pool
-                    .query_text_params(
-                        "SELECT pg_terminate_backend($1::int4)",
-                        &[&pid.to_string()],
-                    )
+                    .query_text_params("SELECT pg_terminate_backend($1::int4)", &[&pid.to_string()])
                     .await
                     .map_err(|e| {
-                        let mut err = DbError::from_pg(&e);
-                        prefix_message(
-                            &mut err,
-                            "replication: drop: pg_terminate_backend: ",
-                        );
+                        let mut err = pg_error::classify(&e);
+                        prefix_message(&mut err, "replication: drop: pg_terminate_backend: ");
                         err
                     })?;
             }
@@ -526,7 +509,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
                 )
                 .await
                 .map_err(|e| {
-                    let mut err = DbError::from_pg(&e);
+                    let mut err = pg_error::classify(&e);
                     prefix_message(&mut err, "replication: drop: await slot inactive: ");
                     err
                 })?;
@@ -551,7 +534,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
         {
             Ok(_) => {}
             Err(e) => {
-                let err = DbError::from_pg(&e);
+                let err = pg_error::classify(&e);
                 // 55006 object_in_use ⇒ the backend hasn't fully detached
                 // yet. Surface as LockContention so the caller can retry
                 // from step 3 (§17.7 "retry from step 3 on partial
@@ -560,9 +543,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
                     let mut err = err;
                     prefix_message(
                         &mut err,
-                        &format!(
-                            "replication: drop: slot {slot} still active (retry): "
-                        ),
+                        &format!("replication: drop: slot {slot} still active (retry): "),
                     );
                     return Err(err);
                 }
@@ -603,7 +584,11 @@ mod tests {
     fn worker_setup_only_probes_for_the_migrated_publication() {
         let sql = publication_probe_sql();
         assert!(sql.contains("FROM pg_publication"));
-        for forbidden in ["CREATE PUBLICATION", "ALTER PUBLICATION", "DROP PUBLICATION"] {
+        for forbidden in [
+            "CREATE PUBLICATION",
+            "ALTER PUBLICATION",
+            "DROP PUBLICATION",
+        ] {
             assert!(
                 !sql.contains(forbidden),
                 "worker publication probe must not carry publication DDL: {sql}"
@@ -618,7 +603,11 @@ mod tests {
             .split_once("const fn publication_probe_sql")
             .expect("publication probe boundary")
             .0;
-        for forbidden in ["CREATE PUBLICATION", "ALTER PUBLICATION", "DROP PUBLICATION"] {
+        for forbidden in [
+            "CREATE PUBLICATION",
+            "ALTER PUBLICATION",
+            "DROP PUBLICATION",
+        ] {
             assert!(
                 !setup.contains(forbidden),
                 "worker setup must contain no publication DDL: {setup}"
@@ -636,7 +625,10 @@ mod tests {
 
     #[test]
     fn case_distinct_app_ids_have_distinct_names() {
-        assert_ne!(publication_name("MyApp").unwrap(), publication_name("myapp").unwrap());
+        assert_ne!(
+            publication_name("MyApp").unwrap(),
+            publication_name("myapp").unwrap()
+        );
     }
 
     #[test]
@@ -667,7 +659,10 @@ mod tests {
     fn publication_sql_uses_quoted_original_case_schema() {
         assert!(publication_name("MyApp").is_ok());
         assert!(worker_slot_name("MyApp", "worker-a").is_ok());
-        assert_ne!(publication_name("MyApp").unwrap(), publication_name("myapp").unwrap());
+        assert_ne!(
+            publication_name("MyApp").unwrap(),
+            publication_name("myapp").unwrap()
+        );
 
         // The schema reference still preserves original case via quote_ident
         // (the same function build_create_schema uses) — defense-in-depth.
@@ -904,5 +899,4 @@ mod tests {
         let wildcard = worker_slot_name_prefix("%").unwrap();
         assert!(!wildcard.contains('%'));
     }
-
 }

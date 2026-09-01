@@ -138,6 +138,7 @@ use std::cell::Cell;
 
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
+use crate::backend::pg_error;
 use crate::binding::DbBinding;
 use crate::error::DbError;
 use crate::exec::clear_pending_emits;
@@ -219,7 +220,7 @@ pub(crate) async fn apply_per_app_role(
     let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id)
         .map_err(crate::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
-        let mut classified = crate::error::DbError::classify_pg_per_app_session_setup(&e, app_id);
+        let mut classified = pg_error::classify_pg_per_app_session_setup(&e, app_id);
         crate::error::prefix_message(
             classified.error_mut(),
             "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
