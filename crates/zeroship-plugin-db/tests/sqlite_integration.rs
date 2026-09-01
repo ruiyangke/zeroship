@@ -4362,8 +4362,22 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             &source,
             "failBulkInsideTransaction",
         ));
+        // TWO things were stale here until 2026-09-01, and the first hid the
+        // second.
+        //
+        // PATH: `transaction()` returns `Promise<Result<R>>` and wraps the
+        // callback's value with `ok(...)` (`sdks/bootstrap/src/install-schema.ts`
+        // :1145, :1193), so the payload is `{data: {...}, error: null}` and the
+        // failure sits at `["data"]["failure"]`. Reading `["failure"]` yielded
+        // `Null`, which compares unequal to ANY expected code - so this assertion
+        // could never have passed, and could never have told you why.
+        //
+        // CASE: `canonicalErrorCode` (`sdks/db/src/errors.ts:27`) deliberately
+        // upper-snakes every code not already in that form, so `unique_violation`
+        // reaches app code as `UNIQUE_VIOLATION`. The lowercase driver spelling
+        // survives only inside the nested `message` payload.
         assert_eq!(
-            nested["failure"]["code"], "unique_violation",
+            nested["data"]["failure"]["code"], "UNIQUE_VIOLATION",
             "the savepoint-wrapped fan-out must preserve the row error: {nested}"
         );
         let after_nested = client
@@ -7046,17 +7060,23 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 // 3. The diff classifier sees the recovered metadata and emits no
 //    spurious ops on a stable-shape redeploy.
 
-/// **Mask added to an EXISTING column is refused end-to-end on
+/// **Mask added to an EXISTING column is BACKFILLED end-to-end on
 /// SQLite**: adding a `.mask({...})` declaration to a column that
-/// already holds data does NOT backfill any more - it is refused. After
-/// the storage flip the transition means four data-touching steps (add
-/// the raw column, copy every row's value into it, overwrite the
-/// field's own column with the mask, rewrite the field's own column to
-/// `TEXT` dropping its declared constraints) and the differ can see
-/// only the first, so it emits exactly one `MaskBackfill` op classified
-/// `Destructive`, with `sql: None` and a `"refused"` key in `details`,
-/// and no `AddColumn`. Nothing is applied and the live row is
-/// untouched.
+/// already holds data emits exactly one `MaskBackfill` op classified
+/// `Destructive`, with `sql: None` and `details["executor"] =
+/// "BackfillSpec"` - the migration engine performs the transition, the
+/// differ does not try to express it as DDL. After the storage flip it
+/// means four data-touching steps (add the raw column, copy every row's
+/// value into it, overwrite the field's own column with the mask,
+/// rewrite the field's own column to `TEXT` dropping its declared
+/// constraints), which is why the op carries no SQL and stays
+/// `Destructive` so it is never auto-applied. No `AddColumn` is emitted.
+///
+/// **This doc and the assertion below both said "refused" until
+/// 2026-09-01, and had been wrong since `747ca3292` ("mask a populated
+/// column through the engine backfill", 2026-08-28 23:25) - #30.** Only
+/// ENCRYPTED input is still refused, because the engine has no AEAD key
+/// material (`zeroship-schema/src/diff.rs:910`, `:925`).
 ///
 /// Paired with a control: the SAME mask declaration on a column that
 /// does NOT exist yet (a genuinely new field) is unaffected and still
@@ -7144,16 +7164,36 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
         assert_eq!(
             ops[0].class,
             zeroship_plugin_db::diff::ChangeClass::Destructive,
-            "the refused transition must be classified Destructive so it is never \
+            "the backfill must be classified Destructive so it is never \
              auto-applied: {ops:?}"
         );
         assert!(
             ops[0].sql.is_none(),
-            "a refused transition must carry no SQL to apply: {ops:?}"
+            "the differ must emit no SQL - the engine's backfill performs this: {ops:?}"
         );
+        // PLAINTEXT masking is BACKFILLED, not refused. This asserted
+        // `details["refused"].is_some()` until 2026-09-01 and had been wrong since
+        // 747ca3292 ("mask a populated column through the engine backfill",
+        // 2026-08-28 23:25) - which landed SIX HOURS AFTER this file's previous
+        // edit at 16:52 the same day, so nothing re-ran it. `9ffd4a5dc` touched
+        // this very region two days later without noticing, because no local
+        // command compiles this target: `tests/run_plugin_db_live_suite.sh` runs
+        // four others and says so at its :138-141, and `required-features =
+        // ["test-helpers"]` (Cargo.toml:200) excludes it from a bare `cargo test`.
+        //
+        // `zeroship-schema/src/diff.rs:1862` asserts the OPPOSITE of the old line
+        // here - `details.get("refused").is_none()` - so the repo carried two
+        // tests demanding contradictory contracts, one passing and one never run.
+        // Only ENCRYPTED input is still refused (diff.rs:910, :925), because the
+        // migration engine has no AEAD key material.
         assert!(
-            ops[0].details.get("refused").is_some(),
-            "the refusal reason must be recorded in details: {ops:?}"
+            ops[0].details.get("refused").is_none(),
+            "plaintext masking is backfilled, not refused: {ops:?}"
+        );
+        assert_eq!(
+            ops[0].details.get("executor").and_then(|v| v.as_str()),
+            Some("BackfillSpec"),
+            "the backfill must name the executor that will run it: {ops:?}"
         );
         assert!(
             !ops.iter().any(|o| matches!(
